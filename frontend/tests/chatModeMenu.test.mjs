@@ -8,8 +8,8 @@ const structuredPane = readFileSync(
 )
 
 test('mode picker lives beside the attachment control and opens an upward menu', () => {
-  const composerRow = structuredPane.match(/<div class="composer-row">[\s\S]*?<textarea/)
-  assert.ok(composerRow, 'composer row must contain its left-side tools before the textarea')
+  const composerRow = structuredPane.match(/<div class="composer-row">[\s\S]*?<div class="composer-hints">/)
+  assert.ok(composerRow, 'composer row must contain its toolbar with the mode picker')
   assert.match(composerRow[0], /class="composer-tools"/)
   assert.match(composerRow[0], /class="composer-attach-btn"[\s\S]*?class="composer-mode-trigger"/)
   assert.match(composerRow[0], /aria-haspopup="menu"/)

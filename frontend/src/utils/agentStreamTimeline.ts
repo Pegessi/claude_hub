@@ -56,6 +56,7 @@ export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
   | { kind: 'text'; key: string; text: string }
   | { kind: 'tool'; key: string; tool: TimelineTool }
+  | { kind: 'tool_group'; key: string; tools: TimelineTool[] }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
   | { kind: 'error'; key: string; message: string }
   | { kind: 'status'; key: string; text: string }
@@ -302,7 +303,16 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         toolMap.set(identity, tool)
         turn.tools.push(tool)
         if (toolName !== 'AskQuestion') {
-          turn.parts.push({ kind: 'tool', key: tool.key, tool })
+          // Group consecutive tool calls into a single tool_group part so the
+          // UI can render a compact summary (e.g. "3 tools: Read, Edit, Bash")
+          // with expandable per-tool details, matching how Codex/Paseo display
+          // parallel tool calls.
+          const lastPart = turn.parts[turn.parts.length - 1]
+          if (lastPart && lastPart.kind === 'tool_group') {
+            lastPart.tools.push(tool)
+          } else {
+            turn.parts.push({ kind: 'tool_group', key: `tool-group-${event.stream_sequence}`, tools: [tool] })
+          }
         }
         mutated = true
       }
@@ -353,7 +363,13 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         }
         toolMap.set(identity, tool)
         turn.tools.push(tool)
-        turn.parts.push({ kind: 'tool', key: tool.key, tool })
+        // If we never saw the start event, still group this completed tool.
+        const lastPart = turn.parts[turn.parts.length - 1]
+        if (lastPart && lastPart.kind === 'tool_group') {
+          lastPart.tools.push(tool)
+        } else {
+          turn.parts.push({ kind: 'tool_group', key: `tool-group-${event.stream_sequence}`, tools: [tool] })
+        }
       }
       const newStatus = payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
       const newResult = payloadString(event, 'result')

@@ -14,6 +14,7 @@ from ..models import (
     User,
 )
 from ..services import ttyd_manager
+from .agent_stream import _get_tab_tailer_manager, _terminal_tab_stream_session
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,15 @@ async def switch_tab_env(
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # For native Chat sessions the provider transport owns the subprocess and
+    # reads session.env per turn. Push the updated env into the live transport
+    # so the next turn picks it up without a restart.
+    if tab.session_kind.value == "chat":
+        session = _terminal_tab_stream_session(tab_id)
+        if session is not None:
+            _get_tab_tailer_manager().set_env(session, dict(tab.env))
+
     return tab
 
 
