@@ -55,6 +55,42 @@ CURSOR_TRANSCRIPT_SCHEMA = "cli-transcript-v1"
 SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS: frozenset[str] = frozenset({"2026.08.25-3e8eec8"})
 
 
+def _promote_cursor_chat_transport(
+    session_kind: SessionKind,
+    agent_type: AgentType,
+    target: ExecutionTarget,
+    cursor_transport: str,
+) -> str:
+    """Promote a local Cursor Chat tab to the native transport.
+
+    The frontend renders every ``session_kind=chat`` tab as a native
+    structured surface (``TerminalPane.vue`` shows "… Chat · native
+    structured" and mounts ``StructuredPane``), so a Cursor Chat tab left on
+    the raw ``terminal`` transport fails closed in the adapter registry
+    (``get_adapter_for_session`` returns ``None`` → "no structured adapter").
+
+    The native ``ProviderSession`` owns the Cursor process and does not need a
+    cwd (it spawns with ``cwd=None``, inheriting the backend cwd), so this
+    promotion intentionally does NOT require one. The ``and cwd`` guard that
+    used to gate promotion belonged to the retired ``terminal_transcript``
+    mode, which needed a cwd to locate the transcript file.
+
+    Applied at every transport-assignment boundary — ``create_tab``, the
+    state-restore path, and ``update_tab`` agent switches — so legacy rows
+    persisted as ``terminal`` are healed on the next reload. The explicit
+    ``terminal_transcript`` compatibility fallback is preserved (only the raw
+    ``terminal`` transport is promoted).
+    """
+    if (
+        session_kind == SessionKind.CHAT
+        and agent_type == AgentType.CURSOR
+        and target == ExecutionTarget.LOCAL
+        and cursor_transport == "terminal"
+    ):
+        return "native"
+    return cursor_transport
+
+
 def get_tab_native_runtime_snapshot(tab_id: str) -> Any:
     """Lazy bridge to avoid importing transcript adapters during ttyd startup."""
 
@@ -2283,12 +2319,19 @@ asyncio.run(_main())
             ValueError: if the tab is not a local Claude/Codex tab.
             RuntimeError: if the tmux session is not alive or respawn fails.
         """
-        if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX}:
-            raise ValueError("switch_env is only supported for Claude and Codex tabs")
+        if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}:
+            raise ValueError("switch_env is only supported for Claude, Codex, and Cursor tabs")
         if self.session_kind == SessionKind.CHAT:
-            # Chat sessions own their provider via the native transport;
-            # env changes are applied to the ProviderSession, not tmux.
-            raise ValueError("switch_env is not supported for native Chat sessions")
+            # Chat sessions own their provider via the native transport. The
+            # native transport reads ``self.session.env`` on every turn (via
+            # ``_build_env`` / ``_build_command``), so updating the persisted
+            # env here is sufficient for the next turn to pick it up. No tmux
+            # respawn is needed — the one-shot subprocess is spawned per turn.
+            if solo_mode is not None:
+                self.solo_mode = solo_mode
+            self.env = self._clean_env(new_env)
+            self._prepare_agent_env()
+            return
         if self.target != ExecutionTarget.LOCAL:
             raise ValueError("switch_env is only supported for local tabs")
         if not await _tmux_session_exists_async(self.tmux_session):
@@ -2979,7 +3022,12 @@ class TTYDManager:
                             from_persisted_state=True,
                             resume_quarantined=tab_data.get("resume_quarantined", False),
                             shell_explicitly_provided=tab_data.get("shell_explicitly_provided"),
-                            cursor_transport=tab_data.get("cursor_transport", "terminal"),
+                            cursor_transport=_promote_cursor_chat_transport(
+                                session_kind,
+                                agent_type,
+                                target,
+                                tab_data.get("cursor_transport", "terminal"),
+                            ),
                             cursor_data_dir=tab_data.get("cursor_data_dir"),
                             cursor_cli_version=tab_data.get("cursor_cli_version"),
                             cursor_transcript_path=tab_data.get("cursor_transcript_path"),
@@ -3207,17 +3255,9 @@ class TTYDManager:
         # worker) created by the workspace orchestrator pass TERMINAL so they
         # keep raw TUI control-plane semantics. We never auto-promote a
         # TERMINAL tab to CHAT based on workspace_id or agent_type.
-        if (
-            session_kind == SessionKind.CHAT
-            and agent_type == AgentType.CURSOR
-            and target == ExecutionTarget.LOCAL
-            and cwd
-            and cursor_transport == "terminal"
-        ):
-            # Chat sessions use the native ProviderSession as the sole owner
-            # of the Cursor process. The legacy terminal_transcript mode is
-            # retained only as an explicit compatibility fallback.
-            cursor_transport = "native"
+        cursor_transport = _promote_cursor_chat_transport(
+            session_kind, agent_type, target, cursor_transport
+        )
         tab_id = str(uuid.uuid4())
         port = self._get_next_port()
 
@@ -3935,6 +3975,17 @@ class TTYDManager:
             process.cursor_cli_version = None
             process.cursor_transcript_path = None
             process.cursor_transcript_schema = None
+
+        # Enforce the "Chat = native structured" invariant after every field
+        # update. An agent_type switch (above) resets cursor_transport to
+        # "terminal"; re-promote a local Cursor Chat tab so it does not fail
+        # closed in the adapter registry.
+        process.cursor_transport = _promote_cursor_chat_transport(
+            process.session_kind,
+            process.agent_type,
+            process.target,
+            process.cursor_transport,
+        )
 
         if needs_restart:
             logger.info(

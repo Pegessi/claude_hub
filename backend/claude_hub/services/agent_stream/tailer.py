@@ -1423,6 +1423,17 @@ class TailerManager:
         if self._persist_mode_cb is not None:
             self._persist_mode_cb(session.id, mode)
 
+    def set_env(self, session: ManagedSession, env: Dict[str, str]) -> None:
+        """Update the native owner's session env for subsequent turns."""
+
+        tailer = self._tailers.get(session.id)
+        if tailer is None:
+            return
+        transport = tailer.native_transport
+        if transport is None or tailer.native_error is not None:
+            return
+        transport.update_env(env)
+
     async def ensure_started(self, session: ManagedSession) -> SessionTailer:
         return await self._get_or_create(session)
 

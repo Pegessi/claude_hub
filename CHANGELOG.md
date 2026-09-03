@@ -16,6 +16,76 @@
 - Add regressions for both cancellation and a completed process whose stdout
   remains open while the next turn starts.
 
+### fix: Codex Chat model selection now actually takes effect
+
+- The composer's Codex model picker wrote `CODEX_MODEL` into the session env,
+  but the selection never reached the model: the codex app-server is a
+  persistent process (spawned once, model fixed at thread start) and the CLI
+  does not read `CODEX_MODEL` from the environment. Unlike Claude/Cursor,
+  which rebuild their command every turn, there was no per-turn channel
+  carrying the selected model — so every turn silently used the config
+  default regardless of what the picker showed.
+- `CodexNativeSession` now injects the selected `CODEX_MODEL` into the
+  per-turn `turn/start` request via `collaborationMode.settings.model`, the
+  app-server's live model-override channel. This takes effect on the next
+  turn without restarting the persistent app-server (preserving the
+  conversation), in both Default and Plan modes, and even when
+  `collaborationMode/list` returned no default preset. Verified end-to-end
+  against a live codex app-server: the server's `thread/settings/updated`
+  notification reports the selected model.
+
+### fix: promote Cursor Chat tabs to native transport regardless of cwd
+
+- A Cursor Chat tab could stay on the raw `terminal` transport and fail closed
+  in the adapter registry ("no structured adapter for agent_type=CURSOR") via
+  two paths: `create_tab` required a truthy cwd to promote `terminal` →
+  `native` (a leftover from the retired `terminal_transcript` mode; the native
+  `ProviderSession` spawns with `cwd=None` and does not need one), and the
+  state-restore path read `cursor_transport` directly from `tabs.json` without
+  re-running the promotion.
+- Extracted `_promote_cursor_chat_transport()` and applied it at all three
+  transport-assignment boundaries: `create_tab` (dropping the stale cwd
+  guard), the restore path (heals already-persisted bad rows on next reload),
+  and `update_tab` (re-promotes after agent_type switches). The fail-closed
+  contract is preserved — only a local Cursor CHAT tab on the raw `terminal`
+  transport is promoted; `terminal_transcript` and TERMINAL-kind tabs are
+  untouched.
+
+### fix: correct Codex model picker list to real model slugs
+
+- The Codex model picker listed stale placeholders (`gpt-5`, `gpt-4o`, `o3`,
+  `o4-mini`). It now lists the actual Codex model slugs matching the real
+  Codex app picker: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
+  `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`. "Default"
+  remains the empty-value state shown by the trigger.
+
+### refactor: Codex-style composer layout (textarea above controls)
+
+- The Structured Chat composer previously packed the attach button, mode
+  picker, model picker, textarea, and Send button into a single crowded row.
+  It now uses a Codex/ChatGPT-style layout: the textarea spans the full width
+  on top, and the controls (attach, mode, model) sit in a bottom toolbar row
+  with Send/Stop right-aligned. The composer card also shows an accent border
+  on focus.
+
+### feat: model switching in Chat composer and Cursor model support
+
+- Add a model picker button to the Structured Chat composer for Claude, Codex,
+  and Cursor tabs. Each agent type maps to its own env var (`ANTHROPIC_MODEL`,
+  `CODEX_MODEL`, `CURSOR_MODEL`); selecting a model calls `switch-env` which
+  updates the persisted env and pushes it to the live native transport.
+- Cursor native sessions now forward `CURSOR_MODEL` as the `--model` CLI flag
+  (the Cursor agent CLI does not read `CURSOR_MODEL` from the environment).
+- `switch_env` for native Chat sessions updates the provider env directly
+  without a tmux respawn, since the one-shot subprocess reads env per turn.
+
+### feat: timeline tool call grouping
+
+- Consecutive tool calls within a turn are now grouped into a single
+  expandable `tool_group` part, matching Codex/Paseo UX. The group header
+  shows a summary ("3 tools: Read, Edit, Bash") and an aggregate status;
+  expanding reveals per-tool args and results.
+
 ### fix: release native turn guard at TURN_COMPLETED, not subprocess EOF
 
 - For one-shot providers (Claude, Cursor), the turn guard (`_turn_in_flight`)

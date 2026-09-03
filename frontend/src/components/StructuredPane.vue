@@ -185,34 +185,54 @@
             </div>
 
             <div
-              v-else-if="part.kind === 'tool'"
+              v-else-if="part.kind === 'tool_group'"
               class="conversation-row conversation-row--assistant"
             >
               <span
                 class="conversation-avatar conversation-avatar--tool"
                 aria-hidden="true"
               >⌘</span>
-              <details class="tool-card">
+              <details class="tool-card tool-card--group">
                 <summary class="tool-header">
-                  <span class="tool-name">{{ part.tool.name }}</span>
+                  <span class="tool-name">
+                    {{ part.tools.length === 1 ? part.tools[0].name : `${part.tools.length} tools` }}
+                  </span>
+                  <template v-if="part.tools.length > 1">
+                    <span class="tool-group-names">
+                      {{ part.tools.map(t => t.name).join(', ') }}
+                    </span>
+                  </template>
                   <span
                     class="tool-status"
-                    :class="part.tool.status"
-                  >{{ part.tool.status }}</span>
+                    :class="toolGroupStatus(part.tools)"
+                  >{{ toolGroupStatus(part.tools) }}</span>
                 </summary>
                 <div
-                  v-if="part.tool.argsText"
-                  class="tool-block"
+                  v-for="tool in part.tools"
+                  :key="tool.key"
+                  class="tool-group-item"
                 >
-                  <span>Input</span>
-                  <pre>{{ part.tool.argsText }}</pre>
-                </div>
-                <div
-                  v-if="part.tool.resultText"
-                  class="tool-block"
-                >
-                  <span>Result</span>
-                  <pre>{{ part.tool.resultText }}</pre>
+                  <div class="tool-group-item-header">
+                    <span class="tool-name">{{ tool.name }}</span>
+                    <span
+                      class="tool-status"
+                      :class="tool.status"
+                    >{{ tool.status }}</span>
+                  </div>
+                  <div
+                    v-if="tool.argsText"
+                    class="tool-block"
+                  >
+                    <span>Input</span>
+                    <pre>{{ tool.argsText }}</pre>
+                  </div>
+                  <div
+                    v-if="tool.resultText"
+                    class="tool-block"
+                  >
+                    <span>Result</span>
+                    <pre>{{ tool.resultText }}</pre>
+                  </div>
                 </div>
               </details>
             </div>
@@ -415,6 +435,21 @@
         </div>
 
         <div class="composer-row">
+          <textarea
+            ref="composerTextareaEl"
+            v-model="draftMessage"
+            class="composer-textarea"
+            placeholder="Send a message…"
+            rows="1"
+            :disabled="isSending || connectionState !== 'live'"
+            @compositionstart="isComposing = true"
+            @compositionend="isComposing = false"
+            @keydown.enter.exact="handleComposerEnter"
+            @keydown.enter.meta.exact="handleComposerEnter"
+            @keydown.enter.ctrl.exact="handleComposerEnter"
+            @input="syncComposerTextareaHeight"
+            @paste="handlePaste"
+          />
           <div class="composer-tools">
             <button
               type="button"
@@ -482,22 +517,67 @@
                 </button>
               </div>
             </div>
+            <div
+              v-if="isModelPickerAvailable"
+              ref="modelPickerEl"
+              class="composer-mode-picker"
+            >
+              <button
+                ref="modelTriggerEl"
+                type="button"
+                class="composer-mode-trigger"
+                aria-haspopup="menu"
+                :aria-expanded="isModelMenuOpen"
+                :aria-label="`Model: ${currentModel || 'default'}`"
+                :title="`Model: ${currentModel || 'default'}`"
+                :disabled="modeInteractionLocked || isUpdatingModel"
+                @click="toggleModelMenu"
+              >
+                <span class="composer-mode-trigger-label">{{ currentModel || 'default' }}</span>
+                <span
+                  class="composer-mode-chevron"
+                  aria-hidden="true"
+                >▴</span>
+              </button>
+              <div
+                v-if="isModelMenuOpen"
+                ref="modelMenuEl"
+                class="composer-mode-menu"
+                role="menu"
+                aria-label="Model"
+              >
+                <button
+                  v-for="model in modelOptions"
+                  :key="model"
+                  type="button"
+                  class="composer-mode-menu-item"
+                  role="menuitemradio"
+                  :aria-checked="currentModel === model"
+                  @click="selectModel(model)"
+                >
+                  <span>{{ model }}</span>
+                  <span
+                    v-if="currentModel === model"
+                    class="composer-mode-check"
+                    aria-hidden="true"
+                  >✓</span>
+                </button>
+                <div
+                  class="composer-mode-menu-item"
+                  style="border-top:1px solid var(--border,#333);padding-top:6px;margin-top:4px;"
+                >
+                  <input
+                    ref="modelInputEl"
+                    type="text"
+                    class="composer-textarea"
+                    placeholder="custom model id…"
+                    :value="currentModel"
+                    @keydown.enter="selectModel(($event.target as HTMLInputElement).value)"
+                  >
+                </div>
+              </div>
+            </div>
           </div>
-          <textarea
-            ref="composerTextareaEl"
-            v-model="draftMessage"
-            class="composer-textarea"
-            placeholder="Send a message…"
-            rows="1"
-            :disabled="isSending || connectionState !== 'live'"
-            @compositionstart="isComposing = true"
-            @compositionend="isComposing = false"
-            @keydown.enter.exact="handleComposerEnter"
-            @keydown.enter.meta.exact="handleComposerEnter"
-            @keydown.enter.ctrl.exact="handleComposerEnter"
-            @input="syncComposerTextareaHeight"
-            @paste="handlePaste"
-          />
           <button
             v-if="turnInFlight"
             type="button"
@@ -557,7 +637,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
-import { IncrementalTimelineReducer, type TimelineApproval, type TimelineAttachment } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer, type TimelineApproval, type TimelineAttachment, type TimelineTool } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
@@ -639,6 +719,126 @@ const currentModeId = computed(() => getCurrentChatModeId(capabilities.value))
 const currentModeOption = computed(() => modeOptions.value.find(option => option.id === currentModeId.value))
 const currentModeLabel = computed(() => currentModeOption.value?.label ?? 'Mode')
 
+// ── Model picker ────────────────────────────────────────────────────────────
+// Each agent type reads its model from a different env var. The frontend
+// model picker sets that env var via ``switch-env``; the backend forwards it
+// to the provider (Claude/Codex read it from the environment; Cursor receives
+// it as a ``--model`` flag because the agent CLI does not read ``CURSOR_MODEL``).
+
+const MODEL_ENV_VAR: Record<string, string> = {
+  claude: 'ANTHROPIC_MODEL',
+  codex: 'CODEX_MODEL',
+  cursor: 'CURSOR_MODEL',
+}
+
+// Curated common models per agent type. The user can also type a custom model
+// id into the picker's text input.
+const MODEL_OPTIONS: Record<string, string[]> = {
+  claude: [
+    'claude-opus-4-8',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5',
+    'doubao-seed-2.0-code',
+  ],
+  codex: [
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'gpt-5.5',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.3-codex-spark',
+  ],
+  cursor: [
+    'claude-opus-4-8-thinking-high',
+    'claude-opus-4-8-high',
+    'claude-4.6-sonnet-medium-thinking',
+    'claude-4.6-sonnet-medium',
+    'claude-4.5-sonnet',
+    'gpt-5.2',
+    'gpt-5.3-codex',
+    'gemini-3.7-flash-high',
+    'cursor-grok-4.6-high',
+  ],
+}
+
+const currentTab = computed(() =>
+  terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
+)
+const modelEnvVar = computed(() => {
+  const at = currentTab.value?.agent_type
+  return at ? MODEL_ENV_VAR[at] ?? null : null
+})
+const currentModel = computed(() => {
+  const env = currentTab.value?.env ?? {}
+  const key = modelEnvVar.value
+  return key ? env[key] ?? '' : ''
+})
+const modelOptions = computed(() => {
+  const at = currentTab.value?.agent_type
+  return at ? MODEL_OPTIONS[at] ?? [] : []
+})
+const isModelPickerAvailable = computed(() => modelEnvVar.value !== null)
+const isModelMenuOpen = ref(false)
+const isUpdatingModel = ref(false)
+
+async function selectModel(model: string) {
+  closeModelMenu(true)
+  const key = modelEnvVar.value
+  if (!key) return
+  const tab = currentTab.value
+  if (!tab) return
+  if (currentModel.value === model) return
+  const epoch = preparationEpoch.value
+  isUpdatingModel.value = true
+  try {
+    const env = { ...(tab.env ?? {}) }
+    if (model) {
+      env[key] = model
+    } else {
+      delete env[key]
+    }
+    // Errors surface via the store's notifyError toast; swallow so the
+    // rejection is not unhandled.
+    await terminalStore.switchEnv(tab.id, { env })
+  } catch {
+    // Swallow: error feedback comes from terminalStore.switchEnv's toast.
+  } finally {
+    if (preparationEpoch.value === epoch) isUpdatingModel.value = false
+  }
+}
+
+function closeModelMenu(focusTrigger: boolean) {
+  isModelMenuOpen.value = false
+  if (focusTrigger) modelTriggerEl.value?.focus()
+}
+
+function toggleModelMenu() {
+  if (modeInteractionLocked.value || isUpdatingModel.value) return
+  if (isModelMenuOpen.value) {
+    closeModelMenu(false)
+    return
+  }
+  isModelMenuOpen.value = true
+  void nextTick(() => {
+    const currentItem = modelMenuEl.value?.querySelector<HTMLButtonElement>('[aria-checked="true"]')
+    const firstItem = modelMenuEl.value?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
+    const focusTarget = currentItem ?? firstItem
+    focusTarget?.focus()
+  })
+}
+
+function handleModelOutsidePointer(e: PointerEvent) {
+  if (!isModelMenuOpen.value) return
+  const el = modelPickerEl.value
+  if (el && !el.contains(e.target as Node)) closeModelMenu(false)
+}
+
+const modelPickerEl = ref<HTMLElement | null>(null)
+const modelTriggerEl = ref<HTMLButtonElement | null>(null)
+const modelMenuEl = ref<HTMLElement | null>(null)
+const modelInputEl = ref<HTMLInputElement | null>(null)
+
 const pendingTurns = computed(() => {
   const observedTurnIds = new Set(authoritativeTurns.value.map(turn => turn.turnId).filter(Boolean))
   return pendingDirectTurns.value.filter(turn => !observedTurnIds.has(turn.turnId))
@@ -698,6 +898,7 @@ onMounted(() => {
   startStream()
   document.addEventListener('keydown', handleDocumentKeydown)
   document.addEventListener('pointerdown', handleModeOutsidePointer)
+  document.addEventListener('pointerdown', handleModelOutsidePointer)
 })
 
 watch(
@@ -731,6 +932,7 @@ onUnmounted(() => {
   preparationEpoch.value++
   document.removeEventListener('keydown', handleDocumentKeydown)
   document.removeEventListener('pointerdown', handleModeOutsidePointer)
+  document.removeEventListener('pointerdown', handleModelOutsidePointer)
   dismissImageLightbox(false)
   stop()
 })
@@ -893,6 +1095,10 @@ async function changeMode(modeId: string) {
 
 watch([modeInteractionLocked, isUpdatingMode], ([locked, updating]) => {
   if (locked || updating) closeModeMenu(false)
+})
+
+watch([modeInteractionLocked, isUpdatingModel], ([locked, updating]) => {
+  if (locked || updating) closeModelMenu(false)
 })
 
 function triggerFilePicker() {
@@ -1191,6 +1397,14 @@ function toggleQuestionOption(
   }
   current[questionId] = [...selected]
   questionAnswers.value = { ...questionAnswers.value, [approvalKey]: current }
+}
+
+/** Aggregate status for a tool group: 'running' if any tool is still running,
+ *  'failed' if any tool failed (and none running), else 'completed'. */
+function toolGroupStatus(tools: TimelineTool[]): 'running' | 'completed' | 'failed' {
+  if (tools.some(t => t.status === 'running')) return 'running'
+  if (tools.some(t => t.status === 'failed')) return 'failed'
+  return 'completed'
 }
 
 function isApprovalResolved(approval: TimelineApproval): boolean {
@@ -1768,9 +1982,10 @@ onUnmounted(() => {
 
 .composer-tools {
   display: inline-flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 3px;
   flex: 0 0 auto;
+  margin-right: auto;
 }
 
 .composer-mode-picker {
@@ -1932,7 +2147,8 @@ onUnmounted(() => {
 
 .composer-row {
   display: flex;
-  align-items: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 
@@ -1969,7 +2185,7 @@ onUnmounted(() => {
 }
 
 .composer-textarea {
-  flex: 1;
+  flex: 1 1 100%;
   min-width: 0;
   min-height: 32px;
   max-height: 240px;
@@ -2527,6 +2743,42 @@ onUnmounted(() => {
   word-break: break-word;
 }
 
+.tool-group-names {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ch-color-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-group-item {
+  padding: 8px 10px;
+  border-top: 1px solid var(--ch-color-border-muted);
+}
+
+.tool-group-item:first-child {
+  border-top: 0;
+}
+
+.tool-group-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.tool-group-item-header .tool-name {
+  font-size: 12px;
+}
+
+.tool-group-item .tool-block {
+  padding: 0;
+}
+
 .event-error {
   align-self: flex-start;
   width: min(85%, 680px);
@@ -2556,6 +2808,10 @@ onUnmounted(() => {
   border-radius: calc(var(--ch-radius-md) + 2px);
   background: var(--ch-color-app-bg);
   box-shadow: 0 8px 24px var(--ch-shadow-color-soft);
+}
+
+.composer-row:focus-within {
+  border-color: var(--ch-color-accent);
 }
 
 .composer-textarea {
