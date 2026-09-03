@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### fix: recover Chat turns interrupted by backend reloads
+
+- Terminalize active native Chat turns before graceful tailer shutdown and
+  stop both Workspace and top-level Chat tailer managers during application
+  shutdown. Backend reloads no longer leave an open turn in durable history.
+- Make Stop repair the latest unfinished durable turn when the current backend
+  process has no matching provider runtime, covering turns orphaned by an
+  earlier crash or reload. The recovery is durable and idempotent, so the
+  composer leaves Stop/Queue state and remains fixed after another reload.
+
 ### perf: resume and index long structured Chat history
 
 - Cache the three most recently viewed structured Chat histories in the

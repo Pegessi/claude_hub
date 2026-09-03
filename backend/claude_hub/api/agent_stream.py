@@ -182,6 +182,19 @@ def _get_tab_tailer_manager() -> TailerManager:
     return _tab_tailer_manager
 
 
+async def _stop_all_tailer_managers() -> None:
+    """Stop every initialized structured-stream owner during app shutdown."""
+    managers = [
+        manager for manager in (_tailer_manager, _tab_tailer_manager) if manager is not None
+    ]
+    for manager in managers:
+        try:
+            await manager.stop_all()
+        except Exception:
+            # One namespace failing cleanup must not strand the other one.
+            logger.exception("failed to stop an agent-stream tailer manager")
+
+
 def _reset_tailer_manager() -> None:
     global _tailer_manager, _tab_tailer_manager
     _tailer_manager = None
