@@ -435,6 +435,21 @@
         </div>
 
         <div class="composer-row">
+          <textarea
+            ref="composerTextareaEl"
+            v-model="draftMessage"
+            class="composer-textarea"
+            placeholder="Send a message…"
+            rows="1"
+            :disabled="isSending || connectionState !== 'live'"
+            @compositionstart="isComposing = true"
+            @compositionend="isComposing = false"
+            @keydown.enter.exact="handleComposerEnter"
+            @keydown.enter.meta.exact="handleComposerEnter"
+            @keydown.enter.ctrl.exact="handleComposerEnter"
+            @input="syncComposerTextareaHeight"
+            @paste="handlePaste"
+          />
           <div class="composer-tools">
             <button
               type="button"
@@ -563,21 +578,6 @@
               </div>
             </div>
           </div>
-          <textarea
-            ref="composerTextareaEl"
-            v-model="draftMessage"
-            class="composer-textarea"
-            placeholder="Send a message…"
-            rows="1"
-            :disabled="isSending || connectionState !== 'live'"
-            @compositionstart="isComposing = true"
-            @compositionend="isComposing = false"
-            @keydown.enter.exact="handleComposerEnter"
-            @keydown.enter.meta.exact="handleComposerEnter"
-            @keydown.enter.ctrl.exact="handleComposerEnter"
-            @input="syncComposerTextareaHeight"
-            @paste="handlePaste"
-          />
           <button
             v-if="turnInFlight"
             type="button"
@@ -1979,9 +1979,10 @@ onUnmounted(() => {
 
 .composer-tools {
   display: inline-flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 3px;
   flex: 0 0 auto;
+  margin-right: auto;
 }
 
 .composer-mode-picker {
@@ -2143,7 +2144,8 @@ onUnmounted(() => {
 
 .composer-row {
   display: flex;
-  align-items: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 
@@ -2180,7 +2182,7 @@ onUnmounted(() => {
 }
 
 .composer-textarea {
-  flex: 1;
+  flex: 1 1 100%;
   min-width: 0;
   min-height: 32px;
   max-height: 240px;
@@ -2803,6 +2805,10 @@ onUnmounted(() => {
   border-radius: calc(var(--ch-radius-md) + 2px);
   background: var(--ch-color-app-bg);
   box-shadow: 0 8px 24px var(--ch-shadow-color-soft);
+}
+
+.composer-row:focus-within {
+  border-color: var(--ch-color-accent);
 }
 
 .composer-textarea {

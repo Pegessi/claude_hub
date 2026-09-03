@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### refactor: Codex-style composer layout (textarea above controls)
+
+- The Structured Chat composer previously packed the attach button, mode
+  picker, model picker, textarea, and Send button into a single crowded row.
+  It now uses a Codex/ChatGPT-style layout: the textarea spans the full width
+  on top, and the controls (attach, mode, model) sit in a bottom toolbar row
+  with Send/Stop right-aligned. The composer card also shows an accent border
+  on focus.
+
 ### feat: model switching in Chat composer and Cursor model support
 
 - Add a model picker button to the Structured Chat composer for Claude, Codex,
