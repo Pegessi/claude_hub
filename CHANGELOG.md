@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### fix: Codex Chat model selection now actually takes effect
+
+- The composer's Codex model picker wrote `CODEX_MODEL` into the session env,
+  but the selection never reached the model: the codex app-server is a
+  persistent process (spawned once, model fixed at thread start) and the CLI
+  does not read `CODEX_MODEL` from the environment. Unlike Claude/Cursor,
+  which rebuild their command every turn, there was no per-turn channel
+  carrying the selected model — so every turn silently used the config
+  default regardless of what the picker showed.
+- `CodexNativeSession` now injects the selected `CODEX_MODEL` into the
+  per-turn `turn/start` request via `collaborationMode.settings.model`, the
+  app-server's live model-override channel. This takes effect on the next
+  turn without restarting the persistent app-server (preserving the
+  conversation), in both Default and Plan modes, and even when
+  `collaborationMode/list` returned no default preset. Verified end-to-end
+  against a live codex app-server: the server's `thread/settings/updated`
+  notification reports the selected model.
+
 ### fix: promote Cursor Chat tabs to native transport regardless of cwd
 
 - A Cursor Chat tab could stay on the raw `terminal` transport and fail closed

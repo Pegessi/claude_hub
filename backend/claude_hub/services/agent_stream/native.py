@@ -421,10 +421,12 @@ class ProviderSession(ABC):
     def update_env(self, env: Dict[str, str]) -> None:
         """Replace the session env used for the next turn.
 
-        The native transport reads ``self.session.env`` on every turn (via
-        ``_build_env`` for Claude/Codex and ``_build_command`` for Cursor's
-        ``--model`` flag), so updating it here takes effect on the next
-        ``send_message`` without restarting anything.
+        Claude/Cursor rebuild their command every turn, so the new env is
+        picked up live. Codex is a persistent app-server whose model is fixed
+        at thread start; its ``CODEX_MODEL`` selection is instead injected
+        per-turn via ``collaborationMode.settings.model`` (see
+        ``_selected_model_override``), so it likewise takes effect on the
+        next ``send_message`` without restarting the app-server.
         """
         self.session.env = dict(env)
 
@@ -1097,13 +1099,45 @@ class CodexNativeSession(ProviderSession):
             options.append(_PLAN_MODE)
         return options
 
+    def _selected_model_override(self) -> Optional[str]:
+        """Return the user-pinned ``CODEX_MODEL``, if one was selected.
+
+        The composer's model picker writes ``CODEX_MODEL`` into the session
+        env. Unlike Claude/Cursor (one-shot per turn, so the env is read live
+        on each command rebuild), the codex app-server is persistent — its
+        model is fixed at thread start and the CLI ignores ``CODEX_MODEL``
+        in the environment. The per-turn ``collaborationMode.settings.model``
+        channel is what actually changes the model mid-conversation, so the
+        selected model is injected there rather than into the spawn env.
+        """
+        model = self.session.env.get("CODEX_MODEL")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+        return None
+
     def _collaboration_mode_payload(self) -> Optional[Dict[str, Any]]:
+        model_override = self._selected_model_override()
         preset = self._mode_presets.get(self._current_mode)
         if preset is None:
-            if self._current_mode == ChatMode.DEFAULT.value:
+            if self._current_mode != ChatMode.DEFAULT.value:
+                raise RuntimeError(f"Codex Chat mode is unavailable: {self._current_mode}")
+            # No advertised default preset (e.g. collaborationMode/list was
+            # never called or failed). Normally no payload is needed — the
+            # app-server uses its configured default. But when the user pinned
+            # a model we must still send it, otherwise the selection is
+            # silently dropped. Verified against codex app-server 0.151.0:
+            # a default-mode collaborationMode with settings.model is accepted
+            # and surfaces in thread/settings/updated.
+            if model_override is None:
                 return None
-            raise RuntimeError(f"Codex Chat mode is unavailable: {self._current_mode}")
-        model = preset.get("model") or self._thread_model
+            return {
+                "mode": ChatMode.DEFAULT.value,
+                "settings": {
+                    "model": model_override,
+                    "developer_instructions": None,
+                },
+            }
+        model = model_override or preset.get("model") or self._thread_model
         if not isinstance(model, str) or not model:
             raise RuntimeError("Codex collaboration mode requires the active thread model")
         settings: Dict[str, Any] = {
