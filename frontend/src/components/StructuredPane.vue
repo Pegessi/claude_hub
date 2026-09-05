@@ -193,7 +193,10 @@
                 aria-hidden="true"
               >⌘</span>
               <details class="tool-card tool-card--group">
-                <summary class="tool-header">
+                <summary
+                  class="tool-header"
+                  :class="{ 'tool-header--single': part.tools.length === 1 }"
+                >
                   <span class="tool-name">
                     {{ part.tools.length === 1 ? part.tools[0].name : `${part.tools.length} tools` }}
                   </span>
@@ -2723,6 +2726,16 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
+/* Single-tool group header: let the name shrink and ellipsize so an
+   ultra-long tool name never clips the status badge. Multi-tool headers
+   keep flex-shrink: 0 on the "N tools" label and ellipsize the names string
+   instead. */
+.tool-header--single .tool-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .tool-status {
   flex: 0 0 auto;
   padding: 2px 8px;
@@ -2785,6 +2798,9 @@ onUnmounted(() => {
 }
 
 .tool-group-item-header .tool-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 12px;
 }
 

@@ -375,6 +375,11 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
       // AskUserQuestion reports "failed" when the user dismisses the prompt —
       // that is a cancellation, not a tool error. Surface it as cancelled.
+      // The tool name is only known when the start event was loaded (it alone
+      // carries the name); history hydrates contiguously from sequence 0, so a
+      // completed event without its start only occurs for a corrupted
+      // transcript. There the name is unrecoverable and the tool renders as a
+      // generic failed "tool" — pre-fix behavior, not a regression.
       if (newStatus === 'failed' && tool.name === 'AskUserQuestion') {
         newStatus = 'cancelled'
       }
