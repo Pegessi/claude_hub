@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix: correct tool-call rendering in structured Chat
+
+- Stop the multi-tool group header label (e.g. "72 tools") from collapsing to
+  one character per line. The header name no longer flex-shrinks or wraps, so
+  long tool-name strings truncate with an ellipsis instead of squeezing the
+  label vertical.
+- Map a dismissed `AskUserQuestion` to a neutral `cancelled` status instead of
+  a red `failed` badge. The provider reports `is_error` when the user dismisses
+  the prompt, which is a cancellation, not a tool failure. A genuinely failed
+  tool still renders as `failed`.
+
 ### fix: recover Chat turns interrupted by backend reloads
 
 - Terminalize active native Chat turns before graceful tailer shutdown and

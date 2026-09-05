@@ -1404,10 +1404,14 @@ function toggleQuestionOption(
 }
 
 /** Aggregate status for a tool group: 'running' if any tool is still running,
- *  'failed' if any tool failed (and none running), else 'completed'. */
-function toolGroupStatus(tools: TimelineTool[]): 'running' | 'completed' | 'failed' {
+ *  'failed' if any tool failed (and none running), 'cancelled' if every tool
+ *  was cancelled (e.g. a dismissed AskUserQuestion), else 'completed'. */
+function toolGroupStatus(
+  tools: TimelineTool[],
+): 'running' | 'completed' | 'failed' | 'cancelled' {
   if (tools.some(t => t.status === 'running')) return 'running'
   if (tools.some(t => t.status === 'failed')) return 'failed'
+  if (tools.length > 0 && tools.every(t => t.status === 'cancelled')) return 'cancelled'
   return 'completed'
 }
 
@@ -1927,6 +1931,11 @@ onUnmounted(() => {
 .tool-status.running {
   background-color: var(--ch-color-warning-bg, rgba(224, 168, 0, 0.12));
   color: var(--ch-color-warning, #e0a800);
+}
+
+.tool-status.cancelled {
+  background-color: var(--ch-color-surface-muted, rgba(139, 148, 158, 0.12));
+  color: var(--ch-color-text-muted, #8b949e);
 }
 
 .tool-args,
@@ -2707,8 +2716,9 @@ onUnmounted(() => {
 }
 
 .tool-name {
+  flex-shrink: 0;
   min-width: 0;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-weight: 600;
 }

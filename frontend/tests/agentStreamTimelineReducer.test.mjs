@@ -278,6 +278,45 @@ test('incremental reducer preserves tool ordering across batches', () => {
   assert.equal(turns[0].parts[0].tools.length, 2)
 })
 
+test('incremental reducer maps a dismissed AskUserQuestion to cancelled, not failed', () => {
+  const reducer = new IncrementalTimelineReducer()
+
+  const events = [
+    makeEvent(0, 'turn_started', { summary: 'ask' }, { turn_id: 't1' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'c1', name: 'AskUserQuestion', args: { questions: [] },
+    }, { turn_id: 't1' }),
+    // The provider reports is_error=true when the user dismisses the prompt.
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'c1', status: 'failed', result: 'Answer questions?',
+    }, { turn_id: 't1' }),
+    makeEvent(3, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+  ]
+  const turns = reducer.reduce(events)
+
+  assert.equal(turns[0].tools.length, 1)
+  assert.equal(turns[0].tools[0].name, 'AskUserQuestion')
+  assert.equal(turns[0].tools[0].status, 'cancelled')
+})
+
+test('incremental reducer keeps a genuinely failed tool as failed', () => {
+  const reducer = new IncrementalTimelineReducer()
+
+  const events = [
+    makeEvent(0, 'turn_started', { summary: 'fail' }, { turn_id: 't1' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'c1', name: 'Bash', args: { command: 'boom' },
+    }, { turn_id: 't1' }),
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'c1', status: 'failed', result: 'exit 1',
+    }, { turn_id: 't1' }),
+    makeEvent(3, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+  ]
+  const turns = reducer.reduce(events)
+
+  assert.equal(turns[0].tools[0].status, 'failed')
+})
+
 test('incremental reducer handles replay dedup across batches', () => {
   const reducer = new IncrementalTimelineReducer()
 
