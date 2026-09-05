@@ -27,12 +27,17 @@ under the canonical root. The merged `feat/model-switcher-and-cursor-fix`
 test stack on ports 5175/8175 and its isolated runtime were explicitly stopped
 and removed.
 
-Six process-owned worktrees were deliberately left at their existing paths:
+The `feat/structured-chat-fixes` preview stack was subsequently confirmed to
+be obsolete and explicitly authorized for shutdown. Its frontend (5174),
+backend (8174), isolated tmux servers, ttyd, and stale controller were stopped;
+because the branch is not merged, the clean worktree was preserved and moved
+to `~/claude_hub_worktree/structured-chat-fixes`.
+
+Five process-owned worktrees remain at their existing paths:
 
 - `~/claude_hub-agent-tree`
 - `~/claude_hub-chat-history-cache`
 - `~/claude_hub-paseo-v2`
-- `~/claude_hub-structured-chat-fixes`
 - `~/claude_hub-structured-ui`
 - `~/Projects/codex_workspace/claude_hub-terminal-hmr-recovery`
 
