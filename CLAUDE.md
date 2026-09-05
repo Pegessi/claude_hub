@@ -166,7 +166,7 @@ task.
 | CLI workspace/agent reuse lifecycle | `docs/working-logs/2026-08-26-cli-reuse-lifecycle-policy.md` |
 | Orphan reviewer tabs / tab-session reconciliation | `docs/working-logs/2026-06-19-orphan-reviewer-tab-reconcile.md` |
 | Subagent mode / worktree runtime isolation / `/clear` seat check | `docs/working-logs/2026-08-31-subagent-mode-and-session-seat.md` |
-| Claude/Cursor approval cards (AskUserQuestion / AskQuestion) | `docs/working-logs/2026-09-05-claude-ask-user-question-approval.md`, `docs/working-logs/2026-09-02-chat-composer-ux-and-ask-question.md` |
+| Claude/Cursor/Codex approval cards (AskUserQuestion / AskQuestion / requestUserInput) | `docs/working-logs/2026-09-05-claude-ask-user-question-approval.md`, `docs/working-logs/2026-09-02-chat-composer-ux-and-ask-question.md`, `docs/working-logs/2026-09-06-codex-question-approval.md` |
 
 ## Common Edit Areas
 

@@ -66,6 +66,35 @@ _STDERR_BUFFER_MAX = 64 * 1024
 # being base64-encoded into the user message envelope.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
+# Codex app-server server→client request methods that ask the user a question.
+# The turn blocks until the client answers with a matching JSON-RPC response.
+# ``item/tool/requestUserInput`` is the current method; ``tool/requestUserInput``
+# is the legacy alias used by older builds.
+_CODEX_QUESTION_METHODS = ("item/tool/requestUserInput", "tool/requestUserInput")
+
+
+def parse_ask_question_response(text: str) -> Optional[List[Dict[str, Any]]]:
+    """Parse a structured ``ask_question_response`` composer payload.
+
+    The approval card submits answers as a JSON string of the form
+    ``{"type": "ask_question_response", "answers": [{"questionId",
+    "selected": [...]}]}``. Returns the answers list when ``text`` is such a
+    payload, else ``None`` so the caller can fall through to normal delivery.
+    """
+    if not text or not text.lstrip().startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict) or parsed.get("type") != "ask_question_response":
+        return None
+    answers = parsed.get("answers")
+    if not isinstance(answers, list):
+        return None
+    return answers
+
+
 _DEFAULT_MODE = StreamModeOption(
     id=ChatMode.DEFAULT.value,
     label="Default",
@@ -480,6 +509,20 @@ class ProviderSession(ABC):
                 self._clear_staged_images()
                 self._end_turn()
                 raise
+
+    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+        """Answer a provider-native blocking question, if one is pending.
+
+        Some providers (Codex) block the in-flight turn on a server→client
+        question request. The composer's structured answer is routed here
+        *before* the normal turn guard, so it is delivered as the question's
+        JSON-RPC response rather than as a new (turn-cancelling) steer.
+
+        Returns ``True`` when the transport consumed the answers (a question
+        was pending), ``False`` to let the caller fall through to normal
+        delivery. The base implementation has no question channel.
+        """
+        return False
 
     @abstractmethod
     async def _send_text(self, text: str) -> None:
@@ -937,6 +980,7 @@ class CodexNativeSession(ProviderSession):
     adapter_id = "codex-native"
     schema_version = 1
     supports_tool_timeline = True
+    supports_approval_ui = True
     supports_images = True
 
     @property
@@ -954,6 +998,10 @@ class CodexNativeSession(ProviderSession):
         self._thread_id: Optional[str] = None
         # Per-request response futures keyed by JSON-RPC id.
         self._pending_requests: Dict[int, asyncio.Future[Dict[str, Any]]] = {}
+        # Server→client question requests awaiting an answer, keyed by the
+        # server's JSON-RPC id. The value is the request params (with
+        # ``questions``); consumed by :meth:`answer_pending_question`.
+        self._pending_questions: Dict[int, Dict[str, Any]] = {}
         # Notifications (no ``id``) are placed here for the tailer to consume.
         self._notification_queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
         # Staged image temp files for the next turn/start.
@@ -983,6 +1031,9 @@ class CodexNativeSession(ProviderSession):
             inflight = self._inflight_images
             self._staged_images = []
             self._inflight_images = []
+            # The app-server is being terminated; any unanswered questions die
+            # with it.
+            self._pending_questions = {}
             await super().stop()
             self._cleanup_images(staged)
             self._cleanup_images(inflight)
@@ -1346,6 +1397,86 @@ class CodexNativeSession(ProviderSession):
         proc.stdin.write(payload)
         await proc.stdin.drain()
 
+    # ── server→client requests (blocking questions) ─────────────────────────
+
+    async def _handle_server_request(self, record: Dict[str, Any]) -> None:
+        """Dispatch a server→client JSON-RPC request.
+
+        The app-server asks the user a question via
+        ``item/tool/requestUserInput`` (legacy ``tool/requestUserInput``),
+        blocking the turn until we answer. We stash the request and forward a
+        synthetic notification so the adapter emits the approval card; the
+        answer arrives via :meth:`answer_pending_question`. Any other server
+        request is rejected with method-not-found so the app-server does not
+        hang waiting for a response we would never send.
+        """
+        method = record.get("method")
+        req_id = record.get("id")
+        if method in _CODEX_QUESTION_METHODS and isinstance(req_id, int):
+            params = record.get("params")
+            if isinstance(params, dict):
+                self._pending_questions[req_id] = params
+                # Forward as a notification (no ``id``) so the adapter's
+                # ``_normalize_notification`` maps it to the approval card.
+                await self._notification_queue.put({"method": method, "params": params})
+                return
+        await self._send_jsonrpc_response(
+            req_id,
+            error={"code": -32601, "message": f"method not found: {method}"},
+        )
+
+    async def _send_jsonrpc_response(
+        self,
+        req_id: Any,
+        *,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Write a JSON-RPC response for a server→client request."""
+        proc = self._process
+        if proc is None or proc.stdin is None:
+            return
+        response: Dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
+        if error is not None:
+            response["error"] = error
+        else:
+            response["result"] = result if result is not None else {}
+        payload = (json.dumps(response) + "\n").encode("utf-8")
+        try:
+            proc.stdin.write(payload)
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # The app-server is gone; nothing to answer.
+            pass
+
+    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+        """Answer a pending ``requestUserInput`` question.
+
+        Maps the composer's ``[{questionId, selected: [labels]}]`` payload to
+        the app-server's ``{answers: {questionId: {answers: [labels]}}}``
+        shape and sends it as the JSON-RPC response for every pending question
+        request. An empty answers list (dismissal) yields ``{"answers": {}}``.
+        Returns ``False`` when no question is pending so the caller can
+        deliver the text normally.
+        """
+        if not self._pending_questions:
+            return False
+        codex_answers: Dict[str, Dict[str, List[str]]] = {}
+        for entry in answers:
+            if not isinstance(entry, dict):
+                continue
+            question_id = entry.get("questionId")
+            selected = entry.get("selected")
+            if not isinstance(question_id, str) or not isinstance(selected, list):
+                continue
+            values = [value for value in selected if isinstance(value, str)]
+            codex_answers[question_id] = {"answers": values}
+        result = {"answers": codex_answers}
+        for req_id in list(self._pending_questions.keys()):
+            self._pending_questions.pop(req_id, None)
+            await self._send_jsonrpc_response(req_id, result=result)
+        return True
+
     # ── output override ─────────────────────────────────────────────────────
 
     async def read_line(self) -> Optional[Dict[str, Any]]:
@@ -1353,11 +1484,14 @@ class CodexNativeSession(ProviderSession):
         return await self._notification_queue.get()
 
     async def _drain_stdout(self) -> None:
-        """Parse stdout lines and dispatch responses vs notifications.
+        """Parse stdout lines and dispatch responses vs requests vs notifications.
 
-        Records with an ``id`` are JSON-RPC responses: resolve the matching
-        pending Future. Records without an ``id`` are notifications: place
-        them on the notification queue for the tailer.
+        Records with an ``id`` but no ``method`` are JSON-RPC responses:
+        resolve the matching pending Future. Records with both an ``id`` and a
+        ``method`` are server→client requests (e.g. a blocking question):
+        answer or reject them so the app-server never hangs. Records without
+        an ``id`` are notifications: place them on the notification queue for
+        the tailer.
         """
         proc = self._process
         if proc is None or proc.stdout is None:
@@ -1384,12 +1518,19 @@ class CodexNativeSession(ProviderSession):
                     if not isinstance(record, dict):
                         continue
                     if "id" in record:
-                        # Response: dispatch to the matching pending request.
-                        req_id = record.get("id")
-                        if isinstance(req_id, int):
-                            future = self._pending_requests.pop(req_id, None)
-                            if future is not None and not future.done():
-                                future.set_result(record)
+                        if "method" in record:
+                            # Server→client request (e.g. a blocking
+                            # question): answer or reject it so the app-server
+                            # never hangs waiting for a response.
+                            await self._handle_server_request(record)
+                        else:
+                            # Response to one of our requests: resolve the
+                            # matching pending Future.
+                            req_id = record.get("id")
+                            if isinstance(req_id, int):
+                                future = self._pending_requests.pop(req_id, None)
+                                if future is not None and not future.done():
+                                    future.set_result(record)
                     else:
                         # Notification: forward to the tailer.
                         self._handshake_complete = True
@@ -1416,11 +1557,14 @@ class CodexNativeSession(ProviderSession):
                         record = None
                     if isinstance(record, dict):
                         if "id" in record:
-                            req_id = record.get("id")
-                            if isinstance(req_id, int):
-                                future = self._pending_requests.pop(req_id, None)
-                                if future is not None and not future.done():
-                                    future.set_result(record)
+                            if "method" in record:
+                                await self._handle_server_request(record)
+                            else:
+                                req_id = record.get("id")
+                                if isinstance(req_id, int):
+                                    future = self._pending_requests.pop(req_id, None)
+                                    if future is not None and not future.done():
+                                        future.set_result(record)
                         else:
                             self._handshake_complete = True
                             await self._notification_queue.put(record)

@@ -31,6 +31,7 @@ from claude_hub.services.agent_stream.native import (
     CodexNativeSession,
     CursorNativeSession,
     create_native_session,
+    parse_ask_question_response,
 )
 
 
@@ -848,9 +849,7 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
         # Switch model mid-session (the model-picker path).
         native.update_env({"CODEX_MODEL": "gpt-5.4"})
         proc.stdout.push(
-            json.dumps(
-                {"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-2"}}}
-            ).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-2"}}}).encode()
             + b"\n"
         )
         await native.send_message("second", [])
@@ -859,9 +858,7 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
         # Clear the selection -> revert to the thread model.
         native.update_env({})
         proc.stdout.push(
-            json.dumps(
-                {"jsonrpc": "2.0", "id": 6, "result": {"turn": {"id": "tu-3"}}}
-            ).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 6, "result": {"turn": {"id": "tu-3"}}}).encode()
             + b"\n"
         )
         await native.send_message("third", [])
@@ -1482,3 +1479,137 @@ def test_codex_startup_cleanup_removes_prior_process_temp_files(tmp_path: Path) 
         assert cleanup_codex_temp_dir() == 1
 
     assert not orphan.exists()
+
+
+# ── Codex server→client question requests (requestUserInput) ────────────────
+
+
+def _codex_question_request(req_id: int = 42) -> Dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "item/tool/requestUserInput",
+        "params": {
+            "itemId": "it-9",
+            "threadId": "th-1",
+            "turnId": "tu-1",
+            "questions": [
+                {
+                    "id": "q1",
+                    "question": "Pick a color",
+                    "options": [{"label": "red"}, {"label": "blue"}],
+                }
+            ],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_server_question_request_stashed_and_forwarded() -> None:
+    """A server→client request (id + method) must be dispatched as a question,
+    not dropped as a response. It is stashed for answering and a synthetic
+    notification reaches the tailer queue."""
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"thread": {"id": "th-1"}}}).encode()
+            + b"\n",
+        ]
+    )
+    sess = _codex_session()
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await sess.start()
+    # Push a blocking question request after startup.
+    proc.stdout.push(json.dumps(_codex_question_request()).encode() + b"\n")
+    # The synthetic notification must reach the queue (the dispatch fix: a
+    # record with both id and method is a server request, not a response).
+    notif = await asyncio.wait_for(sess.read_line(), timeout=1.0)
+    assert notif is not None
+    assert notif["method"] == "item/tool/requestUserInput"
+    assert notif["params"]["itemId"] == "it-9"
+    # The request was stashed so the answer can be routed back.
+    assert 42 in sess._pending_questions
+    assert sess._pending_questions[42]["itemId"] == "it-9"
+
+
+@pytest.mark.asyncio
+async def test_codex_answer_pending_question_sends_jsonrpc_response() -> None:
+    """Answering a pending question writes the JSON-RPC response with the
+    app-server's ``{answers: {questionId: {answers: [labels]}}}`` shape."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    sess._pending_questions[42] = _codex_question_request()["params"]
+    answers = [{"questionId": "q1", "selected": ["red", "blue"]}]
+    handled = await sess.answer_pending_question(answers)
+    assert handled is True
+    msgs = _written_requests(proc)
+    resp = next(m for m in msgs if m.get("id") == 42)
+    assert "method" not in resp  # a response, not a request
+    assert resp["result"] == {"answers": {"q1": {"answers": ["red", "blue"]}}}
+    # The pending question is consumed.
+    assert sess._pending_questions == {}
+
+
+@pytest.mark.asyncio
+async def test_codex_answer_pending_question_dismissal_empty_answers() -> None:
+    """An empty answers list (dismissal) yields ``{"answers": {}}``."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    sess._pending_questions[42] = _codex_question_request()["params"]
+    handled = await sess.answer_pending_question([])
+    assert handled is True
+    resp = next(m for m in _written_requests(proc) if m.get("id") == 42)
+    assert resp["result"] == {"answers": {}}
+
+
+@pytest.mark.asyncio
+async def test_codex_answer_pending_question_returns_false_when_none_pending() -> None:
+    """With no pending question, the answer is not consumed and nothing is
+    written — the caller falls through to normal delivery."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    handled = await sess.answer_pending_question([{"questionId": "q1", "selected": ["red"]}])
+    assert handled is False
+    assert _written_requests(proc) == []
+
+
+@pytest.mark.asyncio
+async def test_codex_unknown_server_request_gets_method_not_found() -> None:
+    """An unrecognized server→client request is rejected with method-not-found
+    so the app-server does not hang waiting for a response we never send."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    await sess._handle_server_request(
+        {"jsonrpc": "2.0", "id": 99, "method": "some/unknown", "params": {}}
+    )
+    msgs = _written_requests(proc)
+    resp = next(m for m in msgs if m.get("id") == 99)
+    assert resp["error"]["code"] == -32601
+    assert "some/unknown" in resp["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_codex_base_answer_pending_question_returns_false() -> None:
+    """Providers without a question channel (Claude/Cursor) fall through."""
+    claude = ClaudeNativeSession(_session(AgentType.CLAUDE))
+    assert await claude.answer_pending_question([{"questionId": "q", "selected": ["a"]}]) is False
+    cursor = CursorNativeSession(_session(AgentType.CURSOR))
+    assert await cursor.answer_pending_question([{"questionId": "q", "selected": ["a"]}]) is False
+
+
+def test_parse_ask_question_response() -> None:
+    """The composer payload parser returns the answers list for a matching
+    payload and ``None`` otherwise (so non-answer text is delivered normally)."""
+    payload = json.dumps(
+        {"type": "ask_question_response", "answers": [{"questionId": "q1", "selected": ["a"]}]}
+    )
+    assert parse_ask_question_response(payload) == [{"questionId": "q1", "selected": ["a"]}]
+    assert parse_ask_question_response("hello world") is None
+    assert parse_ask_question_response("") is None
+    assert parse_ask_question_response('{"type": "something_else"}') is None
+    assert parse_ask_question_response("{not valid json") is None
+    assert parse_ask_question_response('{"type": "ask_question_response"}') is None
