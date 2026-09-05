@@ -46,12 +46,70 @@ def _flatten_content(content: Any) -> str:
     return str(content)
 
 
+#: Tool name Claude Code uses to ask the user a structured question.
+_ASK_USER_QUESTION_TOOL = "AskUserQuestion"
+
+
+def _normalize_ask_user_question_args(
+    args: Dict[str, Any],
+) -> Optional[List[Dict[str, Any]]]:
+    """Normalize Claude ``AskUserQuestion`` input to the approval-card shape.
+
+    Claude's tool input is::
+
+        {"questions": [{"question", "header", "multiSelect",
+                        "options": [{"label", "description"}]}]}
+
+    The structured timeline renders ``approval_required`` questions as
+    ``{id, prompt, options: [{id, label}], allow_multiple}``. Option ids are
+    set to the option label so the answer the frontend submits
+    (``ask_question_response``) is self-describing: Claude's own tool call
+    carries no option ids, and the next one-shot turn maps the labels back to
+    its ``AskUserQuestion`` options.
+    """
+    raw_questions = args.get("questions")
+    if not isinstance(raw_questions, list) or not raw_questions:
+        return None
+    normalized: List[Dict[str, Any]] = []
+    for index, raw_question in enumerate(raw_questions):
+        if not isinstance(raw_question, dict):
+            continue
+        prompt = raw_question.get("question")
+        if not isinstance(prompt, str) or not prompt.strip():
+            header = raw_question.get("header")
+            prompt = header if isinstance(header, str) else ""
+        if not prompt.strip():
+            continue
+        raw_options = raw_question.get("options")
+        if not isinstance(raw_options, list):
+            continue
+        options: List[Dict[str, str]] = []
+        for raw_option in raw_options:
+            if not isinstance(raw_option, dict):
+                continue
+            label = raw_option.get("label")
+            if not isinstance(label, str) or not label.strip():
+                continue
+            options.append({"id": label, "label": label})
+        if not options:
+            continue
+        normalized.append(
+            {
+                "id": str(index),
+                "prompt": prompt,
+                "allow_multiple": bool(raw_question.get("multiSelect")),
+                "options": options,
+            }
+        )
+    return normalized or None
+
+
 class ClaudeJsonlAdapter(AgentStreamAdapter):
     """Adapter for Claude Code's ``~/.claude/projects/**/*.jsonl`` logs."""
 
     adapter_id = "claude-jsonl"
     schema_version = 1
-    supports_approval_ui = False
+    supports_approval_ui = True
     supports_tool_timeline = True
 
     # ── source discovery ─────────────────────────────────────────────────────
@@ -290,6 +348,47 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
                 call_id=tool_id,
             )
         )
+        if tool_name == _ASK_USER_QUESTION_TOOL:
+            self._emit_ask_user_question_approval(events, tool_id, args, ctx)
+
+    def _emit_ask_user_question_approval(
+        self,
+        events: List[AgentStreamEvent],
+        tool_call_id: Optional[str],
+        args: Dict[str, Any],
+        ctx: NormalizeContext,
+    ) -> None:
+        """Append an ``approval_required`` event for an ``AskUserQuestion`` call.
+
+        No-op when the input carries no renderable question (the ordinary tool
+        row stays the only surface). Mirrors the Cursor ``AskQuestion`` path so
+        the frontend renders the same interactive card and submits the answer
+        as a follow-up message.
+        """
+        questions = _normalize_ask_user_question_args(args)
+        if questions is None:
+            return
+        title: Optional[str] = None
+        raw_questions = args.get("questions")
+        if isinstance(raw_questions, list):
+            for raw_question in raw_questions:
+                if isinstance(raw_question, dict):
+                    header = raw_question.get("header")
+                    if isinstance(header, str) and header.strip():
+                        title = header
+                        break
+        events.append(
+            ctx.event(
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                {
+                    "tool_call_id": tool_call_id,
+                    "kind": "ask_question",
+                    "title": title,
+                    "questions": questions,
+                },
+                call_id=tool_call_id,
+            )
+        )
 
     def _normalize_assistant(
         self, msg: Dict[str, Any], ctx: NormalizeContext
@@ -389,6 +488,8 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
                         call_id=tool_call_id,
                     )
                 )
+                if tool_name == _ASK_USER_QUESTION_TOOL:
+                    self._emit_ask_user_question_approval(events, tool_call_id, args, ctx)
         return events
 
     def _normalize_user(self, msg: Dict[str, Any], ctx: NormalizeContext) -> List[AgentStreamEvent]:

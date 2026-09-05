@@ -1398,6 +1398,158 @@ def test_claude_streamed_tool_use_with_block_index_emits_single_tool_start() -> 
     assert tool_starts[0].call_id == "tu1"
 
 
+def test_claude_ask_user_question_final_snapshot_emits_approval() -> None:
+    """A final assistant snapshot carrying an ``AskUserQuestion`` tool_use
+    emits ``TOOL_CALL_STARTED`` plus an ``approval_required`` event whose
+    questions are normalized to the approval-card shape. Option ids default to
+    the option label so the submitted answer is self-describing (Claude's own
+    tool call carries no option ids)."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    raw = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu_ask1",
+                    "name": "AskUserQuestion",
+                    "input": {
+                        "questions": [
+                            {
+                                "question": "Which approach should I take?",
+                                "header": "Approach",
+                                "multiSelect": False,
+                                "options": [
+                                    {"label": "Fast", "description": "Ship quickly"},
+                                    {"label": "Safe", "description": "More tests"},
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx())
+    types = [event.type for event in events]
+    assert AgentStreamEventType.TOOL_CALL_STARTED in types
+    assert AgentStreamEventType.APPROVAL_REQUIRED in types
+    approval = next(e for e in events if e.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    assert approval.call_id == "tu_ask1"
+    assert approval.payload["kind"] == "ask_question"
+    assert approval.payload["title"] == "Approach"
+    question = approval.payload["questions"][0]
+    assert question["id"] == "0"
+    assert question["prompt"] == "Which approach should I take?"
+    assert question["allow_multiple"] is False
+    assert question["options"] == [
+        {"id": "Fast", "label": "Fast"},
+        {"id": "Safe", "label": "Safe"},
+    ]
+
+
+def test_claude_ask_user_question_streaming_emits_approval_once() -> None:
+    """Streaming an ``AskUserQuestion`` block (start/delta/stop) and then the
+    final assistant snapshot emits exactly one ``approval_required`` — the
+    streaming path and the snapshot path are deduplicated by
+    ``emitted_tool_call_ids`` (same as ``TOOL_CALL_STARTED``)."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    ask_input = {
+        "questions": [
+            {
+                "question": "Proceed?",
+                "header": "Confirm",
+                "multiSelect": True,
+                "options": [{"label": "Yes"}, {"label": "No"}],
+            }
+        ]
+    }
+    lines = [
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg1"}}},
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tu_ask2",
+                    "name": "AskUserQuestion",
+                    "input": {},
+                },
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": json.dumps(ask_input)},
+            },
+        },
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {"type": "stream_event", "event": {"type": "message_stop"}},
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_ask2",
+                        "name": "AskUserQuestion",
+                        "input": ask_input,
+                    },
+                ]
+            },
+        },
+        {"type": "result", "subtype": "success"},
+    ]
+
+    events: List[Any] = []
+    for line in lines:
+        events.extend(adapter.normalize_line(line, ctx))
+
+    approvals = [e for e in events if e.type == AgentStreamEventType.APPROVAL_REQUIRED]
+    assert len(approvals) == 1
+    assert approvals[0].call_id == "tu_ask2"
+    assert approvals[0].payload["questions"][0]["allow_multiple"] is True
+    tool_starts = [e for e in events if e.type == AgentStreamEventType.TOOL_CALL_STARTED]
+    assert len(tool_starts) == 1
+
+
+def test_claude_ask_user_question_malformed_args_emits_no_approval() -> None:
+    """An ``AskUserQuestion`` call with no renderable questions emits only the
+    ordinary tool row — no ``approval_required`` card."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    raw = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu_bad",
+                    "name": "AskUserQuestion",
+                    "input": {"questions": []},
+                }
+            ]
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx())
+    types = [event.type for event in events]
+    assert AgentStreamEventType.TOOL_CALL_STARTED in types
+    assert AgentStreamEventType.APPROVAL_REQUIRED not in types
+
+
 def test_claude_tool_snapshot_before_block_stop_emits_single_tool_start() -> None:
     """Claude 2.1.159 emits the top-level assistant tool_use snapshot before
     content_block_stop. The snapshot announces the call and the later block

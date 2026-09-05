@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat: interactive approval cards for Claude AskUserQuestion
+
+- Claude structured Chat turns that call `AskUserQuestion` now render an
+  interactive approval card (options as toggle buttons) instead of a raw tool
+  call, matching the existing Cursor `AskQuestion` experience. The Claude
+  adapter normalizes Claude's `{question, header, multiSelect, options}` schema
+  to the shared approval-card shape and emits `approval_required` from both the
+  streaming and final-snapshot paths (deduplicated to one card).
+- The submitted answer is routed back as a steer (turn in flight) or normal
+  follow-up message — Claude runs one-shot `--print` subprocesses, so the
+  answer cannot be a blocking tool result on stdin. Option ids default to the
+  option label so the answer JSON is self-describing for the next turn.
+- `ClaudeJsonlAdapter.supports_approval_ui` flips to `True`. The raw
+  `AskUserQuestion` tool row is hidden from the compact tool-group summary,
+  leaving the card as the only surface; a dismissed prompt still maps to
+  `cancelled` (not `failed`).
+
 ### fix: correct tool-call rendering in structured Chat
 
 - Stop the multi-tool group header label (e.g. "72 tools") from collapsing to

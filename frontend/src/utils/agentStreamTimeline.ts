@@ -302,11 +302,13 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         }
         toolMap.set(identity, tool)
         turn.tools.push(tool)
-        if (toolName !== 'AskQuestion') {
+        if (toolName !== 'AskQuestion' && toolName !== 'AskUserQuestion') {
           // Group consecutive tool calls into a single tool_group part so the
           // UI can render a compact summary (e.g. "3 tools: Read, Edit, Bash")
           // with expandable per-tool details, matching how Codex/Paseo display
-          // parallel tool calls.
+          // parallel tool calls. AskQuestion (Cursor) and AskUserQuestion
+          // (Claude) are excluded: they render as interactive approval cards
+          // instead of a raw tool row.
           const lastPart = turn.parts[turn.parts.length - 1]
           if (lastPart && lastPart.kind === 'tool_group') {
             lastPart.tools.push(tool)
