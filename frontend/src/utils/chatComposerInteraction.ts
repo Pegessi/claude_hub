@@ -8,11 +8,22 @@ export interface ComposerEnterContext {
   altKey: boolean
   turnInFlight: boolean
   hasDraft: boolean
+  /**
+   * Mobile soft keyboards have no Shift/⌘/Ctrl modifiers, so Enter can only
+   * insert a newline; sending is always via the Send button. Optional so
+   * existing desktop callers and tests are unchanged.
+   */
+  isMobile?: boolean
 }
 
 /** Resolve the default Enter key behavior for the structured composer. */
 export function resolveComposerEnterAction(ctx: ComposerEnterContext): ComposerEnterAction {
   if (ctx.isComposing) return 'ignore'
+  // Mobile: Enter always inserts a newline. There is no modifier key to
+  // distinguish send/queue/steer, so sending is only possible via the Send
+  // button. This stays after the isComposing check so IME input (e.g. CJK)
+  // still takes precedence on mobile.
+  if (ctx.isMobile) return 'newline'
   if (ctx.shiftKey || ctx.altKey) return 'newline'
   if ((ctx.metaKey || ctx.ctrlKey) && ctx.hasDraft) {
     return ctx.turnInFlight ? 'steer' : 'send'

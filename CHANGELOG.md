@@ -5,6 +5,34 @@
 
 ## Unreleased
 
+### fix: stop false "runtime no longer available" Chat interruptions
+
+- No longer cancel a healthy in-flight native Chat turn when its tailer loses
+  all subscribers. Mobile backgrounding kills the SSE connection and the
+  long-poll self-expires, so after the idle TTL the tailer used to reap the
+  turn and surface "Turn interrupted because its backend runtime was no longer
+  available." even though the runtime was healthy. The tailer now keeps
+  consuming while a turn is in flight (records are still persisted with zero
+  subscribers) and reaps only once the turn completes on its own.
+- Add a hard safety cap (`MAX_TURN_DURATION_S`) on a single turn's wall-clock
+  duration, firing only in the zero-subscriber idle path. A genuinely hung
+  turn is terminalized with a distinct "Turn stopped after exceeding the
+  maximum allowed duration." message instead of keeping the tailer alive
+  forever; the cap is duration-based, so it can never fire on a healthy turn
+  that was merely backgrounded.
+- Preserve a healthy, actively-running tailer on manual Retry instead of
+  replacing it. Replacing the tailer stopped the in-flight turn and emitted a
+  false runtime-interruption; only hard-failed, stopped, or idle tailers are
+  now replaced.
+
+### fix: mobile Chat composer Enter and hints
+
+- Hide the desktop key-binding hint line ("Enter queue ⌘/Ctrl+Enter steer
+  Shift+Enter newline") on mobile viewports, where those keys do not exist.
+- On mobile, Enter always inserts a newline; sending is only possible via the
+  Send button. IME composition still takes precedence so CJK input is not
+  interrupted, and desktop behavior is unchanged.
+
 ### fix: correct tool-call rendering in structured Chat
 
 - Stop the multi-tool group header label (e.g. "72 tools") from collapsing to
