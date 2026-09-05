@@ -5,7 +5,7 @@ export interface TimelineTool {
   key: string
   callId: string | null
   name: string
-  status: 'running' | 'completed' | 'failed'
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
   argsText: string
   resultText: string
 }
@@ -371,7 +371,13 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           turn.parts.push({ kind: 'tool_group', key: `tool-group-${event.stream_sequence}`, tools: [tool] })
         }
       }
-      const newStatus = payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
+      let newStatus: TimelineTool['status'] =
+        payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
+      // AskUserQuestion reports "failed" when the user dismisses the prompt —
+      // that is a cancellation, not a tool error. Surface it as cancelled.
+      if (newStatus === 'failed' && tool.name === 'AskUserQuestion') {
+        newStatus = 'cancelled'
+      }
       const newResult = payloadString(event, 'result')
       if (isNew || tool.status !== newStatus || tool.resultText !== newResult) {
         tool.status = newStatus
