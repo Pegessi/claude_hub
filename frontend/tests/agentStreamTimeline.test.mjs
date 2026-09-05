@@ -295,3 +295,77 @@ test('interleaved thinking, tool, thinking, text produce ordered parts', () => {
   assert.equal(turn.parts[2].text, 'post-tool thought')
   assert.equal(turn.parts[3].text, 'final answer')
 })
+
+test('request_user_input tool call is hidden from tool groups and renders an approval card', () => {
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'ask' }, { turn_id: 't' }),
+    makeEvent(2, 'tool_call_started', {
+      tool_call_id: 'c1',
+      name: 'request_user_input',
+      args: { questions: [] },
+    }, { turn_id: 't' }),
+    makeEvent(3, 'approval_required', {
+      tool_call_id: 'c1',
+      kind: 'ask_question',
+      title: 'Pick one',
+      questions: [{
+        id: 'q1',
+        prompt: 'Pick one',
+        options: [{ id: 'red', label: 'red' }],
+      }],
+    }, { turn_id: 't' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  const turn = turns[0]
+  // The tool is recorded on the turn...
+  assert.equal(turn.tools.length, 1)
+  assert.equal(turn.tools[0].name, 'request_user_input')
+  // ...but is NOT rendered as a raw tool_group row.
+  const toolGroups = turn.parts.filter(p => p.kind === 'tool_group')
+  assert.equal(toolGroups.length, 0)
+  // The question surfaces as an interactive approval card.
+  const approvalPart = turn.parts.find(p => p.kind === 'approval')
+  assert.ok(approvalPart, 'approval card part must be present')
+  assert.equal(approvalPart.approval.questions.length, 1)
+  assert.equal(approvalPart.approval.questions[0].prompt, 'Pick one')
+})
+
+test('request_user_input does not merge with adjacent tool groups', () => {
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'mixed' }, { turn_id: 't' }),
+    makeEvent(2, 'tool_call_started', {
+      tool_call_id: 'b1',
+      name: 'Bash',
+      args: { command: 'ls' },
+    }, { turn_id: 't' }),
+    makeEvent(3, 'tool_call_started', {
+      tool_call_id: 'c1',
+      name: 'request_user_input',
+      args: {},
+    }, { turn_id: 't' }),
+    makeEvent(4, 'approval_required', {
+      tool_call_id: 'c1',
+      kind: 'ask_question',
+      title: 'Pick',
+      questions: [{
+        id: 'q1',
+        prompt: 'Pick',
+        options: [{ id: 'a', label: 'A' }],
+      }],
+    }, { turn_id: 't' }),
+    makeEvent(5, 'tool_call_started', {
+      tool_call_id: 'e1',
+      name: 'Edit',
+      args: { file: 'x.ts' },
+    }, { turn_id: 't' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  const turn = turns[0]
+  // Bash forms its own group; request_user_input is excluded; Edit starts a
+  // NEW group because the approval card breaks the tool run.
+  const toolGroups = turn.parts.filter(p => p.kind === 'tool_group')
+  assert.equal(toolGroups.length, 2)
+  assert.deepEqual(toolGroups[0].tools.map(t => t.name), ['Bash'])
+  assert.deepEqual(toolGroups[1].tools.map(t => t.name), ['Edit'])
+  assert.equal(turn.parts.some(p => p.kind === 'approval'), true)
+})

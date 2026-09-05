@@ -44,6 +44,7 @@ from .base import (
     resolve_cwd,
     resolve_process_hint,
 )
+from .native import _CODEX_QUESTION_METHODS
 
 _FLAT_OBJ_RE = re.compile(r"\{[^{}]*\}")
 _CMD_RE = re.compile(r'"cmd"\s*:\s*"((?:[^"\\]|\\.)*)"')
@@ -115,7 +116,7 @@ class CodexJsonlAdapter(AgentStreamAdapter):
 
     adapter_id = "codex-jsonl"
     schema_version = 1
-    supports_approval_ui = False
+    supports_approval_ui = True
     supports_tool_timeline = True
 
     def capabilities(self, session: ManagedSession) -> StreamCapabilities:
@@ -239,7 +240,90 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
                 events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": delta}))
+        elif method in _CODEX_QUESTION_METHODS:
+            events.extend(self._normalize_question(params, ctx))
         return events
+
+    def _normalize_question(
+        self, params: Dict[str, Any], ctx: NormalizeContext
+    ) -> List[AgentStreamEvent]:
+        """Emit a tool call + approval card for a blocking user question.
+
+        The app-server blocks the turn on ``requestUserInput``; the card lets
+        the user answer, and the tailer routes the answer back as the JSON-RPC
+        response (see ``CodexNativeSession.answer_pending_question``).
+        """
+        events: List[AgentStreamEvent] = []
+        questions = self._codex_normalize_questions(params.get("questions"))
+        if not questions:
+            return events
+        item_id = params.get("itemId")
+        call_id = str(item_id) if item_id is not None else "request_user_input"
+        events.append(
+            ctx.event(
+                AgentStreamEventType.TOOL_CALL_STARTED,
+                {"name": "request_user_input", "args": params},
+                call_id=call_id,
+            )
+        )
+        events.append(
+            ctx.event(
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                {
+                    "tool_call_id": call_id,
+                    "kind": "ask_question",
+                    "title": questions[0].get("prompt"),
+                    "questions": questions,
+                },
+                call_id=call_id,
+            )
+        )
+        return events
+
+    @staticmethod
+    def _codex_normalize_questions(raw: Any) -> List[Dict[str, Any]]:
+        """Map Codex ``requestUserInput`` questions to the shared card shape.
+
+        Codex sends ``{id, header, question, options: [{label, ...}],
+        multiSelect}``; the approval card expects ``{id, prompt,
+        options: [{id, label}], allow_multiple}``. Option ids are the labels
+        themselves, so a selected label is also the answer value.
+        """
+        if not isinstance(raw, list):
+            return []
+        questions: List[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            question_id = item.get("id")
+            if not isinstance(question_id, str) or not question_id:
+                continue
+            prompt = item.get("question")
+            if not isinstance(prompt, str) or not prompt:
+                prompt = item.get("header")
+            if not isinstance(prompt, str) or not prompt:
+                continue
+            raw_options = item.get("options")
+            options: List[Dict[str, str]] = []
+            if isinstance(raw_options, list):
+                for opt in raw_options:
+                    if not isinstance(opt, dict):
+                        continue
+                    label = opt.get("label")
+                    if not isinstance(label, str) or not label:
+                        continue
+                    options.append({"id": label, "label": label})
+            if not options:
+                continue
+            questions.append(
+                {
+                    "id": question_id,
+                    "prompt": prompt,
+                    "options": options,
+                    "allow_multiple": item.get("multiSelect") is True,
+                }
+            )
+        return questions
 
     def _normalize_event_msg(
         self, payload: Dict[str, Any], payload_type: str, ctx: NormalizeContext

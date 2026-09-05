@@ -1836,6 +1836,130 @@ def test_codex_adapter_task_complete_emits_turn_completed():
     assert events[0].payload["summary"] == "done"
 
 
+def test_codex_adapter_question_emits_approval_card():
+    """A ``requestUserInput`` notification must emit a tool call plus an
+    approval card whose questions are in the shared card shape."""
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    adapter = CodexJsonlAdapter()
+    raw = {
+        "method": "item/tool/requestUserInput",
+        "params": {
+            "itemId": "it-9",
+            "threadId": "th-1",
+            "turnId": "tu-1",
+            "questions": [
+                {
+                    "id": "q1",
+                    "question": "Pick a color",
+                    "options": [{"label": "red"}, {"label": "blue"}],
+                    "multiSelect": False,
+                }
+            ],
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx())
+    types = [e.type for e in events]
+    assert AgentStreamEventType.TOOL_CALL_STARTED in types
+    assert AgentStreamEventType.APPROVAL_REQUIRED in types
+    started = next(e for e in events if e.type == AgentStreamEventType.TOOL_CALL_STARTED)
+    assert started.payload["name"] == "request_user_input"
+    assert started.call_id == "it-9"
+    approval = next(e for e in events if e.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    assert approval.payload["kind"] == "ask_question"
+    assert approval.payload["tool_call_id"] == "it-9"
+    questions = approval.payload["questions"]
+    assert questions == [
+        {
+            "id": "q1",
+            "prompt": "Pick a color",
+            "options": [
+                {"id": "red", "label": "red"},
+                {"id": "blue", "label": "blue"},
+            ],
+            "allow_multiple": False,
+        }
+    ]
+
+
+def test_codex_adapter_question_legacy_method_alias():
+    """The legacy ``tool/requestUserInput`` method must be handled identically."""
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    adapter = CodexJsonlAdapter()
+    raw = {
+        "method": "tool/requestUserInput",
+        "params": {
+            "itemId": "it-2",
+            "questions": [{"id": "q", "question": "Continue?", "options": [{"label": "yes"}]}],
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx())
+    assert any(e.type == AgentStreamEventType.APPROVAL_REQUIRED for e in events)
+
+
+def test_codex_adapter_question_multiselect_and_header_fallback():
+    """``multiSelect`` maps to ``allow_multiple``; a missing ``question`` falls
+    back to ``header``; option ids are the labels."""
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    adapter = CodexJsonlAdapter()
+    raw = {
+        "method": "item/tool/requestUserInput",
+        "params": {
+            "itemId": "it-3",
+            "questions": [
+                {
+                    "id": "q1",
+                    "header": "Choose tags",
+                    "options": [{"label": "a"}, {"label": "b"}],
+                    "multiSelect": True,
+                }
+            ],
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx())
+    approval = next(e for e in events if e.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    question = approval.payload["questions"][0]
+    assert question["prompt"] == "Choose tags"
+    assert question["allow_multiple"] is True
+
+
+def test_codex_adapter_question_skips_invalid_entries():
+    """Questions missing an id, prompt, or options are skipped; an empty
+    question list yields no events."""
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    adapter = CodexJsonlAdapter()
+    raw = {
+        "method": "item/tool/requestUserInput",
+        "params": {
+            "itemId": "it-4",
+            "questions": [
+                {"question": "no id", "options": [{"label": "x"}]},
+                {"id": "q2", "options": [{"label": "x"}]},  # no prompt/header
+                {"id": "q3", "question": "no options", "options": []},
+                {
+                    "id": "q4",
+                    "question": "valid",
+                    "options": [{"label": "ok"}],
+                },
+            ],
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx())
+    approval = next(e for e in events if e.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    questions = approval.payload["questions"]
+    assert [q["id"] for q in questions] == ["q4"]
+
+    # No questions at all → no events.
+    empty = adapter.normalize_line(
+        {"method": "item/tool/requestUserInput", "params": {"itemId": "it-5", "questions": []}},
+        _ctx(),
+    )
+    assert empty == []
+
+
 # ── SSE live stream: session deletion ───────────────────────────────────────
 
 

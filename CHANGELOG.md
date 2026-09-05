@@ -50,6 +50,27 @@
   Send button. IME composition still takes precedence so CJK input is not
   interrupted, and desktop behavior is unchanged.
 
+### feat: Codex requestUserInput question cards
+
+- Native Codex (app-server 0.153.x) blocks the in-flight turn on a
+  server→client `item/tool/requestUserInput` JSON-RPC request (legacy alias
+  `tool/requestUserInput`). These now render as the same interactive approval
+  card used for Cursor `AskQuestion`, and the user's selection is routed back
+  as the blocking JSON-RPC response — unblocking the turn instead of
+  cancelling it. Dismissal answers with `{"answers":{}}`.
+- Fix a latent `_drain_stdout` dispatch bug that would have silently dropped
+  every server→client request: dispatch was `id` → response, but a request has
+  both `id` and `method`, so it was misclassified, found no pending future, and
+  was discarded (hanging the app-server). Dispatch is now three-way:
+  `id`+`method` → server request, `id`+no `method` → response, no `id` →
+  notification.
+- The composer's structured answer is intercepted in `send_message` before the
+  busy-check/steer guard (which would `turn/cancel` the blocked turn) and
+  delivered on the same stdin as the tool result. Providers without a
+  blocking-question channel (Claude, Cursor) return `False` and fall through to
+  normal delivery.
+- See `docs/working-logs/2026-09-06-codex-question-approval.md`.
+
 ### fix: correct tool-call rendering in structured Chat
 
 - Stop the multi-tool group header label (e.g. "72 tools") from collapsing to

@@ -55,7 +55,12 @@ from .base import (
     invalidate_source,
 )
 from .coalescer import AgentStreamCoalescer
-from .native import ProviderSession, _detect_image_mime, create_native_session
+from .native import (
+    ProviderSession,
+    _detect_image_mime,
+    create_native_session,
+    parse_ask_question_response,
+)
 from .redaction import redact_event
 from .store import AgentStreamStore
 
@@ -363,6 +368,19 @@ class SessionTailer:
             raise RuntimeError(self._native_error)
         if not transport._started:
             await transport.start()
+
+        # A structured answer to a provider-native blocking question (e.g.
+        # Codex ``requestUserInput``) must be routed as the question's JSON-RPC
+        # response — NOT as a new turn. The turn is blocked waiting for that
+        # answer, so the busy-check below would either raise or steer-cancel
+        # the very turn we are answering. Intercept before the send lock;
+        # providers without a question channel return False and fall through.
+        if not images:
+            parsed_answers = parse_ask_question_response(text)
+            if parsed_answers is not None and await transport.answer_pending_question(
+                parsed_answers
+            ):
+                return
 
         async with self._send_lock:
             # 1. Busy check BEFORE any state mutation. If a turn is already in
