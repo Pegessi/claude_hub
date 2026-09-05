@@ -299,6 +299,61 @@ test('incremental reducer maps a dismissed AskUserQuestion to cancelled, not fai
   assert.equal(turns[0].tools[0].status, 'cancelled')
 })
 
+test('incremental reducer hides AskUserQuestion tool row and renders an approval card', () => {
+  // Claude's AskUserQuestion emits both tool_call_started and
+  // approval_required. The tool is tracked (so a later completion can resolve
+  // it) but excluded from the visible tool_group parts; the approval card is
+  // the only surface — mirroring the Cursor AskQuestion treatment.
+  const reducer = new IncrementalTimelineReducer()
+
+  const events = [
+    makeEvent(0, 'turn_started', { summary: 'ask' }, { turn_id: 't1' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'c1', name: 'AskUserQuestion', args: { questions: [] },
+    }, { turn_id: 't1' }),
+    makeEvent(2, 'approval_required', {
+      tool_call_id: 'c1',
+      kind: 'ask_question',
+      title: 'Approach',
+      questions: [
+        {
+          id: '0',
+          prompt: 'Which approach should I take?',
+          allow_multiple: false,
+          options: [
+            { id: 'Fast', label: 'Fast' },
+            { id: 'Safe', label: 'Safe' },
+          ],
+        },
+      ],
+    }, { turn_id: 't1' }),
+    makeEvent(3, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+  ]
+  const turns = reducer.reduce(events)
+
+  // The tool is still tracked for lifecycle resolution…
+  assert.equal(turns[0].tools.length, 1)
+  assert.equal(turns[0].tools[0].name, 'AskUserQuestion')
+  // …but it renders no tool_group part (the card replaces the raw row).
+  assert.equal(turns[0].parts.filter(p => p.kind === 'tool_group').length, 0)
+
+  // An approval part renders with the parsed questions.
+  const approvalPart = turns[0].parts.find(p => p.kind === 'approval')
+  assert.ok(approvalPart, 'an approval part must be present')
+  assert.equal(approvalPart.approval.kind, 'ask_question')
+  assert.equal(approvalPart.approval.title, 'Approach')
+  assert.equal(approvalPart.approval.questions.length, 1)
+  assert.deepEqual(approvalPart.approval.questions[0], {
+    id: '0',
+    prompt: 'Which approach should I take?',
+    allowMultiple: false,
+    options: [
+      { id: 'Fast', label: 'Fast' },
+      { id: 'Safe', label: 'Safe' },
+    ],
+  })
+})
+
 test('incremental reducer keeps a genuinely failed tool as failed', () => {
   const reducer = new IncrementalTimelineReducer()
 
