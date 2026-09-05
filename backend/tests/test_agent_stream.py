@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2290,6 +2291,214 @@ async def test_native_runtime_needs_attention_on_failed_completion_before_eof() 
     assert snapshot is not None
     assert snapshot.status == AgentRuntimeStatus.ATTENTION
     await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_reap_does_not_cancel_healthy_inflight_turn(
+    store: AgentStreamStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A healthy in-flight turn survives losing all subscribers (AC1).
+
+    Regression for the false "runtime no longer available" interruption: the
+    idle-reap used to cancel an in-flight turn when the tailer had zero
+    subscribers for > IDLE_TTL_S (mobile backgrounding kills SSE and the
+    long-poll self-expires). The tailer now keeps consuming while a turn is
+    in flight and reaps only once the turn completes on its own.
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+
+    session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.session = session
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+    queue = await tailer.subscribe()
+    await tailer.send_message("hello", [], client_turn_id="turn-bg")
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
+        AgentStreamEventType.TURN_STARTED
+    )
+
+    # Simulate mobile backgrounding: every subscriber vanishes, long past TTL.
+    tailer.unsubscribe(queue)
+    tailer._last_subscriber_at = time.monotonic() - tailer_module.IDLE_TTL_S - 1
+
+    # Let the idle check fire repeatedly. The healthy turn must stay alive.
+    await asyncio.sleep(0.3)
+    assert transport.turn_in_flight is True
+    assert tailer.is_running() is True
+    page = await store.read_since(-1, limit=50)
+    assert not any(
+        event.type == AgentStreamEventType.ERROR
+        and event.payload.get("message")
+        == "Turn interrupted because its backend runtime was no longer available."
+        for event in page.events
+    )
+
+    # The turn is still producing records; they are persisted even with zero
+    # subscribers (the tailer keeps consuming), so nothing is lost.
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+    await asyncio.sleep(0.2)
+    assert transport.turn_in_flight is False
+
+    # Now idle (no in-flight turn): the next idle check reaps the tailer.
+    await asyncio.sleep(0.3)
+    assert tailer.is_running() is False
+    assert transport.stop_called is True
+
+
+@pytest.mark.asyncio
+async def test_idle_reap_cancels_hung_turn_past_hard_cap(
+    store: AgentStreamStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn stuck past the hard duration cap is reaped, not left forever.
+
+    Reviewer safety-cap note: after AC1 a hung turn with zero subscribers would
+    otherwise keep the tailer alive indefinitely. The cap fires on in-flight
+    duration (not subscriber presence), so it can never interrupt a healthy
+    turn that was merely backgrounded — only a genuinely stuck one.
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(tailer_module, "MAX_TURN_DURATION_S", 0.0)
+
+    session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.session = session
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+    queue = await tailer.subscribe()
+    await tailer.send_message("hello", [], client_turn_id="turn-hung")
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
+        AgentStreamEventType.TURN_STARTED
+    )
+
+    tailer.unsubscribe(queue)
+    tailer._last_subscriber_at = time.monotonic() - tailer_module.IDLE_TTL_S - 1
+    # Force the observed in-flight duration past the (zeroed) cap.
+    tailer._turn_in_flight_since = time.monotonic() - 1.0
+
+    await asyncio.sleep(0.3)
+    # The hung turn is terminalized (cancelled) and the subprocess reaped.
+    assert transport.turn_in_flight is False
+    assert transport.stop_called is True
+    assert tailer.is_running() is False
+    page = await store.read_since(-1, limit=50)
+    assert page.events[-1].type == AgentStreamEventType.TURN_COMPLETED
+    assert page.events[-1].payload["status"] == "cancelled"
+    hung = [
+        event
+        for event in page.events
+        if event.type == AgentStreamEventType.ERROR
+        and event.payload.get("message")
+        == "Turn stopped after exceeding the maximum allowed duration."
+    ]
+    assert len(hung) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_preserves_healthy_inflight_tailer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manual Retry must not cancel a healthy in-flight turn (AC2).
+
+    After a transient reconnect the frontend calls ``retry`` while the tailer
+    itself is still healthy and running a turn. Replacing it would stop the
+    tailer and emit a false runtime-interruption. The healthy tailer is
+    preserved instead.
+    """
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.session = session
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    manager = TailerManager(lambda _session_id: session)
+    manager._tailers[session.id] = tailer
+    queue = await tailer.subscribe()
+    await tailer.send_message("hello", [], client_turn_id="turn-retry")
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
+        AgentStreamEventType.TURN_STARTED
+    )
+    assert transport.turn_in_flight is True
+    assert tailer.is_running() is True
+
+    result = await manager.retry(session)
+
+    # The same healthy tailer is returned, still running the same turn.
+    assert result is tailer
+    assert manager._tailers[session.id] is tailer
+    assert transport.turn_in_flight is True
+    assert transport.stop_called is False
+    assert tailer.is_running() is True
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_replaces_hard_failed_tailer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hard-failed tailer is still replaced; the AC2 preserve path is narrow
+    (only healthy + running + in-flight)."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.session = session
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    tailer._hard_failed = True
+    manager = TailerManager(lambda _session_id: session)
+    manager._tailers[session.id] = tailer
+
+    fresh = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_FakeNativeTransport(eof_is_fatal=False),
+    )
+
+    # Stub the (real-transport-creating) factory so the replace path stays
+    # hermetic; only the preserve/replace decision is under test. The stub
+    # mirrors ``_get_or_create``'s registration of the fresh tailer.
+    async def fake_get_or_create(sess: ManagedSession) -> SessionTailer:
+        manager._tailers[sess.id] = fresh
+        return fresh
+
+    manager._get_or_create = fake_get_or_create
+
+    result = await manager.retry(session)
+
+    assert result is fresh
+    assert manager._tailers[session.id] is fresh
+    # The failed tailer was stopped (its subprocess reaped).
+    assert transport.stop_called is True
 
 
 @pytest.mark.asyncio

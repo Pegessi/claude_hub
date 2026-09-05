@@ -8,7 +8,9 @@ const structuredPane = readFileSync(
 )
 
 test('mode picker lives beside the attachment control and opens an upward menu', () => {
-  const composerRow = structuredPane.match(/<div class="composer-row">[\s\S]*?<div class="composer-hints">/)
+  // The composer-hints element carries a v-if (hidden on mobile), so match up
+  // to its class attribute without requiring a bare `<div class="composer-hints">`.
+  const composerRow = structuredPane.match(/<div class="composer-row">[\s\S]*?class="composer-hints"/)
   assert.ok(composerRow, 'composer row must contain its toolbar with the mode picker')
   assert.match(composerRow[0], /class="composer-tools"/)
   assert.match(composerRow[0], /class="composer-attach-btn"[\s\S]*?class="composer-mode-trigger"/)
