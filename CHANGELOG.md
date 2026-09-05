@@ -15,6 +15,12 @@
   a red `failed` badge. The provider reports `is_error` when the user dismisses
   the prompt, which is a cancellation, not a tool failure. A genuinely failed
   tool still renders as `failed`.
+- Ellipsize an ultra-long single tool name (and each expanded group row) so it
+  can no longer clip the status badge out of the card. Document why a
+  `completed` event orphaned without its `started` event (a corrupted
+  transcript) still renders as a generic failed tool — the name is
+  unrecoverable there, and history always hydrates contiguously from sequence
+  zero, so this only affects already-corrupt state.
 
 ### fix: recover Chat turns interrupted by backend reloads
 
