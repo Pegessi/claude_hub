@@ -1601,6 +1601,58 @@ async def test_codex_base_answer_pending_question_returns_false() -> None:
     assert await cursor.answer_pending_question([{"questionId": "q", "selected": ["a"]}]) is False
 
 
+@pytest.mark.asyncio
+async def test_codex_concurrent_answer_calls_do_not_double_answer() -> None:
+    """Two concurrent answer calls must drain a disjoint set of pending
+    requests: snapshot+clear before awaiting means exactly one call drains the
+    map and no req_id receives more than one response."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+
+    # The real StreamWriter.drain yields to the event loop mid-write; the fake's
+    # ``pass`` coroutine does not, which would let one call finish before the
+    # other starts. Force a yield so the two calls actually interleave at the
+    # drain await — the interleaving the snapshot+clear guard is built for.
+    async def _yielding_drain() -> None:
+        await asyncio.sleep(0)
+
+    proc.stdin.drain = _yielding_drain  # type: ignore[method-assign]
+    sess._pending_questions[42] = _codex_question_request(42)["params"]
+    sess._pending_questions[43] = _codex_question_request(43)["params"]
+    answers = [{"questionId": "q1", "selected": ["red"]}]
+    results = await asyncio.gather(
+        sess.answer_pending_question(answers),
+        sess.answer_pending_question(answers),
+    )
+    # Exactly one call consumed the questions; the other fell through.
+    assert results.count(True) == 1
+    assert results.count(False) == 1
+    responses = [m for m in _written_requests(proc) if "method" not in m]
+    ids = [m["id"] for m in responses]
+    assert sorted(ids) == [42, 43]
+    assert len(ids) == len(set(ids))  # no req_id answered twice
+    assert sess._pending_questions == {}
+
+
+@pytest.mark.asyncio
+async def test_codex_cancel_active_turn_clears_pending_questions() -> None:
+    """Stopping while a question is pending must drop the stale request so the
+    next turn's answer is not also sent to a request id the app-server is no
+    longer waiting on."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    sess._pending_questions[42] = _codex_question_request()["params"]
+    sess._turn_in_flight = True
+    # cancel_active_turn awaits turn/cancel via _send_request; mock it so the
+    # test does not block on the 10s startup-grace timeout.
+    sess._send_request = AsyncMock(return_value={})  # type: ignore[method-assign]
+    await sess.cancel_active_turn()
+    assert sess._pending_questions == {}
+    assert sess._turn_in_flight is False
+
+
 def test_parse_ask_question_response() -> None:
     """The composer payload parser returns the answers list for a matching
     payload and ``None`` otherwise (so non-answer text is delivered normally)."""

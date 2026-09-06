@@ -1232,6 +1232,10 @@ class CodexNativeSession(ProviderSession):
             await self._send_request("turn/cancel", {})
         except Exception:
             logger.exception("codex turn/cancel failed")
+        # turn/cancel kills the blocked turn, so any pending question request is
+        # dead — drop it so the next turn's answer is not also sent to a stale
+        # request id the app-server is no longer waiting on.
+        self._pending_questions.clear()
         self._clear_staged_images()
         inflight = self._inflight_images
         self._inflight_images = []
@@ -1461,6 +1465,11 @@ class CodexNativeSession(ProviderSession):
         """
         if not self._pending_questions:
             return False
+        # Snapshot and clear BEFORE awaiting so a concurrent answer call cannot
+        # observe a partially-popped map and re-send responses for the ids the
+        # first call is still draining.
+        pending = list(self._pending_questions.items())
+        self._pending_questions.clear()
         codex_answers: Dict[str, Dict[str, List[str]]] = {}
         for entry in answers:
             if not isinstance(entry, dict):
@@ -1472,8 +1481,7 @@ class CodexNativeSession(ProviderSession):
             values = [value for value in selected if isinstance(value, str)]
             codex_answers[question_id] = {"answers": values}
         result = {"answers": codex_answers}
-        for req_id in list(self._pending_questions.keys()):
-            self._pending_questions.pop(req_id, None)
+        for req_id, _params in pending:
             await self._send_jsonrpc_response(req_id, result=result)
         return True
 

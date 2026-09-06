@@ -116,13 +116,63 @@ response arrives; there is no completion event for a blocking request.
   `_send_lock`, matching `cancel_active_turn` (single small JSON line; the turn
   is blocked so there is no concurrent `turn/start`).
 
+## Review fixes (post-implementation)
+
+An independent adversarial review of `2e16c6d` found one blocking regression and
+two robustness gaps; all are fixed on the branch.
+
+- **Blocking — answering a question locked the composer forever.** The answer
+  is intercepted in `send_message` *before* `turn_started` is published, so no
+  authoritative turn ever carries the answer's `client_turn_id`. But the
+  frontend `submit()` unconditionally pushed an optimistic pending turn keyed
+  by that id; the only removal path is a watcher that drops a pending turn once
+  its id appears in an authoritative turn. The bubble therefore stayed pinned
+  forever (showing the raw JSON answer), and `turnInFlight`
+  (`isChatModeLocked(pendingDirectTurns.length > 0, …)`) stayed `true`, so
+  every subsequent send was silently queued and never flushed. Fix: an answer
+  (`messageOverride`) is not a new turn — skip the optimistic push. The card is
+  already marked resolved by `submitQuestionResponse` as the visual ack, and
+  `turnInFlight` stays correctly `true` from the blocked authoritative turn
+  until its `turn/completed` arrives. Claude/Cursor are unaffected (their
+  answer goes through the full steer path and publishes `turn_started`).
+- **Race — concurrent `answer_pending_question` calls could double-answer.**
+  The old loop popped one id per iteration then `await`ed the write, so a
+  second call could observe a partially-popped map and re-send for the
+  remaining ids. Fix: snapshot + `clear()` before any await (atomic — no await
+  between the check and the clear), then drain the snapshot. Exactly one call
+  drains; the other sees an empty map and returns `False`.
+- **Stale state — `cancel_active_turn` left `_pending_questions` populated.**
+  Stopping while a question is pending killed the blocked turn but left the
+  request id in the map, so the next turn's answer was also sent to a dead
+  request. Fix: `cancel_active_turn` clears the map (the app-server is no
+  longer waiting on that id after `turn/cancel`).
+
+### Deferred (non-blocking, pre-existing pattern)
+
+- **Answer is not durably persisted.** No `turn_started`/`approval_resolved`
+  is recorded for the answer, so on reload the card renders as open inside a
+  completed turn. Re-submitting a stale card then sends the raw JSON as a
+  genuine new turn (nothing pending → falls through to normal delivery). Same
+  class of stale-card issue exists for Claude; a follow-up should emit an
+  `approval_resolved` event or mark the card resolved durably.
+- **All-skipped question hangs silently.** If every question in a request is
+  skipped by the adapter (e.g. all have empty `options`), no card is emitted
+  but the request stays pending and the turn blocks with no UI; only Stop
+  recovers it. Degenerate input (Codex always sends options); auto-dismissing
+  with `{"answers":{}}` would be more robust.
+
 ## Validation
 
 - Backend: `test_agent_stream_native.py` (transport: stash/forward, answer
   response shape, dismissal, no-pending `False`, unknown-method `-32601`, base
-  `False`, parser) + `test_agent_stream.py` (adapter: card emission, legacy
-  alias, multiSelect/header fallback, invalid-entry skip). 140 passed in the
-  targeted run. Full suite (excluding the Playwright/tmux E2E files CI also
+  `False`, parser, **concurrent-answer no-double-answer**, **cancel clears
+  pending questions**) + `test_agent_stream.py` (adapter: card emission, legacy
+  alias, multiSelect/header fallback, invalid-entry skip). 37 passed in the
+  targeted native+adapter run. The concurrent-answer test forces a yield in the
+  fake stdin `drain()` (the real `StreamWriter.drain` yields mid-write) so the
+  two calls actually interleave; verified it FAILS on the pre-fix code
+  (`assert 2 == 1` — both calls drained, double-answering id 43) and PASSES on
+  the fix. Full suite (excluding the Playwright/tmux E2E files CI also
   ignores): 1271 passed, 13 failed — all 13 are the documented environmental
   `tmux session not created` / real-ttyd failures, none in `agent_stream`.
 - `black --check`, `isort --check-only`, `mypy` clean on the changed source.
@@ -131,5 +181,7 @@ response arrives; there is no completion event for a blocking request.
   `fa2153c`, not introduced here.)
 - Frontend: `agentStreamTimeline.test.mjs` — `request_user_input` hidden from
   `tool_group` and renders an approval card; does not merge with adjacent tool
-  groups. 21 passed in-file; 270 passed across the full `tests/*.test.mjs`
-  suite. `eslint`, `vue-tsc --noEmit`, and `pnpm build` clean.
+  groups. 270 passed across the full `tests/*.test.mjs` suite. `eslint`,
+  `vue-tsc` (via `pnpm build`), and `vite build` clean. The composer-lock fix
+  is in `StructuredPane.vue`'s `submit()` closure (not unit-tested directly);
+  verified by the typecheck/build passing and the failure-chain trace above.

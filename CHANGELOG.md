@@ -69,6 +69,15 @@
   delivered on the same stdin as the tool result. Providers without a
   blocking-question channel (Claude, Cursor) return `False` and fall through to
   normal delivery.
+- Answering a Codex question no longer pins an optimistic pending turn: an
+  answer is not a new turn (no `turn_started` is published for it), so the
+  bubble would never reconcile against an authoritative `turnId` and would hold
+  `turnInFlight` (composer lock) until remount. The approval card is marked
+  resolved as the visual ack instead.
+- `answer_pending_question` snapshots and clears the pending map before
+  awaiting, so two concurrent answer calls cannot double-answer a stale
+  request id; `cancel_active_turn` drops pending questions so a stopped turn's
+  dead request is not answered by the next turn's answer.
 - See `docs/working-logs/2026-09-06-codex-question-approval.md`.
 
 ### fix: correct tool-call rendering in structured Chat
