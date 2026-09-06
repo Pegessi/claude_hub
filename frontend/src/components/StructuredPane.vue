@@ -599,7 +599,10 @@
             {{ isSending ? 'Sending…' : (turnInFlight ? 'Queue' : 'Send') }}
           </button>
         </div>
-        <div class="composer-hints">
+        <div
+          v-if="!isMobileViewport"
+          class="composer-hints"
+        >
           <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
           <span>⌘/Ctrl+Enter steer</span>
           <span>Shift+Enter newline</span>
@@ -867,6 +870,14 @@ const composerError = ref<string | null>(null)
 const isSending = ref(false)
 const isCancelling = ref(false)
 const isComposing = ref(false)
+// Mobile soft keyboards have no Shift/⌘/Ctrl keys, so on a mobile viewport the
+// composer hides the desktop-only key hints and treats Enter as a newline
+// (sending is only via the Send button). Reactive on resize so rotating or
+// resizing a device updates it live.
+const isMobileViewport = ref(false)
+function handleViewportResize() {
+  isMobileViewport.value = window.innerWidth <= 768
+}
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
 const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
 const questionAnswers = ref<Record<string, QuestionAnswerMap>>({})
@@ -902,6 +913,8 @@ watch(events, (latest, previous) => {
 // ── Stream lifecycle ────────────────────────────────────────────────────────
 
 onMounted(() => {
+  handleViewportResize()
+  window.addEventListener('resize', handleViewportResize)
   startStream()
   document.addEventListener('keydown', handleDocumentKeydown)
   document.addEventListener('pointerdown', handleModeOutsidePointer)
@@ -940,6 +953,7 @@ onUnmounted(() => {
   document.removeEventListener('keydown', handleDocumentKeydown)
   document.removeEventListener('pointerdown', handleModeOutsidePointer)
   document.removeEventListener('pointerdown', handleModelOutsidePointer)
+  window.removeEventListener('resize', handleViewportResize)
   dismissImageLightbox(false)
   stop()
 })
@@ -1337,6 +1351,7 @@ function handleComposerEnter(event: KeyboardEvent) {
     altKey: event.altKey,
     turnInFlight: turnInFlight.value,
     hasDraft: draftMessage.value.trim().length > 0 || attachments.value.length > 0,
+    isMobile: isMobileViewport.value,
   })
   if (action === 'ignore' || action === 'newline') return
   event.preventDefault()

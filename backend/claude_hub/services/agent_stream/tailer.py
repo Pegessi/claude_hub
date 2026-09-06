@@ -63,12 +63,22 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 1.0
 IDLE_TTL_S = 300.0
+# Hard safety cap on a single native turn's wall-clock duration. The idle-reap
+# never cancels a healthy in-flight turn (see ``_run_native``), but a genuinely
+# hung turn must not keep the tailer alive forever. This cap is intentionally
+# generous: it fires on in-flight duration, never on subscriber presence, so it
+# cannot interrupt a healthy turn that was merely backgrounded on mobile.
+MAX_TURN_DURATION_S = 3600.0
 DISCOVERY_GRACE_S = 30.0
 SUBSCRIBER_QUEUE_MAX = 2000
 _STOP_JOIN_TIMEOUT_S = 5.0
 _RUNTIME_INTERRUPTED_MESSAGE = (
     "Turn interrupted because its backend runtime was no longer available."
 )
+# Distinct from the runtime-loss interruption: the runtime is healthy here, the
+# turn itself is stuck past the hard cap. Surfaced so the user knows why a
+# long-running turn was stopped rather than seeing an immortal spinner.
+_HUNG_TURN_MESSAGE = "Turn stopped after exceeding the maximum allowed duration."
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
@@ -210,6 +220,10 @@ class SessionTailer:
         self._task: Optional[asyncio.Task[Any]] = None
         self._subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
         self._last_subscriber_at = time.monotonic()
+        # Wall-clock stamp of when the current in-flight turn was first
+        # observed active; ``None`` when no turn is in flight. Drives the
+        # hung-turn safety cap in ``_run_native`` (independent of subscribers).
+        self._turn_in_flight_since: Optional[float] = None
         self._hard_failed = False
         self._discovery_deadline: Optional[float] = None
         self._stopped = False
@@ -557,6 +571,15 @@ class SessionTailer:
         self._turn_completed_seen = True
         self._terminalize_native_runtime(status)
 
+    def _turn_exceeds_hard_cap(self) -> bool:
+        """True if the active turn has run longer than ``MAX_TURN_DURATION_S``.
+
+        Independent of subscriber presence, so it can never fire on a healthy
+        turn that was merely backgrounded — only on a genuinely hung turn.
+        """
+        since = self._turn_in_flight_since
+        return since is not None and (time.monotonic() - since > MAX_TURN_DURATION_S)
+
     async def _cancel_active_turn_locked(
         self,
         transport: ProviderSession,
@@ -787,25 +810,55 @@ class SessionTailer:
             self._hard_failed = False
             _HARD_FAILED_SESSION_IDS.discard(self.session_id)
             self._last_error = None
-            # Idle reaping: stop if we've had no subscribers for IDLE_TTL_S.
+            # Track the current turn's wall-clock duration for the hung-turn
+            # safety cap below. ``turn_in_flight`` is the authoritative guard
+            # (released at TURN_COMPLETED), so this stamps the first tick on
+            # which a turn is observed active and clears on completion.
+            if transport.turn_in_flight:
+                if self._turn_in_flight_since is None:
+                    self._turn_in_flight_since = time.monotonic()
+            elif self._turn_in_flight_since is not None:
+                self._turn_in_flight_since = None
+            # Idle reaping: with no subscribers for IDLE_TTL_S, reap an idle
+            # tailer. A healthy in-flight turn is NEVER cancelled just because
+            # viewers vanished (e.g. mobile backgrounding kills SSE and the
+            # long-poll self-expires) — it completes on its own and the next
+            # idle check reaps it. Only a turn that exceeds the hard duration
+            # cap (genuinely hung) is reaped, with a distinct message because
+            # the runtime is healthy — the turn itself is stuck.
             if not self._subscribers and (time.monotonic() - self._last_subscriber_at > IDLE_TTL_S):
-                # Stop the native transport so the provider subprocess (e.g.
-                # the Codex app-server) is reaped, not left orphaned.
-                try:
-                    async with self._send_lock:
-                        if transport.turn_in_flight:
-                            await self._cancel_active_turn_locked(
-                                transport,
-                                error_message=_RUNTIME_INTERRUPTED_MESSAGE,
-                            )
-                        else:
+                if not transport.turn_in_flight:
+                    # Stop the native transport so the provider subprocess
+                    # (e.g. the Codex app-server) is reaped, not left orphaned.
+                    try:
+                        async with self._send_lock:
                             await transport.stop()
-                except Exception:
-                    logger.exception(
-                        "native transport stop failed during idle reap for session %s",
-                        self.session_id,
-                    )
-                break
+                    except Exception:
+                        logger.exception(
+                            "native transport stop failed during idle reap for session %s",
+                            self.session_id,
+                        )
+                    break
+                if self._turn_exceeds_hard_cap():
+                    # Genuinely hung turn: terminalize it and reap the
+                    # subprocess so the tailer does not live forever.
+                    try:
+                        async with self._send_lock:
+                            if transport.turn_in_flight and self._turn_exceeds_hard_cap():
+                                await self._cancel_active_turn_locked(
+                                    transport,
+                                    error_message=_HUNG_TURN_MESSAGE,
+                                )
+                                await transport.stop()
+                    except Exception:
+                        logger.exception(
+                            "native hung-turn reap failed for session %s",
+                            self.session_id,
+                        )
+                    break
+                # Healthy in-flight turn: fall through and keep consuming.
+                # Records are still persisted even with zero subscribers, so
+                # nothing is lost while no viewer is attached.
             try:
                 record = await asyncio.wait_for(transport.read_line(), timeout=POLL_INTERVAL_S)
             except asyncio.TimeoutError:
@@ -1531,6 +1584,22 @@ class TailerManager:
     async def ensure_started(self, session: ManagedSession) -> SessionTailer:
         return await self._get_or_create(session)
 
+    @staticmethod
+    def _is_reusable(tailer: SessionTailer) -> bool:
+        """True if ``tailer`` is healthy and actively running a turn.
+
+        A manual Retry after a transient reconnect must not stop such a
+        tailer: stopping it would cancel the in-flight turn and emit a false
+        runtime-interruption. Only a hard-failed, stopped, or idle tailer is
+        replaced (AC2).
+        """
+        if tailer.hard_failed or not tailer.is_running():
+            return False
+        transport = tailer.native_transport
+        if transport is None or not transport.turn_in_flight:
+            return False
+        return True
+
     async def retry(self, session: ManagedSession) -> SessionTailer:
         """Replace a failed/stopped tailer and resume from durable provider id.
 
@@ -1539,9 +1608,19 @@ class TailerManager:
         the whole in-memory owner, stop any surviving subprocess, then let the
         normal constructor create a fresh adapter/transport.  The persisted
         ``agent_session_id`` on ``session`` preserves the conversation.
+
+        A healthy tailer that is actively running a turn is preserved instead
+        of replaced: a manual Retry after a transient network failure must not
+        cancel an in-flight turn (AC2). Re-register it under the lock and
+        return it; the durable conversation id is unchanged.
         """
 
         async with self._lock:
+            previous = self._tailers.get(session.id)
+            if previous is not None and self._is_reusable(previous):
+                self._tailers[session.id] = previous
+                _HARD_FAILED_SESSION_IDS.discard(session.id)
+                return previous
             previous = self._tailers.pop(session.id, None)
         if previous is not None:
             await previous.stop()
