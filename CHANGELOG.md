@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### fix: persist approval_resolved so answered question cards stay resolved
+
+- Answering a Codex `requestUserInput` or Claude `AskUserQuestion` card now
+  emits and persists an `approval_resolved` event carrying the card's identity
+  (`str(itemId)` for Codex, the tool_use id for Claude) and the blocked turn's
+  id. Previously no resolved event was recorded, so on reload the card rendered
+  as still-open inside a completed turn and re-submitting a stale card sent the
+  raw answer JSON as a genuine new turn. The tailer tracks pending cards and
+  emits one resolved event per answered card through the durable persistence
+  path (stored even with zero live subscribers), stamped with the card's own
+  turn so the frontend routes it correctly even when a Claude steer cancels the
+  blocked turn.
+- A `requestUserInput` request whose questions are all skipped by the adapter
+  (e.g. all empty/invalid `options`) now auto-answers with the dismissal
+  payload `{"answers":{}}` instead of leaving the turn blocked forever. The
+  skip logic is shared (`codex_normalize_questions` in `native.py`) between the
+  transport stash and the adapter so the two can never drift.
+
 ### feat: interactive approval cards for Claude AskUserQuestion
 
 - Claude structured Chat turns that call `AskUserQuestion` now render an

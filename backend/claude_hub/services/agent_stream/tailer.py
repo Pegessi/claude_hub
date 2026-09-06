@@ -97,6 +97,22 @@ class NativeRuntimeSnapshot:
     detail: str
 
 
+@dataclass(frozen=True)
+class _PendingApproval:
+    """An unanswered approval card's identity, captured when its
+    ``approval_required`` event flows through ``_run_native``.
+
+    The tailer stamps the matching ``approval_resolved`` with the card's own
+    ``turn_id``/``run_epoch`` so a reload marks the card resolved inside the
+    correct turn even if the answer arrives after the turn's active id was
+    released (the Claude/Cursor steer path cancels the blocked turn).
+    """
+
+    call_id: str
+    turn_id: Optional[str]
+    run_epoch: Optional[int]
+
+
 def _native_runtime_snapshot(tailer: "SessionTailer") -> Optional[NativeRuntimeSnapshot]:
     if tailer.hard_failed or tailer.native_error is not None:
         return NativeRuntimeSnapshot(
@@ -208,6 +224,13 @@ class SessionTailer:
         # the turn completes. Every provider event normalized while this is set
         # is stamped with it so the frontend can upsert by identity.
         self._active_turn_id: Optional[str] = None
+        # Approval cards (``approval_required``) awaiting an answer, keyed by
+        # the card's ``call_id``. Each entry captures the turn the card was
+        # emitted in so ``_emit_approval_resolved`` can stamp the durable
+        # ``approval_resolved`` event with the card's own turn even when the
+        # answer is delivered as a steer that cancels that turn (Claude/Cursor).
+        # Cleared when the turn completes.
+        self._pending_approvals: Dict[str, _PendingApproval] = {}
         # Whether the provider has emitted a terminal ``turn_completed`` event
         # for the active turn. Used at EOF to decide whether a failed
         # ``turn_completed`` must be synthesized (nonzero exit or early EOF
@@ -377,10 +400,19 @@ class SessionTailer:
         # providers without a question channel return False and fall through.
         if not images:
             parsed_answers = parse_ask_question_response(text)
-            if parsed_answers is not None and await transport.answer_pending_question(
-                parsed_answers
-            ):
-                return
+            if parsed_answers is not None:
+                consumed = await transport.answer_pending_question(parsed_answers)
+                # The card is answered either way: Codex consumed the answer
+                # as the blocking JSON-RPC response; Claude/Cursor have no
+                # question channel and deliver it as a steer/follow-up below.
+                # Persist an ``approval_resolved`` for every pending card so a
+                # reload marks it resolved instead of rendering an open card
+                # inside a completed turn (and re-submitting a stale card no
+                # longer sends the raw JSON as a genuine new turn).
+                if consumed or self._pending_approvals:
+                    await self._emit_approval_resolved()
+                if consumed:
+                    return
 
         async with self._send_lock:
             # 1. Busy check BEFORE any state mutation. If a turn is already in
@@ -623,6 +655,9 @@ class SessionTailer:
                 publish_error = exc
         await transport.cancel_active_turn()
         self._active_turn_id = None
+        # A cancelled turn can no longer answer a pending card; drop stale
+        # tracking so it cannot be resolved against a later turn.
+        self._pending_approvals.clear()
         if publish_error is not None:
             raise RuntimeError("turn stopped but its cancelled state could not be persisted") from (
                 publish_error
@@ -969,6 +1004,7 @@ class SessionTailer:
                 is_turn_completed = event.type == AgentStreamEventType.TURN_COMPLETED
                 if event.run_epoch is None:
                     event.run_epoch = self._run_epoch
+                self._record_approval_card(event)
                 event = redact_event(event)
                 try:
                     await self._publish(event)
@@ -979,6 +1015,9 @@ class SessionTailer:
                     )
                     continue
                 if is_turn_completed:
+                    # A completed turn can no longer answer a pending card;
+                    # drop any stale tracking so it cannot be resolved later.
+                    self._pending_approvals.clear()
                     # Mark that the provider emitted a terminal completion for
                     # the active turn. At EOF we use this to decide whether a
                     # failed turn_completed must be synthesized.
@@ -1331,6 +1370,63 @@ class SessionTailer:
             if isinstance(record, dict):
                 lines.append(record)
         return lines, new_offset, inode, False
+
+    def _record_approval_card(self, event: AgentStreamEvent) -> None:
+        """Track an ``approval_required`` card (or drop a resolved one) so its
+        durable ``approval_resolved`` can be stamped with the card's own turn.
+
+        Called from ``_run_native`` as normalized events flow through, before
+        they are persisted. Only native sessions reach this path; transcript
+        sessions have no answer-intercept flow.
+        """
+        if event.type == AgentStreamEventType.APPROVAL_REQUIRED and event.call_id:
+            self._pending_approvals[event.call_id] = _PendingApproval(
+                call_id=event.call_id,
+                turn_id=event.turn_id,
+                run_epoch=event.run_epoch,
+            )
+        elif event.type == AgentStreamEventType.APPROVAL_RESOLVED and event.call_id:
+            self._pending_approvals.pop(event.call_id, None)
+
+    async def _emit_approval_resolved(self) -> None:
+        """Persist + fan out one ``approval_resolved`` per pending card.
+
+        Snapshot + clear before any await so a concurrent answer cannot emit a
+        duplicate resolved event for the same card (mirrors the snapshot+clear
+        guard in ``CodexNativeSession.answer_pending_question``). Each event is
+        stamped with the captured card identity (``call_id``/``tool_call_id``)
+        and the card's own ``turn_id``/``run_epoch`` — not the active turn at
+        emit time — so the frontend routes it to the turn that owns the card
+        even when the answer was delivered as a steer that cancelled that turn.
+        """
+        if not self._pending_approvals:
+            return
+        pending = dict(self._pending_approvals)
+        self._pending_approvals.clear()
+        session = self._session_getter()
+        if session is None:
+            return
+        for card in pending.values():
+            ctx = NormalizeContext(
+                session_id=self.session_id,
+                tab_id=session.tab_id,
+                agent_type=session.agent_type,
+                run_epoch=card.run_epoch if card.run_epoch is not None else self._run_epoch,
+                turn_id=card.turn_id,
+            )
+            event = ctx.event(
+                AgentStreamEventType.APPROVAL_RESOLVED,
+                {"tool_call_id": card.call_id},
+                call_id=card.call_id,
+            )
+            event = redact_event(event)
+            try:
+                await self._publish(event)
+            except Exception:
+                logger.exception(
+                    "agent_stream store append failed for approval_resolved session %s",
+                    self.session_id,
+                )
 
     async def _persist_and_fanout(self, event: AgentStreamEvent) -> None:
         """Persist a (possibly coalesced) event and fan it out to subscribers.

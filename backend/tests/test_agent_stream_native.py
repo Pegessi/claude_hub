@@ -1533,6 +1533,45 @@ async def test_codex_server_question_request_stashed_and_forwarded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_all_skipped_question_auto_dismisses() -> None:
+    """A request whose questions are ALL skipped by the adapter (e.g. every
+    question has empty options) emits no card, so nothing can answer it and
+    the turn would block forever. The transport must auto-answer with
+    ``{"answers": {}}`` to unblock, and must NOT stash the request or forward
+    a notification (there is no card to resolve)."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    # Every question has empty options -> zero actionable questions.
+    request = _codex_question_request()
+    request["params"]["questions"] = [{"id": "q1", "question": "Pick?", "options": []}]
+    await sess._handle_server_request(request)
+    # The dismissal response was written as a JSON-RPC response (not a request).
+    resp = next(m for m in _written_requests(proc) if m.get("id") == 42)
+    assert "method" not in resp
+    assert resp["result"] == {"answers": {}}
+    # Nothing stashed and no synthetic notification forwarded.
+    assert sess._pending_questions == {}
+    assert sess._notification_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_codex_missing_questions_auto_dismisses() -> None:
+    """A request with no ``questions`` field at all is also zero-actionable
+    and must be auto-dismissed rather than blocking the turn."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    request = _codex_question_request()
+    del request["params"]["questions"]
+    await sess._handle_server_request(request)
+    resp = next(m for m in _written_requests(proc) if m.get("id") == 42)
+    assert resp["result"] == {"answers": {}}
+    assert sess._pending_questions == {}
+    assert sess._notification_queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_codex_answer_pending_question_sends_jsonrpc_response() -> None:
     """Answering a pending question writes the JSON-RPC response with the
     app-server's ``{answers: {questionId: {answers: [labels]}}}`` shape."""

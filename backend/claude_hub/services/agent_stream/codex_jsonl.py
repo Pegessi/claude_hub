@@ -44,7 +44,7 @@ from .base import (
     resolve_cwd,
     resolve_process_hint,
 )
-from .native import _CODEX_QUESTION_METHODS
+from .native import _CODEX_QUESTION_METHODS, codex_normalize_questions
 
 _FLAT_OBJ_RE = re.compile(r"\{[^{}]*\}")
 _CMD_RE = re.compile(r'"cmd"\s*:\s*"((?:[^"\\]|\\.)*)"')
@@ -254,7 +254,7 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         response (see ``CodexNativeSession.answer_pending_question``).
         """
         events: List[AgentStreamEvent] = []
-        questions = self._codex_normalize_questions(params.get("questions"))
+        questions = codex_normalize_questions(params.get("questions"))
         if not questions:
             return events
         item_id = params.get("itemId")
@@ -279,51 +279,6 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             )
         )
         return events
-
-    @staticmethod
-    def _codex_normalize_questions(raw: Any) -> List[Dict[str, Any]]:
-        """Map Codex ``requestUserInput`` questions to the shared card shape.
-
-        Codex sends ``{id, header, question, options: [{label, ...}],
-        multiSelect}``; the approval card expects ``{id, prompt,
-        options: [{id, label}], allow_multiple}``. Option ids are the labels
-        themselves, so a selected label is also the answer value.
-        """
-        if not isinstance(raw, list):
-            return []
-        questions: List[Dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            question_id = item.get("id")
-            if not isinstance(question_id, str) or not question_id:
-                continue
-            prompt = item.get("question")
-            if not isinstance(prompt, str) or not prompt:
-                prompt = item.get("header")
-            if not isinstance(prompt, str) or not prompt:
-                continue
-            raw_options = item.get("options")
-            options: List[Dict[str, str]] = []
-            if isinstance(raw_options, list):
-                for opt in raw_options:
-                    if not isinstance(opt, dict):
-                        continue
-                    label = opt.get("label")
-                    if not isinstance(label, str) or not label:
-                        continue
-                    options.append({"id": label, "label": label})
-            if not options:
-                continue
-            questions.append(
-                {
-                    "id": question_id,
-                    "prompt": prompt,
-                    "options": options,
-                    "allow_multiple": item.get("multiSelect") is True,
-                }
-            )
-        return questions
 
     def _normalize_event_msg(
         self, payload: Dict[str, Any], payload_type: str, ctx: NormalizeContext
