@@ -1564,15 +1564,24 @@ async function submit(
     }
     // Show the user's turn immediately; the stream will replace it with the
     // authoritative transcript line once the provider echoes it back.
-    pendingDirectTurns.value = [
-      ...pendingDirectTurns.value,
-      {
-        key: `pending-${clientTurnId}`,
-        turnId: clientTurnId,
-        userText: message,
-        attachments: pendingAtts,
-      },
-    ]
+    //
+    // A provider-native question answer (messageOverride) is NOT a new turn:
+    // the transport routes it as the blocking question's JSON-RPC response and
+    // publishes no turn_started for it, so an optimistic bubble would never
+    // reconcile against an authoritative turnId — leaving it pinned forever and
+    // holding turnInFlight (composer lock) until remount. The approval card is
+    // already marked resolved by submitQuestionResponse as the visual ack.
+    if (!messageOverride) {
+      pendingDirectTurns.value = [
+        ...pendingDirectTurns.value,
+        {
+          key: `pending-${clientTurnId}`,
+          turnId: clientTurnId,
+          userText: message,
+          attachments: pendingAtts,
+        },
+      ]
+    }
     requestLatestAnchor(true)
     await sendToStream(message, atts, clientTurnId, delivery)
     // The POST acknowledgement means provider dispatch has begun. Refresh the
