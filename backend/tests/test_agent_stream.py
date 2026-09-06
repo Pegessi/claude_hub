@@ -2159,6 +2159,14 @@ class _FakeNativeTransport:
         self._turn_in_flight = True
         self.sent_messages.append((text, images))
 
+    async def answer_pending_question(self, answers: Any) -> bool:
+        """Mirrors the base ``ProviderSession`` (no blocking-question channel).
+
+        Codex tests override this with an ``AsyncMock(return_value=True)`` to
+        simulate the transport consuming the answer as the JSON-RPC response.
+        """
+        return False
+
     @property
     def turn_in_flight(self) -> bool:
         return self._turn_in_flight
@@ -2190,6 +2198,36 @@ def _native_session() -> ManagedSession:
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
+
+
+def _isolate_state_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point the durable event store at ``tmp_path`` for one test.
+
+    ``AgentStreamStore`` is a per-(workspace, session) JSONL file under
+    ``STATE_ROOT``; without isolation, tests sharing a session id read each
+    other's persisted events and writes land under the live state dir. The
+    store reads ``STATE_ROOT`` at call time, so monkeypatching the module
+    attribute (not the ``WorkspaceManager`` instance shadowing it in
+    ``claude_hub.services``) is what takes effect.
+    """
+    import importlib
+
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path)
+
+
+async def _wait_for_store_event(
+    store: AgentStreamStore, event_type: AgentStreamEventType, timeout: float = 2.0
+) -> AgentStreamEvent:
+    """Poll the persisted store until an event of ``event_type`` appears."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        page = await store.read_since(-1, limit=500)
+        for event in page.events:
+            if event.type == event_type:
+                return event
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"timed out waiting for persisted {event_type}")
 
 
 @pytest.mark.asyncio
@@ -2834,6 +2872,145 @@ async def test_native_first_turn_is_fanned_out_not_swallowed_by_backfill() -> No
     turn_started = next(e for e in events if e.type == AgentStreamEventType.TURN_STARTED)
     assert turn_started.turn_id == "turn-1"
     assert turn_started.message_id == "turn-1:user"
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_codex_answer_emits_persisted_approval_resolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Answering a Codex ``requestUserInput`` card must persist an
+    ``approval_resolved`` event carrying the card's identity (``str(itemId)``)
+    and the blocked turn's id, so a reload marks the card resolved instead of
+    rendering it open inside a completed turn."""
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    # Isolate the durable store so this test never reads another test's
+    # persisted events (the store is keyed by workspace/session id) and never
+    # writes under the live STATE_ROOT.
+    _isolate_state_root(monkeypatch, tmp_path)
+
+    transport = _FakeNativeTransport()
+    # Codex consumes the answer as the blocking JSON-RPC response.
+    transport.answer_pending_question = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    session = _native_session()
+    session.agent_type = AgentType.CODEX
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=CodexJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.subscribe()
+    await asyncio.sleep(0.05)
+
+    # The authoritative turn_started is published by send_message before the
+    # provider runs; the blocking question arrives during that turn.
+    await tailer.send_message("hello", [], client_turn_id="turn-codex")
+    transport._records.put_nowait(
+        {
+            "method": "item/tool/requestUserInput",
+            "params": {
+                "itemId": "it-9",
+                "threadId": "th-1",
+                "turnId": "tu-1",
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": "Pick a color",
+                        "options": [{"label": "red"}, {"label": "blue"}],
+                    }
+                ],
+            },
+        }
+    )
+    approval = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_REQUIRED)
+    assert approval.call_id == "it-9"
+    assert approval.turn_id == "turn-codex"
+
+    # The composer's answer is consumed as the JSON-RPC response (not a new turn).
+    answer = json.dumps(
+        {"type": "ask_question_response", "answers": [{"questionId": "q1", "selected": ["red"]}]}
+    )
+    await tailer.send_message(answer, [], client_turn_id="turn-codex-answer")
+
+    resolved = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_RESOLVED)
+    assert resolved.payload["tool_call_id"] == "it-9"
+    assert resolved.call_id == "it-9"
+    assert resolved.turn_id == "turn-codex"
+    transport.answer_pending_question.assert_awaited_once()
+    # The raw JSON answer must not be sent as a genuine new turn.
+    assert all(text != answer for text, _ in transport.sent_messages)
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_claude_answer_emits_persisted_approval_resolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Answering a Claude ``AskUserQuestion`` card must persist an
+    ``approval_resolved`` event carrying the tool_use id and the blocked
+    turn's id. Claude has no blocking-question channel, so the answer is
+    delivered as a steer that cancels the blocked turn; the resolved event
+    must still be stamped with the card's own turn, not the steer's new turn."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    # Isolate the durable store (see the Codex test above for rationale).
+    _isolate_state_root(monkeypatch, tmp_path)
+
+    transport = _FakeNativeTransport()  # answer_pending_question returns False
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.subscribe()
+    await asyncio.sleep(0.05)
+
+    await tailer.send_message("hello", [], client_turn_id="turn-claude")
+    transport._records.put_nowait(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_ask1",
+                        "name": "AskUserQuestion",
+                        "input": {
+                            "questions": [
+                                {
+                                    "question": "Which approach?",
+                                    "header": "Approach",
+                                    "multiSelect": False,
+                                    "options": [{"label": "Fast"}, {"label": "Safe"}],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+        }
+    )
+    approval = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_REQUIRED)
+    assert approval.call_id == "tu_ask1"
+    assert approval.turn_id == "turn-claude"
+
+    # The answer is delivered as a steer (Claude falls through to the steer path).
+    answer = json.dumps(
+        {"type": "ask_question_response", "answers": [{"questionId": "0", "selected": ["Fast"]}]}
+    )
+    await tailer.send_message(answer, [], client_turn_id="turn-claude-answer", delivery="steer")
+
+    resolved = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_RESOLVED)
+    assert resolved.payload["tool_call_id"] == "tu_ask1"
+    assert resolved.call_id == "tu_ask1"
+    # Stamped with the blocked turn's id, even though the steer cancelled it.
+    assert resolved.turn_id == "turn-claude"
     await tailer.stop()
 
 

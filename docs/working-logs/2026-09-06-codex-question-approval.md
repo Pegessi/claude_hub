@@ -185,3 +185,102 @@ two robustness gaps; all are fixed on the branch.
   `vue-tsc` (via `pnpm build`), and `vite build` clean. The composer-lock fix
   is in `StructuredPane.vue`'s `submit()` closure (not unit-tested directly);
   verified by the typecheck/build passing and the failure-chain trace above.
+
+## Follow-up (2026-09-07): resolved persistence, error-code evaluation, all-skipped auto-dismiss
+
+The two "Deferred" gaps above are now closed, plus a JSON-RPC error-code
+evaluation. Branch `feat/approval-resolved-persistence`.
+
+### #4 — `approval_resolved` is now emitted and persisted (Codex + Claude)
+
+Previously an answered card produced no `approval_resolved` event, so on reload
+the card rendered as still-open inside a completed turn, and re-submitting a
+stale card sent the raw JSON as a genuine new turn. The tailer now emits one
+resolved event per answered card identity, durably (through the same
+`_publish` → coalescer → `_persist_and_fanout` path as every other event, so it
+is appended to the per-session store even with zero live subscribers).
+
+Mechanism (`tailer.py`):
+
+- `_PendingApproval(call_id, turn_id, run_epoch)` is recorded in
+  `self._pending_approvals` (keyed by `call_id`) whenever an
+  `APPROVAL_REQUIRED` event flows through `_run_native`, and popped when an
+  `APPROVAL_RESOLVED` for the same id flows through.
+- The answer intercept in `send_message` (already before the send lock /
+  busy-check) now calls `_emit_approval_resolved()` when the transport
+  consumed the answer (Codex) **or** when any card is pending (Claude/Cursor
+  steer path). Codex returns early after emitting; Claude falls through to the
+  steer, so the resolved event is published **before** the steer's
+  `turn_completed(cancelled)` — correct ordering.
+- `_emit_approval_resolved` snapshots + clears the map atomically (no await
+  between check and clear, mirroring the concurrent-answer guard) and stamps
+  each event with the **card's own** `turn_id`/`run_epoch` captured at
+  `APPROVAL_REQUIRED` time. This is load-bearing for Claude: the steer cancels
+  the blocked turn and starts a new one, so stamping with the *active* turn at
+  emit time would route the resolved event to the wrong turn. The frontend
+  `resolveTurn` routes by `event.turn_id`, and the `case 'approval_resolved':`
+  handler matches `approval-${payload.tool_call_id ?? call_id ?? ...}` — the
+  emitted payload `{"tool_call_id": call_id}` with `call_id=call_id` matches
+  the card key exactly (Codex: `str(itemId)`; Claude: the AskUserQuestion
+  tool_use id).
+- Stale tracking is cleared on three paths: turn completion in `_run_native`
+  (a completed turn can no longer answer a pending card),
+  `_cancel_active_turn_locked` (safety net for a turn cancelled with an
+  unanswered card), and the snapshot+clear in `_emit_approval_resolved`
+  itself.
+
+No frontend change was needed — the `approval_resolved` reducer case already
+existed and matches the emitted payload — so no frontend tests were added.
+
+### #5 — `-32601` vs `-32602`: evaluated, won't-fix ( `-32601` is spec-correct )
+
+`native.py` replies to an unknown server→client JSON-RPC method with error
+code `-32601`. Per JSON-RPC 2.0, `-32601` ("Method not found") is the correct
+code for an unknown/unavailable method, while `-32602` ("Invalid params") is
+for a **known** method called with invalid params. An unknown method is not a
+known method with bad params, so `-32602` would be the wrong semantic. The code
+is left as-is; this entry is the documentation of that decision.
+
+### #6 — All-skipped question auto-dismisses instead of hanging
+
+If the adapter skipped **every** question in a `requestUserInput` request
+(e.g. all empty/invalid `options`), no card was emitted but the request stayed
+in `_pending_questions` and the turn blocked forever (only Stop recovered it).
+`_handle_server_request` now normalizes the questions first and, when zero
+survive the skip rules, auto-answers with the dismissal payload
+`{"answers":{}}` and returns without stashing — there is no card to resolve,
+so no `approval_resolved` is emitted.
+
+Layer choice: the transport stash (`_handle_server_request`), not the adapter,
+because the transport owns the JSON-RPC response channel and is the only layer
+that can unblock the turn. To avoid duplicating the skip logic (drift risk),
+the adapter's `_codex_normalize_questions` staticmethod moved to `native.py`
+as the shared `codex_normalize_questions`, and `codex_jsonl.py` imports and
+reuses it for card emission. Import direction stays acyclic (`codex_jsonl` →
+`native`; `native` imports only `…models`).
+
+### Validation
+
+- Backend: 4 new tests — `test_native_codex_answer_emits_persisted_approval_resolved`
+  and `test_native_claude_answer_emits_persisted_approval_resolved` in
+  `test_agent_stream.py` (assert the persisted `approval_resolved` carries the
+  card identity and the blocked turn's id; Codex also asserts the raw answer is
+  not sent as a new turn and `answer_pending_question` is awaited once);
+  `test_codex_all_skipped_question_auto_dismisses` and
+  `test_codex_missing_questions_auto_dismisses` in `test_agent_stream_native.py`
+  (assert the `{"answers":{}}` response is written, nothing is stashed, and no
+  notification is queued). The two `test_agent_stream.py` tests isolate
+  `STATE_ROOT` to `tmp_path` via a new `_isolate_state_root` helper — the
+  durable store is keyed by (workspace, session) id, so without isolation the
+  Codex test's persisted `it-9` event leaked into the Claude test's store.
+- Pre-existing flake (not introduced here):
+  `test_native_subscriber_receives_delta_far_below_poll_interval` does not
+  isolate `STATE_ROOT`. When the live store has a dangling unfinished turn,
+  `start()` → `_recover_orphaned_turn_locked` fans an `ERROR` +
+  `TURN_COMPLETED` out to the freshly-subscribed queue (the queue is added
+  before `start()` runs), so the test's `queue.get()` sees the recovery ERROR
+  instead of the expected `TEXT_DELTA`. It passes in isolation and on re-run;
+  the failure is order/state-dependent on the live store. Left untouched
+  (out of scope); the fix would be the same `tmp_path` isolation the new tests
+  use.
+

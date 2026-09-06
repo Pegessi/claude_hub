@@ -95,6 +95,57 @@ def parse_ask_question_response(text: str) -> Optional[List[Dict[str, Any]]]:
     return answers
 
 
+def codex_normalize_questions(raw: Any) -> List[Dict[str, Any]]:
+    """Map Codex ``requestUserInput`` questions to the shared card shape.
+
+    Codex sends ``{id, header, question, options: [{label, ...}],
+    multiSelect}``; the approval card expects ``{id, prompt,
+    options: [{id, label}], allow_multiple}``. Option ids are the labels
+    themselves, so a selected label is also the answer value.
+
+    Lives in the transport module (not the adapter) so
+    ``CodexNativeSession._handle_server_request`` can reuse the exact same
+    skip rules to detect a request that yields zero actionable questions and
+    auto-dismiss it — keeping the "what makes a question card-worthy" logic in
+    one place. The adapter imports and reuses this for card emission.
+    """
+    if not isinstance(raw, list):
+        return []
+    questions: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        question_id = item.get("id")
+        if not isinstance(question_id, str) or not question_id:
+            continue
+        prompt = item.get("question")
+        if not isinstance(prompt, str) or not prompt:
+            prompt = item.get("header")
+        if not isinstance(prompt, str) or not prompt:
+            continue
+        raw_options = item.get("options")
+        options: List[Dict[str, str]] = []
+        if isinstance(raw_options, list):
+            for opt in raw_options:
+                if not isinstance(opt, dict):
+                    continue
+                label = opt.get("label")
+                if not isinstance(label, str) or not label:
+                    continue
+                options.append({"id": label, "label": label})
+        if not options:
+            continue
+        questions.append(
+            {
+                "id": question_id,
+                "prompt": prompt,
+                "options": options,
+                "allow_multiple": item.get("multiSelect") is True,
+            }
+        )
+    return questions
+
+
 _DEFAULT_MODE = StreamModeOption(
     id=ChatMode.DEFAULT.value,
     label="Default",
@@ -1419,6 +1470,17 @@ class CodexNativeSession(ProviderSession):
         if method in _CODEX_QUESTION_METHODS and isinstance(req_id, int):
             params = record.get("params")
             if isinstance(params, dict):
+                # Auto-dismiss a request whose questions are ALL skipped by
+                # the adapter (e.g. every question has empty/invalid options):
+                # no approval card is emitted, so nothing can answer this
+                # blocking request and the turn would hang until Stop. Reply
+                # with the same empty-answers dismissal payload ``answer_pending_question``
+                # uses, and do NOT stash it (there is no card to resolve).
+                # Codex always sends actionable options in practice, so this
+                # is a robustness guard for degenerate input.
+                if not codex_normalize_questions(params.get("questions")):
+                    await self._send_jsonrpc_response(req_id, result={"answers": {}})
+                    return
                 self._pending_questions[req_id] = params
                 # Forward as a notification (no ``id``) so the adapter's
                 # ``_normalize_notification`` maps it to the approval card.
