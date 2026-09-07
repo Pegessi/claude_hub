@@ -35,11 +35,27 @@
                     │    反向代理 + SSL 终止                  │
                     └──────┬──────────────────┬──────────────┘
                            │                  │
-               ┌───────────▼──┐          ┌──▼───────────┐
-               │  Frontend    │          │   Backend     │
-               │  (Vue 5173)  │          │  (FastAPI 8173)│
-               └──────────────┘          └───────────────┘
+                           ▼                  ▼
+               ┌───────────────────────────────────────────┐
+               │        Claude Hub（生产模式：单源）          │
+               │   FastAPI :8173 同时提供构建后的 SPA + API   │
+               │   （开发模式下才拆成 vite :5173 + uvicorn）  │
+               └───────────────────────────────────────────┘
 ```
+
+> **部署模式（重要）**
+>
+> 本服务有两种运行模式，由 `start.sh` 控制：
+>
+> - **生产模式（默认，`./start.sh`）**：先 `pnpm build` 构建前端，然后用**单个
+>   uvicorn 进程**在 `:8173` 同时提供 API 和构建后的 SPA。无 `--reload`、无
+>   vite dev server、无 HMR WebSocket（HMR 断连会导致后台标签页整页重载）。
+>   公网部署应使用此模式，隧道/反代统一指向 `:8173`。
+> - **开发模式（`./start.sh --dev`）**：vite dev（`:5173`，HMR）+ uvicorn
+>   `--reload`（`:8173`），用于本地开发热更新。
+>
+> 下文的隧道/反代示例默认按**生产模式**指向 `:8173`；若用开发模式，把端口换回
+> `:5173` 即可。
 
 ---
 
@@ -127,11 +143,11 @@ AUTH_ALLOWED_EMAILS=user1@company.com,user2@company.com
 2. 运行 ngrok：
 
 ```bash
-# 转发前端端口（如果前端和后端在同一端口）
-ngrok http 5173
+# 转发服务端口（生产模式下 FastAPI 在 8173 同时提供前端和 API）
+ngrok http 8173
 
 # 或者使用自定义域名（付费版）
-ngrok http --domain=your-custom-domain.ngrok.io 5173
+ngrok http --domain=your-custom-domain.ngrok.io 8173
 ```
 
 3. 将 ngrok 提供的 URL 配置到 `.env` 的 `FRONTEND_URL` 和 `FEISHU_REDIRECT_URI`
@@ -159,7 +175,7 @@ auth.token = "your-auth-token"
 name = "claude-hub"
 type = "http"
 localIP = "127.0.0.1"
-localPort = 5173
+localPort = 8173
 customDomains = ["claude.your-domain.com"]
 ```
 
@@ -185,9 +201,8 @@ Cloudflare Tunnel 是最简单、最安全的公网访问方案，无需公网�
 # 1. 运行设置脚本（只需运行一次）
 ./scripts/cloudflared-setup.sh
 
-# 2. 启动 Claude Hub 后端和前端（在两个不同的终端中）
-cd backend && uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
-cd frontend && pnpm dev
+# 2. 启动 Claude Hub（生产模式：构建前端并在 :8173 同时提供前端和 API）
+./start.sh
 
 # 3. 启动 Cloudflare Tunnel
 ./scripts/cloudflared-run.sh
@@ -238,7 +253,7 @@ credentials-file: /Users/your-user/.cloudflared/your-tunnel-id-here.json
 
 ingress:
   - hostname: claude.your-domain.com
-    service: http://localhost:5173
+    service: http://localhost:8173
   - service: http_status:404
 ```
 
@@ -347,31 +362,29 @@ cp /etc/letsencrypt/live/your-domain.com/privkey.pem docker/nginx/ssl/
 
 ## 启动服务
 
-### 开发模式 + Cloudflare Tunnel（推荐）
+### 生产模式 + Cloudflare Tunnel（推荐）
 
 ```bash
-# 终端 1 - 启动后端
-cd backend
-uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
+# 终端 1 - 启动服务（构建前端，并在 :8173 同时提供前端和 API）
+./start.sh
 
-# 终端 2 - 启动前端
-cd frontend
-pnpm dev
-
-# 终端 3 - 启动 Cloudflare Tunnel
+# 终端 2 - 启动 Cloudflare Tunnel
 ./scripts/cloudflared-run.sh
 ```
 
-### 开发模式（本地测试）
+### 生产模式（本地）
 
 ```bash
-# 后端
-cd backend
-uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
+./start.sh
+# 访问 http://localhost:8173
+```
 
-# 前端（新终端）
-cd frontend
-pnpm dev
+### 开发模式（热更新）
+
+```bash
+./start.sh --dev
+# 前端（HMR）: http://localhost:5173
+# 后端（--reload）: http://localhost:8173
 ```
 
 ### Docker Compose 部署
