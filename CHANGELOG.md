@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### fix: AskUserQuestion option chips unclickable (v-memo skipped selection re-render)
+
+- **Root cause.** `StructuredPane.vue` memoized each timeline turn with
+  `v-memo="[turn.renderRevision, erroredAttachments.size]"`. The approval
+  card's selected/resolved/disabled state lives in component refs
+  (`questionAnswers`, `resolvedApprovalKeys`, `isSending`) that were **not** in
+  the deps array. Clicking an option updated the reactive state (and triggered
+  a re-render), but `v-memo` saw unchanged deps and skipped re-rendering the
+  turn subtree — so the chip's `:class` selected state and the submit button's
+  `:disabled` binding never re-evaluated. The card looked frozen.
+- **Fix.** Extracted the per-approval selection logic into a new
+  `useQuestionAnswers` composable and added a pure `approvalStateSignature`
+  helper. The turn's `v-memo` deps now include `turnApprovalSignature(turn)`,
+  which folds each approval's answers + resolved flag (and the `isSending`
+  gate) into the memo key. Turns without approvals short-circuit to `''`, so
+  the long-history memoization perf optimization is preserved.
+- **Tests.** New `useQuestionAnswers.test.mjs` (single/multi-select toggle,
+  selected-state reflection, submit gating, resolved states, reset, signature
+  reactivity) and `structuredPaneApprovalMemo.test.mjs` (source-level guard
+  that the `v-memo` deps include the approval signature).
+
 ### fix: Cursor image temp-file lifecycle across turns
 
 Three hardening fixes for the Cursor image-attachment temp files, found by
