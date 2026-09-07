@@ -48,7 +48,7 @@ from .base import (
     discover_source_cached,
     resolve_cwd,
 )
-from .native import strip_question_protocol_guidance
+from .native import strip_image_attachment_guidance, strip_question_protocol_guidance
 
 #: Schema identifier for the same-pane Cursor transcript format this adapter
 #: understands. Bump when the row shape changes incompatibly.
@@ -249,6 +249,11 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             # system-prompt flag) so it never reaches the persisted timeline
             # or the UI. No-op for ordinary user messages.
             text = strip_question_protocol_guidance(text)
+            # Strip the sentinel-wrapped image-reference block the transport
+            # injects for attached images (Cursor has no structured image
+            # flag; the model reads the staged files via its Read tool) so
+            # the temp paths never reach the persisted timeline or the UI.
+            text = strip_image_attachment_guidance(text)
             if text:
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": text}))
         elif role == "assistant":

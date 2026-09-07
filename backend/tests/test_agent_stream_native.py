@@ -33,7 +33,9 @@ from claude_hub.services.agent_stream.native import (
     CursorNativeSession,
     create_native_session,
     parse_ask_question_response,
+    strip_image_attachment_guidance,
     strip_question_protocol_guidance,
+    wrap_image_attachment_guidance,
     wrap_question_protocol_guidance,
 )
 
@@ -212,6 +214,44 @@ def test_strip_question_protocol_guidance_leaves_malformed_block_untouched() -> 
     a legitimate message containing the marker is never truncated)."""
     malformed = "<<<HUB_QUESTION_PROTOCOL_V1>>> some user text"
     assert strip_question_protocol_guidance(malformed) == malformed
+
+
+def test_image_attachment_guidance_wrap_and_strip_round_trip(tmp_path: Path) -> None:
+    """wrap() prepends a sentinel block listing the image paths; strip()
+    removes it exactly, leaving the original user text."""
+    img = tmp_path / "a.png"
+    img.write_bytes(_VALID_PNG)
+    clean = "what color is this?"
+    wrapped = wrap_image_attachment_guidance(clean, [img])
+    assert wrapped.startswith("<<<HUB_IMAGE_ATTACHMENT_V1>>>")
+    assert str(img) in wrapped
+    assert wrapped.endswith(clean)
+    assert strip_image_attachment_guidance(wrapped) == clean
+    # No images → no-op.
+    assert wrap_image_attachment_guidance(clean, []) == clean
+
+
+def test_strip_image_attachment_guidance_is_noop_without_block() -> None:
+    """Ordinary user messages (no sentinel block) pass through untouched."""
+    assert strip_image_attachment_guidance("just a user message") == "just a user message"
+    assert strip_image_attachment_guidance("") == ""
+
+
+def test_strip_image_attachment_guidance_leaves_malformed_block_untouched() -> None:
+    """An open sentinel without its close marker is left as-is (fail-safe)."""
+    malformed = "<<<HUB_IMAGE_ATTACHMENT_V1>>> /tmp/a.png"
+    assert strip_image_attachment_guidance(malformed) == malformed
+
+
+def test_image_and_question_guidance_strips_compose(tmp_path: Path) -> None:
+    """The two sentinel blocks are independent: applying both strips in either
+    order recovers the original text (the transport wraps images outermost)."""
+    img = tmp_path / "a.png"
+    img.write_bytes(_VALID_PNG)
+    clean = "请描述这张图"
+    wrapped = wrap_image_attachment_guidance(wrap_question_protocol_guidance(clean), [img])
+    assert strip_question_protocol_guidance(strip_image_attachment_guidance(wrapped)) == clean
+    assert strip_image_attachment_guidance(strip_question_protocol_guidance(wrapped)) == clean
 
 
 @pytest.mark.asyncio
@@ -1266,20 +1306,115 @@ async def test_invalid_image_resets_turn_guard() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unsupported_image_resets_turn_guard() -> None:
-    """Cursor does not support images. ``send_message`` with images must raise
-    ``NotImplementedError`` and reset the turn guard so a text turn works."""
+async def test_cursor_invalid_image_resets_turn_guard() -> None:
+    """If ``_stage_images`` raises (invalid image bytes), the turn guard must
+    be released so a subsequent text-only turn can be sent. Cursor now
+    supports images (via file reference), so the failure is a ``ValueError``
+    from magic-byte validation, not ``NotImplementedError``."""
     native = CursorNativeSession(_session(AgentType.CURSOR))
 
-    with pytest.raises(NotImplementedError):
-        await native.send_message("hello", [_VALID_PNG])
+    with pytest.raises(ValueError):
+        await native.send_message("hello", [b"not an image"])
     assert native._turn_in_flight is False
+    assert native._staged_images == []
 
     # A text-only turn must succeed after the failed image send.
     proc = _FakeProcess(stdout_lines=[])
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         await native.send_message("hello", [])
     assert native._turn_in_flight is True
+
+
+def test_cursor_image_staging_uses_private_runtime_owned_files(tmp_path: Path) -> None:
+    """Cursor stages image bytes to 0600 files under an app-owned 0700
+    ``runtime_home/tmp/cursor-images`` directory (never the persistent
+    workspace state)."""
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    with patch(
+        "claude_hub.services.agent_stream.native._runtime_home",
+        return_value=tmp_path,
+    ):
+        native._stage_images([_VALID_PNG])
+        staged = list(native._staged_images)
+        temp_dir = tmp_path / "tmp" / "cursor-images"
+
+        assert staged and staged[0].parent == temp_dir
+        assert temp_dir.stat().st_mode & 0o777 == 0o700
+        assert staged[0].stat().st_mode & 0o777 == 0o600
+
+        native._clear_staged_images()
+
+    assert all(not path.exists() for path in staged)
+
+
+@pytest.mark.asyncio
+async def test_cursor_send_message_stages_images_and_cleans_up_on_eof(
+    tmp_path: Path,
+) -> None:
+    """Cursor has no structured image flag: images are staged to temp files,
+    referenced by absolute path in a sentinel-wrapped prompt block, and
+    deleted when the one-shot process exits (EOF)."""
+    proc = _FakeProcess(stdout_lines=[])  # stdout blocks until we push EOF
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    captured_paths: List[Path] = []
+    original_stage = native._stage_images
+
+    def tracking_stage(images: List[bytes]) -> None:
+        original_stage(images)
+        captured_paths.extend(native._staged_images)
+
+    native._stage_images = tracking_stage  # type: ignore[assignment]
+
+    with (
+        patch(
+            "claude_hub.services.agent_stream.native._runtime_home",
+            return_value=tmp_path,
+        ),
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+    ):
+        await native.send_message("what color?", [_VALID_PNG])
+
+        # Staged images transferred to in-flight before spawn; the files still
+        # exist while the (still-running) one-shot process may read them.
+        assert native._staged_images == []
+        assert native._inflight_images == captured_paths
+        assert captured_paths and all(path.exists() for path in captured_paths)
+
+        # The prompt written to stdin carries the sentinel block + paths.
+        written = b"".join(proc.stdin.written).decode("utf-8")
+        assert "<<<HUB_IMAGE_ATTACHMENT_V1>>>" in written
+        assert "<<<END_HUB_IMAGE_ATTACHMENT_V1>>>" in written
+        for path in captured_paths:
+            assert str(path) in written
+        assert "what color?" in written
+
+        # Signal EOF: the one-shot process exits. The drain's finally clears
+        # the in-flight images and deletes the temp files.
+        proc.stdout.push(b"")
+        assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
+        await asyncio.wait_for(native._reader_task, timeout=1.0)
+
+    assert native._inflight_images == []
+    assert all(not path.exists() for path in captured_paths)
+
+
+def test_cursor_startup_cleanup_removes_prior_process_temp_files(tmp_path: Path) -> None:
+    """``cleanup_cursor_temp_dir`` removes orphaned image temp files left by a
+    prior crashed process (single-ownership guarantee at startup)."""
+    from claude_hub.services.agent_stream.native import cleanup_cursor_temp_dir
+
+    temp_dir = tmp_path / "tmp" / "cursor-images"
+    temp_dir.mkdir(parents=True)
+    orphan = temp_dir / "cursor-img-orphan.png"
+    orphan.write_bytes(_VALID_PNG)
+
+    with patch(
+        "claude_hub.services.agent_stream.native._runtime_home",
+        return_value=tmp_path,
+    ):
+        assert cleanup_cursor_temp_dir() == 1
+
+    assert not orphan.exists()
 
 
 @pytest.mark.asyncio
