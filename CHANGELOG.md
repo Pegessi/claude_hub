@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### fix: chat question cards wait indefinitely instead of auto-timing-out
+
+- Interactive question cards (Claude `AskUserQuestion`, Cursor `AskQuestion`)
+  no longer auto-time-out in the Chat UI. In one-shot `--print` mode the CLI
+  reads stdin to EOF and immediately auto-declines the question with a
+  placeholder tool result, which the agent interpreted as "user declined" and
+  ended the turn — the perceived timeout. A shared "interactive question
+  protocol" guidance now teaches the agent to treat that placeholder as "still
+  pending in the UI": end the turn with one short neutral waiting line and
+  stop, so the card stays interactive until the user clicks it.
+- Claude injects the guidance via `--append-system-prompt` (clean, not part of
+  the user message, persists on every `--resume` turn). Cursor's CLI has no
+  system-prompt flag, so the guidance is prepended to the prompt wrapped in a
+  unique sentinel block; `CursorCliTranscriptAdapter` strips that block on
+  user-message normalization so it never reaches the persisted transcript or
+  the UI. Codex already blocks indefinitely on `requestUserInput` and is
+  unchanged.
+
 ### fix: persist approval_resolved so answered question cards stay resolved
 
 - Answering a Codex `requestUserInput` or Claude `AskUserQuestion` card now
