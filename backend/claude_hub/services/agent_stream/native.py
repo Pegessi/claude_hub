@@ -72,6 +72,79 @@ _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 # is the legacy alias used by older builds.
 _CODEX_QUESTION_METHODS = ("item/tool/requestUserInput", "tool/requestUserInput")
 
+# Interactive question protocol guidance (chat "no timeout").
+#
+# Claude and Cursor run each chat turn as a one-shot ``--print`` subprocess.
+# In non-interactive mode the CLI cannot render an interactive prompt, so when
+# the agent calls AskUserQuestion/AskQuestion the CLI immediately auto-declines
+# it with a placeholder tool_result ("Answer questions?" for Claude; a
+# "skipped" notice for Cursor). The agent reads that placeholder as "the user
+# declined" and ends the turn — the perceived "timeout". This guidance teaches
+# the agent to interpret the placeholder as "still pending in the UI — wait",
+# so the card stays live and the agent continues when the user's follow-up
+# answer arrives.
+#
+# Claude receives it via ``--append-system-prompt`` (clean, not part of the
+# user message). Cursor's CLI has no system-prompt flag, so the guidance is
+# prepended to the prompt wrapped in sentinel markers; the adapter strips the
+# sentinel block when normalizing user messages so it never reaches the
+# persisted transcript or the UI.
+QUESTION_PROTOCOL_GUIDANCE = (
+    "INTERACTIVE QUESTION PROTOCOL (Hub UI): When you call an interactive "
+    "question tool (AskUserQuestion or AskQuestion), the question is rendered "
+    "as an interactive card in the user's Hub interface and the user will "
+    "answer by clicking it. In this non-interactive transport the tool may "
+    "return a placeholder result (such as 'Answer questions?' or a 'skipped' "
+    "notice) instead of the real answer. This placeholder means the question "
+    "is STILL PENDING in the UI — it does NOT mean the user declined, "
+    "dismissed, or skipped it. When you see this placeholder: (1) do NOT say "
+    "the user declined, dismissed, ignored, or skipped the question; (2) do "
+    "NOT re-ask, choose a default, or proceed without the answer; (3) end "
+    "your turn with one short neutral line such as 'I've made my selection "
+    "above — waiting for your choice.' and stop. The user's real answer will "
+    "arrive as a follow-up message; continue from it then."
+)
+
+_HUB_QUESTION_PROTOCOL_START = "<<<HUB_QUESTION_PROTOCOL_V1>>>"
+_HUB_QUESTION_PROTOCOL_END = "<<<END_HUB_QUESTION_PROTOCOL_V1>>>"
+
+
+def wrap_question_protocol_guidance(text: str) -> str:
+    """Prepend the sentinel-wrapped guidance to a Cursor prompt.
+
+    Cursor's CLI has no system-prompt flag, so the guidance is delivered as a
+    prefix on the prompt text. The adapter strips it on transcript read (see
+    :func:`strip_question_protocol_guidance`) so it never reaches the
+    persisted timeline or the UI.
+    """
+    return (
+        f"{_HUB_QUESTION_PROTOCOL_START}\n{QUESTION_PROTOCOL_GUIDANCE}\n"
+        f"{_HUB_QUESTION_PROTOCOL_END}\n\n{text}"
+    )
+
+
+def strip_question_protocol_guidance(text: str) -> str:
+    """Remove the sentinel-wrapped guidance block from a user message.
+
+    Applied when normalizing Cursor user messages (transcript/snapshot read)
+    so the injected guidance never reaches the persisted timeline or the UI.
+    No-op when the block is absent or malformed (an open block without a
+    close marker is left untouched rather than risk truncating a legitimate
+    message).
+    """
+    if not text:
+        return text
+    start = text.find(_HUB_QUESTION_PROTOCOL_START)
+    if start == -1:
+        return text
+    end = text.find(_HUB_QUESTION_PROTOCOL_END, start + len(_HUB_QUESTION_PROTOCOL_START))
+    if end == -1:
+        return text  # malformed (open block); leave untouched
+    end += len(_HUB_QUESTION_PROTOCOL_END)
+    # Drop the block and the separator newlines that wrap() placed after it,
+    # preserving any legitimate text that preceded the block (normally none).
+    return text[:start] + text[end:].lstrip("\n")
+
 
 def parse_ask_question_response(text: str) -> Optional[List[Dict[str, Any]]]:
     """Parse a structured ``ask_question_response`` composer payload.
@@ -903,6 +976,12 @@ class ClaudeNativeSession(ProviderSession):
             "--output-format",
             "stream-json",
             "--include-partial-messages",
+            # Teach the agent to treat the non-interactive auto-decline of
+            # AskUserQuestion as "still pending in the UI — wait" rather than
+            # "the user declined". A system prompt (not a user message) so it
+            # is not echoed into the transcript; persists on every --resume.
+            "--append-system-prompt",
+            QUESTION_PROTOCOL_GUIDANCE,
         ]
         if self.session.solo_mode and self._current_mode == ChatMode.DEFAULT.value:
             cmd.append("--dangerously-skip-permissions")
@@ -1718,7 +1797,12 @@ class CursorNativeSession(ProviderSession):
 
     async def _send_text(self, text: str) -> None:
         cmd = self._build_command()
-        await self._spawn_oneshot(cmd, text)
+        # Cursor's CLI has no system-prompt flag, so deliver the
+        # question-protocol guidance as a sentinel-wrapped prefix on the
+        # prompt (mirroring Claude's --append-system-prompt). The adapter
+        # strips the sentinel block on transcript read so it never reaches
+        # the persisted timeline or the UI.
+        await self._spawn_oneshot(cmd, wrap_question_protocol_guidance(text))
 
     def maybe_capture_conversation_id(self, record: Dict[str, Any]) -> None:
         """Extract the conversation id from Cursor's system init record.

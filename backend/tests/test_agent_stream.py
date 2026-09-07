@@ -1133,6 +1133,58 @@ def test_cursor_repeated_single_delta_is_preserved() -> None:
     assert [event.payload["text"] for event in first + second] == ["哈", "哈"]
 
 
+# ── Cursor question-protocol guidance strip (chat "no timeout") ─────────────
+
+
+def test_cursor_user_message_guidance_prefix_is_stripped() -> None:
+    """The sentinel-wrapped guidance the transport prepends to Cursor prompts
+    must be stripped on normalize so it never reaches the persisted timeline
+    or the UI (AC2/AC5)."""
+    from claude_hub.services.agent_stream.cursor_cli_transcript import (
+        CursorCliTranscriptAdapter,
+    )
+    from claude_hub.services.agent_stream.native import (
+        QUESTION_PROTOCOL_GUIDANCE,
+        wrap_question_protocol_guidance,
+    )
+
+    adapter = CursorCliTranscriptAdapter()
+    ctx = _cursor_ctx()
+    clean = "请帮我清理这个目录"
+    raw = {
+        "role": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": wrap_question_protocol_guidance(clean)}],
+        },
+    }
+    events = adapter.normalize_line(raw, ctx)
+    assert len(events) == 1
+    assert events[0].type == AgentStreamEventType.TURN_STARTED
+    assert events[0].payload["summary"] == clean
+    assert QUESTION_PROTOCOL_GUIDANCE not in events[0].payload["summary"]
+    assert "HUB_QUESTION_PROTOCOL" not in events[0].payload["summary"]
+
+
+def test_cursor_plain_user_message_normalizes_unchanged() -> None:
+    """A user message without the guidance prefix normalizes as before
+    (regression guard for the strip)."""
+    from claude_hub.services.agent_stream.cursor_cli_transcript import (
+        CursorCliTranscriptAdapter,
+    )
+
+    adapter = CursorCliTranscriptAdapter()
+    ctx = _cursor_ctx()
+    raw = {
+        "role": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+    }
+    events = adapter.normalize_line(raw, ctx)
+    assert len(events) == 1
+    assert events[0].type == AgentStreamEventType.TURN_STARTED
+    assert events[0].payload["summary"] == "hello"
+
+
 # ── Claude adapter normalization ─────────────────────────────────────────────
 
 

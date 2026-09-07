@@ -27,11 +27,14 @@ from claude_hub.models import (
 from claude_hub.services.agent_stream.base import NormalizeContext
 from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 from claude_hub.services.agent_stream.native import (
+    QUESTION_PROTOCOL_GUIDANCE,
     ClaudeNativeSession,
     CodexNativeSession,
     CursorNativeSession,
     create_native_session,
     parse_ask_question_response,
+    strip_question_protocol_guidance,
+    wrap_question_protocol_guidance,
 )
 
 
@@ -171,6 +174,60 @@ def test_verified_flag_true_seeds_conversation_id_verified() -> None:
     assert "--resume" in cmd
     assert "captured-id" in cmd
     assert "--session-id" not in cmd
+
+
+# ── Interactive question protocol guidance (chat "no timeout") ──────────────
+
+
+def test_claude_command_includes_question_protocol_guidance() -> None:
+    """Claude injects the wait-guidance as a system prompt so the agent treats
+    the non-interactive auto-decline of AskUserQuestion as 'still pending in
+    the UI' rather than 'the user declined'."""
+    sess = _session()
+    cmd = ClaudeNativeSession(sess)._build_command()
+    assert "--append-system-prompt" in cmd
+    idx = cmd.index("--append-system-prompt")
+    assert cmd[idx + 1] == QUESTION_PROTOCOL_GUIDANCE
+
+
+def test_question_protocol_guidance_wrap_and_strip_round_trip() -> None:
+    """wrap() prepends a sentinel block; strip() removes it exactly, leaving
+    the original user text."""
+    clean = "请帮我清理这个目录"
+    wrapped = wrap_question_protocol_guidance(clean)
+    assert wrapped.startswith("<<<HUB_QUESTION_PROTOCOL_V1>>>")
+    assert QUESTION_PROTOCOL_GUIDANCE in wrapped
+    assert wrapped.endswith(clean)
+    assert strip_question_protocol_guidance(wrapped) == clean
+
+
+def test_strip_question_protocol_guidance_is_noop_without_block() -> None:
+    """Ordinary user messages (no sentinel block) pass through untouched."""
+    assert strip_question_protocol_guidance("just a user message") == "just a user message"
+    assert strip_question_protocol_guidance("") == ""
+
+
+def test_strip_question_protocol_guidance_leaves_malformed_block_untouched() -> None:
+    """An open sentinel without its close marker is left as-is (fail-safe, so
+    a legitimate message containing the marker is never truncated)."""
+    malformed = "<<<HUB_QUESTION_PROTOCOL_V1>>> some user text"
+    assert strip_question_protocol_guidance(malformed) == malformed
+
+
+@pytest.mark.asyncio
+async def test_cursor_send_text_prepends_question_protocol_guidance() -> None:
+    """Cursor's CLI has no system-prompt flag, so ``_send_text`` delivers the
+    guidance as a sentinel-wrapped prefix on the prompt (the adapter strips it
+    on transcript read)."""
+    sess = _session(AgentType.CURSOR)
+    native = CursorNativeSession(sess)
+    with patch.object(native, "_spawn_oneshot", new_callable=AsyncMock) as mock_spawn:
+        await native._send_text("hello")
+    mock_spawn.assert_awaited_once()
+    prompt = mock_spawn.await_args.args[1]
+    assert prompt.startswith("<<<HUB_QUESTION_PROTOCOL_V1>>>")
+    assert QUESTION_PROTOCOL_GUIDANCE in prompt
+    assert prompt.endswith("hello")
 
 
 # ── Claude stream_event normalization ───────────────────────────────────────
