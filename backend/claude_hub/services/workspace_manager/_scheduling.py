@@ -91,10 +91,13 @@ class _SchedulingMixin:
     def create_scheduled_task(self, payload: ScheduledTaskCreate) -> ScheduledTask:
         fields = payload.model_dump()
         self._validate_scheduled_task_fields(fields)
+        name = payload.name.strip()
+        if not name:
+            raise ValueError("name must not be empty")
         now = _wm._now()
         task = ScheduledTask(
             id=str(uuid.uuid4()),
-            name=payload.name.strip(),
+            name=name,
             kind=payload.kind,
             enabled=payload.enabled,
             run_at=payload.run_at,
@@ -135,6 +138,10 @@ class _SchedulingMixin:
         if task is None:
             raise KeyError(task_id)
         updates = payload.model_dump(exclude_unset=True)
+        if "name" in updates:
+            updates["name"] = updates["name"].strip()
+            if not updates["name"]:
+                raise ValueError("name must not be empty")
 
         schedule_keys = ("run_at", "cron", "interval_seconds")
         schedule_changed = any(k in updates for k in schedule_keys)
@@ -167,11 +174,18 @@ class _SchedulingMixin:
         return True
 
     async def run_scheduled_task(self, task_id: str) -> ScheduledTask:
-        """Fire a scheduled task immediately (manual run-now)."""
+        """Fire a scheduled task immediately (manual run-now).
+
+        Stamps and advances the schedule just like a tick fire (a one-shot is
+        disabled after firing). Raises ``RuntimeError`` if the fire itself
+        failed so the API / CLI can surface a non-success status.
+        """
         task = self.scheduled_tasks.get(task_id)
         if task is None:
             raise KeyError(task_id)
-        await self._fire_scheduled_task(task, _wm._now())
+        await self._fire_scheduled_task(task, _wm._now(), manual=True)
+        if task.last_status == "error":
+            raise RuntimeError(task.last_error or "scheduled task failed to fire")
         return task
 
     # ------------------------------------------------------------------
@@ -200,6 +214,16 @@ class _SchedulingMixin:
             if fields["session_id"] not in self.sessions:
                 raise ValueError(f"Session '{fields['session_id']}' not found")
         elif kind == ScheduledTaskKind.NEW_SESSION:
+            if fields.get("cron") is not None or fields.get("interval_seconds") is not None:
+                # A recurring new_session task spawns a fresh ephemeral session on
+                # every fire with no completion signal to clean it up, leaking one
+                # session per fire. Restrict to one-shot (run_at); recurring
+                # "execute on a schedule" needs should use hub_task, which
+                # auto-cleans its ephemeral session on completion.
+                raise ValueError(
+                    "new_session tasks only support one-shot run_at scheduling; "
+                    "use hub_task for recurring execution (it auto-cleans)"
+                )
             if not fields.get("workspace_id"):
                 raise ValueError("workspace_id is required for new_session tasks")
             if not fields.get("message"):
@@ -300,7 +324,9 @@ class _SchedulingMixin:
         minute_set, hour_set, dom_set, month_set, dow_set = cron_parts
 
         candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        limit = after + timedelta(days=366)
+        # Search ~4 years out so a cron whose only match is Feb 29 (e.g.
+        # "0 0 29 2 *") is not falsely reported as having no future run.
+        limit = after + timedelta(days=366 * 4)
 
         while candidate <= limit:
             if candidate.month not in month_set:
@@ -354,7 +380,15 @@ class _SchedulingMixin:
             # One-shot: fire at run_at; if it is already in the past, fire now.
             return task.run_at if task.run_at > after else after
         if task.cron is not None:
-            return self._next_cron_run(task.cron, after)
+            nxt = self._next_cron_run(task.cron, after)
+            if nxt is None:
+                logger.warning(
+                    "Scheduled task %s cron %r has no future match within the search "
+                    "window; next_run_at left unset (task will not fire)",
+                    task.id,
+                    task.cron,
+                )
+            return nxt
         if task.interval_seconds is not None:
             return after + timedelta(seconds=task.interval_seconds)
         return None
@@ -378,37 +412,60 @@ class _SchedulingMixin:
             except Exception:
                 logger.exception("Scheduled task tick failed for task_id=%s", task_id)
 
-    async def _fire_scheduled_task(self, task: ScheduledTask, now: datetime) -> None:
-        # Stamp BEFORE the side effect (crash-idempotent, same pattern as
-        # resident agents): persist last_run_at / run_count / next_run_at first
-        # so a crash does not re-fire or respawn. One-shot tasks are disabled
-        # after firing.
-        task.last_run_at = now
-        task.run_count += 1
-        task.updated_at = now
-        if task.run_at is not None:
-            task.enabled = False
-            task.next_run_at = None
-        else:
-            task.next_run_at = self._compute_next_run(task, now)
-        self._save_scheduled_tasks()
+    async def _fire_scheduled_task(
+        self, task: ScheduledTask, now: datetime, *, manual: bool = False
+    ) -> None:
+        lock = self._sched_fire_locks.setdefault(task.id, asyncio.Lock())
+        async with lock:
+            # Re-check eligibility under the lock: a concurrent fire (the 5s
+            # tick vs a manual run-now, or two run-now clicks) may have already
+            # stamped this task. Without this re-check a one-shot could fire
+            # twice and run_count could double-increment.
+            if not task.enabled:
+                if manual:
+                    raise ValueError(f"Scheduled task '{task.id}' is disabled")
+                return
+            if not manual and (task.next_run_at is None or task.next_run_at > now):
+                # Already advanced by a concurrent manual fire.
+                return
 
+            # Stamp BEFORE the side effect (crash-idempotent, same pattern as
+            # resident agents): persist last_run_at / run_count / next_run_at
+            # first so a crash does not re-fire or respawn. One-shot tasks are
+            # disabled after firing.
+            task.last_run_at = now
+            task.run_count += 1
+            task.updated_at = now
+            if task.run_at is not None:
+                task.enabled = False
+                task.next_run_at = None
+            else:
+                task.next_run_at = self._compute_next_run(task, now)
+            self._save_scheduled_tasks()
+
+            try:
+                if task.kind == ScheduledTaskKind.SESSION_MESSAGE:
+                    await self.send_session_message(task.session_id, task.message)
+                elif task.kind == ScheduledTaskKind.NEW_SESSION:
+                    await self._fire_new_session(task)
+                elif task.kind == ScheduledTaskKind.HUB_TASK:
+                    await self._fire_hub_task(task)
+                task.last_status = "ok"
+                task.last_error = None
+            except Exception as exc:
+                logger.exception("Scheduled task %s failed to fire", task.id)
+                task.last_status = "error"
+                task.last_error = str(exc)
+
+            task.updated_at = _wm._now()
+            self._save_scheduled_tasks()
+
+    async def _best_effort_delete_session(self, session_id: str) -> None:
+        """Best-effort teardown of an ephemeral session; never raises."""
         try:
-            if task.kind == ScheduledTaskKind.SESSION_MESSAGE:
-                await self.send_session_message(task.session_id, task.message)
-            elif task.kind == ScheduledTaskKind.NEW_SESSION:
-                await self._fire_new_session(task)
-            elif task.kind == ScheduledTaskKind.HUB_TASK:
-                await self._fire_hub_task(task)
-            task.last_status = "ok"
-            task.last_error = None
-        except Exception as exc:
-            logger.exception("Scheduled task %s failed to fire", task.id)
-            task.last_status = "error"
-            task.last_error = str(exc)
-
-        task.updated_at = _wm._now()
-        self._save_scheduled_tasks()
+            await self.delete_session(session_id)
+        except Exception:
+            logger.exception("Best-effort delete of scheduled-task session %s failed", session_id)
 
     async def _fire_new_session(self, task: ScheduledTask) -> None:
         """Create a new session in the workspace and send it the message."""
@@ -422,7 +479,13 @@ class _SchedulingMixin:
                 reuse_existing=False,
             ),
         )
-        await self.send_session_message(session.id, task.message)
+        try:
+            await self.send_session_message(session.id, task.message)
+        except Exception:
+            # The send failed; tear down the just-created ephemeral session so
+            # a fire failure does not strand an idle orchestrator.
+            await self._best_effort_delete_session(session.id)
+            raise
 
     async def _fire_hub_task(self, task: ScheduledTask) -> None:
         """Publish a system-internal task on a caller-owned ephemeral orchestrator.
@@ -469,4 +532,14 @@ class _SchedulingMixin:
             }
         )
         self.tasks[internal_task.id] = internal_task
-        await self._dispatch_task_to_session(internal_task, session)
+        try:
+            await self._dispatch_task_to_session(internal_task, session)
+        except Exception:
+            # Mark the internal task failed and tear down the ephemeral
+            # orchestrator so a dispatch failure strands neither a task nor a
+            # session.
+            self.tasks[internal_task.id] = internal_task.model_copy(
+                update={"status": WorkspaceTaskStatus.FAILED, "updated_at": _wm._now()}
+            )
+            await self._best_effort_delete_session(session.id)
+            raise

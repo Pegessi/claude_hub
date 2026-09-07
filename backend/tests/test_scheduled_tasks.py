@@ -10,6 +10,7 @@ terminal.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from importlib import import_module
@@ -223,6 +224,15 @@ def test_next_cron_run_specific_month(manager: WorkspaceManager) -> None:
     assert nxt == datetime(2027, 1, 1, 0, 0)
 
 
+def test_next_cron_run_feb_29_reaches_beyond_one_year(manager: WorkspaceManager) -> None:
+    # "0 0 29 2 *" only matches on Feb 29. From late 2026 the next occurrence is
+    # Feb 29, 2028 — more than a year out. The ~4-year search window must reach
+    # it (a 366-day window would falsely return None).
+    after = datetime(2026, 9, 8, 0, 0, 0)
+    nxt = manager._next_cron_run("0 0 29 2 *", after)
+    assert nxt == datetime(2028, 2, 29, 0, 0)
+
+
 # ---------------------------------------------------------------------------
 # Next-run computation
 # ---------------------------------------------------------------------------
@@ -350,10 +360,11 @@ def test_create_session_message_requires_session_and_message(
 
 def test_create_new_session_requires_workspace(manager: WorkspaceManager, tmp_path: Path) -> None:
     _make_workspace(manager, tmp_path)
+    run_at = datetime.now() + timedelta(hours=1)
     with pytest.raises(ValueError, match="workspace_id is required"):
         manager.create_scheduled_task(
             ScheduledTaskCreate(
-                name="x", kind=ScheduledTaskKind.NEW_SESSION, cron="* * * * *", message="m"
+                name="x", kind=ScheduledTaskKind.NEW_SESSION, run_at=run_at, message="m"
             )
         )
     with pytest.raises(ValueError, match="not found"):
@@ -361,7 +372,7 @@ def test_create_new_session_requires_workspace(manager: WorkspaceManager, tmp_pa
             ScheduledTaskCreate(
                 name="x",
                 kind=ScheduledTaskKind.NEW_SESSION,
-                cron="* * * * *",
+                run_at=run_at,
                 workspace_id="nope",
                 message="m",
             )
@@ -546,7 +557,7 @@ async def test_fire_session_message_stamps_and_sends(
     assert task.run_count == 0
 
     now = datetime.now()
-    await manager._fire_scheduled_task(task, now)
+    await manager._fire_scheduled_task(task, now, manual=True)
 
     assert sent == [(session.id, "check in")]
     assert task.last_run_at == now
@@ -583,7 +594,7 @@ async def test_fire_send_failure_marks_error_but_keeps_stamp(
         )
     )
     now = datetime.now()
-    await manager._fire_scheduled_task(task, now)
+    await manager._fire_scheduled_task(task, now, manual=True)
 
     # Stamps persisted BEFORE the failing side effect (crash-idempotent).
     assert task.last_run_at == now
@@ -621,7 +632,7 @@ async def test_fire_one_shot_disables_and_clears_next_run(
     )
     assert task.next_run_at == future
 
-    await manager._fire_scheduled_task(task, datetime.now())
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
     assert task.enabled is False
     assert task.next_run_at is None
     assert task.run_count == 1
@@ -656,12 +667,12 @@ async def test_fire_new_session_creates_ephemeral_and_sends(
         ScheduledTaskCreate(
             name="fresh run",
             kind=ScheduledTaskKind.NEW_SESSION,
-            cron="0 9 * * *",
+            run_at=datetime.now() + timedelta(hours=1),
             workspace_id=workspace.id,
             message="do a thing",
         )
     )
-    await manager._fire_scheduled_task(task, datetime.now())
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
 
     assert len(captured_req) == 1
     req = captured_req[0]
@@ -703,7 +714,7 @@ async def test_fire_hub_task_publishes_internal_task_and_dispatches(
             message="Run the lint sweep",
         )
     )
-    await manager._fire_scheduled_task(task, datetime.now())
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
 
     assert task.last_status == "ok"
     assert len(dispatched) == 1
@@ -748,6 +759,166 @@ async def test_run_scheduled_task_fires_immediately(
     await manager.run_scheduled_task(task.id)
     assert sent == ["now"]
     assert manager.scheduled_tasks[task.id].run_count == 1
+
+
+async def test_run_scheduled_task_raises_on_fire_failure(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    session = _make_session(workspace)
+    manager.sessions[session.id] = session
+
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
+        raise RuntimeError("tmux down")
+
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="fail",
+            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            run_at=datetime.now() + timedelta(hours=1),
+            session_id=session.id,
+            message="go",
+        )
+    )
+    # The fire failure propagates so the API / CLI can surface a non-success
+    # status; the task is still stamped and records the error.
+    with pytest.raises(RuntimeError, match="tmux down"):
+        await manager.run_scheduled_task(task.id)
+    assert task.last_status == "error"
+    assert "tmux down" in (task.last_error or "")
+    # A one-shot is still disabled even though its fire failed.
+    assert task.enabled is False
+    assert task.run_count == 1
+
+
+async def test_run_scheduled_task_on_disabled_raises(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    session = _make_session(workspace)
+    manager.sessions[session.id] = session
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="off",
+            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            run_at=datetime.now() + timedelta(hours=1),
+            session_id=session.id,
+            message="go",
+            enabled=False,
+        )
+    )
+    with pytest.raises(ValueError, match="disabled"):
+        await manager.run_scheduled_task(task.id)
+    # A disabled task is never stamped by a manual run.
+    assert task.run_count == 0
+
+
+async def test_fire_lock_prevents_concurrent_double_fire(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    session = _make_session(workspace)
+    manager.sessions[session.id] = session
+
+    sent: List[str] = []
+
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
+        # Yield so a second concurrent fire can reach the lock before the first
+        # one releases it.
+        await asyncio.sleep(0)
+        sent.append(message)
+
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="concurrent",
+            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            interval_seconds=3600,
+            session_id=session.id,
+            message="once",
+        )
+    )
+    task.next_run_at = datetime.now() - timedelta(seconds=1)  # due
+
+    now = datetime.now()
+    await asyncio.gather(
+        manager._fire_scheduled_task(task, now),
+        manager._fire_scheduled_task(task, now),
+    )
+
+    # The per-task lock + in-lock re-check serialize the two fires; only one
+    # actually stamps and sends (the second sees the advanced next_run_at).
+    assert task.run_count == 1
+    assert sent == ["once"]
+
+
+def test_new_session_rejects_recurring_schedule(manager: WorkspaceManager, tmp_path: Path) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    # A recurring new_session task would leak one ephemeral session per fire;
+    # only one-shot run_at is allowed.
+    with pytest.raises(ValueError, match="one-shot"):
+        manager.create_scheduled_task(
+            ScheduledTaskCreate(
+                name="recurring new session",
+                kind=ScheduledTaskKind.NEW_SESSION,
+                cron="0 9 * * *",
+                workspace_id=workspace.id,
+                message="do a thing",
+            )
+        )
+    with pytest.raises(ValueError, match="one-shot"):
+        manager.create_scheduled_task(
+            ScheduledTaskCreate(
+                name="recurring new session",
+                kind=ScheduledTaskKind.NEW_SESSION,
+                interval_seconds=3600,
+                workspace_id=workspace.id,
+                message="do a thing",
+            )
+        )
+
+
+def test_create_rejects_whitespace_name(manager: WorkspaceManager, tmp_path: Path) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    session = _make_session(workspace)
+    manager.sessions[session.id] = session
+    with pytest.raises(ValueError, match="name must not be empty"):
+        manager.create_scheduled_task(
+            ScheduledTaskCreate(
+                name="   ",
+                kind=ScheduledTaskKind.SESSION_MESSAGE,
+                run_at=datetime.now() + timedelta(hours=1),
+                session_id=session.id,
+                message="go",
+            )
+        )
+
+
+def test_update_rejects_whitespace_name(manager: WorkspaceManager, tmp_path: Path) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    session = _make_session(workspace)
+    manager.sessions[session.id] = session
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="keep",
+            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            run_at=datetime.now() + timedelta(hours=1),
+            session_id=session.id,
+            message="go",
+        )
+    )
+    with pytest.raises(ValueError, match="name must not be empty"):
+        manager.update_scheduled_task(task.id, ScheduledTaskUpdate(name="  "))
+    # A non-empty name is stripped, not rejected.
+    updated = manager.update_scheduled_task(task.id, ScheduledTaskUpdate(name="  renamed  "))
+    assert updated.name == "renamed"
 
 
 # ---------------------------------------------------------------------------

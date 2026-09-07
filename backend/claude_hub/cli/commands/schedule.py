@@ -280,7 +280,11 @@ def schedule_disable(ctx: click.Context, task_id: str) -> None:
 @click.argument("task_id")
 @click.pass_context
 def schedule_run(ctx: click.Context, task_id: str) -> None:
-    """Fire a scheduled task immediately (does not change its schedule)."""
+    """Fire a scheduled task immediately.
+
+    Stamps and advances the schedule like a tick fire (a one-shot is disabled
+    after firing). Exits non-zero if the fire side-effect fails.
+    """
     try:
         with cli_main.get_client(ctx) as client:
             data = client.run_scheduled_task(task_id)

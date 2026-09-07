@@ -16,6 +16,22 @@
         </button>
       </div>
 
+      <div
+        v-if="formError"
+        class="st-banner"
+        role="alert"
+      >
+        <span class="st-banner-text">{{ formError }}</span>
+        <button
+          type="button"
+          class="st-banner-close"
+          :aria-label="'Dismiss error'"
+          @click="formError = ''"
+        >
+          ×
+        </button>
+      </div>
+
       <!-- ===================== LIST VIEW ===================== -->
       <div
         v-if="mode === 'list'"
@@ -114,6 +130,7 @@
                 <input
                   :checked="task.enabled"
                   type="checkbox"
+                  :aria-label="`${task.enabled ? 'Disable' : 'Enable'} scheduled task ${task.name}`"
                   @change="onToggle(task, ($event.target as HTMLInputElement).checked)"
                 >
                 <span class="st-toggle-track" />
@@ -352,13 +369,6 @@
             spellcheck="false"
           />
         </div>
-
-        <p
-          v-if="formError"
-          class="st-form-error"
-        >
-          {{ formError }}
-        </p>
       </div>
 
       <div class="st-footer">
@@ -988,10 +998,39 @@ async function save() {
   color: var(--ch-color-text-muted);
 }
 
-.st-form-error {
-  margin: 0;
+.st-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-warning-bg, rgba(251, 191, 36, 0.14));
+  border: 1px solid var(--ch-color-warning, #fbbf24);
   color: var(--ch-color-warning, #fbbf24);
   font-size: var(--ch-font-size-sm);
+  flex-shrink: 0;
+}
+
+.st-banner-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.st-banner-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.st-banner-close:hover {
+  opacity: 0.8;
 }
 
 .st-footer {

@@ -22,6 +22,9 @@ class _StateMixin:
         self.sessions: dict[str, ManagedSession] = {}
         self.reports: dict[str, AgentReport] = {}
         self.scheduled_tasks: dict[str, ScheduledTask] = {}
+        # Per-task fire locks: serialize the 5s tick and a manual run-now so
+        # the same task cannot be stamped / fired twice concurrently.
+        self._sched_fire_locks: dict[str, asyncio.Lock] = {}
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
         # Per-session pump locks: serialize _pump_session_messages so two
