@@ -13,6 +13,12 @@ task **must** use an isolated worktree on a feature branch. No exceptions.
 This is the single most important rule in this document. See
 [Mandatory Workflow](#mandatory-workflow).
 
+**⚠️ RULE #2 — ALL LINKED WORKTREES LIVE UNDER `~/claude_hub_worktree`. ⚠️**
+
+The primary checkout at `~/claude_hub` is the only exception. Do not create
+task, review, test, or temporary worktrees beside the primary checkout, under
+`/tmp`, or in another project directory.
+
 ---
 
 ## Project
@@ -32,12 +38,34 @@ interface and a workspace orchestration layer that drives multiple agents
 
 **This workflow is mandatory. Do not skip steps. Do not take shortcuts.**
 
+### Canonical Worktree Root
+
+Every linked Git worktree for this repository must be an immediate child of
+`~/claude_hub_worktree/`. Create the root if needed and use a short task slug
+for the directory name:
+
+```bash
+mkdir -p ~/claude_hub_worktree
+git worktree add ~/claude_hub_worktree/<slug> -b feat/your-feature main
+```
+
+This location rule applies equally to feature development, bug fixes, reviews,
+tests, experiments, documentation, and managed Workspace tasks. Paths such as
+`../claude_hub-<slug>`, `/tmp/<slug>`, and
+`~/Projects/codex_workspace/claude_hub-<slug>` are forbidden.
+
+Before relocating or removing an existing worktree, inspect its Git status and
+confirm that no process, tmux session, dev server, or browser test is using its
+path. Preserve dirty and untracked state. Use `git worktree move` for safe
+relocation and `git worktree remove` only for a worktree proven disposable;
+never move a registered worktree with plain `mv`.
+
 For all feature work, bug fixes, UI changes, tests, documentation changes,
 and managed workspace tasks — even small ones:
 
 1. Start from clean `main`: fetch/sync first.
 2. Create an isolated worktree and branch:
-   `git worktree add ../claude_hub-<slug> -b feat/your-feature main`.
+   `git worktree add ~/claude_hub_worktree/<slug> -b feat/your-feature main`.
 3. **Work only inside that task worktree.** Never edit files in the `main`
    worktree directly.
 4. For frontend changes, run a dedicated dev/review server from that worktree

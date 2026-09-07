@@ -115,6 +115,12 @@
   unrecoverable there, and history always hydrates contiguously from sequence
   zero, so this only affects already-corrupt state.
 
+### docs: standardize linked worktree placement
+
+- Require every Claude Hub linked worktree, including review and temporary
+  test checkouts, to live under `~/claude_hub_worktree/`; document safe
+  relocation and cleanup checks for dirty or process-owned worktrees.
+
 ### fix: recover Chat turns interrupted by backend reloads
 
 - Terminalize active native Chat turns before graceful tailer shutdown and
