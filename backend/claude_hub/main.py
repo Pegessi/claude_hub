@@ -85,6 +85,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("Codex image temp cleanup failed at startup")
 
+        # Remove any Cursor image temp files left by a prior crashed process.
+        # Cursor stages attached images to temp files referenced by path in
+        # the prompt; same single-ownership guarantee as Codex above.
+        try:
+            from .services.agent_stream.native import cleanup_cursor_temp_dir
+
+            removed = cleanup_cursor_temp_dir()
+            if removed:
+                logger.info("cleaned up %d orphaned Cursor image temp files", removed)
+        except Exception:
+            logger.exception("Cursor image temp cleanup failed at startup")
+
         # Start all saved tabs
         await ttyd_manager.start_all_tabs()
         workspace_manager.start_background_monitor()

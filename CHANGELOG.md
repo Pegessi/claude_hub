@@ -5,6 +5,52 @@
 
 ## Unreleased
 
+### fix: Cursor image temp-file lifecycle across turns
+
+Three hardening fixes for the Cursor image-attachment temp files, found by
+code review and covered by a new multi-turn regression test:
+
+- **Cross-turn clobber leaked/deleted the wrong turn's files.** In-flight
+  image paths were held in a single shared `_inflight_images` slot. When turn
+  N's one-shot process lingered past `TURN_COMPLETED` and turn N+1 spawned,
+  turn N+1 overwrote the slot *before* `_spawn_oneshot` cancelled turn N's
+  lingering drain — so that drain's cleanup deleted turn N+1's files (and
+  leaked turn N's). In-flight files are now keyed by stdout generation
+  (`_inflight_images_by_gen`); each drain pops and deletes only its own
+  generation in its `finally`, and `stop` sweeps any generations still
+  registered.
+- **Buffered-write error was swallowed.** `_stage_images` wrote the bytes
+  without flushing, so a write failure (e.g. ENOSPC) only surfaced at
+  `close()`, whose `OSError` the `finally` swallowed — silently staging a
+  truncated file the model would then read. An explicit `f.flush()` makes the
+  error surface at the write, triggering the unlink + re-raise path.
+- **Cancellation leaked in-flight files.** `_send_text`'s spawn-failure
+  cleanup caught only `Exception`, but `asyncio.CancelledError` is a
+  `BaseException`; a cancellation between registering the in-flight files and
+  creating the reader task skipped the cleanup. It now catches
+  `(Exception, asyncio.CancelledError)`.
+
+### feat: Cursor Chat supports image attachments
+
+- The Cursor Chat composer now accepts pasted/attached images. Cursor was the
+  only provider with `supports_images = False`; flipping it to `True` opens the
+  existing pipeline (the frontend attach control and paste handler are already
+  gated on `caps.supports_images`, so no API/UI change was needed).
+- Cursor's native CLI has no structured image-input flag, so images are staged
+  to 0600 temp files under an app-owned 0700 `runtime_home/tmp/cursor-images/`
+  directory and referenced by absolute path in a sentinel-wrapped prompt block
+  (`<<<HUB_IMAGE_ATTACHMENT_V1>>>`); the model reads them with its multimodal
+  Read tool. Validated empirically against the real CLI for images both inside
+  and outside the workspace.
+- Temp files are deleted when the one-shot process exits (a `_drain_oneshot_stdout`
+  override clears the in-flight set after the base drain awaits process exit)
+  and on `stop`; a startup `cleanup_cursor_temp_dir()` removes orphans from a
+  crashed process under the `BackendInstanceLock` single-ownership guarantee.
+- The injected image block is stripped on transcript read (mirroring the
+  question-protocol block) so the file paths never reach the persisted timeline
+  or the UI; the two strips compose in either order.
+- See `docs/working-logs/2026-09-07-cursor-chat-images.md`.
+
 ### feat: production deployment mode — FastAPI serves the built SPA
 
 - `start.sh` now defaults to **production mode**: it builds the frontend
