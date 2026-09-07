@@ -9,7 +9,9 @@ echo "Stopping Claude Hub services..."
 BACKEND_PORT="${CLAUDE_HUB_PORT:-8173}"
 
 # --- Backend (uvicorn) -----------------------------------------------------
-# With `--reload` the backend is a 3-process tree:
+# In production mode (start.sh with no --reload) the backend is a single
+# uvicorn process, so the pattern pkill below is sufficient. In dev mode
+# (--reload) it is a 3-process tree:
 #   1. `uv run uvicorn ...`            (launcher)
 #   2. uvicorn reload supervisor
 #   3. multiprocessing-spawned worker  (the process that actually binds the port)
@@ -17,7 +19,8 @@ BACKEND_PORT="${CLAUDE_HUB_PORT:-8173}"
 # spawn_main; ...` — it contains NO "uvicorn" token, so a single pattern pkill
 # kills the launcher + supervisor but leaves the worker holding the port. That
 # is why a naive restart appears to "not take effect". So: pattern-kill the
-# tree, then reap whatever is still LISTENing on the port.
+# tree, then reap whatever is still LISTENing on the port (a safety net that
+# also covers a stale process from a previous run in either mode).
 pkill -f "uvicorn claude_hub.main:app" 2>/dev/null || true
 
 # Give the supervisor a moment to tear down its worker gracefully, then force

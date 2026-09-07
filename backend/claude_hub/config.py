@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     ttyd_base_port: int = 10000
     default_command: str = "claude"
 
+    # Serve the built frontend (frontend/dist) from FastAPI at the same origin
+    # as the API. start.sh sets SERVE_FRONTEND=true in production mode so the
+    # backend serves the SPA directly — no vite dev server, no HMR WebSocket
+    # (which force-reloads background tabs), no CORS/proxy. Off by default so
+    # dev/CI (no build present) keeps the JSON root endpoint and the backend
+    # tests that assert on it stay green.
+    serve_frontend: bool = False
+
     # Feishu OAuth settings
     feishu_app_id: Optional[str] = None
     feishu_app_secret: Optional[str] = None

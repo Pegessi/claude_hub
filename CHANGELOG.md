@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### feat: production deployment mode — FastAPI serves the built SPA
+
+- `start.sh` now defaults to **production mode**: it builds the frontend
+  (`pnpm build`) and runs a single uvicorn process (no `--reload`) that serves
+  both the API and the built SPA on `:8173`. `./start.sh --dev` keeps the old
+  vite-dev (`:5173`, HMR) + uvicorn `--reload` (`:8173`) behavior for active
+  development.
+- The backend serves the SPA via a `StaticFiles` mount gated on a new
+  `serve_frontend` setting (default off; `start.sh` exports
+  `SERVE_FRONTEND=true`). When the flag is off or `frontend/dist` is absent
+  (dev/CI), `/` falls back to the JSON API info so the backend tests that
+  assert on it stay green. The app has no vue-router, so `html=True` serves
+  `index.html` at `/` and 404s unknown paths; API/health/docs routes are
+  registered first and win route-ordering. COOP/COEP headers are applied to
+  static assets too.
+- This eliminates the vite dev HMR WebSocket, whose drop in background tabs
+  triggered a full `location.reload()` — the reported "switch back to the tab
+  and the page reloads" bug. It also stops spurious backend restarts on code
+  merge (no `--reload`). Single worker only: the Hub is stateful (tmux
+  sessions, ttyd/WebSocket connections, in-memory state), so multiple workers
+  would break state sharing.
+- `docs/DEPLOYMENT.md` updated: tunnel/reverse-proxy examples now target
+  `:8173` (single origin) and the 启动服务 section is production-first.
+
 ### fix: chat question cards wait indefinitely instead of auto-timing-out
 
 - Interactive question cards (Claude `AskUserQuestion`, Cursor `AskQuestion`)
