@@ -1525,6 +1525,8 @@ class _ReportsMixin:
         )
         self._write_task_record(updated)
         self._release_task_session(updated)
+        if updated.internal_kind == "scheduled":
+            await self._auto_cleanup_scheduled_session(updated, session)
         if updated.feedback_lesson_ids:
             self._feedback_store().increment_lesson_usage(
                 updated.workspace_id,
@@ -1534,6 +1536,34 @@ class _ReportsMixin:
             )
         self._save_state()
         await self.dispatch_workspace(updated.workspace_id)
+
+    async def _auto_cleanup_scheduled_session(
+        self, task: WorkspaceTask, session: ManagedSession
+    ) -> None:
+        """Delete the caller-owned ephemeral session that ran a scheduled task.
+
+        A scheduled hub task spins up a throwaway orchestrator session to run
+        the task. Once the task is DONE the session has no further purpose, so
+        delete it (tab + tmux included) rather than leaving it to hold agent /
+        reviewer resources. Guarded on ``caller_owned_ephemeral`` so a session
+        the scheduler did not own is never torn down here.
+        """
+        sess = self.sessions.get(session.id)
+        if sess is None or not sess.caller_owned_ephemeral:
+            return
+        try:
+            await self.delete_session(session.id)
+            logger.info(
+                "Auto-cleaned scheduled task session task_id=%s session_id=%s",
+                task.id,
+                session.id,
+            )
+        except Exception:
+            logger.exception(
+                "Auto-cleanup failed for scheduled task session task_id=%s session_id=%s",
+                task.id,
+                session.id,
+            )
 
     async def _should_request_task_review(
         self,

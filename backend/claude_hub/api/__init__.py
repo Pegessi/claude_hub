@@ -7,6 +7,7 @@ from .codex import router as codex_router
 from .env_presets import router as env_presets_router
 from .filesystem import router as filesystem_router
 from .remote import router as remote_router
+from .scheduled_tasks import router as scheduled_tasks_router
 from .system import router as system_router
 from .tabs import router as tabs_router
 from .terminal import router as terminal_router
@@ -23,6 +24,7 @@ api_router.include_router(clipboard_router)
 api_router.include_router(workspaces_router)
 api_router.include_router(codex_router)
 api_router.include_router(env_presets_router)
+api_router.include_router(scheduled_tasks_router)
 api_router.include_router(agent_stream_router)
 
 __all__ = ["api_router"]

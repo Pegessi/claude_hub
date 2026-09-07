@@ -520,3 +520,29 @@ class HubClient:
             f"/api/workspaces/{workspace_id}/lessons/summarize",
             json=body,
         )
+
+    # -- Scheduled tasks ----------------------------------------------------
+
+    def list_scheduled_tasks(self) -> Any:
+        """GET /api/scheduled-tasks."""
+        return self._request("GET", "/api/scheduled-tasks")
+
+    def create_scheduled_task(self, body: Dict[str, Any]) -> Any:
+        """POST /api/scheduled-tasks."""
+        return self._request("POST", "/api/scheduled-tasks", json=body)
+
+    def get_scheduled_task(self, task_id: str) -> Any:
+        """GET /api/scheduled-tasks/{task_id}."""
+        return self._request("GET", f"/api/scheduled-tasks/{task_id}")
+
+    def update_scheduled_task(self, task_id: str, body: Dict[str, Any]) -> Any:
+        """PATCH /api/scheduled-tasks/{task_id}."""
+        return self._request("PATCH", f"/api/scheduled-tasks/{task_id}", json=body)
+
+    def delete_scheduled_task(self, task_id: str) -> None:
+        """DELETE /api/scheduled-tasks/{task_id}."""
+        self._request("DELETE", f"/api/scheduled-tasks/{task_id}")
+
+    def run_scheduled_task(self, task_id: str) -> Any:
+        """POST /api/scheduled-tasks/{task_id}/run."""
+        return self._request("POST", f"/api/scheduled-tasks/{task_id}/run")
