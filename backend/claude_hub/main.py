@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
@@ -159,11 +160,35 @@ async def health_check() -> dict[str, str]:
     return {"status": "healthy"}
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    """Root endpoint."""
-    return {
-        "message": "Claude Hub API",
-        "version": "0.1.0",
-        "docs": "/docs",
-    }
+# Production frontend serving. When ``serve_frontend`` is enabled (start.sh
+# exports ``SERVE_FRONTEND=true``) and a built ``frontend/dist`` exists, FastAPI
+# serves the SPA at the same origin as the API — no separate vite dev server,
+# no HMR WebSocket (which force-reloads background tabs), no CORS/proxy. The app
+# has no vue-router, so ``StaticFiles(html=True)`` serves index.html at "/" and
+# 404s unknown paths; the API/health/docs routes above are registered first and
+# win route-ordering. COOP/COEP headers are added by the middleware above to
+# every response, static assets included. When the build is absent (dev/CI),
+# fall back to the JSON root so backend tests asserting on it stay green.
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+def register_frontend(fastapi_app: FastAPI, *, serve: bool, dist: Path) -> None:
+    """Mount the built SPA on ``fastapi_app`` when enabled and present.
+
+    Falls back to a JSON root endpoint otherwise (dev/CI without a build).
+    """
+    if serve and dist.is_dir():
+        fastapi_app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
+        return
+
+    @fastapi_app.get("/")
+    async def root() -> dict[str, str]:
+        """Root endpoint."""
+        return {
+            "message": "Claude Hub API",
+            "version": "0.1.0",
+            "docs": "/docs",
+        }
+
+
+register_frontend(app, serve=settings.serve_frontend, dist=FRONTEND_DIST)
