@@ -100,8 +100,10 @@ async def run_scheduled_task(
 ) -> ScheduledTaskRunResult:
     """Fire a scheduled task immediately (manual run-now).
 
-    This does not change the task's schedule or enable/disable state; it only
-    triggers one immediate execution and records the result.
+    Stamps and advances the schedule just like a tick fire: a one-shot task is
+    disabled after firing and a recurring task's ``next_run_at`` is recomputed.
+    Returns 400 if the task is disabled and 500 if the fire side-effect failed
+    (the task's ``last_status`` / ``last_error`` are still persisted either way).
     """
     try:
         task = await workspace_manager.run_scheduled_task(task_id)
@@ -109,6 +111,12 @@ async def run_scheduled_task(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Scheduled task '{task_id}' not found",
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
         ) from None
     return ScheduledTaskRunResult(
         id=task.id,
