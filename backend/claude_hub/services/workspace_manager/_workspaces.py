@@ -328,6 +328,7 @@ class _WorkspacesMixin:
                 for workspace_id in list(self.workspaces):
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                 await self._tick_resident_agents()
+                await self._tick_scheduled_tasks()
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -43,6 +43,11 @@ from ...models import (
     ResidentPeriodicTask,
     ReviewDecision,
     ReviewProfile,
+    ScheduledTask,
+    ScheduledTaskCreate,
+    ScheduledTaskKind,
+    ScheduledTaskRunResult,
+    ScheduledTaskUpdate,
     SessionKind,
     StartTaskRequest,
     TaskCleanupResult,
@@ -77,6 +82,7 @@ logger = logging.getLogger(__name__)
 
 STATE_ROOT = resolve_state_root()
 INDEX_FILE = STATE_ROOT / "index.json"
+SCHEDULED_TASKS_FILE = STATE_ROOT / "scheduled_tasks.json"
 LEGACY_STATE_FILE = Path.home() / ".claude_hub" / "workspaces.json"
 REMOTE_FORWARD_PORT_BASE = 18173
 TMUX_SUBMIT_ATTEMPTS = 3
@@ -336,8 +342,14 @@ __all__ = [
     "RESIDENT_ACTIVITY_DEBOUNCE_SECONDS",
     "REVIEW_REAPER_DISPATCH_GRACE_SECONDS",
     "REVIEW_RUNTIME_REOPEN_GRACE_SECONDS",
+    "SCHEDULED_TASKS_FILE",
     "RequestTaskReviewRequest",
     "ResidentPeriodicTask",
+    "ScheduledTask",
+    "ScheduledTaskCreate",
+    "ScheduledTaskKind",
+    "ScheduledTaskRunResult",
+    "ScheduledTaskUpdate",
     "ReviewDecision",
     "ReviewProfile",
     "SessionKind",

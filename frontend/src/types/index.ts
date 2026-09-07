@@ -467,6 +467,66 @@ export interface ManualTaskControlRequest {
   reason: string
 }
 
+export type ScheduledTaskKind = 'session_message' | 'new_session' | 'hub_task'
+
+export type ScheduledTaskStatus = 'ok' | 'error'
+
+export interface ScheduledTask {
+  id: string
+  name: string
+  kind: ScheduledTaskKind
+  enabled: boolean
+  run_at?: string | null
+  cron?: string | null
+  interval_seconds?: number | null
+  session_id?: string | null
+  workspace_id?: string | null
+  agent_type: AgentType
+  message?: string | null
+  task_title?: string | null
+  last_run_at?: string | null
+  next_run_at?: string | null
+  last_status?: ScheduledTaskStatus | null
+  last_error?: string | null
+  run_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ScheduledTaskCreate {
+  name: string
+  kind: ScheduledTaskKind
+  enabled?: boolean
+  run_at?: string | null
+  cron?: string | null
+  interval_seconds?: number | null
+  session_id?: string | null
+  workspace_id?: string | null
+  agent_type?: AgentType
+  message?: string | null
+  task_title?: string | null
+}
+
+export interface ScheduledTaskUpdate {
+  name?: string
+  enabled?: boolean
+  run_at?: string | null
+  cron?: string | null
+  interval_seconds?: number | null
+  session_id?: string | null
+  workspace_id?: string | null
+  agent_type?: AgentType | null
+  message?: string | null
+  task_title?: string | null
+}
+
+export interface ScheduledTaskRunResult {
+  id: string
+  last_run_at?: string | null
+  last_status?: ScheduledTaskStatus | null
+  last_error?: string | null
+}
+
 export interface EnsureWorkspaceAgentRequest {
   agent_type: AgentType
   title?: string | null

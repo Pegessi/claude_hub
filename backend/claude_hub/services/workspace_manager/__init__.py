@@ -26,6 +26,7 @@ from ._persistence import _PersistenceMixin
 from ._prompts import _PromptsMixin
 from ._reports import _ReportsMixin
 from ._review import _ReviewMixin
+from ._scheduling import _SchedulingMixin
 from ._sessions import _SessionsMixin
 from ._state import _StateMixin
 from ._task_updates import _TaskUpdatesMixin
@@ -52,6 +53,7 @@ class WorkspaceManager(
     _ReviewMixin,
     _TmuxQueriesMixin,
     _MonitorMixin,
+    _SchedulingMixin,
 ):
     """Human-orchestrated workspace/task/session layer above TTYDManager."""
 

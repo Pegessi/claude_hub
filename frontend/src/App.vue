@@ -67,6 +67,33 @@
           </button>
         </div>
         <div class="app-mode-tools">
+          <button
+            type="button"
+            class="schedule-tool-btn"
+            title="Scheduled tasks"
+            aria-label="Scheduled tasks"
+            :class="{ active: showScheduledTasks }"
+            @click="showScheduledTasks = !showScheduledTasks"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <circle
+                cx="12"
+                cy="12"
+                r="9"
+              />
+              <path d="M12 7v5l3 2" />
+            </svg>
+          </button>
           <NetworkAccessMenu />
           <button
             type="button"
@@ -108,15 +135,22 @@
           <p>Click the + button to create a new terminal tab</p>
         </div>
         <TerminalGridView v-else />
-        <MobileControls />
+        <!-- The floating keyboard ball only injects raw PTY keys, so it has no
+             purpose (and just clutters the chat surface) when the active pane
+             is a native structured Chat session. -->
+        <MobileControls v-if="!activePaneIsChat" />
       </div>
       <AgentWorkspaceView v-if="mode === 'workspace'" />
+      <ScheduledTasksPanel
+        :visible="showScheduledTasks"
+        @close="showScheduledTasks = false"
+      />
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import TabBar from '@/components/TabBar.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
@@ -124,6 +158,7 @@ import TerminalGridView from '@/components/TerminalGridView.vue'
 import MobileControls from '@/components/MobileControls.vue'
 import AgentWorkspaceView from '@/components/AgentWorkspaceView.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+import ScheduledTasksPanel from '@/components/ScheduledTasksPanel.vue'
 import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -132,8 +167,9 @@ import { useAuthStore } from '@/stores/authStore'
 const appStore = useAppStore()
 const store = useTerminalStore()
 const authStore = useAuthStore()
-const { tabs, error, activePane } = storeToRefs(store)
+const { tabs, error, activePane, activePaneIsChat } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
+const showScheduledTasks = ref(false)
 
 // Clear all error-type notifications from the terminal store toast stack.
 function clearError() {
@@ -1021,6 +1057,33 @@ textarea {
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
+}
+
+.schedule-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  transition: color var(--ch-motion-fast), border-color var(--ch-motion-fast),
+    background var(--ch-motion-fast);
+}
+
+.schedule-tool-btn:hover {
+  color: var(--ch-color-text);
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.schedule-tool-btn.active {
+  color: var(--ch-color-accent);
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-accent-soft);
 }
 
 .theme-switch {
