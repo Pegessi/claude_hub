@@ -67,7 +67,7 @@
         <div
           v-for="turn in turns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, erroredAttachments.size]"
+          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn)]"
           class="structured-turn"
         >
           <!-- A right-aligned user bubble and a left-aligned assistant bubble make
@@ -643,7 +643,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
-import { IncrementalTimelineReducer, type TimelineApproval, type TimelineAttachment, type TimelineTool } from '@/utils/agentStreamTimeline'
+import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
+import { IncrementalTimelineReducer, type TimelineApproval, type TimelineAttachment, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
@@ -652,11 +653,7 @@ import {
   autoresizeComposerTextarea,
   resolveComposerEnterAction,
 } from '@/utils/chatComposerInteraction'
-import {
-  formatAskQuestionResponse,
-  isQuestionAnswerComplete,
-  type QuestionAnswerMap,
-} from '@/utils/chatQuestionResponse'
+import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 import { useTerminalStore } from '@/stores/terminalStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import type { WorkspaceAttachmentCreate } from '@/types'
@@ -678,6 +675,21 @@ const {
   setMode,
   stop,
 } = useAgentStream()
+
+// Approval-card selection state (AskUserQuestion / AskQuestion /
+// request_user_input). Component-scoped so a stream batch rebuilding the
+// timeline turn never wipes a pending selection.
+const {
+  questionAnswers,
+  resolvedApprovalKeys,
+  isQuestionOptionSelected,
+  toggleQuestionOption,
+  isApprovalResolved,
+  canSubmitQuestion,
+  answersFor,
+  markResolved,
+  reset: resetQuestionAnswers,
+} = useQuestionAnswers()
 
 const isHistoryVisible = computed(() =>
   connectionState.value === 'live' || connectionState.value === 'reconciling'
@@ -880,8 +892,6 @@ function handleViewportResize() {
 }
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
 const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
-const questionAnswers = ref<Record<string, QuestionAnswerMap>>({})
-const resolvedApprovalKeys = ref<Set<string>>(new Set())
 const isPreparingAttachments = ref(false)
 const turnInFlight = computed(() => isChatModeLocked(
   pendingDirectTurns.value.length > 0,
@@ -935,8 +945,7 @@ watch(
     draftMessage.value = ''
     attachments.value = []
     draftQueue.value = []
-    questionAnswers.value = {}
-    resolvedApprovalKeys.value = new Set()
+    resetQuestionAnswers()
     composerError.value = null
     isUpdatingMode.value = false
     modeChangeError.value = null
@@ -1394,31 +1403,33 @@ watch(
   },
 )
 
-function isQuestionOptionSelected(
-  approvalKey: string,
-  questionId: string,
-  optionId: string,
-): boolean {
-  return (questionAnswers.value[approvalKey]?.[questionId] ?? []).includes(optionId)
-}
-
-function toggleQuestionOption(
-  approvalKey: string,
-  questionId: string,
-  optionId: string,
-  allowMultiple: boolean,
-) {
-  const current = { ...(questionAnswers.value[approvalKey] ?? {}) }
-  const selected = new Set(current[questionId] ?? [])
-  if (allowMultiple) {
-    if (selected.has(optionId)) selected.delete(optionId)
-    else selected.add(optionId)
-  } else {
-    selected.clear()
-    selected.add(optionId)
+/**
+ * Per-turn memo signature for approval-card interaction state.
+ *
+ * Each turn is memoized with ``v-memo="[renderRevision, erroredAttachments,
+ * signature]"``. The approval card's selected / resolved / send-disabled state
+ * lives in component refs (``questionAnswers``, ``resolvedApprovalKeys``,
+ * ``isSending``) that are NOT part of the timeline turn, so without this
+ * signature a click toggles the reactive state but ``v-memo`` skips
+ * re-rendering the turn — the chip never shows selected and the submit button
+ * stays disabled. Folding this signature into the deps re-renders only the
+ * turn owning the changed approval; turns without approvals return ``''`` and
+ * stay memoized.
+ */
+function turnApprovalSignature(turn: TimelineTurn): string {
+  // Turns without approvals never depend on this state; keep them memoized.
+  if (turn.approvals.length === 0) return ''
+  let signature = ''
+  for (const approval of turn.approvals) {
+    signature += `${approval.key}=${approvalStateSignature(
+      approval,
+      questionAnswers.value,
+      resolvedApprovalKeys.value,
+    )};`
   }
-  current[questionId] = [...selected]
-  questionAnswers.value = { ...questionAnswers.value, [approvalKey]: current }
+  // isSending gates the option/submit disabled state inside the card, so a
+  // send start/end must also invalidate the memo for approval-bearing turns.
+  return isSending.value ? `${signature}|sending` : signature
 }
 
 /** Aggregate status for a tool group: 'running' if any tool is still running,
@@ -1433,23 +1444,13 @@ function toolGroupStatus(
   return 'completed'
 }
 
-function isApprovalResolved(approval: TimelineApproval): boolean {
-  return approval.resolved || resolvedApprovalKeys.value.has(approval.key)
-}
-
-function canSubmitQuestion(approval: TimelineApproval): boolean {
-  const answers = questionAnswers.value[approval.key] ?? {}
-  return isQuestionAnswerComplete(approval.questions, answers)
-}
-
 async function submitQuestionResponse(approval: TimelineApproval) {
-  const answers = questionAnswers.value[approval.key] ?? {}
-  if (!isQuestionAnswerComplete(approval.questions, answers)) {
+  if (!canSubmitQuestion(approval)) {
     composerError.value = '请选择所有问题的选项后再提交。'
     return
   }
-  await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answers))
-  resolvedApprovalKeys.value = new Set(resolvedApprovalKeys.value).add(approval.key)
+  await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))
+  markResolved(approval.key)
 }
 
 async function cancelActiveTurn() {
