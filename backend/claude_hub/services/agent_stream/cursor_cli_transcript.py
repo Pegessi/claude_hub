@@ -48,6 +48,7 @@ from .base import (
     discover_source_cached,
     resolve_cwd,
 )
+from .native import strip_question_protocol_guidance
 
 #: Schema identifier for the same-pane Cursor transcript format this adapter
 #: understands. Bump when the row shape changes incompatibly.
@@ -243,6 +244,11 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         role = raw.get("role")
         if role == "user":
             text = self._extract_text(raw.get("message"))
+            # Strip the sentinel-wrapped question-protocol guidance that the
+            # transport prepends to Cursor prompts (the CLI has no
+            # system-prompt flag) so it never reaches the persisted timeline
+            # or the UI. No-op for ordinary user messages.
+            text = strip_question_protocol_guidance(text)
             if text:
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": text}))
         elif role == "assistant":
@@ -301,7 +307,9 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             self._clear_turn_state(ctx)
         return events
 
-    def _tool_use_events(self, block: Dict[str, Any], ctx: NormalizeContext) -> List[AgentStreamEvent]:
+    def _tool_use_events(
+        self, block: Dict[str, Any], ctx: NormalizeContext
+    ) -> List[AgentStreamEvent]:
         events: List[AgentStreamEvent] = []
         name = block.get("name") or "unknown"
         args = block.get("input")
