@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### feat: Cursor Chat supports image attachments
+
+- The Cursor Chat composer now accepts pasted/attached images. Cursor was the
+  only provider with `supports_images = False`; flipping it to `True` opens the
+  existing pipeline (the frontend attach control and paste handler are already
+  gated on `caps.supports_images`, so no API/UI change was needed).
+- Cursor's native CLI has no structured image-input flag, so images are staged
+  to 0600 temp files under an app-owned 0700 `runtime_home/tmp/cursor-images/`
+  directory and referenced by absolute path in a sentinel-wrapped prompt block
+  (`<<<HUB_IMAGE_ATTACHMENT_V1>>>`); the model reads them with its multimodal
+  Read tool. Validated empirically against the real CLI for images both inside
+  and outside the workspace.
+- Temp files are deleted when the one-shot process exits (a `_drain_oneshot_stdout`
+  override clears the in-flight set after the base drain awaits process exit)
+  and on `stop`; a startup `cleanup_cursor_temp_dir()` removes orphans from a
+  crashed process under the `BackendInstanceLock` single-ownership guarantee.
+- The injected image block is stripped on transcript read (mirroring the
+  question-protocol block) so the file paths never reach the persisted timeline
+  or the UI; the two strips compose in either order.
+- See `docs/working-logs/2026-09-07-cursor-chat-images.md`.
+
 ### feat: production deployment mode — FastAPI serves the built SPA
 
 - `start.sh` now defaults to **production mode**: it builds the frontend
