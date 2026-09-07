@@ -111,3 +111,79 @@ can stage new files).
   the full `send_message` → EOF cleanup lifecycle, and startup cleanup.
 - Frontend: ESLint, `vue-tsc` typecheck, production build, and 276 unit tests
   pass.
+
+## Follow-up: temp-file lifecycle bugs (2026-09-08)
+
+Code review of the landed design found three lifecycle bugs in the image
+temp-file handling. All three are fixed in `native.py` and covered by a new
+multi-turn regression test.
+
+### BUG-1 — cross-turn clobber leaked/deleted the wrong turn's files
+
+The original design held in-flight paths in a single shared
+`_inflight_images` slot. Each turn is a fresh one-shot subprocess, and
+`_send_text` transferred `_staged_images → _inflight_images` **before**
+spawning. The failure window:
+
+1. Turn N spawns; its drain task is reading stdout (the process lingers past
+   `TURN_COMPLETED`).
+2. Turn N+1 calls `_send_text`, which **overwrites** `_inflight_images` with
+   turn N+1's paths.
+3. `_spawn_oneshot` → `_terminate_process` cancels turn N's still-running
+   drain.
+4. Turn N's drain `finally` calls `_clear_inflight_images()` — which now
+   deletes **turn N+1's** files (the ones the new process is about to read),
+   and leaks turn N's.
+
+Fix: key in-flight files by stdout generation.
+`_inflight_images_by_gen: Dict[int, List[Path]]` replaces the single slot.
+`_send_text` registers under `generation = _stdout_generation + 1`; each
+drain pops and deletes **only its own generation** in its `finally`; `stop()`
+sweeps any generations still registered. Generations are unique per spawn, so
+a lingering drain can never touch another turn's files.
+
+### BUG-2 — buffered-write error was swallowed
+
+`_stage_images` wrote the bytes via `f.write(...)` without flushing. A write
+failure (e.g. ENOSPC) only surfaces at `close()`, and the `finally`'s
+`except OSError: pass` swallowed it — silently staging a **truncated** file
+the model would then read as a valid image. Fix: an explicit `f.flush()`
+after the write, inside the `try`, so the error surfaces at the write and
+takes the unlink + re-raise path.
+
+### BUG-3 — cancellation leaked in-flight files
+
+`_send_text`'s spawn-failure cleanup caught only `Exception`. But
+`asyncio.CancelledError` is a `BaseException`, not an `Exception` — so a
+cancellation landing between registering the in-flight files and creating the
+reader task skipped the cleanup and leaked the files. Fix: catch
+`(Exception, asyncio.CancelledError)`.
+
+### Test-fidelity pitfall: a never-started task's `finally` never runs
+
+The regression test (`test_cursor_lingering_turn_does_not_delete_next_turn_images`)
+initially failed: turn N's files were **not** deleted when turn N+1 spawned,
+even with the BUG-1 fix in place. The production code was correct; the test
+fakes were not production-faithful.
+
+The fake `create_subprocess_exec` and the fake stream's no-op `drain()`
+complete **without yielding to the event loop**. So turn N's drain task,
+though created via `create_task`, was never scheduled before turn N+1's
+`_terminate_process` cancelled it. A task cancelled **before it ever starts
+running** has its coroutine body never execute — the `try/finally` cleanup
+never runs. Real subprocess I/O always yields, so this only affects the test.
+
+Fix: `await asyncio.sleep(0.05)` after turn N's send, which (a) yields so the
+drain task actually starts, and (b) exceeds the fake stream's 0.01s read
+latency shim, so the drain is genuinely blocked on its stdout queue — the
+real lingering state. With that, cancellation runs the `finally` and the
+per-generation cleanup deletes exactly turn N's files.
+
+### Validation
+
+- black, isort, mypy clean.
+- The 252 `test_agent_stream_native.py` tests pass, including the new
+  multi-turn regression test.
+- Full suite: only the known environmental Playwright/tmux e2e failures and
+  three pre-existing failures (verified identical on the clean branch tip by
+  stashing these changes) — none caused by this fix.

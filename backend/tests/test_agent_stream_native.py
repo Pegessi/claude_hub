@@ -1377,7 +1377,8 @@ async def test_cursor_send_message_stages_images_and_cleans_up_on_eof(
         # Staged images transferred to in-flight before spawn; the files still
         # exist while the (still-running) one-shot process may read them.
         assert native._staged_images == []
-        assert native._inflight_images == captured_paths
+        # Registered under the generation _spawn_oneshot just assigned.
+        assert native._inflight_images_by_gen[native._stdout_generation] == captured_paths
         assert captured_paths and all(path.exists() for path in captured_paths)
 
         # The prompt written to stdin carries the sentinel block + paths.
@@ -1394,8 +1395,97 @@ async def test_cursor_send_message_stages_images_and_cleans_up_on_eof(
         assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
         await asyncio.wait_for(native._reader_task, timeout=1.0)
 
-    assert native._inflight_images == []
+    # The drain's finally popped its generation, so the dict is empty and the
+    # temp files are deleted.
+    assert native._inflight_images_by_gen == {}
     assert all(not path.exists() for path in captured_paths)
+
+
+@pytest.mark.asyncio
+async def test_cursor_lingering_turn_does_not_delete_next_turn_images(
+    tmp_path: Path,
+) -> None:
+    """Regression: a one-shot process that lingers past TURN_COMPLETED must
+    not delete the NEXT turn's image files.
+
+    Turn N's process stays alive (stdout never reaches EOF) after the tailer
+    acknowledges TURN_COMPLETED. Turn N+1 then spawns a fresh process;
+    ``_spawn_oneshot`` terminates turn N's lingering drain, whose ``finally``
+    must pop ONLY turn N's generation (deleting turn N's files) — not turn
+    N+1's, registered under a newer generation. A single shared in-flight slot
+    clobbered by turn N+1 before the termination made the old drain delete the
+    wrong turn's files (and leak its own).
+    """
+    proc_n = _FakeProcess(stdout_lines=[])  # lingers: stdout blocks, no EOF
+    proc_n1 = _FakeProcess(stdout_lines=[])
+    procs = [proc_n, proc_n1]
+    calls = {"n": 0}
+    staged: List[List[Path]] = []
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        proc = procs[calls["n"]]
+        calls["n"] += 1
+        return proc
+
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    original_stage = native._stage_images
+
+    def tracking_stage(images: List[bytes]) -> None:
+        original_stage(images)
+        staged.append(list(native._staged_images))
+
+    native._stage_images = tracking_stage  # type: ignore[assignment]
+
+    with (
+        patch(
+            "claude_hub.services.agent_stream.native._runtime_home",
+            return_value=tmp_path,
+        ),
+        patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+    ):
+        # Turn N: send with images; the process lingers (no EOF pushed).
+        await native.send_message("first", [_VALID_PNG])
+        paths_n = staged[0]
+        gen_n = native._stdout_generation
+        assert native._inflight_images_by_gen[gen_n] == paths_n
+        assert all(p.exists() for p in paths_n)
+
+        # Let turn N's drain task start and block on stdout. The fake
+        # subprocess spawn and stdin drain complete without yielding to the
+        # event loop, so without this yield the drain coroutine never executes
+        # before turn N+1's ``_terminate_process`` cancels it — and a
+        # never-started task's ``finally`` never runs, leaking turn N's files.
+        # Real subprocess I/O always yields, so this only affects the test.
+        # 0.05s exceeds ``_FakeStream.read``'s 0.01s latency shim, so the drain
+        # is genuinely blocked on its stdout queue (the lingering state).
+        await asyncio.sleep(0.05)
+
+        # Tailer acknowledges TURN_COMPLETED (releasing the guard) while the
+        # process is still alive — the linger window that triggers the bug.
+        native.acknowledge_turn_complete()
+        assert native._turn_in_flight is False
+
+        # Turn N+1: send with images. Spawning terminates turn N's lingering
+        # drain; its finally pops only gen_n, leaving turn N+1's files intact.
+        await native.send_message("second", [_VALID_PNG])
+        paths_n1 = staged[1]
+        gen_n1 = native._stdout_generation
+
+        # Turn N's files were cleaned by its own drain's termination.
+        assert all(not p.exists() for p in paths_n)
+        # Turn N+1's files MUST still exist — the old drain must not have
+        # deleted them. With the shared-slot clobber these were already gone.
+        assert paths_n1 and all(p.exists() for p in paths_n1)
+        assert native._inflight_images_by_gen == {gen_n1: paths_n1}
+
+        # Turn N+1's process exits: its drain cleans its own files.
+        proc_n1.stdout.push(b"")
+        assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
+        await asyncio.wait_for(native._reader_task, timeout=1.0)
+
+    assert native._inflight_images_by_gen == {}
+    assert all(not p.exists() for p in paths_n1)
+    assert calls["n"] == 2
 
 
 def test_cursor_startup_cleanup_removes_prior_process_temp_files(tmp_path: Path) -> None:

@@ -1550,6 +1550,12 @@ class CodexNativeSession(ProviderSession):
             try:
                 f = os.fdopen(fd, "wb")
                 f.write(img)
+                # Flush explicitly so a write error (e.g. ENOSPC) surfaces
+                # HERE and triggers the unlink + re-raise below. Without it
+                # the bytes sit in the buffer until close(), whose OSError
+                # the finally swallows — staging a silently truncated file
+                # the model would then read.
+                f.flush()
             except Exception:
                 # Best-effort cleanup: never let a close/unlink error mask
                 # the original write exception.
@@ -1891,9 +1897,14 @@ class CursorNativeSession(ProviderSession):
         super().__init__(session, conversation_id_persist=conversation_id_persist)
         # Staged image temp files for the next turn's prompt.
         self._staged_images: List[Path] = []
-        # Image temp files owned by the in-flight one-shot process; deleted
-        # when the process exits (see _drain_oneshot_stdout) or on stop.
-        self._inflight_images: List[Path] = []
+        # Image temp files owned by each in-flight one-shot process, keyed by
+        # the stdout generation ``_spawn_oneshot`` assigns that process's
+        # drain. A drain deletes ONLY its own generation's files in its
+        # finally (see ``_drain_oneshot_stdout``). A single shared slot would
+        # be clobbered by a later turn before a lingering previous drain is
+        # cancelled, making that drain's cleanup delete the WRONG turn's
+        # files (and leak the previous turn's).
+        self._inflight_images_by_gen: Dict[int, List[Path]] = {}
 
     def _build_command(self) -> List[str]:
         cmd = [
@@ -1945,35 +1956,49 @@ class CursorNativeSession(ProviderSession):
         self._staged_images = []
         if image_paths:
             prompt = wrap_image_attachment_guidance(prompt, image_paths)
-        # Transfer ownership of the image temp files to the in-flight turn
-        # BEFORE spawning. The one-shot process reads the files during its
-        # run; they are deleted when the process exits (see
-        # _drain_oneshot_stdout). If the spawn fails, no process will read
-        # them, so clean up here.
-        self._inflight_images = image_paths
+        # Transfer ownership of the image temp files to this turn's process
+        # BEFORE spawning. ``_spawn_oneshot`` advances ``_stdout_generation``
+        # by exactly one and spawns the drain with that generation, so
+        # predict it and register the files under it: the drain deletes only
+        # its own generation's files in its finally, never a later turn's.
+        # ``_send_text`` runs under ``_send_lock`` and only after the previous
+        # turn's ``acknowledge_turn_complete`` released the turn guard, so
+        # ``_stdout_generation`` is stable here and the prediction is exact.
+        # If the spawn fails (or the turn is cancelled before the reader task
+        # exists), no process will read the files, so clean them up. Catch
+        # ``CancelledError`` too — it is a ``BaseException`` and would
+        # otherwise skip the cleanup and leak the files.
+        generation = self._stdout_generation + 1
+        self._inflight_images_by_gen[generation] = image_paths
         try:
             await self._spawn_oneshot(cmd, prompt)
-        except Exception:
-            inflight = self._inflight_images
-            self._inflight_images = []
-            self._cleanup_images(inflight)
+        except (Exception, asyncio.CancelledError):
+            self._inflight_images_by_gen.pop(generation, None)
+            self._cleanup_images(image_paths)
             raise
 
     async def _drain_oneshot_stdout(self, generation: int) -> None:
         # The one-shot process has fully exited by the time the base drain
         # returns (natural EOF awaits proc.wait()) or is being terminated
         # (cancellation). Either way it has finished reading the staged
-        # image files, so they are safe to delete. The two-list staging
-        # design means a new turn's _staged_images is never touched here.
+        # image files, so they are safe to delete. Pop ONLY this drain's
+        # generation: a later turn may already have registered its own
+        # files under a newer generation, and a shared-slot cleanup would
+        # delete that later turn's files (and leak this turn's).
         try:
             await super()._drain_oneshot_stdout(generation)
         finally:
-            self._clear_inflight_images()
+            self._cleanup_images(self._inflight_images_by_gen.pop(generation, []))
 
     async def stop(self) -> None:
         await super().stop()
         self._clear_staged_images()
-        self._clear_inflight_images()
+        # super().stop() terminated the active drain (its finally popped its
+        # own generation); sweep any generations still registered so no
+        # in-flight image files survive shutdown.
+        for paths in list(self._inflight_images_by_gen.values()):
+            self._cleanup_images(paths)
+        self._inflight_images_by_gen.clear()
 
     def _stage_images(self, images: List[bytes]) -> None:
         """Stage images to temp files referenced by path in the next prompt.
@@ -2004,6 +2029,12 @@ class CursorNativeSession(ProviderSession):
             try:
                 f = os.fdopen(fd, "wb")
                 f.write(img)
+                # Flush explicitly so a write error (e.g. ENOSPC) surfaces
+                # HERE and triggers the unlink + re-raise below. Without it
+                # the bytes sit in the buffer until close(), whose OSError
+                # the finally swallows — staging a silently truncated file
+                # the model would then read.
+                f.flush()
             except Exception:
                 # Best-effort cleanup: never let a close/unlink error mask
                 # the original write exception.
@@ -2034,11 +2065,6 @@ class CursorNativeSession(ProviderSession):
         staged = self._staged_images
         self._staged_images = []
         self._cleanup_images(staged)
-
-    def _clear_inflight_images(self) -> None:
-        inflight = self._inflight_images
-        self._inflight_images = []
-        self._cleanup_images(inflight)
 
     @staticmethod
     def _cleanup_images(paths: List[Path]) -> None:

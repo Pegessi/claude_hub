@@ -5,6 +5,31 @@
 
 ## Unreleased
 
+### fix: Cursor image temp-file lifecycle across turns
+
+Three hardening fixes for the Cursor image-attachment temp files, found by
+code review and covered by a new multi-turn regression test:
+
+- **Cross-turn clobber leaked/deleted the wrong turn's files.** In-flight
+  image paths were held in a single shared `_inflight_images` slot. When turn
+  N's one-shot process lingered past `TURN_COMPLETED` and turn N+1 spawned,
+  turn N+1 overwrote the slot *before* `_spawn_oneshot` cancelled turn N's
+  lingering drain — so that drain's cleanup deleted turn N+1's files (and
+  leaked turn N's). In-flight files are now keyed by stdout generation
+  (`_inflight_images_by_gen`); each drain pops and deletes only its own
+  generation in its `finally`, and `stop` sweeps any generations still
+  registered.
+- **Buffered-write error was swallowed.** `_stage_images` wrote the bytes
+  without flushing, so a write failure (e.g. ENOSPC) only surfaced at
+  `close()`, whose `OSError` the `finally` swallowed — silently staging a
+  truncated file the model would then read. An explicit `f.flush()` makes the
+  error surface at the write, triggering the unlink + re-raise path.
+- **Cancellation leaked in-flight files.** `_send_text`'s spawn-failure
+  cleanup caught only `Exception`, but `asyncio.CancelledError` is a
+  `BaseException`; a cancellation between registering the in-flight files and
+  creating the reader task skipped the cleanup. It now catches
+  `(Exception, asyncio.CancelledError)`.
+
 ### feat: Cursor Chat supports image attachments
 
 - The Cursor Chat composer now accepts pasted/attached images. Cursor was the
