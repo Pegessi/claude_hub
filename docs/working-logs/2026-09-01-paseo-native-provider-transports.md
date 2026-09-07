@@ -1,5 +1,11 @@
 # 2026-09-01 — Paseo Native Provider Transports
 
+> **Update 2026-09-07:** The two passages below stating that Cursor has no
+> image-input contract (and that image capability is explicitly `false`)
+> reflect the state at this log's date. Cursor image support has since been
+> added via a file-reference + Read-tool transport — see
+> [`2026-09-07-cursor-chat-images.md`](2026-09-07-cursor-chat-images.md).
+
 ## System overview
 
 Claude Hub's previous structured surface observed provider transcript files
