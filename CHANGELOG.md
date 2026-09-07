@@ -5,6 +5,52 @@
 
 ## Unreleased
 
+### feat: scheduled tasks (cron / interval / one-off)
+
+A durable scheduled-task mechanism, modeled on Codex's scheduled executions
+but extended with a Hub-native task variant. A `ScheduledTask` fires an action
+when its next-run time arrives, on a cron / interval / one-off basis, and is
+persisted to `STATE_ROOT/scheduled_tasks.json` (atomic write) and driven by the
+5-second background monitor loop. Three kinds:
+
+- **`session_message`** — send a message to an existing managed session. This
+  is the agent self-scheduling primitive: an agent calls the `claude-hub
+  schedule` CLI (which hits the scheduling API) to register a schedule that
+  re-messages its own session on a cron / interval basis.
+- **`new_session`** — create a new session in a workspace and send it a message
+  (manual one-off execution, like Codex's "create a new session to execute").
+  One-shot only.
+- **`hub_task`** — publish a Hub-native system-internal task on a caller-owned
+  ephemeral orchestrator. The task runs the normal reviewed flow; on worker
+  completion it is auto-DONE (skipping human review) and the ephemeral session
+  is auto-deleted — no agent / reviewer resources held.
+
+Hardening from a sub-agent review:
+
+- Per-task fire lock with an in-lock eligibility re-check prevents the 5s tick
+  and a manual run-now from double-firing the same task.
+- `new_session` / `hub_task` best-effort delete their ephemeral session on a
+  send/dispatch failure so a failed fire doesn't strand it; `hub_task` also
+  marks the internal task `FAILED`.
+- `new_session` restricted to one-shot (a recurring `new_session` would leak a
+  session per fire); recurring execution uses `hub_task`, which auto-cleans.
+- A failed fire now returns 500 and the CLI exits non-zero (was 200 / exit 0);
+  a disabled task returns 400.
+- The cron next-run search window is extended to ~4 years so Feb-29-only
+  schedules (e.g. `0 0 29 2 *`) aren't killed by a 366-day window.
+- Whitespace-only names are rejected on create and update.
+- Frontend: `runTask` re-fetches authoritative state after fire (the run result
+  omits `enabled` / `next_run_at`, which change on fire); list-action errors
+  render in a shared dismissible banner (were only rendered in the edit view);
+  the enable toggle gets an `aria-label`.
+- See `docs/working-logs/2026-09-08-scheduled-tasks.md`.
+
+### fix: mobile floating ball hidden in chat UI
+
+- The `MobileControls` floating keyboard ball (bottom-right) was still rendered
+  over the chat UI (`StructuredPane`). It is now hidden there; it only shows
+  over the plain terminal view.
+
 ### fix: Cursor image temp-file lifecycle across turns
 
 Three hardening fixes for the Cursor image-attachment temp files, found by
