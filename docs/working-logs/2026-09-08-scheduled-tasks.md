@@ -18,7 +18,7 @@ variants the user asked for:
 
 | Kind | User's variant | Behavior on fire |
 | --- | --- | --- |
-| `session_message` | **A** — agent self-scheduling | Send a message to an existing managed session. An agent calls the `claude-hub` CLI (which hits the scheduling API) to register a schedule that re-messages its own session. |
+| `tab_message` | **A** — agent self-scheduling | Type a message into an existing terminal tab's pane and submit it. An agent calls the `claude-hub` CLI (which hits the scheduling API) to register a schedule that re-messages its own tab; it learns its tab id from the injected `CLAUDE_HUB_TAB_ID` env var. |
 | `new_session` | **B** — manual creation, "new session to execute" | Create a new session in a workspace and send it a message. One-shot only. |
 | `hub_task` | **C** — Hub-native task scheduling | Publish a system-internal task on a caller-owned ephemeral orchestrator. The task runs the normal reviewed flow; on worker completion it is auto-DONE (skipping human review) and the ephemeral session is auto-deleted — no agent / reviewer resources held. |
 
@@ -31,9 +31,9 @@ hydrated at startup after the core workspace state. The tick is driven by the
 
 ### `models/schemas.py`
 
-- `ScheduledTaskKind` — enum: `session_message`, `new_session`, `hub_task`.
+- `ScheduledTaskKind` — enum: `tab_message`, `new_session`, `hub_task`.
 - `ScheduledTask` — durable schedule. Holds the schedule spec, the kind-specific
-  payload (`session_id` / `workspace_id` + `agent_type` / `task_title` +
+  payload (`tab_id` / `workspace_id` + `agent_type` / `task_title` +
   `message`), and run bookkeeping: `enabled`, `next_run_at`, `last_run_at`,
   `run_count`, `last_status`, `last_error`.
 - `ScheduledTaskCreate` / `ScheduledTaskUpdate` — create and patch payloads.
@@ -60,7 +60,7 @@ All scheduling logic lives in `_SchedulingMixin`, composed into
     is recomputed.
 - **Validation** — `_validate_scheduled_task_fields` enforces: exactly one
   schedule field; cron is parseable; and per-kind payload requirements
-  (`session_id` exists for `session_message`; `workspace_id` exists for
+  (`tab_id` exists for `tab_message`; `workspace_id` exists for
   `new_session` / `hub_task`; `task_title` set for `hub_task`). It also enforces
   the **`new_session` one-shot restriction** (see pitfalls).
 - **Cron parser** — self-contained 5-field parser.
@@ -75,7 +75,9 @@ All scheduling logic lives in `_SchedulingMixin`, composed into
 - **Tick + fire** — `_tick_scheduled_tasks` (iterates enabled, due tasks) and
   `_fire_scheduled_task` (the core fire routine, shared by the tick and manual
   run-now).
-- **Fire actions** — `_fire_new_session` and `_fire_hub_task`, plus the
+- **Fire actions** — `_send_tab_message` (validates the tab exists via
+  `ttyd_manager.get_tab`, then types into its tmux pane through
+  `_send_tmux_message`), `_fire_new_session`, and `_fire_hub_task`, plus the
   `_best_effort_delete_session` helper.
 
 ### `api/scheduled_tasks.py`
@@ -155,8 +157,19 @@ branch:
   `module = "claude_hub.services.workspace_manager.*"` with
   `disable_error_code = ["attr-defined", "no-any-return"]`. Cross-mixin
   `self.<async-method>` calls resolve to `Any`, so a missing `await` is invisible
-  to mypy. **Runtime tests are the safety net** — the 47 scheduled-task tests
+  to mypy. **Runtime tests are the safety net** — the 48 scheduled-task tests
   exercise every fire path.
+- **`CLAUDE_HUB_TAB_ID` is overlaid at the render boundary, not stored on
+  `self.env`.** The tab-id env var (which lets an agent self-identify and target
+  its own tab) is added by `TTYDProcess._child_env()` at every env-render point
+  (`_env_shell_prefix`, `_env_export_commands`, `_with_local_env_wrapper`,
+  `_claude_settings_arg`). It must NOT be injected in `__init__` or written into
+  `self.env`: `switch_env` reassigns `self.env` from a fresh payload (which would
+  wipe a one-time injection), and storing it on `self.env` would persist it as
+  user config (via `to_dict`) and break the strict dict-equality reuse matching
+  in `env_preset_resolver`. `_child_env()` copies `self.env` and overlays the
+  tab id, so the base env is never mutated and the overlay is re-derived on
+  every render.
 
 ## Validation
 
@@ -166,8 +179,12 @@ branch:
   `test_legacy_resident_mailbox_routes_are_gone`,
   `test_real_cold_restart_7tab_bijection`) are pre-existing/environmental and
   unrelated to scheduling.
-- `test_scheduled_tasks.py`: **47 tests pass**, covering CRUD, cron parsing,
+- `test_scheduled_tasks.py`: **48 tests pass**, covering CRUD, cron parsing,
   next-run computation (incl. Feb-29), tick eligibility, all three fire actions,
-  the fire lock (concurrent double-fire), and the error-propagation paths.
+  the fire lock (concurrent double-fire), the error-propagation paths, and the
+  `_child_env` tab-id overlay (base env not mutated).
+- `test_ttyd_manager.py`: the 4 command/env tests that assert the rendered
+  launch command now expect the `CLAUDE_HUB_TAB_ID=<tab_id>` prefix / settings
+  env entry (the overlay is always rendered).
 - Frontend: ESLint clean, `vue-tsc` type check + `vite build` clean, 276 unit
   tests pass.

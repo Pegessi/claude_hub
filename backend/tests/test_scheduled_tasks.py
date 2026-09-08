@@ -2,10 +2,10 @@
 
 Mirrors the hermetic-persistence pattern from ``test_workspace_resident_agent.py``:
 all state is redirected to a tmp directory, and the tmux / ttyd side effects are
-mocked. The scheduler's cross-mixin calls (``send_session_message``,
+mocked. The scheduler's cross-mixin calls (``_send_tmux_message``,
 ``ensure_workspace_agent``, ``_dispatch_task_to_session``, ``delete_session``)
 are monkeypatched so the tests exercise the scheduling logic without a live
-terminal.
+terminal. Tab existence (``ttyd_manager.get_tab``) is stubbed per test.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from claude_hub.models import (
     WorkspaceTaskMode,
     WorkspaceTaskStatus,
 )
+from claude_hub.services.ttyd_manager import ttyd_manager
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 _wm = import_module("claude_hub.services.workspace_manager")
@@ -117,6 +118,17 @@ def _make_session(
         created_at=now,
         updated_at=now,
     )
+
+
+def _stub_known_tabs(monkeypatch: MonkeyPatch, *tab_ids: str) -> None:
+    """Make ``ttyd_manager.get_tab`` return a dummy for the given tab ids.
+
+    The ``tab_message`` validation resolves tab existence through the
+    ``ttyd_manager`` singleton; tests stub it so only the ids they care about
+    are "live".
+    """
+    known = set(tab_ids)
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tid: object() if tid in known else None)
 
 
 def _weekday_at(hour: int, minute: int, target_weekday: int) -> datetime:
@@ -243,7 +255,7 @@ def _bare_task(**kwargs: Any) -> ScheduledTask:
     defaults: Dict[str, Any] = dict(
         id="t1",
         name="t",
-        kind=ScheduledTaskKind.SESSION_MESSAGE,
+        kind=ScheduledTaskKind.TAB_MESSAGE,
         created_at=now,
         updated_at=now,
     )
@@ -277,20 +289,24 @@ def test_compute_next_run_cron(manager: WorkspaceManager) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_create_session_message_task(manager: WorkspaceManager, tmp_path: Path) -> None:
+def test_create_tab_message_task(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="nudge",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             cron="*/10 * * * *",
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="ping",
         )
     )
-    assert task.kind == ScheduledTaskKind.SESSION_MESSAGE
+    assert task.kind == ScheduledTaskKind.TAB_MESSAGE
+    assert task.tab_id == session.tab_id
     assert task.enabled is True
     assert task.run_count == 0
     assert task.next_run_at is not None
@@ -307,8 +323,8 @@ def test_create_requires_exactly_one_schedule(manager: WorkspaceManager, tmp_pat
         manager.create_scheduled_task(
             ScheduledTaskCreate(
                 name="x",
-                kind=ScheduledTaskKind.SESSION_MESSAGE,
-                session_id=session.id,
+                kind=ScheduledTaskKind.TAB_MESSAGE,
+                tab_id=session.tab_id,
                 message="m",
             )
         )
@@ -316,43 +332,43 @@ def test_create_requires_exactly_one_schedule(manager: WorkspaceManager, tmp_pat
         manager.create_scheduled_task(
             ScheduledTaskCreate(
                 name="x",
-                kind=ScheduledTaskKind.SESSION_MESSAGE,
+                kind=ScheduledTaskKind.TAB_MESSAGE,
                 cron="* * * * *",
                 interval_seconds=60,
-                session_id=session.id,
+                tab_id=session.tab_id,
                 message="m",
             )
         )
 
 
-def test_create_session_message_requires_session_and_message(
+def test_create_tab_message_requires_tab_and_message(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
-    with pytest.raises(ValueError, match="session_id is required"):
+    with pytest.raises(ValueError, match="tab_id is required"):
         manager.create_scheduled_task(
             ScheduledTaskCreate(
-                name="x", kind=ScheduledTaskKind.SESSION_MESSAGE, cron="* * * * *", message="m"
+                name="x", kind=ScheduledTaskKind.TAB_MESSAGE, cron="* * * * *", message="m"
             )
         )
     with pytest.raises(ValueError, match="message is required"):
         manager.create_scheduled_task(
             ScheduledTaskCreate(
                 name="x",
-                kind=ScheduledTaskKind.SESSION_MESSAGE,
+                kind=ScheduledTaskKind.TAB_MESSAGE,
                 cron="* * * * *",
-                session_id=session.id,
+                tab_id=session.tab_id,
             )
         )
     with pytest.raises(ValueError, match="not found"):
         manager.create_scheduled_task(
             ScheduledTaskCreate(
                 name="x",
-                kind=ScheduledTaskKind.SESSION_MESSAGE,
+                kind=ScheduledTaskKind.TAB_MESSAGE,
                 cron="* * * * *",
-                session_id="nope",
+                tab_id="nope",
                 message="m",
             )
         )
@@ -426,9 +442,9 @@ def test_create_rejects_invalid_cron(manager: WorkspaceManager, tmp_path: Path) 
         manager.create_scheduled_task(
             ScheduledTaskCreate(
                 name="x",
-                kind=ScheduledTaskKind.SESSION_MESSAGE,
+                kind=ScheduledTaskKind.TAB_MESSAGE,
                 cron="not a cron",
-                session_id=session.id,
+                tab_id=session.tab_id,
                 message="m",
             )
         )
@@ -436,24 +452,27 @@ def test_create_rejects_invalid_cron(manager: WorkspaceManager, tmp_path: Path) 
         manager.create_scheduled_task(
             ScheduledTaskCreate(
                 name="x",
-                kind=ScheduledTaskKind.SESSION_MESSAGE,
+                kind=ScheduledTaskKind.TAB_MESSAGE,
                 cron="* * * *",  # 4 fields
-                session_id=session.id,
+                tab_id=session.tab_id,
                 message="m",
             )
         )
 
 
-def test_update_normalizes_schedule_switch(manager: WorkspaceManager, tmp_path: Path) -> None:
+def test_update_normalizes_schedule_switch(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="orig",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             cron="*/5 * * * *",
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="m",
         )
     )
@@ -482,16 +501,19 @@ def test_get_update_delete_missing_raises(manager: WorkspaceManager, tmp_path: P
     assert manager.delete_scheduled_task("nope") is False
 
 
-def test_delete_existing(manager: WorkspaceManager, tmp_path: Path) -> None:
+def test_delete_existing(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="x",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             interval_seconds=60,
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="m",
         )
     )
@@ -500,16 +522,19 @@ def test_delete_existing(manager: WorkspaceManager, tmp_path: Path) -> None:
     assert manager.list_scheduled_tasks() == []
 
 
-def test_scheduled_tasks_persist_across_reload(manager: WorkspaceManager, tmp_path: Path) -> None:
+def test_scheduled_tasks_persist_across_reload(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="persist",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             cron="30 9 * * *",
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="m",
         )
     )
@@ -519,9 +544,9 @@ def test_scheduled_tasks_persist_across_reload(manager: WorkspaceManager, tmp_pa
     assert task_id in reloaded.scheduled_tasks
     rt = reloaded.scheduled_tasks[task_id]
     assert rt.name == "persist"
-    assert rt.kind == ScheduledTaskKind.SESSION_MESSAGE
+    assert rt.kind == ScheduledTaskKind.TAB_MESSAGE
     assert rt.cron == "30 9 * * *"
-    assert rt.session_id == session.id
+    assert rt.tab_id == session.tab_id
 
 
 # ---------------------------------------------------------------------------
@@ -529,28 +554,27 @@ def test_scheduled_tasks_persist_across_reload(manager: WorkspaceManager, tmp_pa
 # ---------------------------------------------------------------------------
 
 
-async def test_fire_session_message_stamps_and_sends(
+async def test_fire_tab_message_stamps_and_sends(
     manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
 
     sent: List[tuple[str, str]] = []
 
-    async def fake_send(
-        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
-    ) -> None:
-        sent.append((session_id, message))
+    async def fake_tmux_send(tmux_session: str, message: str) -> None:
+        sent.append((tmux_session, message))
 
-    monkeypatch.setattr(manager, "send_session_message", fake_send)
+    monkeypatch.setattr(manager, "_send_tmux_message", fake_tmux_send)
 
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="nudge",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             cron="*/5 * * * *",
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="check in",
         )
     )
@@ -559,7 +583,8 @@ async def test_fire_session_message_stamps_and_sends(
     now = datetime.now()
     await manager._fire_scheduled_task(task, now, manual=True)
 
-    assert sent == [(session.id, "check in")]
+    # The tmux session name is derived from the tab id (claude-hub-<tab_id[:8]>).
+    assert sent == [("claude-hub-tab-sess", "check in")]
     assert task.last_run_at == now
     assert task.run_count == 1
     assert task.last_status == "ok"
@@ -576,20 +601,19 @@ async def test_fire_send_failure_marks_error_but_keeps_stamp(
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
 
-    async def fake_send(
-        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
-    ) -> None:
+    async def fake_tmux_send(tmux_session: str, message: str) -> None:
         raise RuntimeError("tmux down")
 
-    monkeypatch.setattr(manager, "send_session_message", fake_send)
+    monkeypatch.setattr(manager, "_send_tmux_message", fake_tmux_send)
 
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="nudge",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             cron="*/5 * * * *",
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="check in",
         )
     )
@@ -612,21 +636,20 @@ async def test_fire_one_shot_disables_and_clears_next_run(
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
 
-    async def fake_send(
-        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
-    ) -> None:
+    async def fake_tmux_send(tmux_session: str, message: str) -> None:
         return None
 
-    monkeypatch.setattr(manager, "send_session_message", fake_send)
+    monkeypatch.setattr(manager, "_send_tmux_message", fake_tmux_send)
 
     future = datetime.now() + timedelta(hours=1)
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="one-shot",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             run_at=future,
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="go",
         )
     )
@@ -736,23 +759,22 @@ async def test_run_scheduled_task_fires_immediately(
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
 
     sent: List[str] = []
 
-    async def fake_send(
-        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
-    ) -> None:
+    async def fake_tmux_send(tmux_session: str, message: str) -> None:
         sent.append(message)
 
-    monkeypatch.setattr(manager, "send_session_message", fake_send)
+    monkeypatch.setattr(manager, "_send_tmux_message", fake_tmux_send)
 
     # A far-future run_at is not otherwise due, but run-now fires it anyway.
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="manual",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             run_at=datetime.now() + timedelta(days=1),
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="now",
         )
     )
@@ -767,20 +789,19 @@ async def test_run_scheduled_task_raises_on_fire_failure(
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
 
-    async def fake_send(
-        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
-    ) -> None:
+    async def fake_tmux_send(tmux_session: str, message: str) -> None:
         raise RuntimeError("tmux down")
 
-    monkeypatch.setattr(manager, "send_session_message", fake_send)
+    monkeypatch.setattr(manager, "_send_tmux_message", fake_tmux_send)
 
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="fail",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             run_at=datetime.now() + timedelta(hours=1),
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="go",
         )
     )
@@ -796,17 +817,18 @@ async def test_run_scheduled_task_raises_on_fire_failure(
 
 
 async def test_run_scheduled_task_on_disabled_raises(
-    manager: WorkspaceManager, tmp_path: Path
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="off",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             run_at=datetime.now() + timedelta(hours=1),
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="go",
             enabled=False,
         )
@@ -823,25 +845,24 @@ async def test_fire_lock_prevents_concurrent_double_fire(
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
 
     sent: List[str] = []
 
-    async def fake_send(
-        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
-    ) -> None:
+    async def fake_tmux_send(tmux_session: str, message: str) -> None:
         # Yield so a second concurrent fire can reach the lock before the first
         # one releases it.
         await asyncio.sleep(0)
         sent.append(message)
 
-    monkeypatch.setattr(manager, "send_session_message", fake_send)
+    monkeypatch.setattr(manager, "_send_tmux_message", fake_tmux_send)
 
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="concurrent",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             interval_seconds=3600,
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="once",
         )
     )
@@ -885,32 +906,38 @@ def test_new_session_rejects_recurring_schedule(manager: WorkspaceManager, tmp_p
         )
 
 
-def test_create_rejects_whitespace_name(manager: WorkspaceManager, tmp_path: Path) -> None:
+def test_create_rejects_whitespace_name(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
     with pytest.raises(ValueError, match="name must not be empty"):
         manager.create_scheduled_task(
             ScheduledTaskCreate(
                 name="   ",
-                kind=ScheduledTaskKind.SESSION_MESSAGE,
+                kind=ScheduledTaskKind.TAB_MESSAGE,
                 run_at=datetime.now() + timedelta(hours=1),
-                session_id=session.id,
+                tab_id=session.tab_id,
                 message="go",
             )
         )
 
 
-def test_update_rejects_whitespace_name(manager: WorkspaceManager, tmp_path: Path) -> None:
+def test_update_rejects_whitespace_name(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="keep",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             run_at=datetime.now() + timedelta(hours=1),
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="go",
         )
     )
@@ -932,15 +959,14 @@ async def test_tick_fires_only_due_enabled_tasks(
     workspace = _make_workspace(manager, tmp_path)
     session = _make_session(workspace)
     manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
 
     sent: List[str] = []
 
-    async def fake_send(
-        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
-    ) -> None:
+    async def fake_tmux_send(tmux_session: str, message: str) -> None:
         sent.append(message)
 
-    monkeypatch.setattr(manager, "send_session_message", fake_send)
+    monkeypatch.setattr(manager, "_send_tmux_message", fake_tmux_send)
 
     past = datetime.now() - timedelta(minutes=1)
     future = datetime.now() + timedelta(hours=1)
@@ -948,9 +974,9 @@ async def test_tick_fires_only_due_enabled_tasks(
     due = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="due",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             interval_seconds=60,
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="due-msg",
         )
     )
@@ -958,9 +984,9 @@ async def test_tick_fires_only_due_enabled_tasks(
     not_due = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="not-due",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             interval_seconds=60,
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="not-due-msg",
         )
     )
@@ -968,9 +994,9 @@ async def test_tick_fires_only_due_enabled_tasks(
     disabled = manager.create_scheduled_task(
         ScheduledTaskCreate(
             name="disabled",
-            kind=ScheduledTaskKind.SESSION_MESSAGE,
+            kind=ScheduledTaskKind.TAB_MESSAGE,
             interval_seconds=60,
-            session_id=session.id,
+            tab_id=session.tab_id,
             message="disabled-msg",
             enabled=False,
         )
@@ -988,6 +1014,31 @@ async def test_tick_fires_only_due_enabled_tasks(
 async def test_tick_no_tasks_is_noop(manager: WorkspaceManager) -> None:
     # Should simply return without raising when there are no tasks.
     await manager._tick_scheduled_tasks()
+
+
+# ---------------------------------------------------------------------------
+# Env injection — CLAUDE_HUB_TAB_ID
+# ---------------------------------------------------------------------------
+
+
+def test_child_env_overlays_tab_id_without_mutating_base() -> None:
+    """``_child_env`` exposes ``CLAUDE_HUB_TAB_ID`` but keeps ``self.env`` clean.
+
+    The overlay is re-derived at every render point (not stored on ``self.env``)
+    so it is never persisted as user config and survives ``switch_env``
+    reassignments that rebuild ``self.env``.
+    """
+    tm = import_module("claude_hub.services.ttyd_manager")
+    proc = tm.TTYDProcess.__new__(tm.TTYDProcess)
+    proc.env = {"FOO": "bar"}
+    proc.tab_id = "tab-123"
+
+    child = proc._child_env()
+
+    assert child["FOO"] == "bar"
+    assert child["CLAUDE_HUB_TAB_ID"] == "tab-123"
+    # The base env is copied, not mutated.
+    assert "CLAUDE_HUB_TAB_ID" not in proc.env
 
 
 # ---------------------------------------------------------------------------
@@ -1151,12 +1202,12 @@ def test_cli_schedule_body_rejects_multiple_schedules() -> None:
         _schedule_body(
             None,
             name="x",
-            kind="session_message",
+            kind="tab_message",
             enabled=True,
             run_at="2026-09-09T09:00:00",
             cron="* * * * *",
             interval=None,
-            session_id=None,
+            tab_id=None,
             workspace_id=None,
             agent_type=None,
             message=None,
@@ -1173,7 +1224,7 @@ def test_cli_schedule_builds_interval_body() -> None:
         run_at=None,
         cron=None,
         interval=300,
-        session_id=None,
+        tab_id=None,
         workspace_id="ws-1",
         agent_type=None,
         message="m",

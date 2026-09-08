@@ -1731,14 +1731,29 @@ asyncio.run(_main())
         self.env[api_key] = f"https://127.0.0.1:{local_port}{target_path}"
         self.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
 
+    def _child_env(self) -> Dict[str, str]:
+        """Environment handed to the tab's shell / agent process.
+
+        Overlays ``CLAUDE_HUB_TAB_ID`` on top of the user/preset-configured
+        ``self.env`` so an agent running in the tab can self-identify and
+        target its own tab (e.g. register a ``tab_message`` scheduled task via
+        the CLI). Kept out of ``self.env`` itself so it is not persisted as
+        user config and survives ``switch_env`` reassignments that rebuild
+        ``self.env`` from a fresh payload.
+        """
+        child = dict(self.env)
+        child["CLAUDE_HUB_TAB_ID"] = self.tab_id
+        return child
+
     def _env_shell_prefix(self) -> str:
-        if not self.env:
+        env = self._child_env()
+        if not env:
             return ""
-        assignments = [f"{key}={shlex.quote(value)}" for key, value in self.env.items()]
+        assignments = [f"{key}={shlex.quote(value)}" for key, value in env.items()]
         return "env " + " ".join(assignments) + " "
 
     def _env_export_commands(self) -> list[str]:
-        return [f"export {key}={shlex.quote(value)}" for key, value in self.env.items()]
+        return [f"export {key}={shlex.quote(value)}" for key, value in self._child_env().items()]
 
     def _with_env(self, command: str) -> str:
         if self.env and self.target == ExecutionTarget.LOCAL:
@@ -1748,7 +1763,9 @@ asyncio.run(_main())
     def _with_local_env_wrapper(self, command: str) -> str:
         LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
         script_path = LAUNCH_ENV_DIR / f"{self.tab_id}.sh"
-        exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in self.env.items())
+        exports = "\n".join(
+            f"export {key}={shlex.quote(value)}" for key, value in self._child_env().items()
+        )
         script = "#!/bin/sh\n" "set -eu\n" f"{exports}\n" 'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
         script_path.write_text(script, encoding="utf-8")
         os.chmod(script_path, 0o600)
@@ -1762,7 +1779,7 @@ asyncio.run(_main())
         LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
         settings_path = LAUNCH_ENV_DIR / f"{self.tab_id}.settings.json"
         settings_path.write_text(
-            json.dumps({"env": self.env}, ensure_ascii=False, indent=2),
+            json.dumps({"env": self._child_env()}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         os.chmod(settings_path, 0o600)

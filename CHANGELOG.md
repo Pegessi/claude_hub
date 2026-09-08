@@ -13,10 +13,13 @@ when its next-run time arrives, on a cron / interval / one-off basis, and is
 persisted to `STATE_ROOT/scheduled_tasks.json` (atomic write) and driven by the
 5-second background monitor loop. Three kinds:
 
-- **`session_message`** — send a message to an existing managed session. This
-  is the agent self-scheduling primitive: an agent calls the `claude-hub
-  schedule` CLI (which hits the scheduling API) to register a schedule that
-  re-messages its own session on a cron / interval basis.
+- **`tab_message`** — type a message into an existing terminal tab's pane and
+  submit it. This is the agent self-scheduling primitive: an agent calls the
+  `claude-hub schedule` CLI (which hits the scheduling API) to register a
+  schedule that re-messages its own tab on a cron / interval basis. The agent
+  learns its own tab id from the `CLAUDE_HUB_TAB_ID` environment variable,
+  which the Hub injects into every tab's environment. The UI's target picker
+  lists plain terminal tabs (a working directory, no belonging workspace).
 - **`new_session`** — create a new session in a workspace and send it a message
   (manual one-off execution, like Codex's "create a new session to execute").
   One-shot only.
@@ -43,6 +46,11 @@ Hardening from a sub-agent review:
   omits `enabled` / `next_run_at`, which change on fire); list-action errors
   render in a shared dismissible banner (were only rendered in the edit view);
   the enable toggle gets an `aria-label`.
+- The `tab_message` kind (formerly `session_message`) targets a terminal tab by
+  `tab_id` rather than a managed session; the fire path types into the tab's
+  tmux pane. `CLAUDE_HUB_TAB_ID` is overlaid at the env-render boundary (not
+  stored on the persisted `env`) so it survives `switch_env` and never leaks
+  into user config or reuse matching.
 - See `docs/working-logs/2026-09-08-scheduled-tasks.md`.
 
 ### fix: mobile floating ball hidden in chat UI
