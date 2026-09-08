@@ -97,3 +97,47 @@ its own `AskUserQuestion` options.
 - Frontend: `node --test tests/*.test.mjs` — 269 passed (1 new reducer test:
   AskUserQuestion hidden from tool_group + approval card rendered).
 - `vue-tsc --noEmit`, `eslint`, `black`, `isort`, `mypy` all clean.
+
+## Follow-up (2026-09-08): option chips unclickable — v-memo skipped the selection re-render
+
+**Symptom.** On a shipped approval card, clicking an option chip produced no
+selected highlight and the "提交选择" submit button stayed disabled. The card
+was visually frozen.
+
+**Root cause.** `StructuredPane.vue` renders the timeline with a per-turn
+`v-memo="[turn.renderRevision, erroredAttachments.size]"`. The approval card's
+render-affecting state — the selected option ids (`questionAnswers`), the
+resolved flag (`resolvedApprovalKeys`), and the send-in-flight gate
+(`isSending`) — lives in component refs, none of which were in the memo deps.
+A click correctly mutated the reactive refs (which triggered a re-render
+because they were tracked on first paint), but `v-memo` compared the deps
+array, saw them unchanged, and skipped re-rendering the turn subtree. The
+`:class` selected binding and the submit button's `:disabled` binding never
+re-evaluated.
+
+The initially-suspected causes were all ruled out: `part.approval.key` is
+always defined (`approval-<callId|messageId|sequence-N>`),
+`isApprovalResolved` returns `false` for a fresh approval, the toggle
+reassigned the ref (reactive), and there was no CSS overlay intercepting
+pointer events.
+
+**Fix.**
+
+- Extracted the per-approval selection logic from inline component refs into a
+  new `frontend/src/composables/useQuestionAnswers.ts` composable
+  (`isQuestionOptionSelected`, `toggleQuestionOption`, `isApprovalResolved`,
+  `canSubmitQuestion`, `answersFor`, `markResolved`, `reset`) plus a pure
+  `approvalStateSignature(approval, questionAnswers, resolvedKeys)` helper.
+- The turn's `v-memo` deps now include `turnApprovalSignature(turn)`, which
+  folds each approval's answers + resolved flag and the `isSending` gate into
+  the memo key. Turns without approvals short-circuit to `''`, preserving the
+  long-history memoization perf optimization.
+- `submitQuestionResponse` now uses `canSubmitQuestion` / `answersFor` /
+  `markResolved` from the composable; the tab-switch reset calls
+  `resetQuestionAnswers()`.
+
+**Tests.** `frontend/tests/useQuestionAnswers.test.mjs` (single/multi-select
+toggle, selected-state reflection, submit gating, resolved states, reset,
+signature reactivity) and `frontend/tests/structuredPaneApprovalMemo.test.mjs`
+(source-level guard that the `v-memo` deps include `turnApprovalSignature`).
+`node --test tests/*.test.mjs` — 292 passed (16 new).
