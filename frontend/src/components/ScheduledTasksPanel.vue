@@ -196,8 +196,8 @@
             <option value="new_session">
               New session — create a session and send a message
             </option>
-            <option value="session_message">
-              Message — send to an existing session
+            <option value="tab_message">
+              Message — type into a terminal tab
             </option>
           </select>
           <p class="form-hint">
@@ -266,29 +266,40 @@
 
         <!-- kind-specific payload -->
         <div
-          v-if="draft.kind === 'session_message'"
+          v-if="draft.kind === 'tab_message'"
           class="form-group"
         >
-          <label for="st-session">Target session</label>
-          <input
-            id="st-session"
-            v-model="draft.session_id"
-            type="text"
-            class="ch-input"
-            list="st-session-list"
-            placeholder="Session ID"
+          <label for="st-tab">Target terminal tab</label>
+          <select
+            id="st-tab"
+            v-model="draft.tab_id"
+            class="ch-select"
           >
-          <datalist id="st-session-list">
             <option
-              v-for="session in sessionOptions"
-              :key="session.id"
-              :value="session.id"
+              value=""
+              disabled
             >
-              {{ session.role }} · {{ session.workspace_id }}
+              {{ tabOptions.length === 0 ? 'No plain terminal tabs yet' : 'Select a terminal tab' }}
             </option>
-          </datalist>
+            <option
+              v-if="staleTab"
+              :value="staleTab.value"
+              disabled
+            >
+              {{ staleTab.label }}
+            </option>
+            <option
+              v-for="opt in tabOptions"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}<template v-if="opt.detail">
+                · {{ opt.detail }}
+              </template>
+            </option>
+          </select>
           <p class="form-hint">
-            Sessions from the active workspace are suggested; paste any session ID.
+            {{ tabHint }}
           </p>
         </div>
 
@@ -401,9 +412,9 @@
 
 <script setup lang="ts">
 import { computed, onUnmounted, reactive, ref, watch } from 'vue'
-import { storeToRefs } from 'pinia'
 import { useScheduledTasksStore } from '@/stores/scheduledTasksStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
+import { useTerminalStore } from '@/stores/terminalStore'
 import type { AgentType, ScheduledTask, ScheduledTaskCreate, ScheduledTaskKind } from '@/types'
 
 const props = defineProps<{ visible: boolean }>()
@@ -411,7 +422,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 
 const store = useScheduledTasksStore()
 const workspaceStore = useWorkspaceStore()
-const { sessions: sessionOptions } = storeToRefs(workspaceStore)
+const terminalStore = useTerminalStore()
 
 type Mode = 'list' | 'edit'
 type ScheduleType = 'run_at' | 'cron' | 'interval'
@@ -427,7 +438,7 @@ const draft = reactive({
   run_at: '',
   cron: '',
   interval_seconds: 300,
-  session_id: '',
+  tab_id: '',
   workspace_id: '',
   agent_type: 'claude' as AgentType,
   message: '',
@@ -448,6 +459,33 @@ const intervalChips = [
   { label: '1d', seconds: 86400 },
 ]
 
+// Plain terminal tabs (a working directory, no belonging workspace) are the
+// valid targets for a tab_message task. Managed agent sessions are excluded —
+// they belong to a workspace and have their own messaging path.
+const tabOptions = computed(() =>
+  terminalStore.manualTabs.map(tab => ({
+    value: tab.id,
+    label: tab.name?.trim() || tab.id,
+    detail: tab.cwd || '',
+  })),
+)
+
+// When editing a task whose target tab has since been closed, keep the stale
+// id visible (disabled) so the select doesn't render blank and the user can
+// switch to a live tab. Never silently re-point by name.
+const staleTab = computed<{ value: string; label: string } | null>(() => {
+  const id = draft.tab_id.trim()
+  if (!id) return null
+  if (tabOptions.value.some(opt => opt.value === id)) return null
+  return { value: id, label: `${id} (removed)` }
+})
+
+const tabHint = computed(() =>
+  tabOptions.value.length === 0
+    ? 'No plain terminal tabs yet. Open one from the terminal bar (the + button), or use the New-session or Hub-task kinds.'
+    : 'Pick a plain terminal tab — one with a working directory and no workspace. The message is typed into that tab and submitted when the schedule fires.',
+)
+
 let pollTimer: number | undefined
 
 watch(
@@ -458,6 +496,10 @@ watch(
       // Ensure workspaces are loaded for the workspace picker.
       if (workspaceStore.workspaces.length === 0) {
         void workspaceStore.fetchWorkspaces()
+      }
+      // Ensure terminal tabs are loaded for the tab_message target picker.
+      if (terminalStore.tabs.length === 0) {
+        void terminalStore.fetchTabs()
       }
       pollTimer = window.setInterval(() => void store.fetchTasks({ silent: true }), 10000)
     } else {
@@ -483,7 +525,7 @@ function handleClose() {
 
 function kindLabel(kind: ScheduledTaskKind): string {
   switch (kind) {
-    case 'session_message':
+    case 'tab_message':
       return 'Message'
     case 'new_session':
       return 'New session'
@@ -494,8 +536,8 @@ function kindLabel(kind: ScheduledTaskKind): string {
 
 function kindHint(kind: ScheduledTaskKind): string {
   switch (kind) {
-    case 'session_message':
-      return 'Send a message to an existing managed session — the agent self-scheduling primitive.'
+    case 'tab_message':
+      return 'Type a message into one of your plain terminal tabs and submit it when the schedule fires — the agent self-scheduling primitive.'
     case 'new_session':
       return 'Create a new session in a workspace and send it a message (manual one-off execution).'
     case 'hub_task':
@@ -579,7 +621,7 @@ function resetDraft() {
   draft.run_at = ''
   draft.cron = ''
   draft.interval_seconds = 300
-  draft.session_id = ''
+  draft.tab_id = ''
   draft.workspace_id = ''
   draft.agent_type = 'claude'
   draft.message = ''
@@ -608,7 +650,7 @@ function startEdit(task: ScheduledTask) {
     draft.scheduleType = 'interval'
     draft.interval_seconds = task.interval_seconds
   }
-  draft.session_id = task.session_id ?? ''
+  draft.tab_id = task.tab_id ?? ''
   draft.workspace_id = task.workspace_id ?? ''
   draft.agent_type = task.agent_type ?? 'claude'
   draft.message = task.message ?? ''
@@ -624,8 +666,8 @@ function cancelEdit() {
 
 const messagePlaceholder = computed(() => {
   switch (draft.kind) {
-    case 'session_message':
-      return 'Message to send to the session when the schedule fires'
+    case 'tab_message':
+      return 'Message to type into the terminal tab when the schedule fires'
     case 'new_session':
       return 'Message to send to the new session when the schedule fires'
     case 'hub_task':
@@ -643,7 +685,7 @@ const canSave = computed(() => {
     return false
   }
   if (!draft.message.trim()) return false
-  if (draft.kind === 'session_message' && !draft.session_id.trim()) return false
+  if (draft.kind === 'tab_message' && !draft.tab_id.trim()) return false
   if (draft.kind === 'new_session' && !draft.workspace_id) return false
   if (draft.kind === 'hub_task') {
     if (!draft.workspace_id) return false
@@ -662,8 +704,8 @@ function buildPayload(): ScheduledTaskCreate {
   else if (draft.scheduleType === 'cron') payload.cron = draft.cron.trim()
   else payload.interval_seconds = draft.interval_seconds
 
-  if (draft.kind === 'session_message') {
-    payload.session_id = draft.session_id.trim()
+  if (draft.kind === 'tab_message') {
+    payload.tab_id = draft.tab_id.trim()
   } else {
     payload.workspace_id = draft.workspace_id
     payload.agent_type = draft.agent_type
@@ -835,7 +877,7 @@ async function save() {
   letter-spacing: 0.4px;
 }
 
-.st-kind--session_message {
+.st-kind--tab_message {
   background: var(--ch-color-accent-soft);
   color: var(--ch-color-accent);
 }

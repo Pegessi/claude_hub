@@ -3,10 +3,11 @@
 A ``ScheduledTask`` is a durable schedule that fires an action when its
 next-run time arrives. Three kinds are supported:
 
-* ``session_message`` — send a message to an existing managed session. This
-  is the agent self-scheduling primitive: an agent calls the ``claude-hub``
-  CLI (which hits the scheduling API) to register a schedule that will
-  re-message its own session on a cron / interval basis.
+* ``tab_message`` — type a message into an existing terminal tab's pane and
+  submit it. This is the agent self-scheduling primitive: an agent calls the
+  ``claude-hub`` CLI (which hits the scheduling API) to register a schedule
+  that will re-message its own tab on a cron / interval basis. The agent
+  learns its own tab id from the ``CLAUDE_HUB_TAB_ID`` environment variable.
 * ``new_session`` — create a new session in a workspace and send it a
   message (manual one-off execution, like Codex's "create a new session to
   execute").
@@ -103,7 +104,7 @@ class _SchedulingMixin:
             run_at=payload.run_at,
             cron=payload.cron,
             interval_seconds=payload.interval_seconds,
-            session_id=payload.session_id,
+            tab_id=payload.tab_id,
             workspace_id=payload.workspace_id,
             agent_type=payload.agent_type,
             message=payload.message,
@@ -206,13 +207,13 @@ class _SchedulingMixin:
         if cron is not None:
             self._validate_cron_expression(cron)
 
-        if kind == ScheduledTaskKind.SESSION_MESSAGE:
-            if not fields.get("session_id"):
-                raise ValueError("session_id is required for session_message tasks")
+        if kind == ScheduledTaskKind.TAB_MESSAGE:
+            if not fields.get("tab_id"):
+                raise ValueError("tab_id is required for tab_message tasks")
             if not fields.get("message"):
-                raise ValueError("message is required for session_message tasks")
-            if fields["session_id"] not in self.sessions:
-                raise ValueError(f"Session '{fields['session_id']}' not found")
+                raise ValueError("message is required for tab_message tasks")
+            if ttyd_manager.get_tab(fields["tab_id"]) is None:
+                raise ValueError(f"Terminal tab '{fields['tab_id']}' not found")
         elif kind == ScheduledTaskKind.NEW_SESSION:
             if fields.get("cron") is not None or fields.get("interval_seconds") is not None:
                 # A recurring new_session task spawns a fresh ephemeral session on
@@ -444,8 +445,8 @@ class _SchedulingMixin:
             self._save_scheduled_tasks()
 
             try:
-                if task.kind == ScheduledTaskKind.SESSION_MESSAGE:
-                    await self.send_session_message(task.session_id, task.message)
+                if task.kind == ScheduledTaskKind.TAB_MESSAGE:
+                    await self._send_tab_message(task.tab_id, task.message)
                 elif task.kind == ScheduledTaskKind.NEW_SESSION:
                     await self._fire_new_session(task)
                 elif task.kind == ScheduledTaskKind.HUB_TASK:
@@ -459,6 +460,33 @@ class _SchedulingMixin:
 
             task.updated_at = _wm._now()
             self._save_scheduled_tasks()
+
+    async def _send_tab_message(self, tab_id: Optional[str], message: Optional[str]) -> None:
+        """Type ``message`` into a terminal tab's pane and submit it (Enter).
+
+        Used by the ``tab_message`` scheduled-task kind. Every tab (plain
+        terminal or managed agent) owns a tmux session named
+        ``claude-hub-<tab_id[:8]>``, so the same tmux paste path that
+        delivers managed-session messages can target any tab.
+
+        The fields are ``Optional`` because the durable schema allows nulls;
+        create/update validation guarantees they are set for this kind, and
+        the guards below re-check defensively.
+
+        Delivery is best-effort: the message is pasted and submitted, but
+        there is no worker-ACK state machine (unlike
+        ``send_session_message``). A tab whose tmux session is gone raises,
+        which the fire path records as ``last_status=error``.
+        """
+        from ..ttyd_manager import _tmux_session_name
+
+        if not tab_id:
+            raise ValueError("tab_id is required")
+        if not message:
+            raise ValueError("message is required")
+        if ttyd_manager.get_tab(tab_id) is None:
+            raise ValueError(f"Terminal tab '{tab_id}' not found")
+        await self._send_tmux_message(_tmux_session_name(tab_id), message)
 
     async def _best_effort_delete_session(self, session_id: str) -> None:
         """Best-effort teardown of an ephemeral session; never raises."""

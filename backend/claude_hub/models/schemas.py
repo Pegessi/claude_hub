@@ -1677,8 +1677,8 @@ class EnvPresetsResponse(BaseModel):
 class ScheduledTaskKind(str, Enum):
     """How a scheduled task is executed when it fires."""
 
-    SESSION_MESSAGE = "session_message"
-    """Send a message to an existing managed session (agent self-scheduling)."""
+    TAB_MESSAGE = "tab_message"
+    """Send a message to a terminal tab (agent self-scheduling)."""
 
     NEW_SESSION = "new_session"
     """Create a new session and send it a message (manual one-off execution)."""
@@ -1693,7 +1693,8 @@ class ScheduledTask(BaseModel):
     The schedule spec is exactly one of ``run_at`` (one-shot), ``cron``
     (5-field), or ``interval_seconds``. The action payload depends on ``kind``:
 
-    * ``session_message``: ``session_id`` + ``message`` (sent to that session).
+    * ``tab_message``: ``tab_id`` + ``message`` (typed into that terminal tab's
+      pane and submitted).
     * ``new_session``: ``workspace_id`` + ``agent_type`` + ``message`` (a new
       session is created and the message sent to it).
     * ``hub_task``: ``workspace_id`` + ``agent_type`` + ``task_title`` +
@@ -1713,7 +1714,7 @@ class ScheduledTask(BaseModel):
     interval_seconds: Optional[int] = Field(default=None, ge=1)
 
     # Action payload.
-    session_id: Optional[str] = None
+    tab_id: Optional[str] = None
     workspace_id: Optional[str] = None
     agent_type: AgentType = AgentType.CLAUDE
     message: Optional[str] = None
@@ -1740,7 +1741,7 @@ class ScheduledTaskCreate(BaseModel):
     cron: Optional[str] = None
     interval_seconds: Optional[int] = Field(default=None, ge=1)
 
-    session_id: Optional[str] = None
+    tab_id: Optional[str] = None
     workspace_id: Optional[str] = None
     agent_type: AgentType = AgentType.CLAUDE
     message: Optional[str] = None
@@ -1761,7 +1762,7 @@ class ScheduledTaskUpdate(BaseModel):
     cron: Optional[str] = None
     interval_seconds: Optional[int] = Field(default=None, ge=1)
 
-    session_id: Optional[str] = None
+    tab_id: Optional[str] = None
     workspace_id: Optional[str] = None
     agent_type: Optional[AgentType] = None
     message: Optional[str] = None

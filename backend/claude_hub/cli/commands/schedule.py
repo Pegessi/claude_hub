@@ -3,9 +3,12 @@
 Scheduled tasks fire an action on a cron / interval / one-off basis. Three
 kinds are supported:
 
-* ``session_message`` — send a message to an existing managed session. This is
-  the agent self-scheduling primitive: an agent calls this command (which hits
-  the scheduling API) to register a schedule that re-messages its own session.
+* ``tab_message`` — type a message into an existing terminal tab's pane and
+  submit it. This is the agent self-scheduling primitive: an agent calls this
+  command (which hits the scheduling API) to register a schedule that
+  re-messages its own tab. The agent learns its own tab id from the
+  ``CLAUDE_HUB_TAB_ID`` environment variable, which the Hub injects into
+  every tab's environment.
 * ``new_session`` — create a new session in a workspace and send it a message.
 * ``hub_task`` — publish a Hub-native task that runs on a throwaway ephemeral
   session and auto-cleans when done (no agent / reviewer resources held).
@@ -33,7 +36,7 @@ SCHEDULE_COLUMNS = [
     "run_count",
 ]
 
-SCHEDULE_KINDS = ["session_message", "new_session", "hub_task"]
+SCHEDULE_KINDS = ["tab_message", "new_session", "hub_task"]
 
 
 def _schedule_body(
@@ -45,7 +48,7 @@ def _schedule_body(
     run_at: str | None,
     cron: str | None,
     interval: int | None,
-    session_id: str | None,
+    tab_id: str | None,
     workspace_id: str | None,
     agent_type: str | None,
     message: str | None,
@@ -64,7 +67,7 @@ def _schedule_body(
         run_at=run_at,
         cron=cron,
         interval_seconds=interval,
-        session_id=session_id,
+        tab_id=tab_id,
         workspace_id=workspace_id,
         agent_type=agent_type,
         message=message,
@@ -133,7 +136,7 @@ def schedule_get(ctx: click.Context, task_id: str) -> None:
 @click.option("--run-at", default=None, help="One-shot fire time (ISO 8601).")
 @click.option("--cron", default=None, help="5-field cron expression (e.g. '30 9 * * *').")
 @click.option("--interval", type=int, default=None, help="Repeat every N seconds.")
-@click.option("--session-id", default=None, help="Target session (session_message kind).")
+@click.option("--tab-id", default=None, help="Target terminal tab (tab_message kind).")
 @click.option("--workspace-id", default=None, help="Workspace (new_session / hub_task kinds).")
 @click.option(
     "--agent-type",
@@ -152,7 +155,7 @@ def schedule_create(
     run_at: str | None,
     cron: str | None,
     interval: int | None,
-    session_id: str | None,
+    tab_id: str | None,
     workspace_id: str | None,
     agent_type: str | None,
     message: str | None,
@@ -169,7 +172,7 @@ def schedule_create(
         run_at=run_at,
         cron=cron,
         interval=interval,
-        session_id=session_id,
+        tab_id=tab_id,
         workspace_id=workspace_id,
         agent_type=agent_type,
         message=message,
@@ -189,7 +192,7 @@ def schedule_create(
 @click.option("--run-at", default=None, help="One-shot fire time (ISO 8601).")
 @click.option("--cron", default=None, help="5-field cron expression.")
 @click.option("--interval", type=int, default=None, help="Repeat every N seconds.")
-@click.option("--session-id", default=None, help="Target session (session_message kind).")
+@click.option("--tab-id", default=None, help="Target terminal tab (tab_message kind).")
 @click.option("--workspace-id", default=None, help="Workspace (new_session / hub_task kinds).")
 @click.option("--agent-type", default=None, help="Agent type.")
 @click.option("--message", default=None, help="Message to send / task prompt.")
@@ -203,7 +206,7 @@ def schedule_update(
     run_at: str | None,
     cron: str | None,
     interval: int | None,
-    session_id: str | None,
+    tab_id: str | None,
     workspace_id: str | None,
     agent_type: str | None,
     message: str | None,
@@ -223,7 +226,7 @@ def schedule_update(
         run_at=run_at,
         cron=cron,
         interval=interval,
-        session_id=session_id,
+        tab_id=tab_id,
         workspace_id=workspace_id,
         agent_type=agent_type,
         message=message,

@@ -467,7 +467,7 @@ export interface ManualTaskControlRequest {
   reason: string
 }
 
-export type ScheduledTaskKind = 'session_message' | 'new_session' | 'hub_task'
+export type ScheduledTaskKind = 'tab_message' | 'new_session' | 'hub_task'
 
 export type ScheduledTaskStatus = 'ok' | 'error'
 
@@ -479,7 +479,7 @@ export interface ScheduledTask {
   run_at?: string | null
   cron?: string | null
   interval_seconds?: number | null
-  session_id?: string | null
+  tab_id?: string | null
   workspace_id?: string | null
   agent_type: AgentType
   message?: string | null
@@ -500,7 +500,7 @@ export interface ScheduledTaskCreate {
   run_at?: string | null
   cron?: string | null
   interval_seconds?: number | null
-  session_id?: string | null
+  tab_id?: string | null
   workspace_id?: string | null
   agent_type?: AgentType
   message?: string | null
@@ -513,7 +513,7 @@ export interface ScheduledTaskUpdate {
   run_at?: string | null
   cron?: string | null
   interval_seconds?: number | null
-  session_id?: string | null
+  tab_id?: string | null
   workspace_id?: string | null
   agent_type?: AgentType | null
   message?: string | null
