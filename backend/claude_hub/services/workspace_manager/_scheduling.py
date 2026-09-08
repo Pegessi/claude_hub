@@ -35,6 +35,13 @@ from ._constants import *  # noqa: F401,F403
 class _SchedulingMixin:
     """Scheduled-task persistence, CRUD, scheduling, and firing."""
 
+    # Minimum gap between fires of the same task. A concurrent fire (tick vs
+    # run-now, or two run-now calls) that lands within this window joins the
+    # in-flight fire instead of re-firing. This is the guard that stops a
+    # recurring task from double-firing on concurrent manual run-now calls,
+    # where the ``enabled`` / ``next_run_at`` re-checks don't apply.
+    _FIRE_COOLDOWN = timedelta(seconds=1)
+
     # Per-field (min, max) for the 5 cron fields: minute, hour, day-of-month,
     # month, day-of-week (0 = Sunday).
     _CRON_FIELD_RANGES = (
@@ -156,7 +163,7 @@ class _SchedulingMixin:
         merged = task.model_copy(update={**updates, "updated_at": now})
 
         fields = merged.model_dump()
-        self._validate_scheduled_task_fields(fields)
+        self._validate_scheduled_task_fields(fields, existing=task)
 
         if schedule_changed:
             merged.next_run_at = self._compute_next_run(merged, now)
@@ -193,8 +200,16 @@ class _SchedulingMixin:
     # Validation
     # ------------------------------------------------------------------
 
-    def _validate_scheduled_task_fields(self, fields: dict) -> None:
-        """Validate a complete set of scheduled-task fields. Raises ValueError."""
+    def _validate_scheduled_task_fields(
+        self, fields: dict, existing: Optional[ScheduledTask] = None
+    ) -> None:
+        """Validate a complete set of scheduled-task fields. Raises ValueError.
+
+        ``existing`` is the stored task being updated (``None`` on create).
+        For ``tab_message`` it lets us skip the tab-existence re-check when
+        the target tab is unchanged, so a task whose tab was deleted can
+        still be disabled or edited (only changing the tab re-validates).
+        """
         kind = fields.get("kind")
 
         schedule_count = sum(
@@ -212,8 +227,11 @@ class _SchedulingMixin:
                 raise ValueError("tab_id is required for tab_message tasks")
             if not fields.get("message"):
                 raise ValueError("message is required for tab_message tasks")
-            if ttyd_manager.get_tab(fields["tab_id"]) is None:
-                raise ValueError(f"Terminal tab '{fields['tab_id']}' not found")
+            # Only re-check tab existence when the target tab is changing.
+            # A task whose tab was deleted can still be disabled / edited.
+            if existing is None or fields["tab_id"] != existing.tab_id:
+                if ttyd_manager.get_tab(fields["tab_id"]) is None:
+                    raise ValueError(f"Terminal tab '{fields['tab_id']}' not found")
         elif kind == ScheduledTaskKind.NEW_SESSION:
             if fields.get("cron") is not None or fields.get("interval_seconds") is not None:
                 # A recurring new_session task spawns a fresh ephemeral session on
@@ -422,6 +440,16 @@ class _SchedulingMixin:
             # tick vs a manual run-now, or two run-now clicks) may have already
             # stamped this task. Without this re-check a one-shot could fire
             # twice and run_count could double-increment.
+            #
+            # The cooldown below is what prevents a *recurring* task from
+            # double-firing on concurrent manual run-now calls: such a task
+            # stays enabled after firing, so the ``enabled`` re-check does not
+            # catch the second call, and the ``next_run_at`` re-check is
+            # tick-only (it does not apply to the manual path).
+            if task.last_run_at is not None and (now - task.last_run_at) < self._FIRE_COOLDOWN:
+                # A concurrent fire advanced this task within the cooldown
+                # window while we waited for the lock. Join it: don't re-fire.
+                return
             if not task.enabled:
                 if manual:
                     raise ValueError(f"Scheduled task '{task.id}' is disabled")

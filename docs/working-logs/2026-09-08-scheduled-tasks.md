@@ -119,6 +119,26 @@ branch:
   `asyncio.Lock` (`self._sched_fire_locks` in `_state.py`) taken in
   `_fire_scheduled_task`, with an **in-lock eligibility re-check** so a task
   already advanced by a concurrent fire is not re-fired.
+- **Concurrent manual run-now still double-fired (co-op multitasking).** The
+  in-lock re-check alone is not enough for two *manual* run-now calls: a
+  recurring task passes the `enabled` / `next_run_at` re-checks, and capturing
+  a `prev_run_count` baseline *before* the lock does not detect a concurrent
+  fire — the second coroutine does not start running until the first yields
+  (e.g. at `await asyncio.sleep(0)` inside the send side-effect), which is
+  *after* the first stamped `run_count`. Fix: a time-based **cooldown**
+  (`_FIRE_COOLDOWN = 1s`), checked *first* under the lock against
+  `task.last_run_at`. A concurrent fire stamps `last_run_at`, so the waiter
+  sees it within the window and returns ("joins the in-flight fire") instead of
+  re-firing. This is the robust guard for the case the eligibility re-checks
+  don't cover.
+- **Deleted-tab target stranded the task.** A `tab_message` task whose tab was
+  deleted could no longer be toggled off or edited: `update_scheduled_task`
+  re-ran full validation, which re-checked tab existence and raised. Fix:
+  `_validate_scheduled_task_fields` takes an `existing` task; the tab-existence
+  check only runs when the target tab is *changing* (`existing is None or
+  fields["tab_id"] != existing.tab_id`). A task whose tab was deleted can still
+  be disabled / renamed / re-pointed (re-pointing to a still-missing tab is
+  rejected, as it should be).
 - **Ephemeral-session leak on fire failure.** `_fire_new_session` /
   `_fire_hub_task` created an ephemeral session, then if the send/dispatch threw,
   the session was stranded. Fix: wrap the send/dispatch in try/except →
@@ -157,7 +177,7 @@ branch:
   `module = "claude_hub.services.workspace_manager.*"` with
   `disable_error_code = ["attr-defined", "no-any-return"]`. Cross-mixin
   `self.<async-method>` calls resolve to `Any`, so a missing `await` is invisible
-  to mypy. **Runtime tests are the safety net** — the 48 scheduled-task tests
+  to mypy. **Runtime tests are the safety net** — the 50 scheduled-task tests
   exercise every fire path.
 - **`CLAUDE_HUB_TAB_ID` is overlaid at the render boundary, not stored on
   `self.env`.** The tab-id env var (which lets an agent self-identify and target
@@ -179,10 +199,12 @@ branch:
   `test_legacy_resident_mailbox_routes_are_gone`,
   `test_real_cold_restart_7tab_bijection`) are pre-existing/environmental and
   unrelated to scheduling.
-- `test_scheduled_tasks.py`: **48 tests pass**, covering CRUD, cron parsing,
+- `test_scheduled_tasks.py`: **50 tests pass**, covering CRUD, cron parsing,
   next-run computation (incl. Feb-29), tick eligibility, all three fire actions,
-  the fire lock (concurrent double-fire), the error-propagation paths, and the
-  `_child_env` tab-id overlay (base env not mutated).
+  the fire lock (concurrent double-fire), the manual-run-now cooldown
+  (double-fire fires once), the deleted-tab-target toggle (disable / re-point),
+  the error-propagation paths, and the `_child_env` tab-id overlay (base env not
+  mutated).
 - `test_ttyd_manager.py`: the 4 command/env tests that assert the rendered
   launch command now expect the `CLAUDE_HUB_TAB_ID=<tab_id>` prefix / settings
   env entry (the overlay is always rendered).
