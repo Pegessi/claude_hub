@@ -24,6 +24,7 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubClient, HubError
+from claude_hub.cli.commands.common import MIN_BOARD_TASKS_LIMIT
 from claude_hub.cli.commands.tasks import _find_task_board, _latest_acceptance_report
 from claude_hub.cli.feishu_cards import (
     CARD_KINDS,
@@ -63,17 +64,32 @@ def feishu() -> None:
 def _resolve_task_board(
     client: HubClient, task_id: str, workspace_id: Optional[str], kind: str
 ) -> tuple[str, dict]:
-    """Locate a task across boards, returning ``(workspace_id, task_dict)``."""
+    """Locate a task, returning ``(workspace_id, task_dict)``.
+
+    When ``workspace_id`` is given, uses the O(1) direct task endpoint
+    (``GET /workspaces/{ws}/tasks/{task}``) instead of reading the board; the
+    direct response's ``task`` is the same redacted dict the board returns.
+    When ``workspace_id`` is absent, falls back to a cross-workspace board
+    scan.
+    """
     if workspace_id is not None:
-        board = client.get_board(workspace_id)
-        tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
-        match = next((t for t in tasks if t.get("id") == task_id), None)
-        ws_id: Optional[str] = workspace_id
-    else:
-        ws_id, match = _find_task_board(client, task_id)
+        try:
+            detail = client.get_task_detail(workspace_id, task_id)
+        except HubError as e:
+            if e.status == 404:
+                raise click.ClickException(
+                    f"task {task_id} not found in workspace {workspace_id} (kind={kind})"
+                ) from e
+            raise
+        task = detail.get("task") if isinstance(detail, dict) else None
+        if not isinstance(task, dict):
+            raise click.ClickException(
+                f"task {task_id} not found in workspace {workspace_id} (kind={kind})"
+            )
+        return workspace_id, task
+    ws_id, match = _find_task_board(client, task_id)
     if match is None or ws_id is None:
-        where = f" in workspace {workspace_id}" if workspace_id else ""
-        raise click.ClickException(f"task {task_id} not found{where} (kind={kind})")
+        raise click.ClickException(f"task {task_id} not found (kind={kind})")
     return ws_id, match
 
 
@@ -128,13 +144,9 @@ def _build_card(
             raise click.ClickException("--workspace-id and --task-id are required for kind=task")
         try:
             with cli_main.get_client(ctx) as client:
-                board = client.get_board(workspace_id)
+                _, match = _resolve_task_board(client, task_id, workspace_id, kind)
         except HubError as e:
             raise click.ClickException(str(e)) from e
-        tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
-        match = next((t for t in tasks if t.get("id") == task_id), None)
-        if match is None:
-            raise click.ClickException(f"task {task_id} not found in workspace {workspace_id}")
         return build_task_card(match)
 
     if kind == "workspaces":
@@ -173,7 +185,7 @@ def _build_card(
             raise click.ClickException("--workspace-id is required for kind=agents")
         try:
             with cli_main.get_client(ctx) as client:
-                board = client.get_board(workspace_id)
+                board = client.get_board(workspace_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
         except HubError as e:
             raise click.ClickException(str(e)) from e
         sessions = board.get("sessions", []) if isinstance(board, dict) else []
@@ -187,7 +199,8 @@ def _build_card(
         try:
             with cli_main.get_client(ctx) as client:
                 ws_id, match = _resolve_task_board(client, task_id, workspace_id, kind)
-                board = client.get_board(ws_id)
+                # Session-only read: bound Done-task history transfer.
+                board = client.get_board(ws_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
                 sessions = board.get("sessions", []) if isinstance(board, dict) else []
                 session = next(
                     (s for s in sessions if s.get("id") == match.get("session_id")), None

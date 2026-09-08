@@ -248,9 +248,24 @@ class HubClient:
         """PATCH /api/workspaces/{workspace_id}."""
         return self._request("PATCH", f"/api/workspaces/{workspace_id}", json=body)
 
-    def get_board(self, workspace_id: str) -> Any:
-        """GET /api/workspaces/{workspace_id}/board."""
-        return self._request("GET", f"/api/workspaces/{workspace_id}/board")
+    def get_board(
+        self,
+        workspace_id: str,
+        tasks_limit: Optional[int] = None,
+        tasks_cursor: Optional[str] = None,
+    ) -> Any:
+        """GET /api/workspaces/{workspace_id}/board.
+
+        ``tasks_limit``/``tasks_cursor`` bound the board's task history so
+        list/summary reads do not transfer the full history. ``tasks_cursor``
+        requires ``tasks_limit``.
+        """
+        params: Dict[str, Any] = {}
+        if tasks_limit is not None:
+            params["tasks_limit"] = tasks_limit
+        if tasks_cursor is not None:
+            params["tasks_cursor"] = tasks_cursor
+        return self._request("GET", f"/api/workspaces/{workspace_id}/board", params=params or None)
 
     def dispatch_workspace(self, workspace_id: str) -> None:
         """POST /api/workspaces/{workspace_id}/dispatch (204)."""
@@ -329,6 +344,15 @@ class HubClient:
     def get_task_reports(self, workspace_id: str, task_id: str) -> Any:
         """GET /api/workspaces/{workspace_id}/tasks/{task_id}/reports."""
         return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/reports")
+
+    def get_task_detail(self, workspace_id: str, task_id: str) -> Any:
+        """GET /api/workspaces/{workspace_id}/tasks/{task_id}.
+
+        Single task with its full report history via O(1) lookup. Used by
+        ``task status``/``task report``/``task review`` so they avoid pulling
+        the whole board to locate one task.
+        """
+        return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}")
 
     def list_task_tree(self, workspace_id: str, task_id: Optional[str] = None) -> Any:
         """GET /api/workspaces/{workspace_id}/tasks/tree or .../tasks/{task_id}/tree."""

@@ -147,6 +147,27 @@ def test_build_card_new_display_kinds(monkeypatch) -> None:
                     ],
                 },
             )
+        if path == "/api/workspaces/ws1/tasks/t1":
+            # Direct single-task endpoint (O(1) lookup, no board scan). The
+            # CLI/feishu single-task reads use this when --workspace-id is given.
+            return httpx.Response(
+                200,
+                json={
+                    "task": {
+                        "id": "t1",
+                        "title": "Fix it",
+                        "status": "working",
+                        "session_id": "s1",
+                        "review_cycle": 1,
+                        "reviewed_cycle": 0,
+                        "goal_packet": {
+                            "objective": "Fix it",
+                            "status": "pending_review",
+                        },
+                    },
+                    "reports": [],
+                },
+            )
         if path == "/api/workspaces/ws1/tasks/t1/reports":
             return httpx.Response(
                 200,

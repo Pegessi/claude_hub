@@ -326,6 +326,17 @@ class _WorkspacesMixin:
                     except Exception:
                         logger.exception("Live pump failed for session %s", session_id)
                 for workspace_id in list(self.workspaces):
+                    # Relocated from the board read path: keep the cheap
+                    # in-memory reconcile steps on the monitor cadence now
+                    # that get_board is a pure snapshot. Run before dispatch
+                    # so a task flipped to REVIEW by the report reconciler is
+                    # not assigned to a worker in the same tick.
+                    try:
+                        self._reconcile_workspace_board_state(workspace_id)
+                    except Exception:
+                        logger.exception(
+                            "Board-state reconcile failed for workspace %s", workspace_id
+                        )
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                 await self._tick_resident_agents()
             except asyncio.CancelledError:
@@ -362,6 +373,21 @@ class _WorkspacesMixin:
             updates["updated_at"] = _wm._now()
             self.workspaces[workspace_id] = workspace.model_copy(update=updates)
             self._save_state()
+
+    def _reconcile_workspace_board_state(self, workspace_id: str) -> None:
+        """Run the cheap in-memory reconcile steps that ``get_board`` used to
+        perform on every read, now relocated to the monitor cadence.
+
+        ``get_board`` is now a pure snapshot read (no tmux I/O, no reconcile),
+        so these idempotent steps live here instead. The heavyweight work is
+        covered elsewhere in the same monitor tick: ``_refresh_session_statuses``
+        (session status sampling) runs at the top of the loop, and
+        ``_prune_orphan_workspace_tabs`` runs inside ``dispatch_workspace``.
+        """
+        self._reconcile_task_report_statuses(workspace_id)
+        self._reconcile_workspace_session_pointers(workspace_id)
+        self._cleanup_stale_orchestrator_assignments(workspace_id)
+        self._sync_workspace_tab_metadata(workspace_id)
 
     def _assert_no_duplicate_identity(self, payload: WorkspaceCreate | WorkspaceEnsure) -> None:
         from ..workspace_identity import (

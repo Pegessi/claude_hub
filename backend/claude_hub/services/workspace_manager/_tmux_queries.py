@@ -144,7 +144,9 @@ class _TmuxQueriesMixin:
 
         Used for receipt queries (``show-option -v``) where we need the
         option value. Raises ``RuntimeError`` on non-zero exit (including
-        the case where the target session no longer exists).
+        the case where the target session no longer exists) and on timeout
+        (a wedged tmux server must not block the monitor or board read
+        path); callers already treat a failed query as fail-closed.
         """
         from ..runtime_isolation import tmux_command
 
@@ -153,7 +155,25 @@ class _TmuxQueriesMixin:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=TMUX_QUERY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # wait_for cancels communicate() but leaves the child running;
+            # kill and reap it so a wedged tmux process doesn't leak.
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"tmux {' '.join(args)} timed out after {TMUX_QUERY_TIMEOUT_SECONDS}s"
+            )
         if proc.returncode != 0:
             error = stderr.decode("utf-8", errors="ignore").strip()
             raise RuntimeError(error or f"tmux {' '.join(args)} failed with code {proc.returncode}")
@@ -1295,29 +1315,25 @@ class _TmuxQueriesMixin:
         tasks_limit: int | None = None,
         tasks_cursor: str | None = None,
     ) -> WorkspaceBoard:
+        """Return a pure snapshot of the workspace board.
+
+        This is a read-only path: it performs NO tmux I/O and NO
+        reconcile/cleanup. Session statuses are refreshed by the background
+        monitor loop (``_refresh_session_statuses``) and the in-memory
+        reconcile steps run there too (``_reconcile_workspace_board_state``),
+        so the board reflects the most recent monitor tick — bounded by
+        ``WORKSPACE_MONITOR_INTERVAL_SECONDS`` (5s). Keeping the read path
+        pure is what lets the board scale to many concurrent readers without
+        serializing on tmux; the previous per-read refresh made every board
+        GET (and the CLI status commands that pull the board) pay for a full
+        tmux status sample.
+        """
         workspace = self.workspaces.get(workspace_id)
         if not workspace:
             raise KeyError(workspace_id)
 
-        await self._refresh_session_statuses(workspace_id)
-        self._reconcile_task_report_statuses(workspace_id)
-        self._reconcile_workspace_session_pointers(workspace_id)
-        self._cleanup_stale_orchestrator_assignments(workspace_id)
-        await self._prune_orphan_workspace_tabs(workspace_id)
-        self._sync_workspace_tab_metadata(workspace_id)
         tasks = [
-            (
-                task.model_copy(
-                    update={
-                        "prompt": (
-                            "System-managed Feedback Reaper task. Inspect its reports and "
-                            "summary-run audit for lifecycle details."
-                        )
-                    }
-                )
-                if task.system_internal and task.internal_kind == "feedback_reaper"
-                else task
-            )
+            self._public_task(task)
             for task in self.tasks.values()
             if task.workspace_id == workspace_id
         ]
@@ -1343,6 +1359,41 @@ class _TmuxQueriesMixin:
             markdown_documents=self.markdown_documents_for_workspace(workspace_id),
             snapshot_path=str(self.snapshot_path(workspace_id)),
             tasks_pagination=tasks_pagination,
+        )
+
+    @staticmethod
+    def _public_task(task: WorkspaceTask) -> WorkspaceTask:
+        """Redact the prompt of system-managed Feedback Reaper tasks for public reads."""
+        if task.system_internal and task.internal_kind == "feedback_reaper":
+            return task.model_copy(
+                update={
+                    "prompt": (
+                        "System-managed Feedback Reaper task. Inspect its reports and "
+                        "summary-run audit for lifecycle details."
+                    )
+                }
+            )
+        return task
+
+    def get_task_detail(self, workspace_id: str, task_id: str) -> WorkspaceTaskDetail:
+        """Return a single task with its full report history via O(1) lookup.
+
+        This is the direct counterpart to :meth:`get_board` for CLI
+        status/report/review commands that only need one task: it reads the
+        task by id from the in-memory dict (no board scan, no tmux I/O) and
+        attaches that task's report history. Raises ``KeyError`` for an
+        unknown workspace or task.
+        """
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        task = self.tasks.get(task_id)
+        if task is None or task.workspace_id != workspace_id:
+            raise KeyError(task_id)
+        reports = self.reports_for_task(workspace_id, task_id)
+        return WorkspaceTaskDetail(
+            task=self._public_task(task),
+            reports=reports,
+            latest_report=reports[-1] if reports else None,
         )
 
     def _sync_workspace_tab_metadata(self, workspace_id: str) -> None:

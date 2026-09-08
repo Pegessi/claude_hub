@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+from importlib import import_module
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator, Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +14,7 @@ from pytest import MonkeyPatch
 
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.main import app
-from claude_hub.models import AgentType, User, WorkspaceTaskStatus
+from claude_hub.models import AgentType, User, Workspace, WorkspaceTaskStatus
 from claude_hub.models.schemas import WorkspaceTask
 from claude_hub.services.board_pagination import (
     board_task_sort_key,
@@ -410,3 +412,96 @@ def test_board_api_rejects_out_of_range_limit(tmp_path: Path) -> None:
         params={"tasks_limit": 101},
     )
     assert response.status_code == 422
+
+
+def _make_workspace(workspace_id: str, base: datetime) -> Workspace:
+    return Workspace(
+        id=workspace_id,
+        name="Repo",
+        path="/repo",
+        default_branch="main",
+        session_prefix="repo",
+        created_at=base,
+        updated_at=base,
+    )
+
+
+def test_get_board_is_pure_snapshot_no_refresh_no_tmux(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """AC1: ``get_board`` performs NO tmux I/O and NO reconcile/cleanup on the
+    read path; the six steps run on the background monitor loop instead."""
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    workspace_manager.workspaces["ws-1"] = _make_workspace("ws-1", base)
+    workspace_manager.tasks["t1"] = _task("t1", updated_at=base, status=WorkspaceTaskStatus.WORKING)
+
+    refresh_calls: list[Optional[str]] = []
+
+    async def fake_refresh(
+        workspace_id: Optional[str] = None, *, run_auto_continue: bool = False
+    ) -> None:
+        refresh_calls.append(workspace_id)
+
+    monkeypatch.setattr(workspace_manager, "_refresh_session_statuses", fake_refresh)
+
+    def fail_tmux(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("get_board must not perform tmux I/O")
+
+    workspace_module = import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_module.ttyd_manager, "list_tab_agent_statuses", fail_tmux)
+
+    board = asyncio.run(workspace_manager.get_board("ws-1"))
+    assert refresh_calls == []
+    assert [task.id for task in board.tasks] == ["t1"]
+
+
+class _StopMonitor(Exception):
+    """Raised by the mocked ``asyncio.sleep`` to end the monitor loop after one tick."""
+
+
+def test_reconcile_steps_run_on_monitor_tick(monkeypatch: MonkeyPatch) -> None:
+    """AC2: the board-only reconcile steps (``_reconcile_task_report_statuses``,
+    ``_sync_workspace_tab_metadata``) run on the background monitor loop."""
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    workspace_manager.workspaces["ws-1"] = _make_workspace("ws-1", base)
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        workspace_manager,
+        "_reconcile_task_report_statuses",
+        lambda ws_id: called.append(f"report:{ws_id}"),
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_sync_workspace_tab_metadata",
+        lambda ws_id: called.append(f"tabmeta:{ws_id}"),
+    )
+    # Stub the other in-memory steps and the heavyweight per-tick work so the
+    # loop only exercises the relocated reconcile steps.
+    monkeypatch.setattr(
+        workspace_manager, "_reconcile_workspace_session_pointers", lambda _ws_id: None
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_cleanup_stale_orchestrator_assignments",
+        lambda _ws_id: None,
+    )
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_manager, "_refresh_session_statuses", _noop)
+    monkeypatch.setattr(workspace_manager, "dispatch_workspace", _noop)
+    monkeypatch.setattr(workspace_manager, "_tick_resident_agents", _noop)
+
+    # Stop the loop after one iteration by making asyncio.sleep raise.
+    async def _stop_after_tick(_seconds: float) -> None:
+        raise _StopMonitor
+
+    monkeypatch.setattr(asyncio, "sleep", _stop_after_tick)
+
+    with pytest.raises(_StopMonitor):
+        asyncio.run(workspace_manager._background_monitor_loop())
+
+    assert "report:ws-1" in called
+    assert "tabmeta:ws-1" in called

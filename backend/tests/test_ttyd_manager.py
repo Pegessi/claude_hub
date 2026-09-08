@@ -7,10 +7,12 @@ import shlex
 import stat
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Optional
 
 import pytest
 from pytest import MonkeyPatch
@@ -22,6 +24,7 @@ from claude_hub.models import (
     ExecutionTarget,
     RemoteProfile,
     SessionKind,
+    TerminalAgentStatus,
     TerminalTabCreate,
     WorkspaceSessionRole,
 )
@@ -4422,3 +4425,63 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
         assert (
             proc._shell_explicitly_provided is expected
         ), f"{tab_id}: stable reload must preserve shell_explicitly_provided={expected}"
+
+
+@pytest.mark.asyncio
+async def test_get_tab_agent_status_hung_tmux_falls_back_to_cached(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """AC5: when local tmux is hung, the status read returns the last cached
+    status within the deadline instead of blocking on the subprocess."""
+    tab_id = "hung-tab"
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {}
+    manager._status_cache = {}
+
+    process = TTYDProcess.__new__(TTYDProcess)
+    process.tab_id = tab_id
+    process.name = "Hung"
+    process.agent_type = AgentType.CLAUDE
+    process.tmux_session = "claude-hub-hungtab"
+    process.session_kind = SessionKind.TERMINAL
+    process.cursor_transport = "terminal"
+    manager.processes[tab_id] = process
+
+    # Pre-populate the cache with a status older than the TTL so the read
+    # passes the TTL check and reaches the (hung) capture path.
+    cached = TerminalAgentStatus(
+        tab_id=tab_id,
+        tab_name="Hung",
+        agent_type=AgentType.CLAUDE,
+        status=AgentRuntimeStatus.WORKING,
+        status_text="Working",
+        detail="cached detail",
+        tmux_session="claude-hub-hungtab",
+        sampled_at=datetime.now() - timedelta(seconds=5),
+    )
+    manager._status_cache[tab_id] = cached
+
+    # The tmux session is considered alive so the read proceeds to capture.
+    async def fake_session_exists(_session: str) -> bool:
+        return True
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", fake_session_exists)
+
+    # Simulate a hung tmux subprocess: the capture call hits the wait_for
+    # deadline and raises asyncio.TimeoutError.
+    async def hung_capture_history(*_args: Any, **_kwargs: Any) -> str:
+        raise asyncio.TimeoutError
+
+    async def hung_capture_foreground(*_args: Any, **_kwargs: Any) -> Optional[str]:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(process, "capture_history", hung_capture_history)
+    monkeypatch.setattr(process, "capture_foreground_command", hung_capture_foreground)
+
+    started = time.monotonic()
+    result = await manager.get_tab_agent_status(tab_id)
+    elapsed = time.monotonic() - started
+
+    assert result is cached
+    # The fallback must return promptly, not block for the subprocess timeout.
+    assert elapsed < 1.0

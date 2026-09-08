@@ -5038,6 +5038,9 @@ def test_start_task_dispatches_to_resident_agent(
     assert "Run this in the resident terminal" in sent_messages[1][1]
     assert renamed_tabs == [("tab-agent", "Resident task")]
 
+    # Board is now a pure snapshot; the tab-metadata sync that the board read
+    # used to perform lives on the monitor cadence, so drive it explicitly.
+    workspace_manager._reconcile_workspace_board_state(workspace_response.json()["id"])
     board_response = client.get(f"/api/workspaces/{workspace_response.json()['id']}/board")
     board = board_response.json()
     assert board["workspace"]["dispatcher_session_id"] is None
@@ -6584,6 +6587,14 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
         )
     ]
 
+    # Board is now a pure snapshot; refresh session status (without firing
+    # auto-continue) the way the board read used to, then read the snapshot.
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=False,
+        )
+    )
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
     assert sent_messages == []
     assert board["tasks"][0]["status"] == "working"
@@ -6597,7 +6608,6 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
             run_auto_continue=True,
         )
     )
-
     session = workspace_manager.sessions[started["session_id"]]
     assert len(sent_messages) == 1
     assert sent_messages[0][0] == "claude-hub-tab-api-"
@@ -6720,6 +6730,14 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
         )
     ]
 
+    # Board is now a pure snapshot; refresh session status (without firing
+    # auto-continue) the way the board read used to, then read the snapshot.
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=False,
+        )
+    )
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
     assert sent_messages == []
@@ -6862,6 +6880,14 @@ def test_completed_idle_working_agent_is_prompted_to_report(
         )
     ]
 
+    # Board is now a pure snapshot; refresh session status (without firing
+    # auto-continue) the way the board read used to, then read the snapshot.
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=False,
+        )
+    )
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
     assert board["tasks"][0]["status"] == "working"
     assert board["sessions"][0]["runtime_status"] == "idle"
@@ -8105,6 +8131,14 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
         )
     ]
 
+    # Board is now a pure snapshot; refresh session status (without firing
+    # auto-continue) the way the board read used to, then read the snapshot.
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=False,
+        )
+    )
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
     assert sent_messages == []
     assert board["tasks"][0]["status"] == "working"
@@ -8270,6 +8304,14 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
         )
     ]
 
+    # Board is now a pure snapshot; refresh session status the way the board
+    # read used to, then read the snapshot.
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=False,
+        )
+    )
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
     # The parked task stays in REVIEW and its verdict fields are untouched even
@@ -8426,6 +8468,14 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
         )
     ]
 
+    # Board is now a pure snapshot; refresh session status the way the board
+    # read used to, then read the snapshot.
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=False,
+        )
+    )
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
     assert board["tasks"][0]["status"] == "review"
@@ -9126,6 +9176,14 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
         )
     ]
 
+    # Board is now a pure snapshot; refresh session status the way the board
+    # read used to, then read the snapshot.
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=False,
+        )
+    )
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
     assert board["tasks"][0]["status"] == "review"
@@ -9272,6 +9330,14 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
         )
     ]
 
+    # Board is now a pure snapshot; refresh session status the way the board
+    # read used to, then read the snapshot.
+    asyncio.run(
+        workspace_manager._refresh_session_statuses(
+            workspace["id"],
+            run_auto_continue=False,
+        )
+    )
     board = client.get(f"/api/workspaces/{workspace['id']}/board").json()
 
     assert board["tasks"][0]["status"] == expected_task_status

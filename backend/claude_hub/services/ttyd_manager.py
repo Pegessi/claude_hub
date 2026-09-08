@@ -261,6 +261,12 @@ _PORT_CHECK_TIMEOUT_SECONDS = 0.2
 _MAX_TCP_PORT = 65535
 _MAX_TTYD_BIND_ATTEMPTS = 3
 _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
+# Local tmux read/query deadline. A wedged tmux server must not block the
+# board/status read path (or the 5s monitor) indefinitely; on timeout the
+# status sampler falls back to its last cached status. Local capture-pane /
+# display-message calls normally finish in tens of milliseconds, so 2s is a
+# generous upper bound that only fires when tmux is genuinely stuck.
+_LOCAL_CAPTURE_TIMEOUT_SECONDS = 2.0
 _VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
     "ark/seed-code-0602": "doubao-seed-2.0-code",
     "ark/seed-code-0602[1m]": "doubao-seed-2.0-code",
@@ -441,6 +447,32 @@ async def _tmux_session_exists_async(session_name: str) -> bool:
     except FileNotFoundError:
         return False
     return await proc.wait() == 0
+
+
+async def _communicate_with_deadline(
+    proc: asyncio.subprocess.Process,
+    timeout: float,
+) -> tuple[bytes, bytes]:
+    """Wait for a subprocess with a hard deadline, killing it on timeout.
+
+    ``asyncio.wait_for`` cancels the ``communicate()`` coroutine but leaves
+    the child process running, so on timeout we explicitly kill the child
+    and reap it to avoid leaking a hung tmux process. Re-raises
+    ``asyncio.TimeoutError`` so callers can distinguish a deadline expiry
+    from a normal non-zero exit.
+    """
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+        raise
 
 
 async def _tmux_list_sessions() -> set[str]:
@@ -2709,7 +2741,7 @@ asyncio.run(_main())
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await _communicate_with_deadline(proc, _LOCAL_CAPTURE_TIMEOUT_SECONDS)
         if proc.returncode != 0:
             error = stderr.decode("utf-8", errors="ignore").strip()
             raise RuntimeError(error or f"tmux capture-pane failed with code {proc.returncode}")
@@ -2746,7 +2778,7 @@ asyncio.run(_main())
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await _communicate_with_deadline(proc, _LOCAL_CAPTURE_TIMEOUT_SECONDS)
         if proc.returncode != 0:
             error = stderr.decode("utf-8", errors="ignore").strip()
             raise RuntimeError(error or f"tmux display-message failed with code {proc.returncode}")
@@ -2814,7 +2846,10 @@ asyncio.run(_main())
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _ = await proc.communicate()
+        try:
+            stdout, _ = await _communicate_with_deadline(proc, _LOCAL_CAPTURE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return None
         if proc.returncode != 0:
             return None
         command = stdout.decode("utf-8", errors="ignore").strip()
@@ -3834,11 +3869,19 @@ class TTYDManager:
 
         try:
             raw_output = await process.capture_history(lines=120)
+            foreground_command = await process.capture_foreground_command()
+        except asyncio.TimeoutError:
+            # Local tmux is unresponsive. Return the last cached status so a
+            # wedged tmux server doesn't block the caller for the full
+            # subprocess timeout; only classify OFFLINE if we have never
+            # sampled this tab before. The stale cache entry is left in place
+            # so the TTL check throttles re-queries while tmux stays hung.
+            if cached is not None:
+                return cached
+            raw_output, foreground_command = "", None
         except Exception as e:
-            logger.debug(f"Unable to capture status output for tab {tab_id}: {e}")
-            raw_output = ""
-
-        foreground_command = await process.capture_foreground_command()
+            logger.debug(f"Unable to sample agent status for tab {tab_id}: {e}")
+            raw_output, foreground_command = "", None
         output = _ANSI_ESCAPE_RE.sub("", raw_output)
         output_hash = hashlib.sha256(output.encode("utf-8", errors="ignore")).hexdigest()
         runtime_status, status_text, detail, last_changed_at = self._classify_agent_status(

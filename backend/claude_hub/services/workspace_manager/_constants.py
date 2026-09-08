@@ -59,6 +59,7 @@ from ...models import (
     WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskCreate,
+    WorkspaceTaskDetail,
     WorkspaceTaskExecutionComplexity,
     WorkspaceTaskMode,
     WorkspaceTaskOrigin,
@@ -114,6 +115,11 @@ PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
 REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
+# Deadline for local tmux read/query subprocesses (receipt show-options,
+# capture-pane, display-message). A wedged tmux server must not block the
+# board/status read path or the monitor loop; on timeout callers fall back to
+# cached state. Local tmux calls normally finish in milliseconds.
+TMUX_QUERY_TIMEOUT_SECONDS = 2.0
 # Agent-facing examples call the Hub over localhost (or a loopback SSH
 # forward). Keep external traffic on the configured proxy while forcing these
 # internal control-plane requests to stay on the machine. --fail-with-body also
@@ -349,6 +355,7 @@ __all__ = [
     "TMUX_SUBMIT_SETTLE_SECONDS",
     "TerminalAgentStatus",
     "WORKSPACE_MONITOR_INTERVAL_SECONDS",
+    "TMUX_QUERY_TIMEOUT_SECONDS",
     "WORKTREE_LIST_TIMEOUT_SECONDS",
     "WORKTREE_ROOT_CACHE_TTL_SECONDS",
     "Workspace",
@@ -363,6 +370,7 @@ __all__ = [
     "WorkspaceSessionRole",
     "WorkspaceTask",
     "WorkspaceTaskCreate",
+    "WorkspaceTaskDetail",
     "WorkspaceTaskExecutionComplexity",
     "WorkspaceTaskMode",
     "WorkspaceTaskOrigin",

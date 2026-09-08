@@ -101,6 +101,28 @@ def _create_task(
     return response.json()
 
 
+def test_direct_task_endpoint_returns_single_task_404_for_unknown(
+    persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
+) -> None:
+    """AC3: ``GET /workspaces/{ws}/tasks/{task}`` returns the single task (with
+    its reports) via O(1) lookup, no board scan; 404 for unknown task/workspace."""
+    manager, _ = persist_api
+    client = _client()
+    workspace_id = _create_workspace(client, tmp_path, "direct")
+    task = _create_task(client, workspace_id, "solo")
+    task_id = task["id"]
+
+    response = client.get(f"/api/workspaces/{workspace_id}/tasks/{task_id}")
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    assert detail["task"]["id"] == task_id
+    assert detail["task"]["workspace_id"] == workspace_id
+    assert isinstance(detail["reports"], list)
+
+    assert client.get(f"/api/workspaces/{workspace_id}/tasks/unknown-task").status_code == 404
+    assert client.get(f"/api/workspaces/unknown-workspace/tasks/{task_id}").status_code == 404
+
+
 def test_ordinary_task_tree_events_wait_ack_followup(
     persist_api: tuple[WorkspaceManager, Path], tmp_path: Path
 ) -> None:

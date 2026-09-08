@@ -10,6 +10,7 @@ import click
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
 from claude_hub.cli.commands.common import (
+    MIN_BOARD_TASKS_LIMIT,
     lifecycle_group_help,
     merge_payload,
     parse_kv_pairs,
@@ -48,6 +49,29 @@ def _items(board: Any, key: str) -> List[dict]:
 def _counts(items: List[dict], key: str) -> Dict[str, int]:
     """Build stable string counts for a board field."""
     return dict(sorted(Counter(str(item.get(key) or "unknown") for item in items).items()))
+
+
+def _task_status_counts(board: Any, tasks: List[dict]) -> Dict[str, int]:
+    """Prefer true per-status totals from board pagination.
+
+    When the board was fetched with a bounded ``tasks_limit`` (see
+    ``MIN_BOARD_TASKS_LIMIT``), the shipped ``tasks`` page only carries active
+    tasks plus a single Done-task row, so counting that page undercounts
+    finished work. ``tasks_pagination.status_counts`` holds the true totals
+    across every task; fall back to the page counts when it is absent.
+    """
+    if isinstance(board, dict):
+        pagination = board.get("tasks_pagination")
+        if isinstance(pagination, dict):
+            counts = pagination.get("status_counts")
+            if isinstance(counts, dict) and counts:
+                try:
+                    return dict(
+                        sorted((str(status), int(total)) for status, total in counts.items())
+                    )
+                except (TypeError, ValueError):
+                    pass
+    return _counts(tasks, "status")
 
 
 def _latest_reports(board: Any) -> Dict[str, dict]:
@@ -116,7 +140,7 @@ def _workspace_summary(workspace_id: str, board: Any) -> Dict[str, Any]:
     ]
     return {
         "workspace": workspace,
-        "task_counts": _counts(tasks, "status"),
+        "task_counts": _task_status_counts(board, tasks),
         "session_counts": _counts(sessions, "runtime_status"),
         "active_tasks": task_rows,
         "active_sessions": session_rows,
@@ -383,7 +407,9 @@ def workspace_summary(ctx: click.Context, workspace_id: str) -> None:
     """Show a concise typed summary of backend workspace state."""
     try:
         with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
+            # Bound Done-task history: the summary only displays active tasks
+            # (always returned) and reads true totals from tasks_pagination.
+            board = client.get_board(workspace_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     summary = _workspace_summary(workspace_id, board)
@@ -497,7 +523,7 @@ def agent_list(ctx: click.Context, workspace_id: str) -> None:
     """List managed agent sessions for a workspace."""
     try:
         with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
+            board = client.get_board(workspace_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
@@ -515,7 +541,7 @@ def agent_status(ctx: click.Context, workspace_id: str, role: Optional[str]) -> 
     """Show resident agent/session runtime state for a workspace."""
     try:
         with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
+            board = client.get_board(workspace_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     sessions = _items(board, "sessions")

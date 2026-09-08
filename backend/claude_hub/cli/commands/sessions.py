@@ -9,7 +9,11 @@ import click
 
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubError
-from claude_hub.cli.commands.common import merge_payload, parse_attachment_json
+from claude_hub.cli.commands.common import (
+    MIN_BOARD_TASKS_LIMIT,
+    merge_payload,
+    parse_attachment_json,
+)
 from claude_hub.cli.output import emit, print_rows
 
 REPORT_STATES = [
@@ -65,7 +69,7 @@ def session_list(ctx: click.Context, workspace_id: str, role: Optional[str]) -> 
     """List managed sessions for a workspace."""
     try:
         with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
+            board = client.get_board(workspace_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
@@ -85,7 +89,7 @@ def _find_session_board(client: Any, session_id: str) -> tuple[Optional[str], Op
         ws_id = ws.get("id") if isinstance(ws, dict) else None
         if not ws_id:
             continue
-        board = client.get_board(ws_id)
+        board = client.get_board(ws_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
         sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
         match = next((s for s in sessions if s.get("id") == session_id), None)
         if match is not None:
@@ -111,7 +115,7 @@ def session_status(
         with cli_main.get_client(ctx) as client:
             ws_id: Optional[str]
             if workspace_id is not None:
-                board = client.get_board(workspace_id)
+                board = client.get_board(workspace_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
                 sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
                 match = next((s for s in sessions if s.get("id") == session_id), None)
                 ws_id = workspace_id
@@ -167,7 +171,7 @@ def _find_session_tab(client: Any, session_id: str) -> Optional[str]:
         ws_id = ws.get("id") if isinstance(ws, dict) else None
         if not ws_id:
             continue
-        board = client.get_board(ws_id)
+        board = client.get_board(ws_id, tasks_limit=MIN_BOARD_TASKS_LIMIT)
         sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
         match = next((s for s in sessions if s.get("id") == session_id), None)
         if match is not None:

@@ -5,6 +5,26 @@
 
 ## Unreleased
 
+### fix: CLI/board performance — pure snapshot board, direct task endpoint, tmux deadline
+
+- **Root cause.** `GET /board` did too much work per request: it refreshed
+  session statuses via tmux and ran reconcile/cleanup steps on the read path.
+  CLI single-task commands (`task status/report/review`) located their target
+  by pulling the **entire board** — a 2.48MB payload taking 1.43–1.56s.
+- **Fix.** `get_board()` is now a pure in-memory snapshot (no tmux I/O, no
+  reconcile); the six read-path steps moved to the background monitor loop
+  (5s cadence). New `GET /workspaces/{ws}/tasks/{task}` returns one task + its
+  reports via O(1) lookup, and the CLI uses it when `--workspace-id` is given.
+  Local tmux capture/query paths are wrapped in `asyncio.wait_for` (≤2s) with a
+  fallback to the last cached `TerminalAgentStatus` on timeout. CLI
+  list/summary reads pass `tasks_limit` so they no longer transfer full history.
+- **Tests.** New unit tests: board is a pure snapshot (no `_refresh_session_statuses`/tmux),
+  reconcile steps run on a monitor tick, direct task endpoint (404 for unknown),
+  and a hung-tmux test asserting the request returns within the deadline with
+  cached status. A benchmark (`backend/bench_board_perf.py`) measures single
+  board GET median 4.3ms / p95 15.3ms (was 0.65–1.0s), 8-concurrent median
+  28.7ms / p95 48.8ms (was 4.23s), and direct task GET median 0.7ms / 12.6KB.
+
 ### fix: AskUserQuestion option chips unclickable (v-memo skipped selection re-render)
 
 - **Root cause.** `StructuredPane.vue` memoized each timeline turn with

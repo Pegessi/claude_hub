@@ -89,21 +89,85 @@ def task() -> None:
 @task.command("list")
 @click.argument("workspace_id")
 @click.option("--status", default=None, help="Client-side filter on task status.")
+@click.option(
+    "--limit",
+    type=click.IntRange(1, 100),
+    default=100,
+    show_default=True,
+    help="Max Done-task rows per board page (active tasks are always returned).",
+)
+@click.option(
+    "--all",
+    "fetch_all",
+    is_flag=True,
+    default=False,
+    help="Follow pagination to return every task (transfers full history).",
+)
 @click.pass_context
-def task_list(ctx: click.Context, workspace_id: str, status: Optional[str]) -> None:
-    """List tasks for a workspace."""
+def task_list(
+    ctx: click.Context,
+    workspace_id: str,
+    status: Optional[str],
+    limit: int,
+    fetch_all: bool,
+) -> None:
+    """List tasks for a workspace.
+
+    By default reads a single bounded board page (all active tasks plus up to
+    ``--limit`` Done-task rows). Pass ``--all`` to page through full history.
+    """
     try:
         with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
+            tasks, has_more = _list_board_tasks(
+                client, workspace_id, limit=limit, fetch_all=fetch_all
+            )
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
     if status is not None:
         tasks = [t for t in tasks if t.get("status") == status]
     if cli_main.as_json(ctx):
         emit(tasks, True)
     else:
         print_rows(tasks, TASK_COLUMNS)
+    if has_more and not fetch_all:
+        click.echo(
+            "… more tasks available; pass --all to page through full history.",
+            err=True,
+        )
+
+
+def _list_board_tasks(
+    client: Any,
+    workspace_id: str,
+    *,
+    limit: int,
+    fetch_all: bool,
+) -> tuple[List[dict], bool]:
+    """Return ``(tasks, has_more)`` from the board, bounded by ``limit``.
+
+    Always passes ``tasks_limit`` so a single page never transfers full task
+    history. With ``fetch_all``, follows ``tasks_pagination.next_cursor`` to
+    accumulate every page; otherwise returns just the first page and reports
+    whether more remain.
+    """
+    collected: List[dict] = []
+    cursor: Optional[str] = None
+    has_more = False
+    while True:
+        board = client.get_board(workspace_id, tasks_limit=limit, tasks_cursor=cursor)
+        if not isinstance(board, dict):
+            break
+        page = board.get("tasks", [])
+        if isinstance(page, list):
+            collected.extend(task for task in page if isinstance(task, dict))
+        pagination = board.get("tasks_pagination") or {}
+        has_more = bool(pagination.get("has_more"))
+        if not fetch_all or not has_more:
+            break
+        cursor = pagination.get("next_cursor")
+        if not cursor:
+            break
+    return collected, has_more
 
 
 TASK_DETAIL_FIELDS = [
@@ -137,6 +201,55 @@ def _find_task_board(client: Any, task_id: str) -> tuple:
         if match is not None:
             return ws_id, match
     return None, None
+
+
+def _task_detail_or_scan(
+    client: Any,
+    task_id: str,
+    workspace_id: Optional[str],
+    *,
+    fetch_reports: bool = True,
+) -> tuple:
+    """Return ``(ws_id, task, reports)`` for a single task.
+
+    When ``workspace_id`` is given, uses the O(1) direct task endpoint
+    (``GET /workspaces/{ws}/tasks/{task}``) and never reads the board; the
+    direct response already carries the task's report history, so no separate
+    reports call is needed. When ``workspace_id`` is absent (the task's
+    workspace is unknown) falls back to a cross-workspace board scan.
+
+    Raises ``click.ClickException`` with a clean message when the task is not
+    found (a 404 from the direct endpoint, or no board match in scan mode).
+    """
+    if workspace_id is not None:
+        try:
+            detail = client.get_task_detail(workspace_id, task_id)
+        except HubError as e:
+            if e.status == 404:
+                raise click.ClickException(
+                    f"Task {task_id} not found in workspace {workspace_id}."
+                ) from e
+            raise
+        task: Dict[str, Any] = {}
+        reports: List[dict] = []
+        if isinstance(detail, dict):
+            nested = detail.get("task")
+            if isinstance(nested, dict):
+                task = nested
+            if fetch_reports:
+                nested_reports = detail.get("reports")
+                if isinstance(nested_reports, list):
+                    reports = nested_reports
+        return workspace_id, task, reports
+    ws_id, match = _find_task_board(client, task_id)
+    if match is None or ws_id is None:
+        raise click.ClickException(f"Task {task_id} not found.")
+    if fetch_reports:
+        fetched = client.get_task_reports(ws_id, task_id)
+        reports = fetched if isinstance(fetched, list) else []
+    else:
+        reports = []
+    return str(ws_id), match, reports
 
 
 def _report_message(report: Optional[dict]) -> str:
@@ -257,20 +370,9 @@ def task_get(
     """Show details for a single task."""
     try:
         with cli_main.get_client(ctx) as client:
-            if workspace_id is not None:
-                board = client.get_board(workspace_id)
-                tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
-                match = next((t for t in tasks if t.get("id") == task_id), None)
-                ws_id = workspace_id
-            else:
-                ws_id, match = _find_task_board(client, task_id)
-            if match is None:
-                where = f" in workspace {workspace_id}" if workspace_id else ""
-                raise click.ClickException(f"Task {task_id} not found{where}.")
-            report_history: List[dict] = []
-            if reports and ws_id:
-                fetched = client.get_task_reports(ws_id, task_id)
-                report_history = fetched if isinstance(fetched, list) else []
+            ws_id, match, report_history = _task_detail_or_scan(
+                client, task_id, workspace_id, fetch_reports=reports
+            )
     except HubError as e:
         raise click.ClickException(str(e)) from e
 
@@ -309,39 +411,14 @@ def task_status(
     """Show Goal Packet, review, and acceptance state for a task."""
     try:
         with cli_main.get_client(ctx) as client:
-            if workspace_id is not None:
-                board = client.get_board(workspace_id)
-                tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
-                match = next((t for t in tasks if t.get("id") == task_id), None)
-                ws_id = workspace_id
-            else:
-                ws_id, match = _find_task_board(client, task_id)
-            if match is None:
-                where = f" in workspace {workspace_id}" if workspace_id else ""
-                raise click.ClickException(f"Task {task_id} not found{where}.")
-            fetched = client.get_task_reports(ws_id, task_id) if ws_id else []
+            ws_id, match, reports = _task_detail_or_scan(client, task_id, workspace_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    reports: List[dict] = fetched if isinstance(fetched, list) else []
     payload = _task_status_payload(ws_id, match, reports)
     if cli_main.as_json(ctx):
         emit(payload, True)
     else:
         _print_task_status(payload)
-
-
-def _resolve_ws_id(client: Any, task_id: str, workspace_id: Optional[str]) -> str:
-    """Return the workspace id for ``task_id``, scanning boards when not given."""
-    if workspace_id is not None:
-        board = client.get_board(workspace_id)
-        tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
-        if not any(t.get("id") == task_id for t in tasks):
-            raise click.ClickException(f"Task {task_id} not found in workspace {workspace_id}.")
-        return workspace_id
-    ws_id, match = _find_task_board(client, task_id)
-    if match is None or ws_id is None:
-        raise click.ClickException(f"Task {task_id} not found.")
-    return str(ws_id)
 
 
 REVIEW_STATES = {
@@ -372,11 +449,9 @@ def task_report(
         raise click.ClickException("--limit must be >= 1.")
     try:
         with cli_main.get_client(ctx) as client:
-            ws_id = _resolve_ws_id(client, task_id, workspace_id)
-            fetched = client.get_task_reports(ws_id, task_id)
+            _ws_id, _task, reports = _task_detail_or_scan(client, task_id, workspace_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    reports: List[dict] = fetched if isinstance(fetched, list) else []
     reports = list(reversed(reports))
     if limit is not None:
         reports = reports[:limit]
@@ -401,11 +476,9 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
     """Show a task's review timeline."""
     try:
         with cli_main.get_client(ctx) as client:
-            ws_id = _resolve_ws_id(client, task_id, workspace_id)
-            fetched = client.get_task_reports(ws_id, task_id)
+            _ws_id, _task, reports = _task_detail_or_scan(client, task_id, workspace_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    reports: List[dict] = fetched if isinstance(fetched, list) else []
     rounds = [
         {
             "review_cycle": r.get("review_cycle"),
@@ -862,15 +935,9 @@ def task_accept(
     """Human-accept a task in review and mark it done."""
     try:
         with cli_main.get_client(ctx) as client:
-            if workspace_id is not None:
-                board = client.get_board(workspace_id)
-                tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
-                match = next((t for t in tasks if t.get("id") == task_id), None)
-            else:
-                _, match = _find_task_board(client, task_id)
-            if match is None:
-                where = f" in workspace {workspace_id}" if workspace_id else ""
-                raise click.ClickException(f"Task {task_id} not found{where}.")
+            _ws_id, match, _reports = _task_detail_or_scan(
+                client, task_id, workspace_id, fetch_reports=False
+            )
             status = match.get("status")
             if status not in (WorkspaceTaskStatus.REVIEW.value, WorkspaceTaskStatus.FAILED.value):
                 raise click.ClickException(

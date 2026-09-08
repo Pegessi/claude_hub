@@ -37,6 +37,7 @@ from ..models import (
     WorkspaceEnsure,
     WorkspaceTask,
     WorkspaceTaskCreate,
+    WorkspaceTaskDetail,
     WorkspaceTaskUpdate,
     WorkspaceUpdate,
     redact_workspace_board_for_public,
@@ -300,6 +301,26 @@ async def list_top_level_task_tree(
     """Top-level Tasks in the workspace Task graph."""
     try:
         return workspace_manager.list_top_level_tasks(workspace_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from exc
+
+
+@router.get("/{workspace_id}/tasks/{task_id}", response_model=WorkspaceTaskDetail)
+async def get_task(
+    workspace_id: str,
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> WorkspaceTaskDetail:
+    """Single task with its full report history via O(1) lookup.
+
+    A direct read for callers that need exactly one task (CLI ``task status``,
+    ``task report``, ``task review``): it avoids scanning the whole board and
+    ships only that task's reports rather than the latest report of every task
+    in the workspace. Registered after the static ``/tasks/tree`` route so
+    ``tree`` is not captured as a ``task_id``.
+    """
+    try:
+        return workspace_manager.get_task_detail(workspace_id, task_id)
     except (KeyError, ValueError, RuntimeError) as exc:
         raise _task_public_http(exc) from exc
 

@@ -10,6 +10,13 @@ import click
 
 from claude_hub.models import redact_session_json_payload
 
+# Smallest valid board ``tasks_limit`` (the API rejects 0). CLI reads that only
+# need active tasks and/or sessions — session/agent listings and the workspace
+# summary — pass this to bound Done-task history transfer: the board always
+# returns every non-done (active) task regardless of limit, so this only caps
+# the Done-task page (and the reports shipped for it).
+MIN_BOARD_TASKS_LIMIT = 1
+
 LIFECYCLE_RECIPE = (
     "Lifecycle: one Claude Hub Workspace per Git repo (git common-dir);\n"
     "Git feature worktree != Hub Workspace — run workspace ensure from any checkout.\n"

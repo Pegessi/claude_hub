@@ -384,10 +384,11 @@ def test_task_report_newest_first_and_review_filter(monkeypatch):
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/workspaces/wsA/board":
-            return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "review"}]})
-        assert request.url.path == "/api/workspaces/wsA/tasks/t9/reports"
-        return httpx.Response(200, json=reports)
+        if request.url.path == "/api/workspaces/wsA/tasks/t9":
+            return httpx.Response(
+                200, json={"task": {"id": "t9", "status": "review"}, "reports": reports}
+            )
+        raise AssertionError(f"unexpected path {request.url.path}")
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
@@ -409,8 +410,8 @@ def test_task_report_with_workspace_id_requires_task(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        if request.url.path == "/api/workspaces/wsA/board":
-            return httpx.Response(200, json={"tasks": []})
+        if request.url.path == "/api/workspaces/wsA/tasks/missing":
+            return httpx.Response(404, json={"detail": "task not found"})
         raise AssertionError(f"unexpected path {request.url.path}")
 
     patch_get_client(monkeypatch, handler)
@@ -418,7 +419,7 @@ def test_task_report_with_workspace_id_requires_task(monkeypatch):
     result = runner.invoke(cli, ["task", "report", "missing", "--workspace-id", "wsA"])
     assert result.exit_code != 0
     assert "not found in workspace wsA" in result.output
-    assert calls == ["/api/workspaces/wsA/board"]
+    assert calls == ["/api/workspaces/wsA/tasks/missing"]
 
 
 def test_task_accept_marks_review_task_done(monkeypatch):
@@ -426,17 +427,16 @@ def test_task_accept_marks_review_task_done(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/api/workspaces/wsA/board":
+        if path == "/api/workspaces/wsA/tasks/t9" and request.method == "GET":
             return httpx.Response(
                 200,
                 json={
-                    "tasks": [
-                        {
-                            "id": "t9",
-                            "status": "review",
-                            "human_acceptance_requested_at": "2026-06-28T01:00:00",
-                        }
-                    ]
+                    "task": {
+                        "id": "t9",
+                        "status": "review",
+                        "human_acceptance_requested_at": "2026-06-28T01:00:00",
+                    },
+                    "reports": [],
                 },
             )
         if path == "/api/workspaces/tasks/t9" and request.method == "PATCH":
@@ -455,7 +455,7 @@ def test_task_accept_marks_review_task_done(monkeypatch):
 def test_task_accept_rejects_non_review(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "working"}]})
+        return httpx.Response(200, json={"task": {"id": "t9", "status": "working"}, "reports": []})
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
@@ -467,7 +467,7 @@ def test_task_accept_rejects_non_review(monkeypatch):
 def test_task_accept_rejects_review_without_human_acceptance(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
-        return httpx.Response(200, json={"tasks": [{"id": "t9", "status": "review"}]})
+        return httpx.Response(200, json={"task": {"id": "t9", "status": "review"}, "reports": []})
 
     patch_get_client(monkeypatch, handler)
     runner = CliRunner()
@@ -919,30 +919,27 @@ def test_task_status_surfaces_goal_review_and_acceptance(monkeypatch):
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/workspaces/ws1/board":
+        if request.url.path == "/api/workspaces/ws1/tasks/t1":
             return httpx.Response(
                 200,
                 json={
-                    "tasks": [
-                        {
-                            "id": "t1",
-                            "title": "CLI status",
-                            "status": "review",
-                            "agent_type": "codex",
-                            "task_mode": "reviewed",
-                            "execution_complexity": "simple",
-                            "session_id": "worker",
-                            "review_cycle": 1,
-                            "reviewed_cycle": 1,
-                            "review_attempts": 1,
-                            "human_acceptance_requested_at": "2026-06-29T02:30:00",
-                            "goal_packet": goal_packet,
-                        }
-                    ]
+                    "task": {
+                        "id": "t1",
+                        "title": "CLI status",
+                        "status": "review",
+                        "agent_type": "codex",
+                        "task_mode": "reviewed",
+                        "execution_complexity": "simple",
+                        "session_id": "worker",
+                        "review_cycle": 1,
+                        "reviewed_cycle": 1,
+                        "review_attempts": 1,
+                        "human_acceptance_requested_at": "2026-06-29T02:30:00",
+                        "goal_packet": goal_packet,
+                    },
+                    "reports": reports,
                 },
             )
-        if request.url.path == "/api/workspaces/ws1/tasks/t1/reports":
-            return httpx.Response(200, json=reports)
         raise AssertionError(f"unexpected path {request.url.path}")
 
     patch_get_client(monkeypatch, handler)

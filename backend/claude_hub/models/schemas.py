@@ -1427,6 +1427,20 @@ def redact_workspace_board_for_public(board: WorkspaceBoard) -> WorkspaceBoard:
     return board.model_copy(update={"sessions": redact_managed_sessions_for_public(board.sessions)})
 
 
+class WorkspaceTaskDetail(BaseModel):
+    """Single task with its report history, for direct O(1) task lookup.
+
+    The board carries only the latest report per task across the whole
+    workspace; this endpoint returns one task plus its full report history so
+    CLI status/report/review commands can fetch a single task without pulling
+    the entire board payload.
+    """
+
+    task: WorkspaceTask
+    reports: List[AgentReport]
+    latest_report: Optional[AgentReport] = None
+
+
 class SpawnWorkerRequest(BaseModel):
     """Payload for spawning a worker session for a task."""
 
