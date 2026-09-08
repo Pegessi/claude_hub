@@ -880,6 +880,90 @@ async def test_fire_lock_prevents_concurrent_double_fire(
     assert sent == ["once"]
 
 
+async def test_manual_run_now_double_fire_fires_once(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Two concurrent manual run-now calls on a recurring task fire once.
+
+    The in-lock re-check compares the captured ``run_count``; a recurring
+    task stays enabled after firing, so without the counter check the
+    second manual call would re-fire (the ``next_run_at`` re-check is
+    tick-only and does not apply to the manual path).
+    """
+    workspace = _make_workspace(manager, tmp_path)
+    session = _make_session(workspace)
+    manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
+
+    sent: List[str] = []
+
+    async def fake_tmux_send(tmux_session: str, message: str) -> None:
+        # Yield so the second manual fire reaches the lock before the first
+        # releases it.
+        await asyncio.sleep(0)
+        sent.append(message)
+
+    monkeypatch.setattr(manager, "_send_tmux_message", fake_tmux_send)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="manual double",
+            kind=ScheduledTaskKind.TAB_MESSAGE,
+            interval_seconds=3600,
+            tab_id=session.tab_id,
+            message="fire-me",
+        )
+    )
+
+    now = datetime.now()
+    await asyncio.gather(
+        manager._fire_scheduled_task(task, now, manual=True),
+        manager._fire_scheduled_task(task, now, manual=True),
+    )
+
+    assert task.run_count == 1
+    assert sent == ["fire-me"]
+    # A recurring task stays enabled after firing.
+    assert task.enabled is True
+
+
+def test_update_allows_toggle_when_tab_deleted(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A task whose tab was deleted can still be disabled via update.
+
+    The tab-existence re-check is skipped when ``tab_id`` is unchanged, so
+    the enable/disable toggle (and other non-tab edits) don't raise
+    "Terminal tab not found". Changing the tab to a live one still
+    validates.
+    """
+    workspace = _make_workspace(manager, tmp_path)
+    session = _make_session(workspace)
+    manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="stuck",
+            kind=ScheduledTaskKind.TAB_MESSAGE,
+            interval_seconds=3600,
+            tab_id=session.tab_id,
+            message="hi",
+        )
+    )
+
+    # The target tab is gone now.
+    _stub_known_tabs(monkeypatch)
+
+    # Disabling via the toggle (tab_id unchanged) must succeed.
+    updated = manager.update_scheduled_task(task.id, ScheduledTaskUpdate(enabled=False))
+    assert updated.enabled is False
+
+    # Re-pointing to a still-missing tab is rejected.
+    with pytest.raises(ValueError, match="not found"):
+        manager.update_scheduled_task(task.id, ScheduledTaskUpdate(tab_id="also-gone"))
+
+
 def test_new_session_rejects_recurring_schedule(manager: WorkspaceManager, tmp_path: Path) -> None:
     workspace = _make_workspace(manager, tmp_path)
     # A recurring new_session task would leak one ephemeral session per fire;
