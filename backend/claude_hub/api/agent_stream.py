@@ -1253,6 +1253,93 @@ async def cancel_tab_stream_turn(
     return await _cancel_native_turn(session, _get_tab_tailer_manager())
 
 
+class AgentStreamEditResendRequest(BaseModel):
+    """Request body for editing a previously sent user message and rerunning."""
+
+    text: str = Field(..., min_length=1)
+    client_turn_id: str
+    turn_id: str
+
+    @model_validator(mode="after")
+    def _require_fields(self) -> "AgentStreamEditResendRequest":
+        if not self.text.strip():
+            raise ValueError("text must not be empty")
+        if not self.client_turn_id.strip():
+            raise ValueError("client_turn_id is required")
+        if not self.turn_id.strip():
+            raise ValueError("turn_id is required")
+        return self
+
+
+def _map_edit_resend_exception(exc: Exception) -> HTTPException:
+    """Map edit-resend errors to explicit HTTP status codes.
+
+    ``ValueError`` (turn not found, bad input) → 400.
+    ``TranscriptForkError`` (transcript cannot be forked) → 409.
+    ``RuntimeError`` (no adapter, transport died) → 503.
+    """
+    from ..services.agent_stream.transcript_fork import TranscriptForkError
+
+    if isinstance(exc, TranscriptForkError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, RuntimeError):
+        return HTTPException(status_code=503, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/sessions/{managed_session_id}/stream/edit-resend")
+async def edit_resend_stream(
+    managed_session_id: str,
+    payload: AgentStreamEditResendRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Edit a previously sent user message and rerun the conversation from there.
+
+    Truncates both the Hub event store and the provider transcript at the
+    identified turn, restarts the native transport, and delivers the edited
+    text as a new turn.
+    """
+    session = _session_or_404(managed_session_id)
+    manager = _get_tailer_manager()
+    try:
+        await manager.edit_resend(
+            session,
+            payload.text,
+            payload.client_turn_id,
+            payload.turn_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _map_edit_resend_exception(exc) from exc
+    return {"ok": True}
+
+
+@router.post("/tabs/{tab_id}/stream/edit-resend")
+async def edit_resend_tab_stream(
+    tab_id: str,
+    payload: AgentStreamEditResendRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Edit-resend for a direct Agent tab."""
+    session = _terminal_tab_session_or_404(tab_id)
+    manager = _get_tab_tailer_manager()
+    try:
+        await manager.edit_resend(
+            session,
+            payload.text,
+            payload.client_turn_id,
+            payload.turn_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _map_edit_resend_exception(exc) from exc
+    return {"ok": True}
+
+
 @router.get("/sessions/{managed_session_id}/stream/attachments/{attachment_id}")
 async def get_session_attachment(
     managed_session_id: str,

@@ -47,8 +47,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { MarkdownBlockCache } from '@/utils/markdownBlocks'
+import { ensureHighlighter, highlightReady } from '@/utils/codeHighlight'
 
 const props = withDefaults(defineProps<{
   text?: string | null
@@ -72,7 +73,19 @@ const emit = defineEmits<{
 // tail (the still-growing last block) is re-rendered on each delta.
 const blockCache = new MarkdownBlockCache()
 
+// Kick off lazy loading of the syntax highlighter.  When the chunk
+// finishes loading, ``highlightReady`` flips and the ``blocks`` computed
+// re-evaluates (it depends on ``highlightReady``), causing the cache to
+// invalidate and code blocks to re-render with real highlighting.
+onMounted(() => {
+  ensureHighlighter()
+})
+
 const blocks = computed(() => {
+  // Depend on highlightReady so the computed re-evaluates when the
+  // lazy-loaded highlighter finishes loading.
+  void highlightReady.value
+
   const source = props.text?.trim() || ''
   if (!source) {
     blockCache.clear()
@@ -201,6 +214,84 @@ function handleClick(event: MouseEvent) {
   background: transparent;
   padding: 0;
   white-space: pre;
+}
+
+/* ---- Syntax highlighting (highlight.js token → CSS variable) ---- */
+
+.markdown-block :deep(.hljs-keyword),
+.markdown-block :deep(.hljs-selector-tag),
+.markdown-block :deep(.hljs-built_in),
+.markdown-block :deep(.hljs-name),
+.markdown-block :deep(.hljs-tag) {
+  color: var(--ch-code-keyword);
+}
+
+.markdown-block :deep(.hljs-string),
+.markdown-block :deep(.hljs-regexp),
+.markdown-block :deep(.hljs-code),
+.markdown-block :deep(.hljs-template-variable) {
+  color: var(--ch-code-string);
+}
+
+.markdown-block :deep(.hljs-title),
+.markdown-block :deep(.hljs-title.function_),
+.markdown-block :deep(.hljs-section),
+.markdown-block :deep(.hljs-formula) {
+  color: var(--ch-code-function);
+}
+
+.markdown-block :deep(.hljs-number),
+.markdown-block :deep(.hljs-literal),
+.markdown-block :deep(.hljs-symbol),
+.markdown-block :deep(.hljs-bullet) {
+  color: var(--ch-code-number);
+}
+
+.markdown-block :deep(.hljs-comment),
+.markdown-block :deep(.hljs-quote),
+.markdown-block :deep(.hljs-link) {
+  color: var(--ch-code-comment);
+}
+
+.markdown-block :deep(.hljs-type),
+.markdown-block :deep(.hljs-class .hljs-title) {
+  color: var(--ch-code-builtin);
+}
+
+.markdown-block :deep(.hljs-attr),
+.markdown-block :deep(.hljs-attribute),
+.markdown-block :deep(.hljs-variable) {
+  color: var(--ch-code-attr);
+}
+
+.markdown-block :deep(.hljs-selector-id),
+.markdown-block :deep(.hljs-selector-class),
+.markdown-block :deep(.hljs-selector-attr),
+.markdown-block :deep(.hljs-selector-pseudo) {
+  color: var(--ch-code-selector);
+}
+
+.markdown-block :deep(.hljs-meta),
+.markdown-block :deep(.hljs-meta .hljs-keyword) {
+  color: var(--ch-code-meta);
+}
+
+.markdown-block :deep(.hljs-deletion) {
+  color: var(--ch-code-deletion);
+}
+
+.markdown-block :deep(.hljs-addition) {
+  color: var(--ch-code-addition);
+}
+
+.markdown-block :deep(.hljs-emphasis) {
+  color: var(--ch-code-emphasis);
+  font-style: italic;
+}
+
+.markdown-block :deep(.hljs-strong) {
+  color: var(--ch-code-strong);
+  font-weight: 700;
 }
 
 .markdown-block :deep(blockquote) {
