@@ -326,6 +326,29 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
+  async function forkTab(tabId: string, ordinal: number) {
+    isLoading.value = true
+    try {
+      const response = await fetch(`${API_BASE}/tabs/${tabId}/fork`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ordinal }),
+      })
+      if (!response.ok) throw new Error('Failed to fork tab')
+      const newTab = await response.json()
+      tabs.value.push(newTab)
+      activeTabId.value = newTab.id
+      if (activePaneId.value) {
+        assignTabToPane(newTab.id, activePaneId.value)
+      }
+      return newTab
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   async function updateTab(tabId: string, data: TerminalTabUpdate) {
     isLoading.value = true
     try {
@@ -474,6 +497,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     stopAgentStatusPolling,
     createTab,
     duplicateTab,
+    forkTab,
     updateTab,
     deleteTab,
     switchEnv,

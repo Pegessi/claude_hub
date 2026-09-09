@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### feat: Fork a new chat tab from a specific turn
+
+- **What.** Each turn in a Chat tab's structured pane now has a hover-revealed
+  "Fork from here" action. It creates a new tab that deep-copies the source
+  tab's structured history up to and including that turn (0-based ordinal) and
+  starts a fresh provider conversation with the same launch configuration.
+- **How.** `POST /tabs/{tab_id}/fork` (body `{ordinal}`) reads the source
+  tab's stream events, groups them into turns via
+  `_group_event_turn_end_indices` (mirrors the frontend's `resolveTurn`
+  grouping), truncates at the ordinal, creates the forked tab, and rewrites the
+  copied events to the new tab's identity. Returns 404 for a missing source tab
+  and 400 for an out-of-range ordinal.
+- **Provenance.** The forked tab records `forked_from_tab_id` and
+  `forked_from_ordinal` for traceability.
+- **Trade-off.** The forked tab shows the copied history but the provider
+  (Claude/Cursor) starts without conversation memory — provider session forking
+  is only natively supported by Codex, so this keeps the feature uniform across
+  providers.
+
 ### fix: Chat tab env overridden by user-level settings.json (relay 403)
 
 - **Root cause.** Chat sessions spawn a per-turn one-shot

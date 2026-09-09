@@ -551,6 +551,20 @@ class TerminalTab(TerminalTabBase):
             "of a UUID."
         ),
     )
+    forked_from_tab_id: Optional[str] = Field(
+        None,
+        description=(
+            "Source tab id when this tab was forked from a specific turn of "
+            "another conversation; None for tabs started from scratch."
+        ),
+    )
+    forked_from_ordinal: Optional[int] = Field(
+        None,
+        description=(
+            "0-based ordinal of the source turn this tab was forked from "
+            "(inclusive); None for tabs started from scratch."
+        ),
+    )
 
     class Config:
         from_attributes = True

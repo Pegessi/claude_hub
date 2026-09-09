@@ -4505,3 +4505,72 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
         assert (
             proc._shell_explicitly_provided is expected
         ), f"{tab_id}: stable reload must preserve shell_explicitly_provided={expected}"
+
+
+@pytest.mark.asyncio
+async def test_fork_tab_copies_history_up_to_ordinal(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    # ``import ... as workspace_manager`` would resolve to the singleton
+    # instance (the services package rebinds that name); importlib returns the
+    # module object so monkeypatching STATE_ROOT sticks for the store.
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12020
+    manager.processes = {}
+    manager._tab_order = []
+
+    async def fake_start(self: TTYDProcess) -> None:
+        return None
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return False
+
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+
+    source = await manager.create_tab(
+        name="Source",
+        shell="/bin/zsh",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+
+    def make_event(turn_id: str, text: str) -> AgentStreamEvent:
+        return AgentStreamEvent(
+            stream_sequence=0,
+            session_id=f"terminal-tab-{source.id}",
+            tab_id=source.id,
+            agent_type=AgentType.CLAUDE,
+            type=AgentStreamEventType.TURN_STARTED,
+            turn_id=turn_id,
+            payload={"summary": text},
+            created_at=datetime.now(timezone.utc),
+        )
+
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{source.id}")
+    await store.append(make_event("turn-a", "first message"))
+    await store.append(make_event("turn-b", "second message"))
+
+    # Fork from turn 0 (inclusive): only the first turn is copied.
+    forked = await manager.fork_tab(source.id, 0)
+    assert forked is not None
+    assert forked.forked_from_tab_id == source.id
+    assert forked.forked_from_ordinal == 0
+
+    forked_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{forked.id}")
+    page = await forked_store.read_since(-1, limit=100)
+    assert len(page.events) == 1
+    assert page.events[0].turn_id == "turn-a"
+    assert page.events[0].tab_id == forked.id
+
+    # Out-of-range ordinal raises ValueError; missing source returns None.
+    with pytest.raises(ValueError):
+        await manager.fork_tab(source.id, 99)
+    assert await manager.fork_tab("nonexistent-tab", 0) is None
