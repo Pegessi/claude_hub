@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### fix: Chat tab env overridden by user-level settings.json (relay 403)
+
+- **Root cause.** Chat sessions spawn a per-turn one-shot
+  (`claude --print --input-format stream-json ...`) whose tab env (provider
+  base URL + token) only arrived via the **process environment** — the
+  lowest-precedence env source in Claude Code. Any env block in user-level
+  `~/.claude/settings.json` (e.g. a global internal-relay override) silently
+  overrode the tab's provider settings, so a tab configured for a custom
+  endpoint (e.g. DeepSeek) actually called the relay with that endpoint's
+  model name → `403 Access denied for model`. Terminal tabs were unaffected
+  because their launch command passes `--settings <tab>.settings.json`, a
+  CLI-precedence settings source that beats user-level settings.
+- **Fix.** Chat one-shot commands now append the **same** per-tab settings
+  file (`--settings <runtime_home>/launch_env/<tab_id>.settings.json`) when it
+  exists (`ClaudeNativeSession._build_command`). The file is written on every
+  env mutation path — tab creation, restore from `tabs.json`, `switch_env`
+  (including the no-respawn Chat branch), and `update_tab` — via a shared
+  `TTYDProcess._write_launch_settings_file` helper (chmod 600, guarded to
+  local Claude tabs with env). Existing tabs are self-healing: the next
+  `switch_env` or backend restart (restore path) regenerates the file.
+- **Tests.** Native command building includes/skips `--settings` by file
+  presence; Chat `switch_env` refreshes the file; Chat tab creation writes it;
+  remote and non-Claude tabs never write it.
+
 ### fix: AskUserQuestion option chips unclickable (v-memo skipped selection re-render)
 
 - **Root cause.** `StructuredPane.vue` memoized each timeline turn with

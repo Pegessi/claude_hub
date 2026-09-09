@@ -2926,6 +2926,82 @@ async def test_switch_env_chat_toggles_solo_mode_when_provided(
 
 
 @pytest.mark.asyncio
+async def test_switch_env_chat_session_refreshes_launch_settings_file(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    # The CHAT branch skips the tmux respawn, but must still refresh the
+    # per-tab settings file the native transport passes via --settings so the
+    # next one-shot turn picks up the new env.
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    process = TTYDProcess(
+        tab_id="tab-chat-switch-write",
+        port=12397,
+        name="Chat Switch Env Write",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        env=dict(DEFAULT_CLAUDE_LAUNCH_ENV),
+    )
+
+    await process.switch_env(
+        {**dict(DEFAULT_CLAUDE_LAUNCH_ENV), "ANTHROPIC_MODEL": "claude-opus-4-8"}
+    )
+
+    settings_file = tmp_path / "tab-chat-switch-write.settings.json"
+    assert settings_file.is_file()
+    payload = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert payload["env"]["ANTHROPIC_MODEL"] == "claude-opus-4-8"
+    assert payload["env"]["CLAUDE_HUB_TAB_ID"] == "tab-chat-switch-write"
+    assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600
+
+
+def test_chat_tab_creation_writes_launch_settings_file(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    # A CHAT tab must have its per-tab settings file from creation so the very
+    # first one-shot turn already carries the tab env at CLI precedence.
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    TTYDProcess(
+        tab_id="tab-chat-create",
+        port=12398,
+        name="Chat Create",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        env=dict(DEFAULT_CLAUDE_LAUNCH_ENV),
+    )
+
+    settings_file = tmp_path / "tab-chat-create.settings.json"
+    assert settings_file.is_file()
+    payload = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert payload["env"]["ANTHROPIC_BASE_URL"] == DEFAULT_CLAUDE_LAUNCH_ENV["ANTHROPIC_BASE_URL"]
+    assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600
+
+
+def test_remote_and_terminal_tabs_do_not_write_launch_settings_file(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    # Remote tabs receive env over the SSH launch path, not a local settings
+    # file; non-Claude tabs have no Claude settings file either.
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", tmp_path)
+    TTYDProcess(
+        tab_id="tab-remote-no-write",
+        port=12399,
+        name="Remote No Write",
+        agent_type=AgentType.CLAUDE,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="prof",
+        env=dict(DEFAULT_CLAUDE_LAUNCH_ENV),
+    )
+    TTYDProcess(
+        tab_id="tab-terminal-agent-no-write",
+        port=12400,
+        name="Terminal Agent No Write",
+        agent_type=AgentType.TERMINAL,
+        env={"FOO": "bar"},
+    )
+
+    assert not (tmp_path / "tab-remote-no-write.settings.json").exists()
+    assert not (tmp_path / "tab-terminal-agent-no-write.settings.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_switch_env_non_solo_respawn_command(monkeypatch: MonkeyPatch, tmp_path) -> None:
     process = _make_claude_process(monkeypatch, solo_mode=False, tmp_path=tmp_path)
     new_env = {

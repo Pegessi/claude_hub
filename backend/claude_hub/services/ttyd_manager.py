@@ -1597,6 +1597,13 @@ class TTYDProcess:
         if self.agent_type != AgentType.CLAUDE:
             return
         self._normalize_volcengine_coding_plan_model()
+        # Keep the per-tab settings file fresh on every env mutation path
+        # (create, restore from tabs.json, switch_env, update_tab). It is the
+        # CLI-precedence carrier for this tab's env: both terminal launches
+        # and Chat one-shot turns (ClaudeNativeSession._build_command) pass it
+        # via ``--settings`` so the tab env beats user-level
+        # ``~/.claude/settings.json`` env overrides.
+        self._write_launch_settings_file()
 
     def _normalize_volcengine_coding_plan_model(self) -> None:
         base_url = self.env.get("ANTHROPIC_BASE_URL", "")
@@ -1771,11 +1778,21 @@ asyncio.run(_main())
         os.chmod(script_path, 0o600)
         return f"/bin/sh {shlex.quote(str(script_path))} {shlex.quote(command)}"
 
-    def _claude_settings_arg(self) -> str:
+    def _write_launch_settings_file(self) -> Optional[Path]:
+        """Persist the per-tab Claude settings file carrying this tab's env.
+
+        Claude Code applies ``env`` from settings files at higher precedence
+        than the process environment, and user-level ``~/.claude/settings.json``
+        in turn overrides the inherited process env. Terminal launches pass
+        this file via ``--settings`` so the tab env wins; the native Chat
+        transport reuses the same file for its one-shot turns. The write is
+        guarded like ``_claude_settings_arg`` (Claude + local + env present)
+        and chmod 600 because it may contain API tokens.
+        """
         if self.agent_type != AgentType.CLAUDE or not self.env:
-            return ""
+            return None
         if self.target != ExecutionTarget.LOCAL:
-            return ""
+            return None
         LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
         settings_path = LAUNCH_ENV_DIR / f"{self.tab_id}.settings.json"
         settings_path.write_text(
@@ -1783,6 +1800,12 @@ asyncio.run(_main())
             encoding="utf-8",
         )
         os.chmod(settings_path, 0o600)
+        return settings_path
+
+    def _claude_settings_arg(self) -> str:
+        settings_path = self._write_launch_settings_file()
+        if settings_path is None:
+            return ""
         return f" --settings {shlex.quote(str(settings_path))}"
 
     def _claude_bypass_acceptance_arg(self) -> str:
