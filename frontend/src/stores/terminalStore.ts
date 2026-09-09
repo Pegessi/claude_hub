@@ -326,25 +326,58 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
+  const FORK_TIMEOUT_MS = 30000
+
   async function forkTab(tabId: string, ordinal: number) {
     isLoading.value = true
+    // Capture the source tab BEFORE the await. The fork is a background job:
+    // if the user switches to another tab/pane while it is in flight, we must
+    // not yank them back to the fork when it resolves (their explicit switch
+    // would be silently overridden).
+    const sourceTabId = tabId
+    // Bound the request so a hung connection cannot leave forkingOrdinal (and
+    // the fork buttons) stuck forever.
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), FORK_TIMEOUT_MS)
     try {
       const response = await fetch(`${API_BASE}/tabs/${tabId}/fork`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ordinal }),
+        signal: controller.signal,
       })
       if (!response.ok) throw new Error('Failed to fork tab')
       const newTab = await response.json()
       tabs.value.push(newTab)
-      activeTabId.value = newTab.id
-      if (activePaneId.value) {
-        assignTabToPane(newTab.id, activePaneId.value)
+      // Is the user still looking at the source tab? The active pane's tab is
+      // the ground truth for what is on screen right now. If yes → auto-switch
+      // to the fork (legacy behavior). If they switched away → leave them
+      // where they are and just notify.
+      const activePane = panes.value.find(p => p.id === activePaneId.value)
+      const stillOnSource = activePane?.tabId === sourceTabId
+      if (stillOnSource) {
+        activeTabId.value = newTab.id
+        if (activePaneId.value) {
+          assignTabToPane(newTab.id, activePaneId.value)
+        }
+      } else {
+        pushNotification({
+          type: 'success',
+          message: `Fork created: ${newTab.name ?? 'new fork'}`,
+          autoDismissMs: 5000,
+        })
       }
       return newTab
     } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'Unknown error')
+      // We only abort from the timeout timer above, so an AbortError here is a
+      // timeout — surface a clearer message than the generic abort text.
+      if (e instanceof Error && e.name === 'AbortError') {
+        notifyError('Fork timed out — please try again')
+      } else {
+        notifyError(e instanceof Error ? e.message : 'Unknown error')
+      }
     } finally {
+      window.clearTimeout(timer)
       isLoading.value = false
     }
   }
