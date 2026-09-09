@@ -5,6 +5,31 @@
 
 ## Unreleased
 
+### fix: edit-resend data-loss — snapshot/restore, per-session lock, content-based turn mapping
+
+Hardens the edit-and-resend path against permanent conversation loss:
+
+- **Snapshot/restore (CRITICAL).** Before truncating either the Hub event
+  store or the provider transcript, both files are copied to `.edit-bak`
+  sidecars. The truncate→fork→send sequence is wrapped in a try/except; on
+  any exception both files are restored from the snapshots (byte-identical
+  to before the edit), the sidecars are cleaned up, and the original error
+  is re-raised. On success the sidecars are discarded. Invariant: after a
+  failed edit-resend the conversation is byte-identical to before the edit.
+- **Per-session lock (HIGH).** An `asyncio.Lock` keyed by session id is held
+  across the entire edit-resend. Concurrent edits wait (not fail fast) so
+  they never interleave; the second edit proceeds once the first releases
+  the lock.
+- **Content-based turn mapping (HIGH).** The previous code assumed the Hub
+  `turn_started` count equals the provider user-message count, which breaks
+  when a turn's provider delivery failed (Hub has the turn, the transcript
+  does not), shifting the fork onto the wrong message. The edited turn is
+  now matched to a provider user message by *content* (the turn's summary
+  text), disambiguated by ordinal. If no provider message matches, the
+  edit fails fast with a 409 before any truncation rather than guessing.
+
+## Unreleased
+
 ### feat: edit-and-resend user messages + code block syntax highlighting
 
 Two features for the structured Chat UI:
