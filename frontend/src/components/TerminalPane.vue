@@ -68,12 +68,19 @@
     </div>
 
     <!-- Only top-level Chat sessions use the native structured endpoint.
-         Workspace-managed agents always remain on their Terminal surface. -->
+         Workspace-managed agents always remain on their Terminal surface.
+         KeepAlive caches one StructuredPane per chat tab (keyed by tabId) so
+         switching tabs preserves scroll, draft, attachments, and expand state. -->
     <div
       v-if="pane.tabId && isChatSession"
       class="pane-structured"
     >
-      <StructuredPane :tab-id="pane.tabId" />
+      <KeepAlive :max="MAX_CACHED_CHAT_PANES">
+        <StructuredPane
+          :key="pane.tabId"
+          :tab-id="pane.tabId"
+        />
+      </KeepAlive>
     </div>
   </div>
 </template>
@@ -110,6 +117,12 @@ const isManagedTab = computed(() => Boolean(paneTab.value?.workspace_role))
 const isChatSession = computed(() =>
   paneTab.value?.session_kind === 'chat' && !isManagedTab.value
 )
+
+// Upper bound on cached StructuredPane instances per pane. Each entry holds a
+// full conversation DOM + composer state, so this stays modest; the global
+// history LRU (agentStreamHistoryCache) is the larger safety net for panes
+// evicted from this cache.
+const MAX_CACHED_CHAT_PANES = 8
 
 const sessionMark = computed(() => {
   if (agentType.value === 'claude') return 'C'
