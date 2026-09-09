@@ -62,7 +62,9 @@ from .native import (
     parse_ask_question_response,
 )
 from .redaction import redact_event
+from .registry import get_adapter_for_session
 from .store import AgentStreamStore
+from .transcript_fork import TranscriptForkError, fork_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -1672,6 +1674,74 @@ class TailerManager:
         """Cancel the active native turn for ``session``, if any."""
         tailer = await self._get_or_create(session)
         return await tailer.cancel_turn()
+
+    async def edit_resend(
+        self,
+        session: ManagedSession,
+        text: str,
+        client_turn_id: str,
+        turn_id: str,
+    ) -> None:
+        """Edit a previously sent message and rerun the conversation from there.
+
+        Truncates both planes at the turn identified by ``turn_id``:
+
+        1. **Hub event store** — events from the turn's ``turn_started``
+           onward are removed.
+        2. **Provider transcript** — the JSONL file is forked so the first
+           ``turn_index`` genuine user messages are preserved.
+
+        The native transport is then restarted (it reads the forked
+        transcript and resumes via ``--resume`` / ``thread/resume``) and the
+        edited ``text`` is delivered as the new turn.
+
+        Args:
+            session: The managed session.
+            text: The edited message text.
+            client_turn_id: Frontend-generated stable id for the new turn.
+            turn_id: The ``turn_id`` of the original turn being edited.
+
+        Raises:
+            ValueError: If the turn is not found in the event store.
+            TranscriptForkError: If the provider transcript cannot be forked.
+            RuntimeError: If no structured adapter exists for the session.
+        """
+        adapter = get_adapter_for_session(session)
+        if adapter is None:
+            raise RuntimeError("no structured adapter for session")
+
+        store = self.get_store(session.workspace_id, session.id)
+        turn_info = await store.find_turn(turn_id)
+        if turn_info is None:
+            raise ValueError(f"turn {turn_id!r} not found in event store")
+        stream_seq, turn_index = turn_info
+
+        # Stop the current tailer so it cannot write to the store during
+        # truncation.  Pop under the lock, then stop outside (stop() is async).
+        async with self._lock:
+            previous = self._tailers.pop(session.id, None)
+        if previous is not None:
+            await previous.stop()
+
+        # Truncate the Hub event store.
+        await store.truncate_before(stream_seq)
+
+        # Fork the provider transcript.  If this fails, restart the tailer
+        # to restore service (the store is already truncated, so the user
+        # gets a consistent Hub view even though the provider transcript
+        # was not modified).
+        try:
+            fork_transcript(session, adapter, turn_index)
+        except TranscriptForkError:
+            invalidate_source(session.id)
+            await self._get_or_create(session)
+            raise
+
+        # Restart the tailer with a fresh transport that reads the forked
+        # transcript, then deliver the edited text.
+        invalidate_source(session.id)
+        tailer = await self._get_or_create(session)
+        await tailer.send_message(text, [], client_turn_id)
 
     async def set_mode(self, session: ManagedSession, mode: str) -> None:
         """Set the existing native owner's mode for subsequent turns."""

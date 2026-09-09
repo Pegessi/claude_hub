@@ -314,3 +314,79 @@ class AgentStreamStore:
         except OSError:
             return None
         return last
+
+    async def truncate_before(self, sequence: int) -> int:
+        """Remove all events with ``stream_sequence >= sequence``.
+
+        Used by edit-resend to discard the event suffix from the edited
+        turn onward.  Returns the number of events removed.
+        """
+        async with self._lock:
+            async with self._read_lock:
+                if not self._path.exists():
+                    self._next_seq = 0
+                    return 0
+
+                kept: List[str] = []
+                removed = 0
+
+                def _read() -> None:
+                    nonlocal removed
+                    with self._path.open("r", encoding="utf-8") as f:
+                        for line in f:
+                            stripped = line.strip()
+                            if not stripped:
+                                continue
+                            try:
+                                obj = json.loads(stripped)
+                                seq = obj.get("stream_sequence")
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                            if isinstance(seq, int) and seq >= sequence:
+                                removed += 1
+                                continue
+                            kept.append(stripped)
+
+                await asyncio.to_thread(_read)
+                await asyncio.to_thread(self._write_all, kept)
+                self._next_seq = len(kept)
+                self._reset_read_index()
+                return removed
+
+    async def find_turn(self, turn_id: str) -> Optional[Tuple[int, int]]:
+        """Locate a turn by its ``turn_id``.
+
+        Returns ``(stream_sequence, turn_index)`` where ``turn_index`` is the
+        0-based count of ``turn_started`` events up to and including the
+        matching one.  This index maps the Hub turn to the corresponding
+        user message in the provider transcript.
+
+        Returns ``None`` if no ``turn_started`` event carries ``turn_id``.
+        """
+        if not self._path.exists():
+            return None
+        result: Optional[Tuple[int, int]] = None
+
+        def _read() -> None:
+            nonlocal result
+            turn_count = 0
+            with self._path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        obj = json.loads(stripped)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if obj.get("type") != "turn_started":
+                        continue
+                    turn_count += 1
+                    if obj.get("turn_id") == turn_id:
+                        seq = obj.get("stream_sequence")
+                        if isinstance(seq, int):
+                            result = (seq, turn_count - 1)
+                        return
+
+        await asyncio.to_thread(_read)
+        return result

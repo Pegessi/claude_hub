@@ -1,5 +1,6 @@
 import { marked, type Token, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
+import { highlightVersion, renderCodeBlockHtml } from '@/utils/codeHighlight'
 
 /**
  * Marked render options.
@@ -53,8 +54,17 @@ export function splitBlockTokens(source: string): Token[] {
 
 /**
  * Render a single block token to sanitized HTML.
+ *
+ * Code tokens are handled by the syntax highlighter (``renderCodeBlockHtml``)
+ * rather than marked's own renderer, so that hljs spans are part of the
+ * HTML string that DOMPurify sanitises.  All other token types use marked's
+ * parser as before.
  */
 export function renderBlockToken(token: Token): string {
+  if (token.type === 'code') {
+    const codeToken = token as Tokens.Code
+    return DOMPurify.sanitize(renderCodeBlockHtml(codeToken.text, codeToken.lang || ''))
+  }
   return DOMPurify.sanitize(marked.parser([token], MARKED_OPTIONS))
 }
 
@@ -182,6 +192,10 @@ export class MarkdownBlockCache {
   /** The linkMarkdownPaths mode the cache was populated for. If the mode
    *  changes, the cache is invalidated. */
   private linkMode: boolean | null = null
+  /** The highlight.js version the cache was populated for.  Bumped once
+   *  when the lazy-loaded highlighter finishes loading; the cache is
+   *  invalidated so code blocks are re-rendered with real highlighting. */
+  private hlVersion: number | null = null
 
   private cacheKey(raw: string, linkMarkdownPaths: boolean, listLoose?: boolean): string {
     const link = linkMarkdownPaths ? 'l' : 'n'
@@ -215,6 +229,13 @@ export class MarkdownBlockCache {
       this.cache.clear()
     }
     this.linkMode = linkMarkdownPaths
+
+    // Invalidate the cache if the highlighter version changed (the
+    // lazy-loaded highlight.js chunk finished loading since last render).
+    if (this.hlVersion !== null && this.hlVersion !== highlightVersion.value) {
+      this.cache.clear()
+    }
+    this.hlVersion = highlightVersion.value
 
     const tokens = splitBlockTokens(source)
     if (tokens.length === 0) return []
@@ -334,6 +355,7 @@ export class MarkdownBlockCache {
   clear(): void {
     this.cache.clear()
     this.linkMode = null
+    this.hlVersion = null
   }
 
   /** Check whether a block's raw text is cached. */

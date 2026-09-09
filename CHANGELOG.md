@@ -5,6 +5,36 @@
 
 ## Unreleased
 
+### feat: edit-and-resend user messages + code block syntax highlighting
+
+Two features for the structured Chat UI:
+
+- **Edit resend.** Users can edit one of their already-sent user messages
+  and rerun the conversation from that point. Hovering a user bubble reveals
+  an edit button; clicking it swaps the bubble for an inline textarea with
+  Resend / Cancel. On resend, the backend truncates the event store at the
+  target turn, forks the provider's transcript file (preserving records
+  before the edited user message), restarts the transport with a fresh
+  session, and sends the edited text — the conversation reruns from the
+  edited point. Provider-specific user-message predicates handle Claude
+  (JSONL), Codex (rollout JSONL), and Cursor (JSONL) transcript formats.
+  API: `POST /sessions/{id}/stream/edit-resend` and
+  `POST /tabs/{id}/stream/edit-resend`.
+- **Syntax highlighting.** Markdown code blocks now render with highlight.js.
+  The highlighter is lazy-loaded via a dynamic `import()` so it never
+  contributes to the first-load bundle (the first-load JS grew by only
+  ~1.6 kB gzip; the ~55 kB gzip highlighter chunk loads on demand). When
+  the chunk finishes loading, a version counter bumps and the per-block
+  render cache invalidates, re-rendering code blocks with real highlighting.
+  The `common` bundle ships ~40 languages (JavaScript, TypeScript, Python,
+  Bash, JSON, YAML, CSS, XML, SQL, Go, Rust, Java, C/C++, Dockerfile,
+  Diff, …). Language aliases (js, ts, py, sh, yml, html, md, etc.) are
+  normalized to canonical highlight.js names. Highlighted markup is
+  DOMPurify-compatible (hljs spans survive sanitization). Token colors
+  are mapped to CSS variables for dark/light theme support.
+
+## Unreleased
+
 ### fix: Chat tab env overridden by user-level settings.json (relay 403)
 
 - **Root cause.** Chat sessions spawn a per-turn one-shot
