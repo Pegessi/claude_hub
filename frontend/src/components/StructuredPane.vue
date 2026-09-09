@@ -65,11 +65,23 @@
         </div>
 
         <div
-          v-for="turn in turns"
+          v-for="(turn, turnIndex) in turns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn)]"
+          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), forkingOrdinal === turnIndex]"
           class="structured-turn"
         >
+          <!-- Hover-revealed per-turn actions. -->
+          <div class="turn-actions">
+            <button
+              type="button"
+              class="turn-fork-button"
+              :disabled="forkingOrdinal !== null"
+              title="Fork a new chat from this turn"
+              @click="forkFromTurn(turnIndex)"
+            >
+              {{ forkingOrdinal === turnIndex ? 'Forking…' : 'Fork from here' }}
+            </button>
+          </div>
           <!-- A right-aligned user bubble and a left-aligned assistant bubble make
                this the same conversation as the terminal, not terminal text
                pasted into a second surface. -->
@@ -724,6 +736,22 @@ const turns = computed(() => authoritativeTurns.value.map(turn => ({
     turn.errors.length === 0 &&
     turn.statuses.length === 0,
 })))
+
+// ── Fork from turn ──────────────────────────────────────────────────────────
+// The turn index in the v-for is the 0-based ordinal: the reducer groups
+// events into turns in the same order the backend's
+// ``_group_event_turn_end_indices`` does, so the indices line up.
+const forkingOrdinal = ref<number | null>(null)
+
+async function forkFromTurn(ordinal: number) {
+  if (forkingOrdinal.value !== null) return
+  forkingOrdinal.value = ordinal
+  try {
+    await terminalStore.forkTab(props.tabId, ordinal)
+  } finally {
+    forkingOrdinal.value = null
+  }
+}
 
 type PendingTurn = {
   key: string
@@ -1845,6 +1873,43 @@ onUnmounted(() => {
 
 .structured-turn {
   margin-bottom: 16px;
+  position: relative;
+}
+
+.turn-actions {
+  position: absolute;
+  top: -10px;
+  right: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.structured-turn:hover .turn-actions,
+.turn-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.turn-fork-button {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  background: var(--ch-color-bg-elevated, canvas);
+  color: var(--ch-color-text-subtle, currentColor);
+  cursor: pointer;
+}
+
+.turn-fork-button:hover:not(:disabled) {
+  border-color: var(--ch-color-accent);
+  color: var(--ch-color-accent);
+}
+
+.turn-fork-button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .structured-turn--pending {

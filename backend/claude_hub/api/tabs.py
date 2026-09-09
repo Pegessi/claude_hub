@@ -25,6 +25,12 @@ class TabOrderUpdate(BaseModel):
     tab_ids: List[str]
 
 
+class ForkTabRequest(BaseModel):
+    """Body for forking a tab from a specific turn."""
+
+    ordinal: int
+
+
 @router.get("", response_model=List[TerminalTab])
 async def list_tabs(current_user: User = Depends(get_current_user)) -> List[TerminalTab]:
     """List all terminal tabs."""
@@ -84,6 +90,31 @@ async def duplicate_tab(
     """Duplicate a terminal tab, preserving launch configuration like solo mode."""
     logger.info(f"Duplicating tab {tab_id}, user={current_user.email}")
     tab = await ttyd_manager.duplicate_tab(tab_id)
+    if not tab:
+        raise HTTPException(status_code=404, detail="Tab not found")
+    return tab
+
+
+@router.post("/{tab_id}/fork", response_model=TerminalTab, status_code=201)
+async def fork_tab(
+    tab_id: str,
+    req: ForkTabRequest,
+    current_user: User = Depends(get_current_user),
+) -> TerminalTab:
+    """Fork a new tab from a specific turn (0-based ordinal, inclusive).
+
+    The forked tab copies the source's structured history up to and including
+    the given turn and starts a fresh provider conversation with the same
+    launch configuration. Returns 404 if the source tab is missing and 400 if
+    the ordinal is out of range.
+    """
+    logger.info(
+        f"Forking tab {tab_id} at ordinal {req.ordinal}, user={current_user.email}"
+    )
+    try:
+        tab = await ttyd_manager.fork_tab(tab_id, req.ordinal)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
     return tab

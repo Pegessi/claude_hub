@@ -23,6 +23,8 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDi
 from ..config import settings
 from ..models import (
     AgentRuntimeStatus,
+    AgentStreamEvent,
+    AgentStreamEventType,
     AgentType,
     ChatMode,
     ExecutionTarget,
@@ -1386,6 +1388,8 @@ class TTYDProcess:
         cursor_transcript_schema: Optional[str] = None,
         session_kind: SessionKind = SessionKind.TERMINAL,
         chat_mode: ChatMode = ChatMode.DEFAULT,
+        forked_from_tab_id: Optional[str] = None,
+        forked_from_ordinal: Optional[int] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -1395,6 +1399,8 @@ class TTYDProcess:
         self.agent_type = agent_type
         self.session_kind = session_kind
         self.chat_mode = chat_mode
+        self.forked_from_tab_id = forked_from_tab_id
+        self.forked_from_ordinal = forked_from_ordinal
         self.target = target
         self.remote_profile_id = remote_profile_id
         self.remote_cwd = remote_cwd
@@ -2929,6 +2935,8 @@ asyncio.run(_main())
             "cursor_cli_version": self.cursor_cli_version,
             "cursor_transcript_path": self.cursor_transcript_path,
             "cursor_transcript_schema": self.cursor_transcript_schema,
+            "forked_from_tab_id": self.forked_from_tab_id,
+            "forked_from_ordinal": self.forked_from_ordinal,
         }
 
     def to_schema(self) -> TerminalTab:
@@ -2959,7 +2967,39 @@ asyncio.run(_main())
             cursor_cli_version=self.cursor_cli_version,
             cursor_transcript_path=self.cursor_transcript_path,
             cursor_transcript_schema=self.cursor_transcript_schema,
+            forked_from_tab_id=self.forked_from_tab_id,
+            forked_from_ordinal=self.forked_from_ordinal,
         )
+
+
+def _group_event_turn_end_indices(events: List[AgentStreamEvent]) -> List[int]:
+    """Return the exclusive end index of each turn in ``events``.
+
+    Mirrors the frontend's ``resolveTurn`` grouping (agentStreamTimeline.ts):
+    events with a ``turn_id`` are grouped by that id (order of first
+    appearance); events without a ``turn_id`` start a new legacy turn only
+    when they are ``turn_started`` or no legacy turn is active yet. The last
+    entry is the exclusive end of the final turn (== ``len(events)``).
+    """
+    end_indices: List[int] = []
+    turn_index_by_id: Dict[str, int] = {}
+    legacy_index: Optional[int] = None
+    for i, ev in enumerate(events):
+        if ev.turn_id:
+            idx = turn_index_by_id.get(ev.turn_id)
+            if idx is None:
+                idx = len(end_indices)
+                turn_index_by_id[ev.turn_id] = idx
+                end_indices.append(i + 1)
+            else:
+                end_indices[idx] = i + 1
+        else:
+            if ev.type == AgentStreamEventType.TURN_STARTED or legacy_index is None:
+                legacy_index = len(end_indices)
+                end_indices.append(i + 1)
+            else:
+                end_indices[legacy_index] = i + 1
+    return end_indices
 
 
 class TTYDManager:
@@ -3072,6 +3112,8 @@ class TTYDManager:
                             cursor_cli_version=tab_data.get("cursor_cli_version"),
                             cursor_transcript_path=tab_data.get("cursor_transcript_path"),
                             cursor_transcript_schema=tab_data.get("cursor_transcript_schema"),
+                            forked_from_tab_id=tab_data.get("forked_from_tab_id"),
+                            forked_from_ordinal=tab_data.get("forked_from_ordinal"),
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
@@ -3436,6 +3478,89 @@ class TTYDManager:
             remote_forward_port=source.remote_forward_port,
             env=source.env,
         )
+
+    async def fork_tab(self, tab_id: str, ordinal: int) -> Optional[TerminalTab]:
+        """Create a new tab by deep-copying the source tab's structured history
+        up to and including turn ``ordinal`` (0-based).
+
+        The forked tab carries the source's launch configuration but a fresh
+        provider conversation; the structured pane shows the copied history so
+        the user can continue independently from that point. ``forked_from``
+        provenance is recorded on the forked tab for traceability.
+        """
+        source = self.processes.get(tab_id)
+        if not source:
+            return None
+
+        # Deferred import: ``agent_stream`` pulls in the native tailer, which
+        # imports this module; importing at call time avoids a circular import.
+        from .agent_stream.store import AgentStreamStore
+
+        # Read the source stream events, paging through large histories.
+        source_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
+        events: List[AgentStreamEvent] = []
+        since = -1
+        while True:
+            page = await source_store.read_since(since, limit=5000)
+            events.extend(page.events)
+            if not page.has_more:
+                break
+            since = page.next_sequence
+
+        # Group events into turns and locate the cutoff at ordinal.
+        turn_end_indices = _group_event_turn_end_indices(events)
+        if ordinal < 0 or ordinal >= len(turn_end_indices):
+            raise ValueError(
+                f"ordinal {ordinal} out of range (conversation has "
+                f"{len(turn_end_indices)} turns)"
+            )
+        cutoff = events[: turn_end_indices[ordinal]]
+
+        # Create the forked tab with the source's launch configuration.
+        forked = await self.create_tab(
+            name=f"{source.name} (fork)",
+            shell=source.shell,
+            cwd=source.cwd,
+            solo_mode=source.solo_mode,
+            agent_type=source.agent_type,
+            session_kind=source.session_kind,
+            chat_mode=source.chat_mode,
+            target=source.target,
+            remote_profile_id=source.remote_profile_id,
+            remote_cwd=source.remote_cwd,
+            remote_reconnect=source.remote_reconnect,
+            remote_forward_port=source.remote_forward_port,
+            env=source.env,
+            # Copy the Cursor launch mode so a forked Cursor tab streams the
+            # same way, but omit the transcript path/schema: those identify
+            # the source conversation, and the fork starts a fresh one.
+            cursor_transport=source.cursor_transport,
+            cursor_data_dir=source.cursor_data_dir,
+            cursor_cli_version=source.cursor_cli_version,
+        )
+
+        # Rewrite the copied events to the forked tab's identity and persist
+        # them. ``replace_all`` re-sequences from 0 so the forked stream is a
+        # clean append-only log starting at the copied history.
+        forked_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{forked.id}")
+        rewritten = [
+            ev.model_copy(
+                update={
+                    "session_id": f"terminal-tab-{forked.id}",
+                    "tab_id": forked.id,
+                }
+            )
+            for ev in cutoff
+        ]
+        await forked_store.replace_all(rewritten)
+
+        # Record fork provenance on the forked tab.
+        process = self.processes[forked.id]
+        process.forked_from_tab_id = tab_id
+        process.forked_from_ordinal = ordinal
+        self._save_state()
+
+        return process.to_schema()
 
     async def delete_tab(self, tab_id: str) -> bool:
         """Delete a tab and explicitly kill its tmux session (user requested deletion)."""
