@@ -24,6 +24,21 @@
   is only natively supported by Codex, so this keeps the feature uniform across
   providers.
 
+### fix: Fork no longer overrides the user's tab switch, and times out instead of hanging
+
+- **Race.** `forkTab` read `activeTabId`/`activePaneId` only after the `await`,
+  so clicking Fork on tab A and switching to tab B before the backend responded
+  assigned the fork to the pane the user was now looking at — silently
+  displacing tab B. The fork now captures the source tab before the request and,
+  on resolve, auto-switches only if the active pane still shows the source tab.
+  If the user switched away, the fork is created in the background and a
+  non-intrusive "Fork created: <name>" toast is shown instead.
+- **Timeout.** The fork `fetch` had no timeout, so a hung connection left
+  `forkingOrdinal` set and the fork buttons stuck forever. It now uses an
+  `AbortController` with a 30s timeout; on abort the request is canceled,
+  `forkingOrdinal` resets, and a "Fork timed out — please try again" error is
+  shown.
+
 ### fix: Chat tab env overridden by user-level settings.json (relay 403)
 
 - **Root cause.** Chat sessions spawn a per-turn one-shot
