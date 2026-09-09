@@ -51,6 +51,8 @@ export interface UseAgentStreamApi {
   setMode: (mode: string) => Promise<void>
   /** Tear down the stream (SSE / long-poll). Safe to call repeatedly. */
   stop: () => void
+  /** Clear in-memory state and optionally restore a cached history snapshot. */
+  reset: (snapshot?: AgentStreamHistorySnapshot) => void
 }
 
 /**
@@ -495,5 +497,6 @@ export function useAgentStream(): UseAgentStreamApi {
     retry,
     setMode,
     stop,
+    reset,
   }
 }
