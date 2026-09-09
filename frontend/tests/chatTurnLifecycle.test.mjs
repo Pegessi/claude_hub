@@ -70,7 +70,7 @@ test('StructuredPane wires the lifecycle lock into mode UI and refreshes status 
   assert.match(structuredPane, /terminalStore\.fetchAgentStatuses\(\)/)
   assert.match(
     structuredPane,
-    /pendingDirectTurns\.value = \[\][\s\S]*?startStream\(\)/,
-    'source switch clears the optimistic lock before starting the next stream',
+    /const pendingDirectTurns = ref<PendingTurn\[\]>\(\[\]\)/,
+    'each keyed KeepAlive instance starts with an empty optimistic turn list, so a source switch needs no manual wipe',
   )
 })
