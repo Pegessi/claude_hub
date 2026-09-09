@@ -458,7 +458,10 @@ def test_codex_tab_uses_codex_command() -> None:
     )
 
     assert process.shell == "codex"
-    assert process._build_ttyd_command(session_exists=False)[-1] == "codex"
+    last = process._build_ttyd_command(session_exists=False)[-1]
+    assert last.endswith("codex")
+    # The tab-id overlay is always rendered so the agent can self-identify.
+    assert "CLAUDE_HUB_TAB_ID=tab-codex-normal" in last
 
 
 def test_tab_session_kind_defaults_to_terminal_and_round_trips() -> None:
@@ -845,11 +848,10 @@ def test_codex_solo_mode_command(monkeypatch: MonkeyPatch) -> None:
 
     cmd = process._build_ttyd_command(session_exists=False)
 
-    assert cmd[-3:] == [
-        "/bin/zsh",
-        "-c",
-        "codex --ask-for-approval never --sandbox danger-full-access; exec /bin/zsh",
-    ]
+    assert cmd[-3:-1] == ["/bin/zsh", "-c"]
+    last = cmd[-1]
+    assert "CLAUDE_HUB_TAB_ID=tab-codex-solo" in last
+    assert "codex --ask-for-approval never --sandbox danger-full-access; exec /bin/zsh" in last
 
 
 def test_codex_solo_mode_reattaches_existing_tmux_session() -> None:
@@ -861,7 +863,9 @@ def test_codex_solo_mode_reattaches_existing_tmux_session() -> None:
         agent_type=AgentType.CODEX,
     )
 
-    assert process._build_ttyd_command(session_exists=True)[-1] == "codex"
+    last = process._build_ttyd_command(session_exists=True)[-1]
+    assert last.endswith("codex")
+    assert "CLAUDE_HUB_TAB_ID=tab-codex-existing" in last
 
 
 def test_custom_env_is_injected_and_serialized() -> None:
@@ -993,7 +997,10 @@ def test_claude_explicit_env_overrides_default_model_env() -> None:
 
     assert "ANTHROPIC_BASE_URL" not in process.env
     assert process.env["ANTHROPIC_MODEL"] == "claude-opus-4-8"
-    assert settings["env"] == {"ANTHROPIC_MODEL": "claude-opus-4-8"}
+    assert settings["env"]["ANTHROPIC_MODEL"] == "claude-opus-4-8"
+    # The tab-id overlay rides along in the settings env so the agent can
+    # self-identify; it is kept out of the persisted ``process.env``.
+    assert settings["env"]["CLAUDE_HUB_TAB_ID"] == "tab-claude-override-model-env"
     assert "--model claude-opus-4-8" in cmd[-1]
 
 
