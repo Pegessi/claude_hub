@@ -1103,6 +1103,17 @@ class ClaudeNativeSession(ProviderSession):
         if self._current_mode == ChatMode.PLAN.value:
             cmd.extend(["--permission-mode", "plan"])
         cmd.extend(self._resume_arg())
+        # Chat turns are one-shot subprocesses whose env only arrives via the
+        # process environment — the lowest-precedence source in Claude Code,
+        # below user-level ~/.claude/settings.json. Re-assert the tab env
+        # through the same per-tab settings file terminal launches pass
+        # (written by ttyd_manager), so the tab's configured provider wins
+        # over any user-level settings env (e.g. a global relay override).
+        tab_id = getattr(self.session, "tab_id", None)
+        if tab_id:
+            settings_path = _runtime_home() / "launch_env" / f"{tab_id}.settings.json"
+            if settings_path.is_file():
+                cmd.extend(["--settings", str(settings_path)])
         return cmd
 
     def available_modes(self) -> List[StreamModeOption]:

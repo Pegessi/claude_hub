@@ -14,7 +14,9 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pytest import MonkeyPatch
 
+import claude_hub.services.agent_stream.native as native_module
 from claude_hub.models import (
     AgentStreamEventType,
     AgentType,
@@ -176,6 +178,45 @@ def test_verified_flag_true_seeds_conversation_id_verified() -> None:
     assert "--resume" in cmd
     assert "captured-id" in cmd
     assert "--session-id" not in cmd
+
+
+# ── per-tab settings file on Chat one-shot commands ─────────────────────────
+
+
+def test_claude_command_passes_tab_settings_file_when_present(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Chat one-shot turns must re-assert the tab env at CLI-settings
+    precedence via the same per-tab settings file terminal launches use;
+    otherwise user-level ~/.claude/settings.json env overrides the provider
+    env that only arrives through the process environment."""
+    sess = _session()  # tab_id="tab-1"
+    settings_file = tmp_path / "launch_env" / "tab-1.settings.json"
+    settings_file.parent.mkdir(parents=True)
+    settings_file.write_text(
+        '{"env": {"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+
+    cmd = ClaudeNativeSession(sess)._build_command()
+
+    assert "--settings" in cmd
+    assert cmd[cmd.index("--settings") + 1] == str(settings_file)
+
+
+def test_claude_command_skips_settings_arg_when_file_missing(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A session without a persisted per-tab settings file (e.g. a workspace
+    session or a tab created before the file-writing path existed) must not
+    gain a --settings argument."""
+    sess = _session()
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+
+    cmd = ClaudeNativeSession(sess)._build_command()
+
+    assert "--settings" not in cmd
 
 
 # ── Interactive question protocol guidance (chat "no timeout") ──────────────
