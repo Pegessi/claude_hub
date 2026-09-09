@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ...models import AgentType, ManagedSession
 from .base import discover_source_cached
@@ -42,6 +43,38 @@ logger = logging.getLogger(__name__)
 
 class TranscriptForkError(ValueError):
     """Raised when the transcript cannot be safely forked."""
+
+
+# ── snapshot / restore (edit-resend rollback) ───────────────────────────────
+
+
+def snapshot_transcript(path: Optional[Path]) -> Optional[Path]:
+    """Create a ``.edit-bak`` sidecar copy of the transcript for rollback.
+
+    Returns the backup path, or ``None`` if the transcript does not exist.
+    """
+    if path is None or not path.exists():
+        return None
+    backup = path.with_name(path.name + ".edit-bak")
+    shutil.copy2(path, backup)
+    return backup
+
+
+def restore_transcript(path: Optional[Path], backup: Optional[Path]) -> None:
+    """Restore the transcript from a snapshot created by :func:`snapshot_transcript`."""
+    if path is None or backup is None or not backup.exists():
+        return
+    shutil.copy2(backup, path)
+
+
+def discard_snapshot(backup: Optional[Path]) -> None:
+    """Delete a snapshot sidecar file, if it exists.  Never raises."""
+    if backup is None:
+        return
+    try:
+        backup.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _is_claude_user_message(obj: Dict[str, Any]) -> bool:
@@ -56,10 +89,7 @@ def _is_claude_user_message(obj: Dict[str, Any]) -> bool:
         return bool(content.strip())
     if not isinstance(content, list):
         return False
-    return any(
-        isinstance(block, dict) and block.get("type") == "text"
-        for block in content
-    )
+    return any(isinstance(block, dict) and block.get("type") == "text" for block in content)
 
 
 def _is_codex_user_message(obj: Dict[str, Any]) -> bool:
@@ -79,7 +109,7 @@ def _is_cursor_user_message(obj: Dict[str, Any]) -> bool:
     return isinstance(obj.get("message"), dict)
 
 
-def _user_message_predicate(agent_type: AgentType):
+def _user_message_predicate(agent_type: AgentType) -> Callable[[Dict[str, Any]], bool]:
     """Return the genuine-user-message predicate for ``agent_type``."""
     if agent_type == AgentType.CLAUDE:
         return _is_claude_user_message
@@ -87,32 +117,132 @@ def _user_message_predicate(agent_type: AgentType):
         return _is_codex_user_message
     if agent_type == AgentType.CURSOR:
         return _is_cursor_user_message
-    raise TranscriptForkError(
-        f"edit-resend is not supported for agent_type={agent_type}"
-    )
+    raise TranscriptForkError(f"edit-resend is not supported for agent_type={agent_type}")
+
+
+def _extract_user_text(obj: Dict[str, Any], agent_type: AgentType) -> str:
+    """Extract the typed text from a genuine user message for content matching.
+
+    Each provider stores the text differently; this must agree with the
+    predicate above so the same records are both counted and matched.
+    """
+    if agent_type == AgentType.CLAUDE:
+        message = obj.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        return ""
+    if agent_type == AgentType.CODEX:
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            return ""
+        message = payload.get("message")
+        return message if isinstance(message, str) else ""
+    if agent_type == AgentType.CURSOR:
+        message = obj.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts)
+        return ""
+    return ""
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize text for comparison: strip surrounding whitespace."""
+    return text.strip()
+
+
+def _find_target_line(
+    user_messages: List[Tuple[int, int, str]],
+    turn_index: int,
+    turn_text: str,
+) -> int:
+    """Find the transcript line number of the user message for the edited turn.
+
+    ``user_messages`` is a list of ``(line_number, ordinal, text)`` tuples in
+    file order.  The edited turn is matched to a provider message by *content*
+    (normalized), disambiguated by ordinal position:
+
+    1. An exact ordinal+content match is preferred.
+    2. Otherwise the content match with the largest ordinal below
+       ``turn_index`` is used (divergence from failed deliveries shifts
+       provider ordinals down).
+    3. Otherwise the content match with the smallest ordinal.
+
+    Raises ``TranscriptForkError`` if there is no content match at all — the
+    turn's delivery likely failed and there is no provider message to
+    truncate at, so we fail fast rather than guess.
+    """
+    target = _normalize_text(turn_text)
+    matches = [
+        (ordinal, line_no)
+        for line_no, ordinal, text in user_messages
+        if _normalize_text(text) == target
+    ]
+    if not matches:
+        raise TranscriptForkError(
+            "edited turn has no matching provider user message "
+            "(its delivery may have failed); refusing to guess the truncation point"
+        )
+    for ordinal, line_no in matches:
+        if ordinal == turn_index:
+            return line_no
+    below = [(ordinal, line_no) for ordinal, line_no in matches if ordinal < turn_index]
+    if below:
+        return max(below, key=lambda item: item[0])[1]
+    return min(matches, key=lambda item: item[0])[1]
 
 
 def fork_transcript(
     session: ManagedSession,
     adapter: Any,
     turn_index: int,
+    turn_text: str,
 ) -> int:
-    """Truncate the provider transcript at the ``turn_index``-th user message.
+    """Truncate the provider transcript at the user message for the edited turn.
 
-    Preserves all records *before* the (turn_index)-th genuine user message
-    (0-based).  Everything from that user message onward is discarded.
+    The Hub turn identified by the caller is matched to a provider user
+    message by *content* (``turn_text``), disambiguated by ``turn_index``, so
+    a ``turn_started`` whose provider delivery failed cannot shift the
+    truncation onto the wrong message.  All records before the matched user
+    message are preserved; the matched message and everything after it is
+    discarded.
 
     Args:
         session: The managed session.
         adapter: The structured-stream adapter (used to locate the file).
-        turn_index: 0-based index of the user message to replace.
+        turn_index: 0-based ordinal of the edited turn among Hub
+            ``turn_started`` events (used to disambiguate duplicate content).
+        turn_text: The edited turn's text (``payload.summary`` from the Hub
+            store) used to match the provider user message by content.
 
     Returns:
         The number of transcript lines removed.
 
     Raises:
-        TranscriptForkError: If the transcript cannot be located, the turn
-            index is out of range, or the agent type is unsupported.
+        TranscriptForkError: If the transcript cannot be located, the agent
+            type is unsupported, or no provider user message matches
+            ``turn_text`` (unmappable turn).
     """
     path: Optional[Path] = discover_source_cached(adapter, session)
     if path is None:
@@ -122,38 +252,35 @@ def fork_transcript(
 
     predicate = _user_message_predicate(session.agent_type)
 
-    kept: List[str] = []
-    removed = 0
+    # Read every line and collect genuine user messages with their file line
+    # numbers, ordinals, and extracted text.
+    all_lines: List[str] = []
+    user_messages: List[Tuple[int, int, str]] = []  # (line_no, ordinal, text)
     user_count = 0
-    found = False
 
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             stripped = line.strip()
             if not stripped:
                 continue
-            if not found:
-                try:
-                    obj = json.loads(stripped)
-                except (json.JSONDecodeError, ValueError):
-                    # Keep unparseable lines in the prefix (defensive).
-                    kept.append(stripped)
-                    continue
-                if predicate(obj):
-                    if user_count == turn_index:
-                        found = True
-                        removed += 1
-                        continue
-                    user_count += 1
-                kept.append(stripped)
-            else:
-                removed += 1
+            line_no = len(all_lines)
+            all_lines.append(stripped)
+            try:
+                obj = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                # Keep unparseable lines in the prefix (defensive).
+                continue
+            if predicate(obj):
+                text = _extract_user_text(obj, session.agent_type)
+                user_messages.append((line_no, user_count, text))
+                user_count += 1
 
-    if not found:
-        raise TranscriptForkError(
-            f"turn_index={turn_index} is out of range "
-            f"(only {user_count} user messages in transcript)"
-        )
+    # Find the line to truncate at (raises TranscriptForkError if unmappable).
+    target_line = _find_target_line(user_messages, turn_index, turn_text)
+
+    # Keep everything strictly before the target line.
+    kept = all_lines[:target_line]
+    removed = len(all_lines) - target_line
 
     # Write the truncated transcript atomically: write to a temp file first,
     # then rename, so a crash mid-write does not corrupt the original.

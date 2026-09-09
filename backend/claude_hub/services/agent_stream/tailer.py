@@ -64,7 +64,13 @@ from .native import (
 from .redaction import redact_event
 from .registry import get_adapter_for_session
 from .store import AgentStreamStore
-from .transcript_fork import TranscriptForkError, fork_transcript
+from .transcript_fork import (
+    TranscriptForkError,
+    discard_snapshot,
+    fork_transcript,
+    restore_transcript,
+    snapshot_transcript,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1566,6 +1572,12 @@ class TailerManager:
         self._persist_mode_cb = persist_mode
         self._tailers: Dict[str, SessionTailer] = {}
         self._lock = asyncio.Lock()
+        # Per-session locks that serialize edit-resend attempts.  A second
+        # edit_resend for a session waits for the first to complete rather
+        # than interleaving truncate/fork/send operations.  Keyed by
+        # session_id; entries persist for the manager's lifetime (one small
+        # lock per session that has ever been edited).
+        self._edit_locks: Dict[str, asyncio.Lock] = {}
         _TAILER_MANAGERS.add(self)
 
     async def _get_or_create(self, session: ManagedSession) -> SessionTailer:
@@ -1688,12 +1700,26 @@ class TailerManager:
 
         1. **Hub event store** — events from the turn's ``turn_started``
            onward are removed.
-        2. **Provider transcript** — the JSONL file is forked so the first
-           ``turn_index`` genuine user messages are preserved.
+        2. **Provider transcript** — the JSONL file is forked so the records
+           before the turn's user message are preserved.
 
         The native transport is then restarted (it reads the forked
         transcript and resumes via ``--resume`` / ``thread/resume``) and the
         edited ``text`` is delivered as the new turn.
+
+        Concurrency: a per-session lock (``self._edit_locks``) is held across
+        the entire sequence.  A concurrent ``edit_resend`` for the same
+        session waits for the in-flight one to complete; it does not fail
+        fast.  This prevents two edits from interleaving truncate/fork/send
+        operations.
+
+        Failure recovery: before truncating either plane, both files are
+        snapshotted to ``.edit-bak`` sidecars.  If any step after the
+        snapshot fails (truncate, fork, restart, or send), both files are
+        restored from their snapshots so the conversation is byte-identical
+        to before the edit was attempted, any tailer created during the
+        failed attempt is discarded, and a fresh tailer is started on the
+        restored state.  The original error is then re-raised.
 
         Args:
             session: The managed session.
@@ -1703,18 +1729,34 @@ class TailerManager:
 
         Raises:
             ValueError: If the turn is not found in the event store.
-            TranscriptForkError: If the provider transcript cannot be forked.
+            TranscriptForkError: If the provider transcript cannot be forked
+                or the turn cannot be mapped to a provider user message.
             RuntimeError: If no structured adapter exists for the session.
         """
         adapter = get_adapter_for_session(session)
         if adapter is None:
             raise RuntimeError("no structured adapter for session")
 
+        # Per-session lock: serialize concurrent edit-resend attempts.  The
+        # second caller waits (no fail-fast).
+        edit_lock = self._edit_locks.setdefault(session.id, asyncio.Lock())
+        async with edit_lock:
+            await self._edit_resend_locked(session, text, client_turn_id, turn_id, adapter)
+
+    async def _edit_resend_locked(
+        self,
+        session: ManagedSession,
+        text: str,
+        client_turn_id: str,
+        turn_id: str,
+        adapter: Any,
+    ) -> None:
+        """Inner edit-resend logic, executed under the per-session edit lock."""
         store = self.get_store(session.workspace_id, session.id)
         turn_info = await store.find_turn(turn_id)
         if turn_info is None:
             raise ValueError(f"turn {turn_id!r} not found in event store")
-        stream_seq, turn_index = turn_info
+        stream_seq, turn_index, turn_text = turn_info
 
         # Stop the current tailer so it cannot write to the store during
         # truncation.  Pop under the lock, then stop outside (stop() is async).
@@ -1723,25 +1765,78 @@ class TailerManager:
         if previous is not None:
             await previous.stop()
 
-        # Truncate the Hub event store.
-        await store.truncate_before(stream_seq)
+        # Use a fresh store instance now that the tailer is gone, so the
+        # snapshot/truncate/restore operate on a store without a live writer.
+        store = self.get_store(session.workspace_id, session.id)
 
-        # Fork the provider transcript.  If this fails, restart the tailer
-        # to restore service (the store is already truncated, so the user
-        # gets a consistent Hub view even though the provider transcript
-        # was not modified).
+        # Locate the transcript path (cached discovery is fine; we invalidate
+        # before restarting the tailer).
+        transcript_path = discover_source_cached(adapter, session)
+
+        # Snapshot both files BEFORE truncating so a failure can be undone.
+        store_backup = await store.snapshot()
+        transcript_backup = snapshot_transcript(transcript_path)
+
         try:
-            fork_transcript(session, adapter, turn_index)
-        except TranscriptForkError:
-            invalidate_source(session.id)
-            await self._get_or_create(session)
-            raise
+            # Truncate the Hub event store.
+            await store.truncate_before(stream_seq)
 
-        # Restart the tailer with a fresh transport that reads the forked
-        # transcript, then deliver the edited text.
-        invalidate_source(session.id)
-        tailer = await self._get_or_create(session)
-        await tailer.send_message(text, [], client_turn_id)
+            # Fork the provider transcript.  This matches the edited turn to
+            # a provider user message by content and raises if it cannot.
+            fork_transcript(session, adapter, turn_index, turn_text)
+
+            # Restart the tailer with a fresh transport that reads the forked
+            # transcript, then deliver the edited text.
+            invalidate_source(session.id)
+            tailer = await self._get_or_create(session)
+            await tailer.send_message(text, [], client_turn_id)
+        except BaseException:
+            # Discard any tailer created during the failed attempt so it
+            # cannot operate on the forked transcript.
+            async with self._lock:
+                created = self._tailers.pop(session.id, None)
+            if created is not None:
+                try:
+                    await created.stop()
+                except Exception:
+                    logger.exception(
+                        "edit_resend: failed to stop tailer after error for session %s",
+                        session.id,
+                    )
+
+            # Restore both files from their snapshots so the conversation is
+            # byte-identical to before the edit.
+            try:
+                await store.restore(store_backup)
+            except Exception:
+                logger.exception(
+                    "edit_resend: failed to restore event store for session %s",
+                    session.id,
+                )
+            try:
+                restore_transcript(transcript_path, transcript_backup)
+            except Exception:
+                logger.exception(
+                    "edit_resend: failed to restore transcript for session %s",
+                    session.id,
+                )
+
+            # Best-effort: start a fresh tailer on the restored state so the
+            # session is immediately usable again.  Never masks the original
+            # error.
+            try:
+                invalidate_source(session.id)
+                await self._get_or_create(session)
+            except Exception:
+                logger.exception(
+                    "edit_resend: failed to restart tailer after restore for session %s",
+                    session.id,
+                )
+            raise
+        finally:
+            # Clean up snapshot files on both success and failure paths.
+            discard_snapshot(store_backup)
+            discard_snapshot(transcript_backup)
 
     async def set_mode(self, session: ManagedSession, mode: str) -> None:
         """Set the existing native owner's mode for subsequent turns."""

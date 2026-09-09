@@ -1300,6 +1300,13 @@ async def edit_resend_stream(
     Truncates both the Hub event store and the provider transcript at the
     identified turn, restarts the native transport, and delivers the edited
     text as a new turn.
+
+    The operation is atomic with respect to failure: both planes are
+    snapshotted before truncation and fully restored (byte-identical) if any
+    step fails, so a failed edit-resend never loses conversation history.
+    Concurrent edit-resend attempts for the same session are serialized (the
+    second waits for the first). A turn whose provider delivery failed cannot
+    be mapped and is rejected with 409 before anything is truncated.
     """
     session = _session_or_404(managed_session_id)
     manager = _get_tailer_manager()
