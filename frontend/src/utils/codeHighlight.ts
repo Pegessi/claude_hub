@@ -151,7 +151,11 @@ export function highlightCode(code: string, lang: string): string {
  */
 export function renderCodeBlockHtml(text: string, lang: string): string {
   const langAttr = lang ? ` class="language-${escapeAttr(lang)}"` : ''
-  return `<pre><code${langAttr}>${highlightCode(text, lang)}</code></pre>`
+  // Match marked's own code renderer: normalise the code to end with exactly
+  // one trailing newline and emit a newline after ``</pre>`` so the joined
+  // block HTML is byte-identical to ``marked.parse`` for the same source.
+  const normalized = text.replace(/\n$/, '') + '\n'
+  return `<pre><code${langAttr}>${highlightCode(normalized, lang)}</code></pre>\n`
 }
 
 /** ``true`` if ``lang`` is registered with the loaded highlighter. */

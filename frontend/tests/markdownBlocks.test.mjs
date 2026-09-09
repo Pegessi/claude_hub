@@ -17,6 +17,30 @@ const mockDOMPurify = {
   },
 }
 
+// ── Load codeHighlight.ts with a vue ref mock ───────────────────────────
+// markdownBlocks.ts imports highlightVersion + renderCodeBlockHtml from
+// codeHighlight, which can't be resolved from a data: URL. Load the real
+// module (it only needs vue's ref; the highlight.js chunk is imported
+// dynamically and never loaded here) and expose it as a global.
+const hlSource = await readFile(
+  new URL('../src/utils/codeHighlight.ts', import.meta.url),
+  'utf8',
+)
+const { outputText: hlOutputText } = ts.transpileModule(hlSource, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2020,
+  },
+})
+const hlMocked = hlOutputText.replace(
+  /import \{ ref \} from ['"]vue['"];?/,
+  'const ref = globalThis.__vueRef;',
+)
+globalThis.__vueRef = (v) => ({ value: v })
+globalThis.__codeHighlight = await import(
+  `data:text/javascript;base64,${Buffer.from(hlMocked).toString('base64')}`
+)
+
 // ── Load markdownBlocks.ts with mocked dompurify ────────────────────────
 const source = await readFile(
   new URL('../src/utils/markdownBlocks.ts', import.meta.url),
@@ -40,6 +64,10 @@ const mocked = outputText
   .replace(
     /import DOMPurify from ['"]dompurify['"];?/,
     'const DOMPurify = globalThis.__mockDOMPurify;',
+  )
+  .replace(
+    /import \{ highlightVersion, renderCodeBlockHtml \} from ['"]@\/utils\/codeHighlight['"];?/,
+    'const { highlightVersion, renderCodeBlockHtml } = globalThis.__codeHighlight;',
   )
 
 globalThis.__marked = marked
