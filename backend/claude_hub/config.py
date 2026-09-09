@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     # Optional age-based eviction. None disables age TTL.
     attachment_max_age_seconds: Optional[float] = None
 
+    # Fork / tab growth limits. A fork loop must not be able to exhaust ttyd
+    # ports, processes, and tmux sessions. ``max_forks_per_tab`` bounds how
+    # many forks a single source tab can have; ``max_total_tabs`` is a global
+    # backstop on the number of live tabs. Both are configurable via env vars.
+    max_forks_per_tab: int = 12
+    max_total_tabs: int = 200
+
+    @field_validator("max_forks_per_tab", "max_total_tabs")
+    @classmethod
+    def _growth_limit_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"must be positive, got {v}")
+        return v
+
     @field_validator(
         "attachment_max_preview_bytes",
         "attachment_max_session_count",

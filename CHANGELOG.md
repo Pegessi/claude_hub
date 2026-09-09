@@ -31,6 +31,40 @@
   existing source-text tests updated to encode per-instance isolation instead
   of the removed `tabId` watcher.
 
+### feat: Fork a new chat tab from a specific turn
+
+- **What.** Each turn in a Chat tab's structured pane now has a hover-revealed
+  "Fork from here" action. It creates a new tab that deep-copies the source
+  tab's structured history up to and including that turn (0-based ordinal) and
+  starts a fresh provider conversation with the same launch configuration.
+- **How.** `POST /tabs/{tab_id}/fork` (body `{ordinal}`) reads the source
+  tab's stream events, groups them into turns via
+  `_group_event_turn_end_indices` (mirrors the frontend's `resolveTurn`
+  grouping), truncates at the ordinal, creates the forked tab, and rewrites the
+  copied events to the new tab's identity. Returns 404 for a missing source tab
+  and 400 for an out-of-range ordinal.
+- **Provenance.** The forked tab records `forked_from_tab_id` and
+  `forked_from_ordinal` for traceability.
+- **Trade-off.** The forked tab shows the copied history but the provider
+  (Claude/Cursor) starts without conversation memory — provider session forking
+  is only natively supported by Codex, so this keeps the feature uniform across
+  providers.
+
+### fix: Fork no longer overrides the user's tab switch, and times out instead of hanging
+
+- **Race.** `forkTab` read `activeTabId`/`activePaneId` only after the `await`,
+  so clicking Fork on tab A and switching to tab B before the backend responded
+  assigned the fork to the pane the user was now looking at — silently
+  displacing tab B. The fork now captures the source tab before the request and,
+  on resolve, auto-switches only if the active pane still shows the source tab.
+  If the user switched away, the fork is created in the background and a
+  non-intrusive "Fork created: <name>" toast is shown instead.
+- **Timeout.** The fork `fetch` had no timeout, so a hung connection left
+  `forkingOrdinal` set and the fork buttons stuck forever. It now uses an
+  `AbortController` with a 30s timeout; on abort the request is canceled,
+  `forkingOrdinal` resets, and a "Fork timed out — please try again" error is
+  shown.
+
 ### fix: Chat tab env overridden by user-level settings.json (relay 403)
 
 - **Root cause.** Chat sessions spawn a per-turn one-shot
