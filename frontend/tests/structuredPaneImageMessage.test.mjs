@@ -181,14 +181,20 @@ test('mobile image controls retain a touch target and keep the lightbox inside t
 // ---------------------------------------------------------------------------
 
 test('source changes invalidate every in-flight attachment preparation batch', () => {
-  const sourceWatch = structuredPane.match(
-    /watch\(\s*\(\) => props\.tabId[\s\S]*?startStream\(\)\s*\},\s*\)/,
+  // Keyed KeepAlive instances isolate each chat tab's composer and
+  // preparationEpoch, so a source switch no longer shares one instance — a
+  // batch from a previous tab appends only to that tab's cached composer,
+  // never to the newly selected one. The epoch still advances on unmount
+  // (KeepAlive eviction / Chat→Terminal destroy) so a batch outliving its
+  // instance aborts instead of mutating stale state.
+  const unmountMatch = structuredPane.match(
+    /onUnmounted\(\(\) => \{[\s\S]*?\n\}\)/,
   )
-  assert.ok(sourceWatch, 'Chat-tab watcher must reset the structured composer')
+  assert.ok(unmountMatch, 'onUnmounted must exist to clean up the composer')
   assert.match(
-    sourceWatch[0],
+    unmountMatch[0],
     /preparationEpoch\.value\+\+/,
-    'source switch must invalidate old FileReader/canvas continuations',
+    'unmount must invalidate in-flight FileReader/canvas continuations',
   )
 })
 
