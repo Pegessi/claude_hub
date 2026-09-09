@@ -17,6 +17,7 @@ from pytest import MonkeyPatch
 
 from claude_hub.models import (
     AgentRuntimeStatus,
+    AgentStreamEvent,
     AgentType,
     ChatMode,
     ExecutionTarget,
@@ -27,8 +28,10 @@ from claude_hub.models import (
 )
 from claude_hub.services.ttyd_manager import (
     DEFAULT_CLAUDE_LAUNCH_ENV,
+    TabLimitExceededError,
     TTYDManager,
     TTYDProcess,
+    _event_turn_ordinals,
 )
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
@@ -4574,3 +4577,214 @@ async def test_fork_tab_copies_history_up_to_ordinal(
     with pytest.raises(ValueError):
         await manager.fork_tab(source.id, 99)
     assert await manager.fork_tab("nonexistent-tab", 0) is None
+
+
+def _make_fork_test_manager(
+    monkeypatch: MonkeyPatch, tmp_path: Path, start_port: int
+) -> TTYDManager:
+    """Build a TTYDManager with a stubbed process lifecycle for fork tests.
+
+    ``start``, ``ensure_tmux_session``, and ``stop`` are stubbed so no real
+    ttyd/tmux process is spawned. ``stop`` is stubbed (in addition to the
+    existing fork test's stubs) because the orphan-cleanup path calls
+    ``delete_tab`` -> ``process.stop(kill_tmux=True)``, which must complete
+    for the tab to be removed.
+    """
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = start_port
+    manager.processes = {}
+    manager._tab_order = []
+
+    async def fake_start(self: TTYDProcess) -> None:
+        return None
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return False
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+    return manager
+
+
+def _make_turn_event(source_id: str, turn_id: str, seq: int) -> AgentStreamEvent:
+    from claude_hub.models import AgentStreamEventType
+
+    return AgentStreamEvent(
+        stream_sequence=0,
+        session_id=f"terminal-tab-{source_id}",
+        tab_id=source_id,
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TURN_STARTED,
+        turn_id=turn_id,
+        payload={"summary": f"event-{seq}"},
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def test_event_turn_ordinals_prefix_by_first_appearance() -> None:
+    """``_event_turn_ordinals`` assigns ordinals by first appearance of turn_id."""
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+
+    def make_event(turn_id) -> AgentStreamEvent:
+        return AgentStreamEvent(
+            stream_sequence=0,
+            session_id="s",
+            tab_id="t",
+            agent_type=AgentType.CLAUDE,
+            type=AgentStreamEventType.TURN_STARTED,
+            turn_id=turn_id,
+            payload={},
+            created_at=datetime.now(timezone.utc),
+        )
+
+    # [A, B, A] -> [0, 1, 0]: interleaving does not create a new ordinal.
+    assert _event_turn_ordinals([make_event("A"), make_event("B"), make_event("A")]) == [
+        0,
+        1,
+        0,
+    ]
+    # Legacy events (no turn_id) fold into the currently open turn.
+    assert _event_turn_ordinals([make_event("A"), make_event(None), make_event("B")]) == [
+        0,
+        0,
+        1,
+    ]
+    # A leading legacy event opens turn 0 rather than breaking the prefix.
+    assert _event_turn_ordinals([make_event(None), make_event("A")]) == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_fork_tab_rejected_when_fork_cap_reached(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Forking is rejected once the per-source-tab cap is reached."""
+    from claude_hub.config import settings
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    manager = _make_fork_test_manager(monkeypatch, tmp_path, start_port=13000)
+    source = await manager.create_tab(
+        name="Source",
+        shell="/bin/zsh",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{source.id}")
+    await store.append(_make_turn_event(source.id, "turn-a", 0))
+    await store.append(_make_turn_event(source.id, "turn-b", 1))
+
+    cap = settings.max_forks_per_tab
+    for _ in range(cap):
+        forked = await manager.fork_tab(source.id, 0)
+        assert forked is not None
+
+    # The next fork exceeds the per-source cap.
+    with pytest.raises(TabLimitExceededError):
+        await manager.fork_tab(source.id, 0)
+
+    # Exactly ``cap`` forks exist and the source is untouched.
+    assert manager._count_forks(source.id) == cap
+    assert manager.get_tab(source.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_fork_tab_cleans_up_orphan_on_replace_all_failure(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A replace_all failure deletes the just-created tab, leaving no orphan."""
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    manager = _make_fork_test_manager(monkeypatch, tmp_path, start_port=13100)
+    source = await manager.create_tab(
+        name="Source",
+        shell="/bin/zsh",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{source.id}")
+    await store.append(_make_turn_event(source.id, "turn-a", 0))
+
+    async def boom(self: AgentStreamStore, events) -> None:
+        raise RuntimeError("replace_all failed")
+
+    monkeypatch.setattr(AgentStreamStore, "replace_all", boom)
+
+    tabs_before = set(manager.processes)
+    with pytest.raises(RuntimeError):
+        await manager.fork_tab(source.id, 0)
+
+    # No orphan tab: the just-created fork was deleted; the source remains.
+    assert set(manager.processes) == tabs_before
+    assert manager.get_tab(source.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_fork_tab_interleaved_turns_keeps_complete_turns(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fork at ordinal 1 of interleaved [A,B,A] includes all three events."""
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    manager = _make_fork_test_manager(monkeypatch, tmp_path, start_port=13200)
+    source = await manager.create_tab(
+        name="Source",
+        shell="/bin/zsh",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{source.id}")
+    # Interleaved turns: A, B, A.
+    await store.append(_make_turn_event(source.id, "turn-a", 0))
+    await store.append(_make_turn_event(source.id, "turn-b", 1))
+    await store.append(_make_turn_event(source.id, "turn-a", 2))
+
+    # Fork at ordinal 1 (turn B): both complete turns are included.
+    forked = await manager.fork_tab(source.id, 1)
+    assert forked is not None
+
+    forked_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{forked.id}")
+    page = await forked_store.read_since(-1, limit=100)
+    assert len(page.events) == 3
+    assert [ev.turn_id for ev in page.events] == ["turn-a", "turn-b", "turn-a"]
+
+
+@pytest.mark.asyncio
+async def test_fork_tab_at_middle_ordinal_keeps_prefix(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fork at ordinal 0 of interleaved [A,B,A,C] keeps only A's events."""
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    manager = _make_fork_test_manager(monkeypatch, tmp_path, start_port=13300)
+    source = await manager.create_tab(
+        name="Source",
+        shell="/bin/zsh",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{source.id}")
+    # Interleaved turns: A, B, A, C.
+    await store.append(_make_turn_event(source.id, "turn-a", 0))
+    await store.append(_make_turn_event(source.id, "turn-b", 1))
+    await store.append(_make_turn_event(source.id, "turn-a", 2))
+    await store.append(_make_turn_event(source.id, "turn-c", 3))
+
+    # Fork at ordinal 0 (turn A): only A's events (0 and 2) are included.
+    forked = await manager.fork_tab(source.id, 0)
+    assert forked is not None
+
+    forked_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{forked.id}")
+    page = await forked_store.read_since(-1, limit=100)
+    assert len(page.events) == 2
+    assert [ev.turn_id for ev in page.events] == ["turn-a", "turn-a"]
+    assert [ev.payload["summary"] for ev in page.events] == ["event-0", "event-2"]
