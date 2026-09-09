@@ -58,4 +58,11 @@ export function createAgentStreamHistoryCache(maxEntries: number): AgentStreamHi
   }
 }
 
-export const agentStreamHistoryCache = createAgentStreamHistoryCache(3)
+// Global safety net for Chat history, keyed by stream path. KeepAlive
+// (MAX_CACHED_CHAT_PANES in TerminalPane) preserves the full pane state — DOM,
+// scroll, draft — for the most recently visited chat tabs. This LRU is the
+// layer beneath it: a pane evicted from KeepAlive (or destroyed by a
+// Chat→Terminal switch) still restores its transcript from here in O(1)
+// instead of a full network reload. Sized above the KeepAlive bound so an
+// evicted pane's history stays warm.
+export const agentStreamHistoryCache = createAgentStreamHistoryCache(12)

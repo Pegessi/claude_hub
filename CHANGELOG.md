@@ -5,6 +5,32 @@
 
 ## Unreleased
 
+### feat: Chat tab keep-alive — switching tabs preserves pane state
+
+- **Problem.** Switching between Chat tabs lost pane state: the scroll
+  position was force-pinned to the tail, `<details>` expand/collapse state,
+  draft text, attachments, and queued messages were all wiped. Two paths
+  caused this: a Chat→Chat prop change ran a `tabId` watcher that reset the
+  composer, and a Chat→Terminal switch destroyed the component via `v-if`.
+  The history LRU beneath it held only 3 entries, so the 4th chat tab was
+  evicted and triggered a full network reload.
+- **Fix.** `StructuredPane` is now keyed by `tabId` inside a bounded
+  `<KeepAlive :max="8">` (`TerminalPane.vue`), so each chat tab owns a cached
+  instance — switching tabs deactivates instead of destroys, preserving DOM,
+  scroll, draft, attachments, and expand state. The stream is owned by the
+  active pane: `onDeactivated` stops it (caching history) so cached panes
+  don't hold open SSE/long-poll connections; `onActivated` resumes from the
+  cached snapshot (`reconciling`, no full reload). The activation gate skips
+  its force-pin when the timeline was already revealed, so a user's reading
+  position (including a scrolled-up, detached view) survives the switch. The
+  dead `tabId` watchers are removed. The global history LRU
+  (`agentStreamHistoryCache`) is expanded from 3 to 12 as the safety net for
+  panes evicted from KeepAlive.
+- **Tests.** New `tests/tabKeepAlive.test.mjs` locks the KeepAlive structure,
+  the activate/deactivate lifecycle, and the reactivation guard. Three
+  existing source-text tests updated to encode per-instance isolation instead
+  of the removed `tabId` watcher.
+
 ### fix: Chat tab env overridden by user-level settings.json (relay 403)
 
 - **Root cause.** Chat sessions spawn a per-turn one-shot
