@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import struct
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -147,6 +149,17 @@ def _make_manager(
 
 def _read_bytes(path: Path) -> bytes:
     return path.read_bytes()
+
+
+def _png(width: int = 1, height: int = 1) -> bytes:
+    """A minimal valid PNG (used to seed an attachment preview)."""
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF
+    ihdr = struct.pack(">I", 13) + b"IHDR" + ihdr_data + struct.pack(">I", ihdr_crc)
+    iend_crc = zlib.crc32(b"IEND") & 0xFFFFFFFF
+    iend = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", iend_crc)
+    return sig + ihdr + iend
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -284,6 +297,70 @@ async def test_success_truncates_after_edited_turn(
             content = obj["message"]["content"]
             kept_texts.append(content[0]["text"])
     assert kept_texts == ["msg0"], f"expected only msg0, got {kept_texts}"
+
+
+# ── 3b. attachment preservation (success) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_preserves_attachments(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Edit-resend must re-send the original turn's image attachments.
+
+    The original turn carries one image attachment whose preview is persisted
+    in the attachment store.  After edit-resend, ``send_message`` must receive
+    the preview bytes as ``images`` and the original attachment metas via
+    ``reuse_attachments`` so the new turn re-references the same thumbnails.
+    """
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript_path, ["msg0", "msg1", "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    # Persist a preview for the original turn's image attachment.
+    att_store = AgentStreamAttachmentStore(session.workspace_id, session.id)
+    png_bytes = _png(width=8, height=8)
+    meta = await att_store.save("image/png", png_bytes)
+    assert meta["id"], "save must return a non-empty attachment id"
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    # t1 carries the image attachment.
+    t1 = AgentStreamEvent(
+        stream_sequence=0,
+        session_id=store.session_id,
+        tab_id="tab-1",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TURN_STARTED,
+        turn_id="t1",
+        message_id="t1:user",
+        payload={"summary": "msg1", "attachments": [meta]},
+        created_at=datetime.now(timezone.utc),
+    )
+    await store.append(t1)
+    await _append_turn(store, "t2", "msg2")
+
+    manager, mock_tailer = _make_manager(session)
+
+    await manager.edit_resend(session, "edited msg1", "c-new", "t1")
+
+    # The edited text was delivered WITH the original image re-sent and the
+    # original attachment metas re-referenced.
+    mock_tailer.send_message.assert_called_once_with(
+        "edited msg1",
+        [png_bytes],
+        "c-new",
+        reuse_attachments=[meta],
+    )
+
+    # The preview is still readable (edit-resend must not delete it).
+    data, _mime = await att_store.read(meta["id"])
+    assert data == png_bytes, "original preview was deleted by edit-resend"
 
 
 # ── 4. concurrent edit ──────────────────────────────────────────────────────

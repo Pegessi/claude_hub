@@ -91,6 +91,32 @@
                   @keydown.enter.exact.prevent="submitEdit(turn)"
                   @keydown.esc.prevent="cancelEdit"
                 />
+                <!-- Preserved attachments: edit-resend re-sends the original
+                     images, so show them as read-only thumbnails so the user
+                     knows they are kept (not dropped) on resend. -->
+                <div
+                  v-if="turn.attachments?.length"
+                  class="turn-attachments edit-resend-attachments"
+                >
+                  <template
+                    v-for="(att, i) in turn.attachments"
+                    :key="att.id ?? `edit-null-${turn.key}-${i}`"
+                  >
+                    <img
+                      v-if="att.id !== null && !erroredAttachments.has(att.id)"
+                      :src="attachmentUrl(att.id)"
+                      class="turn-attachment-img"
+                      alt="attached image (will be re-sent)"
+                      @error="onAttachmentError($event, att)"
+                    >
+                    <div
+                      v-else
+                      class="turn-attachment-placeholder"
+                    >
+                      <span>{{ att.id === null ? 'Preview unavailable' : 'Preview expired' }}</span>
+                    </div>
+                  </template>
+                </div>
                 <div
                   v-if="editError"
                   class="edit-resend-error"
@@ -2737,6 +2763,16 @@ onUnmounted(() => {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+/* Read-only preserved-attachment thumbnails inside the edit form.  The base
+   .turn-attachment-img fills its container; in the edit form there is no
+   fixed-size button wrapper, so bound it to the same thumbnail size. */
+.edit-resend-attachments .turn-attachment-img {
+  width: clamp(72px, 8vw, 88px);
+  aspect-ratio: 4 / 3;
+  border: 1px solid color-mix(in srgb, #fff 34%, transparent);
+  border-radius: var(--ch-radius-sm);
 }
 
 .edit-resend-btn {

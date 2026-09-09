@@ -466,7 +466,9 @@ def test_normalize_ask_question_emits_approval_required() -> None:
     types = [event.type for event in events]
     assert AgentStreamEventType.TOOL_CALL_STARTED in types
     assert AgentStreamEventType.APPROVAL_REQUIRED in types
-    approval = next(event for event in events if event.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    approval = next(
+        event for event in events if event.type == AgentStreamEventType.APPROVAL_REQUIRED
+    )
     assert approval.payload["kind"] == "ask_question"
     assert approval.payload["questions"][0]["id"] == "queue_persistence"
 
