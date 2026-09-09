@@ -78,7 +78,11 @@ const blockCache = new MarkdownBlockCache()
 // re-evaluates (it depends on ``highlightReady``), causing the cache to
 // invalidate and code blocks to re-render with real highlighting.
 onMounted(() => {
-  ensureHighlighter()
+  // Degrade gracefully on chunk-load failure: the block renders as plain
+  // text and ``ensureHighlighter`` resets its state so the next mount
+  // retries the dynamic import.  The ``.catch`` prevents an unhandled
+  // rejection from bubbling out of the mount hook.
+  ensureHighlighter().catch(() => {})
 })
 
 const blocks = computed(() => {

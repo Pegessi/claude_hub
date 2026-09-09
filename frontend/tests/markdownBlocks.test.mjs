@@ -157,6 +157,81 @@ test('rendered output equals marked.parse with gfm+breaks', () => {
   }
 })
 
+// ── Multi-word info string (Fix 1) ──────────────────────────────────────
+
+test('multi-word info string byte-matches marked.parse (first word for class)', () => {
+  // marked extracts only the FIRST non-space word of the info string for the
+  // ``language-…`` class; the render path must do the same so the joined HTML
+  // is byte-identical to marked.parse.
+  const fixtures = [
+    '```js title=foo\nconst x = 1;\n```',
+    "```python caption='hi'\ndef f(): pass\n```",
+    '```ts\nlet x: number;\n```',
+  ]
+  for (const src of fixtures) {
+    const cache = new MarkdownBlockCache()
+    const actual = renderString(cache, src)
+    const expected = marked.parse(src, { gfm: true, breaks: true })
+    assert.equal(actual, expected, `mismatch for fixture ${JSON.stringify(src)}`)
+  }
+})
+
+test('multi-word info string uses first word for class and highlight lang', async () => {
+  // Load a fresh copy of codeHighlight where the ``highlightCode`` call inside
+  // ``renderCodeBlockHtml`` is routed through a spy, so we can assert both the
+  // ``class`` attribute and the language passed to the highlighter.
+  const src = await readFile(
+    new URL('../src/utils/codeHighlight.ts', import.meta.url),
+    'utf8',
+  )
+  const { outputText } = ts.transpileModule(src, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2020,
+    },
+  })
+  const mocked = outputText
+    .replace(
+      /import \{ ref \} from ['"]vue['"];?/,
+      'const ref = globalThis.__vueRef;',
+    )
+    .replace(
+      /highlightCode\(normalized, firstWord\)/,
+      'globalThis.__spyHighlight(normalized, firstWord)',
+    )
+  const spyMod = await import(
+    `data:text/javascript;base64,${Buffer.from(mocked).toString('base64')}`
+  )
+
+  let capturedLang = null
+  globalThis.__spyHighlight = (code, lang) => {
+    capturedLang = lang
+    // Delegate to the real module so the output stays escaped plain text.
+    return globalThis.__codeHighlight.highlightCode(code, lang)
+  }
+
+  // Multi-word info string: first word drives both class and highlight lang.
+  const html = spyMod.renderCodeBlockHtml('const x = 1;', 'js title=foo')
+  assert.ok(
+    html.includes('class="language-js"'),
+    `expected class="language-js", got: ${JSON.stringify(html)}`,
+  )
+  assert.equal(
+    capturedLang,
+    'js',
+    `expected highlight lang "js", got ${JSON.stringify(capturedLang)}`,
+  )
+
+  // Empty info string: no class attribute, no highlight lang.
+  capturedLang = null
+  const empty = spyMod.renderCodeBlockHtml('x', '')
+  assert.ok(
+    !empty.includes('class='),
+    `expected no class for empty info string, got: ${JSON.stringify(empty)}`,
+  )
+  assert.equal(capturedLang, '', `expected empty highlight lang, got ${JSON.stringify(capturedLang)}`)
+})
+
 // ── Per-block caching: completed blocks parsed once ─────────────────────
 
 test('completed blocks are cached and not re-parsed on growth', () => {

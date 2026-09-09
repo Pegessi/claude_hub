@@ -347,6 +347,7 @@ class SessionTailer:
         *,
         previews: Optional[List[bytes]] = None,
         delivery: str = "normal",
+        reuse_attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -365,6 +366,14 @@ class SessionTailer:
         carries non-renderable placeholder metadata so the turn is still
         visible but no original bytes are persisted. This preserves the
         "originals never enter the durable cache" boundary.
+
+        ``reuse_attachments`` (edit-resend only): when supplied, no new
+        previews are persisted — the supplied metadata (with its existing
+        attachment ids) is carried straight into the ``turn_started`` event so
+        the new turn re-references the original turn's image attachments
+        rather than dropping them.  The preview bytes are passed in as
+        ``images`` (the durable cache holds only previews, not originals) and
+        delivered to the provider.  Steps 3–4 are skipped for this path.
 
         Transaction ordering (all under ``self._send_lock``):
 
@@ -452,7 +461,14 @@ class SessionTailer:
             attachment_metas: List[Dict[str, Any]] = []
             saved_ids: List[str] = []
             try:
-                if previews is not None:
+                if reuse_attachments is not None:
+                    # Edit-resend: re-reference the original turn's attachment
+                    # ids without persisting new previews.  The preview bytes
+                    # were passed in as ``images`` and are delivered to the
+                    # provider below.  ``saved_ids`` stays empty so a later
+                    # failure does not delete the (already-existing) previews.
+                    attachment_metas = [dict(m) for m in reuse_attachments if isinstance(m, dict)]
+                elif previews is not None:
                     for prev in previews:
                         mime = _detect_image_mime(prev) or "image/png"
                         meta = await self.attachment_store.save(mime, prev)
@@ -1756,7 +1772,27 @@ class TailerManager:
         turn_info = await store.find_turn(turn_id)
         if turn_info is None:
             raise ValueError(f"turn {turn_id!r} not found in event store")
-        stream_seq, turn_index, turn_text = turn_info
+        stream_seq, turn_index, turn_text, attachment_metas = turn_info
+
+        # Read the original turn's attachment preview bytes BEFORE truncating
+        # so they can be re-sent to the provider.  The durable cache stores
+        # only bounded previews (never the original full-resolution bytes), so
+        # the preview is what we re-send; the attachment IDs are re-referenced
+        # in the new turn (via ``reuse_attachments`` below) so the same
+        # thumbnails render.  A preview that was evicted/expired is skipped:
+        # its ID is still re-referenced (UI shows "Preview expired") but the
+        # provider does not receive that image.
+        att_store = AgentStreamAttachmentStore(session.workspace_id, session.id)
+        images: List[bytes] = []
+        for meta in attachment_metas:
+            att_id = meta.get("id") if isinstance(meta, dict) else None
+            if not isinstance(att_id, str) or not att_id:
+                continue
+            try:
+                data, _mime = await att_store.read(att_id)
+            except KeyError:
+                continue
+            images.append(data)
 
         # Stop the current tailer so it cannot write to the store during
         # truncation.  Pop under the lock, then stop outside (stop() is async).
@@ -1786,10 +1822,14 @@ class TailerManager:
             fork_transcript(session, adapter, turn_index, turn_text)
 
             # Restart the tailer with a fresh transport that reads the forked
-            # transcript, then deliver the edited text.
+            # transcript, then deliver the edited text (with the original
+            # turn's image attachments re-sent and re-referenced).
             invalidate_source(session.id)
             tailer = await self._get_or_create(session)
-            await tailer.send_message(text, [], client_turn_id)
+            send_kwargs: Dict[str, Any] = {}
+            if attachment_metas:
+                send_kwargs["reuse_attachments"] = attachment_metas
+            await tailer.send_message(text, images, client_turn_id, **send_kwargs)
         except BaseException:
             # Discard any tailer created during the failed attempt so it
             # cannot operate on the forked transcript.

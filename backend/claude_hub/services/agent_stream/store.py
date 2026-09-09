@@ -380,10 +380,10 @@ class AgentStreamStore:
         self._next_seq = None
         self._reset_read_index()
 
-    async def find_turn(self, turn_id: str) -> Optional[Tuple[int, int, str]]:
+    async def find_turn(self, turn_id: str) -> Optional[Tuple[int, int, str, List[Dict[str, Any]]]]:
         """Locate a turn by its ``turn_id``.
 
-        Returns ``(stream_sequence, turn_index, turn_text)`` where:
+        Returns ``(stream_sequence, turn_index, turn_text, attachments)`` where:
 
         - ``stream_sequence`` is the ``stream_sequence`` of the matching
           ``turn_started`` event (the truncation point for the Hub store).
@@ -394,12 +394,17 @@ class AgentStreamStore:
           match the Hub turn to its provider user message by content rather
           than by ordinal count, so a failed delivery cannot shift the
           mapping onto the wrong provider message.
+        - ``attachments`` is the ``payload.attachments`` list of the
+          ``turn_started`` event (opaque attachment metadata: id, mime_type,
+          bytes, width, height).  Edit-resend uses it to re-reference the
+          original turn's image attachments in the new turn so they are not
+          silently dropped.
 
         Returns ``None`` if no ``turn_started`` event carries ``turn_id``.
         """
         if not self._path.exists():
             return None
-        result: Optional[Tuple[int, int, str]] = None
+        result: Optional[Tuple[int, int, str, List[Dict[str, Any]]]] = None
 
         def _read() -> None:
             nonlocal result
@@ -420,12 +425,16 @@ class AgentStreamStore:
                         seq = obj.get("stream_sequence")
                         if isinstance(seq, int):
                             text = ""
+                            attachments: List[Dict[str, Any]] = []
                             payload = obj.get("payload")
                             if isinstance(payload, dict):
                                 summary = payload.get("summary")
                                 if isinstance(summary, str):
                                     text = summary
-                            result = (seq, turn_count - 1, text)
+                                atts = payload.get("attachments")
+                                if isinstance(atts, list):
+                                    attachments = [a for a in atts if isinstance(a, dict)]
+                            result = (seq, turn_count - 1, text, attachments)
                         return
 
         await asyncio.to_thread(_read)

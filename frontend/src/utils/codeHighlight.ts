@@ -4,9 +4,11 @@
  * highlight.js is loaded on demand via dynamic ``import()`` so it never
  * contributes to the first-load bundle.  The ``common`` bundle ships ~40
  * of the most frequently used languages (JavaScript, TypeScript, Python,
- * Bash, JSON, YAML, CSS, XML, SQL, Go, Rust, Java, C/C++, Dockerfile,
- * Diff, …) — enough for the vast majority of code blocks without the
- * weight of the full 190+ language distribution.
+ * Bash, JSON, YAML, CSS, XML, SQL, Go, Rust, Java, C/C++, Diff, …) —
+ * enough for the vast majority of code blocks without the weight of the
+ * full 190+ language distribution.  (Some languages people often reach
+ * for — Dockerfile, HCL/Terraform — are NOT in ``common``; info strings
+ * for those degrade gracefully to plain text.)
  *
  * Rendering flow
  * --------------
@@ -57,6 +59,14 @@ export function ensureHighlighter(): Promise<Hljs> {
       highlightReady.value = true
       highlightVersion.value++
       return hljsInstance
+    }).catch((err) => {
+      // Reset so the NEXT call retries the dynamic import.  Without this a
+      // single failed chunk load would leave ``loadPromise`` permanently
+      // rejected and wedge the highlighter forever (no retry, and every
+      // caller inherits the same rejection).
+      loadPromise = null
+      hljsInstance = null
+      throw err
     })
   }
   return loadPromise
@@ -92,10 +102,6 @@ const LANG_ALIASES: Record<string, string> = {
   cs: 'csharp',
   golang: 'go',
   rs: 'rust',
-  docker: 'dockerfile',
-  containerfile: 'dockerfile',
-  tf: 'hcl',
-  terraform: 'hcl',
   gql: 'graphql',
   'objective-c': 'objectivec',
   objc: 'objectivec',
@@ -150,12 +156,18 @@ export function highlightCode(code: string, lang: string): string {
  * @param lang - the info-string language (may be empty).
  */
 export function renderCodeBlockHtml(text: string, lang: string): string {
-  const langAttr = lang ? ` class="language-${escapeAttr(lang)}"` : ''
+  // marked extracts only the FIRST non-space word of the info string for the
+  // ``language-…`` class — its renderer does ``(infoString || '').match(/^\S*/)?.[0]``.
+  // Match that here so multi-word info strings (e.g. ```js title=foo) produce
+  // ``class="language-js"`` and highlight as JavaScript rather than failing to
+  // normalise the full "js title=foo" and never highlighting.
+  const firstWord = (lang || '').match(/^\S*/)?.[0] || ''
+  const langAttr = firstWord ? ` class="language-${escapeAttr(firstWord)}"` : ''
   // Match marked's own code renderer: normalise the code to end with exactly
   // one trailing newline and emit a newline after ``</pre>`` so the joined
   // block HTML is byte-identical to ``marked.parse`` for the same source.
   const normalized = text.replace(/\n$/, '') + '\n'
-  return `<pre><code${langAttr}>${highlightCode(normalized, lang)}</code></pre>\n`
+  return `<pre><code${langAttr}>${highlightCode(normalized, firstWord)}</code></pre>\n`
 }
 
 /** ``true`` if ``lang`` is registered with the loaded highlighter. */
@@ -174,7 +186,9 @@ function escapeHtml(s: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#x27;')
+    // marked escapes apostrophes as the DECIMAL entity ``&#39;`` (not the hex
+    // ``&#x27;``); emit the same so the fallback path byte-matches marked.parse.
+    .replace(/'/g, '&#39;')
 }
 
 function escapeAttr(s: string): string {
