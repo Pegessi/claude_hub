@@ -14,6 +14,7 @@ from ..models import (
     User,
 )
 from ..services import ttyd_manager
+from ..services.ttyd_manager import TabLimitExceededError
 from .agent_stream import _get_tab_tailer_manager, _terminal_tab_stream_session
 
 logger = logging.getLogger(__name__)
@@ -54,21 +55,24 @@ async def create_tab(
     logger.info(
         f"Received create_tab request: name={tab.name}, solo_mode={tab.solo_mode}, shell={tab.shell}, cwd={tab.cwd}, agent_type={tab.agent_type}, session_kind={tab.session_kind}, target={tab.target}, remote_profile_id={tab.remote_profile_id}, agent_session_id={tab.agent_session_id}, user={current_user.email}"
     )
-    return await ttyd_manager.create_tab(
-        name=tab.name,
-        shell=tab.shell,
-        cwd=tab.cwd,
-        solo_mode=tab.solo_mode,
-        agent_type=tab.agent_type,
-        session_kind=tab.session_kind,
-        chat_mode=tab.chat_mode,
-        target=tab.target,
-        remote_profile_id=tab.remote_profile_id,
-        remote_cwd=tab.remote_cwd,
-        remote_reconnect=tab.remote_reconnect,
-        env=tab.env,
-        agent_session_id=tab.agent_session_id,
-    )
+    try:
+        return await ttyd_manager.create_tab(
+            name=tab.name,
+            shell=tab.shell,
+            cwd=tab.cwd,
+            solo_mode=tab.solo_mode,
+            agent_type=tab.agent_type,
+            session_kind=tab.session_kind,
+            chat_mode=tab.chat_mode,
+            target=tab.target,
+            remote_profile_id=tab.remote_profile_id,
+            remote_cwd=tab.remote_cwd,
+            remote_reconnect=tab.remote_reconnect,
+            env=tab.env,
+            agent_session_id=tab.agent_session_id,
+        )
+    except TabLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
 
 
 @router.put("/order")
@@ -105,14 +109,15 @@ async def fork_tab(
 
     The forked tab copies the source's structured history up to and including
     the given turn and starts a fresh provider conversation with the same
-    launch configuration. Returns 404 if the source tab is missing and 400 if
-    the ordinal is out of range.
+    launch configuration. Returns 404 if the source tab is missing, 400 if
+    the ordinal is out of range, and 429 if the source tab's fork cap is
+    reached.
     """
-    logger.info(
-        f"Forking tab {tab_id} at ordinal {req.ordinal}, user={current_user.email}"
-    )
+    logger.info(f"Forking tab {tab_id} at ordinal {req.ordinal}, user={current_user.email}")
     try:
         tab = await ttyd_manager.fork_tab(tab_id, req.ordinal)
+    except TabLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not tab:
