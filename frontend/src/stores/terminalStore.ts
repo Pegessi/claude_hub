@@ -199,6 +199,20 @@ export const useTerminalStore = defineStore('terminal', () => {
   // Get the active pane (for mobile controls to know which terminal to send keys to)
   const activePane = computed(() => panes.value.find(p => p.id === activePaneId.value) || null)
 
+  // True when the active pane hosts a native structured Chat session rather
+  // than a raw PTY terminal. Mirrors TerminalPane's isChatSession boundary:
+  // a top-level chat session owns the StructuredPane surface, and workspace
+  // runners (which carry a workspace_role) always stay on their Terminal
+  // surface. Mobile-only affordances that inject terminal keys (the floating
+  // keyboard ball) are useless on the chat surface and must stay hidden there.
+  const activePaneIsChat = computed(() => {
+    const pane = activePane.value
+    if (!pane || !pane.tabId) return false
+    const tab = tabs.value.find(t => t.id === pane.tabId)
+    if (!tab) return false
+    return tab.session_kind === 'chat' && !tab.workspace_role
+  })
+
   async function fetchTabs() {
     isLoading.value = true
     try {
@@ -453,6 +467,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     panes,
     activePaneId,
     activePane,
+    activePaneIsChat,
     fetchTabs,
     fetchAgentStatuses,
     startAgentStatusPolling,

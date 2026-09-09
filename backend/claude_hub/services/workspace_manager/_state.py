@@ -21,6 +21,10 @@ class _StateMixin:
         self.tasks: dict[str, WorkspaceTask] = {}
         self.sessions: dict[str, ManagedSession] = {}
         self.reports: dict[str, AgentReport] = {}
+        self.scheduled_tasks: dict[str, ScheduledTask] = {}
+        # Per-task fire locks: serialize the 5s tick and a manual run-now so
+        # the same task cannot be stamped / fired twice concurrently.
+        self._sched_fire_locks: dict[str, asyncio.Lock] = {}
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
         # Per-session pump locks: serialize _pump_session_messages so two
@@ -56,6 +60,9 @@ class _StateMixin:
         self._worktree_root_cache: dict[str, tuple[float, list[Path]]] = {}
         self.task_mailbox = TaskMailbox(self)
         self._load_state()
+        # Scheduled tasks reference sessions (Type A) and workspaces (Types B/C),
+        # so load them after the core state has been hydrated.
+        self._load_scheduled_tasks()
 
     def _workspace_dir(self, workspace_id: str) -> Path:
         return _wm.STATE_ROOT / workspace_id
