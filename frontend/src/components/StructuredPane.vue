@@ -67,7 +67,7 @@
         <div
           v-for="turn in turns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn)]"
+          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn)]"
           class="structured-turn"
         >
           <!-- A right-aligned user bubble and a left-aligned assistant bubble make
@@ -147,7 +147,7 @@
                the exact order the provider emitted them. Paseo does not defer
                protocol errors to the turn end, so neither do we. -->
           <template
-            v-for="part in turn.parts"
+            v-for="part in turnPartsFor(turn)"
             :key="part.key"
           >
             <details
@@ -165,6 +165,13 @@
                    avoid re-parsing multi-kilobyte reasoning streams on every
                    delta. Whitespace is preserved with pre-wrap. -->
               <pre class="thinking-body">{{ part.text }}</pre>
+              <button
+                type="button"
+                class="details-collapse"
+                @click="collapseDetails"
+              >
+                收起
+              </button>
             </details>
 
             <div
@@ -237,6 +244,13 @@
                     <pre>{{ tool.resultText }}</pre>
                   </div>
                 </div>
+                <button
+                  type="button"
+                  class="details-collapse"
+                  @click="collapseDetails"
+                >
+                  收起
+                </button>
               </details>
             </div>
 
@@ -328,6 +342,38 @@
             >
               <span>{{ part.text }}</span>
             </div>
+
+            <!-- The folded working region of a finished turn. Synthetic: it
+                 stands in for thinking/tool parts the reducer produced, so it
+                 is only ever seen for turns that are already history. -->
+            <button
+              v-else-if="part.kind === 'process'"
+              type="button"
+              class="process-fold"
+              :aria-label="`展开过程：${part.meta}`"
+              @click="toggleTurnProcess(turn)"
+            >
+              <span
+                class="process-fold-chevron"
+                aria-hidden="true"
+              >▸</span>
+              <span class="process-fold-meta">{{ part.meta }}</span>
+            </button>
+
+            <!-- Footer of an expanded process, so a long working region can be
+                 re-folded without scrolling back to its top. -->
+            <button
+              v-else-if="part.kind === 'process_end'"
+              type="button"
+              class="process-fold process-fold--end"
+              @click="toggleTurnProcess(turn)"
+            >
+              <span
+                class="process-fold-chevron"
+                aria-hidden="true"
+              >▴</span>
+              <span class="process-fold-meta">{{ part.label }}</span>
+            </button>
           </template>
         </div>
 
@@ -644,7 +690,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { IncrementalTimelineReducer, type TimelineApproval, type TimelineAttachment, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer, foldTurnParts, splitTurnProcess, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
@@ -1429,6 +1475,84 @@ function turnApprovalSignature(turn: TimelineTurn): string {
   // isSending gates the option/submit disabled state inside the card, so a
   // send start/end must also invalidate the memo for approval-bearing turns.
   return isSending.value ? `${signature}|sending` : signature
+}
+
+/**
+ * Which turns the viewer has explicitly opened or closed.
+ *
+ * Fold state is per-viewer UI state, not part of the durable timeline, so it
+ * lives here rather than on the turn the shared reducer produces. Same
+ * ``v-memo`` constraint as ``turnApprovalSignature``: a turn whose deps do not
+ * change will not re-render, so the fold decision has to reach the deps array
+ * via ``turnFoldSignature`` below or a click would do nothing.
+ */
+const processExpandedOverrides = ref(new Map<string, boolean>())
+
+/**
+ * Key of the newest completed turn, or ``null`` while none has finished.
+ *
+ * That turn stays open: it is the one being read, and folding it the instant
+ * it finished would collapse the process out from under someone mid-glance.
+ * Older turns are history and fold themselves.
+ */
+const latestCompletedTurnKey = computed(() => {
+  for (let i = turns.value.length - 1; i >= 0; i -= 1) {
+    if (turns.value[i].completed) return turns.value[i].key
+  }
+  return null
+})
+
+function isProcessExpanded(turn: TimelineTurn): boolean {
+  const override = processExpandedOverrides.value.get(turn.key)
+  if (override !== undefined) return override
+  return turn.key === latestCompletedTurnKey.value
+}
+
+/** True when this turn has a working region worth folding.
+ *
+ * The newest completed turn is excluded so it keeps rendering exactly as it
+ * did before folding existed, and ``splitTurnProcess`` rejects the rest of the
+ * unsafe cases (running turn, no delivered answer, approval card or error in
+ * the process). */
+function isTurnFoldable(turn: TimelineTurn): boolean {
+  return turn.key !== latestCompletedTurnKey.value && splitTurnProcess(turn) !== null
+}
+
+function toggleTurnProcess(turn: TimelineTurn): void {
+  const next = new Map(processExpandedOverrides.value)
+  next.set(turn.key, !isProcessExpanded(turn))
+  processExpandedOverrides.value = next
+}
+
+/** Parts to render for a turn, with its process folded away once it is history. */
+function turnPartsFor(turn: TimelineTurn): TimelinePart[] {
+  if (!isTurnFoldable(turn)) return turn.parts
+  return foldTurnParts(turn, isProcessExpanded(turn))
+}
+
+function turnFoldSignature(turn: TimelineTurn): string {
+  // Turns with nothing foldable — including the active one — never depend on
+  // this state; keep them on the cheap memoized path.
+  if (!isTurnFoldable(turn)) return ''
+  const split = splitTurnProcess(turn)
+  const label = split ? turnProcessLabel(turn, split.process) : ''
+  return `${isProcessExpanded(turn) ? 'open' : 'folded'}|${label}`
+}
+
+/**
+ * Collapse the native ``<details>`` containing the clicked button.
+ *
+ * The thinking and tool cards stay uncontrolled: the browser owns their open
+ * state, which is exactly what lets ``v-memo`` skip historical turns without
+ * losing an expanded card. A footer "收起" button therefore reaches for the
+ * enclosing element rather than introducing per-card Vue state that every
+ * memo dependency would then have to track.
+ */
+function collapseDetails(event: MouseEvent): void {
+  const target = event.currentTarget
+  if (target instanceof HTMLElement) {
+    target.closest('details')?.removeAttribute('open')
+  }
 }
 
 /** Aggregate status for a tool group: 'running' if any tool is still running,
@@ -2687,6 +2811,100 @@ onUnmounted(() => {
   display: none;
 }
 
+/* A long thinking or tool card scrolls its own header out of view, leaving no
+   way to collapse it without scrolling back to the top. Pinning the summary to
+   the top of the timeline keeps the toggle reachable at any depth. The
+   background must be opaque and match its card, or the body shows through as it
+   passes underneath; the thinking card's summary is pulled out to the card's
+   edges for the same reason. */
+.thinking-card summary,
+.tool-card summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.thinking-card summary {
+  margin: -7px -10px 0;
+  padding: 7px 10px;
+  background: var(--ch-color-surface-soft);
+}
+
+.tool-card summary {
+  background: var(--ch-color-surface);
+}
+
+/* Footer escape hatch for a card whose body is taller than the viewport, so it
+   can be re-folded without scrolling back up to its summary. */
+.details-collapse {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 5px 0;
+  border: none;
+  border-top: 1px solid var(--ch-color-border-muted);
+  background: none;
+  color: var(--ch-color-text-subtle);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.details-collapse:hover {
+  color: var(--ch-color-text-muted);
+}
+
+.details-collapse:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--ch-radius-sm);
+}
+
+/* The folded working process of a finished turn: a single line standing in for
+   the thinking, tool calls, and narration that produced the answer. */
+.process-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  max-width: 100%;
+  margin: 2px 0;
+  padding: 5px 10px;
+  border: 1px dashed var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+  color: var(--ch-color-text-subtle);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.process-fold:hover {
+  color: var(--ch-color-text-muted);
+}
+
+.process-fold:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 2px;
+}
+
+.process-fold--end {
+  border-style: solid;
+}
+
+.process-fold-chevron {
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+.process-fold-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thinking-card summary {
   display: flex;
   align-items: center;
@@ -2725,7 +2943,10 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
-  overflow: hidden;
+  /* ``clip`` rather than ``hidden``: both keep child backgrounds inside the
+     rounded corners, but ``hidden`` would make this card a scroll container and
+     silently stop its summary from sticking to the timeline's scrollport. */
+  overflow: clip;
 }
 
 .tool-header {
