@@ -15,6 +15,10 @@
   only way to close it was to scroll back up.
 - **Fix.** A completed turn is split at its **last** text part: everything
   before it is the working process, the last text part is the delivered answer.
+  The split only applies when the turn actually stopped there — a turn cancelled
+  mid-tool, or one that ran out of room, has narration where an answer would be,
+  and folding it would leave tools and thinking on screen beneath a header
+  claiming to have hidden them.
   Historical turns render the process as one line — `过程 · 19 个工具调用 · 50s`
   — that doubles as the toggle for the detail beneath it. The header keeps its
   place in both states and only the detail below it grows, so expanding never

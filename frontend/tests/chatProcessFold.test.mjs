@@ -142,6 +142,36 @@ test('a process holding an error is left whole', () => {
   assert.equal(splitTurnProcess(turn), null, 'folding would hide why the turn failed')
 })
 
+test('a turn cancelled mid-work has no delivered answer to fold around', () => {
+  // The shape that shipped broken: the last text is working narration and the
+  // turn is cut off while a tool still runs, so "the last text and everything
+  // after it" is not an answer. Folding it left the tools and thinking on
+  // screen under a header claiming to have hidden them.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'text_delta', { text: '停在这里，先确认一下' }),
+    makeEvent(3, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} }),
+    makeEvent(4, 'tool_call_completed', { tool_call_id: 'c1', status: 'completed' }),
+    makeEvent(5, 'thinking_delta', { text: 'still working' }),
+    makeEvent(6, 'turn_completed', { status: 'cancelled' }),
+  ])[0]
+  assert.equal(splitTurnProcess(turn), null)
+  assert.equal(foldTurnParts(turn, false), turn.parts)
+})
+
+test('a delivered answer followed only by a status still folds', () => {
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'text_delta', { text: 'the answer' }),
+    makeEvent(4, 'status', { text: 'usage: 12k tokens' }),
+    makeEvent(5, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  const split = splitTurnProcess(turn)
+  assert.ok(split, 'a status notice is not work, so it does not disqualify the answer')
+  assert.deepEqual(split.delivery.map(p => p.kind), ['text', 'status'])
+})
+
 // ── step count, elapsed time, label ─────────────────────────────────────
 
 test('steps count actions, not render blocks', () => {
