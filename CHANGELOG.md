@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### fix: edit action moved off the message, and a disabled button that says so
+
+- **Problem.** Two defects in the turn hover actions, reported together.
+  The ✎ edit button was `position: absolute` on the user bubble
+  (`top: -10px; right: -8px`), so on a short message it sat over the tail of
+  the text. And because the fork button was anchored separately to the turn's
+  top-right, the two landed on top of each other — measured at 14 px of
+  horizontal overlap. Separately, the edit button is `:disabled` whenever any
+  turn is running (most of the time in an active chat), and it had **no
+  disabled styling at all**: full opacity, `cursor: pointer`, no feedback —
+  it looked clickable and silently swallowed clicks.
+- **Fix.** Both actions now live in the one hover cluster as flex siblings, so
+  they lay out side by side and the edit button inherits show/hide from the
+  cluster instead of being pinned over the message. The disabled state gets an
+  explicit rule (dimmed, `cursor: not-allowed`), so the reason for the tooltip
+  is visible before you click. Wired-but-unstyled is the failure mode here: the
+  guard that disables the button already existed and was already tested.
+- **Tests.** `structuredPaneEditGuard.test.mjs` gains four assertions: the edit
+  button is inside the cluster, is not absolutely positioned, the cluster lays
+  out rather than stacks, and a `:disabled` rule exists that dims and does not
+  claim clickability. `structuredPaneImageMessage.test.mjs` no longer ends its
+  match on the hover button — that anchor assumed the button lived in the
+  bubble; it now runs to the status row after the user row.
+
 ### feat: fold the working process of finished Chat turns
 
 - **Problem.** Every finished turn rendered its whole working history inline —

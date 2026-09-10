@@ -39,6 +39,51 @@ test('edit button explains why it is disabled via a tooltip', () => {
   assert.match(btn, /turn is currently running/, 'tooltip must mention a running turn')
 })
 
+// ---------------------------------------------------------------------------
+// Placement and disabled affordance. The guards above keep the button from
+// doing the wrong thing; these keep it visible in the right place and honest
+// about when it is inert.
+// ---------------------------------------------------------------------------
+
+test('the edit action lives in the turn hover cluster, not on the bubble', () => {
+  // Pinned to the bubble it covered the tail of the message, and — anchored
+  // separately from the fork button — the two ended up on top of each other.
+  const cluster = structuredPane.match(/<div class="turn-actions">[\s\S]*?<\/div>/)
+  assert.ok(cluster, 'the turn-actions cluster must exist')
+  assert.match(
+    cluster[0],
+    /class="edit-resend-hover-btn"/,
+    'the edit button must sit in the cluster beside the fork button',
+  )
+})
+
+test('the edit button is not absolutely positioned over the message', () => {
+  const rule = structuredPane.match(/\.edit-resend-hover-btn \{[\s\S]*?\n\}/)
+  assert.ok(rule, 'the base rule must exist')
+  assert.doesNotMatch(
+    rule[0],
+    /position: absolute/,
+    'an absolutely positioned edit button overlapped the bubble text',
+  )
+})
+
+test('the cluster lays its buttons out instead of stacking them', () => {
+  const cluster = structuredPane.match(/\.turn-actions \{[\s\S]*?\n\}/)
+  assert.ok(cluster, 'the .turn-actions rule must exist')
+  assert.match(cluster[0], /display: flex/, 'the cluster must lay its buttons in a row')
+  assert.match(cluster[0], /gap:/, 'the buttons need a gap so they do not touch')
+})
+
+test('a disabled edit button looks disabled', () => {
+  // The button is disabled whenever any turn is running — most of the time in
+  // an active chat. Wired but unstyled it looked enabled and swallowed clicks
+  // with no feedback at all.
+  const rule = structuredPane.match(/\.edit-resend-hover-btn:disabled \{[\s\S]*?\n\}/)
+  assert.ok(rule, 'a :disabled rule must exist for the edit button')
+  assert.match(rule[0], /opacity:/, 'disabled must be visibly dimmed')
+  assert.match(rule[0], /cursor: not-allowed/, 'disabled must not claim to be clickable')
+})
+
 test('startEdit refuses to open the editor while a turn is running', () => {
   // Even if the disabled button is bypassed (e.g. via a11y tooling), startEdit
   // must bail when turnInFlight is true.
