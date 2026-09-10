@@ -955,12 +955,15 @@ class SessionTailer:
                     # transport retires its generation before publishing the
                     # cancellation sentinel, so ``read_line`` discards it and
                     # never surfaces it as EOF. Reaching here therefore means
-                    # the provider's stdout genuinely closed without a
-                    # completion record — a real failure, and one this branch
-                    # used to swallow silently, leaving no trace beyond the
-                    # synthesized event.
+                    # the provider's stdout ended without a completion record —
+                    # a real failure, and one this branch used to swallow
+                    # silently, leaving no trace beyond the synthesized event.
+                    # "ended" and not "closed": the drain also stops reading
+                    # after a non-cancellation crash, and then the provider may
+                    # still be alive (its ``native transport stdout drain
+                    # failed`` line precedes this one).
                     logger.warning(
-                        "provider closed stdout with no completion record for "
+                        "provider stdout ended with no completion record for "
                         "session %s (exit_error=%r); synthesizing a failed turn",
                         self.session_id,
                         exit_error,

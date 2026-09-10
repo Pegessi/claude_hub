@@ -114,6 +114,32 @@ sentinel be unconditionally stale.
   identically with this change stashed, so it pre-exists and is unrelated.
 - `black`, `isort`, and `mypy claude_hub` (94 files) clean.
 
+## Independent review
+
+An adversarial review of the commit (separate agent, run under the repository's
+`surgical-code-review` method) found no blocker or major. It independently
+reproduced the red test on a detached worktree at the merge base, closed the
+invariant by enumerating every producer of `_stdout_queue` items and every
+canceller of `_reader_task`, and traced the generation through a six-step
+spawn / cancel / acknowledge / spawn / acknowledge / spawn / stop sequence to
+show the removed advances were net-equivalent — the only behaviour change is
+`stop()`, which is the point.
+
+Three things came out of it and are folded into the follow-up commit:
+
+- A comment on the cancelled sentinel argued both that `read_line` discards it
+  and that publishing it keeps consumers unparked. It is inert; the guarantee
+  belongs to the killers, not to the sentinel.
+- The new warning over-claimed. A drain that dies from a non-cancellation
+  exception also reaches the branch with a live generation, and the provider
+  may still be alive, so "stdout ended" is the honest wording.
+- `acknowledge_turn_complete` still advanced the generation inline. It is a
+  different situation (retiring a lingering reader, not killing one), but the
+  discipline now has one implementation.
+
+Its one residual doubt matches the follow-up below: it could not construct the
+end-to-end chain that produced the original incident either.
+
 ## Follow-up
 
 The trigger of the original incident was not proven from the artifacts: the fix
