@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDi
 from ..config import settings
 from ..models import (
     AgentRuntimeStatus,
+    AgentStreamEvent,
     AgentType,
     ChatMode,
     ExecutionTarget,
@@ -283,6 +284,14 @@ DEFAULT_CLAUDE_LAUNCH_ENV: Dict[str, str] = {
     "CLAUDE_CODE_SUBAGENT_MODEL": "doubao-seed-2.0-code",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 }
+
+
+class TabLimitExceededError(Exception):
+    """Raised when creating/forking a tab would exceed a growth limit.
+
+    Maps to HTTP 429 in the API layer. The bound exists so a loop of fork (or
+    create) requests cannot exhaust ttyd ports, processes, and tmux sessions.
+    """
 
 
 class CursorPosition(TypedDict):
@@ -1386,6 +1395,8 @@ class TTYDProcess:
         cursor_transcript_schema: Optional[str] = None,
         session_kind: SessionKind = SessionKind.TERMINAL,
         chat_mode: ChatMode = ChatMode.DEFAULT,
+        forked_from_tab_id: Optional[str] = None,
+        forked_from_ordinal: Optional[int] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -1395,6 +1406,8 @@ class TTYDProcess:
         self.agent_type = agent_type
         self.session_kind = session_kind
         self.chat_mode = chat_mode
+        self.forked_from_tab_id = forked_from_tab_id
+        self.forked_from_ordinal = forked_from_ordinal
         self.target = target
         self.remote_profile_id = remote_profile_id
         self.remote_cwd = remote_cwd
@@ -2929,6 +2942,8 @@ asyncio.run(_main())
             "cursor_cli_version": self.cursor_cli_version,
             "cursor_transcript_path": self.cursor_transcript_path,
             "cursor_transcript_schema": self.cursor_transcript_schema,
+            "forked_from_tab_id": self.forked_from_tab_id,
+            "forked_from_ordinal": self.forked_from_ordinal,
         }
 
     def to_schema(self) -> TerminalTab:
@@ -2959,7 +2974,44 @@ asyncio.run(_main())
             cursor_cli_version=self.cursor_cli_version,
             cursor_transcript_path=self.cursor_transcript_path,
             cursor_transcript_schema=self.cursor_transcript_schema,
+            forked_from_tab_id=self.forked_from_tab_id,
+            forked_from_ordinal=self.forked_from_ordinal,
         )
+
+
+def _event_turn_ordinals(events: List[AgentStreamEvent]) -> List[int]:
+    """Assign each event a turn ordinal by first appearance of its ``turn_id``.
+
+    The first time a ``turn_id`` appears it opens a new turn (ordinal = number
+    of distinct turns seen so far); every later event with the same
+    ``turn_id`` reuses that ordinal, even when turns interleave
+    (e.g. turn_ids [A, B, A] -> ordinals [0, 1, 0]).
+
+    Events without a ``turn_id`` (legacy) are folded into the currently open
+    turn (the ordinal of the most recent turn_id event); when no turn is open
+    yet they open turn 0. This keeps legacy events from breaking the prefix
+    boundary instead of creating artificial turns.
+
+    The returned list is monotonic-by-turn (not by index): a fork at ordinal N
+    keeps exactly the events whose ordinal is <= N, which is correct even when
+    turns interleave.
+    """
+    ordinals: List[int] = []
+    turn_index_by_id: Dict[str, int] = {}
+    current_ordinal: Optional[int] = None
+    for ev in events:
+        if ev.turn_id:
+            idx = turn_index_by_id.get(ev.turn_id)
+            if idx is None:
+                idx = len(turn_index_by_id)
+                turn_index_by_id[ev.turn_id] = idx
+            current_ordinal = idx
+            ordinals.append(idx)
+        else:
+            if current_ordinal is None:
+                current_ordinal = 0
+            ordinals.append(current_ordinal)
+    return ordinals
 
 
 class TTYDManager:
@@ -3072,6 +3124,8 @@ class TTYDManager:
                             cursor_cli_version=tab_data.get("cursor_cli_version"),
                             cursor_transcript_path=tab_data.get("cursor_transcript_path"),
                             cursor_transcript_schema=tab_data.get("cursor_transcript_schema"),
+                            forked_from_tab_id=tab_data.get("forked_from_tab_id"),
+                            forked_from_ordinal=tab_data.get("forked_from_ordinal"),
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
@@ -3282,6 +3336,13 @@ class TTYDManager:
         session_kind: SessionKind = SessionKind.TERMINAL,
         chat_mode: ChatMode = ChatMode.DEFAULT,
     ) -> TerminalTab:
+        # Global backstop: bound the total number of live tabs so even
+        # non-fork creation cannot grow without limit. The per-source fork
+        # cap is enforced in fork_tab; this catches everything else.
+        if len(self.processes) >= settings.max_total_tabs:
+            raise TabLimitExceededError(
+                f"global tab limit reached ({settings.max_total_tabs}); " "cannot create more tabs"
+            )
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
@@ -3436,6 +3497,139 @@ class TTYDManager:
             remote_forward_port=source.remote_forward_port,
             env=source.env,
         )
+
+    def _count_forks(self, source_tab_id: str) -> int:
+        """Count existing tabs forked from ``source_tab_id``."""
+        return sum(
+            1 for proc in self.processes.values() if proc.forked_from_tab_id == source_tab_id
+        )
+
+    def _fork_lock(self, source_tab_id: str) -> asyncio.Lock:
+        """Per-source-tab lock serializing the cap check and tab creation.
+
+        Lazily initialized so managers built via ``TTYDManager.__new__`` (which
+        bypasses ``__init__``) still work. Using ``self.__dict__`` avoids
+        relying on an attribute that ``__new__``-built instances may not set.
+        """
+        locks = self.__dict__.get("_fork_locks")
+        if locks is None:
+            locks = {}
+            self._fork_locks = locks
+        lock = locks.get(source_tab_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[source_tab_id] = lock
+        return lock
+
+    async def fork_tab(self, tab_id: str, ordinal: int) -> Optional[TerminalTab]:
+        """Create a new tab by deep-copying the source tab's structured history
+        up to and including turn ``ordinal`` (0-based).
+
+        The forked tab carries the source's launch configuration but a fresh
+        provider conversation; the structured pane shows the copied history so
+        the user can continue independently from that point. ``forked_from``
+        provenance is recorded on the forked tab for traceability.
+
+        Raises ``TabLimitExceededError`` if the source already has
+        ``settings.max_forks_per_tab`` forks, and ``ValueError`` if the
+        ordinal is out of range.
+        """
+        source = self.processes.get(tab_id)
+        if not source:
+            return None
+
+        # Deferred import: ``agent_stream`` pulls in the native tailer, which
+        # imports this module; importing at call time avoids a circular import.
+        from .agent_stream.store import AgentStreamStore
+
+        # Bound fork growth: a fork loop must not exhaust ttyd ports,
+        # processes, and tmux sessions. Hold the per-source lock across the
+        # cap check and creation so concurrent forks cannot both pass the
+        # check and overshoot the cap.
+        async with self._fork_lock(tab_id):
+            fork_count = self._count_forks(tab_id)
+            if fork_count >= settings.max_forks_per_tab:
+                raise TabLimitExceededError(
+                    f"tab {tab_id} already has {fork_count} forks; limit is "
+                    f"{settings.max_forks_per_tab}"
+                )
+
+            # Read the source stream events, paging through large histories.
+            source_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
+            events: List[AgentStreamEvent] = []
+            since = -1
+            while True:
+                page = await source_store.read_since(since, limit=5000)
+                events.extend(page.events)
+                if not page.has_more:
+                    break
+                since = page.next_sequence
+
+            # Assign each event a turn ordinal by first appearance of its
+            # turn_id, then take the prefix of turns 0..ordinal. This is
+            # correct even when turns interleave (turn_ids [A,B,A] ->
+            # ordinals [0,1,0]; fork at ordinal 1 keeps all three events).
+            ordinals = _event_turn_ordinals(events)
+            num_turns = (max(ordinals) + 1) if ordinals else 0
+            if ordinal < 0 or ordinal >= num_turns:
+                raise ValueError(
+                    f"ordinal {ordinal} out of range (conversation has " f"{num_turns} turns)"
+                )
+            cutoff = [ev for ev, o in zip(events, ordinals) if o <= ordinal]
+
+            # Create the forked tab with the source's launch configuration.
+            forked = await self.create_tab(
+                name=f"{source.name} (fork)",
+                shell=source.shell,
+                cwd=source.cwd,
+                solo_mode=source.solo_mode,
+                agent_type=source.agent_type,
+                session_kind=source.session_kind,
+                chat_mode=source.chat_mode,
+                target=source.target,
+                remote_profile_id=source.remote_profile_id,
+                remote_cwd=source.remote_cwd,
+                remote_reconnect=source.remote_reconnect,
+                remote_forward_port=source.remote_forward_port,
+                env=source.env,
+                # Copy the Cursor launch mode so a forked Cursor tab streams the
+                # same way, but omit the transcript path/schema: those identify
+                # the source conversation, and the fork starts a fresh one.
+                cursor_transport=source.cursor_transport,
+                cursor_data_dir=source.cursor_data_dir,
+                cursor_cli_version=source.cursor_cli_version,
+            )
+
+        # Rewrite the copied events to the forked tab's identity and persist
+        # them. ``replace_all`` re-sequences from 0 so the forked stream is a
+        # clean append-only log starting at the copied history. If anything
+        # after create_tab fails, delete the just-created tab so a failed
+        # fork leaves no empty orphan "X (fork)" tab behind.
+        try:
+            forked_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{forked.id}")
+            rewritten = [
+                ev.model_copy(
+                    update={
+                        "session_id": f"terminal-tab-{forked.id}",
+                        "tab_id": forked.id,
+                    }
+                )
+                for ev in cutoff
+            ]
+            await forked_store.replace_all(rewritten)
+
+            # Record fork provenance on the forked tab.
+            process = self.processes[forked.id]
+            process.forked_from_tab_id = tab_id
+            process.forked_from_ordinal = ordinal
+            self._save_state()
+            return process.to_schema()
+        except Exception:
+            try:
+                await self.delete_tab(forked.id)
+            except Exception:
+                logger.exception("Failed to clean up orphan fork tab %s after error", forked.id)
+            raise
 
     async def delete_tab(self, tab_id: str) -> bool:
         """Delete a tab and explicitly kill its tmux session (user requested deletion)."""

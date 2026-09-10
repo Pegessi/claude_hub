@@ -58,6 +58,91 @@
   existing source-text tests updated to encode per-instance isolation instead
   of the removed `tabId` watcher.
 
+### feat: Fork a new chat tab from a specific turn
+
+- **What.** Each turn in a Chat tab's structured pane now has a hover-revealed
+  "Fork from here" action. It creates a new tab that deep-copies the source
+  tab's structured history up to and including that turn (0-based ordinal) and
+  starts a fresh provider conversation with the same launch configuration.
+- **How.** `POST /tabs/{tab_id}/fork` (body `{ordinal}`) reads the source
+  tab's stream events, groups them into turns via
+  `_group_event_turn_end_indices` (mirrors the frontend's `resolveTurn`
+  grouping), truncates at the ordinal, creates the forked tab, and rewrites the
+  copied events to the new tab's identity. Returns 404 for a missing source tab
+  and 400 for an out-of-range ordinal.
+- **Provenance.** The forked tab records `forked_from_tab_id` and
+  `forked_from_ordinal` for traceability.
+- **Trade-off.** The forked tab shows the copied history but the provider
+  (Claude/Cursor) starts without conversation memory — provider session forking
+  is only natively supported by Codex, so this keeps the feature uniform across
+  providers.
+
+### fix: Fork no longer overrides the user's tab switch, and times out instead of hanging
+
+- **Race.** `forkTab` read `activeTabId`/`activePaneId` only after the `await`,
+  so clicking Fork on tab A and switching to tab B before the backend responded
+  assigned the fork to the pane the user was now looking at — silently
+  displacing tab B. The fork now captures the source tab before the request and,
+  on resolve, auto-switches only if the active pane still shows the source tab.
+  If the user switched away, the fork is created in the background and a
+  non-intrusive "Fork created: <name>" toast is shown instead.
+- **Timeout.** The fork `fetch` had no timeout, so a hung connection left
+  `forkingOrdinal` set and the fork buttons stuck forever. It now uses an
+  `AbortController` with a 30s timeout; on abort the request is canceled,
+  `forkingOrdinal` resets, and a "Fork timed out — please try again" error is
+  shown.
+
+### fix: edit-resend data-loss — snapshot/restore, per-session lock, content-based turn mapping
+
+Hardens the edit-and-resend path against permanent conversation loss:
+
+- **Snapshot/restore (CRITICAL).** Before truncating either the Hub event
+  store or the provider transcript, both files are copied to `.edit-bak`
+  sidecars. The truncate→fork→send sequence is wrapped in a try/except; on
+  any exception both files are restored from the snapshots (byte-identical
+  to before the edit), the sidecars are cleaned up, and the original error
+  is re-raised. On success the sidecars are discarded. Invariant: after a
+  failed edit-resend the conversation is byte-identical to before the edit.
+- **Per-session lock (HIGH).** An `asyncio.Lock` keyed by session id is held
+  across the entire edit-resend. Concurrent edits wait (not fail fast) so
+  they never interleave; the second edit proceeds once the first releases
+  the lock.
+- **Content-based turn mapping (HIGH).** The previous code assumed the Hub
+  `turn_started` count equals the provider user-message count, which breaks
+  when a turn's provider delivery failed (Hub has the turn, the transcript
+  does not), shifting the fork onto the wrong message. The edited turn is
+  now matched to a provider user message by *content* (the turn's summary
+  text), disambiguated by ordinal. If no provider message matches, the
+  edit fails fast with a 409 before any truncation rather than guessing.
+
+### feat: edit-and-resend user messages + code block syntax highlighting
+
+Two features for the structured Chat UI:
+
+- **Edit resend.** Users can edit one of their already-sent user messages
+  and rerun the conversation from that point. Hovering a user bubble reveals
+  an edit button; clicking it swaps the bubble for an inline textarea with
+  Resend / Cancel. On resend, the backend truncates the event store at the
+  target turn, forks the provider's transcript file (preserving records
+  before the edited user message), restarts the transport with a fresh
+  session, and sends the edited text — the conversation reruns from the
+  edited point. Provider-specific user-message predicates handle Claude
+  (JSONL), Codex (rollout JSONL), and Cursor (JSONL) transcript formats.
+  API: `POST /sessions/{id}/stream/edit-resend` and
+  `POST /tabs/{id}/stream/edit-resend`.
+- **Syntax highlighting.** Markdown code blocks now render with highlight.js.
+  The highlighter is lazy-loaded via a dynamic `import()` so it never
+  contributes to the first-load bundle (the first-load JS grew by only
+  ~1.6 kB gzip; the ~55 kB gzip highlighter chunk loads on demand). When
+  the chunk finishes loading, a version counter bumps and the per-block
+  render cache invalidates, re-rendering code blocks with real highlighting.
+  The `common` bundle ships ~40 languages (JavaScript, TypeScript, Python,
+  Bash, JSON, YAML, CSS, XML, SQL, Go, Rust, Java, C/C++, Dockerfile,
+  Diff, …). Language aliases (js, ts, py, sh, yml, html, md, etc.) are
+  normalized to canonical highlight.js names. Highlighted markup is
+  DOMPurify-compatible (hljs spans survive sanitization). Token colors
+  are mapped to CSS variables for dark/light theme support.
+
 ### fix: Chat tab env overridden by user-level settings.json (relay 403)
 
 - **Root cause.** Chat sessions spawn a per-turn one-shot

@@ -62,7 +62,15 @@ from .native import (
     parse_ask_question_response,
 )
 from .redaction import redact_event
+from .registry import get_adapter_for_session
 from .store import AgentStreamStore
+from .transcript_fork import (
+    TranscriptForkError,
+    discard_snapshot,
+    fork_transcript,
+    restore_transcript,
+    snapshot_transcript,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +347,7 @@ class SessionTailer:
         *,
         previews: Optional[List[bytes]] = None,
         delivery: str = "normal",
+        reuse_attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -357,6 +366,14 @@ class SessionTailer:
         carries non-renderable placeholder metadata so the turn is still
         visible but no original bytes are persisted. This preserves the
         "originals never enter the durable cache" boundary.
+
+        ``reuse_attachments`` (edit-resend only): when supplied, no new
+        previews are persisted — the supplied metadata (with its existing
+        attachment ids) is carried straight into the ``turn_started`` event so
+        the new turn re-references the original turn's image attachments
+        rather than dropping them.  The preview bytes are passed in as
+        ``images`` (the durable cache holds only previews, not originals) and
+        delivered to the provider.  Steps 3–4 are skipped for this path.
 
         Transaction ordering (all under ``self._send_lock``):
 
@@ -444,7 +461,14 @@ class SessionTailer:
             attachment_metas: List[Dict[str, Any]] = []
             saved_ids: List[str] = []
             try:
-                if previews is not None:
+                if reuse_attachments is not None:
+                    # Edit-resend: re-reference the original turn's attachment
+                    # ids without persisting new previews.  The preview bytes
+                    # were passed in as ``images`` and are delivered to the
+                    # provider below.  ``saved_ids`` stays empty so a later
+                    # failure does not delete the (already-existing) previews.
+                    attachment_metas = [dict(m) for m in reuse_attachments if isinstance(m, dict)]
+                elif previews is not None:
                     for prev in previews:
                         mime = _detect_image_mime(prev) or "image/png"
                         meta = await self.attachment_store.save(mime, prev)
@@ -1581,6 +1605,12 @@ class TailerManager:
         self._persist_mode_cb = persist_mode
         self._tailers: Dict[str, SessionTailer] = {}
         self._lock = asyncio.Lock()
+        # Per-session locks that serialize edit-resend attempts.  A second
+        # edit_resend for a session waits for the first to complete rather
+        # than interleaving truncate/fork/send operations.  Keyed by
+        # session_id; entries persist for the manager's lifetime (one small
+        # lock per session that has ever been edited).
+        self._edit_locks: Dict[str, asyncio.Lock] = {}
         _TAILER_MANAGERS.add(self)
 
     async def _get_or_create(self, session: ManagedSession) -> SessionTailer:
@@ -1689,6 +1719,181 @@ class TailerManager:
         """Cancel the active native turn for ``session``, if any."""
         tailer = await self._get_or_create(session)
         return await tailer.cancel_turn()
+
+    async def edit_resend(
+        self,
+        session: ManagedSession,
+        text: str,
+        client_turn_id: str,
+        turn_id: str,
+    ) -> None:
+        """Edit a previously sent message and rerun the conversation from there.
+
+        Truncates both planes at the turn identified by ``turn_id``:
+
+        1. **Hub event store** — events from the turn's ``turn_started``
+           onward are removed.
+        2. **Provider transcript** — the JSONL file is forked so the records
+           before the turn's user message are preserved.
+
+        The native transport is then restarted (it reads the forked
+        transcript and resumes via ``--resume`` / ``thread/resume``) and the
+        edited ``text`` is delivered as the new turn.
+
+        Concurrency: a per-session lock (``self._edit_locks``) is held across
+        the entire sequence.  A concurrent ``edit_resend`` for the same
+        session waits for the in-flight one to complete; it does not fail
+        fast.  This prevents two edits from interleaving truncate/fork/send
+        operations.
+
+        Failure recovery: before truncating either plane, both files are
+        snapshotted to ``.edit-bak`` sidecars.  If any step after the
+        snapshot fails (truncate, fork, restart, or send), both files are
+        restored from their snapshots so the conversation is byte-identical
+        to before the edit was attempted, any tailer created during the
+        failed attempt is discarded, and a fresh tailer is started on the
+        restored state.  The original error is then re-raised.
+
+        Args:
+            session: The managed session.
+            text: The edited message text.
+            client_turn_id: Frontend-generated stable id for the new turn.
+            turn_id: The ``turn_id`` of the original turn being edited.
+
+        Raises:
+            ValueError: If the turn is not found in the event store.
+            TranscriptForkError: If the provider transcript cannot be forked
+                or the turn cannot be mapped to a provider user message.
+            RuntimeError: If no structured adapter exists for the session.
+        """
+        adapter = get_adapter_for_session(session)
+        if adapter is None:
+            raise RuntimeError("no structured adapter for session")
+
+        # Per-session lock: serialize concurrent edit-resend attempts.  The
+        # second caller waits (no fail-fast).
+        edit_lock = self._edit_locks.setdefault(session.id, asyncio.Lock())
+        async with edit_lock:
+            await self._edit_resend_locked(session, text, client_turn_id, turn_id, adapter)
+
+    async def _edit_resend_locked(
+        self,
+        session: ManagedSession,
+        text: str,
+        client_turn_id: str,
+        turn_id: str,
+        adapter: Any,
+    ) -> None:
+        """Inner edit-resend logic, executed under the per-session edit lock."""
+        store = self.get_store(session.workspace_id, session.id)
+        turn_info = await store.find_turn(turn_id)
+        if turn_info is None:
+            raise ValueError(f"turn {turn_id!r} not found in event store")
+        stream_seq, turn_index, turn_text, attachment_metas = turn_info
+
+        # Read the original turn's attachment preview bytes BEFORE truncating
+        # so they can be re-sent to the provider.  The durable cache stores
+        # only bounded previews (never the original full-resolution bytes), so
+        # the preview is what we re-send; the attachment IDs are re-referenced
+        # in the new turn (via ``reuse_attachments`` below) so the same
+        # thumbnails render.  A preview that was evicted/expired is skipped:
+        # its ID is still re-referenced (UI shows "Preview expired") but the
+        # provider does not receive that image.
+        att_store = AgentStreamAttachmentStore(session.workspace_id, session.id)
+        images: List[bytes] = []
+        for meta in attachment_metas:
+            att_id = meta.get("id") if isinstance(meta, dict) else None
+            if not isinstance(att_id, str) or not att_id:
+                continue
+            try:
+                data, _mime = await att_store.read(att_id)
+            except KeyError:
+                continue
+            images.append(data)
+
+        # Stop the current tailer so it cannot write to the store during
+        # truncation.  Pop under the lock, then stop outside (stop() is async).
+        async with self._lock:
+            previous = self._tailers.pop(session.id, None)
+        if previous is not None:
+            await previous.stop()
+
+        # Use a fresh store instance now that the tailer is gone, so the
+        # snapshot/truncate/restore operate on a store without a live writer.
+        store = self.get_store(session.workspace_id, session.id)
+
+        # Locate the transcript path (cached discovery is fine; we invalidate
+        # before restarting the tailer).
+        transcript_path = discover_source_cached(adapter, session)
+
+        # Snapshot both files BEFORE truncating so a failure can be undone.
+        store_backup = await store.snapshot()
+        transcript_backup = snapshot_transcript(transcript_path)
+
+        try:
+            # Truncate the Hub event store.
+            await store.truncate_before(stream_seq)
+
+            # Fork the provider transcript.  This matches the edited turn to
+            # a provider user message by content and raises if it cannot.
+            fork_transcript(session, adapter, turn_index, turn_text)
+
+            # Restart the tailer with a fresh transport that reads the forked
+            # transcript, then deliver the edited text (with the original
+            # turn's image attachments re-sent and re-referenced).
+            invalidate_source(session.id)
+            tailer = await self._get_or_create(session)
+            send_kwargs: Dict[str, Any] = {}
+            if attachment_metas:
+                send_kwargs["reuse_attachments"] = attachment_metas
+            await tailer.send_message(text, images, client_turn_id, **send_kwargs)
+        except BaseException:
+            # Discard any tailer created during the failed attempt so it
+            # cannot operate on the forked transcript.
+            async with self._lock:
+                created = self._tailers.pop(session.id, None)
+            if created is not None:
+                try:
+                    await created.stop()
+                except Exception:
+                    logger.exception(
+                        "edit_resend: failed to stop tailer after error for session %s",
+                        session.id,
+                    )
+
+            # Restore both files from their snapshots so the conversation is
+            # byte-identical to before the edit.
+            try:
+                await store.restore(store_backup)
+            except Exception:
+                logger.exception(
+                    "edit_resend: failed to restore event store for session %s",
+                    session.id,
+                )
+            try:
+                restore_transcript(transcript_path, transcript_backup)
+            except Exception:
+                logger.exception(
+                    "edit_resend: failed to restore transcript for session %s",
+                    session.id,
+                )
+
+            # Best-effort: start a fresh tailer on the restored state so the
+            # session is immediately usable again.  Never masks the original
+            # error.
+            try:
+                invalidate_source(session.id)
+                await self._get_or_create(session)
+            except Exception:
+                logger.exception(
+                    "edit_resend: failed to restart tailer after restore for session %s",
+                    session.id,
+                )
+            raise
+        finally:
+            # Clean up snapshot files on both success and failure paths.
+            discard_snapshot(store_backup)
+            discard_snapshot(transcript_backup)
 
     async def set_mode(self, session: ManagedSession, mode: str) -> None:
         """Set the existing native owner's mode for subsequent turns."""
