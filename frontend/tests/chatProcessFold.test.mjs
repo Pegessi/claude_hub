@@ -144,17 +144,27 @@ test('a process holding an error is left whole', () => {
 
 test('a turn cancelled mid-work has no delivered answer to fold around', () => {
   // The shape that shipped broken: the last text is working narration and the
-  // turn is cut off while a tool still runs, so "the last text and everything
-  // after it" is not an answer. Folding it left the tools and thinking on
-  // screen under a header claiming to have hidden them.
+  // turn is cut off while work is still going, so "the last text and everything
+  // after it" is not an answer. Folding it left the tools and thinking on screen
+  // under a header claiming to have hidden them.
+  //
+  // The text has to sit AFTER a tool for this to test anything: with the text
+  // first, the older "nothing to fold" guard (``index <= 0``) returns null on
+  // its own and this case passes even with the rule removed.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
-    makeEvent(2, 'text_delta', { text: '停在这里，先确认一下' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
     makeEvent(3, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} }),
     makeEvent(4, 'tool_call_completed', { tool_call_id: 'c1', status: 'completed' }),
-    makeEvent(5, 'thinking_delta', { text: 'still working' }),
-    makeEvent(6, 'turn_completed', { status: 'cancelled' }),
+    makeEvent(5, 'text_delta', { text: '停在这里，先确认一下' }),
+    makeEvent(6, 'thinking_delta', { text: 'still working' }),
+    makeEvent(7, 'turn_completed', { status: 'cancelled' }),
   ])[0]
+  assert.deepEqual(
+    turn.parts.map(p => p.kind),
+    ['thinking', 'tool_group', 'text', 'thinking'],
+    'fixture sanity: the last text must not be the first part',
+  )
   assert.equal(splitTurnProcess(turn), null)
   assert.equal(foldTurnParts(turn, false), turn.parts)
 })
@@ -226,7 +236,6 @@ test('folding replaces the process with one line ahead of the answer', () => {
   assert.equal(folded.length, 2)
   assert.equal(folded[0].kind, 'process')
   assert.equal(folded[0].meta, '过程 · 1 个工具调用 · 1m')
-  assert.equal(folded[0].stepCount, 1)
   assert.equal(folded[1].kind, 'text')
   assert.equal(folded[1].text, 'the answer')
 })

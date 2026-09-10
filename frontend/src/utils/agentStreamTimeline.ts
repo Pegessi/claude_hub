@@ -64,7 +64,7 @@ export type TimelinePart =
   // Synthetic part produced by ``foldTurnParts`` — never emitted by the
   // reducer. It is the folded working region's header: the toggle that both
   // reveals and hides the detail beneath it.
-  | { kind: 'process'; key: string; meta: string; stepCount: number; expanded: boolean }
+  | { kind: 'process'; key: string; meta: string; expanded: boolean }
 
 export interface TimelineTurn {
   key: string
@@ -561,7 +561,6 @@ export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePa
     kind: 'process',
     key: `process-${turn.key}`,
     meta: turnProcessLabel(turn, split.process),
-    stepCount: countProcessSteps(split.process),
     expanded,
   }
   return expanded
