@@ -33,10 +33,29 @@ rejected: the reducer streams, so "the last text so far" is not knowable until
 the turn ends, and a tag would have to be rewritten on every delta.
 
 The split returns `null` — meaning "render untouched" — for a running turn, a
-turn with no assistant text, and a process region containing an approval card or
-an error. Folding an approval away would hide a control the user still has to
-click; folding an error away would hide why the turn failed. Refusing to fold
-the whole turn is easier to reason about than re-ordering parts around a fold.
+turn with no assistant text, work continuing past the last text, and a process
+region containing an approval card or an error. Folding an approval away would
+hide a control the user still has to click; folding an error away would hide why
+the turn failed. Refusing to fold the whole turn is easier to reason about than
+re-ordering parts around a fold.
+
+The "work continuing past the last text" guard came out of a live report and is
+worth spelling out, because the shape it rejects looks like an answer at a
+glance. A turn cancelled mid-tool ends like this:
+
+```
+thinking_delta  '...a reasonable timeout.'
+tool_call_started  Bash            <- still running when the user hit Stop
+turn_completed  {"status": "cancelled"}
+```
+
+"The last text and everything after it" is only a delivery when the turn stopped
+there. Here the last text is narration and four tool cards plus three thinking
+segments follow it, so the folded view rendered the header *and* the process —
+a header claiming to have hidden the very thing sitting under it. The delivery
+is now required to be terminal: nothing that counts as work may follow it.
+(Status and error parts are not work, so a turn whose answer is followed by a
+status notice still folds.)
 
 ### State and the memo trap
 
@@ -114,7 +133,7 @@ scrolled to the bottom of that card.
 
 ## Validation
 
-- `node --test tests/*.test.mjs`: 318 passed (22 of them new).
+- `node --test tests/*.test.mjs`: 320 passed (24 of them new).
 - `pnpm run lint:check`, `pnpm run build` (vue-tsc + vite): clean.
 - Browser check against a worktree dev server on `:5199` pointed at the live
   backend (the live frontend on `:5173` was not touched). On the `ch ds` tab:
@@ -125,6 +144,10 @@ scrolled to the bottom of that card.
   second click on that same header collapsed it again from the same spot. 53
   `details-collapse` footers were present across the thinking/tool cards. No
   console errors.
+- Consistency sweep over all 11 turns of that tab: every folded turn's tail is
+  the delivery alone (never a thinking or tool part), and the four unfolded
+  turns are each unfolded for a stated reason — cancelled mid-tool, holds an
+  approval card, is the newest completed turn, is still running.
 - The dev server was stopped and its port confirmed closed before this log was
   written.
 

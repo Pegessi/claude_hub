@@ -475,12 +475,22 @@ function deliveryIndex(parts: TimelinePart[]): number {
   return -1
 }
 
+/** Whether a part records how the answer was reached rather than being output. */
+function isProcessPart(part: TimelinePart): boolean {
+  return part.kind === 'thinking' || part.kind === 'tool' || part.kind === 'tool_group'
+}
+
 /** Split a completed turn into its working process and its delivered answer.
  *
  *  Returns ``null`` when there is nothing safe to fold:
  *
  *  * the turn is still running, so its answer is not final yet;
  *  * it never produced assistant text, so folding would leave an empty turn;
+ *  * work continues past its last text — a turn cancelled mid-tool, or one
+ *    that ran out of room, ends without a delivered answer. Folding there
+ *    would leave the tools and thinking on screen under a header claiming to
+ *    have hidden them, because "the last text and everything after it" is only
+ *    an answer when the turn actually stopped there;
  *  * the process region holds an approval card or an error — folding those
  *    would hide a control the user still has to click, or the reason the turn
  *    failed. Keeping such a turn whole is easier to reason about than
@@ -490,6 +500,7 @@ export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   if (!turn.completed) return null
   const index = deliveryIndex(turn.parts)
   if (index <= 0) return null
+  if (turn.parts.slice(index + 1).some(isProcessPart)) return null
   const process = turn.parts.slice(0, index)
   if (process.some((part) => part.kind === 'approval' || part.kind === 'error')) {
     return null
