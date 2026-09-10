@@ -1,5 +1,6 @@
 import type { AgentStreamEvent } from '@/types'
 import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
+import { formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
 
 export interface TimelineTool {
   key: string
@@ -54,12 +55,19 @@ export interface TimelineAttachment {
 
 export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
-  | { kind: 'text'; key: string; text: string }
+  // ``fromPlan`` marks Codex's plan stream: it renders exactly like any other
+  // prose, but it is work rather than the agent's answer, so the fold must not
+  // treat it as a delivery. See the fold helpers below.
+  | { kind: 'text'; key: string; text: string; fromPlan?: boolean }
   | { kind: 'tool'; key: string; tool: TimelineTool }
   | { kind: 'tool_group'; key: string; tools: TimelineTool[] }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
   | { kind: 'error'; key: string; message: string }
   | { kind: 'status'; key: string; text: string }
+  // Synthetic part produced by ``foldTurnParts`` — never emitted by the
+  // reducer. It is the folded working region's header: the toggle that both
+  // reveals and hides the detail beneath it.
+  | { kind: 'process'; key: string; meta: string; expanded: boolean }
 
 export interface TimelineTurn {
   key: string
@@ -81,6 +89,13 @@ export interface TimelineTurn {
   approvals: TimelineApproval[]
   completed: boolean
   completionStatus: string | null
+  /** Wall-clock of ``turn_started`` / ``turn_completed``, used to label the
+   *  folded process with how long the turn took. ``null`` until the matching
+   *  event arrives; a turn whose spans are not real elapsed time (history
+   *  replayed from a provider transcript stamps every event with the import
+   *  time) is filtered by ``turnElapsedMs`` rather than shown as ``0s``. */
+  startedAt: string | null
+  completedAt: string | null
   errors: { key: string; message: string }[]
   statuses: { key: string; text: string }[]
   /**
@@ -119,6 +134,8 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     approvals: [],
     completed: false,
     completionStatus: null,
+    startedAt: null,
+    completedAt: null,
     errors: [],
     statuses: [],
     renderRevision: 0,
@@ -131,13 +148,27 @@ function appendTextPart(
   kind: 'thinking' | 'text',
   text: string,
   sequence: number,
+  fromPlan = false,
 ): void {
   if (!text) return
   const last = turn.parts[turn.parts.length - 1]
-  if (last && last.kind === kind) {
+  // A plan segment and an answer segment are both prose but are different
+  // kinds of thing; merging them would produce one part that is half work and
+  // half answer, which the fold could then only classify wrongly.
+  const samePart =
+    last !== undefined &&
+    last.kind === kind &&
+    (kind !== 'text' || (last.kind === 'text' && Boolean(last.fromPlan) === fromPlan))
+  if (samePart) {
     last.text += text
+  } else if (kind === 'text') {
+    turn.parts.push(
+      fromPlan
+        ? { kind, key: `plan-${sequence}`, text, fromPlan: true }
+        : { kind, key: `text-${sequence}`, text },
+    )
   } else {
-    turn.parts.push({ kind, key: `${kind}-${sequence}`, text })
+    turn.parts.push({ kind, key: `thinking-${sequence}`, text })
   }
   if (kind === 'thinking') turn.thinkingText += text
   else turn.assistantText += text
@@ -221,6 +252,10 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
 
   switch (event.type) {
     case 'turn_started': {
+      // Recorded without touching ``mutated``: on its own a start timestamp
+      // changes nothing visible. It only feeds the folded process label, which
+      // is rendered for completed turns — and completion bumps the revision.
+      if (turn.startedAt === null) turn.startedAt = event.created_at
       const summary = payloadString(event, 'summary')
       if (turn.userText !== summary) {
         turn.userText = summary
@@ -254,6 +289,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     case 'turn_completed': {
       if (!turn.completed) {
         turn.completed = true
+        turn.completedAt = event.created_at
         turn.completionStatus = payloadString(event, 'status') || 'completed'
         for (const tool of turn.tools) {
           if (tool.status === 'running') tool.status = 'completed'
@@ -268,7 +304,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       if (!text) break
       const chunks = state.textChunksByTurn.get(toolMapKey) ?? []
       if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
-      appendTextPart(turn, 'text', text, event.stream_sequence)
+      appendTextPart(turn, 'text', text, event.stream_sequence, event.payload.plan === true)
       chunks.push(text)
       state.textChunksByTurn.set(toolMapKey, chunks)
       mutated = true
@@ -426,6 +462,134 @@ export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[]
     applyEventToState(state, event)
   }
   return state.turns
+}
+
+// ── process folding ─────────────────────────────────────────────────────
+//
+// A finished turn is mostly a record of how the answer was reached: thinking,
+// tool calls, and the narration between them. Once the answer is delivered the
+// working region is collapsed to a single line so a long conversation reads as
+// questions and answers, with the process one click away. The split is
+// structural and pure; where the fold state lives, and which turns default to
+// folded, is the renderer's decision (see ``StructuredPane``).
+
+/** A turn's parts, split into its working process and its delivered answer. */
+export interface TurnProcessSplit {
+  /** Thinking, tool groups, and the narration between them. */
+  process: TimelinePart[]
+  /** The delivered answer plus anything that arrived after it. */
+  delivery: TimelinePart[]
+}
+
+/** Index of the delivered answer: the turn's final text segment.
+ *
+ *  Everything the model says before it is working narration ("我先看一下…"),
+ *  so the LAST text part is the delivery, not the first. Codex's plan stream is
+ *  skipped: it is prose too, but it describes work rather than answering. */
+function deliveryIndex(parts: TimelinePart[]): number {
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const part = parts[i]
+    if (part.kind === 'text' && !part.fromPlan) return i
+  }
+  return -1
+}
+
+/** Whether a part records how the answer was reached rather than being output. */
+function isProcessPart(part: TimelinePart): boolean {
+  return (
+    part.kind === 'thinking' ||
+    part.kind === 'tool' ||
+    part.kind === 'tool_group' ||
+    (part.kind === 'text' && part.fromPlan === true)
+  )
+}
+
+/** Split a completed turn into its working process and its delivered answer.
+ *
+ *  Returns ``null`` when there is nothing safe to fold:
+ *
+ *  * the turn is still running, so its answer is not final yet;
+ *  * it never produced assistant text, so folding would leave an empty turn;
+ *  * work continues past its last text — a turn cancelled mid-tool, or one
+ *    that ran out of room, ends without a delivered answer. Folding there
+ *    would leave the tools and thinking on screen under a header claiming to
+ *    have hidden them, because "the last text and everything after it" is only
+ *    an answer when the turn actually stopped there;
+ *  * the process region holds an approval card or an error — folding those
+ *    would hide a control the user still has to click, or the reason the turn
+ *    failed. Keeping such a turn whole is easier to reason about than
+ *    re-ordering parts around a fold.
+ */
+export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
+  if (!turn.completed) return null
+  const index = deliveryIndex(turn.parts)
+  if (index <= 0) return null
+  if (turn.parts.slice(index + 1).some(isProcessPart)) return null
+  const process = turn.parts.slice(0, index)
+  if (process.some((part) => part.kind === 'approval' || part.kind === 'error')) {
+    return null
+  }
+  return { process, delivery: turn.parts.slice(index) }
+}
+
+/** Count what the agent actually did, for the folded label.
+ *
+ *  Tool calls rather than parts: "8 个工具调用" should mean eight actions, not
+ *  eight render blocks. */
+export function countProcessSteps(process: TimelinePart[]): number {
+  let steps = 0
+  for (const part of process) {
+    if (part.kind === 'tool_group') steps += part.tools.length
+    else if (part.kind === 'tool') steps += 1
+  }
+  return steps
+}
+
+/** Elapsed wall-clock the turn occupied, or ``null`` when it cannot be trusted.
+ *
+ *  A turn replayed from a provider transcript rather than streamed live has
+ *  every ``created_at`` stamped with the import time, so its span collapses to
+ *  ~0. The one-second floor drops those instead of labelling a long turn "0s". */
+export function turnElapsedMs(turn: TimelineTurn): number | null {
+  const started = parseTimestampMs(turn.startedAt)
+  const completed = parseTimestampMs(turn.completedAt)
+  if (started === null || completed === null) return null
+  const elapsed = completed - started
+  return elapsed >= 1000 ? elapsed : null
+}
+
+/** Label for the folded process line, e.g. ``过程 · 8 个工具调用 · 1m 23s``. */
+export function turnProcessLabel(turn: TimelineTurn, process: TimelinePart[]): string {
+  const segments = ['过程']
+  const steps = countProcessSteps(process)
+  if (steps > 0) segments.push(`${steps} 个工具调用`)
+  const elapsed = turnElapsedMs(turn)
+  if (elapsed !== null) segments.push(formatElapsedDuration(elapsed))
+  return segments.join(' · ')
+}
+
+/** Parts to render for a turn, with the working process folded away.
+ *
+ *  The header keeps its identity and its place in both states, and only the
+ *  detail below it grows: expanding must not move the control out from under
+ *  the pointer, and collapsing must not require scrolling back to the bottom
+ *  of whatever was just revealed.
+ *
+ *  Returns ``turn.parts`` untouched when there is nothing to fold, so the turn
+ *  being streamed — and any turn the renderer keeps open — renders exactly as
+ *  it did before folding existed. */
+export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePart[] {
+  const split = splitTurnProcess(turn)
+  if (split === null) return turn.parts
+  const header: TimelinePart = {
+    kind: 'process',
+    key: `process-${turn.key}`,
+    meta: turnProcessLabel(turn, split.process),
+    expanded,
+  }
+  return expanded
+    ? [header, ...split.process, ...split.delivery]
+    : [header, ...split.delivery]
 }
 
 /**

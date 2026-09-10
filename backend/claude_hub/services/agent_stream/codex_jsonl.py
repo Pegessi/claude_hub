@@ -239,7 +239,15 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         elif method == "item/plan/delta":
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
-                events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": delta}))
+                # The plan is process, not the agent's answer to the user: it
+                # describes work it intends to do. It still renders as an
+                # assistant message (the UI shows plans as prose), but the flag
+                # keeps the Chat timeline from mistaking a plan for the turn's
+                # delivered answer — and, with folding on, from hiding the real
+                # answer inside the collapsed process.
+                events.append(
+                    ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": delta, "plan": True})
+                )
         elif method in _CODEX_QUESTION_METHODS:
             events.extend(self._normalize_question(params, ctx))
         return events

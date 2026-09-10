@@ -5,6 +5,49 @@
 
 ## Unreleased
 
+### feat: fold the working process of finished Chat turns
+
+- **Problem.** Every finished turn rendered its whole working history inline —
+  thinking blocks, tool cards, and the narration between them, interleaved with
+  the answer — so scrolling back through a conversation meant re-reading every
+  step the agent took. Separately, a long thinking or tool card could only be
+  collapsed from the summary at its top, so once expanded past the viewport the
+  only way to close it was to scroll back up.
+- **Fix.** A completed turn is split at its **last** text part: everything
+  before it is the working process, the last text part is the delivered answer.
+  The split only applies when the turn actually stopped there — a turn cancelled
+  mid-tool, or one that ran out of room, has narration where an answer would be,
+  and folding it would leave tools and thinking on screen beneath a header
+  claiming to have hidden them.
+  Historical turns render the process as one line — `过程 · 19 个工具调用 · 50s`
+  — that doubles as the toggle for the detail beneath it. The header keeps its
+  place in both states and only the detail below it grows, so expanding never
+  shifts the control out from under the pointer and collapsing is the same
+  click in the same spot; open, the header pins to the top of the timeline so a
+  process taller than the viewport can still be closed. The newest completed
+  turn stays open so the turn being read never collapses mid-glance, and a
+  process holding an approval card or an error is never folded: that would hide
+  a control the user still has to click, or the reason the turn failed.
+- **Escape hatch.** Thinking and tool cards gain a footer `收起` button, and
+  their summaries are now `position: sticky` so the toggle stays reachable at
+  any scroll depth. `.tool-card`'s `overflow: hidden` becomes `overflow: clip`,
+  because `hidden` would make the card its own scroll container and silently
+  disable sticky.
+- **Providers.** Codex streams its plan through the same `text_delta` the answer
+  uses, so a plan update arriving last would be taken as the delivered answer —
+  and the real answer would be folded away with the process. Plan deltas now
+  carry a `plan` flag the fold reads; they render exactly as before. Cursor
+  needed no change: its event shape already folds correctly, verified against
+  live sessions.
+- **Reuse.** `parseTimestampMs` / `formatElapsedDuration` move out of
+  `AgentWorkspaceView.vue` into `utils/duration.ts` so both timelines format
+  elapsed time the same way instead of drifting apart.
+- **Tests.** New `chatProcessFold.test.mjs` covers the split rules (running
+  turn, no delivered text, approval or error in the process), elapsed-time
+  flooring, the folded/expanded part lists, and the component wiring: the
+  `v-memo` deps, the newest-turn exclusion, and the `overflow: clip`
+  prerequisite for sticky.
+
 ### fix: a cancelled Chat reader no longer looks like a provider failure
 
 - **Problem.** `ProviderSession.stop()` cancelled an in-flight one-shot stdout
