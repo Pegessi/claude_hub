@@ -641,7 +641,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { IncrementalTimelineReducer, type TimelineApproval, type TimelineAttachment, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
@@ -688,7 +688,6 @@ const {
   canSubmitQuestion,
   answersFor,
   markResolved,
-  reset: resetQuestionAnswers,
 } = useQuestionAnswers()
 
 const isHistoryVisible = computed(() =>
@@ -925,35 +924,35 @@ watch(events, (latest, previous) => {
 onMounted(() => {
   handleViewportResize()
   window.addEventListener('resize', handleViewportResize)
-  startStream()
   document.addEventListener('keydown', handleDocumentKeydown)
   document.addEventListener('pointerdown', handleModeOutsidePointer)
   document.addEventListener('pointerdown', handleModelOutsidePointer)
 })
 
-watch(
-  () => props.tabId,
-  () => {
-    // Advance the preparation epoch so any in-flight attachment batch from
-    // the previous source fails its post-await epoch check and aborts
-    // instead of appending into the new source's composer.
-    preparationEpoch.value++
-    // A new source means a fresh composer: the previous source's
-    // preparation (if any) is no longer relevant, so re-enable Send.
-    isPreparingAttachments.value = false
-    pendingDirectTurns.value = []
-    draftMessage.value = ''
-    attachments.value = []
-    draftQueue.value = []
-    resetQuestionAnswers()
-    composerError.value = null
-    isUpdatingMode.value = false
-    modeChangeError.value = null
-    isModeMenuOpen.value = false
-    dismissImageLightbox(false)
-    startStream()
-  },
-)
+// KeepAlive lifecycle. The pane is keyed by tabId (see TerminalPane), so each
+// chat tab owns a stable instance and the tabId prop never changes for a given
+// instance — the old tabId watcher that wiped the composer on every switch is
+// gone. The stream is owned by the *active* pane: on deactivate we stop it
+// (caching history) so cached panes don't hold open SSE/long-poll connections;
+// on activate we resume from the cached snapshot (reconciling, no full reload).
+// onActivated also fires on the initial mount, so it replaces the startStream()
+// call that used to live in onMounted.
+onActivated(() => {
+  timelineDisposed = false
+  startStream()
+  void nextTick(() => {
+    if (timelineDisposed) return
+    observeTimelineGeometry()
+  })
+})
+
+onDeactivated(() => {
+  stop()
+  timelineDisposed = true
+  timelineResizeObserver?.disconnect()
+  timelineResizeObserver = null
+  cancelScheduledTimelineScroll()
+})
 
 onUnmounted(() => {
   // Bump the epoch on unmount so any in-flight preparation batch aborts
@@ -1690,6 +1689,11 @@ watch(
 // ``reconciling`` immediately, without waiting for network hydration.
 watch(connectionState, (state) => {
   if (state === 'live' || state === 'reconciling') {
+    // On KeepAlive reactivation the timeline was already revealed and its
+    // scroll + follow state live on the cached instance — don't re-run the
+    // initial-reveal gate, which would force-pin to the tail and rearm
+    // follow, clobbering the user's reading position.
+    if (timelinePhase.value === 'revealed') return
     markHistoryReady()
     void nextTick(() => {
       if (timelineDisposed) return
@@ -1703,17 +1707,6 @@ watch(connectionState, (state) => {
   // 'failed' and 'idle' leave the timeline hidden; failed shows the Retry
   // banner. Retry re-enters 'hydrating' and the gate runs again.
 }, { immediate: true })
-
-watch(
-  () => props.tabId,
-  () => {
-    resetActivation()
-    // Attachment ids are scoped to a session/tab; switching source invalidates
-    // all previously-recorded 404/410 error state.
-    erroredAttachments.value = new Set()
-    requestLatestAnchor(true)
-  },
-)
 
 onMounted(() => {
   timelineDisposed = false

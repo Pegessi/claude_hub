@@ -43,7 +43,7 @@ test('workspace-managed tabs fail closed to TerminalView even if their kind is s
   )
   assert.match(terminalPane, /v-if="pane\.tabId && !isChatSession"[\s\S]*?<TerminalView/)
   assert.match(terminalPane, /v-if="pane\.tabId && isChatSession"[\s\S]*?<StructuredPane/)
-  assert.match(terminalPane, /<StructuredPane\s+:tab-id="pane\.tabId"/)
+  assert.match(terminalPane, /<StructuredPane[\s\S]*?:tab-id="pane\.tabId"/)
   assert.doesNotMatch(terminalPane, /:session-id=/)
   assert.doesNotMatch(terminalPane, /sessionForTab|managedSession/)
   assert.doesNotMatch(workspaceStore, /sessionForTab/)
