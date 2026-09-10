@@ -189,7 +189,9 @@
                 v-if="turn.userText && turn.turnId"
                 type="button"
                 class="edit-resend-hover-btn"
-                aria-label="Edit message"
+                :disabled="turnInFlight"
+                :title="turnInFlight ? 'A turn is currently running' : 'Edit message'"
+                :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : 'Edit message'"
                 @click="startEdit(turn)"
               >
                 ✎
@@ -1615,6 +1617,10 @@ function isEditingTurn(turn: TimelineTurn): boolean {
 
 function startEdit(turn: TimelineTurn) {
   if (isEditSending.value) return
+  // Refuse to edit while a turn is running.  The backend guard is
+  // authoritative (409); this just avoids a round-trip and keeps the button
+  // and the action in sync.
+  if (turnInFlight.value) return
   editingTurnKey.value = turn.key
   editDraft.value = turn.userText
   editError.value = null
