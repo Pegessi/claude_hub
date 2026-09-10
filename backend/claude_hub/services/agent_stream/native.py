@@ -576,24 +576,26 @@ class ProviderSession(ABC):
         # does not hang after the transport is stopped.
         self._end_turn()
 
-    def _invalidate_stdout_stream(self) -> int:
-        """Retire the in-flight stdout reader and return the next generation.
+    def _invalidate_stdout_stream(self) -> None:
+        """Retire the current stdout stream.
 
-        A cancelled reader's ``finally`` publishes an EOF sentinel so a
-        consumer blocked in :meth:`read_line` cannot hang. That sentinel
-        reports *our* cancellation, not the provider's end of stream, and the
-        two are indistinguishable by value — the generation tag is the only
-        witness. Retiring the reader is what makes its sentinel (and any
-        records still queued behind it) unreadable, so a cancelled turn can
-        never be mistaken for a provider that ended without a completion
-        record.
+        Retired records and EOF sentinels stop being readable, and the next
+        reader starts from the following generation.
 
-        ``_terminate_process`` owns this step so every caller — shutdown,
-        cancellation, and turn rollover — invalidates the reader it is about
-        to kill, and none can forget to.
+        A reader's farewell is ambiguous by construction: a cancelled reader
+        publishes an EOF sentinel so a consumer blocked in :meth:`read_line`
+        cannot hang, and that sentinel reports *our* cancellation rather than
+        the provider's end of stream. The two are indistinguishable by value,
+        so the generation tag is the only witness. Retiring the stream is what
+        makes the sentinel (and any records still queued behind it) unreadable,
+        so a cancelled turn can never be mistaken for a provider that ended
+        without a completion record.
+
+        ``_terminate_process`` calls this before cancelling the reader it is
+        about to kill, so shutdown, cancellation, and turn rollover all retire
+        the stream they end, and none can forget to.
         """
         self._stdout_generation += 1
-        return self._stdout_generation
 
     async def _terminate_process(self) -> None:
         """Kill the current subprocess and its reader tasks.
@@ -680,10 +682,10 @@ class ProviderSession(ABC):
         """
         # For one-shot providers, a completed process may remain alive briefly
         # after its final result (for example while a child tool process keeps
-        # stdout open). Invalidate that reader before releasing the turn guard
-        # so its later records/EOF cannot be attributed to the next turn.
+        # stdout open). Retire that stream before releasing the turn guard so
+        # its later records/EOF cannot be attributed to the next turn.
         if not self.eof_is_fatal:
-            self._stdout_generation += 1
+            self._invalidate_stdout_stream()
         self._end_turn()
 
     @property
@@ -876,12 +878,11 @@ class ProviderSession(ABC):
                 # or a killed reader would look like a provider that exited
                 # without a completion record. ``_terminate_process`` retires
                 # this generation before cancelling us, so the sentinel is
-                # stale on arrival and ``read_line`` discards it. Publishing it
-                # anyway keeps this queue free of parked consumers by
-                # construction: whoever killed this reader either installs a
-                # replacement reader, breaks out of its consume loop, or
-                # cancels the consumer, so nothing is left waiting on a stream
-                # that will never speak again.
+                # stale on arrival and ``read_line`` discards it — publishing
+                # it is inert, and nothing may rely on it as a wakeup. Nothing
+                # is left parked on a silent stream either: whoever killed this
+                # reader installs a replacement reader, breaks out of its
+                # consume loop, or cancels the consumer.
                 await self._stdout_queue.put((generation, None))
                 return
             # Natural EOF: the provider's stdout has closed. Wait for the
