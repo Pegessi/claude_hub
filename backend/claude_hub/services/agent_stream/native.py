@@ -576,6 +576,27 @@ class ProviderSession(ABC):
         # does not hang after the transport is stopped.
         self._end_turn()
 
+    def _invalidate_stdout_stream(self) -> None:
+        """Retire the current stdout stream.
+
+        Retired records and EOF sentinels stop being readable, and the next
+        reader starts from the following generation.
+
+        A reader's farewell is ambiguous by construction: a cancelled reader
+        publishes an EOF sentinel so a consumer blocked in :meth:`read_line`
+        cannot hang, and that sentinel reports *our* cancellation rather than
+        the provider's end of stream. The two are indistinguishable by value,
+        so the generation tag is the only witness. Retiring the stream is what
+        makes the sentinel (and any records still queued behind it) unreadable,
+        so a cancelled turn can never be mistaken for a provider that ended
+        without a completion record.
+
+        ``_terminate_process`` calls this before cancelling the reader it is
+        about to kill, so shutdown, cancellation, and turn rollover all retire
+        the stream they end, and none can forget to.
+        """
+        self._stdout_generation += 1
+
     async def _terminate_process(self) -> None:
         """Kill the current subprocess and its reader tasks.
 
@@ -585,6 +606,9 @@ class ProviderSession(ABC):
         completion is resolved by the new process's EOF, not by the old
         process's death).
         """
+        # Retire the reader BEFORE cancelling it: its ``finally`` runs while we
+        # await it below, so the sentinel it publishes must already be stale.
+        self._invalidate_stdout_stream()
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:
@@ -658,10 +682,10 @@ class ProviderSession(ABC):
         """
         # For one-shot providers, a completed process may remain alive briefly
         # after its final result (for example while a child tool process keeps
-        # stdout open). Invalidate that reader before releasing the turn guard
-        # so its later records/EOF cannot be attributed to the next turn.
+        # stdout open). Retire that stream before releasing the turn guard so
+        # its later records/EOF cannot be attributed to the next turn.
         if not self.eof_is_fatal:
-            self._stdout_generation += 1
+            self._invalidate_stdout_stream()
         self._end_turn()
 
     @property
@@ -676,10 +700,9 @@ class ProviderSession(ABC):
         """
         if not self._turn_in_flight:
             return
-        # Invalidate the active one-shot reader before cancelling it. Its
-        # ``finally`` block deliberately publishes EOF to wake consumers; the
-        # generation tag lets ``read_line`` discard that stale sentinel.
-        self._stdout_generation += 1
+        # ``_terminate_process`` retires the active one-shot reader first, so
+        # the EOF its cancellation publishes is already stale by the time a
+        # consumer in ``read_line`` can observe it.
         await self._terminate_process()
         self._clear_staged_images()
         self._end_turn()
@@ -849,6 +872,17 @@ class ProviderSession(ABC):
                 # task returns, so we must NOT await ``proc.wait()`` here (it
                 # could deadlock). Just signal EOF so the tailer's
                 # ``read_line`` does not block forever.
+                #
+                # This sentinel reports our cancellation, not the provider's
+                # end of stream; the tailer must never read it as the latter,
+                # or a killed reader would look like a provider that exited
+                # without a completion record. ``_terminate_process`` retires
+                # this generation before cancelling us, so the sentinel is
+                # stale on arrival and ``read_line`` discards it — publishing
+                # it is inert, and nothing may rely on it as a wakeup. Nothing
+                # is left parked on a silent stream either: whoever killed this
+                # reader installs a replacement reader, breaks out of its
+                # consume loop, or cancels the consumer.
                 await self._stdout_queue.put((generation, None))
                 return
             # Natural EOF: the provider's stdout has closed. Wait for the
@@ -1012,12 +1046,14 @@ class ProviderSession(ABC):
         # ``_terminate_process`` (not ``stop``) so we do NOT call
         # ``_end_turn`` — the new turn's completion is resolved by its own
         # provider output, not by the old process's death.
-        # Advance before terminating the previous reader. Its cancellation
-        # path queues an EOF sentinel, but that sentinel now belongs to the old
-        # generation and ``read_line`` will discard it.
-        self._stdout_generation += 1
-        generation = self._stdout_generation
+        #
+        # ``_terminate_process`` also retires the previous reader, so the
+        # generation it leaves behind is this process's own. That keeps the
+        # advance per spawn at exactly one, which is what
+        # ``CursorNativeSession._send_text`` relies on when it registers
+        # staged images under the predicted next generation.
         await self._terminate_process()
+        generation = self._stdout_generation
         self._stderr_buffer = b""
         self._exit_error = None
         try:
@@ -1968,8 +2004,9 @@ class CursorNativeSession(ProviderSession):
         if image_paths:
             prompt = wrap_image_attachment_guidance(prompt, image_paths)
         # Transfer ownership of the image temp files to this turn's process
-        # BEFORE spawning. ``_spawn_oneshot`` advances ``_stdout_generation``
-        # by exactly one and spawns the drain with that generation, so
+        # BEFORE spawning. ``_spawn_oneshot`` ends with exactly one generation
+        # advance — the one ``_terminate_process`` performs while retiring the
+        # previous reader — and spawns the drain with that generation, so
         # predict it and register the files under it: the drain deletes only
         # its own generation's files in its finally, never a later turn's.
         # ``_send_text`` runs under ``_send_lock`` and only after the previous
