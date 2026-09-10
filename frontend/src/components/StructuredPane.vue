@@ -70,7 +70,9 @@
           v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === turnIndex, isEditingTurn(turn)]"
           class="structured-turn"
         >
-          <!-- Hover-revealed per-turn actions. -->
+          <!-- Hover-revealed per-turn actions. Both live in one cluster so
+               they lay out side by side: separately anchored to the turn and to
+               the bubble they overlapped each other. -->
           <div class="turn-actions">
             <button
               type="button"
@@ -80,6 +82,17 @@
               @click="forkFromTurn(turnIndex)"
             >
               {{ forkingOrdinal === turnIndex ? 'Forking…' : 'Fork from here' }}
+            </button>
+            <button
+              v-if="turn.userText && turn.turnId && !isEditingTurn(turn)"
+              type="button"
+              class="edit-resend-hover-btn"
+              :disabled="turnInFlight"
+              :title="turnInFlight ? 'A turn is currently running' : 'Edit message'"
+              :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : 'Edit message'"
+              @click="startEdit(turn)"
+            >
+              ✎
             </button>
           </div>
           <!-- A right-aligned user bubble and a left-aligned assistant bubble make
@@ -196,18 +209,6 @@
                   </template>
                 </div>
               </template>
-              <!-- Hover edit action -->
-              <button
-                v-if="turn.userText && turn.turnId"
-                type="button"
-                class="edit-resend-hover-btn"
-                :disabled="turnInFlight"
-                :title="turnInFlight ? 'A turn is currently running' : 'Edit message'"
-                :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : 'Edit message'"
-                @click="startEdit(turn)"
-              >
-                ✎
-              </button>
             </div>
           </div>
 
@@ -2148,6 +2149,12 @@ onUnmounted(() => {
   position: absolute;
   top: -10px;
   right: 0;
+  /* The cluster lays its buttons out in a row. Anchoring them separately — the
+     fork one to the turn, the edit one to the bubble — put them on top of each
+     other, and the edit button on top of the message text. */
+  display: flex;
+  align-items: center;
+  gap: 6px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
@@ -2879,33 +2886,32 @@ onUnmounted(() => {
 
 /* ---- Edit-resend UI ---- */
 
+/* Sits in the turn's hover cluster, so it inherits showing and hiding from
+   ``.turn-actions`` and never needs to be positioned over the message. */
 .edit-resend-hover-btn {
-  position: absolute;
-  top: -10px;
-  right: -8px;
   width: 24px;
   height: 24px;
   display: grid;
   place-items: center;
   padding: 0;
-  border: 1px solid color-mix(in srgb, #fff 30%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
   border-radius: 50%;
-  background: var(--ch-color-surface-control, #2a2a2a);
-  color: #fff;
+  background: var(--ch-color-bg-elevated, canvas);
+  color: var(--ch-color-text-subtle, currentColor);
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  transform: scale(0.85);
-  transition: opacity 140ms ease, transform 140ms ease;
-  pointer-events: none;
 }
 
-.conversation-bubble--user:hover .edit-resend-hover-btn,
-.edit-resend-hover-btn:focus-visible {
-  opacity: 1;
-  transform: scale(1);
-  pointer-events: auto;
+.edit-resend-hover-btn:hover:not(:disabled) {
+  color: var(--ch-color-text-muted, currentColor);
+}
+
+/* A turn is running, so the click does nothing. Say so: without this the
+   button looked identical to its enabled self and simply ignored clicks. */
+.edit-resend-hover-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .edit-resend-form {
