@@ -74,6 +74,18 @@ from .transcript_fork import (
 
 logger = logging.getLogger(__name__)
 
+
+class EditResendTurnInFlightError(RuntimeError):
+    """Edit-resend rejected because a turn is currently running.
+
+    Raised by :meth:`TailerManager._edit_resend_locked` when the session's
+    native transport reports ``turn_in_flight=True``.  The API layer maps it
+    to HTTP **409 Conflict**.  Subclasses ``RuntimeError`` so non-API callers
+    that catch ``RuntimeError`` still see it; the API mapping checks this more
+    specific type before the generic ``RuntimeError`` branch.
+    """
+
+
 POLL_INTERVAL_S = 1.0
 IDLE_TTL_S = 300.0
 # Hard safety cap on a single native turn's wall-clock duration. The idle-reap
@@ -1744,6 +1756,8 @@ class TailerManager:
             turn_id: The ``turn_id`` of the original turn being edited.
 
         Raises:
+            EditResendTurnInFlightError: If a turn is currently running (mapped
+                to 409 by the API layer).
             ValueError: If the turn is not found in the event store.
             TranscriptForkError: If the provider transcript cannot be forked
                 or the turn cannot be mapped to a provider user message.
@@ -1758,6 +1772,36 @@ class TailerManager:
         edit_lock = self._edit_locks.setdefault(session.id, asyncio.Lock())
         async with edit_lock:
             await self._edit_resend_locked(session, text, client_turn_id, turn_id, adapter)
+
+    async def _stop_tailer_for_edit(self, tailer: SessionTailer) -> None:
+        """Stop ``tailer`` for an edit-resend, refusing if a turn is running.
+
+        Race-free design: the busy check and the stop both run under the
+        tailer's ``_send_lock``.  ``send_message`` holds ``_send_lock`` across
+        its own busy-check and ``_begin_turn``, so acquiring it here gives a
+        consistent view — either the turn is already in flight (we raise) or
+        no new turn can begin until we release the lock.  This closes the
+        window where a send could start a turn after the check but before the
+        stop.
+
+        Calling ``stop()`` while holding ``_send_lock`` is safe because
+        ``stop()`` only re-acquires ``_send_lock`` when ``turn_in_flight=True``
+        (to terminalize the active turn).  We hold the lock and just confirmed
+        ``turn_in_flight=False`` (and only ``_begin_turn`` under ``_send_lock``
+        can set it True), so that branch cannot run.
+
+        Raises:
+            EditResendTurnInFlightError: If the tailer's transport has a turn
+                in flight.  The tailer is left running so the turn is not
+                killed; the caller restores it to ``self._tailers``.
+        """
+        async with tailer._send_lock:
+            transport = tailer.native_transport
+            if transport is not None and transport.turn_in_flight:
+                raise EditResendTurnInFlightError(
+                    "A turn is currently running; wait for it to finish before editing"
+                )
+            await tailer.stop()
 
     async def _edit_resend_locked(
         self,
@@ -1795,11 +1839,27 @@ class TailerManager:
             images.append(data)
 
         # Stop the current tailer so it cannot write to the store during
-        # truncation.  Pop under the lock, then stop outside (stop() is async).
+        # truncation.  Pop under the manager lock, then stop outside (stop()
+        # is async).  The stop itself is guarded: if a turn is running, the
+        # tailer is restored and the edit is rejected (409) rather than
+        # silently killing the turn.
         async with self._lock:
             previous = self._tailers.pop(session.id, None)
         if previous is not None:
-            await previous.stop()
+            try:
+                await self._stop_tailer_for_edit(previous)
+            except EditResendTurnInFlightError:
+                # Restore the tailer so its in-flight turn is not orphaned.
+                # self._lock is acquired WITHOUT holding the tailer's
+                # _send_lock to preserve lock ordering (self._lock ->
+                # _send_lock, as used by stop_all).  A new tailer is created
+                # in the meantime only if a send raced the pop; in that rare
+                # case the previous tailer's turn still completes and
+                # persists events (the tailer itself is leaked).
+                async with self._lock:
+                    if session.id not in self._tailers:
+                        self._tailers[session.id] = previous
+                raise
 
         # Use a fresh store instance now that the tailer is gone, so the
         # snapshot/truncate/restore operate on a store without a live writer.
