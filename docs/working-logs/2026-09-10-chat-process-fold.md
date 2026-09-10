@@ -151,6 +151,56 @@ scrolled to the bottom of that card.
 - The dev server was stopped and its port confirmed closed before this log was
   written.
 
+## Independent review
+
+An adversarial review (separate agent, the repository's `surgical-code-review`
+method) returned "merge once the test is real", and it was right about the test.
+
+The regression written alongside the cut-off-turn fix **did not reach the rule
+it was written for**. Its fixture put the last text at index 0, so the older
+"nothing to fold" guard (`index <= 0`) returned `null` first. Commenting out the
+new rule left the file green — 24/24 — which the reviewer demonstrated by
+mutation and this author reproduced. The fixture now places the text after a
+tool so the new rule is the only thing that can reject it, and it carries a
+sanity assertion on the part order it depends on. Re-verified by mutation: with
+the rule commented out that one test fails, and the file is green again when it
+is restored.
+
+Worth stating plainly, because it is the kind of mistake that survives review:
+**a regression test that passes both with and without the fix is not a test.**
+The fix commit was green, the suite was green, and the guard was unprotected
+anyway.
+
+Everything else the review attacked held up, and it verified by construction
+what the source-text tests only asserted:
+
+- `v-memo`: clicking one turn's header mutated only that turn's subtree (zero
+  mutations observed on the other nine); injecting a new completed turn moved
+  `latestCompletedTurnKey` and the previously-newest turn **did** grow a folded
+  header, so `turnFoldSignature` genuinely carries memo invalidation.
+- `position: sticky`: measured across a 6,400 px scroll, the open header pins at
+  the timeline's 34 px padding and holds (`stickDelta == step`). Re-running the
+  same trace with an `overflow: hidden` ancestor gives `stickDelta = 0`, which
+  confirms the `hidden → clip` change was load-bearing rather than cosmetic.
+- `overflow: clip`: pixel-counted against `hidden` on the rounded corners and
+  straight edges (both 0 leaked pixels, `visible` leaked 418/608), and the inner
+  `pre` still scrolls.
+- Split rules: no new hole found across interleaved text/tool, `status` at the
+  end, orphan completions, and approvals landing in the delivery region.
+
+Two things were left deliberately unchanged: `turnFoldSignature` costs 0.0155 ms
+per parent render on a 397-part session (about 0.1% of a frame, not worth a
+cache that would have to be invalidated), and the cut-off rule is scoped to
+"work continues past the last text" rather than "the turn was cancelled" — a
+turn cancelled *after* its answer still folds, which is safe because its text
+and any error stay visible.
+
+Coverage gap, not a defect: folding has only been exercised against live Claude
+sessions. Codex maps `item/plan/delta` to `text_delta` too, so a turn ending on
+a plan update with no work after it would treat the plan as a delivery; no
+adapter path was found that orders events that way, but no live Codex session
+was available to disprove it.
+
 ## Follow-up
 
 - Per-tool durations are not shown; the collapsed line reports the turn's total.
