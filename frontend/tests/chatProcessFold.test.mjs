@@ -201,14 +201,23 @@ test('folding replaces the process with one line ahead of the answer', () => {
   assert.equal(folded[1].text, 'the answer')
 })
 
-test('expanding keeps the process and adds a footer to re-fold it', () => {
+test('expanding grows the detail underneath the header, not the header itself', () => {
   const turn = completedTurn()
+  const folded = foldTurnParts(turn, false)
   const expanded = foldTurnParts(turn, true)
   assert.deepEqual(
     expanded.map(p => p.kind),
-    ['thinking', 'tool_group', 'process_end', 'text'],
-    'the footer must sit between the process and the answer so a long '
-      + 'process can be re-folded without scrolling back to its top',
+    ['process', 'thinking', 'tool_group', 'text'],
+    'the header must lead in both states: moving it to the bottom would shift '
+      + 'the control out from under the pointer and force a scroll to re-fold',
+  )
+  assert.equal(expanded[0].expanded, true)
+  assert.equal(folded[0].expanded, false)
+  assert.equal(
+    expanded[0].key,
+    folded[0].key,
+    'the header keeps its identity across states so the DOM node is reused '
+      + 'and the pointer stays on it',
   )
 })
 
@@ -284,11 +293,29 @@ test('fold state is per-turn and replaced on toggle so the memo sees it', () => 
   assert.match(fnMatch[0], /new Map\(processExpandedOverrides\.value\)/)
 })
 
-test('the folded and expanded branches are wired to the toggle', () => {
+test('the process header is the single toggle for its own detail', () => {
   assert.match(structuredPane, /v-else-if="part\.kind === 'process'"/)
-  assert.match(structuredPane, /v-else-if="part\.kind === 'process_end'"/)
+  assert.doesNotMatch(
+    structuredPane,
+    /process_end/,
+    'the collapse control must be the header itself, not a footer that scrolls '
+      + 'out of reach exactly when the detail is long',
+  )
   const toggles = structuredPane.match(/@click="toggleTurnProcess\(turn\)"/g) ?? []
-  assert.equal(toggles.length, 2, 'both the folded line and the footer must toggle')
+  assert.equal(toggles.length, 1, 'one control, in the place the reader clicked')
+  assert.match(structuredPane, /:aria-expanded="part\.expanded"/)
+  assert.match(structuredPane, /part\.expanded \? '▾' : '▸'/)
+})
+
+test('an open process header stays reachable from any scroll depth', () => {
+  const openRule = structuredPane.match(/\.process-fold--open \{[\s\S]*?\n\}/)
+  assert.ok(openRule, 'the open-state rule must exist')
+  assert.match(
+    openRule[0],
+    /position: sticky/,
+    'a working region can be taller than the viewport, so the toggle must pin '
+      + 'to the top of the timeline like the thinking and tool summaries do',
+  )
 })
 
 test('a long thinking or tool card can be collapsed from its own footer', () => {

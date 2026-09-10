@@ -16,11 +16,14 @@
 - **Fix.** A completed turn is split at its **last** text part: everything
   before it is the working process, the last text part is the delivered answer.
   Historical turns render the process as one line — `过程 · 19 个工具调用 · 50s`
-  — which expands in place and carries a footer button to re-fold it. The
-  newest completed turn stays open so the turn being read never collapses
-  mid-glance, and a process holding an approval card or an error is never
-  folded: that would hide a control the user still has to click, or the reason
-  the turn failed.
+  — that doubles as the toggle for the detail beneath it. The header keeps its
+  place in both states and only the detail below it grows, so expanding never
+  shifts the control out from under the pointer and collapsing is the same
+  click in the same spot; open, the header pins to the top of the timeline so a
+  process taller than the viewport can still be closed. The newest completed
+  turn stays open so the turn being read never collapses mid-glance, and a
+  process holding an approval card or an error is never folded: that would hide
+  a control the user still has to click, or the reason the turn failed.
 - **Escape hatch.** Thinking and tool cards gain a footer `收起` button, and
   their summaries are now `position: sticky` so the toggle stays reachable at
   any scroll depth. `.tool-card`'s `overflow: hidden` becomes `overflow: clip`,
