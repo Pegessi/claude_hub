@@ -343,36 +343,26 @@
               <span>{{ part.text }}</span>
             </div>
 
-            <!-- The folded working region of a finished turn. Synthetic: it
-                 stands in for thinking/tool parts the reducer produced, so it
-                 is only ever seen for turns that are already history. -->
+            <!-- Header of a finished turn's working region. Synthetic: it
+                 stands in for the thinking/tool parts the reducer produced, so
+                 it is only ever seen for turns that are already history. It
+                 keeps its place in both states — only the detail underneath
+                 grows — so expanding never moves the control out from under the
+                 pointer, and collapsing is one click wherever the reader has
+                 scrolled to. -->
             <button
               v-else-if="part.kind === 'process'"
               type="button"
               class="process-fold"
-              :aria-label="`展开过程：${part.meta}`"
+              :class="{ 'process-fold--open': part.expanded }"
+              :aria-expanded="part.expanded"
               @click="toggleTurnProcess(turn)"
             >
               <span
                 class="process-fold-chevron"
                 aria-hidden="true"
-              >▸</span>
+              >{{ part.expanded ? '▾' : '▸' }}</span>
               <span class="process-fold-meta">{{ part.meta }}</span>
-            </button>
-
-            <!-- Footer of an expanded process, so a long working region can be
-                 re-folded without scrolling back to its top. -->
-            <button
-              v-else-if="part.kind === 'process_end'"
-              type="button"
-              class="process-fold process-fold--end"
-              @click="toggleTurnProcess(turn)"
-            >
-              <span
-                class="process-fold-chevron"
-                aria-hidden="true"
-              >▴</span>
-              <span class="process-fold-meta">{{ part.label }}</span>
             </button>
           </template>
         </div>
@@ -2860,8 +2850,10 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
 }
 
-/* The folded working process of a finished turn: a single line standing in for
-   the thinking, tool calls, and narration that produced the answer. */
+/* The working process of a finished turn: a single line standing in for the
+   thinking, tool calls, and narration that produced the answer. It is both the
+   collapsed summary and the toggle for the detail beneath it, so it never
+   moves when the detail opens. */
 .process-fold {
   display: inline-flex;
   align-items: center;
@@ -2889,7 +2881,13 @@ onUnmounted(() => {
   outline-offset: 2px;
 }
 
-.process-fold--end {
+/* Open, the header pins to the top of the timeline for the same reason the
+   thinking and tool summaries do: a working region can be taller than the
+   viewport, and the toggle must stay reachable at any depth. */
+.process-fold--open {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   border-style: solid;
 }
 

@@ -57,14 +57,22 @@ turns with nothing foldable so the active turn stays on the cheap path.
 
 `foldTurnParts(turn, expanded)` returns the parts list the template iterates:
 
-- folded — `[{kind:'process', meta, stepCount}, ...delivery]`
-- expanded — `[...process, {kind:'process_end', label:'收起过程'}, ...delivery]`
+- folded — `[{kind:'process', expanded:false}, ...delivery]`
+- expanded — `[{kind:'process', expanded:true}, ...process, ...delivery]`
 - not foldable — `turn.parts` by identity, so nothing changes for the streaming
   turn or the newest completed one
 
-`process` and `process_end` are synthetic part kinds; the reducer never emits
-them. The footer sits between the process and the answer so a long process can
-be re-folded without hunting for its top.
+`process` is a synthetic part kind; the reducer never emits it. The header leads
+in both states and keeps the key `process-{turn.key}` in both, so Vue reuses the
+same DOM node: expanding inserts siblings *below* it, the control does not move,
+and the pointer is still on it for the click that closes it again.
+
+An earlier revision replaced the header with the detail and put the collapse
+control in a footer under it. That was wrong twice over: the button vanished out
+from under the click that opened it (so the page jumped), and the only way back
+was to scroll to the bottom of whatever had just been revealed — worst exactly
+when the process was long. The header-as-toggle has neither problem, which is
+why the footer kind was removed rather than kept alongside it.
 
 ### Problem 1: reachable collapse
 
@@ -77,7 +85,11 @@ introducing per-card Vue state:
 target.closest('details')?.removeAttribute('open')
 ```
 
-Their summaries also became `position: sticky`, which required one CSS change.
+All three collapsible regions — the thinking card, the tool card, and an open
+process header — also pin their header with `position: sticky`, which required
+one CSS change (below). Their controls therefore stay reachable at any scroll
+depth, and the per-card footers are the escape hatch for someone who has already
+scrolled to the bottom of that card.
 
 ## Key issues / pitfalls
 
@@ -102,15 +114,17 @@ Their summaries also became `position: sticky`, which required one CSS change.
 
 ## Validation
 
-- `node --test tests/*.test.mjs`: 317 passed (21 of them new).
+- `node --test tests/*.test.mjs`: 318 passed (22 of them new).
 - `pnpm run lint:check`, `pnpm run build` (vue-tsc + vite): clean.
 - Browser check against a worktree dev server on `:5199` pointed at the live
   backend (the live frontend on `:5173` was not touched). On the `ch ds` tab:
   6 folded lines; the first read `过程 · 19 个工具调用 · 50s`, which matches the
   turn's own event log (19 `tool_call_started`, 50.2 s) — the label is derived,
-  not decorative. Clicking the line expanded it (one `收起过程` footer present),
-  clicking the footer re-folded it, and 91 `details-collapse` buttons were
-  present across the thinking/tool cards. No console errors.
+  not decorative. Expanding moved the header by **0.0 px** and left the scroll
+  position unchanged, the detail appeared as the header's next sibling, and a
+  second click on that same header collapsed it again from the same spot. 53
+  `details-collapse` footers were present across the thinking/tool cards. No
+  console errors.
 - The dev server was stopped and its port confirmed closed before this log was
   written.
 

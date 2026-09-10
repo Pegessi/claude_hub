@@ -61,11 +61,10 @@ export type TimelinePart =
   | { kind: 'approval'; key: string; approval: TimelineApproval }
   | { kind: 'error'; key: string; message: string }
   | { kind: 'status'; key: string; text: string }
-  // Synthetic parts produced by ``foldTurnParts`` — never emitted by the
-  // reducer. ``process`` stands in for the folded working region; ``process_end``
-  // is the collapse affordance rendered below it once expanded.
-  | { kind: 'process'; key: string; meta: string; stepCount: number }
-  | { kind: 'process_end'; key: string; label: string }
+  // Synthetic part produced by ``foldTurnParts`` — never emitted by the
+  // reducer. It is the folded working region's header: the toggle that both
+  // reveals and hides the detail beneath it.
+  | { kind: 'process'; key: string; meta: string; stepCount: number; expanded: boolean }
 
 export interface TimelineTurn {
   key: string
@@ -536,28 +535,27 @@ export function turnProcessLabel(turn: TimelineTurn, process: TimelinePart[]): s
 
 /** Parts to render for a turn, with the working process folded away.
  *
+ *  The header keeps its identity and its place in both states, and only the
+ *  detail below it grows: expanding must not move the control out from under
+ *  the pointer, and collapsing must not require scrolling back to the bottom
+ *  of whatever was just revealed.
+ *
  *  Returns ``turn.parts`` untouched when there is nothing to fold, so the turn
  *  being streamed — and any turn the renderer keeps open — renders exactly as
  *  it did before folding existed. */
 export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePart[] {
   const split = splitTurnProcess(turn)
   if (split === null) return turn.parts
-  if (!expanded) {
-    return [
-      {
-        kind: 'process',
-        key: `process-${turn.key}`,
-        meta: turnProcessLabel(turn, split.process),
-        stepCount: countProcessSteps(split.process),
-      },
-      ...split.delivery,
-    ]
+  const header: TimelinePart = {
+    kind: 'process',
+    key: `process-${turn.key}`,
+    meta: turnProcessLabel(turn, split.process),
+    stepCount: countProcessSteps(split.process),
+    expanded,
   }
-  return [
-    ...split.process,
-    { kind: 'process_end', key: `process-end-${turn.key}`, label: '收起过程' },
-    ...split.delivery,
-  ]
+  return expanded
+    ? [header, ...split.process, ...split.delivery]
+    : [header, ...split.delivery]
 }
 
 /**
