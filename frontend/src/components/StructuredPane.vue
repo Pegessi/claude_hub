@@ -65,11 +65,23 @@
         </div>
 
         <div
-          v-for="turn in turns"
+          v-for="(turn, turnIndex) in turns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn)]"
+          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === turnIndex, isEditingTurn(turn)]"
           class="structured-turn"
         >
+          <!-- Hover-revealed per-turn actions. -->
+          <div class="turn-actions">
+            <button
+              type="button"
+              class="turn-fork-button"
+              :disabled="forkingOrdinal !== null"
+              title="Fork a new chat from this turn"
+              @click="forkFromTurn(turnIndex)"
+            >
+              {{ forkingOrdinal === turnIndex ? 'Forking…' : 'Fork from here' }}
+            </button>
+          </div>
           <!-- A right-aligned user bubble and a left-aligned assistant bubble make
                this the same conversation as the terminal, not terminal text
                pasted into a second surface. -->
@@ -78,45 +90,124 @@
             class="conversation-row conversation-row--user"
           >
             <div class="conversation-bubble conversation-bubble--user">
-              <MarkdownContent
-                v-if="turn.userText"
-                :text="turn.userText"
-                compact
-              />
+              <!-- Inline edit mode -->
               <div
-                v-if="turn.attachments?.length"
-                class="turn-attachments"
+                v-if="isEditingTurn(turn)"
+                class="edit-resend-form"
               >
-                <template
-                  v-for="(att, i) in turn.attachments"
-                  :key="att.id ?? `null-${turn.key}-${i}`"
+                <textarea
+                  v-model="editDraft"
+                  class="edit-resend-textarea"
+                  rows="3"
+                  placeholder="Edit your message..."
+                  @keydown.enter.exact.prevent="submitEdit(turn)"
+                  @keydown.esc.prevent="cancelEdit"
+                />
+                <!-- Preserved attachments: edit-resend re-sends the original
+                     images, so show them as read-only thumbnails so the user
+                     knows they are kept (not dropped) on resend. -->
+                <div
+                  v-if="turn.attachments?.length"
+                  class="turn-attachments edit-resend-attachments"
                 >
-                  <!-- Keep conversation density high: render a bounded
-                       thumbnail and open the full preview in a lightbox. -->
-                  <button
-                    v-if="att.id !== null && !erroredAttachments.has(att.id)"
-                    type="button"
-                    class="turn-attachment-button"
-                    aria-label="Open attached image preview"
-                    @click="openImageLightbox(attachmentUrl(att.id), 'attached image', $event)"
+                  <template
+                    v-for="(att, i) in turn.attachments"
+                    :key="att.id ?? `edit-null-${turn.key}-${i}`"
                   >
                     <img
+                      v-if="att.id !== null && !erroredAttachments.has(att.id)"
                       :src="attachmentUrl(att.id)"
                       class="turn-attachment-img"
-                      alt="attached image"
+                      alt="attached image (will be re-sent)"
                       @error="onAttachmentError($event, att)"
                     >
-                  </button>
-                  <!-- Placeholder for no-preview (id is null) or evicted
-                       preview (fetch returned 404/410). -->
-                  <div
-                    v-else
-                    class="turn-attachment-placeholder"
+                    <div
+                      v-else
+                      class="turn-attachment-placeholder"
+                    >
+                      <span>{{ att.id === null ? 'Preview unavailable' : 'Preview expired' }}</span>
+                    </div>
+                  </template>
+                </div>
+                <div
+                  v-if="editError"
+                  class="edit-resend-error"
+                >
+                  {{ editError }}
+                </div>
+                <div class="edit-resend-actions">
+                  <button
+                    type="button"
+                    class="edit-resend-btn edit-resend-btn--primary"
+                    :disabled="isEditSending"
+                    @click="submitEdit(turn)"
                   >
-                    <span>{{ att.id === null ? 'Preview unavailable' : 'Preview expired' }}</span>
-                  </div>
-                </template>
+                    {{ isEditSending ? 'Sending...' : 'Resend' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="edit-resend-btn"
+                    :disabled="isEditSending"
+                    @click="cancelEdit"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
+              <!-- Normal display mode -->
+              <template v-else>
+                <MarkdownContent
+                  v-if="turn.userText"
+                  :text="turn.userText"
+                  compact
+                />
+                <div
+                  v-if="turn.attachments?.length"
+                  class="turn-attachments"
+                >
+                  <template
+                    v-for="(att, i) in turn.attachments"
+                    :key="att.id ?? `null-${turn.key}-${i}`"
+                  >
+                    <!-- Keep conversation density high: render a bounded
+                         thumbnail and open the full preview in a lightbox. -->
+                    <button
+                      v-if="att.id !== null && !erroredAttachments.has(att.id)"
+                      type="button"
+                      class="turn-attachment-button"
+                      aria-label="Open attached image preview"
+                      @click="openImageLightbox(attachmentUrl(att.id), 'attached image', $event)"
+                    >
+                      <img
+                        :src="attachmentUrl(att.id)"
+                        class="turn-attachment-img"
+                        alt="attached image"
+                        @error="onAttachmentError($event, att)"
+                      >
+                    </button>
+                    <!-- Placeholder for no-preview (id is null) or evicted
+                         preview (fetch returned 404/410). -->
+                    <div
+                      v-else
+                      class="turn-attachment-placeholder"
+                    >
+                      <span>{{ att.id === null ? 'Preview unavailable' : 'Preview expired' }}</span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <!-- Hover edit action -->
+              <button
+                v-if="turn.userText && turn.turnId"
+                type="button"
+                class="edit-resend-hover-btn"
+                :disabled="turnInFlight"
+                :title="turnInFlight ? 'A turn is currently running' : 'Edit message'"
+                :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : 'Edit message'"
+                @click="startEdit(turn)"
+              >
+                ✎
+              </button>
             </div>
           </div>
 
@@ -710,6 +801,7 @@ const {
   retry: retryStream,
   setMode,
   stop,
+  reset: resetStream,
 } = useAgentStream()
 
 // Approval-card selection state (AskUserQuestion / AskQuestion /
@@ -759,6 +851,22 @@ const turns = computed(() => authoritativeTurns.value.map(turn => ({
     turn.errors.length === 0 &&
     turn.statuses.length === 0,
 })))
+
+// ── Fork from turn ──────────────────────────────────────────────────────────
+// The turn index in the v-for is the 0-based ordinal: the reducer groups
+// events into turns in the same order the backend's
+// ``_group_event_turn_end_indices`` does, so the indices line up.
+const forkingOrdinal = ref<number | null>(null)
+
+async function forkFromTurn(ordinal: number) {
+  if (forkingOrdinal.value !== null) return
+  forkingOrdinal.value = ordinal
+  try {
+    await terminalStore.forkTab(props.tabId, ordinal)
+  } finally {
+    forkingOrdinal.value = null
+  }
+}
 
 type PendingTurn = {
   key: string
@@ -1635,6 +1743,87 @@ async function sendToStream(
   }
 }
 
+// ── Edit-resend ──────────────────────────────────────────────────────────────
+// A user can edit one of their sent messages; after resending, the
+// conversation reruns from that point (truncating subsequent turns).
+
+const editingTurnKey = ref<string | null>(null)
+const editDraft = ref('')
+const isEditSending = ref(false)
+const editError = ref<string | null>(null)
+
+function isEditingTurn(turn: TimelineTurn): boolean {
+  return editingTurnKey.value === turn.key
+}
+
+function startEdit(turn: TimelineTurn) {
+  if (isEditSending.value) return
+  // Refuse to edit while a turn is running.  The backend guard is
+  // authoritative (409); this just avoids a round-trip and keeps the button
+  // and the action in sync.
+  if (turnInFlight.value) return
+  editingTurnKey.value = turn.key
+  editDraft.value = turn.userText
+  editError.value = null
+}
+
+function cancelEdit() {
+  if (isEditSending.value) return
+  editingTurnKey.value = null
+  editDraft.value = ''
+  editError.value = null
+}
+
+async function submitEdit(turn: TimelineTurn) {
+  if (isEditSending.value) return
+  const text = editDraft.value
+  if (!text.trim()) {
+    editError.value = 'Message cannot be empty'
+    return
+  }
+  if (!turn.turnId) {
+    editError.value = 'Cannot edit this turn (missing turn id)'
+    return
+  }
+  isEditSending.value = true
+  editError.value = null
+  const clientTurnId = typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+  try {
+    const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/edit-resend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        text,
+        client_turn_id: clientTurnId,
+        turn_id: turn.turnId,
+      }),
+    })
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`
+      try {
+        const body = await res.json()
+        if (body?.detail) detail = body.detail
+      } catch {
+        // ignore non-JSON error body
+      }
+      throw new Error(detail)
+    }
+    // Success: clear editing state and rehydrate the stream from the
+    // truncated event store.
+    editingTurnKey.value = null
+    editDraft.value = ''
+    resetStream()
+    void start(props.tabId, 'terminal-tab')
+  } catch (err) {
+    editError.value = err instanceof Error ? err.message : 'Failed to resend message'
+  } finally {
+    isEditSending.value = false
+  }
+}
+
 async function submit(
   delivery: 'normal' | 'steer' = 'normal',
   messageOverride?: string,
@@ -1952,6 +2141,43 @@ onUnmounted(() => {
 
 .structured-turn {
   margin-bottom: 16px;
+  position: relative;
+}
+
+.turn-actions {
+  position: absolute;
+  top: -10px;
+  right: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.structured-turn:hover .turn-actions,
+.turn-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.turn-fork-button {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  background: var(--ch-color-bg-elevated, canvas);
+  color: var(--ch-color-text-subtle, currentColor);
+  cursor: pointer;
+}
+
+.turn-fork-button:hover:not(:disabled) {
+  border-color: var(--ch-color-accent);
+  color: var(--ch-color-accent);
+}
+
+.turn-fork-button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .structured-turn--pending {
@@ -2586,6 +2812,7 @@ onUnmounted(() => {
 .conversation-bubble--user {
   --paseo-user-bubble: #3268a8;
 
+  position: relative;
   background: var(--paseo-user-bubble);
   color: #fff;
   border-bottom-right-radius: var(--ch-radius-sm);
@@ -2648,6 +2875,116 @@ onUnmounted(() => {
   color: color-mix(in srgb, #fff 78%, transparent);
   font-size: 11px;
   text-align: center;
+}
+
+/* ---- Edit-resend UI ---- */
+
+.edit-resend-hover-btn {
+  position: absolute;
+  top: -10px;
+  right: -8px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, #fff 30%, transparent);
+  border-radius: 50%;
+  background: var(--ch-color-surface-control, #2a2a2a);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 140ms ease, transform 140ms ease;
+  pointer-events: none;
+}
+
+.conversation-bubble--user:hover .edit-resend-hover-btn,
+.edit-resend-hover-btn:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+
+.edit-resend-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: min(320px, 60vw);
+}
+
+.edit-resend-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, #fff 30%, transparent);
+  border-radius: var(--ch-radius-sm);
+  background: rgb(0 0 0 / 22%);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+}
+
+.edit-resend-textarea:focus {
+  border-color: color-mix(in srgb, #fff 60%, transparent);
+}
+
+.edit-resend-textarea::placeholder {
+  color: color-mix(in srgb, #fff 50%, transparent);
+}
+
+.edit-resend-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Read-only preserved-attachment thumbnails inside the edit form.  The base
+   .turn-attachment-img fills its container; in the edit form there is no
+   fixed-size button wrapper, so bound it to the same thumbnail size. */
+.edit-resend-attachments .turn-attachment-img {
+  width: clamp(72px, 8vw, 88px);
+  aspect-ratio: 4 / 3;
+  border: 1px solid color-mix(in srgb, #fff 34%, transparent);
+  border-radius: var(--ch-radius-sm);
+}
+
+.edit-resend-btn {
+  padding: 5px 14px;
+  border: 1px solid color-mix(in srgb, #fff 30%, transparent);
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.edit-resend-btn:hover:not(:disabled) {
+  background: rgb(255 255 255 / 12%);
+}
+
+.edit-resend-btn--primary {
+  background: rgb(255 255 255 / 18%);
+  border-color: color-mix(in srgb, #fff 45%, transparent);
+}
+
+.edit-resend-btn--primary:hover:not(:disabled) {
+  background: rgb(255 255 255 / 28%);
+}
+
+.edit-resend-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.edit-resend-error {
+  color: #ffb4b4;
+  font-size: 12px;
 }
 
 .structured-image-lightbox {
