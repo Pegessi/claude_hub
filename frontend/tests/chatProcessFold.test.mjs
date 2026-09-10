@@ -182,6 +182,75 @@ test('a delivered answer followed only by a status still folds', () => {
   assert.deepEqual(split.delivery.map(p => p.kind), ['text', 'status'])
 })
 
+// ── Codex: the plan stream is work, not the answer ──────────────────────
+//
+// Codex streams its plan through the same ``text_delta`` the answer uses, so
+// the two are told apart by the ``plan`` flag the adapter sets. Without it the
+// last prose part wins the delivery, and an answer followed by a plan update
+// would disappear into the folded process.
+
+test('a Codex plan segment is never mistaken for the delivered answer', () => {
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'text_delta', { text: '1. 读代码\n2. 改测试', plan: true }),
+    makeEvent(3, 'tool_call_started', { tool_call_id: 'c1', name: 'shell', args: {} }),
+    makeEvent(4, 'tool_call_completed', { tool_call_id: 'c1', status: 'completed' }),
+    makeEvent(5, 'text_delta', { text: 'the answer' }),
+    makeEvent(6, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  const split = splitTurnProcess(turn)
+  assert.ok(split)
+  assert.deepEqual(split.process.map(p => p.kind), ['text', 'tool_group'])
+  assert.equal(split.process[0].fromPlan, true)
+  assert.equal(split.delivery[0].text, 'the answer')
+})
+
+test('a plan arriving after the answer does not steal the delivery', () => {
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'text_delta', { text: 'the answer' }),
+    makeEvent(4, 'text_delta', { text: 'next: 清理', plan: true }),
+    makeEvent(5, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  assert.equal(
+    splitTurnProcess(turn),
+    null,
+    'work follows the answer, so folding would hide the answer and leave the plan',
+  )
+})
+
+test('a turn of work plus plan text has no answer to deliver', () => {
+  // The tool comes first so "nothing to fold" cannot be what rejects this:
+  // without the plan flag the plan would be taken as the delivery and the work
+  // would fold away around it.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'tool_call_started', { tool_call_id: 'c1', name: 'shell', args: {} }),
+    makeEvent(3, 'tool_call_completed', { tool_call_id: 'c1', status: 'completed' }),
+    makeEvent(4, 'text_delta', { text: '1. 先跑测试', plan: true }),
+    makeEvent(5, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  assert.deepEqual(turn.parts.map(p => p.kind), ['tool_group', 'text'])
+  assert.equal(splitTurnProcess(turn), null)
+  assert.equal(foldTurnParts(turn, false), turn.parts)
+})
+
+test('plan prose and answer prose never merge into one part', () => {
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'text_delta', { text: '计划：', plan: true }),
+    makeEvent(3, 'text_delta', { text: '先读代码', plan: true }),
+    makeEvent(4, 'text_delta', { text: '答案是 42' }),
+    makeEvent(5, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  assert.deepEqual(
+    turn.parts.map(p => p.text),
+    ['计划：先读代码', '答案是 42'],
+    'adjacent plan deltas coalesce with each other, but not across the boundary',
+  )
+})
+
 // ── step count, elapsed time, label ─────────────────────────────────────
 
 test('steps count actions, not render blocks', () => {

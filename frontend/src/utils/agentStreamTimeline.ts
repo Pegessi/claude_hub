@@ -55,7 +55,10 @@ export interface TimelineAttachment {
 
 export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
-  | { kind: 'text'; key: string; text: string }
+  // ``fromPlan`` marks Codex's plan stream: it renders exactly like any other
+  // prose, but it is work rather than the agent's answer, so the fold must not
+  // treat it as a delivery. See the fold helpers below.
+  | { kind: 'text'; key: string; text: string; fromPlan?: boolean }
   | { kind: 'tool'; key: string; tool: TimelineTool }
   | { kind: 'tool_group'; key: string; tools: TimelineTool[] }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
@@ -145,13 +148,27 @@ function appendTextPart(
   kind: 'thinking' | 'text',
   text: string,
   sequence: number,
+  fromPlan = false,
 ): void {
   if (!text) return
   const last = turn.parts[turn.parts.length - 1]
-  if (last && last.kind === kind) {
+  // A plan segment and an answer segment are both prose but are different
+  // kinds of thing; merging them would produce one part that is half work and
+  // half answer, which the fold could then only classify wrongly.
+  const samePart =
+    last !== undefined &&
+    last.kind === kind &&
+    (kind !== 'text' || (last.kind === 'text' && Boolean(last.fromPlan) === fromPlan))
+  if (samePart) {
     last.text += text
+  } else if (kind === 'text') {
+    turn.parts.push(
+      fromPlan
+        ? { kind, key: `plan-${sequence}`, text, fromPlan: true }
+        : { kind, key: `text-${sequence}`, text },
+    )
   } else {
-    turn.parts.push({ kind, key: `${kind}-${sequence}`, text })
+    turn.parts.push({ kind, key: `thinking-${sequence}`, text })
   }
   if (kind === 'thinking') turn.thinkingText += text
   else turn.assistantText += text
@@ -287,7 +304,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       if (!text) break
       const chunks = state.textChunksByTurn.get(toolMapKey) ?? []
       if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
-      appendTextPart(turn, 'text', text, event.stream_sequence)
+      appendTextPart(turn, 'text', text, event.stream_sequence, event.payload.plan === true)
       chunks.push(text)
       state.textChunksByTurn.set(toolMapKey, chunks)
       mutated = true
@@ -467,17 +484,24 @@ export interface TurnProcessSplit {
 /** Index of the delivered answer: the turn's final text segment.
  *
  *  Everything the model says before it is working narration ("我先看一下…"),
- *  so the LAST text part is the delivery, not the first. */
+ *  so the LAST text part is the delivery, not the first. Codex's plan stream is
+ *  skipped: it is prose too, but it describes work rather than answering. */
 function deliveryIndex(parts: TimelinePart[]): number {
   for (let i = parts.length - 1; i >= 0; i -= 1) {
-    if (parts[i].kind === 'text') return i
+    const part = parts[i]
+    if (part.kind === 'text' && !part.fromPlan) return i
   }
   return -1
 }
 
 /** Whether a part records how the answer was reached rather than being output. */
 function isProcessPart(part: TimelinePart): boolean {
-  return part.kind === 'thinking' || part.kind === 'tool' || part.kind === 'tool_group'
+  return (
+    part.kind === 'thinking' ||
+    part.kind === 'tool' ||
+    part.kind === 'tool_group' ||
+    (part.kind === 'text' && part.fromPlan === true)
+  )
 }
 
 /** Split a completed turn into its working process and its delivered answer.

@@ -133,7 +133,8 @@ scrolled to the bottom of that card.
 
 ## Validation
 
-- `node --test tests/*.test.mjs`: 320 passed (24 of them new).
+- `node --test tests/*.test.mjs`: 324 passed (28 of them new);
+  `pytest tests/test_agent_stream*.py`: 232 passed (2 of them new).
 - `pnpm run lint:check`, `pnpm run build` (vue-tsc + vite): clean.
 - Browser check against a worktree dev server on `:5199` pointed at the live
   backend (the live frontend on `:5173` was not touched). On the `ch ds` tab:
@@ -144,10 +145,11 @@ scrolled to the bottom of that card.
   second click on that same header collapsed it again from the same spot. 53
   `details-collapse` footers were present across the thinking/tool cards. No
   console errors.
-- Consistency sweep over all 11 turns of that tab: every folded turn's tail is
-  the delivery alone (never a thinking or tool part), and the four unfolded
-  turns are each unfolded for a stated reason — cancelled mid-tool, holds an
-  approval card, is the newest completed turn, is still running.
+- Consistency sweep across three live tabs (Claude × 2, Cursor × 1), 30 turns
+  total: every folded turn's tail is the delivery alone — never a thinking or
+  tool part — and each unfolded turn is unfolded for a stated reason (cancelled
+  mid-tool, holds an approval card, is the newest completed turn, or is still
+  running).
 - The dev server was stopped and its port confirmed closed before this log was
   written.
 
@@ -195,11 +197,55 @@ cache that would have to be invalidated), and the cut-off rule is scoped to
 turn cancelled *after* its answer still folds, which is safe because its text
 and any error stay visible.
 
-Coverage gap, not a defect: folding has only been exercised against live Claude
-sessions. Codex maps `item/plan/delta` to `text_delta` too, so a turn ending on
-a plan update with no work after it would treat the plan as a delivery; no
-adapter path was found that orders events that way, but no live Codex session
-was available to disprove it.
+It also flagged the provider coverage gap handled in the next section.
+
+## Provider coverage
+
+The review could only exercise folding against live Claude sessions and pointed
+at two unverified shapes. Both are now closed.
+
+**Cursor needed nothing.** Two live Cursor chats fold correctly with zero
+leaked process parts, and their durations are real elapsed time (17m, 5m, 1h 2m)
+rather than the collapsed spans a replayed transcript would give — the Cursor
+tailer streams live, so `created_at` is authored when the event arrives. Its
+`turn_ended` statuses (`success` / `error` / `aborted` → `completed` / `failed`
+/ `cancelled`) feed the same cut-off rule Claude uses. No adapter-specific code
+was required, which is the point of keeping the fold rules structural: they read
+`TimelinePart`s, not provider identities.
+
+**Codex had a real hole.** `item/plan/delta` is mapped to `TEXT_DELTA`
+(`codex_jsonl.py:231-242`), i.e. the agent's plan renders as an assistant
+message — reasonable in itself, and unchanged here. But the fold takes the last
+*prose* part as the delivery, so a plan update arriving after the answer would
+be taken as the answer and the real answer would be folded away with the
+process. That is a silent failure: the reader would see a plan where the answer
+should be, with the answer one click away and nothing indicating it was there.
+
+The fix separates classification from rendering. Plan deltas now carry
+`payload.plan = true`; the reducer tags the part `fromPlan` and the fold treats
+it as work. Two consequences worth naming:
+
+- A plan part and an answer part never merge, even when adjacent. Merging them
+  would produce one part that is half work and half answer, which the fold could
+  then only classify wrongly. They render as two adjacent bubbles, as they
+  effectively did before.
+- `assistantText` still accumulates plan text, so the compatibility aggregate
+  and everything reading it are unchanged.
+
+Historical Codex events predate the flag, so old sessions keep classifying plan
+text as prose and can still mis-fold in the rare plan-last case. Re-deriving the
+flag for stored events would mean a migration; the exposure is a few sessions
+and the failure is cosmetic, so it was left alone.
+
+Verification is by construction rather than by live session — no Codex chat has
+ever run on this machine, which is exactly why the hole survived review:
+
+- `test_codex_adapter_marks_plan_deltas_as_plan` and
+  `test_codex_adapter_leaves_answer_deltas_unmarked` pin the adapter's side.
+- Four reducer tests cover the shapes: plan-then-answer, answer-then-plan,
+  work-then-plan-only, and plan/answer adjacency.
+- Mutation-checked, per the lesson above: reverting `deliveryIndex` to
+  `part.kind === 'text'` fails exactly the two tests that depend on the flag.
 
 ## Follow-up
 
