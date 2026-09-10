@@ -5,6 +5,33 @@
 
 ## Unreleased
 
+### fix: a cancelled Chat reader no longer looks like a provider failure
+
+- **Problem.** `ProviderSession.stop()` cancelled an in-flight one-shot stdout
+  reader without retiring its generation, so the EOF sentinel the reader's
+  `finally` publishes — which reports *our* cancellation, not the provider's end
+  of stream — arrived carrying the **live** generation, and `read_line` returned
+  it as a genuine EOF. The tailer then synthesized `provider exited without a
+  completion record` for a turn that had already rendered its complete answer:
+  the final delta and the provider's `result` record were both lost, the turn
+  was marked failed, and because the provider had in fact exited cleanly the
+  message was the fallback rather than an exit code. That branch logged nothing,
+  so the incident left no trace in `backend.log` and was reconstructed only by
+  diffing the persisted event stream against the provider's own transcript.
+- **Fix.** Reader retirement now has a single owner: `_terminate_process`
+  invalidates the stdout generation before it cancels the reader, so every
+  caller — shutdown (`stop`), cancellation (`cancel_active_turn`), and turn
+  rollover (`_spawn_oneshot`) — retires the reader it is about to kill and none
+  can forget to. The explicit advances in `cancel_active_turn` and
+  `_spawn_oneshot` are removed; the advance per spawn stays exactly one, which
+  is what Cursor's staged-image bookkeeping relies on. The fallback branch now
+  logs the exit error, so a genuine missing-completion failure is visible in
+  `backend.log`.
+- **Tests.** New regression asserts that a `stop()` during an in-flight turn
+  leaves the reader's sentinel tagged with a retired generation (red before the
+  fix: `assert 1 < 1`). It pins the invariant on state instead of waiting on
+  `read_line`, so it is deterministic and adds no wall-clock budget.
+
 ### feat: Chat tab keep-alive — switching tabs preserves pane state
 
 - **Problem.** Switching between Chat tabs lost pane state: the scroll
