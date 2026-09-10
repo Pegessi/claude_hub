@@ -1157,6 +1157,38 @@ async def test_cancel_active_turn_terminates_in_flight_oneshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_while_turn_in_flight_does_not_surface_cancellation_as_eof() -> None:
+    """``stop()`` cancelling a live reader must not look like a provider EOF.
+
+    The cancelled reader's ``finally`` publishes an EOF sentinel to unblock
+    consumers, but that sentinel reports *our* cancellation, not the
+    provider's end of stream. When it was readable as EOF, the tailer
+    synthesized ``provider exited without a completion record`` for a turn
+    whose provider had merely been killed — discarding the tail of a turn
+    that had in fact already rendered a complete answer.
+    """
+    native = ClaudeNativeSession(_session())
+    proc = _FakeProcess(stdout_lines=[])
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await native.send_message("first", [])
+        assert native.turn_in_flight is True
+        # Let the reader reach its blocking stdout read so the cancellation
+        # exercises the same EOF-finally path as a real in-flight turn.
+        await asyncio.sleep(0.03)
+        await native.stop()
+        assert proc._terminated is True
+
+    # The reader's farewell is queued — ``stop`` awaited it before returning —
+    # but it is retired: it asserts our cancellation, and ``read_line`` only
+    # ever yields a sentinel from the live generation. Asserting the stale tag
+    # directly pins the invariant, where waiting on ``read_line`` would only
+    # have shown that nothing came back within some arbitrary window.
+    generation, sentinel = native._stdout_queue.get_nowait()
+    assert sentinel is None
+    assert generation < native._stdout_generation
+
+
+@pytest.mark.asyncio
 async def test_cancelled_oneshot_eof_does_not_leak_into_next_turn() -> None:
     """The cancelled reader's EOF must not terminate the replacement turn."""
     native = ClaudeNativeSession(_session())
