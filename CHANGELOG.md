@@ -33,6 +33,12 @@
   any scroll depth. `.tool-card`'s `overflow: hidden` becomes `overflow: clip`,
   because `hidden` would make the card its own scroll container and silently
   disable sticky.
+- **Providers.** Codex streams its plan through the same `text_delta` the answer
+  uses, so a plan update arriving last would be taken as the delivered answer —
+  and the real answer would be folded away with the process. Plan deltas now
+  carry a `plan` flag the fold reads; they render exactly as before. Cursor
+  needed no change: its event shape already folds correctly, verified against
+  live sessions.
 - **Reuse.** `parseTimestampMs` / `formatElapsedDuration` move out of
   `AgentWorkspaceView.vue` into `utils/duration.ts` so both timelines format
   elapsed time the same way instead of drifting apart.

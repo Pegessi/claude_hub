@@ -1845,6 +1845,36 @@ def test_codex_adapter_user_message_emits_turn_started():
     assert events[0].payload["summary"] == "hi"
 
 
+def test_codex_adapter_marks_plan_deltas_as_plan():
+    """The plan stream is prose, but it is not the agent's answer.
+
+    It shares ``text_delta`` with the answer, so the ``plan`` flag is the only
+    thing that keeps a plan update out of the folded turn's delivery — without
+    it, a plan arriving after the answer would be taken as the answer and the
+    real one would be folded away with the process.
+    """
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    adapter = CodexJsonlAdapter()
+    raw = {"method": "item/plan/delta", "params": {"delta": "1. read\n2. write"}}
+    events = adapter.normalize_line(raw, _ctx())
+    assert len(events) == 1
+    assert events[0].type == AgentStreamEventType.TEXT_DELTA
+    assert events[0].payload["text"] == "1. read\n2. write"
+    assert events[0].payload["plan"] is True
+
+
+def test_codex_adapter_leaves_answer_deltas_unmarked():
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    adapter = CodexJsonlAdapter()
+    raw = {"method": "item/agentMessage/delta", "params": {"delta": "the answer"}}
+    events = adapter.normalize_line(raw, _ctx())
+    assert len(events) == 1
+    assert events[0].type == AgentStreamEventType.TEXT_DELTA
+    assert "plan" not in events[0].payload
+
+
 def test_codex_adapter_function_call_and_output():
     from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
 
