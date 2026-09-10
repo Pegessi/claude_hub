@@ -78,7 +78,16 @@ test('the turn closes with its own actions row', () => {
   assert.ok(row, 'the turn actions row must exist')
   assert.match(row[0], /class="turn-fork-button"/, 'fork applies to the whole turn')
   assert.match(row[0], /class="turn-time"/, 'the time sits beside it')
-  assert.match(row[0], /turn\.completedAt/, 'the turn row reports when the turn finished')
+  assert.match(row[0], /turnClock\(turn\)/, 'the turn row reports the answer\'s own time')
+})
+
+test('the turn row prefers the answer\'s time over the turn\'s', () => {
+  // The answer's timestamp is the message's own; the turn's completion time is
+  // the coarser fact and is only the fallback for a turn cut off before it
+  // answered.
+  const fn = structuredPane.match(/function turnClock\(turn: TimelineTurn\): string \{[\s\S]*?\n\}/)
+  assert.ok(fn, 'turnClock must exist')
+  assert.match(fn[0], /deliveryAt\(turn\) \?\? turn\.completedAt/)
 })
 
 test('inline editing does not balloon the bubble', () => {

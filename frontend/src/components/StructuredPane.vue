@@ -473,9 +473,9 @@
               {{ forkingOrdinal === turnIndex ? 'Forking…' : 'Fork from here' }}
             </button>
             <time
-              v-if="turn.completedAt"
+              v-if="turnClock(turn)"
               class="turn-time"
-            >{{ formatClockTime(turn.completedAt) }}</time>
+            >{{ turnClock(turn) }}</time>
           </div>
         </div>
 
@@ -792,7 +792,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { IncrementalTimelineReducer, foldTurnParts, splitTurnProcess, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer, deliveryAt, foldTurnParts, splitTurnProcess, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { formatClockTime } from '@/utils/duration'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
@@ -1673,6 +1673,17 @@ function collapseDetails(event: MouseEvent): void {
   if (target instanceof HTMLElement) {
     target.closest('details')?.removeAttribute('open')
   }
+}
+
+/**
+ * Clock label for the turn's own action row.
+ *
+ * The delivered answer's own timestamp where there is one — that is the message
+ * the row belongs to — falling back to when the turn finished for a turn that
+ * was cut off before answering, which has no message time to show.
+ */
+function turnClock(turn: TimelineTurn): string {
+  return formatClockTime(deliveryAt(turn) ?? turn.completedAt)
 }
 
 /** Aggregate status for a tool group: 'running' if any tool is still running,

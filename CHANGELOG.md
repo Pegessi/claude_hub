@@ -25,9 +25,25 @@
   sizes to its content (measured: 344px → 264px on a short message).
 - **Tests.** `structuredPaneEditGuard.test.mjs` now asserts the contract rather
   than the old placement: the row is not absolutely positioned, it reserves gap
-  and height, the message row carries the edit action with `turn.startedAt`, the
-  turn row carries fork with `turn.completedAt`, and inline editing neither
-  forces a wide bubble nor draws a box.
+  and height, the message row carries the edit action, the turn row carries
+  fork and the answer's clock time, and inline editing neither forces a wide
+  bubble nor draws a box.
+
+### feat: per-message timestamps in the Chat transcript
+
+- Text parts now record when the message they render **began** (`at`), taken
+  from the creating delta's `created_at`. Extending a message keeps that
+  original time: a transcript reports when a message started, not when it grew
+  last.
+- The turn's action row reports the **delivered answer's** own time where there
+  is one, falling back to when the turn finished for a turn cut off before
+  answering — which has no message time to show, so the row renders none rather
+  than mislabelling narration as a message. Measured live, a message row and its
+  turn row now differ (23:02 for the question, 23:10 for the answer) instead of
+  both reporting the turn.
+- Only text parts carry a timestamp: they are what the transcript presents
+  per-message, while thinking and tool parts fold into a process line that
+  already reports the turn's elapsed time.
 
 ### fix: edit action moved off the message, and a disabled button that says so
 
