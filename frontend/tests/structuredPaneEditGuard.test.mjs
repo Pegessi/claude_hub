@@ -45,33 +45,54 @@ test('edit button explains why it is disabled via a tooltip', () => {
 // about when it is inert.
 // ---------------------------------------------------------------------------
 
-test('the edit action lives in the turn hover cluster, not on the bubble', () => {
-  // Pinned to the bubble it covered the tail of the message, and — anchored
-  // separately from the fork button — the two ended up on top of each other.
-  const cluster = structuredPane.match(/<div class="turn-actions">[\s\S]*?<\/div>/)
-  assert.ok(cluster, 'the turn-actions cluster must exist')
-  assert.match(
-    cluster[0],
-    /class="edit-resend-hover-btn"/,
-    'the edit button must sit in the cluster beside the fork button',
-  )
-})
-
-test('the edit button is not absolutely positioned over the message', () => {
-  const rule = structuredPane.match(/\.edit-resend-hover-btn \{[\s\S]*?\n\}/)
-  assert.ok(rule, 'the base rule must exist')
+test('the action row is in normal flow, not pinned over the message', () => {
+  // Absolutely positioned it sat behind the bubble — which is itself
+  // positioned — so the buttons could not be clicked at all.
+  const rule = structuredPane.match(/\.turn-actions \{[\s\S]*?\n\}/)
+  assert.ok(rule, 'the .turn-actions rule must exist')
   assert.doesNotMatch(
     rule[0],
     /position: absolute/,
-    'an absolutely positioned edit button overlapped the bubble text',
+    'a pinned row lands behind the bubble and swallows clicks',
   )
 })
 
-test('the cluster lays its buttons out instead of stacking them', () => {
-  const cluster = structuredPane.match(/\.turn-actions \{[\s\S]*?\n\}/)
-  assert.ok(cluster, 'the .turn-actions rule must exist')
-  assert.match(cluster[0], /display: flex/, 'the cluster must lay its buttons in a row')
-  assert.match(cluster[0], /gap:/, 'the buttons need a gap so they do not touch')
+test('the action row reserves room for the buttons and the time', () => {
+  const rule = structuredPane.match(/\.turn-actions \{[\s\S]*?\n\}/)
+  assert.ok(rule)
+  assert.match(rule[0], /display: flex/, 'the row lays its contents out')
+  assert.match(rule[0], /gap:/, 'actions and time need a gap so they do not crowd')
+  assert.match(rule[0], /min-height:/, 'the row keeps its height so revealing it does not shift the thread')
+})
+
+test('the message row carries the edit action and the time', () => {
+  const row = structuredPane.match(/class="turn-actions turn-actions--message"[\s\S]*?<\/div>/)
+  assert.ok(row, 'the message actions row must exist')
+  assert.match(row[0], /class="edit-resend-hover-btn"/, 'the edit action belongs to the message it edits')
+  assert.match(row[0], /class="turn-time"/, 'the time sits beside it')
+  assert.match(row[0], /turn\.startedAt/, 'the time is the message\'s own timestamp')
+})
+
+test('the turn closes with its own actions row', () => {
+  const row = structuredPane.match(/class="turn-actions turn-actions--turn"[\s\S]*?<\/div>/)
+  assert.ok(row, 'the turn actions row must exist')
+  assert.match(row[0], /class="turn-fork-button"/, 'fork applies to the whole turn')
+  assert.match(row[0], /class="turn-time"/, 'the time sits beside it')
+  assert.match(row[0], /turn\.completedAt/, 'the turn row reports when the turn finished')
+})
+
+test('inline editing does not balloon the bubble', () => {
+  // The form forced ``min-width: 320px`` and drew a bordered dark box inside
+  // the blue bubble, so a two-character message opened a wide empty-looking
+  // form. The textarea now reads as the message itself.
+  const form = structuredPane.match(/\.edit-resend-form \{[\s\S]*?\n\}/)
+  assert.ok(form, 'the edit form rule must exist')
+  assert.doesNotMatch(form[0], /min-width: min\(320px/, 'the form must not force a wide bubble')
+
+  const textarea = structuredPane.match(/\.edit-resend-textarea \{[\s\S]*?\n\}/)
+  assert.ok(textarea, 'the textarea rule must exist')
+  assert.match(textarea[0], /border: none/, 'the textarea must not draw a box inside the bubble')
+  assert.match(textarea[0], /background: none/, 'the textarea must not draw its own fill')
 })
 
 test('a disabled edit button looks disabled', () => {

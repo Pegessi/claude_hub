@@ -5,6 +5,30 @@
 
 ## Unreleased
 
+### fix: message actions become a Codex-style row under the message
+
+- **Problem.** Three defects in the same area, reported together. The hover
+  actions were a cluster pinned over the turn (`position: absolute`), which
+  **sat behind the user bubble** — the bubble is itself positioned and later in
+  the DOM — so the edit button could not be clicked at all; a browser reports
+  the bubble intercepting the click. The row was also cramped (6px) with no
+  time, and inline editing forced `min-width: 320px` and drew a bordered dark
+  box inside the blue bubble, so a two-character message opened a wide bubble
+  holding an empty-looking form.
+- **Fix.** The actions are now a hover-revealed row **under** the message, in
+  normal flow: the message's own row carries ✎ 编辑 and the message's clock
+  time, and the turn closes with a second row carrying Fork from here and the
+  turn's clock time. Spacing is 14px with a 24px minimum height, so the row has
+  room for the buttons and the time and does not shift the thread when it
+  appears. Inline editing drops the forced width, and the textarea renders as
+  the message itself — no border, no fill, one focus outline — so the bubble
+  sizes to its content (measured: 344px → 264px on a short message).
+- **Tests.** `structuredPaneEditGuard.test.mjs` now asserts the contract rather
+  than the old placement: the row is not absolutely positioned, it reserves gap
+  and height, the message row carries the edit action with `turn.startedAt`, the
+  turn row carries fork with `turn.completedAt`, and inline editing neither
+  forces a wide bubble nor draws a box.
+
 ### fix: edit action moved off the message, and a disabled button that says so
 
 - **Problem.** Two defects in the turn hover actions, reported together.

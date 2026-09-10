@@ -14,6 +14,21 @@ export function parseTimestampMs(value?: string | null): number | null {
   return Number.isFinite(timestamp) ? timestamp : null
 }
 
+/** Render an ISO-8601 timestamp as a wall-clock label — ``17:27``.
+ *
+ *  Local time, 24-hour, no seconds: this sits beside the actions under a
+ *  message, where the reader only needs to place it in the day. Returns an
+ *  empty string for a missing or unparseable value so callers can drop the
+ *  label rather than render ``NaN:NaN``. */
+export function formatClockTime(value?: string | null): string {
+  const ms = parseTimestampMs(value)
+  if (ms === null) return ''
+  const date = new Date(ms)
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${hours}:${minutes}`
+}
+
 /** Render a duration as a coarse, human-readable span.
  *
  *  Floored to whole units on purpose: ``45s``, ``3m``, ``2h 5m``, ``3d``. A
