@@ -2971,6 +2971,7 @@ import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
+import { formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
 import { DEFAULT_ABORT_REASON, resolveAbortReason } from '@/utils/taskAbort'
 import {
   awaitingHumanAcceptance as taskAcceptanceAwaiting,
@@ -4410,12 +4411,6 @@ function formatTime(value: string) {
   }).format(new Date(value))
 }
 
-function parseTimestampMs(value?: string | null): number | null {
-  if (!value) return null
-  const timestamp = new Date(value).getTime()
-  return Number.isFinite(timestamp) ? timestamp : null
-}
-
 function addTimelineItem(
   items: Array<Omit<ProgressTimelineItem, 'elapsedLabel' | 'deltaLabel'>>,
   id: string,
@@ -4426,24 +4421,6 @@ function addTimelineItem(
   const timestampMs = parseTimestampMs(value)
   if (timestampMs === null) return
   items.push({ id, label, timestampMs, tone })
-}
-
-function formatElapsedDuration(valueMs: number) {
-  const totalSeconds = Math.max(0, Math.floor(valueMs / 1000))
-  if (totalSeconds < 60) return `${totalSeconds}s`
-
-  const totalMinutes = Math.floor(totalSeconds / 60)
-  if (totalMinutes < 60) return `${totalMinutes}m`
-
-  const totalHours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  if (totalHours < 24) {
-    return minutes > 0 && totalHours < 12 ? `${totalHours}h ${minutes}m` : `${totalHours}h`
-  }
-
-  const days = Math.floor(totalHours / 24)
-  const hours = totalHours % 24
-  return hours > 0 && days < 14 ? `${days}d ${hours}h` : `${days}d`
 }
 
 function taskTimingEndMs(task: WorkspaceTask): number {
