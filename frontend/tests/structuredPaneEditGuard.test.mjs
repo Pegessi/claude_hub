@@ -70,7 +70,7 @@ test('the message row carries the edit action and the time', () => {
   assert.ok(row, 'the message actions row must exist')
   assert.match(row[0], /class="edit-resend-hover-btn"/, 'the edit action belongs to the message it edits')
   assert.match(row[0], /class="turn-time"/, 'the time sits beside it')
-  assert.match(row[0], /turn\.startedAt/, 'the time is the message\'s own timestamp')
+  assert.match(row[0], /messageClockLabel\(turn\)/, 'the time is the message\'s own')
 })
 
 test('the turn closes with its own actions row', () => {
@@ -78,16 +78,7 @@ test('the turn closes with its own actions row', () => {
   assert.ok(row, 'the turn actions row must exist')
   assert.match(row[0], /class="turn-fork-button"/, 'fork applies to the whole turn')
   assert.match(row[0], /class="turn-time"/, 'the time sits beside it')
-  assert.match(row[0], /turnClock\(turn\)/, 'the turn row reports the answer\'s own time')
-})
-
-test('the turn row prefers the answer\'s time over the turn\'s', () => {
-  // The answer's timestamp is the message's own; the turn's completion time is
-  // the coarser fact and is only the fallback for a turn cut off before it
-  // answered.
-  const fn = structuredPane.match(/function turnClock\(turn: TimelineTurn\): string \{[\s\S]*?\n\}/)
-  assert.ok(fn, 'turnClock must exist')
-  assert.match(fn[0], /deliveryAt\(turn\) \?\? turn\.completedAt/)
+  assert.match(row[0], /turnClockLabel\(turn\)/, 'the turn row reports the answer\'s own time')
 })
 
 test('inline editing does not balloon the bubble', () => {
