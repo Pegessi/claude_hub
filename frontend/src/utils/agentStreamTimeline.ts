@@ -58,7 +58,12 @@ export type TimelinePart =
   // ``fromPlan`` marks Codex's plan stream: it renders exactly like any other
   // prose, but it is work rather than the agent's answer, so the fold must not
   // treat it as a delivery. See the fold helpers below.
-  | { kind: 'text'; key: string; text: string; fromPlan?: boolean }
+  //
+  // ``at`` is when this message began streaming — the timestamp the transcript
+  // shows beside the message's actions. Only text parts carry one: they are
+  // what the transcript presents per-message, while thinking and tool parts are
+  // folded into a process line that reports the turn's elapsed time instead.
+  | { kind: 'text'; key: string; text: string; at: string; fromPlan?: boolean }
   | { kind: 'tool'; key: string; tool: TimelineTool }
   | { kind: 'tool_group'; key: string; tools: TimelineTool[] }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
@@ -148,6 +153,7 @@ function appendTextPart(
   kind: 'thinking' | 'text',
   text: string,
   sequence: number,
+  at: string,
   fromPlan = false,
 ): void {
   if (!text) return
@@ -160,12 +166,14 @@ function appendTextPart(
     last.kind === kind &&
     (kind !== 'text' || (last.kind === 'text' && Boolean(last.fromPlan) === fromPlan))
   if (samePart) {
+    // Extending a message keeps its original ``at``: that is when the message
+    // started, which is what a transcript reports, not when it grew last.
     last.text += text
   } else if (kind === 'text') {
     turn.parts.push(
       fromPlan
-        ? { kind, key: `plan-${sequence}`, text, fromPlan: true }
-        : { kind, key: `text-${sequence}`, text },
+        ? { kind, key: `plan-${sequence}`, text, at, fromPlan: true }
+        : { kind, key: `text-${sequence}`, text, at },
     )
   } else {
     turn.parts.push({ kind, key: `thinking-${sequence}`, text })
@@ -304,7 +312,14 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       if (!text) break
       const chunks = state.textChunksByTurn.get(toolMapKey) ?? []
       if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
-      appendTextPart(turn, 'text', text, event.stream_sequence, event.payload.plan === true)
+      appendTextPart(
+        turn,
+        'text',
+        text,
+        event.stream_sequence,
+        event.created_at,
+        event.payload.plan === true,
+      )
       chunks.push(text)
       state.textChunksByTurn.set(toolMapKey, chunks)
       mutated = true
@@ -313,7 +328,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     case 'thinking_delta': {
       const text = payloadString(event, 'text')
       if (!text) break
-      appendTextPart(turn, 'thinking', text, event.stream_sequence)
+      appendTextPart(turn, 'thinking', text, event.stream_sequence, event.created_at)
       mutated = true
       break
     }
@@ -530,6 +545,20 @@ export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
     return null
   }
   return { process, delivery: turn.parts.slice(index) }
+}
+
+/** When the turn's delivered answer began, or ``null`` when there is none.
+ *
+ *  What the turn's message row reports beside its actions. The turn's own
+ *  completion time is a coarser fact — it counts the whole process, not just
+ *  the answer — so an answer's own timestamp is preferred where one exists.
+ *  A turn with no delivered answer (cut off mid-work) has no message time to
+ *  report and the caller falls back to when the turn ended. */
+export function deliveryAt(turn: TimelineTurn): string | null {
+  const split = splitTurnProcess(turn)
+  if (split === null) return null
+  const part = split.delivery[0]
+  return part.kind === 'text' ? part.at : null
 }
 
 /** Count what the agent actually did, for the folded label.
