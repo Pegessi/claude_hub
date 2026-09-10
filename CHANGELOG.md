@@ -92,6 +92,24 @@
   `forkingOrdinal` resets, and a "Fork timed out — please try again" error is
   shown.
 
+### feat: block edit-resend while a turn is running
+
+Adds a guard so edit-and-resend cannot interrupt an in-flight turn:
+
+- **Backend (authoritative).** Before stopping the current tailer, the
+  edit-resend path checks the native transport's `turn_in_flight` under the
+  tailer's `_send_lock`. If a turn is running, it raises
+  `EditResendTurnInFlightError`, which the API maps to **409 Conflict**; the
+  tailer is restored to the manager (not orphaned) and the turn is left
+  untouched. The check and the stop both run under `_send_lock`, closing the
+  race where a `send_message` could start a turn after the check but before
+  the stop. A documented micro-window remains only if a send creates a brand
+  new tailer in the instant between the pop and the restore.
+- **Frontend (UX).** The hover edit button is now `disabled` while
+  `turnInFlight` is true, with a tooltip ("A turn is currently running")
+  explaining why. `startEdit` also bails early as a second layer. The backend
+  409 remains the authoritative fallback.
+
 ### fix: edit-resend data-loss — snapshot/restore, per-session lock, content-based turn mapping
 
 Hardens the edit-and-resend path against permanent conversation loss:

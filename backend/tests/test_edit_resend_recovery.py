@@ -11,6 +11,9 @@ Covers the critical data-loss bugs fixed in the edit-resend path:
    by a per-session lock; they do not interleave.
 5. Unmappable turn        — a turn whose provider delivery failed has no
    matching transcript user message and is rejected before truncation.
+6. Turn-in-flight guard   — editing while a turn is running raises
+   ``EditResendTurnInFlightError`` (mapped to 409); editing when idle
+   succeeds.
 
 The tailer creation (``_get_or_create``) and transcript discovery
 (``discover_source_cached``) are mocked so the tests exercise the
@@ -41,7 +44,7 @@ from claude_hub.models import (
     WorkspaceSessionRole,
 )
 from claude_hub.services.agent_stream.store import AgentStreamStore
-from claude_hub.services.agent_stream.tailer import TailerManager
+from claude_hub.services.agent_stream.tailer import SessionTailer, TailerManager
 from claude_hub.services.agent_stream.transcript_fork import TranscriptForkError
 
 # ``claude_hub.services.workspace_manager`` is shadowed on the package by the
@@ -472,3 +475,117 @@ async def test_unmappable_turn_fails_fast_without_truncating(
     # fork was rolled back from the snapshot).
     assert _read_bytes(store.path) == store_before, "event store was modified"
     assert _read_bytes(transcript_path) == transcript_before, "transcript was modified"
+
+
+# ── 6. turn-in-flight guard ─────────────────────────────────────────────────
+
+
+def _tailer_with_transport(
+    session: ManagedSession,
+    turn_in_flight: bool,
+) -> SessionTailer:
+    """A real SessionTailer whose mock transport reports ``turn_in_flight``.
+
+    The tailer creates its own real ``AgentStreamStore`` (same path as the
+    test's), so the manager's ``get_store`` -> ``find_turn`` reads the same
+    file the test populated.  ``stop`` is replaced with an ``AsyncMock`` so
+    the test does not cancel a real run task or flush a real coalescer.
+    """
+    transport = MagicMock()
+    transport.turn_in_flight = turn_in_flight
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=MagicMock(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    tailer.stop = AsyncMock()  # type: ignore[assignment]
+    return tailer
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_rejected_while_turn_running(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Editing while a turn is running must raise (mapped to 409).
+
+    The tailer's transport reports ``turn_in_flight=True``; edit_resend must
+    raise ``EditResendTurnInFlightError``, leave both planes untouched, and
+    restore the tailer to the manager so the in-flight turn is not orphaned.
+    """
+    from claude_hub.services.agent_stream.tailer import EditResendTurnInFlightError
+
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript_path, ["msg0", "msg1", "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(store, "t1", "msg1")
+    await _append_turn(store, "t2", "msg2")
+
+    store_before = _read_bytes(store.path)
+    transcript_before = _read_bytes(transcript_path)
+
+    manager = TailerManager(session_getter=lambda _sid: session)
+    # Populate the manager with a tailer whose turn is in flight.
+    manager._tailers[session.id] = _tailer_with_transport(session, turn_in_flight=True)
+
+    with pytest.raises(EditResendTurnInFlightError, match="turn is currently running"):
+        await manager.edit_resend(session, "edited msg1", "c-new", "t1")
+
+    # Neither plane was modified.
+    assert _read_bytes(store.path) == store_before, "event store was modified"
+    assert _read_bytes(transcript_path) == transcript_before, "transcript was modified"
+
+    # The tailer was restored to the manager (not orphaned).
+    assert session.id in manager._tailers, "tailer was not restored after rejection"
+    # The tailer's stop was NOT called (the in-flight turn was not killed).
+    restored = manager._tailers[session.id]
+    restored.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_succeeds_when_idle(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Editing when no turn is running must succeed.
+
+    The tailer's transport reports ``turn_in_flight=False``; edit_resend must
+    stop the tailer, truncate after the edited turn, and deliver the edit.
+    """
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript_path, ["msg0", "msg1", "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(store, "t1", "msg1")
+    await _append_turn(store, "t2", "msg2")
+
+    manager, mock_tailer = _make_manager(session)
+    # Populate the manager with an idle tailer (turn_in_flight=False).
+    idle_tailer = _tailer_with_transport(session, turn_in_flight=False)
+    manager._tailers[session.id] = idle_tailer
+
+    await manager.edit_resend(session, "edited msg1", "c-new", "t1")
+
+    # The idle tailer was stopped (its stop was called once).
+    idle_tailer.stop.assert_awaited_once()
+
+    # The edited text was delivered via the (mocked) fresh tailer.
+    mock_tailer.send_message.assert_called_once_with("edited msg1", [], "c-new")
+
+    # Hub store: only t0 remains.
+    page = await store.read_since(-1, limit=100)
+    summaries = [
+        e.payload.get("summary") for e in page.events if e.type == AgentStreamEventType.TURN_STARTED
+    ]
+    assert summaries == ["msg0"], f"expected only t0, got {summaries}"

@@ -1274,12 +1274,16 @@ class AgentStreamEditResendRequest(BaseModel):
 def _map_edit_resend_exception(exc: Exception) -> HTTPException:
     """Map edit-resend errors to explicit HTTP status codes.
 
+    ``EditResendTurnInFlightError`` (a turn is running) → 409.
     ``ValueError`` (turn not found, bad input) → 400.
     ``TranscriptForkError`` (transcript cannot be forked) → 409.
     ``RuntimeError`` (no adapter, transport died) → 503.
     """
+    from ..services.agent_stream.tailer import EditResendTurnInFlightError
     from ..services.agent_stream.transcript_fork import TranscriptForkError
 
+    if isinstance(exc, EditResendTurnInFlightError):
+        return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, TranscriptForkError):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, ValueError):
