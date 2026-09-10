@@ -532,6 +532,25 @@ onUnmounted(() => {
   --ch-terminal-bright-magenta: #d8b4fe;
   --ch-terminal-bright-cyan: #67e8f9;
   --ch-terminal-bright-white: #ffffff;
+
+  /* Syntax highlighting (highlight.js token colours). */
+  --ch-code-keyword: #ff7b72;
+  --ch-code-string: #a5d6ff;
+  --ch-code-function: #d2a8ff;
+  --ch-code-number: #79c0ff;
+  --ch-code-comment: #8b949e;
+  --ch-code-builtin: #ffa657;
+  --ch-code-attr: #79c0ff;
+  --ch-code-selector: #7ee787;
+  --ch-code-meta: #79c0ff;
+  --ch-code-deletion: #ffa198;
+  --ch-code-addition: #56d364;
+  --ch-code-symbol: #79c0ff;
+  --ch-code-variable: #ffa657;
+  --ch-code-template: #a5d6ff;
+  --ch-code-quote: #8b949e;
+  --ch-code-emphasis: #ffa657;
+  --ch-code-strong: #ffa657;
 }
 
 :root[data-theme='light'] {
@@ -632,6 +651,25 @@ onUnmounted(() => {
   --ch-terminal-bright-magenta: #5f4f7d;
   --ch-terminal-bright-cyan: #4e7185;
   --ch-terminal-bright-white: #fdfdfc;
+
+  /* Syntax highlighting (highlight.js token colours). */
+  --ch-code-keyword: #cf222e;
+  --ch-code-string: #0a3069;
+  --ch-code-function: #8250df;
+  --ch-code-number: #0550ae;
+  --ch-code-comment: #6e7781;
+  --ch-code-builtin: #953800;
+  --ch-code-attr: #0550ae;
+  --ch-code-selector: #116329;
+  --ch-code-meta: #0550ae;
+  --ch-code-deletion: #82071e;
+  --ch-code-addition: #116329;
+  --ch-code-symbol: #0550ae;
+  --ch-code-variable: #953800;
+  --ch-code-template: #0a3069;
+  --ch-code-quote: #6e7781;
+  --ch-code-emphasis: #953800;
+  --ch-code-strong: #953800;
 }
 
 html, body, #app {

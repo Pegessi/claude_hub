@@ -105,8 +105,12 @@ test('optimistic pending turn renders an <img> for each attachment', () => {
 // ---------------------------------------------------------------------------
 
 test('authoritative user turn renders attachment images', () => {
+  // The user bubble wraps its content in an edit-resend form (v-if) and a
+  // normal-display template (v-else). Match through the hover edit button —
+  // the last element before the bubble closes — so a nested </div> inside
+  // the edit form doesn't truncate the match before the <img>.
   const userBlock = structuredPane.match(
-    /conversation-row--user[\s\S]*?conversation-bubble--user[\s\S]*?<\/div>/,
+    /conversation-row--user[\s\S]*?conversation-bubble--user[\s\S]*?edit-resend-hover-btn[\s\S]*?<\/div>/,
   )
   assert.ok(userBlock, 'user turn block must exist')
   const block = userBlock[0]
