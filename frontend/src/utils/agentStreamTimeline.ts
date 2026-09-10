@@ -1,6 +1,6 @@
 import type { AgentStreamEvent } from '@/types'
 import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
-import { formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
+import { formatClockTime, formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
 
 export interface TimelineTool {
   key: string
@@ -260,10 +260,13 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
 
   switch (event.type) {
     case 'turn_started': {
-      // Recorded without touching ``mutated``: on its own a start timestamp
-      // changes nothing visible. It only feeds the folded process label, which
-      // is rendered for completed turns — and completion bumps the revision.
-      if (turn.startedAt === null) turn.startedAt = event.created_at
+      // Counts as a mutation: the message row renders this timestamp, so a turn
+      // whose only change is this field would otherwise keep a stale clock
+      // label behind ``v-memo``.
+      if (turn.startedAt === null) {
+        turn.startedAt = event.created_at
+        mutated = true
+      }
       const summary = payloadString(event, 'summary')
       if (turn.userText !== summary) {
         turn.userText = summary
@@ -547,18 +550,34 @@ export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   return { process, delivery: turn.parts.slice(index) }
 }
 
-/** When the turn's delivered answer began, or ``null`` when there is none.
+/** When the turn's last message began, or ``null`` when it never spoke.
  *
- *  What the turn's message row reports beside its actions. The turn's own
- *  completion time is a coarser fact — it counts the whole process, not just
- *  the answer — so an answer's own timestamp is preferred where one exists.
- *  A turn with no delivered answer (cut off mid-work) has no message time to
- *  report and the caller falls back to when the turn ended. */
+ *  What the turn's action row reports. Deliberately NOT routed through
+ *  ``splitTurnProcess``: that answers "can this turn be folded", which is also
+ *  false for a plain question-and-answer turn with no process to hide — the
+ *  most common shape there is. This asks a different question, "what was the
+ *  last thing it said", and every turn with a message has an answer. */
 export function deliveryAt(turn: TimelineTurn): string | null {
-  const split = splitTurnProcess(turn)
-  if (split === null) return null
-  const part = split.delivery[0]
+  const index = deliveryIndex(turn.parts)
+  if (index < 0) return null
+  const part = turn.parts[index]
   return part.kind === 'text' ? part.at : null
+}
+
+/** Clock label for the message that opened the turn — when it was sent.
+ *
+ *  Its own function rather than an inline ``formatClockTime(turn.startedAt)``
+ *  so the choice of *which* timestamp belongs to that row is a testable
+ *  decision rather than a string in a template. */
+export function messageClockLabel(turn: TimelineTurn): string {
+  return formatClockTime(turn.startedAt)
+}
+
+/** Clock label for a turn's action row: the last message's own time where the
+ *  turn has one, otherwise when the turn finished. ``''`` while a turn is still
+ *  running, so the caller renders no label rather than an empty one. */
+export function turnClockLabel(turn: TimelineTurn): string {
+  return formatClockTime(deliveryAt(turn) ?? turn.completedAt)
 }
 
 /** Count what the agent actually did, for the folded label.

@@ -38,7 +38,13 @@ const bundled = `${durationJs}\n${questionJs}\n${timelineJs}`
 const mod = await import(
   `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
 )
-const { deliveryAt, groupEventsIntoTurns } = mod
+const { deliveryAt, groupEventsIntoTurns, messageClockLabel, turnClockLabel } = mod
+
+/** Expected clock label for an ISO instant, in the same local time the source uses. */
+function clockOf(iso) {
+  const d = new Date(iso)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
 
 function makeEvent(seq, type, payload = {}, overrides = {}) {
   return {
@@ -419,9 +425,10 @@ test('deliveryAt reports the delivered answer, not the turn', () => {
   assert.notEqual(deliveryAt(turn), turn.completedAt, 'the answer began before the turn ended')
 })
 
-test('a turn with no delivered answer reports no message time', () => {
-  // Cut off mid-work: the narration is not an answer, so the row falls back to
-  // when the turn ended rather than labelling the narration as a message.
+test('a cut-off turn still reports the time of its last message', () => {
+  // It has no delivered answer, but it did say something, and that message is
+  // what the row's clock belongs to. Whether the turn can be *folded* is a
+  // separate question, answered by splitTurnProcess.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
     makeEvent(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} }),
@@ -429,5 +436,57 @@ test('a turn with no delivered answer reports no message time', () => {
     makeEvent(4, 'thinking_delta', { text: 'more' }),
     makeEvent(5, 'turn_completed', { status: 'cancelled' }),
   ])[0]
+  assert.equal(deliveryAt(turn), '2026-01-01T09:05:00Z')
+})
+
+test('the message row reports when the message was sent, not when the turn ended', () => {
+  // Mutation-proof: rendering the turn's completion in this row would still
+  // satisfy a template-text assertion, so the decision lives here.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }, { created_at: '2026-01-01T09:00:00Z' }),
+    makeEvent(2, 'text_delta', { text: 'answer' }, { created_at: '2026-01-01T09:04:00Z' }),
+    makeEvent(3, 'turn_completed', { status: 'completed' }, { created_at: '2026-01-01T09:05:00Z' }),
+  ])[0]
+  assert.equal(messageClockLabel(turn), clockOf('2026-01-01T09:00:00Z'))
+  assert.notEqual(messageClockLabel(turn), turnClockLabel(turn))
+})
+
+test('the turn row falls back to the turn end when no message was delivered', () => {
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'turn_completed', { status: 'completed' }, { created_at: '2026-01-01T09:07:00Z' }),
+  ])[0]
   assert.equal(deliveryAt(turn), null)
+  assert.equal(turnClockLabel(turn), clockOf('2026-01-01T09:07:00Z'))
+})
+
+test('a turn that has not spoken yet shows no clock label', () => {
+  // Nothing to time: the row renders no label rather than an empty or bogus
+  // one. Once the turn streams a message it gets that message's clock.
+  const silent = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+  ])[0]
+  assert.equal(deliveryAt(silent), null)
+  assert.equal(turnClockLabel(silent), '')
+  assert.ok(!turnClockLabel(silent).includes('NaN'), 'an unknown time must not render as NaN')
+
+  const speaking = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'text_delta', { text: 'streaming' }, { created_at: '2026-01-01T09:06:00Z' }),
+  ])[0]
+  assert.equal(turnClockLabel(speaking), clockOf('2026-01-01T09:06:00Z'))
+})
+
+test('a plain question-and-answer turn still reports its message time', () => {
+  // The common shape, and the one ``splitTurnProcess`` rejects (no process to
+  // fold) — reporting its time must not depend on being foldable.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'text_delta', { text: 'answer' }, { created_at: '2026-01-01T09:02:00Z' }),
+    makeEvent(3, 'turn_completed', { status: 'completed' }, { created_at: '2026-01-01T09:03:00Z' }),
+  ])[0]
+  assert.equal(deliveryAt(turn), '2026-01-01T09:02:00Z')
+  assert.equal(turnClockLabel(turn), clockOf('2026-01-01T09:02:00Z'))
 })

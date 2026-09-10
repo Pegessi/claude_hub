@@ -18,9 +18,12 @@
 - **Fix.** The actions are now a hover-revealed row **under** the message, in
   normal flow: the message's own row carries ✎ 编辑 and the message's clock
   time, and the turn closes with a second row carrying Fork from here and the
-  turn's clock time. Spacing is 14px with a 24px minimum height, so the row has
+  turn's clock time. Spacing is 14px with a 20px minimum height, so the row has
   room for the buttons and the time and does not shift the thread when it
-  appears. Inline editing drops the forced width, and the textarea renders as
+  appears. The time label uses the muted token rather than the subtle one at
+  75% opacity, which measured 2.47:1 in dark and 2.05:1 in light — both under
+  the 3:1 floor — and the inline editor's focus ring is 2px at 65% where the
+  first pass drew a 1px ring at 45% (2.43:1). Inline editing drops the forced width, and the textarea renders as
   the message itself — no border, no fill, one focus outline — so the bubble
   sizes to its content (measured: 344px → 264px on a short message).
 - **Tests.** `structuredPaneEditGuard.test.mjs` now asserts the contract rather
@@ -35,15 +38,23 @@
   from the creating delta's `created_at`. Extending a message keeps that
   original time: a transcript reports when a message started, not when it grew
   last.
-- The turn's action row reports the **delivered answer's** own time where there
-  is one, falling back to when the turn finished for a turn cut off before
-  answering — which has no message time to show, so the row renders none rather
-  than mislabelling narration as a message. Measured live, a message row and its
-  turn row now differ (23:02 for the question, 23:10 for the answer) instead of
-  both reporting the turn.
+- Each action row reports its own message's time: the row under a user message
+  reports when it was sent, and the row closing a turn reports the last thing
+  the turn said. Measured live, the two now differ (23:02 for the question,
+  23:10 for the answer) instead of both reporting the turn. A turn that has not
+  spoken yet renders no label rather than an empty one.
 - Only text parts carry a timestamp: they are what the transcript presents
   per-message, while thinking and tool parts fold into a process line that
   already reports the turn's elapsed time.
+- **Known limitation.** These labels trust `created_at`, which is the
+  normalize-time wall clock. A turn streamed live carries the real time; a turn
+  whose history was imported from a provider transcript has every event stamped
+  with the import time, so all its messages would read as "now". The elapsed
+  label beside a folded process already refuses such spans (`turnElapsedMs`
+  floors at one second); the clock labels have no equivalent guard, because
+  there is no span to measure on a single message. Fixing it properly means
+  mapping provider timestamps at backfill time. No session on this machine
+  currently exhibits the shape — all were streamed live.
 
 ### fix: edit action moved off the message, and a disabled button that says so
 

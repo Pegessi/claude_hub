@@ -208,9 +208,9 @@
               ✎ 编辑
             </button>
             <time
-              v-if="turn.startedAt"
+              v-if="messageClockLabel(turn)"
               class="turn-time"
-            >{{ formatClockTime(turn.startedAt) }}</time>
+            >{{ messageClockLabel(turn) }}</time>
           </div>
 
           <div
@@ -473,9 +473,9 @@
               {{ forkingOrdinal === turnIndex ? 'Forking…' : 'Fork from here' }}
             </button>
             <time
-              v-if="turnClock(turn)"
+              v-if="turnClockLabel(turn)"
               class="turn-time"
-            >{{ turnClock(turn) }}</time>
+            >{{ turnClockLabel(turn) }}</time>
           </div>
         </div>
 
@@ -792,8 +792,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { IncrementalTimelineReducer, deliveryAt, foldTurnParts, splitTurnProcess, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
-import { formatClockTime } from '@/utils/duration'
+import { IncrementalTimelineReducer, foldTurnParts, messageClockLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
@@ -1675,16 +1674,6 @@ function collapseDetails(event: MouseEvent): void {
   }
 }
 
-/**
- * Clock label for the turn's own action row.
- *
- * The delivered answer's own timestamp where there is one — that is the message
- * the row belongs to — falling back to when the turn finished for a turn that
- * was cut off before answering, which has no message time to show.
- */
-function turnClock(turn: TimelineTurn): string {
-  return formatClockTime(deliveryAt(turn) ?? turn.completedAt)
-}
 
 /** Aggregate status for a tool group: 'running' if any tool is still running,
  *  'failed' if any tool failed (and none running), 'cancelled' if every tool
@@ -2188,8 +2177,11 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 14px;
-  min-height: 24px;
-  margin: 2px 4px 8px;
+  /* Reserved whether or not the row is showing: revealing it must not shift
+     the conversation. Kept as tight as the pills allow — two rows per turn at
+     24px each is a lot of empty space in a long thread. */
+  min-height: 20px;
+  margin: 0 4px 6px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
@@ -2210,8 +2202,9 @@ onUnmounted(() => {
 .turn-time {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  color: var(--ch-color-text-subtle, currentColor);
-  opacity: 0.75;
+  /* ``muted``, not ``subtle`` + opacity: measured 2.47:1 in dark and 2.05:1 in
+     light, both under the 3:1 floor for non-text content. */
+  color: var(--ch-color-text-muted, var(--ch-color-text-subtle, currentColor));
   white-space: nowrap;
 }
 
@@ -2991,8 +2984,11 @@ onUnmounted(() => {
 }
 
 .edit-resend-textarea:focus-visible {
-  outline: 1px solid color-mix(in srgb, #fff 45%, transparent);
-  outline-offset: 4px;
+  /* 2px at 65%: the earlier 1px/45% ring measured 2.43:1 against the bubble
+     blue, under the 3:1 the focus indicator needs — weaker than the border it
+     replaced. */
+  outline: 2px solid color-mix(in srgb, #fff 65%, transparent);
+  outline-offset: 3px;
   border-radius: 2px;
 }
 
