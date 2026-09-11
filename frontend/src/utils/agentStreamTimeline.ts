@@ -491,10 +491,13 @@ export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[]
 // structural and pure; where the fold state lives, and which turns default to
 // folded, is the renderer's decision (see ``StructuredPane``).
 
-/** A turn's parts, split into its working process and its delivered answer. */
+/** A turn's parts, split into its working region and its delivered answer. */
 export interface TurnProcessSplit {
-  /** Thinking, tool groups, and the narration between them. */
-  process: TimelinePart[]
+  /** The whole working region in arrival order — what the expanded view shows. */
+  before: TimelinePart[]
+  /** Members of ``before`` that stay visible even while folded. Only errors:
+   *  an approval card folds with the rest of the record. */
+  pinned: TimelinePart[]
   /** The delivered answer plus anything that arrived after it. */
   delivery: TimelinePart[]
 }
@@ -533,21 +536,42 @@ function isProcessPart(part: TimelinePart): boolean {
  *    would leave the tools and thinking on screen under a header claiming to
  *    have hidden them, because "the last text and everything after it" is only
  *    an answer when the turn actually stopped there;
- *  * the process region holds an approval card or an error — folding those
- *    would hide a control the user still has to click, or the reason the turn
- *    failed. Keeping such a turn whole is easier to reason about than
- *    re-ordering parts around a fold.
+ *  An approval card inside the region does not stop the fold — it goes with the
+ *  rest of the record. An error is reported as ``pinned`` and stays visible
+ *  beside the header: folding it would bury the reason the turn failed.
  */
 export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   if (!turn.completed) return null
   const index = deliveryIndex(turn.parts)
   if (index <= 0) return null
   if (turn.parts.slice(index + 1).some(isProcessPart)) return null
-  const process = turn.parts.slice(0, index)
-  if (process.some((part) => part.kind === 'approval' || part.kind === 'error')) {
-    return null
+  const before = turn.parts.slice(0, index)
+  return {
+    before,
+    pinned: before.filter(isPinnedPart),
+    delivery: turn.parts.slice(index),
   }
-  return { process, delivery: turn.parts.slice(index) }
+}
+
+/** Whether a part must stay visible while the working region is folded.
+ *
+ *  Only an error, which is the reason the turn failed and would be buried by a
+ *  fold. An approval card folds away with the rest of the record — an answered
+ *  prompt collapses into the transcript in Codex the same way.
+ *
+ *  Pinning unanswered cards was the first attempt and it did not survive contact
+ *  with how cards are actually answered: the agent asks, the tool returns the
+ *  placeholder, and the user replies in the *next message* rather than through
+ *  the card. That reply is ordinary text, so `approval_resolved` is never
+ *  emitted and `resolved` stays false forever — making "pin the unanswered
+ *  card" mean "never fold this turn", which is the bug this fixes.
+ *
+ *  Nothing live is hidden by folding them: the card that could still be
+ *  pending belongs to the newest turn, and the newest completed turn is never
+ *  folded (``StructuredPane.isTurnFoldable``). Anything folded here is history
+ *  the reader has already moved past, one click away. */
+function isPinnedPart(part: TimelinePart): boolean {
+  return part.kind === 'error'
 }
 
 /** When the turn's last message began, or ``null`` when it never spoke.
@@ -611,6 +635,11 @@ export function turnProcessLabel(turn: TimelineTurn, process: TimelinePart[]): s
   const segments = ['过程']
   const steps = countProcessSteps(process)
   if (steps > 0) segments.push(`${steps} 个工具调用`)
+  // The header is the only thing left on screen, so it has to say when a card
+  // is folded in with the rest — otherwise a question the user may never have
+  // answered disappears without a trace.
+  const cards = process.filter(part => part.kind === 'approval').length
+  if (cards > 0) segments.push(`${cards} 张审批卡`)
   const elapsed = turnElapsedMs(turn)
   if (elapsed !== null) segments.push(formatElapsedDuration(elapsed))
   return segments.join(' · ')
@@ -632,12 +661,15 @@ export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePa
   const header: TimelinePart = {
     kind: 'process',
     key: `process-${turn.key}`,
-    meta: turnProcessLabel(turn, split.process),
+    meta: turnProcessLabel(turn, split.before),
     expanded,
   }
+  // Expanded, the region replays in arrival order. Folded, the pinned parts
+  // stay on screen next to the header — an error is not something a fold may
+  // hide. Approval cards are not pinned: they fold with the record.
   return expanded
-    ? [header, ...split.process, ...split.delivery]
-    : [header, ...split.delivery]
+    ? [header, ...split.before, ...split.delivery]
+    : [header, ...split.pinned, ...split.delivery]
 }
 
 /**

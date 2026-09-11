@@ -33,11 +33,22 @@ rejected: the reducer streams, so "the last text so far" is not knowable until
 the turn ends, and a tag would have to be rewritten on every delta.
 
 The split returns `null` — meaning "render untouched" — for a running turn, a
-turn with no assistant text, work continuing past the last text, and a process
-region containing an approval card or an error. Folding an approval away would
-hide a control the user still has to click; folding an error away would hide why
-the turn failed. Refusing to fold the whole turn is easier to reason about than
-re-ordering parts around a fold.
+turn with no assistant text, and work continuing past the last text.
+
+An error inside the region does **not** stop the fold either; it is reported as
+`pinned` and rendered beside the header.
+
+An approval card folds with everything else. Two live reports shaped this. The
+first version refused to fold any turn holding a card, to avoid re-ordering
+parts around a fold — and a session where three turns held an AskUserQuestion
+card rendered 114, 81 and 19 tool cards with no way to collapse them. The second
+version pinned *unanswered* cards, which sounds safer and is worse: these cards
+are answered by replying in the next message, not by clicking, so
+`approval_resolved` is never emitted and `resolved` stays false forever. Pinning
+the unanswered card therefore meant never folding the turn at all — the original
+bug, wearing a rule. Nothing live is hidden by folding them: a card that could
+still be pending belongs to the newest turn, and the newest completed turn is
+never folded.
 
 The "work continuing past the last text" guard came out of a live report and is
 worth spelling out, because the shape it rejects looks like an answer at a
