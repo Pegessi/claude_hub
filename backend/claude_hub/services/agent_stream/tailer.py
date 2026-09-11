@@ -2132,3 +2132,14 @@ async def discard_session_stream(workspace_id: str, session_id: str) -> None:
     # Also clear the session's bounded preview cache so a reused session id
     # cannot surface another conversation's images.
     await AgentStreamAttachmentStore(workspace_id, session_id).clear()
+
+
+async def stop_session_stream(session_id: str) -> None:
+    """Stop in-process tailers/transports for a session WITHOUT clearing history.
+
+    Unlike ``discard_session_stream``, this leaves the on-disk event log and
+    attachment store intact. Used by archive, which releases runtime resources
+    but may later restore the conversation.
+    """
+    for manager in list(_TAILER_MANAGERS):
+        await manager.forget_session(session_id)

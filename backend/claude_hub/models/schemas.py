@@ -565,6 +565,18 @@ class TerminalTab(TerminalTabBase):
             "(inclusive); None for tabs started from scratch."
         ),
     )
+    archived: bool = Field(
+        False,
+        description=(
+            "Soft-deleted flag. Archived tabs are hidden from the default tab "
+            "list and have their runtime resources released, but their JSONL "
+            "history is retained for restore."
+        ),
+    )
+    archived_at: Optional[datetime] = Field(
+        None,
+        description="When the tab was archived; None while active.",
+    )
 
     class Config:
         from_attributes = True
