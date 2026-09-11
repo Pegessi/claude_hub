@@ -122,9 +122,12 @@ test('a turn with no delivered text is not splittable', () => {
   assert.equal(splitTurnProcess(turn), null)
 })
 
-test('an approval card stays visible instead of blocking the fold', () => {
-  // Refusing to fold the whole turn kept approval-heavy sessions showing
-  // hundreds of tool cards, because one card among them blocked the fold.
+test('an approval card folds with the rest of the record', () => {
+  // Pinning it did not survive contact with how cards are actually answered:
+  // the agent asks, the tool returns the placeholder, and the user replies in
+  // the NEXT message rather than through the card. That reply is ordinary text,
+  // so approval_resolved is never emitted and "pin the unanswered card" meant
+  // "never fold this turn" — the bug this fixes.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
     makeEvent(2, 'thinking_delta', { text: 'hmm' }),
@@ -135,19 +138,48 @@ test('an approval card stays visible instead of blocking the fold', () => {
     makeEvent(7, 'turn_completed', { status: 'completed' }),
   ])[0]
   const split = splitTurnProcess(turn)
-  assert.ok(split, 'one card must not keep the whole working region on screen')
-  assert.deepEqual(split.pinned.map(p => p.kind), ['approval'])
+  assert.ok(split, 'a card must not keep the whole working region on screen')
+  assert.deepEqual(split.pinned, [], 'approval cards fold with the process')
   assert.deepEqual(split.before.map(p => p.kind), ['thinking', 'approval', 'tool_group'])
 
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
-    ['process', 'approval', 'text'],
-    'folded, the card stays on screen beside the header',
+    ['process', 'text'],
+    'folded, only the answer shows',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
     ['process', 'thinking', 'approval', 'tool_group', 'text'],
-    'expanded, the region replays in arrival order',
+    'expanded, the card is still in its place in the record',
+  )
+})
+
+test('an answered approval card folds away with the rest', () => {
+  // Pinned only while it is still waiting for an answer: once answered it is
+  // record, not a control, and it collapses into the process like any other
+  // step.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'approval_required', { tool_call_id: 'q1', kind: 'question', title: 'Pick' }),
+    makeEvent(4, 'approval_resolved', { tool_call_id: 'q1' }),
+    makeEvent(5, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} }),
+    makeEvent(6, 'tool_call_completed', { tool_call_id: 'c1', status: 'completed' }),
+    makeEvent(7, 'text_delta', { text: 'the answer' }),
+    makeEvent(8, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  const split = splitTurnProcess(turn)
+  assert.ok(split)
+  assert.deepEqual(split.pinned, [], 'an answered card is not a pending control')
+  assert.deepEqual(
+    foldTurnParts(turn, false).map(p => p.kind),
+    ['process', 'text'],
+    'it folds away with the rest',
+  )
+  assert.deepEqual(
+    foldTurnParts(turn, true).map(p => p.kind),
+    ['process', 'thinking', 'approval', 'tool_group', 'text'],
+    'expanded, it is still in its place in the record',
   )
 })
 

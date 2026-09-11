@@ -561,9 +561,25 @@ export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   }
 }
 
-/** Whether a part must stay visible while the working region is folded. */
+/** Whether a part must stay visible while the working region is folded.
+ *
+ *  Only an error, which is the reason the turn failed and would be buried by a
+ *  fold. An approval card folds away with the rest of the record — an answered
+ *  prompt collapses into the transcript in Codex the same way.
+ *
+ *  Pinning unanswered cards was the first attempt and it did not survive contact
+ *  with how cards are actually answered: the agent asks, the tool returns the
+ *  placeholder, and the user replies in the *next message* rather than through
+ *  the card. That reply is ordinary text, so `approval_resolved` is never
+ *  emitted and `resolved` stays false forever — making "pin the unanswered
+ *  card" mean "never fold this turn", which is the bug this fixes.
+ *
+ *  Nothing live is hidden by folding them: the card that could still be
+ *  pending belongs to the newest turn, and the newest completed turn is never
+ *  folded (``StructuredPane.isTurnFoldable``). Anything folded here is history
+ *  the reader has already moved past, one click away. */
 function isPinnedPart(part: TimelinePart): boolean {
-  return part.kind === 'approval' || part.kind === 'error'
+  return part.kind === 'error'
 }
 
 /** When the turn's last message began, or ``null`` when it never spoke.
