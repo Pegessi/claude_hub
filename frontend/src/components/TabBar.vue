@@ -123,6 +123,34 @@
           <span>Duplicate</span>
         </LoadingButton>
         <LoadingButton
+          v-if="openTabMenuTab"
+          type="button"
+          class="tab-menu-item"
+          role="menuitem"
+          :loading="isPending(tabActionKey('archive', openTabMenuTab.id))"
+          loading-label="Archiving…"
+          @click="handleTabArchive(openTabMenuTab.id); closeTabMenu(openTabMenuId)"
+        >
+          <span
+            class="tab-menu-item-icon"
+            aria-hidden="true"
+          >🗄</span>
+          <span>Archive</span>
+        </LoadingButton>
+        <button
+          v-if="openTabMenuTab"
+          type="button"
+          class="tab-menu-item"
+          role="menuitem"
+          @click="handleCopyTabLink(openTabMenuTab.id); closeTabMenu(openTabMenuId)"
+        >
+          <span
+            class="tab-menu-item-icon"
+            aria-hidden="true"
+          >🔗</span>
+          <span>Copy Link</span>
+        </button>
+        <LoadingButton
           v-if="openTabMenuTab && (openTabMenuTab.agent_type === 'claude' || openTabMenuTab.agent_type === 'codex')"
           type="button"
           class="tab-menu-item"
@@ -701,6 +729,8 @@ import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { writeClipboard } from '@/utils/clipboard'
+import { buildTabLink } from '@/utils/deepLink'
 import type { AppMode, RemoteProfile, TerminalAgentStatus, TerminalTab } from '@/types'
 import type { AgentRuntimeStatus, AgentType, SessionKind, SwitchEnvRequest } from '@/types'
 
@@ -1133,6 +1163,27 @@ async function handleRenameTab() {
 
 async function handleTabDuplicate(tabId: string) {
   await runPending(tabActionKey('duplicate', tabId), () => store.duplicateTab(tabId))
+}
+
+async function handleTabArchive(tabId: string) {
+  await runPending(tabActionKey('archive', tabId), () => store.archiveTab(tabId))
+}
+
+async function handleCopyTabLink(tabId: string) {
+  try {
+    await writeClipboard(buildTabLink(tabId))
+    store.pushNotification({
+      type: 'success',
+      message: 'Link copied',
+      autoDismissMs: 3000,
+    })
+  } catch {
+    store.pushNotification({
+      type: 'error',
+      message: 'Failed to copy link',
+      autoDismissMs: 8000,
+    })
+  }
 }
 
 function serializeEnv(env: Record<string, string> | undefined): string {

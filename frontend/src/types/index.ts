@@ -79,6 +79,8 @@ export interface TerminalTab {
   cursor_cli_version?: string | null
   cursor_transcript_path?: string | null
   cursor_transcript_schema?: string | null
+  archived?: boolean
+  archived_at?: string | null
 }
 
 export interface TerminalTabCreate {
