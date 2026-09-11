@@ -155,9 +155,9 @@ test('an approval card folds with the rest of the record', () => {
 })
 
 test('an answered approval card folds away with the rest', () => {
-  // Pinned only while it is still waiting for an answer: once answered it is
-  // record, not a control, and it collapses into the process like any other
-  // step.
+  // Cards fold whether or not they were answered — `resolved` is not a signal
+  // this can rely on (see the pinned-parts note above), and a card that could
+  // still be pending belongs to the newest turn, which never folds.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
     makeEvent(2, 'thinking_delta', { text: 'hmm' }),
@@ -501,4 +501,34 @@ test('the sticky summary keeps its scrolling ancestor intact', () => {
   assert.ok(toolCard)
   assert.doesNotMatch(toolCard[0], /overflow: hidden/)
   assert.match(toolCard[0], /overflow: clip/)
+})
+
+
+test('the folded header says when a card is folded in with it', () => {
+  // The header is the only thing left on screen, so a card inside must not
+  // vanish without a trace.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'approval_required', { tool_call_id: 'q1', kind: 'question', title: 'Pick' }),
+    makeEvent(4, 'text_delta', { text: 'the answer' }),
+    makeEvent(5, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  const split = splitTurnProcess(turn)
+  const folded = foldTurnParts(turn, false)
+  assert.equal(folded[0].kind, 'process')
+  assert.match(folded[0].meta, /1 张审批卡/, 'the header must count the card inside')
+
+  const plain = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'text_delta', { text: 'the answer' }),
+    makeEvent(4, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  assert.doesNotMatch(
+    foldTurnParts(plain, false)[0].meta,
+    /审批卡/,
+    'a turn without one must not claim to have one',
+  )
+  assert.ok(split)
 })

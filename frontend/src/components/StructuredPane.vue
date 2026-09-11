@@ -1631,8 +1631,9 @@ function isProcessExpanded(turn: TimelineTurn): boolean {
  *
  * The newest completed turn is excluded so it keeps rendering exactly as it
  * did before folding existed, and ``splitTurnProcess`` rejects the rest of the
- * unsafe cases (running turn, no delivered answer, approval card or error in
- * the process). */
+ * unsafe cases (still running, no delivered answer, work continuing past the
+ * last text). An approval card is not one of them — it folds with the record,
+ * and the header counts it so the card is not hidden without a trace. */
 function isTurnFoldable(turn: TimelineTurn): boolean {
   return turn.key !== latestCompletedTurnKey.value && splitTurnProcess(turn) !== null
 }

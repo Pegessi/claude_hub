@@ -11,7 +11,7 @@
   reasoning that folding would hide a control the user must click. In practice
   that kept approval-heavy sessions unreadable: one card among hundreds of
   steps blocked the fold, so three turns of a live session rendered 114, 81 and
-  19 tool cards respectively with no way to collapse them.
+  19 process blocks respectively with no way to collapse them.
 - **Fix.** Approval cards fold with the rest of the record, and only an error
   stays pinned — folding it would bury the reason a turn failed. Errors being
   pinned rather than disqualifying is the point: `splitTurnProcess` now reports
@@ -26,9 +26,13 @@
   making "pin the unanswered card" mean "never fold this turn", which is the bug
   being fixed here. Nothing live is hidden: a card that could still be pending
   belongs to the newest turn, and the newest completed turn is never folded.
+- **The header counts what it hides.** A card folded in with the process is
+  named in the fold header (`过程 · 12 个工具调用 · 1 张审批卡 · 2m`), because the
+  header is the only thing left on screen — a question the user may never have
+  answered must not vanish without a trace.
 - **Verified on the session that reported it:** its four foldable turns now
   render `过程 · 73/50/11/16 个工具调用` with zero thinking and tool cards, where
-  three of them previously showed 114, 81 and 19 uncollapsible cards.
+  three of them previously showed 114, 81 and 19 uncollapsible blocks.
 
 ### fix: message actions become a Codex-style row under the message
 
