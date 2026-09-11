@@ -3097,6 +3097,81 @@ async def test_native_claude_answer_emits_persisted_approval_resolved(
 
 
 @pytest.mark.asyncio
+async def test_native_claude_answer_after_turn_end_emits_approval_resolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A card answered after its turn ended must still persist a resolved event.
+
+    This is the production order, and the existing test above does not cover it:
+    Claude has no blocking-question channel, so the tool returns a placeholder
+    and the turn *completes* before the user answers. Tracking that was dropped
+    at turn completion made the later answer find an empty set, so
+    ``approval_resolved`` was never persisted in any real session and an
+    answered card came back looking unanswered after a reload.
+    """
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.subscribe()
+    await asyncio.sleep(0.05)
+
+    await tailer.send_message("hello", [], client_turn_id="turn-claude")
+    transport._records.put_nowait(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_ask_late",
+                        "name": "AskUserQuestion",
+                        "input": {
+                            "questions": [
+                                {
+                                    "question": "Which approach?",
+                                    "header": "Approach",
+                                    "multiSelect": False,
+                                    "options": [{"label": "Fast"}, {"label": "Safe"}],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+        }
+    )
+    approval = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_REQUIRED)
+    assert approval.call_id == "tu_ask_late"
+
+    # The turn ends here — the card outlives it, which is the whole point.
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+    completed = await _wait_for_store_event(tailer.store, AgentStreamEventType.TURN_COMPLETED)
+    assert completed.turn_id == "turn-claude"
+
+    # Only now does the user answer.
+    answer = json.dumps(
+        {"type": "ask_question_response", "answers": [{"questionId": "0", "selected": ["Fast"]}]}
+    )
+    await tailer.send_message(answer, [], client_turn_id="turn-claude-answer")
+
+    resolved = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_RESOLVED)
+    assert resolved.payload["tool_call_id"] == "tu_ask_late"
+    # Stamped with the turn that owns the card, not the answer's own turn.
+    assert resolved.turn_id == "turn-claude"
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
 async def test_native_idle_reap_stops_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     """When the tailer has zero subscribers for longer than IDLE_TTL_S, the
     native push consumer must call ``transport.stop()`` before exiting so the

@@ -15,7 +15,7 @@ import importlib
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ...models import AgentStreamEvent, AgentStreamEventPage
 
