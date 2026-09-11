@@ -3985,6 +3985,8 @@ def test_hot_restart_reattaches_only_tabs_with_surviving_tmux(
             self.resume_quarantined = False
             self.cwd = "/tmp"
             self.is_active = False
+            self.archived = False
+            self.archived_at = None
 
         async def start(self) -> None:
             started.append(self.tab_id)
@@ -4049,6 +4051,8 @@ def test_cold_restart_recovers_all_saved_non_codex_tabs(monkeypatch: MonkeyPatch
             self.resume_quarantined = False
             self.cwd = "/tmp"
             self.is_active = False
+            self.archived = False
+            self.archived_at = None
 
         async def start(self) -> None:
             started.append(self.tab_id)
@@ -4788,3 +4792,155 @@ async def test_fork_tab_at_middle_ordinal_keeps_prefix(
     assert len(page.events) == 2
     assert [ev.turn_id for ev in page.events] == ["turn-a", "turn-a"]
     assert [ev.payload["summary"] for ev in page.events] == ["event-0", "event-2"]
+
+
+def _make_archive_test_manager(
+    monkeypatch: MonkeyPatch, tmp_path: Path, *, archived: bool = False
+) -> tuple[TTYDManager, TTYDProcess]:
+    """Bare manager + one real chat process, with state file isolated."""
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 14000
+    manager.processes = {}
+    manager._tab_order = []
+    manager._start_locks = {}
+
+    process = TTYDProcess(
+        tab_id="archive-tab",
+        port=14001,
+        name="To Archive",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        archived=archived,
+    )
+    manager.processes[process.tab_id] = process
+    manager._tab_order.append(process.tab_id)
+
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", tmp_path / "tabs.json")
+    return manager, process
+
+
+@pytest.mark.asyncio
+async def test_archive_tab_marks_flag_and_releases_resources(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, process = _make_archive_test_manager(monkeypatch, tmp_path)
+
+    stopped: list[bool] = []
+    stream_stopped: list[str] = []
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        stopped.append(kill_tmux)
+
+    async def fake_stop_session_stream(session_id: str) -> None:
+        stream_stopped.append(session_id)
+
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.tailer.stop_session_stream",
+        fake_stop_session_stream,
+    )
+
+    result = await manager.archive_tab("archive-tab")
+
+    assert result is not None
+    assert result.archived is True
+    assert result.archived_at is not None
+    assert process.archived is True
+    assert process.archived_at is not None
+    assert stopped == [True]  # kill_tmux=True releases tmux
+    assert stream_stopped == ["terminal-tab-archive-tab"]
+    assert process.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_archive_tab_returns_none_for_missing(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, _ = _make_archive_test_manager(monkeypatch, tmp_path)
+
+    result = await manager.archive_tab("missing-tab")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_unarchive_tab_clears_flag(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, process = _make_archive_test_manager(monkeypatch, tmp_path, archived=True)
+    process.archived_at = datetime.now()
+
+    async def fake_ensure_tab_running(self: TTYDManager, tab_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(TTYDManager, "ensure_tab_running", fake_ensure_tab_running)
+
+    result = await manager.unarchive_tab("archive-tab")
+
+    assert result is not None
+    assert result.archived is False
+    assert result.archived_at is None
+    assert process.archived is False
+    assert process.archived_at is None
+
+
+@pytest.mark.asyncio
+async def test_unarchive_tab_returns_none_for_missing(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, _ = _make_archive_test_manager(monkeypatch, tmp_path)
+
+    result = await manager.unarchive_tab("missing-tab")
+
+    assert result is None
+
+
+def test_list_tabs_excludes_archived(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, _ = _make_archive_test_manager(monkeypatch, tmp_path)
+    archived = TTYDProcess(
+        tab_id="archived-tab",
+        port=14002,
+        name="Archived One",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        archived=True,
+        archived_at=datetime.now(),
+    )
+    manager.processes[archived.tab_id] = archived
+    manager._tab_order.append(archived.tab_id)
+
+    assert [t.id for t in manager.list_tabs()] == ["archive-tab"]
+    assert [t.id for t in manager.list_archived_tabs()] == ["archived-tab"]
+
+
+def test_list_archived_tabs_sorted_newest_first(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 14100
+    manager.processes = {}
+    manager._tab_order = []
+    manager._start_locks = {}
+
+    older = TTYDProcess(
+        tab_id="older-tab",
+        port=14101,
+        name="Older",
+        agent_type=AgentType.CLAUDE,
+        archived=True,
+        archived_at=datetime.now() - timedelta(days=2),
+    )
+    newer = TTYDProcess(
+        tab_id="newer-tab",
+        port=14102,
+        name="Newer",
+        agent_type=AgentType.CLAUDE,
+        archived=True,
+        archived_at=datetime.now(),
+    )
+    manager.processes[older.tab_id] = older
+    manager.processes[newer.tab_id] = newer
+
+    assert [t.id for t in manager.list_archived_tabs()] == ["newer-tab", "older-tab"]

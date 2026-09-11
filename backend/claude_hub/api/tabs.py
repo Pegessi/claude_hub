@@ -166,6 +166,47 @@ async def switch_tab_env(
     return tab
 
 
+@router.get("/archived", response_model=List[TerminalTab])
+async def list_archived_tabs(
+    current_user: User = Depends(get_current_user),
+) -> List[TerminalTab]:
+    """List archived (soft-deleted) tabs, most recently archived first.
+
+    Declared before ``GET /{tab_id}`` so "archived" is not captured as a tab id.
+    """
+    return ttyd_manager.list_archived_tabs()
+
+
+@router.post("/{tab_id}/archive", response_model=TerminalTab)
+async def archive_tab(
+    tab_id: str,
+    current_user: User = Depends(get_current_user),
+) -> TerminalTab:
+    """Archive a tab: release its runtime resources but keep its history.
+
+    The tab is hidden from the default list and its agent is stopped, but the
+    JSONL conversation log is retained so it can be restored later.
+    """
+    logger.info(f"Archiving tab {tab_id}, user={current_user.email}")
+    tab = await ttyd_manager.archive_tab(tab_id)
+    if not tab:
+        raise HTTPException(status_code=404, detail="Tab not found")
+    return tab
+
+
+@router.post("/{tab_id}/unarchive", response_model=TerminalTab)
+async def unarchive_tab(
+    tab_id: str,
+    current_user: User = Depends(get_current_user),
+) -> TerminalTab:
+    """Restore an archived tab and best-effort restart its runtime."""
+    logger.info(f"Unarchiving tab {tab_id}, user={current_user.email}")
+    tab = await ttyd_manager.unarchive_tab(tab_id)
+    if not tab:
+        raise HTTPException(status_code=404, detail="Tab not found")
+    return tab
+
+
 @router.get("/{tab_id}", response_model=TerminalTab)
 async def get_tab(
     tab_id: str,
