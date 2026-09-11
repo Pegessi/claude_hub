@@ -166,12 +166,17 @@ export function useQuestionAnswers() {
  * ``StructuredPane`` folds this into each turn's ``v-memo`` deps so a toggle
  * re-renders only the turn owning that approval. Kept pure (state passed in)
  * so it can be unit-tested without mounting a component.
+ *
+ * ``customAnswers`` is required rather than defaulted: the typed text decides
+ * whether submit is enabled, so a call site that forgets it would leave a
+ * keystroke unable to re-render the button — and the default would make that
+ * a silent no-op instead of a type error.
  */
 export function approvalStateSignature(
   approval: TimelineApproval,
   questionAnswers: Record<string, QuestionAnswerMap>,
   resolvedKeys: Set<string>,
-  customAnswers: Record<string, Record<string, string>> = {},
+  customAnswers: Record<string, Record<string, string>>,
 ): string {
   const answers = questionAnswers[approval.key]
   const custom = customAnswers[approval.key] ?? {}

@@ -198,11 +198,12 @@ test('reset clears selections and resolved keys (tab switch)', () => {
 
 test('approvalStateSignature changes when an option is selected', () => {
   const approval = makeApproval()
-  const before = approvalStateSignature(approval, {}, new Set())
+  const before = approvalStateSignature(approval, {}, new Set(), {})
   const after = approvalStateSignature(
     approval,
     { [approval.key]: { q1: ['a'] } },
     new Set(),
+    {},
   )
   assert.notEqual(before, after, 'signature must change on selection')
 })
@@ -210,8 +211,8 @@ test('approvalStateSignature changes when an option is selected', () => {
 test('approvalStateSignature changes when the approval is resolved', () => {
   const approval = makeApproval()
   const answers = { [approval.key]: { q1: ['a'] } }
-  const before = approvalStateSignature(approval, answers, new Set())
-  const after = approvalStateSignature(approval, answers, new Set([approval.key]))
+  const before = approvalStateSignature(approval, answers, new Set(), {})
+  const after = approvalStateSignature(approval, answers, new Set([approval.key]), {})
   assert.notEqual(before, after, 'signature must change on resolve')
 })
 
@@ -220,16 +221,16 @@ test('approvalStateSignature is stable when nothing changed (keeps memoization)'
   const answers = { [approval.key]: { q1: ['a'] } }
   const resolved = new Set([approval.key])
   assert.equal(
-    approvalStateSignature(approval, answers, resolved),
-    approvalStateSignature(approval, { ...answers }, new Set(resolved)),
+    approvalStateSignature(approval, answers, resolved, {}),
+    approvalStateSignature(approval, { ...answers }, new Set(resolved), {}),
     'identical state must produce an identical signature so v-memo can skip re-render',
   )
 })
 
 test('approvalStateSignature distinguishes single-select replacement', () => {
   const approval = makeApproval()
-  const a = approvalStateSignature(approval, { [approval.key]: { q1: ['a'] } }, new Set())
-  const b = approvalStateSignature(approval, { [approval.key]: { q1: ['b'] } }, new Set())
+  const a = approvalStateSignature(approval, { [approval.key]: { q1: ['a'] } }, new Set(), {})
+  const b = approvalStateSignature(approval, { [approval.key]: { q1: ['b'] } }, new Set(), {})
   assert.notEqual(a, b)
 })
 
@@ -323,4 +324,34 @@ test('a typed answer travels in the submitted payload', () => {
     type: 'ask_question_response',
     answers: [{ questionId: 'q1', selected: ['C'] }],
   })
+})
+
+
+test('the typed answer is part of the memo signature', () => {
+  // Without this the keystroke updates state but v-memo skips the turn, so the
+  // submit button never re-enables. The signature is the only thing standing
+  // between a typed answer and a dead button.
+  const approval = makeApproval()
+  const answers = { [approval.key]: { q1: [] } }
+  const blank = approvalStateSignature(approval, answers, new Set(), {
+    [approval.key]: { q1: '' },
+  })
+  const typed = approvalStateSignature(approval, answers, new Set(), {
+    [approval.key]: { q1: '第三个方案' },
+  })
+  assert.notEqual(blank, typed, 'a keystroke must change the signature')
+  assert.equal(
+    approvalStateSignature(approval, answers, new Set(), { [approval.key]: { q1: 'x' } }),
+    approvalStateSignature(approval, answers, new Set(), { [approval.key]: { q1: 'x' } }),
+    'and identical text must keep it stable so memoization survives',
+  )
+})
+
+test('reset clears typed answers along with selections', () => {
+  // A tab switch must not carry a half-typed answer into the next card.
+  const { customAnswer, setCustomAnswer, reset } = useQuestionAnswers()
+  const approval = makeApproval()
+  setCustomAnswer(approval.key, approval.questions[0], '写了半截')
+  reset()
+  assert.equal(customAnswer(approval.key, approval.questions[0]), '')
 })

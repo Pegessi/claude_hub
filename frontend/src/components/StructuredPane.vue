@@ -405,9 +405,9 @@
                     </button>
                   </div>
                   <!-- The listed options are the agent's guess at the answer,
-                       not the whole space of them. Any answer the user types
-                       here is a selection like any other: it satisfies the
-                       completion check, travels in the same payload, and is
+                       not the whole space of them. What the user types here is
+                       merged with the ticked options on submit, so it satisfies
+                       the completion check, travels in the same payload, and is
                        what the agent reads. -->
                   <input
                     type="text"
