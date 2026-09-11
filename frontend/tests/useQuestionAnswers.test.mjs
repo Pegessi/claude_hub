@@ -40,7 +40,7 @@ const bundled = `${questionJs}\n${composableJs}`
 const mod = await import(
   `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
 )
-const { useQuestionAnswers, approvalStateSignature } = mod
+const { useQuestionAnswers, approvalStateSignature, formatAskQuestionResponse } = mod
 
 function makeApproval(overrides = {}) {
   return {
@@ -198,11 +198,12 @@ test('reset clears selections and resolved keys (tab switch)', () => {
 
 test('approvalStateSignature changes when an option is selected', () => {
   const approval = makeApproval()
-  const before = approvalStateSignature(approval, {}, new Set())
+  const before = approvalStateSignature(approval, {}, new Set(), {})
   const after = approvalStateSignature(
     approval,
     { [approval.key]: { q1: ['a'] } },
     new Set(),
+    {},
   )
   assert.notEqual(before, after, 'signature must change on selection')
 })
@@ -210,8 +211,8 @@ test('approvalStateSignature changes when an option is selected', () => {
 test('approvalStateSignature changes when the approval is resolved', () => {
   const approval = makeApproval()
   const answers = { [approval.key]: { q1: ['a'] } }
-  const before = approvalStateSignature(approval, answers, new Set())
-  const after = approvalStateSignature(approval, answers, new Set([approval.key]))
+  const before = approvalStateSignature(approval, answers, new Set(), {})
+  const after = approvalStateSignature(approval, answers, new Set([approval.key]), {})
   assert.notEqual(before, after, 'signature must change on resolve')
 })
 
@@ -220,15 +221,137 @@ test('approvalStateSignature is stable when nothing changed (keeps memoization)'
   const answers = { [approval.key]: { q1: ['a'] } }
   const resolved = new Set([approval.key])
   assert.equal(
-    approvalStateSignature(approval, answers, resolved),
-    approvalStateSignature(approval, { ...answers }, new Set(resolved)),
+    approvalStateSignature(approval, answers, resolved, {}),
+    approvalStateSignature(approval, { ...answers }, new Set(resolved), {}),
     'identical state must produce an identical signature so v-memo can skip re-render',
   )
 })
 
 test('approvalStateSignature distinguishes single-select replacement', () => {
   const approval = makeApproval()
-  const a = approvalStateSignature(approval, { [approval.key]: { q1: ['a'] } }, new Set())
-  const b = approvalStateSignature(approval, { [approval.key]: { q1: ['b'] } }, new Set())
+  const a = approvalStateSignature(approval, { [approval.key]: { q1: ['a'] } }, new Set(), {})
+  const b = approvalStateSignature(approval, { [approval.key]: { q1: ['b'] } }, new Set(), {})
   assert.notEqual(a, b)
+})
+
+
+// ── Free-text answers ───────────────────────────────────────────────────
+//
+// The listed options are the agent's guess at the answer, not the whole space
+// of them. A typed answer has to behave like any other selection or it would
+// be silently dropped: it must satisfy the completion check, survive a
+// multi-select, clear when blank, and travel in the same payload.
+
+test('a typed answer satisfies the completion check', () => {
+  const { customAnswer, setCustomAnswer, canSubmitQuestion } = useQuestionAnswers()
+  const approval = makeApproval()
+  assert.equal(canSubmitQuestion(approval), false, 'nothing chosen yet')
+
+  setCustomAnswer(approval.key, approval.questions[0], '第三个方案')
+  assert.equal(customAnswer(approval.key, approval.questions[0]), '第三个方案')
+  assert.equal(canSubmitQuestion(approval), true, 'the box being filled is an answer')
+})
+
+test('typing replaces a ticked option on a single-select question', () => {
+  const { customAnswer, setCustomAnswer, toggleQuestionOption, answersFor } = useQuestionAnswers()
+  const approval = makeApproval()
+  const question = approval.questions[0]
+
+  toggleQuestionOption(approval.key, question.id, 'a', false)
+  setCustomAnswer(approval.key, question, '都不是')
+  assert.deepEqual(answersFor(approval.key)[question.id], ['都不是'])
+  assert.equal(customAnswer(approval.key, question), '都不是')
+
+  // And picking an option again clears the typed answer: one answer, not two.
+  toggleQuestionOption(approval.key, question.id, 'a', false)
+  assert.deepEqual(answersFor(approval.key)[question.id], ['a'])
+  assert.equal(customAnswer(approval.key, question), '')
+})
+
+test('typing joins the ticked options on a multi-select question', () => {
+  const { customAnswer, setCustomAnswer, toggleQuestionOption, answersFor } = useQuestionAnswers()
+  const approval = makeMultiApproval()
+  const question = approval.questions[0]
+
+  toggleQuestionOption(approval.key, question.id, 'a', true)
+  setCustomAnswer(approval.key, question, '还有别的')
+  assert.deepEqual(answersFor(approval.key)[question.id], ['a', '还有别的'])
+  assert.equal(customAnswer(approval.key, question), '还有别的')
+})
+
+test('whitespace only is not an answer', () => {
+  const { customAnswer, setCustomAnswer, canSubmitQuestion, answersFor } = useQuestionAnswers()
+  const approval = makeApproval()
+  const question = approval.questions[0]
+
+  setCustomAnswer(approval.key, question, '   ')
+  assert.equal(answersFor(approval.key)[question.id], undefined, 'whitespace is not submitted')
+  assert.equal(canSubmitQuestion(approval), false, 'and the question stays unanswered')
+  assert.equal(customAnswer(approval.key, question), '   ', 'but the box keeps what was typed')
+})
+
+test('a typed answer survives unticking a multi-select option', () => {
+  const { customAnswer, setCustomAnswer, toggleQuestionOption, answersFor } = useQuestionAnswers()
+  const approval = makeMultiApproval()
+  const question = approval.questions[0]
+
+  toggleQuestionOption(approval.key, question.id, 'a', true)
+  setCustomAnswer(approval.key, question, '另加一组')
+  toggleQuestionOption(approval.key, question.id, 'a', true)
+  assert.deepEqual(answersFor(approval.key)[question.id], ['另加一组'])
+  assert.equal(customAnswer(approval.key, question), '另加一组')
+})
+
+test('typing an option\'s own text is still a typed answer, not a tick', () => {
+  // The option id IS its label in this codebase, so inferring "is this typed?"
+  // from the id set read the text back as a tick and emptied the box.
+  const { customAnswer, setCustomAnswer, isQuestionOptionSelected, answersFor } = useQuestionAnswers()
+  const approval = makeApproval()
+  const question = approval.questions[0]
+
+  setCustomAnswer(approval.key, question, 'A')
+  assert.equal(customAnswer(approval.key, question), 'A', 'the box keeps the text')
+  assert.equal(isQuestionOptionSelected(approval.key, question.id, 'a'), false, 'no option was ticked')
+  assert.deepEqual(answersFor(approval.key)[question.id], ['A'])
+})
+
+test('a typed answer travels in the submitted payload', () => {
+  const { setCustomAnswer, answersFor } = useQuestionAnswers()
+  const approval = makeApproval()
+  setCustomAnswer(approval.key, approval.questions[0], 'C')
+  const text = formatAskQuestionResponse(answersFor(approval.key))
+  assert.deepEqual(JSON.parse(text), {
+    type: 'ask_question_response',
+    answers: [{ questionId: 'q1', selected: ['C'] }],
+  })
+})
+
+
+test('the typed answer is part of the memo signature', () => {
+  // Without this the keystroke updates state but v-memo skips the turn, so the
+  // submit button never re-enables. The signature is the only thing standing
+  // between a typed answer and a dead button.
+  const approval = makeApproval()
+  const answers = { [approval.key]: { q1: [] } }
+  const blank = approvalStateSignature(approval, answers, new Set(), {
+    [approval.key]: { q1: '' },
+  })
+  const typed = approvalStateSignature(approval, answers, new Set(), {
+    [approval.key]: { q1: '第三个方案' },
+  })
+  assert.notEqual(blank, typed, 'a keystroke must change the signature')
+  assert.equal(
+    approvalStateSignature(approval, answers, new Set(), { [approval.key]: { q1: 'x' } }),
+    approvalStateSignature(approval, answers, new Set(), { [approval.key]: { q1: 'x' } }),
+    'and identical text must keep it stable so memoization survives',
+  )
+})
+
+test('reset clears typed answers along with selections', () => {
+  // A tab switch must not carry a half-typed answer into the next card.
+  const { customAnswer, setCustomAnswer, reset } = useQuestionAnswers()
+  const approval = makeApproval()
+  setCustomAnswer(approval.key, approval.questions[0], '写了半截')
+  reset()
+  assert.equal(customAnswer(approval.key, approval.questions[0]), '')
 })

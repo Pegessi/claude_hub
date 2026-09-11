@@ -35,6 +35,23 @@
   `过程 · 73/50/11/16/15 个工具调用` (the session kept growing while this was
   written, so the count moves) with zero thinking and tool cards, where three of
   them previously showed 114, 81 and 19 uncollapsible blocks.
+### feat: type your own answer into an approval card
+
+- **Problem.** The listed options are the agent's guess at the answer, not the
+  whole space of them. When none fitted there was no way to say so: the card
+  offered only the options it was given, and the submit button stayed disabled
+  until one of them was picked.
+- **Fix.** Every question now carries a free-text field under its options
+  (`其他（自己输入）`, or `其他（可多选，自己输入）` for a multi-select). The
+  text is held apart from the ticked options and merged with them only on
+  submit, so the two can never be confused for one another; the merged result
+  satisfies the completion check, travels in the same `ask_question_response`
+  payload, and is what the agent reads. On a single-select question typing
+  clears any ticked option, and ticking an option clears the text — one answer,
+  not two. On a multi-select the text joins whatever is ticked. Blank input
+  selects nothing, so an emptied box leaves the question unanswered and the
+  button disabled rather than submitting whitespace. Styled dashed so it reads
+  as one more choice in the set.
 
 ### fix: message actions become a Codex-style row under the message
 

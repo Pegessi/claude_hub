@@ -1,0 +1,13 @@
+{
+  "audience": "关注大模型架构与推理成本的中文技术读者（算法/工程/推理服务方向）",
+  "reader_task": "快速理解 DeepSeek-V4.1-Flash 技术报告的核心创新、关键数据与局限，判断其参考价值",
+  "genre_contract": "knowledge.explanation",
+  "adapter": null,
+  "presentation_mode": "normal",
+  "visual_plan": {
+    "reason": "CED 编码器-解码器分层结构与 CSA2 三种模式的跨层复用关系用文字描述理解成本高，用一张分层数据流图可显著降低理解成本",
+    "blocks": [
+      {"type": "whiteboard", "min_count": 1, "purpose": "呈现 40 层 CED 结构、CSA2 各层模式分配与解码器全局 KV 的来源路径"}
+    ]
+  }
+}
