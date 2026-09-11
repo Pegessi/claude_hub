@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 960" width="1040" height="960" font-family="Noto Sans SC, PingFang SC, sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F7F9FF"/>
+      <stop offset="1" stop-color="#FFFFFF"/>
+    </linearGradient>
+    <linearGradient id="encPanel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EFF4FF"/>
+      <stop offset="1" stop-color="#E1E9FF"/>
+    </linearGradient>
+    <linearGradient id="decPanel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EBF9F3"/>
+      <stop offset="1" stop-color="#DBF1E6"/>
+    </linearGradient>
+    <filter id="softShadow">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#1F2A44" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1040" height="960" fill="url(#bgGrad)"/>
+
+  <!-- Title -->
+  <text x="40" y="52" font-size="29" font-weight="bold" fill="#16203A">DeepSeek-V4.1-Flash 架构总览</text>
+  <text x="40" y="88" font-size="15" fill="#5A6478">40 层 Transformer = 20 层因果编码器 + 20 层解码器（CED）　　预填充每 token 激活 8B 参数，解码每 token 激活 16B</text>
+
+  <!-- Over-the-top KV projection arrow -->
+  <polyline points="259,162 259,132 781,132 781,162" fill="none" stroke="#4D6BFE" stroke-width="2.5" stroke-dasharray="8 5"/>
+  <polygon points="781,164 776,152 786,152" fill="#4D6BFE"/>
+  <rect x="352" y="117" width="336" height="30" rx="15" fill="#E7ECFF" stroke="#B9C6FF"/>
+  <text x="520" y="138" font-size="14" fill="#2B4ACB" text-anchor="middle">编码器最终隐状态 → 投影 → 解码器全局 KV</text>
+
+  <!-- ============ Encoder panel ============ -->
+  <rect x="24" y="162" width="470" height="580" rx="18" fill="url(#encPanel)" stroke="#C6D2F2" filter="url(#softShadow)"/>
+  <text x="50" y="202" font-size="19" font-weight="bold" fill="#1F2A44">因果编码器 · 20 层</text>
+  <text x="468" y="202" font-size="12" fill="#7A86A0" text-anchor="end">Causal Encoder</text>
+
+  <!-- Encoder card 1: L15-20 -->
+  <rect x="46" y="212" width="426" height="112" rx="12" fill="#FFFFFF" stroke="#D8E0F5"/>
+  <rect x="46" y="212" width="6" height="112" rx="3" fill="#10B981"/>
+  <text x="68" y="252" font-size="19" font-weight="bold" fill="#1F2A44">L15–20</text>
+  <text x="152" y="252" font-size="15" fill="#5A6478">CSA2 · m = 2</text>
+  <text x="256" y="252" font-size="15" font-weight="bold" fill="#4D6BFE">1× Full Mode</text>
+  <text x="368" y="252" font-size="15" fill="#10B981">+ 5× Reuse</text>
+  <text x="68" y="284" font-size="14" fill="#5A6478">第 3 组 · 6 层共用同一份主 KV 与 Top-K 索引</text>
+  <text x="68" y="308" font-size="13" fill="#8A93A8">组内首层算全局 KV 并建索引，其余 5 层直接复用结果</text>
+
+  <!-- Encoder card 2: L9-14 -->
+  <rect x="46" y="338" width="426" height="112" rx="12" fill="#FFFFFF" stroke="#D8E0F5"/>
+  <rect x="46" y="338" width="6" height="112" rx="3" fill="#10B981"/>
+  <text x="68" y="378" font-size="19" font-weight="bold" fill="#1F2A44">L9–14</text>
+  <text x="152" y="378" font-size="15" fill="#5A6478">CSA2 · m = 2</text>
+  <text x="256" y="378" font-size="15" font-weight="bold" fill="#4D6BFE">1× Full Mode</text>
+  <text x="368" y="378" font-size="15" fill="#10B981">+ 5× Reuse</text>
+  <text x="68" y="410" font-size="14" fill="#5A6478">第 2 组 · Full 层重算索引，其余层复用</text>
+  <text x="68" y="434" font-size="13" fill="#8A93A8">主 KV 与索引器 K 均由该组 Full 层产出</text>
+
+  <!-- Encoder card 3: L3-8 -->
+  <rect x="46" y="464" width="426" height="112" rx="12" fill="#FFFFFF" stroke="#D8E0F5"/>
+  <rect x="46" y="464" width="6" height="112" rx="3" fill="#10B981"/>
+  <text x="68" y="504" font-size="19" font-weight="bold" fill="#1F2A44">L3–8</text>
+  <text x="152" y="504" font-size="15" fill="#5A6478">CSA2 · m = 2</text>
+  <text x="256" y="504" font-size="15" font-weight="bold" fill="#4D6BFE">1× Full Mode</text>
+  <text x="368" y="504" font-size="15" fill="#10B981">+ 5× Reuse</text>
+  <text x="68" y="536" font-size="14" fill="#5A6478">第 1 组 · 每两个 KV 条目压成一个</text>
+  <text x="68" y="560" font-size="13" fill="#8A93A8">编码器侧压缩率 m = 2，全局 KV 存储减半</text>
+
+  <!-- Encoder card 4: L1-2 SWA -->
+  <rect x="46" y="590" width="426" height="112" rx="12" fill="#FFF9F0" stroke="#F3D3A8"/>
+  <rect x="46" y="590" width="6" height="112" rx="3" fill="#F59E0B"/>
+  <text x="68" y="630" font-size="19" font-weight="bold" fill="#1F2A44">L1–2</text>
+  <text x="152" y="630" font-size="15" font-weight="bold" fill="#B45309">SWA</text>
+  <text x="230" y="630" font-size="15" fill="#B45309">纯滑动窗口 · n_win = 128</text>
+  <text x="68" y="662" font-size="14" fill="#5A6478">最底部两层不做全局注意力，只保留局部窗口</text>
+  <text x="68" y="686" font-size="13" fill="#8A93A8">SWA KV 逐层独立计算，不参与跨层共享</text>
+
+  <text x="50" y="726" font-size="12" fill="#7A86A0">↑ 数据流自下而上：L1 → L20，最终隐状态输出给解码器</text>
+
+  <!-- ============ Decoder panel ============ -->
+  <rect x="546" y="162" width="470" height="580" rx="18" fill="url(#decPanel)" stroke="#BEE3D2" filter="url(#softShadow)"/>
+  <text x="572" y="202" font-size="19" font-weight="bold" fill="#1F2A44">解码器 · 20 层</text>
+  <text x="990" y="202" font-size="12" fill="#7A86A0" text-anchor="end">Decoder</text>
+
+  <!-- Decoder card 1: L17-20 -->
+  <rect x="568" y="212" width="426" height="88" rx="12" fill="#FFFFFF" stroke="#D8E0F5"/>
+  <rect x="568" y="212" width="6" height="88" rx="3" fill="#8B5CF6"/>
+  <text x="590" y="248" font-size="19" font-weight="bold" fill="#1F2A44">L17–20</text>
+  <text x="676" y="248" font-size="15" fill="#5A6478">CSA2 · m = 1</text>
+  <text x="780" y="248" font-size="15" font-weight="bold" fill="#8B5CF6">1× Reindex</text>
+  <text x="890" y="248" font-size="15" fill="#10B981">+ 3× Reuse</text>
+  <text x="590" y="280" font-size="14" fill="#5A6478">第 5 组 · 索引器用本层 Q 在候选池内重排，主 KV 仍复用</text>
+
+  <!-- Decoder card 2: L13-16 -->
+  <rect x="568" y="312" width="426" height="88" rx="12" fill="#FFFFFF" stroke="#D8E0F5"/>
+  <rect x="568" y="312" width="6" height="88" rx="3" fill="#8B5CF6"/>
+  <text x="590" y="348" font-size="19" font-weight="bold" fill="#1F2A44">L13–16</text>
+  <text x="676" y="348" font-size="15" fill="#5A6478">CSA2 · m = 1</text>
+  <text x="780" y="348" font-size="15" font-weight="bold" fill="#8B5CF6">1× Reindex</text>
+  <text x="890" y="348" font-size="15" fill="#10B981">+ 3× Reuse</text>
+  <text x="590" y="380" font-size="14" fill="#5A6478">第 4 组 · 分层稀疏索引器把深层搜索域限制为候选池</text>
+
+  <!-- Decoder card 3: L9-12 -->
+  <rect x="568" y="412" width="426" height="88" rx="12" fill="#FFFFFF" stroke="#D8E0F5"/>
+  <rect x="568" y="412" width="6" height="88" rx="3" fill="#8B5CF6"/>
+  <text x="590" y="448" font-size="19" font-weight="bold" fill="#1F2A44">L9–12</text>
+  <text x="676" y="448" font-size="15" fill="#5A6478">CSA2 · m = 1</text>
+  <text x="780" y="448" font-size="15" font-weight="bold" fill="#8B5CF6">1× Reindex</text>
+  <text x="890" y="448" font-size="15" fill="#10B981">+ 3× Reuse</text>
+  <text x="590" y="480" font-size="14" fill="#5A6478">第 3 组 · 候选池固定后，索引成本与上下文长度解耦</text>
+
+  <!-- Decoder card 4: L5-8 -->
+  <rect x="568" y="512" width="426" height="88" rx="12" fill="#FFFFFF" stroke="#D8E0F5"/>
+  <rect x="568" y="512" width="6" height="88" rx="3" fill="#8B5CF6"/>
+  <text x="590" y="548" font-size="19" font-weight="bold" fill="#1F2A44">L5–8</text>
+  <text x="676" y="548" font-size="15" fill="#5A6478">CSA2 · m = 1</text>
+  <text x="780" y="548" font-size="15" font-weight="bold" fill="#8B5CF6">1× Reindex</text>
+  <text x="890" y="548" font-size="15" fill="#10B981">+ 3× Reuse</text>
+  <text x="590" y="580" font-size="14" fill="#5A6478">第 2 组 · 索引器的 K 复用前序层，Q 由本层计算</text>
+
+  <!-- Decoder card 5: L1-4 Full -->
+  <rect x="568" y="612" width="426" height="88" rx="12" fill="#F3F6FF" stroke="#B9C6FF"/>
+  <rect x="568" y="612" width="6" height="88" rx="3" fill="#4D6BFE"/>
+  <text x="590" y="648" font-size="19" font-weight="bold" fill="#1F2A44">L1–4</text>
+  <text x="676" y="648" font-size="15" fill="#5A6478">CSA2 · m = 1</text>
+  <text x="780" y="648" font-size="15" font-weight="bold" fill="#4D6BFE">1× Full Mode</text>
+  <text x="890" y="648" font-size="15" fill="#10B981">+ 3× Reuse</text>
+  <text x="590" y="680" font-size="14" fill="#5A6478">第 1 组 · 唯一自算全局 KV 的层，隐状态取自编码器 L20</text>
+
+  <text x="572" y="726" font-size="12" fill="#7A86A0">↑ 数据流自下而上：L1 → L20，顶层隐状态交给 DSpark 投机解码</text>
+
+  <!-- Legend -->
+  <text x="40" y="784" font-size="14" font-weight="bold" fill="#1F2A44">图例</text>
+  <rect x="92" y="772" width="15" height="15" rx="4" fill="#F59E0B"/>
+  <text x="114" y="785" font-size="14" fill="#5A6478">SWA</text>
+  <rect x="176" y="772" width="15" height="15" rx="4" fill="#4D6BFE"/>
+  <text x="198" y="785" font-size="14" fill="#5A6478">Full 模式（本层自算主 KV + 新索引）</text>
+  <rect x="486" y="772" width="15" height="15" rx="4" fill="#8B5CF6"/>
+  <text x="508" y="785" font-size="14" fill="#5A6478">Reindex（复用主 KV，重算 Top-K 索引）</text>
+  <rect x="796" y="772" width="15" height="15" rx="4" fill="#10B981"/>
+  <text x="818" y="785" font-size="14" fill="#5A6478">Reuse（主 KV 与索引全部复用）</text>
+
+  <!-- Notes -->
+  <rect x="24" y="806" width="992" height="130" rx="14" fill="#F4F7FF" stroke="#DDE5FF"/>
+  <text x="48" y="840" font-size="14" fill="#33406B">· CED 的核心：解码器的全局 KV 不再从各解码层自己的隐状态推导，而是直接由编码器最终隐状态投影而来</text>
+  <text x="48" y="872" font-size="14" fill="#33406B">· 因此 prefill 只需完整计算前 20 层，复杂度由 O(NL) 降至约 O(NL/2)；解码器前向另由 SWA Bounded Replay 限制在 n_win 个 token</text>
+  <text x="48" y="904" font-size="14" fill="#33406B">· 每一层仍保留自己的 Q 与 SWA KV；跨层共享的只有主 KV、索引器 K 与 Top-K 索引，这正是 890 字节/token 的来源</text>
+</svg>

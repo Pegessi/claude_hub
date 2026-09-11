@@ -404,6 +404,24 @@
                       {{ option.label }}
                     </button>
                   </div>
+                  <!-- The listed options are the agent's guess at the answer,
+                       not the whole space of them. What the user types here is
+                       merged with the ticked options on submit, so it satisfies
+                       the completion check, travels in the same payload, and is
+                       what the agent reads. -->
+                  <input
+                    type="text"
+                    class="approval-custom-answer"
+                    :value="customAnswer(part.approval.key, question)"
+                    :disabled="isApprovalResolved(part.approval) || isSending"
+                    :placeholder="question.allowMultiple ? '其他（可多选，自己输入）' : '其他（自己输入）'"
+                    :aria-label="`${question.prompt} — 其他答案`"
+                    @input="setCustomAnswer(
+                      part.approval.key,
+                      question,
+                      ($event.target as HTMLInputElement).value,
+                    )"
+                  >
                 </div>
                 <button
                   v-if="!isApprovalResolved(part.approval)"
@@ -831,6 +849,9 @@ const {
 const {
   questionAnswers,
   resolvedApprovalKeys,
+  customAnswers,
+  customAnswer,
+  setCustomAnswer,
   isQuestionOptionSelected,
   toggleQuestionOption,
   isApprovalResolved,
@@ -1589,6 +1610,7 @@ function turnApprovalSignature(turn: TimelineTurn): string {
       approval,
       questionAnswers.value,
       resolvedApprovalKeys.value,
+      customAnswers.value,
     )};`
   }
   // isSending gates the option/submit disabled state inside the card, so a
@@ -2737,6 +2759,32 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* Free-text answer: the listed options are the agent's guess at the answer,
+   not the whole space of them. Dashed rather than solid so it reads as one
+   more choice in the same set rather than a separate form. */
+.approval-custom-answer {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px dashed var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.approval-custom-answer:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 2px;
+  border-style: solid;
+}
+
+.approval-custom-answer:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .approval-option {
