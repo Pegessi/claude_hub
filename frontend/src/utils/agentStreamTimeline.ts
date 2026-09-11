@@ -495,8 +495,8 @@ export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[]
 export interface TurnProcessSplit {
   /** The whole working region in arrival order — what the expanded view shows. */
   before: TimelinePart[]
-  /** Members of ``before`` that stay visible even while folded: an approval
-   *  card the user still has to click, or the error explaining a failure. */
+  /** Members of ``before`` that stay visible even while folded. Only errors:
+   *  an approval card folds with the rest of the record. */
   pinned: TimelinePart[]
   /** The delivered answer plus anything that arrived after it. */
   delivery: TimelinePart[]
@@ -536,17 +536,9 @@ function isProcessPart(part: TimelinePart): boolean {
  *    would leave the tools and thinking on screen under a header claiming to
  *    have hidden them, because "the last text and everything after it" is only
  *    an answer when the turn actually stopped there;
- *  * work continues past its last text — a turn cancelled mid-tool, or one
- *    that ran out of room, ends without a delivered answer. Folding there
- *    would leave the tools and thinking on screen under a header claiming to
- *    have hidden them, because "the last text and everything after it" is only
- *    an answer when the turn actually stopped there.
- *
- *  An approval card or an error inside the working region does NOT stop the
- *  fold: it is reported as ``pinned`` and stays visible beside the header.
- *  Refusing to fold the whole turn instead left approval-heavy sessions with
- *  hundreds of tool cards on screen, because one card among them blocked the
- *  fold. What must stay reachable is the part, not the turn.
+ *  An approval card inside the region does not stop the fold — it goes with the
+ *  rest of the record. An error is reported as ``pinned`` and stays visible
+ *  beside the header: folding it would bury the reason the turn failed.
  */
 export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   if (!turn.completed) return null
@@ -643,6 +635,11 @@ export function turnProcessLabel(turn: TimelineTurn, process: TimelinePart[]): s
   const segments = ['过程']
   const steps = countProcessSteps(process)
   if (steps > 0) segments.push(`${steps} 个工具调用`)
+  // The header is the only thing left on screen, so it has to say when a card
+  // is folded in with the rest — otherwise a question the user may never have
+  // answered disappears without a trace.
+  const cards = process.filter(part => part.kind === 'approval').length
+  if (cards > 0) segments.push(`${cards} 张审批卡`)
   const elapsed = turnElapsedMs(turn)
   if (elapsed !== null) segments.push(formatElapsedDuration(elapsed))
   return segments.join(' · ')
@@ -668,8 +665,8 @@ export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePa
     expanded,
   }
   // Expanded, the region replays in arrival order. Folded, the pinned parts
-  // stay on screen next to the header — a card the user must click, or the
-  // reason the turn failed, is not something a fold may hide.
+  // stay on screen next to the header — an error is not something a fold may
+  // hide. Approval cards are not pinned: they fold with the record.
   return expanded
     ? [header, ...split.before, ...split.delivery]
     : [header, ...split.pinned, ...split.delivery]
