@@ -70,31 +70,6 @@
           v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === turnIndex, isEditingTurn(turn)]"
           class="structured-turn"
         >
-          <!-- Hover-revealed per-turn actions. Both live in one cluster so
-               they lay out side by side: separately anchored to the turn and to
-               the bubble they overlapped each other. -->
-          <div class="turn-actions">
-            <button
-              type="button"
-              class="turn-fork-button"
-              :disabled="forkingOrdinal !== null"
-              title="Fork a new chat from this turn"
-              @click="forkFromTurn(turnIndex)"
-            >
-              {{ forkingOrdinal === turnIndex ? 'Forking…' : 'Fork from here' }}
-            </button>
-            <button
-              v-if="turn.userText && turn.turnId && !isEditingTurn(turn)"
-              type="button"
-              class="edit-resend-hover-btn"
-              :disabled="turnInFlight"
-              :title="turnInFlight ? 'A turn is currently running' : 'Edit message'"
-              :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : 'Edit message'"
-              @click="startEdit(turn)"
-            >
-              ✎
-            </button>
-          </div>
           <!-- A right-aligned user bubble and a left-aligned assistant bubble make
                this the same conversation as the terminal, not terminal text
                pasted into a second surface. -->
@@ -210,6 +185,32 @@
                 </div>
               </template>
             </div>
+          </div>
+
+          <!-- The message's own actions: a row under the bubble that the turn's
+               hover reveals, with room for both the buttons and the time.
+               Normal flow, not pinned over the turn — absolutely positioned it
+               sat behind the bubble (which is itself positioned) and swallowed
+               clicks. -->
+          <div
+            v-if="turn.userText && !isEditingTurn(turn)"
+            class="turn-actions turn-actions--message"
+          >
+            <button
+              v-if="turn.turnId"
+              type="button"
+              class="edit-resend-hover-btn"
+              :disabled="turnInFlight"
+              :title="turnInFlight ? 'A turn is currently running' : 'Edit message'"
+              :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : 'Edit message'"
+              @click="startEdit(turn)"
+            >
+              ✎ 编辑
+            </button>
+            <time
+              v-if="messageClockLabel(turn)"
+              class="turn-time"
+            >{{ messageClockLabel(turn) }}</time>
           </div>
 
           <div
@@ -457,6 +458,25 @@
               <span class="process-fold-meta">{{ part.meta }}</span>
             </button>
           </template>
+
+          <!-- Turn-level actions close the turn the way the message actions
+               open it, so a long turn's controls sit with its result rather
+               than floating back at the top. -->
+          <div class="turn-actions turn-actions--turn">
+            <button
+              type="button"
+              class="turn-fork-button"
+              :disabled="forkingOrdinal !== null"
+              title="Fork a new chat from this turn"
+              @click="forkFromTurn(turnIndex)"
+            >
+              {{ forkingOrdinal === turnIndex ? 'Forking…' : 'Fork from here' }}
+            </button>
+            <time
+              v-if="turnClockLabel(turn)"
+              class="turn-time"
+            >{{ turnClockLabel(turn) }}</time>
+          </div>
         </div>
 
         <!-- Optimistic turns are reconciled by client_turn_id, never by text. -->
@@ -772,7 +792,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { IncrementalTimelineReducer, foldTurnParts, splitTurnProcess, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer, foldTurnParts, messageClockLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
@@ -1654,6 +1674,7 @@ function collapseDetails(event: MouseEvent): void {
   }
 }
 
+
 /** Aggregate status for a tool group: 'running' if any tool is still running,
  *  'failed' if any tool failed (and none running), 'cancelled' if every tool
  *  was cancelled (e.g. a dismissed AskUserQuestion), else 'completed'. */
@@ -2145,25 +2166,46 @@ onUnmounted(() => {
   position: relative;
 }
 
+/* Per-message actions: a row under the message, revealed by the turn's hover,
+   holding the actions and the time. Codex's shape — and the reason it is a row
+   in normal flow rather than a cluster pinned over the turn is that pinning it
+   put the buttons behind the bubble (which is positioned) where they could not
+   be clicked at all. The row keeps its height when hidden so revealing it does
+   not shift the conversation, and reserves room for the buttons and the time
+   instead of crowding them. */
 .turn-actions {
-  position: absolute;
-  top: -10px;
-  right: 0;
-  /* The cluster lays its buttons out in a row. Anchoring them separately — the
-     fork one to the turn, the edit one to the bubble — put them on top of each
-     other, and the edit button on top of the message text. */
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 14px;
+  /* Reserved whether or not the row is showing: revealing it must not shift
+     the conversation. Kept as tight as the pills allow — two rows per turn at
+     24px each is a lot of empty space in a long thread. */
+  min-height: 20px;
+  margin: 0 4px 6px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
+}
+
+.turn-actions--message,
+.turn-actions--turn {
+  justify-content: flex-end;
 }
 
 .structured-turn:hover .turn-actions,
 .turn-actions:focus-within {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* The time reads as a quiet trailing label, not a fourth button. */
+.turn-time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  /* ``muted``, not ``subtle`` + opacity: measured 2.47:1 in dark and 2.05:1 in
+     light, both under the 3:1 floor for non-text content. */
+  color: var(--ch-color-text-muted, var(--ch-color-text-subtle, currentColor));
+  white-space: nowrap;
 }
 
 .turn-fork-button {
@@ -2886,25 +2928,27 @@ onUnmounted(() => {
 
 /* ---- Edit-resend UI ---- */
 
-/* Sits in the turn's hover cluster, so it inherits showing and hiding from
-   ``.turn-actions`` and never needs to be positioned over the message. */
+/* Lives in the message's action row, so showing and hiding come from
+   ``.turn-actions`` and the button never needs positioning of its own. */
 .edit-resend-hover-btn {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
   border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
-  border-radius: 50%;
+  border-radius: 999px;
   background: var(--ch-color-bg-elevated, canvas);
   color: var(--ch-color-text-subtle, currentColor);
-  font-size: 12px;
-  line-height: 1;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
   cursor: pointer;
 }
 
 .edit-resend-hover-btn:hover:not(:disabled) {
-  color: var(--ch-color-text-muted, currentColor);
+  border-color: var(--ch-color-accent);
+  color: var(--ch-color-accent);
 }
 
 /* A turn is running, so the click does nothing. Say so: without this the
@@ -2914,29 +2958,38 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
+/* Inline editing: the message itself becomes the input. The form used to force
+   ``min-width: 320px`` and draw a bordered dark box inside the blue bubble, so
+   a two-character message opened a wide bubble holding an empty-looking form.
+   Now the bubble sizes to its content and the textarea reads as the message. */
 .edit-resend-form {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-width: min(320px, 60vw);
+  min-width: min(240px, 55vw);
 }
 
 .edit-resend-textarea {
   width: 100%;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, #fff 30%, transparent);
-  border-radius: var(--ch-radius-sm);
-  background: rgb(0 0 0 / 22%);
-  color: #fff;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: inherit;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
   resize: vertical;
   outline: none;
 }
 
-.edit-resend-textarea:focus {
-  border-color: color-mix(in srgb, #fff 60%, transparent);
+.edit-resend-textarea:focus-visible {
+  /* 2px at 65%: the earlier 1px/45% ring measured 2.43:1 against the bubble
+     blue, under the 3:1 the focus indicator needs — weaker than the border it
+     replaced. */
+  outline: 2px solid color-mix(in srgb, #fff 65%, transparent);
+  outline-offset: 3px;
+  border-radius: 2px;
 }
 
 .edit-resend-textarea::placeholder {
