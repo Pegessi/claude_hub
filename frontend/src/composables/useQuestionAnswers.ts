@@ -26,6 +26,17 @@ export function useQuestionAnswers() {
   const questionAnswers: Ref<Record<string, QuestionAnswerMap>> = ref({})
   /** approval keys the user has already submitted (visual ack). */
   const resolvedApprovalKeys: Ref<Set<string>> = ref(new Set())
+  /**
+   * approvalKey -> (questionId -> free-text answer).
+   *
+   * Kept apart from ``questionAnswers`` rather than folded into it. Storing the
+   * typed text as just another selection means telling the two apart by "is
+   * this value one of the option ids?" — and in this codebase an option's id
+   * IS its label, so typing an option's own text would read back as "the user
+   * ticked that option", emptying the box. A separate field answers the
+   * question directly: a selection is a selection, typed text is typed text.
+   */
+  const customAnswers: Ref<Record<string, Record<string, string>>> = ref({})
 
   function isQuestionOptionSelected(
     approvalKey: string,
@@ -47,9 +58,11 @@ export function useQuestionAnswers() {
       if (selected.has(optionId)) selected.delete(optionId)
       else selected.add(optionId)
     } else {
-      // Single-select: clicking an option replaces any prior selection.
+      // Single-select: clicking an option replaces any prior selection — and
+      // any typed answer, so the two can never be submitted together.
       selected.clear()
       selected.add(optionId)
+      clearCustomAnswer(approvalKey, questionId)
     }
     current[questionId] = [...selected]
     questionAnswers.value = { ...questionAnswers.value, [approvalKey]: current }
@@ -57,38 +70,46 @@ export function useQuestionAnswers() {
 
   /**
    * The free-text answer the user has typed for a question, or ``''``.
-   *
-   * A typed answer is stored as an ordinary selection, so everything
-   * downstream — the completion check, the response payload, the memo
-   * signature — treats it like any other answer. It is told apart on the way
-   * back out by not being one of the question's option ids.
    */
   function customAnswer(approvalKey: string, question: TimelineQuestion): string {
-    const selected = questionAnswers.value[approvalKey]?.[question.id] ?? []
-    const optionIds = new Set(question.options.map(option => option.id))
-    return selected.find(value => !optionIds.has(value)) ?? ''
+    return customAnswers.value[approvalKey]?.[question.id] ?? ''
   }
 
   /**
    * Set (or clear) a question's free-text answer.
    *
-   * A single-select question keeps only the typed answer; a multi-select keeps
-   * it alongside the options already ticked. Blank input clears it rather than
-   * selecting whitespace, so an empty box leaves the question unanswered and
-   * the submit button disabled.
+   * Typing on a single-select question clears its ticked option — one answer,
+   * not two. On a multi-select the typed answer joins whatever is ticked.
+   * Blank input clears the answer, so an emptied box leaves the question
+   * unanswered and the submit button disabled rather than submitting
+   * whitespace.
    */
   function setCustomAnswer(
     approvalKey: string,
     question: TimelineQuestion,
     text: string,
   ): void {
-    const current = { ...(questionAnswers.value[approvalKey] ?? {}) }
-    const optionIds = new Set(question.options.map(option => option.id))
-    const ticked = (current[question.id] ?? []).filter(value => optionIds.has(value))
-    current[question.id] = text.trim()
-      ? (question.allowMultiple ? [...ticked, text] : [text])
-      : ticked
-    questionAnswers.value = { ...questionAnswers.value, [approvalKey]: current }
+    customAnswers.value = {
+      ...customAnswers.value,
+      [approvalKey]: {
+        ...(customAnswers.value[approvalKey] ?? {}),
+        [question.id]: text,
+      },
+    }
+    if (text.trim() && !question.allowMultiple) {
+      const selections = { ...(questionAnswers.value[approvalKey] ?? {}) }
+      selections[question.id] = []
+      questionAnswers.value = { ...questionAnswers.value, [approvalKey]: selections }
+    }
+  }
+
+  /** Drop a question's typed answer — the ticked option is the answer now. */
+  function clearCustomAnswer(approvalKey: string, questionId: string): void {
+    const current = customAnswers.value[approvalKey]
+    if (!current?.[questionId]) return
+    const next = { ...current }
+    delete next[questionId]
+    customAnswers.value = { ...customAnswers.value, [approvalKey]: next }
   }
 
   function isApprovalResolved(approval: TimelineApproval): boolean {
@@ -96,12 +117,20 @@ export function useQuestionAnswers() {
   }
 
   function canSubmitQuestion(approval: TimelineApproval): boolean {
-    const answers = questionAnswers.value[approval.key] ?? {}
-    return isQuestionAnswerComplete(approval.questions, answers)
+    return isQuestionAnswerComplete(approval.questions, answersFor(approval.key))
   }
 
+  /** The answers as they will be submitted: ticked options plus typed text. */
   function answersFor(approvalKey: string): QuestionAnswerMap {
-    return questionAnswers.value[approvalKey] ?? {}
+    const merged: QuestionAnswerMap = {}
+    for (const [questionId, selected] of Object.entries(questionAnswers.value[approvalKey] ?? {})) {
+      merged[questionId] = [...selected]
+    }
+    for (const [questionId, text] of Object.entries(customAnswers.value[approvalKey] ?? {})) {
+      if (!text.trim()) continue
+      merged[questionId] = [...(merged[questionId] ?? []), text]
+    }
+    return merged
   }
 
   function markResolved(approvalKey: string): void {
@@ -110,12 +139,14 @@ export function useQuestionAnswers() {
 
   function reset(): void {
     questionAnswers.value = {}
+    customAnswers.value = {}
     resolvedApprovalKeys.value = new Set()
   }
 
   return {
     questionAnswers,
     resolvedApprovalKeys,
+    customAnswers,
     customAnswer,
     setCustomAnswer,
     isQuestionOptionSelected,
@@ -140,10 +171,14 @@ export function approvalStateSignature(
   approval: TimelineApproval,
   questionAnswers: Record<string, QuestionAnswerMap>,
   resolvedKeys: Set<string>,
+  customAnswers: Record<string, Record<string, string>> = {},
 ): string {
   const answers = questionAnswers[approval.key]
+  const custom = customAnswers[approval.key] ?? {}
+  // The typed text is part of the signature: it decides whether submit is
+  // enabled, so a keystroke has to invalidate the turn's memo.
   const answerSig = approval.questions
-    .map(question => `${question.id}=${(answers?.[question.id] ?? []).join('|')}`)
+    .map(question => `${question.id}=${(answers?.[question.id] ?? []).join('|')}+${custom[question.id] ?? ''}`)
     .join(',')
   return `${approval.resolved || resolvedKeys.has(approval.key) ? 'r' : 'o'}:${answerSig}`
 }

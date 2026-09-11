@@ -278,15 +278,40 @@ test('typing joins the ticked options on a multi-select question', () => {
   assert.equal(customAnswer(approval.key, question), '还有别的')
 })
 
-test('clearing the box leaves the question unanswered again', () => {
+test('whitespace only is not an answer', () => {
   const { customAnswer, setCustomAnswer, canSubmitQuestion, answersFor } = useQuestionAnswers()
   const approval = makeApproval()
   const question = approval.questions[0]
 
   setCustomAnswer(approval.key, question, '   ')
-  assert.deepEqual(answersFor(approval.key)[question.id], [], 'whitespace is not an answer')
-  assert.equal(canSubmitQuestion(approval), false)
-  assert.equal(customAnswer(approval.key, question), '')
+  assert.equal(answersFor(approval.key)[question.id], undefined, 'whitespace is not submitted')
+  assert.equal(canSubmitQuestion(approval), false, 'and the question stays unanswered')
+  assert.equal(customAnswer(approval.key, question), '   ', 'but the box keeps what was typed')
+})
+
+test('a typed answer survives unticking a multi-select option', () => {
+  const { customAnswer, setCustomAnswer, toggleQuestionOption, answersFor } = useQuestionAnswers()
+  const approval = makeMultiApproval()
+  const question = approval.questions[0]
+
+  toggleQuestionOption(approval.key, question.id, 'a', true)
+  setCustomAnswer(approval.key, question, '另加一组')
+  toggleQuestionOption(approval.key, question.id, 'a', true)
+  assert.deepEqual(answersFor(approval.key)[question.id], ['另加一组'])
+  assert.equal(customAnswer(approval.key, question), '另加一组')
+})
+
+test('typing an option\'s own text is still a typed answer, not a tick', () => {
+  // The option id IS its label in this codebase, so inferring "is this typed?"
+  // from the id set read the text back as a tick and emptied the box.
+  const { customAnswer, setCustomAnswer, isQuestionOptionSelected, answersFor } = useQuestionAnswers()
+  const approval = makeApproval()
+  const question = approval.questions[0]
+
+  setCustomAnswer(approval.key, question, 'A')
+  assert.equal(customAnswer(approval.key, question), 'A', 'the box keeps the text')
+  assert.equal(isQuestionOptionSelected(approval.key, question.id, 'a'), false, 'no option was ticked')
+  assert.deepEqual(answersFor(approval.key)[question.id], ['A'])
 })
 
 test('a typed answer travels in the submitted payload', () => {
