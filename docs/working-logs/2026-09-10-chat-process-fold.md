@@ -35,14 +35,20 @@ the turn ends, and a tag would have to be rewritten on every delta.
 The split returns `null` — meaning "render untouched" — for a running turn, a
 turn with no assistant text, and work continuing past the last text.
 
-An approval card or an error inside the region does **not** stop the fold; it is
-reported as `pinned` and rendered beside the header. The first version refused
-to fold such a turn at all, to avoid re-ordering parts around a fold — and a
-live report showed what that cost: a session where three turns held an
-AskUserQuestion card rendered 114, 81 and 19 tool cards with no way to collapse
-them. What has to stay reachable is the part, not the turn, and pinning keeps
-both properties: folded, the card sits beside the header and stays clickable;
-expanded, the region replays in arrival order.
+An error inside the region does **not** stop the fold either; it is reported as
+`pinned` and rendered beside the header.
+
+An approval card folds with everything else. Two live reports shaped this. The
+first version refused to fold any turn holding a card, to avoid re-ordering
+parts around a fold — and a session where three turns held an AskUserQuestion
+card rendered 114, 81 and 19 tool cards with no way to collapse them. The second
+version pinned *unanswered* cards, which sounds safer and is worse: these cards
+are answered by replying in the next message, not by clicking, so
+`approval_resolved` is never emitted and `resolved` stays false forever. Pinning
+the unanswered card therefore meant never folding the turn at all — the original
+bug, wearing a rule. Nothing live is hidden by folding them: a card that could
+still be pending belongs to the newest turn, and the newest completed turn is
+never folded.
 
 The "work continuing past the last text" guard came out of a live report and is
 worth spelling out, because the shape it rejects looks like an answer at a
