@@ -849,6 +849,7 @@ const {
 const {
   questionAnswers,
   resolvedApprovalKeys,
+  customAnswers,
   customAnswer,
   setCustomAnswer,
   isQuestionOptionSelected,
@@ -1609,6 +1610,7 @@ function turnApprovalSignature(turn: TimelineTurn): string {
       approval,
       questionAnswers.value,
       resolvedApprovalKeys.value,
+      customAnswers.value,
     )};`
   }
   // isSending gates the option/submit disabled state inside the card, so a
