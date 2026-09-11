@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### fix: an approval card no longer blocks folding its turn
+
+- **Problem.** A turn holding an approval card was left entirely whole, on the
+  reasoning that folding would hide a control the user must click. In practice
+  that kept approval-heavy sessions unreadable: one card among hundreds of
+  steps blocked the fold, so three turns of a live session rendered 114, 81 and
+  19 process blocks respectively with no way to collapse them.
+- **Fix.** Approval cards fold with the rest of the record, and only an error
+  stays pinned — folding it would bury the reason a turn failed. Errors being
+  pinned rather than disqualifying is the point: `splitTurnProcess` now reports
+  `before` (the region in arrival order), `pinned` (what must stay visible) and
+  `delivery`, and refuses only a turn that is still running, never spoke, or
+  kept working past its last words.
+- **Why unanswered cards fold too.** Pinning unresolved cards was the first
+  attempt and it did not survive how cards are actually answered: the agent
+  asks, the tool returns the placeholder, and the user replies in the **next
+  message** rather than through the card. That reply is ordinary text, so
+  `approval_resolved` is never emitted and `resolved` stays false forever —
+  making "pin the unanswered card" mean "never fold this turn", which is the bug
+  being fixed here. A card that may still be waiting is not pinned — it can only
+  be folded once it is history, and the header names it so it does not disappear
+  silently.
+- **The header counts what it hides.** A card folded in with the process is
+  named in the fold header (`过程 · 12 个工具调用 · 1 张审批卡 · 2m`), because the
+  header is the only thing left on screen — a question the user may never have
+  answered must not vanish without a trace.
+- **Verified on the session that reported it:** its foldable turns render
+  `过程 · 73/50/11/16/15 个工具调用` (the session kept growing while this was
+  written, so the count moves) with zero thinking and tool cards, where three of
+  them previously showed 114, 81 and 19 uncollapsible blocks.
+
 ### fix: message actions become a Codex-style row under the message
 
 - **Problem.** Three defects in the same area, reported together. The hover

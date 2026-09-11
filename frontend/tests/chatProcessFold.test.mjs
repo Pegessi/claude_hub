@@ -93,7 +93,7 @@ test('an unfinished turn is never splittable', () => {
 test('a completed turn splits into working process and delivered answer', () => {
   const split = splitTurnProcess(completedTurn())
   assert.ok(split)
-  assert.deepEqual(split.process.map(p => p.kind), ['thinking', 'tool_group'])
+  assert.deepEqual(split.before.map(p => p.kind), ['thinking', 'tool_group'])
   assert.deepEqual(split.delivery.map(p => p.kind), ['text'])
   // The delivery is the LAST text part: narration before the answer is process.
   assert.equal(split.delivery[0].text, 'the answer')
@@ -109,7 +109,7 @@ test('intermediate narration folds with the process, not into the delivery', () 
     makeEvent(6, 'turn_completed', { status: 'completed' }),
   ])[0]
   const split = splitTurnProcess(turn)
-  assert.deepEqual(split.process.map(p => p.kind), ['text', 'tool_group'])
+  assert.deepEqual(split.before.map(p => p.kind), ['text', 'tool_group'])
   assert.deepEqual(split.delivery.map(p => p.text), ['the answer'])
 })
 
@@ -122,24 +122,79 @@ test('a turn with no delivered text is not splittable', () => {
   assert.equal(splitTurnProcess(turn), null)
 })
 
-test('a process holding an approval card is left whole', () => {
+test('an approval card folds with the rest of the record', () => {
+  // Pinning it did not survive contact with how cards are actually answered:
+  // the agent asks, the tool returns the placeholder, and the user replies in
+  // the NEXT message rather than through the card. That reply is ordinary text,
+  // so approval_resolved is never emitted and "pin the unanswered card" meant
+  // "never fold this turn" — the bug this fixes.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
-    makeEvent(2, 'approval_required', { tool_call_id: 'q1', kind: 'question', title: 'Pick' }),
-    makeEvent(3, 'text_delta', { text: 'the answer' }),
-    makeEvent(4, 'turn_completed', { status: 'completed' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'approval_required', { tool_call_id: 'q1', kind: 'question', title: 'Pick' }),
+    makeEvent(4, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} }),
+    makeEvent(5, 'tool_call_completed', { tool_call_id: 'c1', status: 'completed' }),
+    makeEvent(6, 'text_delta', { text: 'the answer' }),
+    makeEvent(7, 'turn_completed', { status: 'completed' }),
   ])[0]
-  assert.equal(splitTurnProcess(turn), null, 'folding would hide a card the user must click')
+  const split = splitTurnProcess(turn)
+  assert.ok(split, 'a card must not keep the whole working region on screen')
+  assert.deepEqual(split.pinned, [], 'approval cards fold with the process')
+  assert.deepEqual(split.before.map(p => p.kind), ['thinking', 'approval', 'tool_group'])
+
+  assert.deepEqual(
+    foldTurnParts(turn, false).map(p => p.kind),
+    ['process', 'text'],
+    'folded, only the answer shows',
+  )
+  assert.deepEqual(
+    foldTurnParts(turn, true).map(p => p.kind),
+    ['process', 'thinking', 'approval', 'tool_group', 'text'],
+    'expanded, the card is still in its place in the record',
+  )
 })
 
-test('a process holding an error is left whole', () => {
+test('an answered approval card folds away with the rest', () => {
+  // Cards fold whether or not they were answered — `resolved` is not a signal
+  // this can rely on (see the pinned-parts note above), and a card that could
+  // still be pending belongs to the newest turn, which never folds.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
-    makeEvent(2, 'error', { message: 'boom' }),
-    makeEvent(3, 'text_delta', { text: 'the answer' }),
-    makeEvent(4, 'turn_completed', { status: 'failed' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'approval_required', { tool_call_id: 'q1', kind: 'question', title: 'Pick' }),
+    makeEvent(4, 'approval_resolved', { tool_call_id: 'q1' }),
+    makeEvent(5, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} }),
+    makeEvent(6, 'tool_call_completed', { tool_call_id: 'c1', status: 'completed' }),
+    makeEvent(7, 'text_delta', { text: 'the answer' }),
+    makeEvent(8, 'turn_completed', { status: 'completed' }),
   ])[0]
-  assert.equal(splitTurnProcess(turn), null, 'folding would hide why the turn failed')
+  const split = splitTurnProcess(turn)
+  assert.ok(split)
+  assert.deepEqual(split.pinned, [], 'a card folds with the record, answered or not')
+  assert.deepEqual(
+    foldTurnParts(turn, false).map(p => p.kind),
+    ['process', 'text'],
+    'it folds away with the rest',
+  )
+  assert.deepEqual(
+    foldTurnParts(turn, true).map(p => p.kind),
+    ['process', 'thinking', 'approval', 'tool_group', 'text'],
+    'expanded, it is still in its place in the record',
+  )
+})
+
+test('an error stays visible instead of blocking the fold', () => {
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} }),
+    makeEvent(3, 'error', { message: 'boom' }),
+    makeEvent(4, 'text_delta', { text: 'the answer' }),
+    makeEvent(5, 'turn_completed', { status: 'failed' }),
+  ])[0]
+  const split = splitTurnProcess(turn)
+  assert.ok(split, 'an error must not keep the whole working region on screen')
+  assert.deepEqual(split.pinned.map(p => p.kind), ['error'])
+  assert.deepEqual(foldTurnParts(turn, false).map(p => p.kind), ['process', 'error', 'text'])
 })
 
 test('a turn cancelled mid-work has no delivered answer to fold around', () => {
@@ -200,8 +255,8 @@ test('a Codex plan segment is never mistaken for the delivered answer', () => {
   ])[0]
   const split = splitTurnProcess(turn)
   assert.ok(split)
-  assert.deepEqual(split.process.map(p => p.kind), ['text', 'tool_group'])
-  assert.equal(split.process[0].fromPlan, true)
+  assert.deepEqual(split.before.map(p => p.kind), ['text', 'tool_group'])
+  assert.equal(split.before[0].fromPlan, true)
   assert.equal(split.delivery[0].text, 'the answer')
 })
 
@@ -265,7 +320,7 @@ test('steps count actions, not render blocks', () => {
     makeEvent(8, 'turn_completed', { status: 'completed' }),
   ])[0]
   const split = splitTurnProcess(turn)
-  assert.equal(countProcessSteps(split.process), 2)
+  assert.equal(countProcessSteps(split.before), 2)
 })
 
 test('elapsed time is omitted when it cannot be trusted', () => {
@@ -284,7 +339,7 @@ test('the folded label reads as process, work done, and time taken', () => {
   const split = splitTurnProcess(turn)
   // 83s floors to "1m": the shared formatter is deliberately coarse so the
   // Chat timeline and the workspace progress timeline read the same way.
-  assert.equal(turnProcessLabel(turn, split.process), '过程 · 1 个工具调用 · 1m')
+  assert.equal(turnProcessLabel(turn, split.before), '过程 · 1 个工具调用 · 1m')
 
   const noTools = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
@@ -294,7 +349,7 @@ test('the folded label reads as process, work done, and time taken', () => {
       created_at: '2026-01-01T00:00:05Z',
     }),
   ])[0]
-  assert.equal(turnProcessLabel(noTools, splitTurnProcess(noTools).process), '过程 · 5s')
+  assert.equal(turnProcessLabel(noTools, splitTurnProcess(noTools).before), '过程 · 5s')
 })
 
 // ── foldTurnParts ───────────────────────────────────────────────────────
@@ -446,4 +501,34 @@ test('the sticky summary keeps its scrolling ancestor intact', () => {
   assert.ok(toolCard)
   assert.doesNotMatch(toolCard[0], /overflow: hidden/)
   assert.match(toolCard[0], /overflow: clip/)
+})
+
+
+test('the folded header says when a card is folded in with it', () => {
+  // The header is the only thing left on screen, so a card inside must not
+  // vanish without a trace.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'approval_required', { tool_call_id: 'q1', kind: 'question', title: 'Pick' }),
+    makeEvent(4, 'text_delta', { text: 'the answer' }),
+    makeEvent(5, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  const split = splitTurnProcess(turn)
+  const folded = foldTurnParts(turn, false)
+  assert.equal(folded[0].kind, 'process')
+  assert.match(folded[0].meta, /1 张审批卡/, 'the header must count the card inside')
+
+  const plain = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'hmm' }),
+    makeEvent(3, 'text_delta', { text: 'the answer' }),
+    makeEvent(4, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  assert.doesNotMatch(
+    foldTurnParts(plain, false)[0].meta,
+    /审批卡/,
+    'a turn without one must not claim to have one',
+  )
+  assert.ok(split)
 })
