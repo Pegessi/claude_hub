@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat: type your own answer into an approval card
+
+- **Problem.** The listed options are the agent's guess at the answer, not the
+  whole space of them. When none fitted there was no way to say so: the card
+  offered only the options it was given, and the submit button stayed disabled
+  until one of them was picked.
+- **Fix.** Every question now carries a free-text field under its options
+  (`其他（自己输入）`, or `其他（可多选，自己输入）` for a multi-select). A typed
+  answer is a selection like any other, not a parallel path: it satisfies the
+  completion check, travels in the same `ask_question_response` payload, and is
+  what the agent reads. On a single-select question it replaces any ticked
+  option, and ticking an option again clears it — one answer, not two. On a
+  multi-select it joins the ticked options. Blank input selects nothing, so an
+  emptied box leaves the question unanswered and the button disabled again
+  rather than submitting whitespace. Styled dashed so it reads as one more
+  choice in the set.
+
 ### fix: message actions become a Codex-style row under the message
 
 - **Problem.** Three defects in the same area, reported together. The hover

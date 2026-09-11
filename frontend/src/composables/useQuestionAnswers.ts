@@ -3,7 +3,7 @@ import {
   isQuestionAnswerComplete,
   type QuestionAnswerMap,
 } from '@/utils/chatQuestionResponse'
-import type { TimelineApproval } from '@/utils/agentStreamTimeline'
+import type { TimelineApproval, TimelineQuestion } from '@/utils/agentStreamTimeline'
 
 /**
  * Per-approval interaction state for AskUserQuestion / AskQuestion /
@@ -55,6 +55,42 @@ export function useQuestionAnswers() {
     questionAnswers.value = { ...questionAnswers.value, [approvalKey]: current }
   }
 
+  /**
+   * The free-text answer the user has typed for a question, or ``''``.
+   *
+   * A typed answer is stored as an ordinary selection, so everything
+   * downstream — the completion check, the response payload, the memo
+   * signature — treats it like any other answer. It is told apart on the way
+   * back out by not being one of the question's option ids.
+   */
+  function customAnswer(approvalKey: string, question: TimelineQuestion): string {
+    const selected = questionAnswers.value[approvalKey]?.[question.id] ?? []
+    const optionIds = new Set(question.options.map(option => option.id))
+    return selected.find(value => !optionIds.has(value)) ?? ''
+  }
+
+  /**
+   * Set (or clear) a question's free-text answer.
+   *
+   * A single-select question keeps only the typed answer; a multi-select keeps
+   * it alongside the options already ticked. Blank input clears it rather than
+   * selecting whitespace, so an empty box leaves the question unanswered and
+   * the submit button disabled.
+   */
+  function setCustomAnswer(
+    approvalKey: string,
+    question: TimelineQuestion,
+    text: string,
+  ): void {
+    const current = { ...(questionAnswers.value[approvalKey] ?? {}) }
+    const optionIds = new Set(question.options.map(option => option.id))
+    const ticked = (current[question.id] ?? []).filter(value => optionIds.has(value))
+    current[question.id] = text.trim()
+      ? (question.allowMultiple ? [...ticked, text] : [text])
+      : ticked
+    questionAnswers.value = { ...questionAnswers.value, [approvalKey]: current }
+  }
+
   function isApprovalResolved(approval: TimelineApproval): boolean {
     return approval.resolved || resolvedApprovalKeys.value.has(approval.key)
   }
@@ -80,6 +116,8 @@ export function useQuestionAnswers() {
   return {
     questionAnswers,
     resolvedApprovalKeys,
+    customAnswer,
+    setCustomAnswer,
     isQuestionOptionSelected,
     toggleQuestionOption,
     isApprovalResolved,

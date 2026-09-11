@@ -40,7 +40,7 @@ const bundled = `${questionJs}\n${composableJs}`
 const mod = await import(
   `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
 )
-const { useQuestionAnswers, approvalStateSignature } = mod
+const { useQuestionAnswers, approvalStateSignature, formatAskQuestionResponse } = mod
 
 function makeApproval(overrides = {}) {
   return {
@@ -231,4 +231,71 @@ test('approvalStateSignature distinguishes single-select replacement', () => {
   const a = approvalStateSignature(approval, { [approval.key]: { q1: ['a'] } }, new Set())
   const b = approvalStateSignature(approval, { [approval.key]: { q1: ['b'] } }, new Set())
   assert.notEqual(a, b)
+})
+
+
+// ── Free-text answers ───────────────────────────────────────────────────
+//
+// The listed options are the agent's guess at the answer, not the whole space
+// of them. A typed answer has to behave like any other selection or it would
+// be silently dropped: it must satisfy the completion check, survive a
+// multi-select, clear when blank, and travel in the same payload.
+
+test('a typed answer satisfies the completion check', () => {
+  const { customAnswer, setCustomAnswer, canSubmitQuestion } = useQuestionAnswers()
+  const approval = makeApproval()
+  assert.equal(canSubmitQuestion(approval), false, 'nothing chosen yet')
+
+  setCustomAnswer(approval.key, approval.questions[0], '第三个方案')
+  assert.equal(customAnswer(approval.key, approval.questions[0]), '第三个方案')
+  assert.equal(canSubmitQuestion(approval), true, 'the box being filled is an answer')
+})
+
+test('typing replaces a ticked option on a single-select question', () => {
+  const { customAnswer, setCustomAnswer, toggleQuestionOption, answersFor } = useQuestionAnswers()
+  const approval = makeApproval()
+  const question = approval.questions[0]
+
+  toggleQuestionOption(approval.key, question.id, 'a', false)
+  setCustomAnswer(approval.key, question, '都不是')
+  assert.deepEqual(answersFor(approval.key)[question.id], ['都不是'])
+  assert.equal(customAnswer(approval.key, question), '都不是')
+
+  // And picking an option again clears the typed answer: one answer, not two.
+  toggleQuestionOption(approval.key, question.id, 'a', false)
+  assert.deepEqual(answersFor(approval.key)[question.id], ['a'])
+  assert.equal(customAnswer(approval.key, question), '')
+})
+
+test('typing joins the ticked options on a multi-select question', () => {
+  const { customAnswer, setCustomAnswer, toggleQuestionOption, answersFor } = useQuestionAnswers()
+  const approval = makeMultiApproval()
+  const question = approval.questions[0]
+
+  toggleQuestionOption(approval.key, question.id, 'a', true)
+  setCustomAnswer(approval.key, question, '还有别的')
+  assert.deepEqual(answersFor(approval.key)[question.id], ['a', '还有别的'])
+  assert.equal(customAnswer(approval.key, question), '还有别的')
+})
+
+test('clearing the box leaves the question unanswered again', () => {
+  const { customAnswer, setCustomAnswer, canSubmitQuestion, answersFor } = useQuestionAnswers()
+  const approval = makeApproval()
+  const question = approval.questions[0]
+
+  setCustomAnswer(approval.key, question, '   ')
+  assert.deepEqual(answersFor(approval.key)[question.id], [], 'whitespace is not an answer')
+  assert.equal(canSubmitQuestion(approval), false)
+  assert.equal(customAnswer(approval.key, question), '')
+})
+
+test('a typed answer travels in the submitted payload', () => {
+  const { setCustomAnswer, answersFor } = useQuestionAnswers()
+  const approval = makeApproval()
+  setCustomAnswer(approval.key, approval.questions[0], 'C')
+  const text = formatAskQuestionResponse(answersFor(approval.key))
+  assert.deepEqual(JSON.parse(text), {
+    type: 'ask_question_response',
+    answers: [{ questionId: 'q1', selected: ['C'] }],
+  })
 })
