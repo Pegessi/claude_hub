@@ -1,6 +1,6 @@
 import type { AgentStreamEvent } from '@/types'
 import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
-import { formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
+import { formatClockTime, formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
 
 export interface TimelineTool {
   key: string
@@ -58,7 +58,12 @@ export type TimelinePart =
   // ``fromPlan`` marks Codex's plan stream: it renders exactly like any other
   // prose, but it is work rather than the agent's answer, so the fold must not
   // treat it as a delivery. See the fold helpers below.
-  | { kind: 'text'; key: string; text: string; fromPlan?: boolean }
+  //
+  // ``at`` is when this message began streaming — the timestamp the transcript
+  // shows beside the message's actions. Only text parts carry one: they are
+  // what the transcript presents per-message, while thinking and tool parts are
+  // folded into a process line that reports the turn's elapsed time instead.
+  | { kind: 'text'; key: string; text: string; at: string; fromPlan?: boolean }
   | { kind: 'tool'; key: string; tool: TimelineTool }
   | { kind: 'tool_group'; key: string; tools: TimelineTool[] }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
@@ -148,6 +153,7 @@ function appendTextPart(
   kind: 'thinking' | 'text',
   text: string,
   sequence: number,
+  at: string,
   fromPlan = false,
 ): void {
   if (!text) return
@@ -160,12 +166,14 @@ function appendTextPart(
     last.kind === kind &&
     (kind !== 'text' || (last.kind === 'text' && Boolean(last.fromPlan) === fromPlan))
   if (samePart) {
+    // Extending a message keeps its original ``at``: that is when the message
+    // started, which is what a transcript reports, not when it grew last.
     last.text += text
   } else if (kind === 'text') {
     turn.parts.push(
       fromPlan
-        ? { kind, key: `plan-${sequence}`, text, fromPlan: true }
-        : { kind, key: `text-${sequence}`, text },
+        ? { kind, key: `plan-${sequence}`, text, at, fromPlan: true }
+        : { kind, key: `text-${sequence}`, text, at },
     )
   } else {
     turn.parts.push({ kind, key: `thinking-${sequence}`, text })
@@ -252,10 +260,13 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
 
   switch (event.type) {
     case 'turn_started': {
-      // Recorded without touching ``mutated``: on its own a start timestamp
-      // changes nothing visible. It only feeds the folded process label, which
-      // is rendered for completed turns — and completion bumps the revision.
-      if (turn.startedAt === null) turn.startedAt = event.created_at
+      // Counts as a mutation: the message row renders this timestamp, so a turn
+      // whose only change is this field would otherwise keep a stale clock
+      // label behind ``v-memo``.
+      if (turn.startedAt === null) {
+        turn.startedAt = event.created_at
+        mutated = true
+      }
       const summary = payloadString(event, 'summary')
       if (turn.userText !== summary) {
         turn.userText = summary
@@ -304,7 +315,14 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       if (!text) break
       const chunks = state.textChunksByTurn.get(toolMapKey) ?? []
       if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
-      appendTextPart(turn, 'text', text, event.stream_sequence, event.payload.plan === true)
+      appendTextPart(
+        turn,
+        'text',
+        text,
+        event.stream_sequence,
+        event.created_at,
+        event.payload.plan === true,
+      )
       chunks.push(text)
       state.textChunksByTurn.set(toolMapKey, chunks)
       mutated = true
@@ -313,7 +331,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     case 'thinking_delta': {
       const text = payloadString(event, 'text')
       if (!text) break
-      appendTextPart(turn, 'thinking', text, event.stream_sequence)
+      appendTextPart(turn, 'thinking', text, event.stream_sequence, event.created_at)
       mutated = true
       break
     }
@@ -530,6 +548,36 @@ export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
     return null
   }
   return { process, delivery: turn.parts.slice(index) }
+}
+
+/** When the turn's last message began, or ``null`` when it never spoke.
+ *
+ *  What the turn's action row reports. Deliberately NOT routed through
+ *  ``splitTurnProcess``: that answers "can this turn be folded", which is also
+ *  false for a plain question-and-answer turn with no process to hide — the
+ *  most common shape there is. This asks a different question, "what was the
+ *  last thing it said", and every turn with a message has an answer. */
+export function deliveryAt(turn: TimelineTurn): string | null {
+  const index = deliveryIndex(turn.parts)
+  if (index < 0) return null
+  const part = turn.parts[index]
+  return part.kind === 'text' ? part.at : null
+}
+
+/** Clock label for the message that opened the turn — when it was sent.
+ *
+ *  Its own function rather than an inline ``formatClockTime(turn.startedAt)``
+ *  so the choice of *which* timestamp belongs to that row is a testable
+ *  decision rather than a string in a template. */
+export function messageClockLabel(turn: TimelineTurn): string {
+  return formatClockTime(turn.startedAt)
+}
+
+/** Clock label for a turn's action row: the last message's own time where the
+ *  turn has one, otherwise when the turn finished. ``''`` while a turn is still
+ *  running, so the caller renders no label rather than an empty one. */
+export function turnClockLabel(turn: TimelineTurn): string {
+  return formatClockTime(deliveryAt(turn) ?? turn.completedAt)
 }
 
 /** Count what the agent actually did, for the folded label.
