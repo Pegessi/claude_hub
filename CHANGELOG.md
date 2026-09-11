@@ -5,6 +5,35 @@
 
 ## Unreleased
 
+### fix: an answered question card stays answered
+
+- **Problem.** `approval_resolved` was never persisted in any real session —
+  every session on this machine had `approval_required` events and not one
+  resolved. Answering a card therefore left it looking unanswered after a
+  reload, and it could be submitted again as raw JSON. The cause is order of
+  events, not a race: Claude and Cursor have no blocking-question channel, so
+  the tool returns a placeholder, the turn **completes**, and only then does the
+  user answer. The tailer dropped its pending-card tracking at turn completion
+  ("a completed turn can no longer answer a pending card"), so the answer found
+  an empty set. In a live session the card and the turn end are three seconds
+  apart, so the window is missed every time.
+- **Fix.** Pending cards survive the turn that owns them. Each entry already
+  carries the card's own `turn_id`/`run_epoch`, so a late answer is stamped with
+  the turn that owns the card rather than whatever is running now — which is
+  what the resolved event needs to land on the right card. The claim that a
+  completed turn cannot answer a pending card is true for Codex, whose turn
+  blocks on the question; it is false for Claude and Cursor, and the tracking
+  now serves both.
+- **Tests.** New `test_native_claude_answer_after_turn_end_emits_approval_resolved`
+  follows the production order (card → turn completes → answer). The existing
+  resolution tests sent the answer with no `turn_completed` in between, which is
+  why they passed while no session ever recorded a resolution; the new test
+  fails on the old code with `timed out waiting for persisted APPROVAL_RESOLVED`.
+- **Not covered:** a backend restart between the card and the answer still loses
+  the in-memory tracking, so that answer would persist nothing. Recovering the
+  card from the durable stream needs the answer payload to identify which card
+  it answers, which it does not carry today.
+
 ### fix: an approval card no longer blocks folding its turn
 
 - **Problem.** A turn holding an approval card was left entirely whole, on the

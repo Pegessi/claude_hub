@@ -1068,9 +1068,17 @@ class SessionTailer:
                     )
                     continue
                 if is_turn_completed:
-                    # A completed turn can no longer answer a pending card;
-                    # drop any stale tracking so it cannot be resolved later.
-                    self._pending_approvals.clear()
+                    # Pending cards are deliberately NOT dropped here. A card
+                    # routinely outlives its turn: Claude and Cursor have no
+                    # blocking-question channel, so the tool returns a
+                    # placeholder, the agent ends the turn, and the user answers
+                    # the card afterwards. Clearing on completion meant that
+                    # answer found an empty set and no ``approval_resolved`` was
+                    # ever persisted — leaving an answered card looking
+                    # unanswered after a reload. Each entry carries the card's
+                    # own ``turn_id``/``run_epoch``, so a late answer is stamped
+                    # with the turn that owns the card, not whatever is running
+                    # now.
                     # Mark that the provider emitted a terminal completion for
                     # the active turn. At EOF we use this to decide whether a
                     # failed turn_completed must be synthesized.
