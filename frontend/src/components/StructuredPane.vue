@@ -1654,7 +1654,7 @@ function turnFoldSignature(turn: TimelineTurn): string {
   // this state; keep them on the cheap memoized path.
   if (!isTurnFoldable(turn)) return ''
   const split = splitTurnProcess(turn)
-  const label = split ? turnProcessLabel(turn, split.process) : ''
+  const label = split ? turnProcessLabel(turn, split.before) : ''
   return `${isProcessExpanded(turn) ? 'open' : 'folded'}|${label}`
 }
 
