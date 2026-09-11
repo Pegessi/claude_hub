@@ -170,7 +170,7 @@ test('an answered approval card folds away with the rest', () => {
   ])[0]
   const split = splitTurnProcess(turn)
   assert.ok(split)
-  assert.deepEqual(split.pinned, [], 'an answered card is not a pending control')
+  assert.deepEqual(split.pinned, [], 'a card folds with the record, answered or not')
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
     ['process', 'text'],

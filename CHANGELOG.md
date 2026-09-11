@@ -24,15 +24,17 @@
   message** rather than through the card. That reply is ordinary text, so
   `approval_resolved` is never emitted and `resolved` stays false forever —
   making "pin the unanswered card" mean "never fold this turn", which is the bug
-  being fixed here. Nothing live is hidden: a card that could still be pending
-  belongs to the newest turn, and the newest completed turn is never folded.
+  being fixed here. A card that may still be waiting is not pinned — it can only
+  be folded once it is history, and the header names it so it does not disappear
+  silently.
 - **The header counts what it hides.** A card folded in with the process is
   named in the fold header (`过程 · 12 个工具调用 · 1 张审批卡 · 2m`), because the
   header is the only thing left on screen — a question the user may never have
   answered must not vanish without a trace.
-- **Verified on the session that reported it:** its four foldable turns now
-  render `过程 · 73/50/11/16 个工具调用` with zero thinking and tool cards, where
-  three of them previously showed 114, 81 and 19 uncollapsible blocks.
+- **Verified on the session that reported it:** its foldable turns render
+  `过程 · 73/50/11/16/15 个工具调用` (the session kept growing while this was
+  written, so the count moves) with zero thinking and tool cards, where three of
+  them previously showed 114, 81 and 19 uncollapsible blocks.
 
 ### fix: message actions become a Codex-style row under the message
 
