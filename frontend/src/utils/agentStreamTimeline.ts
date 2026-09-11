@@ -491,10 +491,13 @@ export function groupEventsIntoTurns(events: AgentStreamEvent[]): TimelineTurn[]
 // structural and pure; where the fold state lives, and which turns default to
 // folded, is the renderer's decision (see ``StructuredPane``).
 
-/** A turn's parts, split into its working process and its delivered answer. */
+/** A turn's parts, split into its working region and its delivered answer. */
 export interface TurnProcessSplit {
-  /** Thinking, tool groups, and the narration between them. */
-  process: TimelinePart[]
+  /** The whole working region in arrival order — what the expanded view shows. */
+  before: TimelinePart[]
+  /** Members of ``before`` that stay visible even while folded: an approval
+   *  card the user still has to click, or the error explaining a failure. */
+  pinned: TimelinePart[]
   /** The delivered answer plus anything that arrived after it. */
   delivery: TimelinePart[]
 }
@@ -533,21 +536,34 @@ function isProcessPart(part: TimelinePart): boolean {
  *    would leave the tools and thinking on screen under a header claiming to
  *    have hidden them, because "the last text and everything after it" is only
  *    an answer when the turn actually stopped there;
- *  * the process region holds an approval card or an error — folding those
- *    would hide a control the user still has to click, or the reason the turn
- *    failed. Keeping such a turn whole is easier to reason about than
- *    re-ordering parts around a fold.
+ *  * work continues past its last text — a turn cancelled mid-tool, or one
+ *    that ran out of room, ends without a delivered answer. Folding there
+ *    would leave the tools and thinking on screen under a header claiming to
+ *    have hidden them, because "the last text and everything after it" is only
+ *    an answer when the turn actually stopped there.
+ *
+ *  An approval card or an error inside the working region does NOT stop the
+ *  fold: it is reported as ``pinned`` and stays visible beside the header.
+ *  Refusing to fold the whole turn instead left approval-heavy sessions with
+ *  hundreds of tool cards on screen, because one card among them blocked the
+ *  fold. What must stay reachable is the part, not the turn.
  */
 export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   if (!turn.completed) return null
   const index = deliveryIndex(turn.parts)
   if (index <= 0) return null
   if (turn.parts.slice(index + 1).some(isProcessPart)) return null
-  const process = turn.parts.slice(0, index)
-  if (process.some((part) => part.kind === 'approval' || part.kind === 'error')) {
-    return null
+  const before = turn.parts.slice(0, index)
+  return {
+    before,
+    pinned: before.filter(isPinnedPart),
+    delivery: turn.parts.slice(index),
   }
-  return { process, delivery: turn.parts.slice(index) }
+}
+
+/** Whether a part must stay visible while the working region is folded. */
+function isPinnedPart(part: TimelinePart): boolean {
+  return part.kind === 'approval' || part.kind === 'error'
 }
 
 /** When the turn's last message began, or ``null`` when it never spoke.
@@ -632,12 +648,15 @@ export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePa
   const header: TimelinePart = {
     kind: 'process',
     key: `process-${turn.key}`,
-    meta: turnProcessLabel(turn, split.process),
+    meta: turnProcessLabel(turn, split.before),
     expanded,
   }
+  // Expanded, the region replays in arrival order. Folded, the pinned parts
+  // stay on screen next to the header — a card the user must click, or the
+  // reason the turn failed, is not something a fold may hide.
   return expanded
-    ? [header, ...split.process, ...split.delivery]
-    : [header, ...split.delivery]
+    ? [header, ...split.before, ...split.delivery]
+    : [header, ...split.pinned, ...split.delivery]
 }
 
 /**

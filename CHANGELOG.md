@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### fix: an approval card no longer blocks folding its turn
+
+- **Problem.** A turn holding an approval card was left entirely whole, on the
+  reasoning that folding would hide a control the user must click. In practice
+  that kept approval-heavy sessions unreadable: one card among hundreds of
+  steps blocked the fold, so three turns of a live session rendered 114, 81 and
+  19 tool cards respectively with no way to collapse them.
+- **Fix.** The card is **pinned**, not a reason to refuse: folded, it renders
+  beside the fold header and stays clickable; expanded, it replays in its
+  original place in the working region. Errors get the same treatment — the
+  reason a turn failed must stay readable, but it need not keep the whole
+  region on screen. `splitTurnProcess` now reports `before` (the region in
+  arrival order), `pinned` (what must stay visible), and `delivery`, and only
+  refuses to fold a turn that is still running, never spoke, or continued
+  working past its last words.
+- **Verified on the session that reported it:** the three turns above now fold
+  to `过程 · 73/50/11 个工具调用`, render zero thinking and tool cards, and each
+  still shows its approval card (`visible: true`).
+
 ### fix: message actions become a Codex-style row under the message
 
 - **Problem.** Three defects in the same area, reported together. The hover
