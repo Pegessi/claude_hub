@@ -5,6 +5,38 @@
 
 ## Unreleased
 
+### feat: chat sessions get a sidebar, an archive, and a deep link
+
+- **Why now.** The Chat UI had nearly reached Codex on the conversation
+  itself, but three gaps kept sessions from being first-class objects:
+  navigation was a flat top tab bar with chat and terminal mixed together,
+  history had only hard delete with no way to browse what was set aside, and
+  there was no way to point another conversation at a session. All three are
+  the same problem — making a chat session *addressable* — so they ship
+  together.
+- **Sidebar.** A collapsible left sidebar lists chat sessions grouped by
+  working directory, with text search, per-group collapse, and a hover
+  shortcut to archive. Clicking a session loads it into the active pane. The
+  collapse state persists across reloads; terminal tabs never appear, and the
+  sidebar hides on mobile where width is scarce.
+- **Archive.** Archiving soft-deletes a session: it releases the ttyd, tmux
+  and agent resources (the expensive part) but keeps the JSONL history (the
+  cheap part) — the inverse of a terminal tab's cost structure. A dedicated
+  drawer, opened from the "Archived (N)" button at the sidebar's foot (the
+  entry point that was missing), lists archived sessions and offers Restore
+  plus a two-step permanent delete. Restoring cold-starts the session back
+  into a pane.
+- **Deep link.** "Copy Link" in the tab menu copies a `?tab=<id>` URL.
+  Opening it loads that session, auto-restoring it from the archive if
+  needed; a link to a session that no longer exists toasts and cleans the
+  URL. Browser back and forward re-resolve the link, while switching tabs
+  inside the app does not touch history.
+- **Tests.** New unit tests cover `groupChatsByCwd` and `cwdLabel`,
+  `buildTabLink`/`parseTabDeepLink`, and `writeClipboard` (both the
+  `navigator.clipboard` path and the `execCommand` fallback). The
+  `forkFromTurn` test, which transpiles the real store, now resolves the
+  store's new `chatGroups` import the same way it resolves `pinia` and `vue`.
+
 ### fix: an answered question card stays answered
 
 - **Problem.** `approval_resolved` was never persisted in any real session —
