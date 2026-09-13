@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### feat: mobile gets a slide-out session drawer
+
+- **Why now.** On mobile the desktop sidebar is hidden, which left phone
+  users with no session navigation and no way to open the archive browser —
+  the archive itself and deep links already worked, they just had no entry
+  point. This mirrors the Paseo/Codex mobile pattern of a slide-out session
+  list.
+- **Drawer.** A "Chats" item in the mobile app menu (⋯) opens a left
+  slide-out drawer that lists chat sessions grouped by working directory —
+  reusing the same `chatTabsByCwd` grouping as the desktop sidebar — with
+  text search and per-group collapse. Selecting a session loads it into the
+  active pane and closes the drawer; the backdrop and Esc also close it.
+- **Archive entry.** The drawer's "Archived (N)" footer opens the existing
+  archive panel above the drawer, closing the navigation gap. The archived
+  count is now fetched on mount so it is accurate from first paint.
+- **Tests.** A new `mobileDrawer` test guards the specific bugs caught in
+  review: the backdrop uses `@click.self` so panel interactions don't close
+  it, the empty state is gated on having no groups, the backdrop and panel
+  are siblings so the slide leave animation fires, and the filter resets on
+  each open.
+
 ### feat: chat sessions get a sidebar, an archive, and a deep link
 
 - **Why now.** The Chat UI had nearly reached Codex on the conversation
