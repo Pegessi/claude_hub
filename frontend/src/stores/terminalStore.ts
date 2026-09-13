@@ -104,6 +104,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   const sidebarCollapsed = ref<boolean>(
     localStorage.getItem(STORAGE_KEY_SIDEBAR) === '1'
   )
+  // Mobile slide-out session drawer visibility. Not persisted — it defaults to
+  // closed on load. Set directly from components (TabBar opens, App closes).
+  const mobileDrawerOpen = ref(false)
   // Soft-deleted tabs. Kept separately from `tabs` (which only holds active
   // tabs) so the archive browser can list them without polluting the grid.
   const archivedTabs = ref<TerminalTab[]>([])
@@ -625,6 +628,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     activePane,
     activePaneIsChat,
     sidebarCollapsed,
+    mobileDrawerOpen,
     archivedTabs,
     isLoadingArchived,
     fetchTabs,

@@ -151,6 +151,11 @@
         :open="archivePanelOpen"
         @close="archivePanelOpen = false"
       />
+      <MobileSessionDrawer
+        :open="store.mobileDrawerOpen"
+        @close="store.mobileDrawerOpen = false"
+        @open-archive="archivePanelOpen = true; store.mobileDrawerOpen = false"
+      />
       <ScheduledTasksPanel
         :visible="showScheduledTasks"
         @close="showScheduledTasks = false"
@@ -169,6 +174,7 @@ import MobileControls from '@/components/MobileControls.vue'
 import AgentWorkspaceView from '@/components/AgentWorkspaceView.vue'
 import ChatSidebar from '@/components/ChatSidebar.vue'
 import ArchivedSessionsPanel from '@/components/ArchivedSessionsPanel.vue'
+import MobileSessionDrawer from '@/components/MobileSessionDrawer.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
 import ScheduledTasksPanel from '@/components/ScheduledTasksPanel.vue'
 import LoginView from '@/views/LoginView.vue'
