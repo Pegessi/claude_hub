@@ -737,7 +737,7 @@ import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { writeClipboard } from '@/utils/clipboard'
-import { buildTabLink } from '@/utils/deepLink'
+import { buildTabShareText } from '@/utils/deepLink'
 import type { AppMode, RemoteProfile, TerminalAgentStatus, TerminalTab } from '@/types'
 import type { AgentRuntimeStatus, AgentType, SessionKind, SwitchEnvRequest } from '@/types'
 
@@ -1178,7 +1178,7 @@ async function handleTabArchive(tabId: string) {
 
 async function handleCopyTabLink(tabId: string) {
   try {
-    await writeClipboard(buildTabLink(tabId))
+    await writeClipboard(buildTabShareText(tabId))
     store.pushNotification({
       type: 'success',
       message: 'Link copied',

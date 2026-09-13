@@ -5,6 +5,29 @@
 
 ## Unreleased
 
+### feat: copy link teaches an agent how to read the conversation
+
+- **Why now.** "Copy Link" produced a bare `?tab=<id>` URL. A human opening it
+  in a browser is fine, but the link's other audience is an AI agent in
+  another session — and handed just the URL, an agent has no obvious way to
+  resolve it to the conversation. The transcript endpoint already existed
+  (`GET /api/tabs/{id}/stream/events`, paged JSON); the gap was discoverability.
+- **Hint in the copied text.** Copy Link now writes the clean URL on the first
+  line (so it stays clickable and paste-able into a browser) followed by a
+  short hint pointing an agent at the `stream/events` endpoint and its paging
+  convention. The hint travels with the link, covers every agent type, and
+  costs nothing until a link is actually copied.
+- **Review fixes.** The same change ships the two MAJORs the multi-agent review
+  found: `ensure_tab_running` now refuses to restart an archived tab (terminal
+  WebSocket / proxy iframe / reconnect can no longer silently undo an archive
+  and leave a hidden live process), and `unarchiveTab` returns a boolean so the
+  deep-link handler only shows "Restored archived session" on real success —
+  a failed restore no longer toasts a contradictory confirmation.
+- **Tests.** New `buildTabShareText` tests cover the first-line URL, the events
+  endpoint hint, and tab-id encoding; a backend test pins the archived-tab
+  guard in `ensure_tab_running`; and a structural test guards the
+  `unarchiveTab` boolean contract and the `if (restored)` toast gate.
+
 ### feat: mobile gets a slide-out session drawer
 
 - **Why now.** On mobile the desktop sidebar is hidden, which left phone

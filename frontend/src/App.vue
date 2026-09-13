@@ -441,12 +441,17 @@ async function handleDeepLink() {
   // Not active — check the archive before giving up.
   await store.fetchArchivedTabs()
   if (store.archivedTabs.some(tab => tab.id === tabId)) {
-    await store.unarchiveTab(tabId)
-    store.pushNotification({
-      type: 'success',
-      message: 'Restored archived session',
-      autoDismissMs: 4000,
-    })
+    const restored = await store.unarchiveTab(tabId)
+    // unarchiveTab surfaces its own error toast on failure; only confirm
+    // success here so a failed restore doesn't show a contradictory
+    // "Restored archived session" notification.
+    if (restored) {
+      store.pushNotification({
+        type: 'success',
+        message: 'Restored archived session',
+        autoDismissMs: 4000,
+      })
+    }
     return
   }
 

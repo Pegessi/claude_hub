@@ -18,3 +18,23 @@ export function buildTabLink(tabId: string): string {
 export function parseTabDeepLink(search: string): string | null {
   return new URLSearchParams(search).get('tab')
 }
+
+/**
+ * Build the share text for a tab: the clean deep link on the first line (so it
+ * stays clickable and paste-able into a browser), followed by a short hint that
+ * teaches an AI agent how to resolve the link to the conversation.
+ *
+ * The hint points at the existing GET /api/tabs/{id}/stream/events endpoint,
+ * which returns the conversation as paged JSON.
+ */
+export function buildTabShareText(tabId: string): string {
+  const link = buildTabLink(tabId)
+  const eventsUrl = `${window.location.origin}/api/tabs/${encodeURIComponent(tabId)}/stream/events?since_sequence=-1&limit=5000`
+  return [
+    link,
+    '',
+    'Claude Hub deep link. To read this conversation, fetch:',
+    `  ${eventsUrl}`,
+    '(authenticated GET; returns paged JSON — follow next_sequence until has_more=false)',
+  ].join('\n')
+}

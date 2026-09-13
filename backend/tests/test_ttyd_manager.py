@@ -2186,6 +2186,31 @@ async def test_ensure_tab_running_reuses_existing_listener(monkeypatch: MonkeyPa
     assert tab.is_active is True
 
 
+@pytest.mark.asyncio
+async def test_ensure_tab_running_skips_archived_tab(monkeypatch: MonkeyPatch) -> None:
+    """Archived tabs must not be silently restarted by terminal access."""
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._start_locks = {}
+    process = TTYDProcess(
+        tab_id="tab-archived",
+        port=12355,
+        name="Archived Tab",
+        agent_type=AgentType.CLAUDE,
+        archived=True,
+    )
+    manager.processes = {process.tab_id: process}
+
+    async def fail_start(self: TTYDProcess) -> None:
+        raise AssertionError("start must not be called for an archived tab")
+
+    monkeypatch.setattr(TTYDProcess, "start", fail_start)
+
+    tab = await manager.ensure_tab_running(process.tab_id)
+
+    assert tab is None
+    assert process.is_active is False
+
+
 # --- Reboot recovery (resume prior conversation on machine restart) ---------
 
 

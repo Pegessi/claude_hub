@@ -504,8 +504,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
-  // Restore an archived tab and load it into the active pane.
-  async function unarchiveTab(tabId: string) {
+  // Restore an archived tab and load it into the active pane. Returns true on
+  // success, false on failure (callers can gate success feedback on it).
+  async function unarchiveTab(tabId: string): Promise<boolean> {
     isLoading.value = true
     try {
       const response = await fetch(`${API_BASE}/tabs/${tabId}/unarchive`, {
@@ -515,8 +516,10 @@ export const useTerminalStore = defineStore('terminal', () => {
       await fetchTabs()
       setActiveTab(tabId)
       void fetchArchivedTabs()
+      return true
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Unknown error')
+      return false
     } finally {
       isLoading.value = false
     }
