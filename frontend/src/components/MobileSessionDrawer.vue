@@ -5,132 +5,131 @@
         v-if="open"
         class="msd-backdrop"
         @click.self="emit('close')"
+      />
+    </Transition>
+    <Transition name="msd-slide">
+      <div
+        v-if="open"
+        class="msd-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Sessions"
       >
-        <Transition
-          name="msd-slide"
-          appear
-        >
-          <div
-            class="msd-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Sessions"
+        <div class="msd-header">
+          <h2 class="msd-title">
+            Sessions
+          </h2>
+          <button
+            type="button"
+            class="msd-close"
+            aria-label="Close"
+            @click="emit('close')"
           >
-            <div class="msd-header">
-              <h2 class="msd-title">
-                Sessions
-              </h2>
-              <button
-                type="button"
-                class="msd-close"
-                aria-label="Close"
-                @click="emit('close')"
-              >
-                ×
-              </button>
-            </div>
+            ×
+          </button>
+        </div>
 
-            <div class="msd-search">
+        <div class="msd-search">
+          <svg
+            viewBox="0 0 16 16"
+            width="13"
+            height="13"
+            aria-hidden="true"
+          >
+            <path
+              fill="currentColor"
+              d="M11.4 10.6a5.5 5.5 0 1 0-.8.8l3 3 .8-.8-3-3zM7 11.5a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"
+            />
+          </svg>
+          <input
+            v-model="filterText"
+            type="text"
+            class="msd-search-input"
+            placeholder="Filter chats..."
+            aria-label="Filter chats"
+          >
+        </div>
+
+        <div class="msd-groups">
+          <div
+            v-for="group in filteredGroups"
+            :key="group.cwd"
+            class="msd-group"
+          >
+            <button
+              type="button"
+              class="msd-group-header"
+              :aria-expanded="!collapsedGroups.has(group.cwd)"
+              :aria-controls="'msd-group-' + group.cwd"
+              @click="toggleGroup(group.cwd)"
+            >
               <svg
                 viewBox="0 0 16 16"
-                width="13"
-                height="13"
+                width="14"
+                height="14"
                 aria-hidden="true"
               >
                 <path
                   fill="currentColor"
-                  d="M11.4 10.6a5.5 5.5 0 1 0-.8.8l3 3 .8-.8-3-3zM7 11.5a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"
+                  d="M1.5 3.5v9h13v-7h-6l-1.5-2h-5.5zm1 1h3.7l1.5 2h5.3v5h-10.5v-7z"
                 />
               </svg>
-              <input
-                v-model="filterText"
-                type="text"
-                class="msd-search-input"
-                placeholder="Filter chats..."
-                aria-label="Filter chats"
+              <span
+                class="msd-group-label"
+                :title="group.cwd"
+              >{{ cwdLabel(group.cwd) }}</span>
+              <span class="msd-group-count">{{ group.tabs.length }}</span>
+              <svg
+                class="msd-group-chevron"
+                :class="{ collapsed: collapsedGroups.has(group.cwd) }"
+                viewBox="0 0 16 16"
+                width="12"
+                height="12"
+                aria-hidden="true"
               >
-            </div>
+                <path
+                  fill="currentColor"
+                  d="M4.5 6 8 9.5 11.5 6l.9.9L8 11.3 3.6 6.9z"
+                />
+              </svg>
+            </button>
 
-            <div class="msd-groups">
-              <div
-                v-for="group in filteredGroups"
-                :key="group.cwd"
-                class="msd-group"
-              >
-                <button
-                  type="button"
-                  class="msd-group-header"
-                  :aria-expanded="!collapsedGroups.has(group.cwd)"
-                  @click="toggleGroup(group.cwd)"
-                >
-                  <svg
-                    viewBox="0 0 16 16"
-                    width="14"
-                    height="14"
-                    aria-hidden="true"
-                  >
-                    <path
-                      fill="currentColor"
-                      d="M1.5 3.5v9h13v-7h-6l-1.5-2h-5.5zm1 1h3.7l1.5 2h5.3v5h-10.5v-7z"
-                    />
-                  </svg>
-                  <span
-                    class="msd-group-label"
-                    :title="group.cwd"
-                  >{{ cwdLabel(group.cwd) }}</span>
-                  <span class="msd-group-count">{{ group.tabs.length }}</span>
-                  <svg
-                    class="msd-group-chevron"
-                    :class="{ collapsed: collapsedGroups.has(group.cwd) }"
-                    viewBox="0 0 16 16"
-                    width="12"
-                    height="12"
-                    aria-hidden="true"
-                  >
-                    <path
-                      fill="currentColor"
-                      d="M4.5 6 8 9.5 11.5 6l.9.9L8 11.3 3.6 6.9z"
-                    />
-                  </svg>
-                </button>
-
-                <div
-                  v-if="!collapsedGroups.has(group.cwd)"
-                  class="msd-group-items"
-                >
-                  <button
-                    v-for="tab in group.tabs"
-                    :key="tab.id"
-                    type="button"
-                    class="msd-item"
-                    :class="{ active: tab.id === activeTabId }"
-                    @click="selectTab(tab.id)"
-                  >
-                    <span class="msd-item-name">{{ tab.name || 'Untitled' }}</span>
-                    <span class="msd-item-time">{{ relativeTime(tab.created_at) }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div
-                v-if="filteredGroups.length === 0"
-                class="msd-empty"
-              >
-                {{ filterText ? 'No matching chats' : 'No chat sessions yet' }}
-              </div>
-            </div>
-
-            <div class="msd-footer">
+            <div
+              v-if="!collapsedGroups.has(group.cwd)"
+              :id="'msd-group-' + group.cwd"
+              class="msd-group-items"
+            >
               <button
+                v-for="tab in group.tabs"
+                :key="tab.id"
                 type="button"
-                class="msd-archived-link"
-                @click="openArchive"
+                class="msd-item"
+                :class="{ active: tab.id === activeTabId }"
+                @click="selectTab(tab.id)"
               >
-                Archived ({{ archivedTabs.length }})
+                <span class="msd-item-name">{{ tab.name || 'Untitled' }}</span>
+                <span class="msd-item-time">{{ relativeTime(tab.created_at) }}</span>
               </button>
             </div>
           </div>
-        </Transition>
+
+          <div
+            v-if="filteredGroups.length === 0"
+            class="msd-empty"
+          >
+            {{ filterText ? 'No matching chats' : 'No chat sessions yet' }}
+          </div>
+        </div>
+
+        <div class="msd-footer">
+          <button
+            type="button"
+            class="msd-archived-link"
+            @click="openArchive"
+          >
+            Archived ({{ archivedTabs.length }})
+          </button>
+        </div>
       </div>
     </Transition>
   </Teleport>
@@ -202,6 +201,7 @@ watch(
   () => props.open,
   isOpen => {
     if (isOpen) {
+      filterText.value = ''
       window.addEventListener('keydown', handleKeydown)
     } else {
       window.removeEventListener('keydown', handleKeydown)
@@ -219,7 +219,7 @@ onUnmounted(() => {
   position: fixed;
   inset: 0;
   background: var(--ch-color-overlay);
-  z-index: 850;
+  z-index: 849;
 }
 
 .msd-panel {
@@ -256,8 +256,6 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
   min-width: 44px;
   min-height: 44px;
   border: none;
