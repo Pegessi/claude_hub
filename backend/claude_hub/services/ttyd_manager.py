@@ -3766,6 +3766,13 @@ class TTYDManager:
         process = self.processes.get(tab_id)
         if not process:
             return None
+        if process.archived:
+            # Archived tabs must not be silently restarted by terminal access
+            # (WebSocket / proxy iframe / reconnect) — that would undo the
+            # archive and leave a hidden live process still flagged archived.
+            # Deep-link restore goes through unarchive_tab, which clears the
+            # flag before calling this method.
+            return None
 
         lock = self._start_locks.setdefault(tab_id, asyncio.Lock())
         async with lock:
