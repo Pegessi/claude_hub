@@ -464,6 +464,7 @@ onMounted(async () => {
   await authStore.checkAuth()
   if (!authStore.authEnabled || !authStore.authRequired || authStore.isAuthenticated) {
     await store.fetchTabs()
+    void store.fetchArchivedTabs()
     await handleDeepLink()
   }
   // Set up mobile viewport sync
