@@ -135,7 +135,10 @@
           </div>
         </div>
 
-        <div class="chat-sidebar__empty">
+        <div
+          v-if="filteredGroups.length === 0"
+          class="chat-sidebar__empty"
+        >
           {{ filterText ? 'No matching chats' : 'No chat sessions yet' }}
         </div>
       </div>

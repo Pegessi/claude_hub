@@ -4,7 +4,7 @@
       <div
         v-if="open"
         class="msd-backdrop"
-        @click="emit('close')"
+        @click.self="emit('close')"
       >
         <Transition
           name="msd-slide"
@@ -44,10 +44,10 @@
               </svg>
               <input
                 v-model="filterText"
-                type="search"
+                type="text"
                 class="msd-search-input"
-                placeholder="Search chats…"
-                aria-label="Search chats"
+                placeholder="Filter chats..."
+                aria-label="Filter chats"
               >
             </div>
 
@@ -112,7 +112,10 @@
                 </div>
               </div>
 
-              <div class="msd-empty">
+              <div
+                v-if="filteredGroups.length === 0"
+                class="msd-empty"
+              >
                 {{ filterText ? 'No matching chats' : 'No chat sessions yet' }}
               </div>
             </div>
@@ -188,7 +191,6 @@ function selectTab(id: string) {
 
 function openArchive() {
   emit('open-archive')
-  emit('close')
 }
 
 function handleKeydown(event: KeyboardEvent) {
@@ -216,7 +218,7 @@ onUnmounted(() => {
 .msd-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--ch-color-overlay);
   z-index: 850;
 }
 
@@ -230,7 +232,7 @@ onUnmounted(() => {
   background: var(--ch-color-surface, #fff);
   display: flex;
   flex-direction: column;
-  box-shadow: var(--ch-shadow-popover);
+  box-shadow: var(--ch-shadow-soft);
 }
 
 /* Header */
@@ -256,6 +258,8 @@ onUnmounted(() => {
   justify-content: center;
   width: 32px;
   height: 32px;
+  min-width: 44px;
+  min-height: 44px;
   border: none;
   border-radius: var(--ch-radius-md);
   background: transparent;
