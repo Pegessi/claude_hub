@@ -204,6 +204,13 @@
             <span>Agent Workspace</span>
             <strong v-if="mode === 'workspace'">Current</strong>
           </button>
+          <button
+            type="button"
+            class="mobile-app-menu-item"
+            @click="openMobileDrawer"
+          >
+            Chats
+          </button>
           <NetworkAccessMenu variant="menu" />
           <button
             type="button"
@@ -1276,6 +1283,11 @@ function closeMobileAppMenu() {
   if (mobileAppMenuRef.value) {
     mobileAppMenuRef.value.open = false
   }
+}
+
+function openMobileDrawer() {
+  store.mobileDrawerOpen = true
+  closeMobileAppMenu()
 }
 
 function setAppMode(nextMode: AppMode) {
