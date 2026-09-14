@@ -328,6 +328,17 @@ def _is_local_port_available(port: int) -> bool:
     return True
 
 
+def _parse_optional_iso(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp, tolerating None / empty / malformed input."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        logger.warning("Failed to parse ISO timestamp %r; treating as None", value)
+        return None
+
+
 def _tmux_session_name(tab_id: str) -> str:
     return f"{TMUX_SESSION_PREFIX}{tab_id[:8]}"
 
@@ -1397,6 +1408,8 @@ class TTYDProcess:
         chat_mode: ChatMode = ChatMode.DEFAULT,
         forked_from_tab_id: Optional[str] = None,
         forked_from_ordinal: Optional[int] = None,
+        archived: bool = False,
+        archived_at: Optional[datetime] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -1439,6 +1452,11 @@ class TTYDProcess:
         self.process: Optional[asyncio.subprocess.Process] = None
         self.created_at = created_at or datetime.now()
         self.is_active = False
+        # Soft-delete state. Archived tabs keep their JSONL history but have
+        # no live runtime; ``archived_at`` is set once at archive time and
+        # drives the archived-browser sort order.
+        self.archived: bool = bool(archived)
+        self.archived_at: Optional[datetime] = archived_at
         self.tmux_session = _tmux_session_name(tab_id)
         # Stable per-tab agent conversation id. Pinned at first launch via the
         # agent CLI's --session-id flag (for agents that support it) or
@@ -2944,6 +2962,8 @@ asyncio.run(_main())
             "cursor_transcript_schema": self.cursor_transcript_schema,
             "forked_from_tab_id": self.forked_from_tab_id,
             "forked_from_ordinal": self.forked_from_ordinal,
+            "archived": bool(self.archived),
+            "archived_at": self.archived_at.isoformat() if self.archived_at else None,
         }
 
     def to_schema(self) -> TerminalTab:
@@ -2976,6 +2996,8 @@ asyncio.run(_main())
             cursor_transcript_schema=self.cursor_transcript_schema,
             forked_from_tab_id=self.forked_from_tab_id,
             forked_from_ordinal=self.forked_from_ordinal,
+            archived=self.archived,
+            archived_at=self.archived_at,
         )
 
 
@@ -3126,6 +3148,8 @@ class TTYDManager:
                             cursor_transcript_schema=tab_data.get("cursor_transcript_schema"),
                             forked_from_tab_id=tab_data.get("forked_from_tab_id"),
                             forked_from_ordinal=tab_data.get("forked_from_ordinal"),
+                            archived=tab_data.get("archived", False),
+                            archived_at=_parse_optional_iso(tab_data.get("archived_at")),
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
@@ -3663,6 +3687,75 @@ class TTYDManager:
             logger.exception("Failed to discard structured stream for tab %s", tab_id)
         return True
 
+    async def archive_tab(self, tab_id: str) -> Optional[TerminalTab]:
+        """Soft-delete a tab: release runtime resources but keep its history.
+
+        Sets the archived flag, then stops the ttyd process, kills the tmux
+        session, and stops the agent stream tailer (which terminates any
+        persistent provider transport like the Codex app-server). The JSONL
+        event log and attachments are NOT cleared, so the tab can later be
+        restored via ``unarchive_tab``. The tab id stays in the order list so
+        restore preserves its position.
+        """
+        process = self.processes.get(tab_id)
+        if not process:
+            return None
+        if not process.archived:
+            process.archived = True
+            process.archived_at = datetime.now()
+        logger.warning(
+            "Archiving tab %s (%s); releasing runtime, keeping history",
+            tab_id,
+            process.name,
+        )
+        await process.stop(kill_tmux=True)
+        # Stop the tailer + provider transport without discarding the JSONL.
+        # ``stop_session_stream`` (unlike ``discard_session_stream``) leaves
+        # the on-disk event log and attachment store intact for restore.
+        try:
+            from .agent_stream.tailer import stop_session_stream
+
+            await stop_session_stream(f"terminal-tab-{tab_id}")
+        except Exception:
+            logger.exception("Failed to stop stream tailer for archived tab %s", tab_id)
+        process.is_active = False
+        self._save_state()
+        return process.to_schema()
+
+    async def unarchive_tab(self, tab_id: str) -> Optional[TerminalTab]:
+        """Restore an archived tab: clear the flag and best-effort restart it.
+
+        The runtime is brought back lazily — ``ensure_tab_running`` is tried
+        once but failures are swallowed, since opening the tab will retry the
+        cold-recovery path anyway.
+        """
+        process = self.processes.get(tab_id)
+        if not process:
+            return None
+        if process.archived:
+            process.archived = False
+            process.archived_at = None
+        logger.info("Unarchiving tab %s (%s)", tab_id, process.name)
+        self._save_state()
+        try:
+            await self.ensure_tab_running(tab_id)
+        except Exception:
+            logger.exception(
+                "Best-effort restart after unarchive failed for tab %s; "
+                "cold recovery will retry on open",
+                tab_id,
+            )
+        return process.to_schema()
+
+    def list_archived_tabs(self) -> list[TerminalTab]:
+        """List archived tabs, most recently archived first."""
+        archived = [p for p in self.processes.values() if p.archived]
+        archived.sort(
+            key=lambda p: p.archived_at or datetime.min,
+            reverse=True,
+        )
+        return [p.to_schema() for p in archived]
+
     def get_tab(self, tab_id: str) -> Optional[TerminalTab]:
         if tab_id not in self.processes:
             return None
@@ -3672,6 +3765,13 @@ class TTYDManager:
         """Ensure the tab has a live ttyd listener while preserving tmux state."""
         process = self.processes.get(tab_id)
         if not process:
+            return None
+        if process.archived:
+            # Archived tabs must not be silently restarted by terminal access
+            # (WebSocket / proxy iframe / reconnect) — that would undo the
+            # archive and leave a hidden live process still flagged archived.
+            # Deep-link restore goes through unarchive_tab, which clears the
+            # flag before calling this method.
             return None
 
         lock = self._start_locks.setdefault(tab_id, asyncio.Lock())
@@ -3825,11 +3925,11 @@ class TTYDManager:
         ordered_tabs: list[TerminalTab] = []
         # First add tabs in the saved order
         for tab_id in self._tab_order:
-            if tab_id in self.processes:
+            if tab_id in self.processes and not self.processes[tab_id].archived:
                 ordered_tabs.append(self.processes[tab_id].to_schema())
         # Then add any tabs not in the order list
         for process in self.processes.values():
-            if process.tab_id not in self._tab_order:
+            if process.tab_id not in self._tab_order and not process.archived:
                 ordered_tabs.append(process.to_schema())
         logger.info(f"list_tabs returning: {[t.name for t in ordered_tabs]}")
         return ordered_tabs
@@ -4832,6 +4932,11 @@ class TTYDManager:
         cold_non_codex: List[TTYDProcess] = []
         cold_codex: List[TTYDProcess] = []
         for p, ex in zip(processes, exists):
+            if p.archived:
+                # Archived tabs stay stopped on startup; restored on demand
+                # via unarchive / deep link.
+                p.is_active = False
+                continue
             if ex:
                 hot.append(p)
             elif hot_restart:

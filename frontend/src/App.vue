@@ -125,22 +125,37 @@
         v-show="mode === 'terminal'"
         class="terminal-mode-shell"
       >
-        <TabBar />
-        <LayoutSelector />
-        <div
-          v-if="tabs.length === 0"
-          class="empty-state"
-        >
-          <h2>No Terminal Tabs</h2>
-          <p>Click the + button to create a new terminal tab</p>
+        <ChatSidebar
+          class="terminal-sidebar"
+          @open-archive="archivePanelOpen = true"
+        />
+        <div class="terminal-main-column">
+          <TabBar />
+          <LayoutSelector />
+          <div
+            v-if="tabs.length === 0"
+            class="empty-state"
+          >
+            <h2>No Terminal Tabs</h2>
+            <p>Click the + button to create a new terminal tab</p>
+          </div>
+          <TerminalGridView v-else />
+          <!-- The floating keyboard ball only injects raw PTY keys, so it has no
+               purpose (and just clutters the chat surface) when the active pane
+               is a native structured Chat session. -->
+          <MobileControls v-if="!activePaneIsChat" />
         </div>
-        <TerminalGridView v-else />
-        <!-- The floating keyboard ball only injects raw PTY keys, so it has no
-             purpose (and just clutters the chat surface) when the active pane
-             is a native structured Chat session. -->
-        <MobileControls v-if="!activePaneIsChat" />
       </div>
       <AgentWorkspaceView v-if="mode === 'workspace'" />
+      <ArchivedSessionsPanel
+        :open="archivePanelOpen"
+        @close="archivePanelOpen = false"
+      />
+      <MobileSessionDrawer
+        :open="store.mobileDrawerOpen"
+        @close="store.mobileDrawerOpen = false"
+        @open-archive="archivePanelOpen = true; store.mobileDrawerOpen = false"
+      />
       <ScheduledTasksPanel
         :visible="showScheduledTasks"
         @close="showScheduledTasks = false"
@@ -157,12 +172,16 @@ import LayoutSelector from '@/components/LayoutSelector.vue'
 import TerminalGridView from '@/components/TerminalGridView.vue'
 import MobileControls from '@/components/MobileControls.vue'
 import AgentWorkspaceView from '@/components/AgentWorkspaceView.vue'
+import ChatSidebar from '@/components/ChatSidebar.vue'
+import ArchivedSessionsPanel from '@/components/ArchivedSessionsPanel.vue'
+import MobileSessionDrawer from '@/components/MobileSessionDrawer.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
 import ScheduledTasksPanel from '@/components/ScheduledTasksPanel.vue'
 import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
+import { parseTabDeepLink } from '@/utils/deepLink'
 
 const appStore = useAppStore()
 const store = useTerminalStore()
@@ -170,6 +189,7 @@ const authStore = useAuthStore()
 const { tabs, error, activePane, activePaneIsChat } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
 const showScheduledTasks = ref(false)
+const archivePanelOpen = ref(false)
 
 // Clear all error-type notifications from the terminal store toast stack.
 function clearError() {
@@ -406,18 +426,62 @@ function cleanupMobileViewportSync() {
   fixedViewportProbe = null
 }
 
+// Route to a session from a ?tab=<id> deep link. Three cases: the tab is
+// active (just load it), the tab is archived (restore then load), or the id is
+// unknown (toast + clean the URL). Runs on mount and on browser back/forward.
+async function handleDeepLink() {
+  const tabId = parseTabDeepLink(window.location.search)
+  if (!tabId) return
+
+  if (store.tabs.some(tab => tab.id === tabId)) {
+    store.setActiveTab(tabId)
+    return
+  }
+
+  // Not active — check the archive before giving up.
+  await store.fetchArchivedTabs()
+  if (store.archivedTabs.some(tab => tab.id === tabId)) {
+    const restored = await store.unarchiveTab(tabId)
+    // unarchiveTab surfaces its own error toast on failure; only confirm
+    // success here so a failed restore doesn't show a contradictory
+    // "Restored archived session" notification.
+    if (restored) {
+      store.pushNotification({
+        type: 'success',
+        message: 'Restored archived session',
+        autoDismissMs: 4000,
+      })
+    }
+    return
+  }
+
+  store.pushNotification({
+    type: 'warning',
+    message: 'Session not found',
+    autoDismissMs: 4000,
+  })
+  // Clean the stale ?tab param so a refresh doesn't re-trigger the warning.
+  window.history.replaceState(null, '', window.location.pathname)
+}
+
 onMounted(async () => {
   // Always check auth first - it will handle the case when auth is not enabled
   await authStore.checkAuth()
   if (!authStore.authEnabled || !authStore.authRequired || authStore.isAuthenticated) {
     await store.fetchTabs()
+    void store.fetchArchivedTabs()
+    await handleDeepLink()
   }
   // Set up mobile viewport sync
   setupMobileViewportSync()
+  // Browser back/forward re-runs the deep-link routing (app-internal tab
+  // switches deliberately do not pushState, so this only fires on nav).
+  window.addEventListener('popstate', handleDeepLink)
 })
 
 onUnmounted(() => {
   cleanupMobileViewportSync()
+  window.removeEventListener('popstate', handleDeepLink)
 })
 </script>
 
@@ -1200,7 +1264,18 @@ textarea {
 .terminal-mode-shell {
   flex: 1;
   display: flex;
+  flex-direction: row;
+  min-height: 0;
+}
+
+/* The sidebar sits to the left; this column holds the TabBar + grid and takes
+   the remaining width. min-width:0 lets the grid shrink instead of overflowing
+   when the sidebar is expanded. */
+.terminal-main-column {
+  flex: 1;
+  display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
 }
 

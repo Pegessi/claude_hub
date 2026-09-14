@@ -23,9 +23,24 @@ const { outputText } = ts.transpileModule(storeSource, {
 })
 const piniaUrl = await import.meta.resolve('pinia')
 const vueUrl = await import.meta.resolve('vue')
+// chatGroups is a value import (not type-only), so it survives transpilation.
+// It is self-contained — its own @/types import is type-only and erased — so
+// transpile it and embed it as a data URL the store can import from.
+const chatGroupsSource = await readFile(
+  new URL('../src/utils/chatGroups.ts', import.meta.url),
+  'utf8',
+)
+const { outputText: chatGroupsJs } = ts.transpileModule(chatGroupsSource, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2020,
+  },
+})
+const chatGroupsUrl = `data:text/javascript;base64,${Buffer.from(chatGroupsJs).toString('base64')}`
 const rewritten = outputText
   .replace(/from\s+['"]pinia['"]/g, `from ${JSON.stringify(piniaUrl)}`)
   .replace(/from\s+['"]vue['"]/g, `from ${JSON.stringify(vueUrl)}`)
+  .replace(/from\s+['"]@\/utils\/chatGroups['"]/g, `from ${JSON.stringify(chatGroupsUrl)}`)
 const storeModule = await import(
   `data:text/javascript;base64,${Buffer.from(rewritten).toString('base64')}`
 )

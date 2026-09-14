@@ -187,3 +187,94 @@ async def test_switch_env_route_returns_200_on_success(
     assert data["id"] == "live-tab"
     assert data["solo_mode"] is True
     assert data["env"]["ANTHROPIC_MODEL"] == "claude-opus"
+
+
+@pytest.mark.asyncio
+async def test_archive_tab_route_returns_404_for_missing_tab(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    async def fake_archive_tab(tab_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.archive_tab",
+        fake_archive_tab,
+    )
+
+    response = await client.post("/api/tabs/missing-id/archive")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_unarchive_tab_route_returns_404_for_missing_tab(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    async def fake_unarchive_tab(tab_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.unarchive_tab",
+        fake_unarchive_tab,
+    )
+
+    response = await client.post("/api/tabs/missing-id/unarchive")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_archived_route_not_shadowed(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    """GET /api/tabs/archived must list archived tabs, not treat "archived" as a tab id."""
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.list_archived_tabs",
+        lambda: [],
+    )
+
+    response = await client.get("/api/tabs/archived")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_archive_tab_route_returns_archived_tab(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    archived_at = datetime.now()
+
+    async def fake_archive_tab(tab_id: str) -> TerminalTab:
+        return TerminalTab(
+            id=tab_id,
+            name="Archived",
+            shell=None,
+            cwd=None,
+            solo_mode=False,
+            agent_type=AgentType.CLAUDE,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
+            port=12345,
+            created_at=datetime.now(),
+            is_active=False,
+            workspace_id=None,
+            workspace_name=None,
+            workspace_role=None,
+            archived=True,
+            archived_at=archived_at,
+        )
+
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.archive_tab",
+        fake_archive_tab,
+    )
+
+    response = await client.post("/api/tabs/live-tab/archive")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["archived"] is True
+    assert data["archived_at"] is not None

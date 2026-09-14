@@ -11,9 +11,11 @@ import type {
   StoreNotification,
   NotificationType,
 } from '@/types'
+import { groupChatsByCwd } from '@/utils/chatGroups'
 
 const API_BASE = '/api'
 const STORAGE_KEY_LAYOUT = 'claude_hub_layout_type'
+const STORAGE_KEY_SIDEBAR = 'claude_hub_sidebar_collapsed'
 const STATUS_POLL_INTERVAL_MS = 5000
 
 function generatePaneId(): string {
@@ -98,9 +100,26 @@ export const useTerminalStore = defineStore('terminal', () => {
   const panes = ref<Pane[]>([])
   const activePaneId = ref<string | null>(null)
 
+  // Left chat sidebar collapse state, persisted across reloads.
+  const sidebarCollapsed = ref<boolean>(
+    localStorage.getItem(STORAGE_KEY_SIDEBAR) === '1'
+  )
+  // Mobile slide-out session drawer visibility. Not persisted — it defaults to
+  // closed on load. Set directly from components (TabBar opens, App closes).
+  const mobileDrawerOpen = ref(false)
+  // Soft-deleted tabs. Kept separately from `tabs` (which only holds active
+  // tabs) so the archive browser can list them without polluting the grid.
+  const archivedTabs = ref<TerminalTab[]>([])
+  const isLoadingArchived = ref(false)
+
   const activeTab = computed(() => tabs.value.find(tab => tab.id === activeTabId.value) || null)
   const manualTabs = computed(() => tabs.value.filter(tab => !tab.workspace_id))
   const managedTabs = computed(() => tabs.value.filter(tab => Boolean(tab.workspace_id)))
+  // Chat sessions only (excludes raw terminal tabs), for the sidebar.
+  const chatTabs = computed(() =>
+    tabs.value.filter(tab => !tab.workspace_id && tab.session_kind === 'chat')
+  )
+  const chatTabsByCwd = computed(() => groupChatsByCwd(chatTabs.value))
 
   function initializePanes() {
     const config = LAYOUT_CONFIGS[layoutType.value]
@@ -428,6 +447,91 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
+  function toggleSidebar() {
+    sidebarCollapsed.value = !sidebarCollapsed.value
+    localStorage.setItem(STORAGE_KEY_SIDEBAR, sidebarCollapsed.value ? '1' : '0')
+  }
+
+  async function fetchArchivedTabs() {
+    isLoadingArchived.value = true
+    try {
+      const response = await fetch(`${API_BASE}/tabs/archived`)
+      if (!response.ok) throw new Error('Failed to fetch archived tabs')
+      archivedTabs.value = await response.json()
+    } catch (e) {
+      console.error('Error fetching archived tabs:', e)
+    } finally {
+      isLoadingArchived.value = false
+    }
+  }
+
+  // Archive (soft-delete) a tab: release its runtime but keep its JSONL history.
+  // Mirrors deleteTab's pane/active cleanup, then refreshes the archived list.
+  async function archiveTab(tabId: string) {
+    isLoading.value = true
+    try {
+      const response = await fetch(`${API_BASE}/tabs/${tabId}/archive`, {
+        method: 'POST',
+      })
+      if (!response.ok) throw new Error('Failed to archive tab')
+      tabs.value = tabs.value.filter(tab => tab.id !== tabId)
+      // Remove tab from all panes, remembering the first pane that lost it so
+      // the fallback tab can take its slot.
+      let orphanedPaneId: string | null = null
+      for (const pane of panes.value) {
+        if (pane.tabId === tabId) {
+          pane.tabId = null
+          if (!orphanedPaneId) orphanedPaneId = pane.id
+        }
+      }
+      if (activeTabId.value === tabId) {
+        const fallback = manualTabs.value[0]
+        if (fallback) {
+          if (orphanedPaneId) {
+            assignTabToPane(fallback.id, orphanedPaneId)
+          } else {
+            activeTabId.value = fallback.id
+          }
+        } else {
+          activeTabId.value = null
+        }
+      }
+      void fetchArchivedTabs()
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  // Restore an archived tab and load it into the active pane. Returns true on
+  // success, false on failure (callers can gate success feedback on it).
+  async function unarchiveTab(tabId: string): Promise<boolean> {
+    isLoading.value = true
+    try {
+      const response = await fetch(`${API_BASE}/tabs/${tabId}/unarchive`, {
+        method: 'POST',
+      })
+      if (!response.ok) throw new Error('Failed to unarchive tab')
+      await fetchTabs()
+      setActiveTab(tabId)
+      void fetchArchivedTabs()
+      return true
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Unknown error')
+      return false
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  // Permanently delete an archived tab (reuses the hard-delete path, then
+  // refreshes the archived list so the row disappears).
+  async function permanentDeleteTab(tabId: string) {
+    await deleteTab(tabId)
+    void fetchArchivedTabs()
+  }
+
   async function switchEnv(tabId: string, data: SwitchEnvRequest) {
     isLoading.value = true
     try {
@@ -510,6 +614,8 @@ export const useTerminalStore = defineStore('terminal', () => {
     tabs,
     manualTabs,
     managedTabs,
+    chatTabs,
+    chatTabsByCwd,
     agentStatuses,
     activeTabId,
     activeTab,
@@ -524,6 +630,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     activePaneId,
     activePane,
     activePaneIsChat,
+    sidebarCollapsed,
+    mobileDrawerOpen,
+    archivedTabs,
+    isLoadingArchived,
     fetchTabs,
     fetchAgentStatuses,
     startAgentStatusPolling,
@@ -542,5 +652,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     getPaneCountForTab,
     initializePanes,
     saveTabOrder,
+    toggleSidebar,
+    fetchArchivedTabs,
+    archiveTab,
+    unarchiveTab,
+    permanentDeleteTab,
   }
 })
