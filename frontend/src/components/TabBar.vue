@@ -123,6 +123,34 @@
           <span>Duplicate</span>
         </LoadingButton>
         <LoadingButton
+          v-if="openTabMenuTab"
+          type="button"
+          class="tab-menu-item"
+          role="menuitem"
+          :loading="isPending(tabActionKey('archive', openTabMenuTab.id))"
+          loading-label="Archiving…"
+          @click="handleTabArchive(openTabMenuTab.id); closeTabMenu(openTabMenuId)"
+        >
+          <span
+            class="tab-menu-item-icon"
+            aria-hidden="true"
+          >🗄</span>
+          <span>Archive</span>
+        </LoadingButton>
+        <button
+          v-if="openTabMenuTab"
+          type="button"
+          class="tab-menu-item"
+          role="menuitem"
+          @click="handleCopyTabLink(openTabMenuTab.id); closeTabMenu(openTabMenuId)"
+        >
+          <span
+            class="tab-menu-item-icon"
+            aria-hidden="true"
+          >🔗</span>
+          <span>Copy Link</span>
+        </button>
+        <LoadingButton
           v-if="openTabMenuTab && (openTabMenuTab.agent_type === 'claude' || openTabMenuTab.agent_type === 'codex')"
           type="button"
           class="tab-menu-item"
@@ -175,6 +203,13 @@
           >
             <span>Agent Workspace</span>
             <strong v-if="mode === 'workspace'">Current</strong>
+          </button>
+          <button
+            type="button"
+            class="mobile-app-menu-item"
+            @click="openMobileDrawer"
+          >
+            Chats
           </button>
           <NetworkAccessMenu variant="menu" />
           <button
@@ -701,6 +736,8 @@ import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { writeClipboard } from '@/utils/clipboard'
+import { buildTabShareText } from '@/utils/deepLink'
 import type { AppMode, RemoteProfile, TerminalAgentStatus, TerminalTab } from '@/types'
 import type { AgentRuntimeStatus, AgentType, SessionKind, SwitchEnvRequest } from '@/types'
 
@@ -1135,6 +1172,27 @@ async function handleTabDuplicate(tabId: string) {
   await runPending(tabActionKey('duplicate', tabId), () => store.duplicateTab(tabId))
 }
 
+async function handleTabArchive(tabId: string) {
+  await runPending(tabActionKey('archive', tabId), () => store.archiveTab(tabId))
+}
+
+async function handleCopyTabLink(tabId: string) {
+  try {
+    await writeClipboard(buildTabShareText(tabId))
+    store.pushNotification({
+      type: 'success',
+      message: 'Link copied',
+      autoDismissMs: 3000,
+    })
+  } catch {
+    store.pushNotification({
+      type: 'error',
+      message: 'Failed to copy link',
+      autoDismissMs: 8000,
+    })
+  }
+}
+
 function serializeEnv(env: Record<string, string> | undefined): string {
   if (!env) return ''
   return Object.entries(env)
@@ -1225,6 +1283,11 @@ function closeMobileAppMenu() {
   if (mobileAppMenuRef.value) {
     mobileAppMenuRef.value.open = false
   }
+}
+
+function openMobileDrawer() {
+  store.mobileDrawerOpen = true
+  closeMobileAppMenu()
 }
 
 function setAppMode(nextMode: AppMode) {

@@ -5,6 +5,82 @@
 
 ## Unreleased
 
+### feat: copy link teaches an agent how to read the conversation
+
+- **Why now.** "Copy Link" produced a bare `?tab=<id>` URL. A human opening it
+  in a browser is fine, but the link's other audience is an AI agent in
+  another session — and handed just the URL, an agent has no obvious way to
+  resolve it to the conversation. The transcript endpoint already existed
+  (`GET /api/tabs/{id}/stream/events`, paged JSON); the gap was discoverability.
+- **Hint in the copied text.** Copy Link now writes the clean URL on the first
+  line (so it stays clickable and paste-able into a browser) followed by a
+  short hint pointing an agent at the `stream/events` endpoint and its paging
+  convention. The hint travels with the link, covers every agent type, and
+  costs nothing until a link is actually copied.
+- **Review fixes.** The same change ships the two MAJORs the multi-agent review
+  found: `ensure_tab_running` now refuses to restart an archived tab (terminal
+  WebSocket / proxy iframe / reconnect can no longer silently undo an archive
+  and leave a hidden live process), and `unarchiveTab` returns a boolean so the
+  deep-link handler only shows "Restored archived session" on real success —
+  a failed restore no longer toasts a contradictory confirmation.
+- **Tests.** New `buildTabShareText` tests cover the first-line URL, the events
+  endpoint hint, and tab-id encoding; a backend test pins the archived-tab
+  guard in `ensure_tab_running`; and a structural test guards the
+  `unarchiveTab` boolean contract and the `if (restored)` toast gate.
+
+### feat: mobile gets a slide-out session drawer
+
+- **Why now.** On mobile the desktop sidebar is hidden, which left phone
+  users with no session navigation and no way to open the archive browser —
+  the archive itself and deep links already worked, they just had no entry
+  point. This mirrors the Paseo/Codex mobile pattern of a slide-out session
+  list.
+- **Drawer.** A "Chats" item in the mobile app menu (⋯) opens a left
+  slide-out drawer that lists chat sessions grouped by working directory —
+  reusing the same `chatTabsByCwd` grouping as the desktop sidebar — with
+  text search and per-group collapse. Selecting a session loads it into the
+  active pane and closes the drawer; the backdrop and Esc also close it.
+- **Archive entry.** The drawer's "Archived (N)" footer opens the existing
+  archive panel above the drawer, closing the navigation gap. The archived
+  count is now fetched on mount so it is accurate from first paint.
+- **Tests.** A new `mobileDrawer` test guards the specific bugs caught in
+  review: the backdrop uses `@click.self` so panel interactions don't close
+  it, the empty state is gated on having no groups, the backdrop and panel
+  are siblings so the slide leave animation fires, and the filter resets on
+  each open.
+
+### feat: chat sessions get a sidebar, an archive, and a deep link
+
+- **Why now.** The Chat UI had nearly reached Codex on the conversation
+  itself, but three gaps kept sessions from being first-class objects:
+  navigation was a flat top tab bar with chat and terminal mixed together,
+  history had only hard delete with no way to browse what was set aside, and
+  there was no way to point another conversation at a session. All three are
+  the same problem — making a chat session *addressable* — so they ship
+  together.
+- **Sidebar.** A collapsible left sidebar lists chat sessions grouped by
+  working directory, with text search, per-group collapse, and a hover
+  shortcut to archive. Clicking a session loads it into the active pane. The
+  collapse state persists across reloads; terminal tabs never appear, and the
+  sidebar hides on mobile where width is scarce.
+- **Archive.** Archiving soft-deletes a session: it releases the ttyd, tmux
+  and agent resources (the expensive part) but keeps the JSONL history (the
+  cheap part) — the inverse of a terminal tab's cost structure. A dedicated
+  drawer, opened from the "Archived (N)" button at the sidebar's foot (the
+  entry point that was missing), lists archived sessions and offers Restore
+  plus a two-step permanent delete. Restoring cold-starts the session back
+  into a pane.
+- **Deep link.** "Copy Link" in the tab menu copies a `?tab=<id>` URL.
+  Opening it loads that session, auto-restoring it from the archive if
+  needed; a link to a session that no longer exists toasts and cleans the
+  URL. Browser back and forward re-resolve the link, while switching tabs
+  inside the app does not touch history.
+- **Tests.** New unit tests cover `groupChatsByCwd` and `cwdLabel`,
+  `buildTabLink`/`parseTabDeepLink`, and `writeClipboard` (both the
+  `navigator.clipboard` path and the `execCommand` fallback). The
+  `forkFromTurn` test, which transpiles the real store, now resolves the
+  store's new `chatGroups` import the same way it resolves `pinia` and `vue`.
+
 ### fix: an answered question card stays answered
 
 - **Problem.** `approval_resolved` was never persisted in any real session —
