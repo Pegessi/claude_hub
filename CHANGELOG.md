@@ -28,6 +28,21 @@
   resolution (and the empty/plain-path edge cases) and verifies
   `discover_source` finds a transcript through a symlinked cwd.
 
+### fix: a finished Chat turn folds as soon as a newer turn starts
+
+- **Why now.** The fold rule kept the newest *completed* turn open, so once a
+  second turn was in flight the first turn stayed expanded for the whole time
+  the second turn ran — scrolling back to review history showed the full
+  process instead of the folded conclusion, which read as folding having
+  stopped working.
+- **The fix.** The turn that stays open is now the newest turn (running or
+  completed), not the newest completed turn. A finished turn therefore folds
+  the instant a newer turn starts, while the turn being read still stays open
+  until the user moves on.
+- **Tests.** A new behavior test pins the transition — with a finished turn and
+  a newer running turn, the first is foldable and folds to its header plus
+  answer; the wiring test now checks `latestTurnKey`.
+
 ### feat: copy link teaches an agent how to read the conversation
 
 - **Why now.** "Copy Link" produced a bare `?tab=<id>` URL. A human opening it
