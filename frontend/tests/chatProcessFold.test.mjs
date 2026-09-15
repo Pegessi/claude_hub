@@ -403,6 +403,43 @@ test('a running turn renders its parts untouched', () => {
   assert.equal(foldTurnParts(turn, false), turn.parts)
 })
 
+// ── the fold transition: a finished turn folds when a newer turn starts ──
+
+// Two finished turns in one session. The component's ``latestTurnKey`` is the
+// last turn's key, so the first turn is history and folds even though it is
+// completed. This is the shape that read as "fold stopped working": the first
+// turn stayed expanded for the whole time the second turn was in flight,
+// because the old rule kept the newest *completed* turn open.
+function twoCompletedTurns() {
+  return groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'first' }, { turn_id: 'turn-a' }),
+    makeEvent(2, 'thinking_delta', { text: 'working' }, { turn_id: 'turn-a' }),
+    makeEvent(3, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} }, { turn_id: 'turn-a' }),
+    makeEvent(4, 'tool_call_completed', { tool_call_id: 'c1', status: 'completed' }, { turn_id: 'turn-a' }),
+    makeEvent(5, 'text_delta', { text: 'first answer' }, { turn_id: 'turn-a' }),
+    makeEvent(6, 'turn_completed', { status: 'completed' }, { turn_id: 'turn-a' }),
+    makeEvent(7, 'turn_started', { summary: 'second' }, { turn_id: 'turn-b' }),
+    makeEvent(8, 'thinking_delta', { text: 'working again' }, { turn_id: 'turn-b' }),
+    makeEvent(9, 'text_delta', { text: 'second answer' }, { turn_id: 'turn-b' }),
+    makeEvent(10, 'turn_completed', { status: 'completed' }, { turn_id: 'turn-b' }),
+  ])
+}
+
+test('a finished turn folds as soon as a newer turn starts', () => {
+  const turns = twoCompletedTurns()
+  assert.equal(turns.length, 2)
+  // The component's latestTurnKey is the last turn's key.
+  const latestKey = turns[turns.length - 1].key
+  const isFoldable = (turn) => turn.key !== latestKey && splitTurnProcess(turn) !== null
+  assert.equal(isFoldable(turns[0]), true, 'the first turn is history once a newer turn exists')
+  assert.equal(isFoldable(turns[1]), false, 'the newest turn stays open')
+  // The first turn folds to its header + answer.
+  assert.deepEqual(
+    foldTurnParts(turns[0], false).map(p => p.kind),
+    ['process', 'text'],
+  )
+})
+
 // ── StructuredPane wiring ───────────────────────────────────────────────
 
 const structuredPane = readFileSync(
@@ -434,15 +471,15 @@ test('toggleTurnProcess returns an empty signature for unfolded turns', () => {
   assert.match(fnMatch[0], /if \(!isTurnFoldable\(turn\)\) return ''/)
 })
 
-test('the newest completed turn is excluded from folding', () => {
+test('the newest turn is excluded from folding', () => {
   const fnMatch = structuredPane.match(
     /function isTurnFoldable\(turn: TimelineTurn\): boolean \{[\s\S]*?\n\}/,
   )
   assert.ok(fnMatch, 'isTurnFoldable function must exist')
   assert.match(
     fnMatch[0],
-    /turn\.key !== latestCompletedTurnKey\.value/,
-    'the turn being read must stay open until a newer one finishes',
+    /turn\.key !== latestTurnKey\.value/,
+    'the turn being read must stay open until a newer turn starts',
   )
   assert.match(fnMatch[0], /splitTurnProcess\(turn\) !== null/)
 })
