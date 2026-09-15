@@ -7,6 +7,7 @@ is always the fail-closed fallback when no adapter can source a transcript.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -410,6 +411,15 @@ def resolve_process_hint(session: ManagedSession) -> Tuple[str, Optional[str]]:
 
 
 def resolve_cwd(session: ManagedSession) -> str:
-    """Prefer the live process cwd; fall back to the session's workspace path."""
+    """Prefer the live process cwd; fall back to the session's workspace path.
+
+    The path is symlink-resolved because providers derive their transcript and
+    project dirs from the *real* path. A cwd passed through a symlink (macOS
+    ``/tmp`` -> ``/private/tmp``) would otherwise encode to a non-existent
+    project dir, so source discovery — notably edit-resend, which locates the
+    provider transcript this way — would fail with "could not locate provider
+    transcript file".
+    """
     cwd, _ = resolve_process_hint(session)
-    return cwd or session.workspace_path or ""
+    raw = cwd or session.workspace_path or ""
+    return os.path.realpath(raw) if raw else raw
