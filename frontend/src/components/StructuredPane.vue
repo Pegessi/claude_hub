@@ -1630,34 +1630,35 @@ function turnApprovalSignature(turn: TimelineTurn): string {
 const processExpandedOverrides = ref(new Map<string, boolean>())
 
 /**
- * Key of the newest completed turn, or ``null`` while none has finished.
+ * Key of the newest turn, or ``null`` while none has started.
  *
  * That turn stays open: it is the one being read, and folding it the instant
  * it finished would collapse the process out from under someone mid-glance.
- * Older turns are history and fold themselves.
+ * Older turns are history and fold themselves. The newest turn is the one
+ * that stays open even while it is still running — so a finished turn folds
+ * as soon as a newer turn starts, rather than staying expanded for the whole
+ * time the newer turn is in flight.
  */
-const latestCompletedTurnKey = computed(() => {
-  for (let i = turns.value.length - 1; i >= 0; i -= 1) {
-    if (turns.value[i].completed) return turns.value[i].key
-  }
-  return null
+const latestTurnKey = computed(() => {
+  const list = turns.value
+  return list.length > 0 ? list[list.length - 1].key : null
 })
 
 function isProcessExpanded(turn: TimelineTurn): boolean {
   const override = processExpandedOverrides.value.get(turn.key)
   if (override !== undefined) return override
-  return turn.key === latestCompletedTurnKey.value
+  return turn.key === latestTurnKey.value
 }
 
 /** True when this turn has a working region worth folding.
  *
- * The newest completed turn is excluded so it keeps rendering exactly as it
- * did before folding existed, and ``splitTurnProcess`` rejects the rest of the
- * unsafe cases (still running, no delivered answer, work continuing past the
- * last text). An approval card is not one of them — it folds with the record,
- * and the header counts it so the card is not hidden without a trace. */
+ * The newest turn is excluded so it keeps rendering exactly as it did before
+ * folding existed, and ``splitTurnProcess`` rejects the rest of the unsafe
+ * cases (still running, no delivered answer, work continuing past the last
+ * text). An approval card is not one of them — it folds with the record, and
+ * the header counts it so the card is not hidden without a trace. */
 function isTurnFoldable(turn: TimelineTurn): boolean {
-  return turn.key !== latestCompletedTurnKey.value && splitTurnProcess(turn) !== null
+  return turn.key !== latestTurnKey.value && splitTurnProcess(turn) !== null
 }
 
 function toggleTurnProcess(turn: TimelineTurn): void {
