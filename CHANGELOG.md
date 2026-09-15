@@ -5,6 +5,29 @@
 
 ## Unreleased
 
+### fix: Chat edit-resend works again (and shows its errors)
+
+- **Why now.** In a Chat tab, editing a previously sent message opened the
+  edit box, but clicking "Resend" always failed with "could not locate
+  provider transcript file" (409). The edit-resend flow locates the provider
+  transcript via `discover_source` → `resolve_cwd` → `_claude_project_dir_for_cwd`.
+- **Root cause.** A direct Chat tab created with a cwd that goes through a
+  symlink (macOS `/tmp` → `/private/tmp`) stored the *unresolved* cwd. The
+  Claude project dir is derived from the *real* path, so the unresolved path
+  encoded to a non-existent project dir and discovery failed. The normal
+  Chat tailer never hit this because it drives the native transport directly
+  (it does not use `discover_source`); only edit-resend locates the transcript
+  this way.
+- **The fix.** `resolve_cwd` now symlink-resolves the cwd before it is used
+  to derive a project dir, so edit-resend finds the transcript. Separately,
+  the edit form's `v-memo` dependencies did not include `editError` /
+  `isEditSending`, so a failed resend's error was set but never rendered —
+  the failure was invisible. The memo now tracks both while a turn is being
+  edited, so the error (and the "Sending…" state) actually show.
+- **Tests.** New `test_edit_resend_discovery.py` pins `resolve_cwd` symlink
+  resolution (and the empty/plain-path edge cases) and verifies
+  `discover_source` finds a transcript through a symlinked cwd.
+
 ### feat: copy link teaches an agent how to read the conversation
 
 - **Why now.** "Copy Link" produced a bare `?tab=<id>` URL. A human opening it

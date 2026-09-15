@@ -67,7 +67,7 @@
         <div
           v-for="(turn, turnIndex) in turns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === turnIndex, isEditingTurn(turn)]"
+          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === turnIndex, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false]"
           class="structured-turn"
         >
           <!-- A right-aligned user bubble and a left-aligned assistant bubble make
