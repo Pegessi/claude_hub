@@ -600,9 +600,54 @@ export interface StreamCapabilities {
   supports_tool_timeline: boolean
   supports_images: boolean
   supports_dynamic_modes: boolean
+  supports_goals: boolean
+  goal_execution_owner: 'provider_native' | 'hub_managed' | null
+  goal_usage_quality: ChatGoalUsageQuality
   available_modes: StreamModeOption[]
   current_mode: string | null
   available_models: StreamModelOption[]
+}
+
+// ── Chat Goal control plane ────────────────────────────────────────────────
+
+export type ChatGoalStatus =
+  | 'active'
+  | 'paused'
+  | 'blocked'
+  | 'budget_limited'
+  | 'complete'
+  | 'cancelled'
+  | 'failed'
+
+export type ChatGoalUsageQuality = 'exact' | 'estimated' | 'unavailable'
+export type ChatGoalDispatchState = 'idle' | 'pending' | 'dispatched' | 'uncertain'
+
+export interface ChatGoal {
+  id: string
+  tab_id: string
+  objective: string
+  status: ChatGoalStatus
+  token_budget: number | null
+  token_usage: number | null
+  usage_quality: ChatGoalUsageQuality
+  max_turns: number
+  turns_completed: number
+  dispatch_state: ChatGoalDispatchState
+  pending_step_id?: string | null
+  current_turn_id?: string | null
+  completed_turn_ids?: string[]
+  status_message?: string | null
+  created_at: string
+  updated_at: string
+  paused_at?: string | null
+  completed_at?: string | null
+}
+
+export interface ChatGoalCreate {
+  objective: string
+  token_budget?: number
+  max_turns?: number
+  client_request_id: string
 }
 
 export type AgentStreamEventType =
