@@ -36,7 +36,10 @@
         <option value="codex">
           Codex
         </option>
-        <option value="traex">
+        <option
+          v-if="!excludeTypes.includes('traex')"
+          value="traex"
+        >
           Trae
         </option>
         <option value="cursor">
@@ -127,6 +130,10 @@ interface Props {
   envText: string
   variant?: 'modal' | 'form'
   allowTerminal?: boolean
+  // Agent types to hide from the selector — used by workspace/resident entry
+  // points that only support autonomous-worker-capable agents (TraeX is not a
+  // workspace worker this wave). The top-level tab launcher leaves this empty.
+  excludeTypes?: AgentType[]
   typeLabel?: string
   soloLabel?: string
   disabled?: boolean
@@ -135,6 +142,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   variant: 'modal',
   allowTerminal: true,
+  excludeTypes: () => [] as AgentType[],
   typeLabel: 'Agent Type',
   soloLabel: 'YOLO mode',
   disabled: false,

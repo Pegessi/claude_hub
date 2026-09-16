@@ -122,3 +122,43 @@ Frontend:
   test-only pydantic `call-arg` noise and an import-order nit in `native.py`
   present on main too); compare against a main baseline rather than chasing a
   zero count locally.
+
+## Adversarial-review follow-up (same day)
+
+A dedicated review pass (with live repro) found four real gaps; all fixed:
+
+1. **M1 — Chat model switch 400.** `switch_env` rejected non
+   claude/codex/cursor *before* its `SessionKind.CHAT` early-return, so the
+   traex model picker always failed. Reordered: the CHAT path now admits
+   `TRAEX` (env-only, no tmux respawn); the terminal respawn whitelist is
+   unchanged (terminal traex stays fresh-only and raises).
+2. **M2 — busy TUI read as idle.** The full-frame codex working-marker check in
+   the runtime classifier was gated on `agent_type == CODEX`; traex paints the
+   same chrome, so a busy traex tab reported idle (which also defeats the
+   frontend's stable-screen replay gate). Now gated on `{CODEX, TRAEX}`, and
+   `traex` joins the foreground-command idle set. (The workspace auto-continue
+   busy check already ran the codex marker set unconditionally.)
+3. **M3 — cross-provider transcript + edit-resend.** Reusing
+   `CodexJsonlAdapter` verbatim let a *terminal* traex tab discover a `~/.codex`
+   rollout and be force-promoted to structured, and let chat edit-resend reach
+   `fork_transcript` (which raises for an unknown agent type). Introduced
+   `TraexJsonlAdapter(CodexJsonlAdapter)` with
+   `supports_transcript_discovery=False` and `discover_source() → None`; added
+   that flag to the base adapter and gated the `_tab_capabilities_for` lazy
+   promote on it (chat is unaffected — native transport never discovers files);
+   hid edit-resend for traex in the UI.
+4. **M4 — workspace-worker surface leak.** The shared `AgentConfigFields` is
+   reused by the add-agent and resident forms, and the scheduled-task panel
+   drives workspace sessions — all gained a Trae option from the shared change.
+   Added an `exclude-types` prop (both workspace usages exclude `traex`),
+   reverted the scheduled-panel option, and made `ensure_workspace_agent`
+   reject `agent_type=traex` with a clear error. Standalone top-level tabs are
+   unaffected.
+
+Plus minor nits: `data-kind='traex'` status-chip colors in two panels, the
+chat-provider validation message now names TraeX, and the test file grew from
+10 to 18 cases (chat-kind never launches a TUI, `ensure_tmux_session` capture,
+chat-only `switch_env`, working classifier). Test-module note: monkeypatch the
+submodule via `importlib.import_module("claude_hub.services.ttyd_manager")` —
+`from claude_hub.services import ttyd_manager` binds the manager *singleton*
+exported by the package `__init__`, not the module.
