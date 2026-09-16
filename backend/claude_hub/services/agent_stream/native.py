@@ -301,6 +301,7 @@ def native_provider_binary(agent_type: AgentType) -> Optional[str]:
     return {
         AgentType.CLAUDE: "claude",
         AgentType.CODEX: "codex",
+        AgentType.TRAEX: "traex",
         AgentType.CURSOR: "agent",
     }.get(agent_type)
 
@@ -358,6 +359,29 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5.3-codex-spark",
+    ],
+    "traex": [
+        # Slugs as reported by ``traex models`` / thread/start ``model``.
+        "Seed-Evolving",
+        "Seed-2.1-Pro",
+        "Seed-2.1-Turbo",
+        "Seed-Code",
+        "Seed-Dogfooding-2.0",
+        "GPT-6-Astra",
+        "GPT-5.6-Sol",
+        "GPT-5.6-Terra",
+        "GPT-5.6-Luna",
+        "GPT-5.5",
+        "GPT-5.4",
+        "GPT-5.2",
+        "DeepSeek-V4-Pro",
+        "DeepSeek-V4-Flash",
+        "Gemini-3.1-Pro-Preview",
+        "Gemini-3-Flash-Preview",
+        "openrouter-3o",
+        "openrouter-2o",
+        "openrouter-1o",
+        "openrouter-1",
     ],
     "cursor": [
         "claude-opus-4-8-thinking-high",
@@ -2095,6 +2119,41 @@ class CodexNativeSession(ProviderSession):
             self._pending_requests.clear()
 
 
+# ── TraeX ────────────────────────────────────────────────────────────────────
+
+
+class TraexNativeSession(CodexNativeSession):
+    """TraeX (``traex``) native transport.
+
+    TraeX is a branded fork of the Codex CLI: its ``app-server`` speaks the
+    same JSON-RPC 2.0 / NDJSON protocol (verified against 0.205.1 — the
+    initialize/thread/start/turn handshake and the ``item/agentMessage/delta``
+    / ``item/reasoning/textDelta`` / ``turn/completed`` notifications are
+    identical, and the server identifies itself as ``Codex Desktop``). So this
+    session reuses the entire Codex engine and only changes the launch command
+    and the reported adapter id.
+
+    Two launch differences vs. upstream Codex:
+
+    * the binary is ``traex`` and the stdio listener is the default
+      (``--listen stdio://``); traex rejects codex's ``--stdio`` flag, so the
+      command is the bare ``traex app-server``;
+    * its config/session home is ``~/.trae`` rather than ``~/.codex`` — that
+      only affects on-disk rollout discovery, not the live protocol.
+
+    The composer's model override still rides the inherited
+    ``collaborationMode.settings.model`` channel. The picker should write the
+    traex model slug (e.g. ``Seed-Evolving``); reuse ``CODEX_MODEL`` as the env
+    key so no base-class plumbing changes.
+    """
+
+    adapter_id = "traex-native"
+
+    def _build_command(self) -> List[str]:
+        # traex has no ``--stdio`` flag; stdio:// is the default listener.
+        return ["traex", "app-server"]
+
+
 # ── Cursor ───────────────────────────────────────────────────────────────────
 
 
@@ -2339,6 +2398,8 @@ def create_native_session(
         return ClaudeNativeSession(session, conversation_id_persist=conversation_id_persist)
     if session.agent_type == AgentType.CODEX:
         return CodexNativeSession(session, conversation_id_persist=conversation_id_persist)
+    if session.agent_type == AgentType.TRAEX:
+        return TraexNativeSession(session, conversation_id_persist=conversation_id_persist)
     if session.agent_type == AgentType.CURSOR:
         return CursorNativeSession(session, conversation_id_persist=conversation_id_persist)
     raise ValueError(f"no native transport for agent_type={session.agent_type}")

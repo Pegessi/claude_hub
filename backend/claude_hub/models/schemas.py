@@ -33,6 +33,7 @@ class AgentType(str, Enum):
 
     CLAUDE = "claude"
     CODEX = "codex"
+    TRAEX = "traex"
     CURSOR = "cursor"
     TERMINAL = "terminal"
 

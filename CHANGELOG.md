@@ -5,6 +5,34 @@
 
 ## Unreleased
 
+### feat: add TraeX (`traex`) agent — terminal TUI and structured Chat
+
+- **Why now.** TraeX CLI is the internal Codex fork (its `app-server`
+  identifies as `Codex Desktop` and shares the `codex_core`/`codex_rollout`
+  engine). It was installed locally but Hub could not launch or chat with it;
+  its migrated default model (`GLM-5.1`) was also stale and crashed the TUI.
+- **The change.** A new `traex` agent type joins `claude`/`codex`/`cursor`/
+  `terminal`. Terminal tabs launch the `traex` TUI under tmux/ttyd (solo adds
+  the Codex-style `--ask-for-approval never --sandbox danger-full-access`),
+  wrapped so the pane falls back to a shell on exit. Structured Chat reuses the
+  entire Codex JSON-RPC transport via a thin `TraexNativeSession(CodexNative
+  Session)` that only swaps the launch command to the bare `traex app-server`
+  (traex rejects Codex's `--stdio` flag; `stdio://` is its default listener),
+  and reuses `CodexJsonlAdapter`. The frontend gains a Trae option/avatar/solo
+  hint and a 20-model static catalog (`Seed-Evolving` default). Protocol
+  equivalence (initialize/thread start, text/reasoning deltas, turn completed,
+  Plan/Default modes) was verified live against traex 0.205.1.
+- **Trade-off / scope.** Terminal tabs always start a fresh TUI — no rollout
+  session-discovery/resume (Chat persistence is handled by the app-server's
+  `thread/resume`); on-disk sessions live under `~/.trae`, not `~/.codex`.
+  TraeX is intentionally **not** added as an autonomous workspace worker this
+  wave (that goal-packet/transcript contract is the heavier integration).
+- **Tests.** New `tests/test_traex_agent.py` pins the binary map, native
+  factory/command (no `--stdio`), registry reuse of the Codex adapter, and the
+  solo/non-solo terminal launch; a live transport smoke test exchanged a real
+  turn and normalized `turn_started → thinking_delta → text_delta("OK") →
+  turn_completed`.
+
 ### refactor: drop the per-pane info header, tab icon becomes the agent avatar
 
 - **Why now.** Every pane showed a small header ("C ch fix / Claude Chat ·

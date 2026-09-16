@@ -179,7 +179,7 @@ def _tab_body(
 @click.option("--solo-mode/--no-solo-mode", default=False, help="Run in agent solo mode.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "terminal"]),
+    type=click.Choice(["claude", "codex", "traex", "cursor", "terminal"]),
     default="claude",
     help="Agent type.",
 )
@@ -260,7 +260,7 @@ def tab_get(ctx: click.Context, tab_id: str) -> None:
 @click.option("--solo-mode/--no-solo-mode", default=None, help="Run in agent solo mode.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "terminal"]),
+    type=click.Choice(["claude", "codex", "traex", "cursor", "terminal"]),
     default=None,
     help="Agent type.",
 )

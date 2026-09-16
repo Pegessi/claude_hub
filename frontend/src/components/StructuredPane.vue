@@ -950,6 +950,9 @@ const currentModeLabel = computed(() => currentModeOption.value?.label ?? 'Mode'
 const MODEL_ENV_VAR: Record<string, string> = {
   claude: 'ANTHROPIC_MODEL',
   codex: 'CODEX_MODEL',
+  // TraeX reuses the Codex app-server; the backend injects the chosen slug via
+  // the collaborationMode.settings.model channel keyed off CODEX_MODEL.
+  traex: 'CODEX_MODEL',
   cursor: 'CURSOR_MODEL',
 }
 

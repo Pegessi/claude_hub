@@ -1367,6 +1367,8 @@ def get_default_command() -> str:
 def get_agent_command(agent_type: AgentType) -> str:
     if agent_type == AgentType.CODEX:
         return "codex"
+    if agent_type == AgentType.TRAEX:
+        return "traex"
     if agent_type == AgentType.CURSOR:
         return "agent"
     return get_default_command()
@@ -1886,6 +1888,9 @@ asyncio.run(_main())
                 "codex --ask-for-approval never --sandbox danger-full-access"
                 f"{self._codex_model_arg()}"
             )
+        if self.agent_type == AgentType.TRAEX:
+            # TraeX is a Codex fork and its TUI accepts the same bypass flags.
+            return "traex --ask-for-approval never --sandbox danger-full-access"
         if self.agent_type == AgentType.CLAUDE:
             return (
                 "IS_SANDBOX=1 claude --dangerously-skip-permissions"
@@ -1909,6 +1914,7 @@ asyncio.run(_main())
             in {
                 AgentType.CLAUDE,
                 AgentType.CODEX,
+                AgentType.TRAEX,
             }
         ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
@@ -1978,6 +1984,21 @@ asyncio.run(_main())
                         user_shell,
                         "-c",
                         f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
+                    ]
+                )
+            )
+        elif self.agent_type == AgentType.TRAEX:
+            # TraeX TUI (a Codex fork). Always wrapped in the user shell so the
+            # pane returns to a prompt when the agent exits, for both solo and
+            # non-solo launches. Terminal resume/session-discovery is not wired
+            # (Chat persistence is provided by the app-server's thread/resume).
+            user_shell = os.environ.get("SHELL", "/bin/bash")
+            cmd.append(
+                shlex.join(
+                    [
+                        user_shell,
+                        "-c",
+                        f"{self._with_env(self._traex_launch_command())}; exec {user_shell}",
                     ]
                 )
             )
@@ -2182,6 +2203,19 @@ asyncio.run(_main())
                     f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
                 ]
             )
+        elif self.agent_type == AgentType.TRAEX and not session_exists:
+            # Live tmux sessions are reattached below; only a missing session
+            # launches the TraeX TUI (solo or not — the bypass flags are added
+            # inside _traex_launch_command), wrapped so the pane falls back to
+            # a shell on exit.
+            user_shell = os.environ.get("SHELL", "/bin/bash")
+            cmd.extend(
+                [
+                    user_shell,
+                    "-c",
+                    f"{self._with_env(self._traex_launch_command())}; exec {user_shell}",
+                ]
+            )
         elif self.agent_type == AgentType.CLAUDE and not session_exists:
             cmd.append(self._with_env(self._agent_start_command(recover=recover)))
         elif self.agent_type == AgentType.CODEX and not session_exists:
@@ -2330,7 +2364,21 @@ asyncio.run(_main())
         # cross-wiring across same-cwd tabs).
         return fresh
 
+    def _traex_launch_command(self) -> str:
+        """Build the TraeX TUI launch command (fresh every time).
+
+        TraeX is a Codex fork and accepts the same bypass flags for solo mode.
+        Unlike Codex/Claude we do not wire terminal ``resume`` or rollout
+        session discovery here: the structured Chat surface persists its
+        conversation through the app-server's ``thread/resume``, and a terminal
+        tab simply starts a fresh interactive TUI.
+        """
+        flags = " --ask-for-approval never --sandbox danger-full-access" if self.solo_mode else ""
+        return f"traex{flags}"
+
     def _agent_start_command(self, recover: bool = False) -> str:
+        if self.agent_type == AgentType.TRAEX:
+            return self._traex_launch_command()
         if self.agent_type == AgentType.CODEX:
             return self._codex_launch_command(recover=recover)
         if self.agent_type == AgentType.CURSOR:

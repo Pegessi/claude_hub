@@ -36,6 +36,9 @@
         <option value="codex">
           Codex
         </option>
+        <option value="traex">
+          Trae
+        </option>
         <option value="cursor">
           Cursor
         </option>
@@ -155,8 +158,9 @@ const supportsSoloMode = computed(
 )
 
 const yoloHint = computed(() => {
-  if (props.agentType === 'codex') {
-    return 'Runs Codex with --ask-for-approval never and --sandbox danger-full-access'
+  if (props.agentType === 'codex' || props.agentType === 'traex') {
+    const name = props.agentType === 'traex' ? 'TraeX' : 'Codex'
+    return `Runs ${name} with --ask-for-approval never and --sandbox danger-full-access`
   }
   return 'Runs Claude with IS_SANDBOX=1 and --dangerously-skip-permissions'
 })
