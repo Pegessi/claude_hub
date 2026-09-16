@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### feat: Cursor model list syncs from the CLI at runtime
+
+- **Why now.** The Chat model picker's dropdown was a hardcoded list in the
+  frontend, so when Cursor shipped new models (e.g. the Opus 5 family) they
+  never appeared until someone manually edited the code.
+- **The fix.** The backend is now the single source of truth. Cursor's model
+  catalog is discovered at runtime via `agent --list-models` (parsed, cached
+  with a 10-minute TTL — 1 minute on probe failure so recovery is quick) and
+  surfaced on the existing session capabilities; claude/codex, whose CLIs have
+  no list-models flag, fall back to a curated static list. The frontend's
+  hardcoded `MODEL_OPTIONS` is deleted; the picker reads `available_models`
+  from capabilities and shows each model's label. The custom-model text input
+  is unchanged.
+- **Also.** `CodexNativeSession.prepare_capabilities` overrode the base hook
+  without calling `super()`, which would have skipped model discovery for
+  Codex — the override now calls `super()` first.
+- **Tests.** New tests in `test_agent_stream_native.py` cover the parser (ANSI
+  / marker stripping, malformed-line skipping), capabilities population, the
+  static fallback on probe error, process kill on probe timeout, single probe
+  under caching, and the static path for claude/codex.
+
 ### fix: Chat edit-resend works again (and shows its errors)
 
 - **Why now.** In a Chat tab, editing a previously sent message opened the
