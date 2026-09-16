@@ -7,11 +7,12 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 GOAL_OBJECTIVE_MAX_LENGTH = 4000
 DEFAULT_GOAL_MAX_TURNS = 20
 HARD_GOAL_MAX_TURNS = 100
+GOAL_CHECKPOINT_HISTORY_LIMIT = 10
 
 
 def utc_now() -> datetime:
@@ -46,6 +47,40 @@ class GoalDispatchState(str, Enum):
     UNCERTAIN = "uncertain"
 
 
+class GoalVerifiedProgress(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item: str = Field(min_length=1, max_length=500)
+    evidence: str = Field(min_length=1, max_length=1000)
+
+
+class GoalCheckpoint(BaseModel):
+    """Bounded agent-authored working memory; never replaces the objective."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(min_length=1, max_length=128)
+    verified_progress: list[GoalVerifiedProgress] = Field(default_factory=list, max_length=20)
+    decisions: list[str] = Field(default_factory=list, max_length=20)
+    remaining: list[str] = Field(default_factory=list, max_length=30)
+    blocker: str | None = Field(default=None, max_length=1000)
+    next_step: str | None = Field(default=None, max_length=1000)
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("decisions", "remaining")
+    @classmethod
+    def validate_bounded_items(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            item = value.strip()
+            if not item:
+                raise ValueError("checkpoint items must not be blank")
+            if len(item) > 1000:
+                raise ValueError("checkpoint items must be at most 1000 characters")
+            normalized.append(item)
+        return normalized
+
+
 class GoalRun(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     tab_id: str
@@ -60,6 +95,9 @@ class GoalRun(BaseModel):
     pending_step_id: str | None = None
     current_turn_id: str | None = None
     completed_turn_ids: list[str] = Field(default_factory=list)
+    checkpoint: GoalCheckpoint | None = None
+    checkpoint_history: list[GoalCheckpoint] = Field(default_factory=list)
+    checkpoint_warning: str | None = None
     status_message: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

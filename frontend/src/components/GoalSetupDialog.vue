@@ -3,7 +3,9 @@
     <div
       v-if="open"
       class="goal-dialog-backdrop"
-      @click.self="emit('close')"
+      @click.self="close"
+      @keydown.esc="close"
+      @keydown.tab="trapFocus"
     >
       <form
         class="goal-dialog"
@@ -62,7 +64,7 @@
           <button
             type="button"
             :disabled="busy"
-            @click="emit('close')"
+            @click="close"
           >
             Cancel
           </button>
@@ -92,11 +94,37 @@ const tokenBudget = ref('')
 const maxTurns = ref('20')
 const validationError = ref<string | null>(null)
 const objectiveEl = ref<HTMLTextAreaElement | null>(null)
+let returnFocusEl: HTMLElement | null = null
+
+function close() {
+  if (!props.busy) emit('close')
+}
+
+function trapFocus(event: KeyboardEvent) {
+  const dialog = objectiveEl.value?.closest<HTMLElement>('.goal-dialog')
+  if (!dialog) return
+  const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled)')]
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (!first || !last) return
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
 
 watch(() => props.open, open => {
-  if (!open) return
-  validationError.value = null
-  void nextTick(() => objectiveEl.value?.focus())
+  if (open) {
+    returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    validationError.value = null
+    void nextTick(() => objectiveEl.value?.focus())
+  } else {
+    returnFocusEl?.focus()
+    returnFocusEl = null
+  }
 })
 
 function submit() {
@@ -113,7 +141,7 @@ function submit() {
 
 <style scoped>
 .goal-dialog-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / 55%); }
-.goal-dialog { display: grid; gap: 16px; width: min(560px, 100%); padding: 20px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-lg, 12px); background: var(--ch-color-surface); box-shadow: var(--ch-shadow-lg, 0 20px 50px rgb(0 0 0 / 35%)); }
+.goal-dialog { display: grid; gap: 16px; width: min(560px, 100%); max-height: calc(100dvh - 32px); padding: 20px; overflow-y: auto; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-lg, 12px); background: var(--ch-color-surface); box-shadow: var(--ch-shadow-lg, 0 20px 50px rgb(0 0 0 / 35%)); }
 h2, p { margin: 0; }
 h2 { font-size: 18px; }
 p { color: var(--ch-color-text-muted); }

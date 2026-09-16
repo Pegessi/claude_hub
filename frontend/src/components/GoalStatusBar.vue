@@ -35,6 +35,30 @@
       >
         {{ goal.status_message }}
       </p>
+      <div
+        v-if="goal.checkpoint"
+        class="goal-checkpoint"
+      >
+        <strong>Latest checkpoint</strong>
+        <p v-if="goal.checkpoint.next_step">
+          <b>Next:</b> {{ goal.checkpoint.next_step }}
+        </p>
+        <p v-if="goal.checkpoint.blocker">
+          <b>Blocked:</b> {{ goal.checkpoint.blocker }}
+        </p>
+        <p v-if="goal.checkpoint.remaining.length">
+          <b>Remaining:</b> {{ goal.checkpoint.remaining.join(' · ') }}
+        </p>
+        <p v-if="goal.checkpoint.verified_progress.length">
+          <b>Verified:</b> {{ goal.checkpoint.verified_progress.map(item => item.item).join(' · ') }}
+        </p>
+      </div>
+      <p
+        v-if="goal.checkpoint_warning"
+        class="goal-checkpoint-warning"
+      >
+        Checkpoint was not updated: {{ goal.checkpoint_warning }}
+      </p>
       <p
         v-if="error"
         class="goal-status-error"
@@ -43,6 +67,13 @@
         {{ error }}
       </p>
     </div>
+    <p
+      v-if="error && !expanded"
+      class="goal-status-error goal-status-error--summary"
+      role="alert"
+    >
+      {{ error }}
+    </p>
     <div class="goal-status-actions">
       <button
         v-if="goal.status === 'active'"
@@ -53,7 +84,7 @@
         Pause
       </button>
       <button
-        v-if="goal.status === 'paused' || goal.status === 'blocked' || goal.status === 'budget_limited'"
+        v-if="goal.status === 'paused' || goal.status === 'blocked'"
         type="button"
         :disabled="busy"
         @click="emit('resume')"
@@ -102,10 +133,14 @@ function formatTime(value: string): string { return new Date(value).toLocaleStri
 .goal-status-actions { display: flex; gap: 5px; }
 .goal-status-actions button { padding: 3px 8px; color: var(--ch-color-text); background: transparent; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-sm); cursor: pointer; }
 .goal-status-actions button:disabled { cursor: default; opacity: .55; }
-.goal-status-details { position: absolute; right: 28px; bottom: 72px; left: 28px; z-index: 4; padding: 12px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-elevated, var(--ch-color-surface)); box-shadow: var(--ch-shadow-md); }
+.goal-status-details { position: absolute; right: 28px; bottom: 72px; left: 28px; z-index: 4; max-height: min(60dvh, 480px); padding: 12px; overflow-y: auto; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-elevated, var(--ch-color-surface)); box-shadow: var(--ch-shadow-md); }
 .goal-status-details p { margin: 0 0 8px; white-space: pre-wrap; }
 .goal-status-meta { display: flex; flex-wrap: wrap; gap: 12px; color: var(--ch-color-text-subtle); }
 .goal-status-message, .goal-status-error { color: var(--ch-color-warning, #e0a800); }
 .goal-status-error { color: var(--ch-color-danger, #e5484d); }
+.goal-status-error--summary { max-width: 260px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-checkpoint { padding-top: 8px; border-top: 1px solid var(--ch-color-border-muted); }
+.goal-checkpoint p { margin: 5px 0 0; color: var(--ch-color-text-muted); }
+.goal-checkpoint-warning { color: var(--ch-color-warning, #e0a800); }
 @media (max-width: 640px) { .goal-status { flex-wrap: wrap; padding: 7px 12px; } .goal-usage { display: none; } .goal-status-actions { width: 100%; justify-content: flex-end; } .goal-status-details { right: 12px; left: 12px; } }
 </style>

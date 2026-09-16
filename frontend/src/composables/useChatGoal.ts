@@ -21,11 +21,14 @@ export function useChatGoal(tabId: Ref<string>) {
   const goal = ref<ChatGoal | null>(null)
   const isHydrating = ref(false)
   const isMutating = ref(false)
+  const isHydrated = ref(false)
   const error = ref<string | null>(null)
   let epoch = 0
+  let mutationEpoch = 0
   let hydrationController: AbortController | null = null
 
   async function hydrate(): Promise<void> {
+    if (isMutating.value) return
     const requestEpoch = ++epoch
     hydrationController?.abort()
     const controller = new AbortController()
@@ -40,11 +43,15 @@ export function useChatGoal(tabId: Ref<string>) {
       if (requestEpoch !== epoch) return
       if (response.status === 204) {
         goal.value = null
+        isHydrated.value = true
         return
       }
       if (!response.ok) throw new Error(await errorDetail(response))
       const body = await response.json() as ChatGoal | null
-      if (requestEpoch === epoch) goal.value = body ?? null
+      if (requestEpoch === epoch) {
+        goal.value = body ?? null
+        isHydrated.value = true
+      }
     } catch (cause) {
       if (controller.signal.aborted || requestEpoch !== epoch) return
       error.value = cause instanceof Error ? cause.message : 'Failed to load Goal.'
@@ -84,28 +91,30 @@ export function useChatGoal(tabId: Ref<string>) {
 
   async function run(action: () => Promise<ChatGoal | null>): Promise<boolean> {
     if (isMutating.value) return false
-    const requestEpoch = ++epoch
+    epoch++
+    const requestMutationEpoch = ++mutationEpoch
     hydrationController?.abort()
     isHydrating.value = false
     isMutating.value = true
     error.value = null
     try {
       const nextGoal = await action()
-      if (requestEpoch !== epoch) return false
+      if (requestMutationEpoch !== mutationEpoch) return false
       goal.value = nextGoal
       return true
     } catch (cause) {
-      if (requestEpoch === epoch) {
+      if (requestMutationEpoch === mutationEpoch) {
         error.value = cause instanceof Error ? cause.message : 'Goal action failed.'
       }
       return false
     } finally {
-      if (requestEpoch === epoch) isMutating.value = false
+      if (requestMutationEpoch === mutationEpoch) isMutating.value = false
     }
   }
 
   function dispose() {
     epoch++
+    mutationEpoch++
     hydrationController?.abort()
     hydrationController = null
   }
@@ -115,6 +124,7 @@ export function useChatGoal(tabId: Ref<string>) {
   return {
     goal,
     error,
+    isHydrated,
     isHydrating,
     isMutating,
     hasGoal: computed(() => goal.value !== null),

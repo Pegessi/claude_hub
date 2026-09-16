@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat: add persistent Goal mode to structured Chat
+
+- Add one persistent Goal per direct Chat with pause, resume, complete, clear,
+  optional token budget, bounded turn count, atomic recovery state, and a
+  capability-driven UI shared by Claude, Cursor, Codex, and TraeX.
+- Continue Hub-managed Goals only after a persisted turn completes and emits a
+  trailing structured status. Codex Goal RPCs and provider-started continuation
+  turns are normalized without allowing two schedulers to own one Goal.
+- Preserve a lightweight, validated checkpoint of verified progress, decisions,
+  remaining work, blocker, and next step. The immutable objective and latest
+  valid checkpoint are re-injected on every continuation; malformed checkpoint
+  updates retain the prior value.
+- Serialize Goal admission with manual sends and Plan-mode changes per Chat tab,
+  and reconcile uncertain restart state before an explicit resume dispatches.
+- See `docs/working-logs/2026-09-17-chat-goal-mode.md` for architecture, provider
+  ownership, safety boundaries, and validation scope.
+
 ### fix: complete TraeX Chat protocol handling
 
 - Stop uses `turn/interrupt` with provider thread/turn IDs and waits for

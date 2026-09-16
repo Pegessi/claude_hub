@@ -32,6 +32,11 @@ def normalize_provider_usage(raw: Any, source: str) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
     candidate = raw
+    token_usage = raw.get("tokenUsage")
+    if isinstance(token_usage, dict) and isinstance(token_usage.get("last"), dict):
+        # Codex notifications contain both cumulative ``total`` and per-turn
+        # ``last``. Goal accounting sums turns, so only ``last`` is safe.
+        candidate = token_usage["last"]
     for _depth in range(3):
         nested = next(
             (
@@ -67,10 +72,16 @@ def normalize_provider_usage(raw: Any, source: str) -> Optional[Dict[str, Any]]:
         "cacheReadInputTokens",
     )
     output_tokens = count("output", "output_tokens", "outputTokens")
-    reasoning_tokens = count("reasoning", "reasoning_tokens", "reasoningTokens")
+    reasoning_tokens = count(
+        "reasoning",
+        "reasoning_tokens",
+        "reasoningTokens",
+        "reasoning_output_tokens",
+        "reasoningOutputTokens",
+    )
     total_tokens = count("total", "total_tokens", "totalTokens")
-    if not total_tokens:
-        total_tokens = input_tokens + output_tokens
+    if input_tokens or output_tokens:
+        total_tokens = max(0, input_tokens - cached_tokens) + output_tokens
     if not any((input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens)):
         return None
     return {

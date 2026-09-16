@@ -200,9 +200,9 @@
               v-if="turn.turnId && supportsEditResend"
               type="button"
               class="edit-resend-hover-btn"
-              :disabled="turnInFlight"
-              :title="turnInFlight ? 'A turn is currently running' : 'Edit message'"
-              :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : 'Edit message'"
+              :disabled="turnInFlight || Boolean(goalEditReason)"
+              :title="turnInFlight ? 'A turn is currently running' : (goalEditReason || 'Edit message')"
+              :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : (goalEditReason ? `Edit message (${goalEditReason})` : 'Edit message')"
               @click="startEdit(turn)"
             >
               ✎ 编辑
@@ -570,6 +570,19 @@
         >
           {{ modeChangeError }}
         </div>
+        <div
+          v-if="goalError && !goal && !isGoalSetupOpen"
+          class="composer-mode-error"
+          role="alert"
+        >
+          Goal: {{ goalError }}
+          <button
+            type="button"
+            @click="hydrateGoal"
+          >
+            Retry
+          </button>
+        </div>
 
         <!-- Attachment previews -->
         <div
@@ -635,8 +648,8 @@
               v-if="!goal && capabilities?.supports_goals"
               type="button"
               class="composer-goal-btn"
-              :disabled="isGoalHydrating || isGoalMutating"
-              title="Start a persistent Chat Goal"
+              :disabled="!isGoalHydrated || Boolean(goalError) || isGoalHydrating || isGoalMutating || turnInFlight"
+              :title="turnInFlight ? 'Wait for the current turn to finish' : 'Start a persistent Chat Goal'"
               @click="isGoalSetupOpen = true"
             >
               {{ isGoalHydrating ? 'Goal…' : 'Goal' }}
@@ -860,7 +873,7 @@ import { IncrementalTimelineReducer, foldTurnParts, messageClockLabel, splitTurn
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
-import { goalPlanLockReason } from '@/utils/chatGoalPolicy'
+import { goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
@@ -882,6 +895,7 @@ const terminalStore = useTerminalStore()
 const {
   goal,
   error: goalError,
+  isHydrated: isGoalHydrated,
   isHydrating: isGoalHydrating,
   isMutating: isGoalMutating,
   hydrate: hydrateGoal,
@@ -893,6 +907,9 @@ const {
 } = useChatGoal(toRef(props, 'tabId'))
 const isGoalSetupOpen = ref(false)
 const goalPlanReason = computed(() => goalPlanLockReason(goal.value))
+const goalEditReason = computed(() => goal.value && !isGoalTerminal(goal.value.status)
+  ? 'Pause or finish the active Goal before editing history'
+  : null)
 
 async function startGoal(input: { objective: string; token_budget?: number; max_turns?: number }) {
   if (await createGoal(input)) isGoalSetupOpen.value = false
@@ -1898,6 +1915,10 @@ function startEdit(turn: TimelineTurn) {
   // authoritative (409); this just avoids a round-trip and keeps the button
   // and the action in sync.
   if (turnInFlight.value) return
+  if (goalEditReason.value) {
+    editError.value = goalEditReason.value
+    return
+  }
   editingTurnKey.value = turn.key
   editDraft.value = turn.userText
   editError.value = null

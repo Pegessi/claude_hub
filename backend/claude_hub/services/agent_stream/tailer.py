@@ -596,7 +596,7 @@ class SessionTailer:
                 self._active_turn_id = None
                 raise
 
-    async def cancel_turn(self) -> bool:
+    async def cancel_turn(self, expected_turn_id: Optional[str] = None) -> bool:
         """Cancel the active native turn or close a durable orphan.
 
         A backend restart loses the process-local ``_active_turn_id`` and
@@ -608,15 +608,19 @@ class SessionTailer:
         transport = self._native_transport
         async with self._send_lock:
             if transport is not None and transport.turn_in_flight:
+                if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
+                    return False
                 await self._cancel_active_turn_locked(transport)
                 return True
 
-            return await self._recover_orphaned_turn_locked()
+            return await self._recover_orphaned_turn_locked(expected_turn_id)
 
-    async def _recover_orphaned_turn_locked(self) -> bool:
+    async def _recover_orphaned_turn_locked(self, expected_turn_id: Optional[str] = None) -> bool:
         """Explain and terminalize a turn owned by an earlier backend."""
         orphan = await self._store.latest_unfinished_turn()
         if orphan is None:
+            return False
+        if expected_turn_id is not None and orphan.turn_id != expected_turn_id:
             return False
         await self._publish_turn_completion(
             turn_id=orphan.turn_id,
@@ -633,7 +637,7 @@ class SessionTailer:
         run_epoch: Optional[int],
         status: str,
         error_message: Optional[str] = None,
-    ) -> None:
+    ) -> AgentStreamEvent:
         """Persist and fan out one authoritative terminal lifecycle edge."""
         session = self._session_getter()
         if session is None:
@@ -663,6 +667,7 @@ class SessionTailer:
         await self._publish(redact_event(completed))
         self._turn_completed_seen = True
         self._terminalize_native_runtime(status)
+        return completed
 
     def _turn_exceeds_hard_cap(self) -> bool:
         """True if the active turn has run longer than ``MAX_TURN_DURATION_S``.
@@ -684,7 +689,7 @@ class SessionTailer:
         publish_error: Optional[Exception] = None
         if turn_id is not None:
             try:
-                await self._publish_turn_completion(
+                completed = await self._publish_turn_completion(
                     turn_id=turn_id,
                     run_epoch=self._run_epoch,
                     status="cancelled",
@@ -698,6 +703,8 @@ class SessionTailer:
                 publish_error = exc
         await transport.cancel_active_turn()
         self._active_turn_id = None
+        if turn_id is not None and publish_error is None:
+            self._notify_post_persist(completed)
         # A cancelled turn can no longer answer a pending card; drop stale
         # tracking so it cannot be resolved against a later turn.
         self._pending_approvals.clear()
@@ -706,7 +713,9 @@ class SessionTailer:
                 publish_error
             )
 
-    async def _fail_active_turn(self, message: str, transport: ProviderSession) -> None:
+    async def _fail_active_turn(
+        self, message: str, transport: ProviderSession
+    ) -> Optional[AgentStreamEvent]:
         """Emit an ``error`` event and a failed ``turn_completed``.
 
         Called when a turn ends without a successful provider completion
@@ -722,10 +731,10 @@ class SessionTailer:
         """
         turn_id = self._active_turn_id
         if turn_id is None:
-            return
+            return None
         session = self._session_getter()
         if session is None:
-            return
+            return None
         ctx = NormalizeContext(
             session_id=self.session_id,
             tab_id=session.tab_id,
@@ -757,8 +766,10 @@ class SessionTailer:
                 "agent_stream store append failed for turn_completed session %s",
                 self.session_id,
             )
+            return None
         self._turn_completed_seen = True
         self._terminalize_native_runtime("failed")
+        return completed
 
     async def poll_once(self) -> None:
         async with self._poll_lock:
@@ -979,7 +990,13 @@ class SessionTailer:
                     # any) is abandoned. Emit an error and a failed
                     # turn_completed for the active turn so the frontend
                     # never leaves it pending, then fail the session.
-                    await self._fail_active_turn("native transport process exited", transport)
+                    fatal_failure = await self._fail_active_turn(
+                        "native transport process exited", transport
+                    )
+                    self._active_turn_id = None
+                    transport.acknowledge_turn_complete()
+                    if fatal_failure is not None:
+                        self._notify_post_persist(fatal_failure)
                     self._hard_failed = True
                     self._last_error = "native transport process exited"
                     _HARD_FAILED_SESSION_IDS.add(self.session_id)
@@ -993,6 +1010,7 @@ class SessionTailer:
                 # completion, even on a nonzero exit, because that would
                 # produce two terminal events for the same turn.
                 exit_error = transport.exit_error
+                failed: Optional[AgentStreamEvent] = None
                 if not self._turn_completed_seen:
                     # A cancelled reader cannot reach this branch: the
                     # transport retires its generation before publishing the
@@ -1011,7 +1029,7 @@ class SessionTailer:
                         self.session_id,
                         exit_error,
                     )
-                    await self._fail_active_turn(
+                    failed = await self._fail_active_turn(
                         exit_error or "provider exited without a completion record",
                         transport,
                     )
@@ -1035,6 +1053,8 @@ class SessionTailer:
                 # completion WAS emitted, these are no-ops.
                 self._active_turn_id = None
                 transport.acknowledge_turn_complete()
+                if failed is not None:
+                    self._notify_post_persist(failed)
                 continue
             # Stop may retire a turn after read_line dequeues its record but
             # before wait_for resumes this consumer. Recheck at consumption.
@@ -1808,10 +1828,18 @@ class TailerManager:
             delivery=delivery,
         )
 
-    async def cancel_turn(self, session: ManagedSession) -> bool:
+    async def cancel_turn(
+        self, session: ManagedSession, expected_turn_id: Optional[str] = None
+    ) -> bool:
         """Cancel the active native turn for ``session``, if any."""
         tailer = await self._get_or_create(session)
-        return await tailer.cancel_turn()
+        return await tailer.cancel_turn(expected_turn_id)
+
+    async def turn_in_flight(self, session: ManagedSession) -> bool:
+        """Return the authoritative native transport turn guard."""
+        tailer = await self._get_or_create(session)
+        transport = tailer._native_transport
+        return bool(transport is not None and transport.turn_in_flight)
 
     async def edit_resend(
         self,

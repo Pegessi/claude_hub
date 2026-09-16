@@ -35,10 +35,11 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..auth.dependencies import get_current_user
 from ..models import (
+    TERMINAL_GOAL_STATUSES,
     AgentRuntimeStatus,
     AgentStreamEvent,
-    AgentStreamEventType,
     AgentStreamEventPage,
+    AgentStreamEventType,
     AgentType,
     ChatMode,
     ManagedSession,
@@ -456,8 +457,20 @@ async def _set_stream_mode_for(
         raise HTTPException(
             status_code=400, detail="mode is only available for native Chat sessions"
         )
+    from ..services.goal_run import get_goal_admission_lock, get_goal_manager
+
+    tab_id = session.tab_id
+    admission = get_goal_admission_lock(tab_id) if direct_tab else asyncio.Lock()
     try:
-        await manager.set_mode(session, mode)
+        async with admission:
+            if direct_tab and mode == ChatMode.PLAN.value:
+                goal = get_goal_manager().current(tab_id)
+                if goal is not None and goal.status.value == "active":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pause or finish the active Goal before switching to Plan mode",
+                    )
+            await manager.set_mode(session, mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -1230,16 +1243,25 @@ async def send_tab_stream_input(
     payload: AgentStreamSendRequest,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    session = _terminal_tab_session_or_404(tab_id)
-    manager = _get_tab_tailer_manager()
-    try:
-        await _send_to_native(session, payload, manager)
-    except StructuredSourceUnavailable as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _map_send_exception(exc)
+    from ..services.goal_run import get_goal_admission_lock, get_goal_manager
+
+    async with get_goal_admission_lock(tab_id):
+        goal = get_goal_manager().current(tab_id)
+        if goal is not None and goal.status.value == "active":
+            raise HTTPException(
+                status_code=409,
+                detail="Pause or finish the active Goal before sending a manual turn",
+            )
+        session = _terminal_tab_session_or_404(tab_id)
+        manager = _get_tab_tailer_manager()
+        try:
+            await _send_to_native(session, payload, manager)
+        except StructuredSourceUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _map_send_exception(exc)
     return {"ok": True}
 
 
@@ -1361,6 +1383,14 @@ async def edit_resend_tab_stream(
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Edit-resend for a direct Agent tab."""
+    from ..services.goal_run import get_goal_manager
+
+    goal = get_goal_manager().current(tab_id)
+    if goal is not None and goal.status not in TERMINAL_GOAL_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Pause or finish the active Goal before editing conversation history",
+        )
     session = _terminal_tab_session_or_404(tab_id)
     manager = _get_tab_tailer_manager()
     try:

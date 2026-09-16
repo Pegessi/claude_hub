@@ -5,22 +5,69 @@ from pydantic import ValidationError
 
 from claude_hub.models import (
     HARD_GOAL_MAX_TURNS,
+    GoalDispatchState,
     GoalRunCreate,
     GoalRunStatus,
     GoalUsageQuality,
 )
+from claude_hub.models.agent_stream import normalize_provider_usage
 from claude_hub.services.goal_run import GoalPolicyError, GoalRunController, GoalRunStore
 from claude_hub.services.goal_run.controller import build_continuation_prompt
+
+
+def response_with_checkpoint(
+    state: str = "continue", *, next_step: str = "Run integration tests"
+) -> str:
+    return f"""Progress report.
+<goal-checkpoint>
+{{"verified_progress":[{{"item":"Goal API","evidence":"12 tests passed"}}],
+ "decisions":["Keep Goal separate from ChatMode"],
+ "remaining":["Provider verification"],
+ "blocker":null,"next_step":"{next_step}"}}
+</goal-checkpoint>
+<goal-status state="{state}">checkpoint recorded</goal-status>"""
 
 
 def controller(tmp_path: Path) -> GoalRunController:
     return GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"))
 
 
+def test_codex_usage_uses_per_turn_last_and_non_cached_total() -> None:
+    usage = normalize_provider_usage(
+        {
+            "tokenUsage": {
+                "last": {
+                    "inputTokens": 100,
+                    "cachedInputTokens": 40,
+                    "outputTokens": 20,
+                    "reasoningOutputTokens": 5,
+                },
+                "total": {"inputTokens": 1000, "outputTokens": 200},
+            }
+        },
+        "codex",
+    )
+    assert usage == {
+        "input": 100,
+        "cached": 40,
+        "output": 20,
+        "reasoning": 5,
+        "total": 80,
+        "source": "codex",
+    }
+
+
 def request(request_id: str = "create-1", **kwargs: object) -> GoalRunCreate:
     return GoalRunCreate(
         objective="Ship the requested feature", client_request_id=request_id, **kwargs
     )
+
+
+def arm_goal(manager: GoalRunController, goal_id: str, turn_id: str) -> None:
+    goal = manager.get(goal_id)
+    goal.current_turn_id = turn_id
+    goal.dispatch_state = GoalDispatchState.DISPATCHED
+    manager.store.put(goal)
 
 
 def test_contract_validation_and_create_idempotency(tmp_path: Path) -> None:
@@ -55,6 +102,18 @@ async def test_mutations_are_idempotent_and_persisted(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_completed_goal_remains_visible_until_cleared(tmp_path: Path) -> None:
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request())
+    completed = await manager.complete(goal.id, "complete-1")
+    assert manager.current("tab-1") == completed
+    assert (await manager.clear(goal.id, "clear-complete")).status == GoalRunStatus.CANCELLED
+    assert manager.current("tab-1") is None
+    replacement = manager.create("tab-1", request("create-2"))
+    assert manager.current("tab-1") == replacement
+
+
+@pytest.mark.asyncio
 async def test_turn_signal_continues_only_after_state_is_persisted(tmp_path: Path) -> None:
     observations: list[tuple[str, str]] = []
 
@@ -65,11 +124,12 @@ async def test_turn_signal_continues_only_after_state_is_persisted(tmp_path: Pat
 
     manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
     goal = manager.create("tab-1", request(token_budget=1000))
+    arm_goal(manager, goal.id, "turn-1")
     result = await manager.on_turn_completed(
         "tab-1",
         "turn-1",
         "complete",
-        'work done\n<goal-status state="continue">tests pending</goal-status>',
+        response_with_checkpoint(),
         {"total_tokens": 100, "quality": "exact"},
     )
     assert result is not None
@@ -80,17 +140,58 @@ async def test_turn_signal_continues_only_after_state_is_persisted(tmp_path: Pat
     assert observations[0][0] == "pending"
     assert "do not narrow" in observations[0][1]
     assert "provider-native subagents" in observations[0][1]
+    assert result.checkpoint is not None
+    assert result.checkpoint.verified_progress[0].evidence == "12 tests passed"
+    assert result.checkpoint_history == [result.checkpoint]
 
 
 @pytest.mark.asyncio
 async def test_turn_missing_signal_fails_closed_and_usage_is_unavailable(tmp_path: Path) -> None:
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "turn-1")
     result = await manager.on_turn_completed("tab-1", "turn-1", "complete", "plain prose")
     assert result is not None
     assert result.status == GoalRunStatus.FAILED
     assert result.usage_quality == GoalUsageQuality.UNAVAILABLE
     assert manager.get(goal.id).turns_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_unrelated_completion_is_ignored_and_stop_pauses_goal(tmp_path: Path) -> None:
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "goal-turn")
+    unrelated = await manager.on_turn_completed(
+        "tab-1", "user-turn", "complete", '<goal-status state="complete">x</goal-status>'
+    )
+    assert unrelated is not None
+    assert unrelated.status == GoalRunStatus.ACTIVE
+    assert unrelated.turns_completed == 0
+    stopped = await manager.on_turn_completed("tab-1", "goal-turn", "cancelled", "")
+    assert stopped is not None
+    assert stopped.status == GoalRunStatus.PAUSED
+    assert stopped.turns_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_usage_quality_conservatively_degrades_across_turns(tmp_path: Path) -> None:
+    async def dispatch(goal, prompt):
+        return "turn-2"
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "turn-1")
+    first = await manager.on_turn_completed(
+        "tab-1", "turn-1", "complete", response_with_checkpoint(), {"total": 100}
+    )
+    assert first is not None and first.usage_quality == GoalUsageQuality.EXACT
+    second = await manager.on_turn_completed(
+        "tab-1", "turn-2", "complete", response_with_checkpoint(state="complete")
+    )
+    assert second is not None
+    assert second.token_usage == 100
+    assert second.usage_quality == GoalUsageQuality.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -108,7 +209,7 @@ async def test_blocked_signal_and_stale_completion_after_pause(tmp_path: Path) -
     await manager.resume(goal.id, "resume")
     blocked = await manager.on_turn_completed(
         "tab-1",
-        "turn-2",
+        "turn-resumed",
         "complete",
         '<goal-status state="needs_input">choose A or B</goal-status>',
     )
@@ -124,7 +225,8 @@ async def test_budget_and_turn_limits_stop_continuation(tmp_path: Path) -> None:
         called = True
 
     manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
-    manager.create("tab-1", request(token_budget=10, max_turns=1))
+    goal = manager.create("tab-1", request(token_budget=10, max_turns=1))
+    arm_goal(manager, goal.id, "turn-1")
     result = await manager.on_turn_completed(
         "tab-1",
         "turn-1",
@@ -140,13 +242,42 @@ def test_recovery_pauses_uncertain_dispatch(tmp_path: Path) -> None:
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
     stored = manager.get(goal.id)
-    from claude_hub.models import GoalDispatchState
-
     stored.dispatch_state = GoalDispatchState.PENDING
     manager.store.put(stored)
     recovered = manager.recover()
     assert recovered[0].status == GoalRunStatus.PAUSED
     assert recovered[0].dispatch_state.value == "uncertain"
+
+
+@pytest.mark.asyncio
+async def test_resume_reconciles_uncertain_turn_and_dispatches_once(tmp_path: Path) -> None:
+    dispatched: list[str] = []
+    cancelled: list[str | None] = []
+
+    async def dispatch(goal, prompt):
+        dispatched.append(goal.pending_step_id)
+        return "turn-recovered"
+
+    async def cancel(goal):
+        cancelled.append(goal.current_turn_id)
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goal_runs.json"), dispatch=dispatch, cancel=cancel
+    )
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "turn-uncertain")
+    manager.recover()
+
+    resumed = await manager.resume(goal.id, "resume-recovered")
+
+    assert resumed.status == GoalRunStatus.ACTIVE
+    assert resumed.dispatch_state == GoalDispatchState.DISPATCHED
+    assert resumed.current_turn_id == "turn-recovered"
+    assert cancelled == ["turn-uncertain"]
+    assert len(dispatched) == 1
+    replay = await manager.resume(goal.id, "resume-recovered")
+    assert replay.current_turn_id == "turn-recovered"
+    assert len(dispatched) == 1
 
 
 def test_continuation_prompt_keeps_full_objective(tmp_path: Path) -> None:
@@ -155,6 +286,102 @@ def test_continuation_prompt_keeps_full_objective(tmp_path: Path) -> None:
     assert goal.objective in prompt
     assert "verify relevant" in prompt
     assert "<goal-status" in prompt
+    assert "<goal-checkpoint>" in prompt
+
+
+@pytest.mark.asyncio
+async def test_latest_valid_checkpoint_is_injected_and_invalid_update_is_non_destructive(
+    tmp_path: Path,
+) -> None:
+    prompts: list[str] = []
+
+    async def dispatch(goal, prompt):
+        prompts.append(prompt)
+        return f"turn-{len(prompts) + 1}"
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "turn-1")
+    first = await manager.on_turn_completed(
+        "tab-1", "turn-1", "complete", response_with_checkpoint()
+    )
+    assert first is not None and first.checkpoint is not None
+    assert '"next_step":"Run integration tests"' in prompts[-1]
+
+    invalid = await manager.on_turn_completed(
+        "tab-1",
+        "turn-2",
+        "complete",
+        '<goal-checkpoint>{"remaining":[""]}</goal-checkpoint>\n'
+        '<goal-status state="continue">keep going</goal-status>',
+    )
+    assert invalid is not None and invalid.checkpoint is not None
+    assert invalid.checkpoint.turn_id == "turn-1"
+    assert invalid.checkpoint_warning is not None
+    assert len(invalid.checkpoint_history) == 1
+
+
+@pytest.mark.asyncio
+async def test_final_status_parser_ignores_earlier_unclosed_opener(tmp_path: Path) -> None:
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "turn-1")
+
+    result = await manager.on_turn_completed(
+        "tab-1",
+        "turn-1",
+        "complete",
+        'quoted <goal-status state="complete">noise\n'
+        '<goal-status state="continue">real final state</goal-status>',
+    )
+
+    assert result is not None
+    assert result.status == GoalRunStatus.PAUSED
+    assert result.status_message == "automatic continuation is not connected"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_rejects_provider_owned_metadata_and_nested_extras(
+    tmp_path: Path,
+) -> None:
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "turn-1")
+    response = (
+        '<goal-checkpoint>{"turn_id":"forged","created_at":"2000-01-01T00:00:00Z",'
+        '"verified_progress":[{"item":"x","evidence":"y","objective":"z"}]}</goal-checkpoint>\n'
+        '<goal-status state="complete">done</goal-status>'
+    )
+
+    result = await manager.on_turn_completed("tab-1", "turn-1", "complete", response)
+
+    assert result is not None and result.status == GoalRunStatus.COMPLETE
+    assert result.checkpoint is None
+    assert "Hub-managed" in (result.checkpoint_warning or "")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_history_is_bounded(tmp_path: Path) -> None:
+    async def dispatch(goal, prompt):
+        return f"next-{goal.turns_completed}"
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
+    goal = manager.create("tab-1", request(max_turns=20))
+    arm_goal(manager, goal.id, "turn-0")
+    for index in range(12):
+        current = manager.get(goal.id)
+        if current.current_turn_id != f"turn-{index}":
+            arm_goal(manager, goal.id, f"turn-{index}")
+        result = await manager.on_turn_completed(
+            "tab-1",
+            f"turn-{index}",
+            "complete",
+            response_with_checkpoint(next_step=f"step {index}"),
+        )
+    assert result is not None
+    assert len(result.checkpoint_history) == 10
+    assert result.checkpoint_history[0].turn_id == "turn-2"
+    assert result.checkpoint_history[-1].turn_id == "turn-11"
 
 
 @pytest.mark.asyncio
