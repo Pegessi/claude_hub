@@ -14,18 +14,22 @@
   whether a chat was running, idle, or failed.
 - **The change.** On desktop the TabBar now renders inside the app-mode-bar —
   one unified row: mode switch, tabs (scrollable, taking the middle space),
-  new-tab, and tools. Mobile is unchanged: the app-mode-bar stays hidden and
-  the TabBar remains the top row with its ⋯ menu. A small status light next
-  to the Send button shows working (pulsing), idle (green), or error (red).
+  new-tab, and tools. The TabBar stays terminal-mode only (it is not shown in
+  workspace mode, where it would have no effect). Mobile is unchanged: the
+  app-mode-bar stays hidden and the TabBar remains the top row with its ⋯ menu.
+  A small status light next to the Send button shows working (pulsing), idle
+  (green), or error (red).
 - **Restoring a minimal session label.** The previous change removed the
   per-pane header entirely, which left no session name in the content area —
   hard to distinguish panes at a glance. A minimal session-name pill now sits
   in the top-right corner of each pane (terminal and chat), so a pane can be
-  identified without the cost of a full header row.
+  identified without the cost of a full header row. The pill has a solid
+  background so content does not show through.
 - **Plumbing.** A shared `useViewport` composable backs the desktop/mobile
-  switch (and replaces ad-hoc `innerWidth` checks); the TabBar is restyled
-  via `.app-mode-bar .tab-bar` rather than a new prop.
-- **Tests.** Lint, type-check, and the full unit suite stay green.
+  switch; the TabBar is restyled via `.app-mode-bar .tab-bar` rather than a
+  new prop.
+- **Tests.** New structural tests pin the merged TabBar, the status light, and
+  the session-name pill; lint, type-check, and the full unit suite stay green.
 
 ### refactor: drop the per-pane info header, tab icon becomes the agent avatar
 

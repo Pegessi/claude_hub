@@ -186,7 +186,9 @@ onUnmounted(() => {
   max-width: 45%;
   padding: 2px 9px;
   border-radius: 999px;
-  background: var(--ch-color-surface-control);
+  background: var(--ch-color-surface-raised);
+  border: 1px solid var(--ch-color-border-muted);
+  box-shadow: 0 1px 4px var(--ch-shadow-color-soft);
   color: var(--ch-color-text-muted);
   font-size: 11px;
   font-weight: 500;
