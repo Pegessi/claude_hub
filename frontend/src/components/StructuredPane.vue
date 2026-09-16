@@ -197,7 +197,7 @@
             class="turn-actions turn-actions--message"
           >
             <button
-              v-if="turn.turnId"
+              v-if="turn.turnId && supportsEditResend"
               type="button"
               class="edit-resend-hover-btn"
               :disabled="turnInFlight"
@@ -950,6 +950,9 @@ const currentModeLabel = computed(() => currentModeOption.value?.label ?? 'Mode'
 const MODEL_ENV_VAR: Record<string, string> = {
   claude: 'ANTHROPIC_MODEL',
   codex: 'CODEX_MODEL',
+  // TraeX reuses the Codex app-server; the backend injects the chosen slug via
+  // the collaborationMode.settings.model channel keyed off CODEX_MODEL.
+  traex: 'CODEX_MODEL',
   cursor: 'CURSOR_MODEL',
 }
 
@@ -964,6 +967,10 @@ const modelEnvVar = computed(() => {
   const at = currentTab.value?.agent_type
   return at ? MODEL_ENV_VAR[at] ?? null : null
 })
+// Edit-resend truncates the provider's on-disk transcript, which is only wired
+// for providers whose rollout Hub can locate. TraeX transcripts live under
+// ~/.trae and are not wired this wave, so the control is hidden (it would 409).
+const supportsEditResend = computed(() => currentTab.value?.agent_type !== 'traex')
 const currentModel = computed(() => {
   const env = currentTab.value?.env ?? {}
   const key = modelEnvVar.value

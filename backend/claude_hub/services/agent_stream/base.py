@@ -172,6 +172,8 @@ class AgentStreamAdapter:
     schema_version: int = 0
     supports_approval_ui: bool = False
     supports_tool_timeline: bool = False
+    # Allow transcript-backed Terminal views; native Chat uses its transport.
+    supports_transcript_discovery: bool = True
 
     def __init__(self) -> None:
         # Per-turn accumulators keyed by (session_id, run_epoch). Used to

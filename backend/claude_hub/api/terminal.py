@@ -280,7 +280,12 @@ async def websocket_endpoint(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
-    filter_probe_responses = tab.agent_type in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}
+    filter_probe_responses = tab.agent_type in {
+        AgentType.CLAUDE,
+        AgentType.CODEX,
+        AgentType.TRAEX,
+        AgentType.CURSOR,
+    }
 
     try:
         await proxy_websocket(
@@ -314,7 +319,12 @@ async def proxy_ttyd_websocket(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
-    filter_probe_responses = tab.agent_type in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}
+    filter_probe_responses = tab.agent_type in {
+        AgentType.CLAUDE,
+        AgentType.CODEX,
+        AgentType.TRAEX,
+        AgentType.CURSOR,
+    }
 
     try:
         await proxy_websocket(
@@ -504,7 +514,7 @@ async def proxy_terminal_request(
         const TAB_ID = {json.dumps(tab_id)};
         const AGENT_TYPE = {json.dumps(tab.agent_type.value)};
         const EXECUTION_TARGET = {json.dumps(tab.target.value)};
-        const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex' || AGENT_TYPE === 'cursor';
+        const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex' || AGENT_TYPE === 'traex' || AGENT_TYPE === 'cursor';
         const IS_REMOTE_AGENT_TUI = EXECUTION_TARGET === 'remote' && IS_AGENT_TUI;
         const FULL_HISTORY_LINES = {FULL_HISTORY_LINES};
         const INITIAL_AGENT_REPLAY_MIN_LINES = {INITIAL_AGENT_REPLAY_MIN_LINES};
