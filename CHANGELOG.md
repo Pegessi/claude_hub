@@ -23,6 +23,17 @@
   absence); the tab-kind styling is reduced to spacing now that the avatar
   owns the visuals.
 
+### fix: make the model picker scrollable and searchable
+
+- **Why now.** With the model list now synced from the CLI, the catalog grew to
+  ~160 entries, but the dropdown had no max-height/scroll and no search — it
+  rendered the whole list and the user could not find a specific model.
+- **The fix.** The menu is now a flex column with a bounded max-height
+  (`min(420px, 65vh)`): a search input at the top filters the list by id or
+  label (case-insensitive), the list scrolls independently, and the
+  custom-model-id input stays pinned at the bottom. The search is focused when
+  the menu opens and reset when it closes.
+
 ### feat: Cursor model list syncs from the CLI at runtime
 
 - **Why now.** The Chat model picker's dropdown was a hardcoded list in the
