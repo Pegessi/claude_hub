@@ -27,14 +27,13 @@ test('Chat sessions never mount a hidden raw terminal fallback', () => {
 })
 
 test('Chat and Terminal are fixed session surfaces, not a per-pane view toggle', () => {
-  assert.match(terminalPane, /class="pane-header pane-session-header"/)
   assert.match(terminalPane, /class="pane-structured"/)
   assert.match(terminalPane, /const isChatSession = computed/)
   assert.match(terminalPane, /paneTab\.value\?\.session_kind === 'chat'/)
-  assert.match(terminalPane, /Chat · native structured/)
-  assert.match(terminalPane, /Terminal · native TUI/)
-  assert.match(terminalPane, /const providerLabel = computed/)
   assert.match(terminalPane, /v-if="pane\.tabId && isChatSession"/)
+  // No per-pane info header: the TabBar already identifies the active tab, so a
+  // header would just duplicate it and cost a row of space.
+  assert.doesNotMatch(terminalPane, /pane-header pane-session-header/)
   assert.doesNotMatch(terminalPane, /pane-view-switch/)
   assert.doesNotMatch(terminalPane, /type ViewMode/)
   assert.doesNotMatch(terminalPane, />\s*Paseo\s*<\/button>/)

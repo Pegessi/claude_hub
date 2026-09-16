@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### refactor: drop the per-pane info header, tab icon becomes the agent avatar
+
+- **Why now.** Every pane showed a small header ("C ch fix / Claude Chat ·
+  native structured") that just repeated what the TabBar already shows — the
+  active tab's name and kind. On mobile that redundant header cost a row of
+  scarce space; on desktop it was visual noise.
+- **The change.** The per-pane header is removed on all surfaces (the TabBar
+  identifies the active tab). The tab's kind marker, formerly a text letter
+  ("C" / ">_"), is now the `AgentAvatar` — the agent type's actual icon with
+  its brand colors (Claude, Codex, Cursor, Terminal) — so the tab reads at a
+  glance which agent it runs.
+- **Trade-off.** The header's "Refresh terminal history" button goes with it.
+  Terminal history still loads on mount; the manual refresh can be re-added
+  (e.g. in the tab ⋯ menu) if it is missed.
+- **Tests.** The structural test no longer expects a pane-header (and pins its
+  absence); the tab-kind styling is reduced to spacing now that the avatar
+  owns the visuals.
+
 ### feat: Cursor model list syncs from the CLI at runtime
 
 - **Why now.** The Chat model picker's dropdown was a hardcoded list in the

@@ -8,42 +8,13 @@
     @drop="handleDrop"
   >
     <!-- The session kind is fixed at creation: Chat sessions own the
-         structured conversation surface, while Terminal sessions own raw PTY. -->
-    <div
-      v-if="pane.tabId"
-      class="pane-header pane-session-header"
-    >
-      <div class="pane-session-identity">
-        <span
-          class="pane-session-mark"
-          aria-hidden="true"
-        >{{ sessionMark }}</span>
-        <span class="pane-session-copy">
-          <strong class="pane-tab-name">{{ getTabName() }}</strong>
-          <span class="pane-session-status">{{ sessionStatusLabel }}</span>
-        </span>
-      </div>
-
-      <button
-        v-if="!isChatSession"
-        type="button"
-        class="pane-action-button"
-        :class="{ refreshing: isRefreshingHistory }"
-        :disabled="isRefreshingHistory"
-        title="Refresh terminal history"
-        aria-label="Refresh terminal history"
-        @click.stop="refreshHistory"
-      >
-        <span
-          class="pane-action-icon"
-          aria-hidden="true"
-        >&#x21bb;</span>
-      </button>
-    </div>
+         structured conversation surface, while Terminal sessions own raw PTY.
+         No per-pane info header: the TabBar already identifies the active tab,
+         so a header would just duplicate it and cost a row of space. -->
 
     <!-- 空状态 -->
     <div
-      v-else
+      v-if="!pane.tabId"
       class="pane-empty"
     >
       <div class="empty-icon">
@@ -109,7 +80,6 @@ const { tabs } = storeToRefs(store)
 const paneTab = computed<TerminalTab | undefined>(() =>
   props.pane.tabId ? tabs.value.find((t: TerminalTab) => t.id === props.pane.tabId) : undefined
 )
-const tabName = computed(() => paneTab.value?.name || '')
 const agentType = computed(() => paneTab.value?.agent_type)
 // workspace_id is optional display metadata on direct top-level sessions.
 // Only a workspace role marks an internal Agent Workspace runner.
@@ -124,32 +94,7 @@ const isChatSession = computed(() =>
 // evicted from this cache.
 const MAX_CACHED_CHAT_PANES = 8
 
-const sessionMark = computed(() => {
-  if (agentType.value === 'claude') return 'C'
-  if (agentType.value === 'codex') return 'X'
-  if (agentType.value === 'cursor') return '↗'
-  return '>_'
-})
-
-const providerLabel = computed(() => {
-  if (agentType.value === 'claude') return 'Claude'
-  if (agentType.value === 'codex') return 'Codex'
-  if (agentType.value === 'cursor') return 'Cursor'
-  return 'Shell'
-})
-
-const sessionStatusLabel = computed(() => {
-  if (isChatSession.value) return `${providerLabel.value} Chat · native structured`
-  return `${providerLabel.value} Terminal · native TUI`
-})
-
 const isDragOver = ref(false)
-const isRefreshingHistory = ref(false)
-let refreshFeedbackTimer: number | null = null
-
-function getTabName(): string {
-  return tabName.value
-}
 
 function getAgentType() {
   return agentType.value
@@ -157,35 +102,6 @@ function getAgentType() {
 
 function handleClick() {
   emit('click')
-}
-
-function clearRefreshFeedbackTimer() {
-  if (refreshFeedbackTimer !== null) {
-    window.clearTimeout(refreshFeedbackTimer)
-    refreshFeedbackTimer = null
-  }
-}
-
-function stopRefreshFeedbackAfter(delayMs: number) {
-  clearRefreshFeedbackTimer()
-  refreshFeedbackTimer = window.setTimeout(() => {
-    isRefreshingHistory.value = false
-    refreshFeedbackTimer = null
-  }, delayMs)
-}
-
-function refreshHistory() {
-  if (!props.pane.tabId) return
-  isRefreshingHistory.value = true
-  const refreshTerminalHistory = window.__claudeHub.refreshTerminalHistory
-  refreshTerminalHistory?.(props.pane.tabId)
-  stopRefreshFeedbackAfter(3000)
-}
-
-function handleHistoryRefreshDone(event: Event) {
-  const detail = (event as CustomEvent<{ tabId?: string }>).detail
-  if (!detail || detail.tabId !== props.pane.tabId) return
-  stopRefreshFeedbackAfter(250)
 }
 
 function handleMessage(event: MessageEvent) {
@@ -220,13 +136,10 @@ function handleDrop(event: DragEvent) {
 
 onMounted(() => {
   window.addEventListener('message', handleMessage)
-  window.addEventListener('terminal-history-refresh-done', handleHistoryRefreshDone)
 })
 
 onUnmounted(() => {
   window.removeEventListener('message', handleMessage)
-  window.removeEventListener('terminal-history-refresh-done', handleHistoryRefreshDone)
-  clearRefreshFeedbackTimer()
 })
 </script>
 
@@ -254,123 +167,6 @@ onUnmounted(() => {
 .terminal-pane.drag-over {
   border-color: var(--ch-color-success-strong);
   background-color: var(--ch-color-success-bg);
-}
-
-.pane-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 48px;
-  padding: 6px 10px;
-  background-color: var(--ch-color-surface);
-  border-bottom: 1px solid var(--ch-color-border-muted);
-  flex-shrink: 0;
-  overflow: hidden;
-  position: relative;
-  z-index: 3;
-  transition: max-height 180ms cubic-bezier(0.2, 0, 0, 1), padding 180ms cubic-bezier(0.2, 0, 0, 1), border-color 180ms cubic-bezier(0.2, 0, 0, 1), opacity 140ms ease, transform 180ms cubic-bezier(0.2, 0, 0, 1);
-}
-
-.pane-tab-name {
-  display: block;
-  min-width: 0;
-  color: var(--ch-color-text);
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.pane-session-identity {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  flex: 1;
-  min-width: 0;
-}
-
-.pane-session-mark {
-  width: 27px;
-  height: 27px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-raised);
-  color: var(--ch-color-accent);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.pane-session-copy {
-  display: block;
-  min-width: 0;
-}
-
-.pane-session-status {
-  display: block;
-  margin-top: 1px;
-  color: var(--ch-color-text-subtle);
-  font-size: 10px;
-  line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.pane-action-button {
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  color: var(--ch-color-text-muted);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--ch-radius-sm);
-  cursor: pointer;
-  transition: color var(--ch-motion-fast), background-color var(--ch-motion-fast), border-color var(--ch-motion-fast);
-}
-
-.pane-action-button:hover:not(:disabled) {
-  color: var(--ch-color-text);
-  background-color: var(--ch-color-surface-control-hover);
-  border-color: var(--ch-color-border-muted);
-}
-
-.pane-action-button:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 1px;
-}
-
-.pane-action-button:disabled {
-  cursor: default;
-  opacity: 0.8;
-}
-
-.pane-action-icon {
-  display: inline-block;
-  font-size: 14px;
-  line-height: 1;
-}
-
-.pane-action-button.refreshing .pane-action-icon {
-  animation: pane-history-spin 700ms linear infinite;
-}
-
-@keyframes pane-history-spin {
-  from {
-    transform: rotate(0deg);
-  }
-
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .pane-empty {
