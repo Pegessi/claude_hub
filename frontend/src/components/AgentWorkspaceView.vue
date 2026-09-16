@@ -1805,6 +1805,7 @@
             v-model:solo-mode="workspaceForm.resident_agent_solo_mode"
             v-model:env-preset="workspaceForm.resident_env_preset"
             v-model:env-text="workspaceForm.resident_env_text"
+            :exclude-types="['traex']"
             variant="modal"
             :disabled="!workspaceForm.resident_agent_enabled"
           />
@@ -2586,6 +2587,7 @@
             v-model:solo-mode="agentOptionsForm.solo_mode"
             v-model:env-preset="agentOptionsForm.env_preset"
             v-model:env-text="agentOptionsForm.env_text"
+            :exclude-types="['traex']"
             variant="modal"
           />
 
@@ -6214,6 +6216,11 @@ onUnmounted(() => {
 .agent-status-cli[data-kind='codex'] {
   background: rgba(16, 163, 127, 0.18);
   color: #10a37f;
+}
+
+.agent-status-cli[data-kind='traex'] {
+  background: rgba(91, 108, 255, 0.18);
+  color: #7b8aff;
 }
 
 .agent-status-cli[data-kind='cursor'] {

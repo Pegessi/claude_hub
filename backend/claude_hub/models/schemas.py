@@ -480,7 +480,7 @@ class TerminalTabBase(BaseModel):
     @model_validator(mode="after")
     def validate_session_kind(self) -> "TerminalTabBase":
         if self.session_kind == SessionKind.CHAT and self.agent_type == AgentType.TERMINAL:
-            raise ValueError("Chat sessions require a Claude, Codex, or Cursor provider")
+            raise ValueError("Chat sessions require a Claude, Codex, TraeX, or Cursor provider")
         if self.session_kind != SessionKind.CHAT and self.chat_mode != ChatMode.DEFAULT:
             raise ValueError("Chat modes are only available for Chat sessions")
         return self

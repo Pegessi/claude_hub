@@ -385,3 +385,30 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                 )
             )
         return events
+
+
+class TraexJsonlAdapter(CodexJsonlAdapter):
+    """Adapter for TraeX Chat's live app-server notifications.
+
+    TraeX is a Codex fork, so its JSON-RPC notification shapes normalize through
+    the inherited :meth:`normalize_line` unchanged. The difference is on-disk:
+    TraeX writes rollouts under ``~/.trae/cli/sessions`` rather than
+    ``~/.codex``, and terminal-side rollout discovery / edit-resend is not wired
+    this wave. We therefore deliberately disable transcript *discovery* so that
+
+    * a TERMINAL TraeX tab fails closed to the raw terminal instead of being
+      matched to a Codex rollout from ``~/.codex`` (a different provider's data),
+      and
+    * edit-resend reports "transcript not located" before touching any file.
+
+    CHAT TraeX is unaffected: its source is the native app-server transport,
+    which never calls :meth:`discover_source`.
+    """
+
+    adapter_id = "traex-jsonl"
+    # Terminal transcript structured surface is not wired (see docstring); only
+    # the native app-server powers the structured Chat view.
+    supports_transcript_discovery = False
+
+    def discover_source(self, session: ManagedSession) -> Optional[Path]:
+        return None

@@ -2435,22 +2435,34 @@ asyncio.run(_main())
         verified for this cwd, otherwise starts fresh.
 
         Raises:
-            ValueError: if the tab is not a local Claude/Codex tab.
+            ValueError: if the tab is not a local supported agent tab.
             RuntimeError: if the tmux session is not alive or respawn fails.
         """
-        if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}:
-            raise ValueError("switch_env is only supported for Claude, Codex, and Cursor tabs")
         if self.session_kind == SessionKind.CHAT:
-            # Chat sessions own their provider via the native transport. The
-            # native transport reads ``self.session.env`` on every turn (via
-            # ``_build_env`` / ``_build_command``), so updating the persisted
-            # env here is sufficient for the next turn to pick it up. No tmux
-            # respawn is needed — the one-shot subprocess is spawned per turn.
+            # Chat sessions own their provider via the native transport. Model
+            # /env switching for Codex and its TraeX fork is supported (the
+            # native transport reads session.env and injects the model via the
+            # collaboration-mode channel). Terminal-side tmux respawn (below)
+            # is not wired for TraeX, so it is admitted on this path only.
+            if self.agent_type not in {
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+                AgentType.CURSOR,
+                AgentType.TRAEX,
+            }:
+                raise ValueError("switch_env is not supported for this chat provider")
+            # The native transport reads ``self.session.env`` on every turn
+            # (via ``_build_env`` / ``_build_command``), so updating the
+            # persisted env here is sufficient for the next turn to pick it up.
+            # No tmux respawn is needed — the app-server persists and a
+            # one-shot subprocess spawns per turn.
             if solo_mode is not None:
                 self.solo_mode = solo_mode
             self.env = self._clean_env(new_env)
             self._prepare_agent_env()
             return
+        if self.agent_type not in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}:
+            raise ValueError("switch_env is only supported for Claude, Codex, and Cursor tabs")
         if self.target != ExecutionTarget.LOCAL:
             raise ValueError("switch_env is only supported for local tabs")
         if not await _tmux_session_exists_async(self.tmux_session):
@@ -4100,16 +4112,18 @@ class TTYDManager:
                     last_changed_at,
                 )
 
-        # Codex (GPT-5.5) renders its working indicator ("⠞ Working  4.03k
-        # tokens" / "• Working (3s • esc to interrupt)") ABOVE a tall persistent
-        # bottom chrome — the ›/❯ composer, a growing "Queued follow-up inputs"
-        # panel, and a model footer — so the indicator falls outside the
-        # bottom-10 window scanned below. Detect it against the wider frame
-        # using the codex-specific marker set. Runs after the ATTENTION and
-        # idle-prompt checks so a codex selection prompt or idle hint still
-        # wins, and through working_or_stale() so the frozen-frame guard still
-        # applies.
-        if process.agent_type == AgentType.CODEX and codex_output_is_working(output):
+        # Codex (GPT-5.5) and its TraeX fork render the same working indicator
+        # ("⠞ Working  4.03k tokens" / "• Working (3s • esc to interrupt)")
+        # ABOVE a tall persistent bottom chrome — the ›/❯ composer, a growing
+        # "Queued follow-up inputs" panel, and a model footer — so the indicator
+        # falls outside the bottom-10 window scanned below. Detect it against
+        # the wider frame using the shared codex-family marker set. Runs after
+        # the ATTENTION and idle-prompt checks so a selection prompt or idle
+        # hint still wins, and through working_or_stale() so the frozen-frame
+        # guard still applies.
+        if process.agent_type in {AgentType.CODEX, AgentType.TRAEX} and codex_output_is_working(
+            output
+        ):
             return working_or_stale()
 
         for pattern in _WORKING_TAIL_PATTERNS:
@@ -4122,7 +4136,12 @@ class TTYDManager:
         if _CURSOR_WORKING_STATUS_RE.search("\n".join(status_tail_lines)):
             return working_or_stale()
 
-        if foreground_command and foreground_command in {"claude", "codex", "agent"}:
+        if foreground_command and foreground_command in {
+            "claude",
+            "codex",
+            "traex",
+            "agent",
+        }:
             return (
                 AgentRuntimeStatus.IDLE,
                 "Idle",
