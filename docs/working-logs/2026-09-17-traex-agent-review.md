@@ -97,3 +97,25 @@ normalization improvements apply to both providers.
 
 The live 5173/8173 services and default tmux server were not modified. Test
 tabs and dedicated review servers are cleaned up before handoff.
+
+## Follow-up: model-aware reasoning effort
+
+TraeX Chat originally exposed model selection but silently inherited the
+global `model_reasoning_effort`. The app-server's live `model/list` response is
+now the source of truth for each model's default and supported effort values.
+The composer shows a TraeX-only Thinking picker when the active model reports
+choices and persists the override through the existing tab environment hot
+update path. Switching to an incompatible model removes a stale override in
+the same update.
+
+The protocol detail is important: `TurnStartParams.collaborationMode` takes
+precedence over top-level `model` and `effort`. Hub therefore writes the user
+selection to `collaborationMode.settings.reasoning_effort`, overriding a mode
+preset while retaining its mode and permissions. Repeated capabilities polls
+must restore the cached live TraeX catalog after Codex's inherited static model
+refresh; otherwise the effort metadata disappears after the first request.
+
+Validation used an isolated runtime and tmux socket on 5279/8279. GPT-5.6-Sol
+advertised Default (medium), low, medium, high and xhigh; selecting high was
+persisted and a real turn returned `TRAEX_EFFORT_OK`. Switching to Seed-Code
+hid the picker and removed the override. No browser page errors occurred.

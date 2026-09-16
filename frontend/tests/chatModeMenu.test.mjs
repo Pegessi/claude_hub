@@ -54,3 +54,23 @@ test('mode trigger locks for the whole turn and mobile targets remain reachable'
     /@media \(max-width: 640px\)[\s\S]*?\.composer-mode-menu-item\s*\{[\s\S]*?min-height:\s*44px/,
   )
 })
+
+test('TraeX reasoning picker follows the selected model and persists an override', () => {
+  assert.match(structuredPane, /const TRAEX_REASONING_EFFORT_ENV = 'TRAEX_REASONING_EFFORT'/)
+  assert.match(structuredPane, /currentTab\.value\?\.agent_type === 'traex'/)
+  assert.match(structuredPane, /currentModelOption\.value\?\.supported_reasoning_efforts/)
+  assert.match(structuredPane, /currentModelOption\.value\?\.default_reasoning_effort/)
+  assert.match(structuredPane, /aria-label="Reasoning effort"/)
+  assert.match(structuredPane, /v-for="effort in reasoningEffortOptions"/)
+  assert.match(structuredPane, /@click="selectReasoningEffort\(effort\.id\)"/)
+  assert.match(structuredPane, /env\[TRAEX_REASONING_EFFORT_ENV\] = effort/)
+  assert.match(structuredPane, /delete env\[TRAEX_REASONING_EFFORT_ENV\]/)
+  assert.match(
+    structuredPane,
+    /:disabled="modeInteractionLocked \|\| isUpdatingModel \|\| isUpdatingReasoningEffort"/,
+  )
+  assert.match(
+    structuredPane,
+    /if \(!isReasoningEffortPickerAvailable\.value \|\| isUpdatingModel\.value\) return/,
+  )
+})
