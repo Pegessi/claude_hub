@@ -1109,11 +1109,12 @@ const turnInFlight = computed(() => isChatModeLocked(
 ))
 const modeInteractionLocked = computed(() => isSending.value || turnInFlight.value)
 
-// Status light next to Send: working while a turn is in flight, error on a
-// failed connection, idle otherwise. (Per-turn errors are shown inline.)
+// Status light next to Send: working while a turn is in flight (or while the
+// connection is still hydrating), error on a failed connection, idle otherwise.
+// (Per-turn errors are shown inline.)
 const chatStatus = computed<'working' | 'error' | 'idle'>(() => {
   if (connectionState.value === 'failed') return 'error'
-  if (turnInFlight.value) return 'working'
+  if (turnInFlight.value || connectionState.value === 'hydrating') return 'working'
   return 'idle'
 })
 

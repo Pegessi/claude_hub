@@ -66,7 +66,7 @@
             Agent Workspace
           </button>
         </div>
-        <TabBar v-if="!isMobile" />
+        <TabBar v-if="!isMobile && mode === 'terminal'" />
         <div class="app-mode-tools">
           <button
             type="button"
