@@ -585,6 +585,12 @@ export interface StreamModeOption {
   description?: string | null
 }
 
+export interface StreamModelOption {
+  id: string
+  label: string
+  description?: string | null
+}
+
 export interface StreamCapabilities {
   structured: boolean
   adapter_id: string
@@ -596,6 +602,7 @@ export interface StreamCapabilities {
   supports_dynamic_modes: boolean
   available_modes: StreamModeOption[]
   current_mode: string | null
+  available_models: StreamModelOption[]
 }
 
 export type AgentStreamEventType =

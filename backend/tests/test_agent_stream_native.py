@@ -2059,3 +2059,128 @@ def test_parse_ask_question_response() -> None:
     assert parse_ask_question_response('{"type": "something_else"}') is None
     assert parse_ask_question_response("{not valid json") is None
     assert parse_ask_question_response('{"type": "ask_question_response"}') is None
+
+
+# ── Available models (runtime discovery) ────────────────────────────────────
+
+# A representative ``agent --list-models`` payload: ANSI-colored ids/labels,
+# ``(default)``/``(current)`` markers, plus a malformed and an empty line.
+_SAMPLE_LIST_MODELS = (
+    "\x1b[36mauto\x1b[39m \x1b[2m- Auto (default)\x1b[22m\n"
+    "\x1b[36mclaude-opus-5-thinking-high\x1b[39m \x1b[2m- Claude Opus 5 1M Thinking\x1b[22m\n"
+    "\x1b[36mclaude-opus-5-thinking-max\x1b[39m \x1b[2m- Claude Opus 5 1M Max Thinking\x1b[22m\n"
+    "\x1b[36mclaude-opus-4-8-thinking-high\x1b[39m \x1b[2m- Claude Opus 4.8 1M Thinking (current)\x1b[22m\n"
+    "malformed line without separator\n"
+    "\n"
+)
+
+
+class _FakeListModelsProc:
+    """Fake subprocess for the cursor ``--list-models`` probe."""
+
+    def __init__(self, stdout: bytes, communicate_error: Optional[Exception] = None) -> None:
+        self._stdout = stdout
+        self._communicate_error = communicate_error
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        if self._communicate_error is not None:
+            raise self._communicate_error
+        return self._stdout, b""
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+@pytest.fixture(autouse=True)
+def _clear_models_cache() -> None:
+    """Reset the module-level available-models cache between tests."""
+    native_module._models_cache.clear()
+
+
+def test_parse_list_models_strips_ansi_and_markers() -> None:
+    """The parser strips ANSI colors and state markers, skips malformed/empty
+    lines, and dedupes ids."""
+    parsed = {m.id: m.label for m in native_module._parse_list_models(_SAMPLE_LIST_MODELS)}
+    assert parsed == {
+        "auto": "Auto",
+        "claude-opus-5-thinking-high": "Claude Opus 5 1M Thinking",
+        "claude-opus-5-thinking-max": "Claude Opus 5 1M Max Thinking",
+        "claude-opus-4-8-thinking-high": "Claude Opus 4.8 1M Thinking",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cursor_prepare_capabilities_populates_models() -> None:
+    """``prepare_capabilities`` probes ``agent --list-models`` and surfaces the
+    parsed options on the session capabilities."""
+    proc = _FakeListModelsProc(_SAMPLE_LIST_MODELS.encode())
+    session = CursorNativeSession(_session(AgentType.CURSOR))
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await session.prepare_capabilities()
+
+    caps = session.capabilities()
+    ids = [m.id for m in caps.available_models]
+    assert "claude-opus-5-thinking-max" in ids
+    assert "auto" in ids
+    labels = {m.id: m.label for m in caps.available_models}
+    assert labels["claude-opus-4-8-thinking-high"] == "Claude Opus 4.8 1M Thinking"
+    assert labels["auto"] == "Auto"
+
+
+@pytest.mark.asyncio
+async def test_cursor_probe_failure_falls_back_to_static() -> None:
+    """A probe error returns the curated static list, cached with the short
+    negative TTL so recovery is quick."""
+    proc = _FakeListModelsProc(b"", communicate_error=OSError("boom"))
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        options = await native_module.available_models_for("cursor")
+
+    assert [m.id for m in options] == native_module._STATIC_MODELS["cursor"]
+    entry = native_module._models_cache["cursor"]
+    assert entry.options is options
+
+
+@pytest.mark.asyncio
+async def test_cursor_probe_timeout_kills_process(monkeypatch: MonkeyPatch) -> None:
+    """A hung probe is cancelled after the timeout, the process is killed, and
+    the static fallback is returned."""
+    monkeypatch.setattr(native_module, "_MODELS_PROBE_TIMEOUT_S", 0.1)
+
+    class _SlowProc(_FakeListModelsProc):
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(0.5)
+            return self._stdout, b""
+
+    proc = _SlowProc(_SAMPLE_LIST_MODELS.encode())
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        options = await native_module.available_models_for("cursor")
+
+    assert proc.killed is True
+    assert [m.id for m in options] == native_module._STATIC_MODELS["cursor"]
+
+
+@pytest.mark.asyncio
+async def test_available_models_caches_single_probe() -> None:
+    """Repeated calls within the TTL return the cached list and spawn the probe
+    only once."""
+    proc = _FakeListModelsProc(_SAMPLE_LIST_MODELS.encode())
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as spawn:
+        first = await native_module.available_models_for("cursor")
+        second = await native_module.available_models_for("cursor")
+
+    assert first is second
+    assert spawn.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_codex_return_static_without_probe() -> None:
+    """claude/codex have no list-models flag, so they return the curated static
+    list without spawning a subprocess."""
+    with patch("asyncio.create_subprocess_exec") as spawn:
+        claude_opts = await native_module.available_models_for("claude")
+        codex_opts = await native_module.available_models_for("codex")
+
+    assert spawn.call_count == 0
+    assert [m.id for m in claude_opts] == native_module._STATIC_MODELS["claude"]
+    assert [m.id for m in codex_opts] == native_module._STATIC_MODELS["codex"]
