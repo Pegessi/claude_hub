@@ -36,6 +36,7 @@ from ...models import (
     ManagedSession,
     StreamCapabilities,
 )
+from ...models.agent_stream import normalize_provider_usage
 from ..ttyd_manager import (
     CURSOR_TRANSCRIPT_SCHEMA,
     SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS,
@@ -296,19 +297,21 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                             events.extend(self._tool_use_events(block, ctx))
         elif raw.get("type") == "turn_ended":
             status = raw.get("status")
+            completed_payload: Dict[str, Any] = {"status": "completed"}
+            usage = normalize_provider_usage(raw, "cursor")
+            if usage is not None:
+                completed_payload["usage"] = usage
             if status == "success":
-                events.append(
-                    ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "completed"})
-                )
+                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed_payload))
             elif status == "error":
                 message = raw.get("error")
                 if isinstance(message, str) and message:
                     events.append(ctx.event(AgentStreamEventType.ERROR, {"message": message}))
-                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "failed"}))
+                completed_payload["status"] = "failed"
+                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed_payload))
             elif status == "aborted":
-                events.append(
-                    ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "cancelled"})
-                )
+                completed_payload["status"] = "cancelled"
+                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed_payload))
             self._clear_turn_state(ctx)
         return events
 
@@ -436,15 +439,17 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             return events
         if top_type == "result":
             is_error = raw.get("is_error", False)
+            completed_payload: Dict[str, Any] = {"status": "failed" if is_error else "completed"}
+            usage = normalize_provider_usage(raw, "cursor")
+            if usage is not None:
+                completed_payload["usage"] = usage
             if is_error:
                 err = raw.get("result") or raw.get("error") or "turn failed"
                 if isinstance(err, str) and err:
                     events.append(ctx.event(AgentStreamEventType.ERROR, {"message": err}))
-                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "failed"}))
+                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed_payload))
             else:
-                events.append(
-                    ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "completed"})
-                )
+                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed_payload))
             self._clear_turn_state(ctx)
             return events
         return events

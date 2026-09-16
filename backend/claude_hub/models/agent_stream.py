@@ -17,7 +17,70 @@ __all__ = [
     "AgentStreamEventType",
     "AgentStreamEventPage",
     "StreamCapabilities",
+    "normalize_provider_usage",
 ]
+
+
+def normalize_provider_usage(raw: Any, source: str) -> Optional[Dict[str, Any]]:
+    """Return the provider-neutral token accounting used by Goal runs.
+
+    Provider releases have used both snake_case and camelCase and sometimes
+    nest the counters below ``usage``/``tokenUsage``/``totalTokenUsage``.
+    Unknown or malformed counters are ignored; an all-empty record is not
+    useful and therefore returns ``None``.
+    """
+    if not isinstance(raw, dict):
+        return None
+    candidate = raw
+    for _depth in range(3):
+        nested = next(
+            (
+                candidate[key]
+                for key in (
+                    "usage",
+                    "token_usage",
+                    "tokenUsage",
+                    "total_token_usage",
+                    "totalTokenUsage",
+                )
+                if isinstance(candidate.get(key), dict)
+            ),
+            None,
+        )
+        if nested is None:
+            break
+        candidate = nested
+
+    def count(*keys: str) -> int:
+        for key in keys:
+            value = candidate.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        return 0
+
+    input_tokens = count("input", "input_tokens", "inputTokens")
+    cached_tokens = count(
+        "cached",
+        "cached_input_tokens",
+        "cachedInputTokens",
+        "cache_read_input_tokens",
+        "cacheReadInputTokens",
+    )
+    output_tokens = count("output", "output_tokens", "outputTokens")
+    reasoning_tokens = count("reasoning", "reasoning_tokens", "reasoningTokens")
+    total_tokens = count("total", "total_tokens", "totalTokens")
+    if not total_tokens:
+        total_tokens = input_tokens + output_tokens
+    if not any((input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens)):
+        return None
+    return {
+        "input": input_tokens,
+        "cached": cached_tokens,
+        "output": output_tokens,
+        "reasoning": reasoning_tokens,
+        "total": total_tokens,
+        "source": source,
+    }
 
 
 class AgentStreamEventType(str, enum.Enum):

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ...models import AgentStreamEvent, AgentStreamEventType, ManagedSession
+from ...models.agent_stream import normalize_provider_usage
 from ..ttyd_manager import (
     _claude_project_dir_for_cwd,
     _jsonl_start_epoch,
@@ -190,7 +191,11 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
                 status = "cancelled"
             else:
                 status = "completed"
-            events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": status}))
+            completed: Dict[str, Any] = {"status": status}
+            usage = normalize_provider_usage(raw, "claude")
+            if usage is not None:
+                completed["usage"] = usage
+            events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
             return events
 
         msg = raw.get("message")

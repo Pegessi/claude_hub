@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -86,6 +86,9 @@ class StreamCapabilities(BaseModel):
     current_mode: Optional[str] = None
     supports_dynamic_modes: bool = False
     available_models: List[StreamModelOption] = Field(default_factory=list)
+    supports_goals: bool = False
+    goal_execution_owner: Optional[Literal["provider_native", "hub_managed"]] = None
+    goal_usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
 
 
 class ExecutionTarget(str, Enum):

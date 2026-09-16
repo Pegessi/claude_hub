@@ -34,10 +34,11 @@ import json
 import logging
 import os
 import time
+import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from ...models import (
     AgentRuntimeStatus,
@@ -107,6 +108,7 @@ _HUNG_TURN_MESSAGE = "Turn stopped after exceeding the maximum allowed duration.
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
+PostPersistObserver = Callable[[AgentStreamEvent], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,7 @@ class SessionTailer:
         store: Optional[AgentStreamStore] = None,
         native_transport: Optional[ProviderSession] = None,
         native_error: Optional[str] = None,
+        post_persist_observers: Optional[List[PostPersistObserver]] = None,
     ) -> None:
         self.workspace_id = workspace_id
         self.session_id = session_id
@@ -227,6 +230,7 @@ class SessionTailer:
         # not be created. Fail-closed: never fall back to transcript as a
         # real-time source for agent sessions.
         self._native_error = native_error
+        self._post_persist_observers = post_persist_observers or []
 
         self._offset = 0
         self._inode: Optional[int] = None
@@ -245,6 +249,7 @@ class SessionTailer:
         # the turn completes. Every provider event normalized while this is set
         # is stamped with it so the frontend can upsert by identity.
         self._active_turn_id: Optional[str] = None
+        self._assistant_text: str = ""
         # Approval cards (``approval_required``) awaiting an answer, keyed by
         # the card's ``call_id``. Each entry captures the turn the card was
         # emitted in so ``_emit_approval_resolved`` can stamp the durable
@@ -516,6 +521,7 @@ class SessionTailer:
             #    the provider does anything. This guarantees the turn exists in
             #    the store and is fanned out to subscribers.
             self._active_turn_id = client_turn_id
+            self._assistant_text = ""
             self._run_epoch += 1
             self._turn_completed_seen = False
             ctx = NormalizeContext(
@@ -1058,11 +1064,34 @@ class SessionTailer:
                     # records that also signal a turn start (Claude
                     # message_start, Codex turn/started) must NOT create a
                     # second turn — skip them.
-                    continue
+                    if self._active_turn_id is not None:
+                        continue
+                    provider_turn_id = event.payload.get("provider_turn_id")
+                    stable_key = (
+                        provider_turn_id
+                        if isinstance(provider_turn_id, str) and provider_turn_id
+                        else f"{self._run_epoch + 1}:{event.created_at.isoformat()}"
+                    )
+                    self._active_turn_id = str(
+                        uuid.uuid5(uuid.NAMESPACE_URL, f"claude-hub:{self.session_id}:{stable_key}")
+                    )
+                    self._run_epoch += 1
+                    self._assistant_text = ""
+                    self._turn_completed_seen = False
+                    transport.acknowledge_provider_turn_started()
+                    event.turn_id = self._active_turn_id
+                    event.message_id = f"{self._active_turn_id}:user"
+                    event.run_epoch = self._run_epoch
                 is_turn_completed = event.type == AgentStreamEventType.TURN_COMPLETED
                 if event.run_epoch is None:
                     event.run_epoch = self._run_epoch
                 self._record_approval_card(event)
+                if event.type == AgentStreamEventType.TEXT_DELTA and not event.payload.get("plan"):
+                    text = event.payload.get("text")
+                    if isinstance(text, str):
+                        self._assistant_text += text
+                if is_turn_completed and self._assistant_text:
+                    event.payload.setdefault("assistant_text", self._assistant_text)
                 event = redact_event(event)
                 try:
                     await self._publish(event)
@@ -1111,6 +1140,27 @@ class SessionTailer:
                     # completion.
                     self._active_turn_id = None
                     transport.acknowledge_turn_complete()
+                    self._notify_post_persist(event)
+                    self._assistant_text = ""
+
+    def _notify_post_persist(self, event: AgentStreamEvent) -> None:
+        """Schedule observers after completion persistence and guard release."""
+        for observer in tuple(self._post_persist_observers):
+            task = asyncio.create_task(self._run_observer(observer, event))
+            task.add_done_callback(self._log_observer_failure)
+
+    @staticmethod
+    async def _run_observer(observer: PostPersistObserver, event: AgentStreamEvent) -> None:
+        await observer(event)
+
+    @staticmethod
+    def _log_observer_failure(task: "asyncio.Task[None]") -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("agent_stream post-persist observer failed")
 
     async def _poll_once(self) -> None:
         session = self._session_getter()
@@ -1635,6 +1685,7 @@ class TailerManager:
         session_getter: Callable[[str], Optional[ManagedSession]],
         persist_session_id: Optional[Callable[[str, str], None]] = None,
         persist_mode: Optional[Callable[[str, str], None]] = None,
+        post_persist_observers: Optional[List[PostPersistObserver]] = None,
     ) -> None:
         self._session_getter = session_getter
         # Optional durable persistence callback for the provider conversation
@@ -1643,6 +1694,7 @@ class TailerManager:
         # the in-memory ManagedSession (used by tests).
         self._persist_session_id_cb = persist_session_id
         self._persist_mode_cb = persist_mode
+        self._post_persist_observers = post_persist_observers or []
         self._tailers: Dict[str, SessionTailer] = {}
         self._lock = asyncio.Lock()
         # Per-session locks that serialize edit-resend attempts.  A second
@@ -1702,6 +1754,7 @@ class TailerManager:
                     session_getter=lambda: self._session_getter(session.id),
                     native_transport=native_transport,
                     native_error=native_error,
+                    post_persist_observers=self._post_persist_observers,
                 )
                 self._tailers[session.id] = tailer
         if existing is not None:
