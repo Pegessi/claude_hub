@@ -55,7 +55,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
 
 from ...models import (
     AgentType,
@@ -67,6 +67,17 @@ from ...models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ProviderGoal(TypedDict, total=False):
+    """Typed provider-native goal representation; Hub remains source of truth."""
+
+    id: str
+    objective: str
+    status: str
+    tokenBudget: int
+    metadata: Dict[str, Any]
+
 
 # How long to wait for the provider's first recognized event before declaring
 # the transport unavailable.
@@ -694,6 +705,9 @@ class ProviderSession(ABC):
     supports_approval_ui: bool = False
     supports_tool_timeline: bool = False
     supports_images: bool = False
+    supports_goals: bool = True
+    goal_execution_owner: Optional[Literal["provider_native", "hub_managed"]] = "hub_managed"
+    goal_usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
 
     def __init__(
         self,
@@ -885,6 +899,11 @@ class ProviderSession(ABC):
         if not self.eof_is_fatal:
             self._invalidate_stdout_stream()
         self._end_turn()
+
+    def acknowledge_provider_turn_started(self) -> None:
+        """Acquire the guard for a provider-initiated turn."""
+        if not self._turn_in_flight:
+            self._begin_turn()
 
     @property
     def turn_in_flight(self) -> bool:
@@ -1172,6 +1191,9 @@ class ProviderSession(ABC):
             current_mode=self._current_mode,
             supports_dynamic_modes=len(available_modes) > 1,
             available_models=self._available_models,
+            supports_goals=self.supports_goals,
+            goal_execution_owner=self.goal_execution_owner,
+            goal_usage_quality=self.goal_usage_quality,
         )
 
     @property
@@ -1317,6 +1339,7 @@ class ClaudeNativeSession(ProviderSession):
     # Image support uses the SDKUserMessage image content block. Marked True
     # only after the envelope was validated against the installed CLI.
     supports_images = True
+    goal_usage_quality = "exact"
 
     def __init__(
         self,
@@ -1484,6 +1507,7 @@ class CodexNativeSession(ProviderSession):
     supports_tool_timeline = True
     supports_approval_ui = True
     supports_images = True
+    goal_usage_quality = "exact"
 
     @property
     def eof_is_fatal(self) -> bool:
@@ -1523,6 +1547,7 @@ class CodexNativeSession(ProviderSession):
         self._thread_model: Optional[str] = None
         self._mode_presets: Dict[str, Dict[str, Any]] = {}
         self._mode_discovery_attempted = False
+        self._provider_goal_api_available: Optional[bool] = None
 
     def _build_command(self) -> List[str]:
         return ["codex", "app-server", "--stdio"]
@@ -1632,6 +1657,49 @@ class CodexNativeSession(ProviderSession):
             if isinstance(thread, dict) and thread.get("id"):
                 self._thread_id = thread["id"]
                 self._persist_conversation_id(thread["id"])
+
+    async def goal_get(self) -> Optional[ProviderGoal]:
+        """Read the provider goal when the optional RPC is implemented."""
+        result = await self._goal_request("thread/goal/get", {"threadId": self._thread_id})
+        if result is None:
+            return None
+        goal = result.get("goal") if isinstance(result, dict) else None
+        return dict(goal) if isinstance(goal, dict) else None  # type: ignore[return-value]
+
+    async def goal_set(self, goal: ProviderGoal) -> bool:
+        """Set a provider goal, returning False when the RPC is unavailable."""
+        params: Dict[str, Any] = {"threadId": self._thread_id}
+        for key in ("objective", "status", "tokenBudget"):
+            if key in goal:
+                params[key] = goal[key]
+        result = await self._goal_request("thread/goal/set", params)
+        return result is not None
+
+    async def goal_clear(self) -> bool:
+        """Clear a provider goal, returning False when the RPC is unavailable."""
+        result = await self._goal_request("thread/goal/clear", {"threadId": self._thread_id})
+        return result is not None
+
+    async def _goal_request(self, method: str, params: Dict[str, Any]) -> Any:
+        if self._provider_goal_api_available is False:
+            return None
+        try:
+            result = await self._send_request(method, params)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "-32601" in message or "method not found" in message:
+                self._provider_goal_api_available = False
+                return None
+            raise
+        self._provider_goal_api_available = True
+        return result
+
+    def capabilities(self) -> StreamCapabilities:
+        caps = super().capabilities()
+        # Provider-native ownership is advertised only after a goal RPC has
+        # succeeded. Unknown and method-not-found states safely use Hub Goal.
+        owner = "provider_native" if self._provider_goal_api_available is True else "hub_managed"
+        return caps.model_copy(update={"goal_execution_owner": owner})
 
     def _thread_config(self) -> Dict[str, Any]:
         return {}

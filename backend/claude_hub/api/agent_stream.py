@@ -37,6 +37,7 @@ from ..auth.dependencies import get_current_user
 from ..models import (
     AgentRuntimeStatus,
     AgentStreamEvent,
+    AgentStreamEventType,
     AgentStreamEventPage,
     AgentType,
     ChatMode,
@@ -75,6 +76,23 @@ _SSE_HEARTBEAT_S = 15.0
 _tailer_manager: Optional[TailerManager] = None
 _tab_tailer_manager: Optional[TailerManager] = None
 
+
+async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
+    """Bridge persisted stream completion to Goal without a module cycle."""
+    if event.type != AgentStreamEventType.TURN_COMPLETED or not event.turn_id:
+        return
+    from ..services.goal_run import get_goal_manager
+
+    payload = event.payload
+    await get_goal_manager().on_turn_completed(
+        event.tab_id,
+        event.turn_id,
+        str(payload.get("status") or "failed"),
+        str(payload.get("assistant_text") or payload.get("summary") or ""),
+        payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
+    )
+
+
 # Terminal-created AI tabs do not have an Agent Workspace record, but their
 # transcript and pinned provider conversation id are just as real as a managed
 # agent's.  Give them an isolated stream namespace rather than inventing a
@@ -108,6 +126,7 @@ def _get_tailer_manager() -> TailerManager:
         _tailer_manager = TailerManager(
             session_getter=lambda sid: workspace_manager.sessions.get(sid),
             persist_session_id=_persist_workspace_agent_session_id,
+            post_persist_observers=[_notify_goal_turn_completed],
         )
     return _tailer_manager
 
@@ -178,6 +197,7 @@ def _get_tab_tailer_manager() -> TailerManager:
             session_getter=_terminal_tab_stream_session_by_id,
             persist_session_id=_persist_tab_agent_session_id,
             persist_mode=_persist_tab_chat_mode,
+            post_persist_observers=[_notify_goal_turn_completed],
         )
     return _tab_tailer_manager
 
