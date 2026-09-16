@@ -66,6 +66,7 @@
             Agent Workspace
           </button>
         </div>
+        <TabBar v-if="!isMobile" />
         <div class="app-mode-tools">
           <button
             type="button"
@@ -130,7 +131,7 @@
           @open-archive="archivePanelOpen = true"
         />
         <div class="terminal-main-column">
-          <TabBar />
+          <TabBar v-if="isMobile" />
           <LayoutSelector />
           <div
             v-if="tabs.length === 0"
@@ -182,6 +183,7 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
 import { parseTabDeepLink } from '@/utils/deepLink'
+import { useViewport } from '@/composables/useViewport'
 
 const appStore = useAppStore()
 const store = useTerminalStore()
@@ -190,6 +192,7 @@ const { tabs, error, activePane, activePaneIsChat } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
 const showScheduledTasks = ref(false)
 const archivePanelOpen = ref(false)
+const { isMobile } = useViewport()
 
 // Clear all error-type notifications from the terminal store toast stack.
 function clearError() {
@@ -1159,6 +1162,20 @@ textarea {
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
+}
+
+/* When the TabBar is merged into the app-mode-bar (desktop), drop its own
+   chrome (border, background, padding) so it reads as one unified row, and let
+   it take the flexible middle space. Higher specificity than .tab-bar. */
+.app-mode-bar .tab-bar {
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+  align-items: center;
+  border-bottom: none;
+  padding: 0;
+  max-height: none;
+  background: transparent;
 }
 
 .schedule-tool-btn {
