@@ -46,15 +46,25 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ...models import AgentType, ChatMode, ManagedSession, StreamCapabilities, StreamModeOption
+from ...models import (
+    AgentType,
+    ChatMode,
+    ManagedSession,
+    StreamCapabilities,
+    StreamModeOption,
+    StreamModelOption,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +328,167 @@ def _help_confirms_plan_mode(binary: str, flag: str) -> bool:
     return completed.returncode == 0 and flag in output and "plan" in output
 
 
+# ── available models ────────────────────────────────────────────────────────
+#
+# Cursor's ``agent`` CLI can list its current model catalog (``--list-models``),
+# so the picker is discovered at runtime instead of hardcoded. claude/codex
+# have no equivalent flag, so they fall back to a curated static list. The
+# whole catalog is cached per agent type with a TTL so we do not spawn a probe
+# on every capabilities fetch.
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
+_MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
+_MODELS_NEGATIVE_TTL_S = 60.0  # failed probe (static fallback): 1 minute
+_MODELS_PROBE_TIMEOUT_S = 5.0
+
+_STATIC_MODELS: Dict[str, List[str]] = {
+    "claude": [
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "doubao-seed-2.0-code",
+    ],
+    "codex": [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+    ],
+    "cursor": [
+        "claude-opus-4-8-thinking-high",
+        "claude-opus-4-8-high",
+        "claude-4.6-sonnet-medium-thinking",
+        "claude-4.6-sonnet-medium",
+        "claude-4.5-sonnet",
+        "gpt-5.2",
+        "gpt-5.3-codex",
+        "gemini-3.7-flash-high",
+        "cursor-grok-4.6-high",
+    ],
+}
+
+
+def _static_options(agent_type: str) -> List[StreamModelOption]:
+    """Build model options from the curated static list for an agent type."""
+    return [
+        StreamModelOption(id=model_id, label=model_id, description="")
+        for model_id in _STATIC_MODELS.get(agent_type, [])
+    ]
+
+
+def _parse_list_models(raw: str) -> List[StreamModelOption]:
+    """Parse ``agent --list-models`` output into model options.
+
+    Each non-empty line is ``<id>  - <label>`` with optional ANSI colors and
+    trailing ``(default)``/``(current)`` markers. Malformed lines are skipped;
+    ids are deduped. An empty result signals the caller to fall back.
+    """
+    options: List[StreamModelOption] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        line = _OSC_RE.sub("", line)
+        line = _ANSI_RE.sub("", line).strip()
+        if not line or " - " not in line:
+            continue
+        model_id, label = line.split(" - ", 1)
+        model_id = model_id.strip()
+        label = _MARKER_RE.sub("", label.strip()).strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        options.append(StreamModelOption(id=model_id, label=label or model_id, description=""))
+    return options
+
+
+def _safe_kill(proc: Any) -> None:
+    """Kill a probe subprocess, ignoring the race where it already exited."""
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
+    """Run ``agent --list-models`` and return ``(options, is_fallback)``.
+
+    ``is_fallback=True`` means the probe failed (binary missing, timeout, or
+    unparseable output) and the static curated list was returned instead; the
+    caller applies the short negative TTL so recovery is quick.
+
+    The probe deliberately inherits the backend process environment rather
+    than the session env: the catalog is cached globally per agent type, so a
+    session-specific ``agent`` binary or credentials would leak one session's
+    models into another's. The backend runs as the user, so ``agent`` auth
+    works.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "agent",
+            "--list-models",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (OSError, NotImplementedError):
+        return _static_options("cursor"), True
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_MODELS_PROBE_TIMEOUT_S)
+    except asyncio.CancelledError:
+        # The calling task was cancelled mid-probe. ``wait_for`` propagates
+        # this without killing the process, so do so explicitly to avoid a
+        # leaked (possibly hung) probe, then re-raise.
+        _safe_kill(proc)
+        raise
+    except Exception:
+        # Timeout or other failure: ``wait_for`` cancels the communicate
+        # coroutine but does not kill the underlying process.
+        _safe_kill(proc)
+        return _static_options("cursor"), True
+    parsed = _parse_list_models(stdout.decode("utf-8", errors="replace"))
+    return (parsed, False) if parsed else (_static_options("cursor"), True)
+
+
+@dataclass
+class _ModelsCacheEntry:
+    options: List[StreamModelOption]
+    expires_at: float
+
+
+_models_cache: Dict[str, _ModelsCacheEntry] = {}
+_models_lock = asyncio.Lock()
+
+
+async def available_models_for(agent_type: str) -> List[StreamModelOption]:
+    """Return the available models for an agent type, cached with a TTL.
+
+    Cursor is discovered at runtime via ``agent --list-models``; other agent
+    types return the curated static list. A single global lock with
+    double-checked checking dedups concurrent probes (contention is negligible:
+    one probe per TTL per agent type).
+    """
+    entry = _models_cache.get(agent_type)
+    now = time.monotonic()
+    if entry is not None and entry.expires_at > now:
+        return entry.options
+    async with _models_lock:
+        entry = _models_cache.get(agent_type)
+        now = time.monotonic()
+        if entry is not None and entry.expires_at > now:
+            return entry.options
+        if agent_type == "cursor":
+            options, is_fallback = await _probe_cursor_models()
+            ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
+        else:
+            options = _static_options(agent_type)
+            ttl = _MODELS_POSITIVE_TTL_S
+        _models_cache[agent_type] = _ModelsCacheEntry(options, now + ttl)
+        return options
+
+
 def _detect_image_mime(data: bytes) -> Optional[str]:
     """Return the MIME type of an image from its magic bytes, or ``None``.
 
@@ -553,6 +724,9 @@ class ProviderSession(ABC):
         # Serialize sends so a second prompt never cancels an active turn.
         self._send_lock = asyncio.Lock()
         self._current_mode = ChatMode(getattr(session, "chat_mode", ChatMode.DEFAULT)).value
+        # Available models, populated by ``prepare_capabilities`` from the
+        # runtime-discovered (cursor) or curated static (claude/codex) list.
+        self._available_models: List[StreamModelOption] = []
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
@@ -711,7 +885,14 @@ class ProviderSession(ABC):
         return [_DEFAULT_MODE]
 
     async def prepare_capabilities(self) -> None:
-        """Perform provider-specific capability discovery when required."""
+        """Discover the available models for this session's agent type.
+
+        Cursor is probed at runtime via ``agent --list-models``; other agent
+        types use the curated static list. Results are cached with a TTL (see
+        ``available_models_for``), so this is cheap to call on every
+        capabilities fetch.
+        """
+        self._available_models = await available_models_for(self.session.agent_type.value)
 
     async def set_mode(self, mode: str) -> None:
         """Select the mode used by the next turn and reject unsafe changes."""
@@ -962,6 +1143,7 @@ class ProviderSession(ABC):
             available_modes=available_modes,
             current_mode=self._current_mode,
             supports_dynamic_modes=len(available_modes) > 1,
+            available_models=self._available_models,
         )
 
     @property
@@ -1454,6 +1636,9 @@ class CodexNativeSession(ProviderSession):
             self._mode_presets[ui_mode] = dict(item)
 
     async def prepare_capabilities(self) -> None:
+        # Populate ``_available_models`` (base implementation); without this
+        # super call the codex override would skip model discovery.
+        await super().prepare_capabilities()
         await self.start()
         if not self._mode_discovery_attempted:
             await self._discover_modes()
