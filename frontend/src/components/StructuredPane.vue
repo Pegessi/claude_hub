@@ -549,6 +549,17 @@
       Latest
     </button>
 
+    <GoalStatusBar
+      v-if="goal"
+      :goal="goal"
+      :busy="isGoalMutating"
+      :error="goalError"
+      @pause="pauseGoal"
+      @resume="resumeGoal"
+      @complete="completeGoal"
+      @clear="clearGoal"
+    />
+
     <!-- Composer -->
     <div class="structured-composer">
       <div class="composer-shell">
@@ -621,6 +632,16 @@
           />
           <div class="composer-tools">
             <button
+              v-if="!goal && capabilities?.supports_goals"
+              type="button"
+              class="composer-goal-btn"
+              :disabled="isGoalHydrating || isGoalMutating"
+              title="Start a persistent Chat Goal"
+              @click="isGoalSetupOpen = true"
+            >
+              {{ isGoalHydrating ? 'Goal…' : 'Goal' }}
+            </button>
+            <button
               type="button"
               class="composer-attach-btn"
               aria-label="Attach image"
@@ -674,7 +695,8 @@
                   class="composer-mode-menu-item"
                   role="menuitemradio"
                   :aria-checked="currentModeId === option.id"
-                  :title="option.description || `${option.label} mode`"
+                  :disabled="option.id === 'plan' && Boolean(goalPlanReason)"
+                  :title="option.id === 'plan' && goalPlanReason ? goalPlanReason : (option.description || `${option.label} mode`)"
                   @click="selectMode(option.id)"
                 >
                   <span>{{ option.label }}</span>
@@ -791,6 +813,14 @@
       </div>
     </div>
 
+    <GoalSetupDialog
+      :open="isGoalSetupOpen"
+      :busy="isGoalMutating"
+      :error="goalError"
+      @close="isGoalSetupOpen = false"
+      @submit="startGoal"
+    />
+
     <Teleport to="body">
       <div
         v-if="imageLightboxUrl"
@@ -822,13 +852,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
+import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { IncrementalTimelineReducer, foldTurnParts, messageClockLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
+import { goalPlanLockReason } from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
@@ -837,6 +869,8 @@ import {
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 import { useTerminalStore } from '@/stores/terminalStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
+import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
@@ -845,6 +879,24 @@ const props = defineProps<{
 }>()
 
 const terminalStore = useTerminalStore()
+const {
+  goal,
+  error: goalError,
+  isHydrating: isGoalHydrating,
+  isMutating: isGoalMutating,
+  hydrate: hydrateGoal,
+  create: createGoal,
+  pause: pauseGoal,
+  resume: resumeGoal,
+  complete: completeGoal,
+  clear: clearGoal,
+} = useChatGoal(toRef(props, 'tabId'))
+const isGoalSetupOpen = ref(false)
+const goalPlanReason = computed(() => goalPlanLockReason(goal.value))
+
+async function startGoal(input: { objective: string; token_budget?: number; max_turns?: number }) {
+  if (await createGoal(input)) isGoalSetupOpen.value = false
+}
 
 const {
   events,
@@ -1127,6 +1179,9 @@ watch(
 watch(events, (latest, previous) => {
   if (hasChatStatusRefreshBoundary(previous, latest)) {
     void terminalStore.fetchAgentStatuses()
+    // Goal lifecycle is a separate control plane. Reconcile its authoritative
+    // snapshot at turn boundaries rather than deriving state from transcript.
+    void hydrateGoal()
   }
 })
 
@@ -1151,6 +1206,7 @@ onMounted(() => {
 onActivated(() => {
   timelineDisposed = false
   startStream()
+  void hydrateGoal()
   void nextTick(() => {
     if (timelineDisposed) return
     observeTimelineGeometry()
@@ -1325,6 +1381,10 @@ async function selectMode(modeId: string) {
 
 async function changeMode(modeId: string) {
   if (modeInteractionLocked.value || isUpdatingMode.value || currentModeId.value === modeId) return
+  if (modeId === 'plan' && goalPlanReason.value) {
+    modeChangeError.value = goalPlanReason.value
+    return
+  }
   const epoch = preparationEpoch.value
   isUpdatingMode.value = true
   modeChangeError.value = null
