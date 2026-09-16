@@ -771,6 +771,13 @@
           >
             {{ isCancelling ? 'Stopping…' : 'Stop' }}
           </button>
+          <span
+            class="composer-status-light"
+            :data-status="chatStatus"
+            role="img"
+            :aria-label="`Chat status: ${chatStatus}`"
+            :title="`Chat status: ${chatStatus}`"
+          />
           <button
             type="button"
             class="composer-send-btn"
@@ -1101,6 +1108,14 @@ const turnInFlight = computed(() => isChatModeLocked(
   authoritativeTurns.value,
 ))
 const modeInteractionLocked = computed(() => isSending.value || turnInFlight.value)
+
+// Status light next to Send: working while a turn is in flight, error on a
+// failed connection, idle otherwise. (Per-turn errors are shown inline.)
+const chatStatus = computed<'working' | 'error' | 'idle'>(() => {
+  if (connectionState.value === 'failed') return 'error'
+  if (turnInFlight.value) return 'working'
+  return 'idle'
+})
 
 // Reconcile optimistic (pending) turns against authoritative turns as they
 // arrive. No text-reveal state is kept: assistant text is rendered directly
@@ -2731,6 +2746,30 @@ onUnmounted(() => {
 
 .composer-textarea:disabled {
   opacity: 0.6;
+}
+
+.composer-status-light {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  align-self: center;
+  background: var(--ch-color-success);
+  box-shadow: 0 0 0 1px var(--ch-color-border-muted);
+}
+
+.composer-status-light[data-status='working'] {
+  background: var(--ch-color-accent);
+  animation: composer-status-pulse 1.2s ease-in-out infinite;
+}
+
+.composer-status-light[data-status='error'] {
+  background: var(--ch-color-danger);
+}
+
+@keyframes composer-status-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
 }
 
 .composer-send-btn {

@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat: the TabBar joins the top bar (desktop), and a status light sits by Send
+
+- **Why now.** On desktop the app had two stacked rows — the app-mode-bar
+  (mode switch + tools) and, below it, the TabBar (tabs + new-tab). Merging
+  them reclaims a row of vertical space for the conversation. Separately,
+  once the per-pane header was gone there was no at-a-glance way to see
+  whether a chat was running, idle, or failed.
+- **The change.** On desktop the TabBar now renders inside the app-mode-bar —
+  one unified row: mode switch, tabs (scrollable, taking the middle space),
+  new-tab, and tools. Mobile is unchanged: the app-mode-bar stays hidden and
+  the TabBar remains the top row with its ⋯ menu. A small status light next
+  to the Send button shows working (pulsing), idle (green), or error (red).
+- **Plumbing.** A shared `useViewport` composable backs the desktop/mobile
+  switch (and replaces ad-hoc `innerWidth` checks); the TabBar is restyled
+  via `.app-mode-bar .tab-bar` rather than a new prop.
+- **Tests.** Lint, type-check, and the full unit suite stay green.
+
 ### refactor: drop the per-pane info header, tab icon becomes the agent avatar
 
 - **Why now.** Every pane showed a small header ("C ch fix / Claude Chat ·
