@@ -1,12 +1,17 @@
 import type { AgentType } from '@/types'
 
-// Agent TUI tabs (Claude/Codex/Cursor) render their UI through relative-cursor
-// live writes. A full tmux snapshot replay while the agent is actively writing
-// corrupts xterm's screen state, so tab-switch history replay is gated on the
-// agent being idle/attention (stable screen). Plain `terminal` tabs have no
-// such constraint and always replay on switch.
+// Agent TUI tabs (Claude/Codex/TraeX/Cursor) render their UI through
+// relative-cursor live writes. A full tmux snapshot replay while the agent is
+// actively writing corrupts xterm's screen state, so tab-switch history replay
+// is gated on the agent being idle/attention (stable screen). Plain `terminal`
+// tabs have no such constraint and always replay on switch.
 export function isAgentTuiTab(agentType?: AgentType): boolean {
-  return agentType === 'claude' || agentType === 'codex' || agentType === 'cursor'
+  return (
+    agentType === 'claude' ||
+    agentType === 'codex' ||
+    agentType === 'traex' ||
+    agentType === 'cursor'
+  )
 }
 
 // Pure decision: is it safe to full-replay tmux history when switching to this

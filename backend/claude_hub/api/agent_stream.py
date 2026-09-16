@@ -291,11 +291,17 @@ async def _tab_capabilities_for(
     """
 
     caps = await _capabilities_for(session, manager)
+    adapter = get_adapter_for_session(session)
     if (
         not caps.structured
-        and get_adapter_for_session(session) is not None
+        and adapter is not None
         and not manager.hard_failed(session.id)
+        and adapter.supports_transcript_discovery
     ):
+        # Providers with a wired on-disk transcript (Claude/Codex) are promoted
+        # to structured lazily before their first rollout exists. Adapters that
+        # disable transcript discovery (TraeX this wave) fail closed to the raw
+        # terminal; Chat sessions returned native caps above and never land here.
         return caps.model_copy(update={"structured": True})
     return caps
 
