@@ -56,6 +56,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     with BackendInstanceLock(backend_lock_file):
         # Startup
         logger.info("Starting Claude Hub Backend")
+        try:
+            from .services.goal_run import get_goal_manager
+
+            recovered = get_goal_manager().recover()
+            if recovered:
+                logger.warning("paused %d uncertain Chat Goal dispatches", len(recovered))
+        except Exception:
+            logger.exception("Chat Goal recovery failed at startup")
 
         # Run cache GC and prior-process temp cleanup *before* starting any
         # tabs or the workspace monitor. BackendInstanceLock guarantees we
