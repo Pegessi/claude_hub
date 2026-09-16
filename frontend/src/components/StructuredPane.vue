@@ -710,31 +710,46 @@
               </button>
               <div
                 v-if="isModelMenuOpen"
-                ref="modelMenuEl"
                 class="composer-mode-menu"
                 role="menu"
                 aria-label="Model"
               >
-                <button
-                  v-for="model in modelOptions"
-                  :key="model.id"
-                  type="button"
-                  class="composer-mode-menu-item"
-                  role="menuitemradio"
-                  :aria-checked="isModelActive(model.id)"
-                  @click="selectModel(model.id)"
-                >
-                  <span>{{ model.label }}</span>
-                  <span
-                    v-if="isModelActive(model.id)"
-                    class="composer-mode-check"
-                    aria-hidden="true"
-                  >✓</span>
-                </button>
-                <div
-                  class="composer-mode-menu-item"
-                  style="border-top:1px solid var(--border,#333);padding-top:6px;margin-top:4px;"
-                >
+                <div class="composer-mode-search">
+                  <input
+                    ref="modelSearchEl"
+                    type="text"
+                    class="composer-textarea composer-mode-search-input"
+                    placeholder="Search models…"
+                    aria-label="Search models"
+                    :value="modelSearch"
+                    @input="modelSearch = ($event.target as HTMLInputElement).value"
+                  >
+                </div>
+                <div class="composer-mode-list">
+                  <button
+                    v-for="model in filteredModelOptions"
+                    :key="model.id"
+                    type="button"
+                    class="composer-mode-menu-item"
+                    role="menuitemradio"
+                    :aria-checked="isModelActive(model.id)"
+                    @click="selectModel(model.id)"
+                  >
+                    <span class="composer-mode-item-label">{{ model.label }}</span>
+                    <span
+                      v-if="isModelActive(model.id)"
+                      class="composer-mode-check"
+                      aria-hidden="true"
+                    >✓</span>
+                  </button>
+                  <div
+                    v-if="filteredModelOptions.length === 0"
+                    class="composer-mode-empty"
+                  >
+                    No matching models
+                  </div>
+                </div>
+                <div class="composer-mode-custom">
                   <input
                     ref="modelInputEl"
                     type="text"
@@ -973,7 +988,24 @@ function isModelActive(modelId: string) {
   }
   return currentModel.value === modelId
 }
+// Search filter for the picker. Matches id or label, case-insensitive.
+const modelSearch = ref('')
+const filteredModelOptions = computed(() => {
+  const q = modelSearch.value.trim().toLowerCase()
+  if (!q) return modelOptions.value
+  return modelOptions.value.filter(
+    m => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q),
+  )
+})
 const isModelPickerAvailable = computed(() => modelEnvVar.value !== null)
+// Reset picker state if it unmounts while open (e.g. the agent type changes),
+// so a remount does not reopen with a stale menu/query.
+watch(isModelPickerAvailable, available => {
+  if (!available) {
+    isModelMenuOpen.value = false
+    modelSearch.value = ''
+  }
+})
 const isModelMenuOpen = ref(false)
 const isUpdatingModel = ref(false)
 
@@ -1005,6 +1037,7 @@ async function selectModel(model: string) {
 
 function closeModelMenu(focusTrigger: boolean) {
   isModelMenuOpen.value = false
+  modelSearch.value = ''
   if (focusTrigger) modelTriggerEl.value?.focus()
 }
 
@@ -1016,10 +1049,7 @@ function toggleModelMenu() {
   }
   isModelMenuOpen.value = true
   void nextTick(() => {
-    const currentItem = modelMenuEl.value?.querySelector<HTMLButtonElement>('[aria-checked="true"]')
-    const firstItem = modelMenuEl.value?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
-    const focusTarget = currentItem ?? firstItem
-    focusTarget?.focus()
+    modelSearchEl.value?.focus()
   })
 }
 
@@ -1031,8 +1061,8 @@ function handleModelOutsidePointer(e: PointerEvent) {
 
 const modelPickerEl = ref<HTMLElement | null>(null)
 const modelTriggerEl = ref<HTMLButtonElement | null>(null)
-const modelMenuEl = ref<HTMLElement | null>(null)
 const modelInputEl = ref<HTMLInputElement | null>(null)
+const modelSearchEl = ref<HTMLInputElement | null>(null)
 
 const pendingTurns = computed(() => {
   const observedTurnIds = new Set(authoritativeTurns.value.map(turn => turn.turnId).filter(Boolean))
@@ -1190,6 +1220,11 @@ function closeImageLightbox() {
 }
 
 function handleDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isModelMenuOpen.value) {
+    event.preventDefault()
+    closeModelMenu(true)
+    return
+  }
   if (event.key === 'Escape' && isModeMenuOpen.value) {
     event.preventDefault()
     closeModeMenu(true)
@@ -2483,13 +2518,66 @@ onUnmounted(() => {
   bottom: calc(100% + 7px);
   z-index: 8;
   width: max-content;
-  min-width: max(132px, 100%);
-  max-width: min(240px, calc(100vw - 32px));
-  padding: 4px;
+  min-width: max(180px, 100%);
+  max-width: min(280px, calc(100vw - 32px));
+  max-height: min(420px, 65vh);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
   border: 1px solid var(--ch-color-border-strong);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-elevated, var(--ch-color-surface));
   box-shadow: var(--ch-shadow-md, 0 10px 30px rgb(0 0 0 / 26%));
+}
+
+.composer-mode-search {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ch-color-border-strong);
+}
+
+.composer-mode-search-input {
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.composer-mode-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.composer-mode-empty {
+  padding: 10px 8px;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.composer-mode-custom {
+  flex: 0 0 auto;
+  display: flex;
+  padding: 6px 8px;
+  border-top: 1px solid var(--ch-color-border-strong);
+}
+
+.composer-mode-custom .composer-textarea {
+  flex: 1 1 auto;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.composer-mode-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-mode-menu-item {
