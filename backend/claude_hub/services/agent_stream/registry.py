@@ -17,12 +17,13 @@ from typing import Dict, Optional, Type
 from ...models import AgentType, ManagedSession
 from .base import AgentStreamAdapter
 from .claude_jsonl import ClaudeJsonlAdapter
-from .codex_jsonl import CodexJsonlAdapter
+from .codex_jsonl import CodexJsonlAdapter, TraexJsonlAdapter
 from .cursor_cli_transcript import CursorCliTranscriptAdapter
 
 _ADAPTERS: Dict[AgentType, Type[AgentStreamAdapter]] = {
     AgentType.CLAUDE: ClaudeJsonlAdapter,
     AgentType.CODEX: CodexJsonlAdapter,
+    AgentType.TRAEX: TraexJsonlAdapter,
     AgentType.CURSOR: CursorCliTranscriptAdapter,
 }
 

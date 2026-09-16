@@ -5,6 +5,57 @@
 
 ## Unreleased
 
+### fix: complete TraeX Chat protocol handling
+
+- Stop uses `turn/interrupt` with provider thread/turn IDs and waits for
+  confirmation; a failed interrupt stops the app-server. Retired output cannot
+  spill into a new turn.
+- Apply the selected model and Solo permissions at thread creation/resume and
+  on subsequent turns. Plan mode uses read-only access. Command/file permission
+  requests render as Chat approval cards with matching JSON-RPC responses.
+- Render command, file and other tool results plus provider errors in the
+  shared Codex/TraeX timeline. Interrupted turns display as cancelled.
+- Share Terminal launch wrappers and simplify transcript capability gating.
+  Use the TraeX label consistently and honor all excluded provider types.
+- Validation: 486 focused backend tests; frontend lint, type check, build and
+  390 tests; live TraeX 0.205.1 model/permission and interrupt checks. See
+  `docs/working-logs/2026-09-17-traex-agent-review.md` for the review scope.
+
+### feat: add TraeX (`traex`) agent — terminal TUI and structured Chat
+
+- **Why now.** TraeX CLI is the internal Codex fork (its `app-server`
+  identifies as `Codex Desktop` and shares the `codex_core`/`codex_rollout`
+  engine). It was installed locally but Hub could not launch or chat with it;
+  its migrated default model (`GLM-5.1`) was also stale and crashed the TUI.
+- **The change.** A new `traex` agent type joins `claude`/`codex`/`cursor`/
+  `terminal`. Terminal tabs launch the `traex` TUI under tmux/ttyd (solo adds
+  the Codex-style `--ask-for-approval never --sandbox danger-full-access`),
+  wrapped so the pane falls back to a shell on exit. Structured Chat reuses the
+  Codex JSON-RPC framing via `TraexNativeSession(CodexNativeSession)`,
+  with explicit TraeX turn contracts and the bare `traex app-server` command
+  (traex rejects Codex's `--stdio` flag; `stdio://` is its default listener).
+  Live notification normalization reuses the Codex normalizer via a
+  `TraexJsonlAdapter` subclass. The frontend gains a Trae option/avatar/solo
+  hint, a model picker (20 slugs plus custom IDs), and shares
+  the Codex working-indicator status classifier. Protocol equivalence
+  (initialize/thread start, text/reasoning deltas, turn completed, Plan/Default
+  modes) was verified live against traex 0.205.1.
+- **Trade-off / scope.** Terminal tabs always start a fresh TUI — no rollout
+  session-discovery/resume (Chat persistence is handled by the app-server's
+  `thread/resume`); on-disk sessions live under `~/.trae`, not `~/.codex`, so a
+  terminal TraeX tab fails closed to the raw terminal (it is never matched to a
+  Codex rollout), and Chat edit-resend is hidden for traex. TraeX is **not** an
+  autonomous workspace worker this wave: the workspace/resident/scheduled
+  launchers do not offer it and the backend rejects `agent_type=traex` for
+  workspace agents (open it as a standalone tab instead).
+- **Tests.** `tests/test_traex_agent.py` (18 cases) pins the binary map, native
+  factory/command (no `--stdio`), the transcript-discover fail-closed boundary,
+  chat-kind never launching a TUI in tmux, chat-only `switch_env`, the
+  solo/non-solo/fresh/reattach terminal launches, and the working-status
+  classifier. A separate live transport smoke (manual) exchanged a real turn and
+  normalized `turn_started → thinking_delta → text_delta("OK") →
+  turn_completed`.
+
 ### refactor: drop the per-pane info header, tab icon becomes the agent avatar
 
 - **Why now.** Every pane showed a small header ("C ch fix / Claude Chat ·

@@ -225,9 +225,22 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             status = "completed"
             if isinstance(turn, dict):
                 turn_status = turn.get("status")
+                if turn_status == "interrupted":
+                    turn_status = "cancelled"
                 if turn_status in ("failed", "cancelled", "completed"):
                     status = turn_status
+                error = turn.get("error")
+                if isinstance(error, dict) and error.get("message"):
+                    events.append(
+                        ctx.event(AgentStreamEventType.ERROR, {"message": error["message"]})
+                    )
             events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": status}))
+        elif method == "error":
+            error = params.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                events.append(ctx.event(AgentStreamEventType.ERROR, {"message": error["message"]}))
+        elif method in {"item/started", "item/completed"}:
+            events.extend(self._normalize_tool_item(params.get("item"), method, ctx))
         elif method == "item/agentMessage/delta":
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
@@ -251,6 +264,69 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         elif method in _CODEX_QUESTION_METHODS:
             events.extend(self._normalize_question(params, ctx))
         return events
+
+    def _normalize_tool_item(
+        self, item: Any, method: str, ctx: NormalizeContext
+    ) -> List[AgentStreamEvent]:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            return []
+        kind = item.get("type")
+        name: str
+        args: Dict[str, Any]
+        result: Any
+        if kind == "commandExecution":
+            name, args = "exec_command", {"cmd": item.get("command"), "cwd": item.get("cwd")}
+            result = item.get("aggregatedOutput") or ""
+        elif kind == "fileChange":
+            name, args = "apply_patch", {"changes": item.get("changes", [])}
+            result = args
+        elif kind in {"mcpToolCall", "dynamicToolCall"}:
+            name = str(item.get("tool") or kind)
+            args = _codex_parse_arguments(item.get("arguments"))
+            result = item.get("error") or item.get("result") or item.get("contentItems")
+        elif kind == "webSearch":
+            name, args = "web_search", {"query": item.get("query")}
+            result = item.get("action")
+        elif kind == "imageView":
+            name, args = "view_image", {"path": item.get("path")}
+            result = ""
+        elif kind == "collabAgentToolCall":
+            name = str(item.get("tool") or kind)
+            args = {
+                "prompt": item.get("prompt"),
+                "receiverThreadIds": item.get("receiverThreadIds"),
+            }
+            result = item.get("agentsStates")
+        else:
+            # Text/reasoning/plan items already arrive as deltas.
+            return []
+        call_id = item["id"]
+        if method == "item/started":
+            return [
+                ctx.event(
+                    AgentStreamEventType.TOOL_CALL_STARTED,
+                    {
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "args": args,
+                    },
+                    call_id=call_id,
+                )
+            ]
+        failed = item.get("status") in {"failed", "declined"} or item.get("success") is False
+        if kind == "commandExecution" and item.get("exitCode") not in (None, 0):
+            failed = True
+        return [
+            ctx.event(
+                AgentStreamEventType.TOOL_CALL_COMPLETED,
+                {
+                    "tool_call_id": call_id,
+                    "status": "failed" if failed else "completed",
+                    "result": _codex_extract_text(result),
+                },
+                call_id=call_id,
+            )
+        ]
 
     def _normalize_question(
         self, params: Dict[str, Any], ctx: NormalizeContext
@@ -385,3 +461,18 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                 )
             )
         return events
+
+
+class TraexJsonlAdapter(CodexJsonlAdapter):
+    """Normalize live TraeX notifications without discovering Codex rollouts.
+
+    TraeX terminal transcripts and edit-resend are not supported yet.
+    """
+
+    adapter_id = "traex-jsonl"
+    # Terminal transcript structured surface is not wired (see docstring); only
+    # the native app-server powers the structured Chat view.
+    supports_transcript_discovery = False
+
+    def discover_source(self, session: ManagedSession) -> Optional[Path]:
+        return None

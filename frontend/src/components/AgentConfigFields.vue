@@ -30,17 +30,32 @@
         :disabled="disabled"
         @change="onAgentTypeChange(($event.target as HTMLSelectElement).value)"
       >
-        <option value="claude">
+        <option
+          v-if="!excludeTypes.includes('claude')"
+          value="claude"
+        >
           Claude
         </option>
-        <option value="codex">
+        <option
+          v-if="!excludeTypes.includes('codex')"
+          value="codex"
+        >
           Codex
         </option>
-        <option value="cursor">
+        <option
+          v-if="!excludeTypes.includes('traex')"
+          value="traex"
+        >
+          TraeX
+        </option>
+        <option
+          v-if="!excludeTypes.includes('cursor')"
+          value="cursor"
+        >
           Cursor
         </option>
         <option
-          v-if="allowTerminal"
+          v-if="allowTerminal && !excludeTypes.includes('terminal')"
           value="terminal"
         >
           Terminal
@@ -124,6 +139,8 @@ interface Props {
   envText: string
   variant?: 'modal' | 'form'
   allowTerminal?: boolean
+  // Workspace launchers exclude providers without managed-worker support.
+  excludeTypes?: AgentType[]
   typeLabel?: string
   soloLabel?: string
   disabled?: boolean
@@ -132,6 +149,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   variant: 'modal',
   allowTerminal: true,
+  excludeTypes: () => [],
   typeLabel: 'Agent Type',
   soloLabel: 'YOLO mode',
   disabled: false,
@@ -155,8 +173,9 @@ const supportsSoloMode = computed(
 )
 
 const yoloHint = computed(() => {
-  if (props.agentType === 'codex') {
-    return 'Runs Codex with --ask-for-approval never and --sandbox danger-full-access'
+  if (props.agentType === 'codex' || props.agentType === 'traex') {
+    const name = props.agentType === 'traex' ? 'TraeX' : 'Codex'
+    return `Runs ${name} with --ask-for-approval never and --sandbox danger-full-access`
   }
   return 'Runs Claude with IS_SANDBOX=1 and --dangerously-skip-permissions'
 })

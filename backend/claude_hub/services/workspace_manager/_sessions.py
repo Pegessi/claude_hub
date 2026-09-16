@@ -109,6 +109,16 @@ class _SessionsMixin:
         if payload.ephemeral and payload.reuse_existing:
             raise ValueError("Cannot combine ephemeral with reuse_existing")
 
+        if payload.agent_type == AgentType.TRAEX:
+            # TraeX is supported as a top-level terminal/Chat tab but not as a
+            # managed workspace worker this wave (goal-packet / autonomous
+            # prompt / native sub-agent contracts are not wired for it). Fail
+            # fast instead of creating a half-supported, terminal-degraded agent.
+            raise ValueError(
+                "agent_type 'traex' is not supported for workspace agents; "
+                "use claude, codex, or cursor (or open traex as a standalone tab)"
+            )
+
         if payload.env_preset:
             try:
                 merged_env = merge_env_with_preset(

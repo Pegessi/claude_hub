@@ -1578,7 +1578,7 @@ ${buildIframeSabScript(tabId)}
       // so first sync the browser image data to the backend pasteboard and
       // then trigger that key.
       document.addEventListener('paste', function(event) {
-        if (CLAUDE_HUB_AGENT_TYPE !== 'codex' && CLAUDE_HUB_AGENT_TYPE !== 'claude' && CLAUDE_HUB_AGENT_TYPE !== 'cursor') return;
+        if (CLAUDE_HUB_AGENT_TYPE !== 'codex' && CLAUDE_HUB_AGENT_TYPE !== 'traex' && CLAUDE_HUB_AGENT_TYPE !== 'claude' && CLAUDE_HUB_AGENT_TYPE !== 'cursor') return;
 
         var imageFile = getClipboardImageFile(event);
         if (!imageFile) return;

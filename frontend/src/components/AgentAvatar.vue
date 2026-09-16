@@ -32,6 +32,19 @@
       />
     </svg>
 
+    <!-- traex: bold T monogram -->
+    <svg
+      v-else-if="kind === 'traex'"
+      viewBox="0 0 24 24"
+      class="agent-avatar__glyph"
+      aria-hidden="true"
+    >
+      <path
+        d="M5 5h14v2.7h-5.6V19h-2.8V7.7H5V5Z"
+        fill="currentColor"
+      />
+    </svg>
+
     <!-- cursor: pointer arrow mark -->
     <svg
       v-else-if="kind === 'cursor'"
@@ -78,7 +91,14 @@ const props = withDefaults(defineProps<{
 
 const kind = computed<AvatarKind>(() => {
   const raw = props.agentType
-  if (raw === 'claude' || raw === 'codex' || raw === 'cursor' || raw === 'terminal') return raw
+  if (
+    raw === 'claude' ||
+    raw === 'codex' ||
+    raw === 'traex' ||
+    raw === 'cursor' ||
+    raw === 'terminal'
+  )
+    return raw
   return 'terminal'
 })
 
@@ -136,6 +156,11 @@ const resolvedTitle = computed(() => props.title?.trim() || `${kind.value} agent
 .agent-avatar--cursor {
   background: linear-gradient(135deg, #f5f5f5 0%, #d4d4d4 100%);
   color: #111;
+}
+
+.agent-avatar--traex {
+  background: linear-gradient(135deg, #5b6cff 0%, #3a48c9 100%);
+  color: #fff;
 }
 
 .agent-avatar--terminal {
