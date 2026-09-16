@@ -1,4 +1,4 @@
-export type AgentType = 'claude' | 'codex' | 'cursor' | 'terminal'
+export type AgentType = 'claude' | 'codex' | 'traex' | 'cursor' | 'terminal'
 export type SessionKind = 'chat' | 'terminal'
 export type ExecutionTarget = 'local' | 'remote'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'

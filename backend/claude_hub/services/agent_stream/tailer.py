@@ -131,6 +131,7 @@ class _PendingApproval:
     call_id: str
     turn_id: Optional[str]
     run_epoch: Optional[int]
+    question_ids: frozenset[str] = frozenset()
 
 
 def _native_runtime_snapshot(tailer: "SessionTailer") -> Optional[NativeRuntimeSnapshot]:
@@ -434,12 +435,12 @@ class SessionTailer:
                 # The card is answered either way: Codex consumed the answer
                 # as the blocking JSON-RPC response; Claude/Cursor have no
                 # question channel and deliver it as a steer/follow-up below.
-                # Persist an ``approval_resolved`` for every pending card so a
+                # Persist an ``approval_resolved`` for each answered card so a
                 # reload marks it resolved instead of rendering an open card
                 # inside a completed turn (and re-submitting a stale card no
                 # longer sends the raw JSON as a genuine new turn).
                 if consumed or self._pending_approvals:
-                    await self._emit_approval_resolved()
+                    await self._emit_approval_resolved(parsed_answers)
                 if consumed:
                     return
 
@@ -1029,6 +1030,10 @@ class SessionTailer:
                 self._active_turn_id = None
                 transport.acknowledge_turn_complete()
                 continue
+            # Stop may retire a turn after read_line dequeues its record but
+            # before wait_for resumes this consumer. Recheck at consumption.
+            if not transport.accepts_notification(record):
+                continue
             transport.maybe_capture_conversation_id(record)
             ctx = NormalizeContext(
                 session_id=self.session_id,
@@ -1445,12 +1450,17 @@ class SessionTailer:
                 call_id=event.call_id,
                 turn_id=event.turn_id,
                 run_epoch=event.run_epoch,
+                question_ids=frozenset(
+                    question["id"]
+                    for question in event.payload.get("questions", [])
+                    if isinstance(question, dict) and isinstance(question.get("id"), str)
+                ),
             )
         elif event.type == AgentStreamEventType.APPROVAL_RESOLVED and event.call_id:
             self._pending_approvals.pop(event.call_id, None)
 
-    async def _emit_approval_resolved(self) -> None:
-        """Persist + fan out one ``approval_resolved`` per pending card.
+    async def _emit_approval_resolved(self, answers: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Persist + fan out ``approval_resolved`` for the answered cards.
 
         Snapshot + clear before any await so a concurrent answer cannot emit a
         duplicate resolved event for the same card (mirrors the snapshot+clear
@@ -1462,8 +1472,18 @@ class SessionTailer:
         """
         if not self._pending_approvals:
             return
-        pending = dict(self._pending_approvals)
-        self._pending_approvals.clear()
+        answered_ids = {
+            answer["questionId"]
+            for answer in answers or []
+            if isinstance(answer, dict) and isinstance(answer.get("questionId"), str)
+        }
+        pending = {
+            key: card
+            for key, card in self._pending_approvals.items()
+            if not answers or not card.question_ids or card.question_ids <= answered_ids
+        }
+        for key in pending:
+            self._pending_approvals.pop(key)
         session = self._session_getter()
         if session is None:
             return
@@ -1984,6 +2004,7 @@ class TailerManager:
         if transport is None or tailer.native_error is not None:
             return
         transport.update_env(env)
+        transport.session.solo_mode = session.solo_mode
 
     async def ensure_started(self, session: ManagedSession) -> SessionTailer:
         return await self._get_or_create(session)

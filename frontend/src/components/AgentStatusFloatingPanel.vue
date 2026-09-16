@@ -804,6 +804,11 @@ onUnmounted(() => {
   color: #10a37f;
 }
 
+.agent-cli[data-kind='traex'] {
+  background: rgba(91, 108, 255, 0.18);
+  color: #7b8aff;
+}
+
 .agent-cli[data-kind='cursor'] {
   background: rgba(120, 120, 120, 0.22);
   color: var(--ch-color-text);

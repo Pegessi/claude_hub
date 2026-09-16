@@ -196,6 +196,7 @@ task.
 | Orphan reviewer tabs / tab-session reconciliation | `docs/working-logs/2026-06-19-orphan-reviewer-tab-reconcile.md` |
 | Subagent mode / worktree runtime isolation / `/clear` seat check | `docs/working-logs/2026-08-31-subagent-mode-and-session-seat.md` |
 | Claude/Cursor/Codex approval cards (AskUserQuestion / AskQuestion / requestUserInput) | `docs/working-logs/2026-09-05-claude-ask-user-question-approval.md`, `docs/working-logs/2026-09-02-chat-composer-ux-and-ask-question.md`, `docs/working-logs/2026-09-06-codex-question-approval.md` |
+| Add a new agent type / TraeX (Codex fork) terminal+Chat wiring | `docs/working-logs/2026-09-16-traex-agent.md` |
 
 ## Common Edit Areas
 
