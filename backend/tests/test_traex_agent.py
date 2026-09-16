@@ -1,29 +1,33 @@
 """TraeX (``traex``) agent integration.
 
-TraeX is a branded Codex fork, so the structured Chat transport reuses the
-Codex app-server JSON-RPC engine and only swaps the launch command (the bare
-``traex app-server`` — traex rejects Codex's ``--stdio`` flag). These tests pin
-that wiring plus the terminal TUI launch command and the scope boundaries
-(Chat-only structured transport; no workspace worker / transcript discovery).
+The transport shares Codex JSON-RPC framing with explicit TraeX turn, model
+and permission contracts. Tests cover native lifecycle and tool notifications,
+terminal launch, and the Chat-only structured/discovery boundary.
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from claude_hub.models import (
     AgentRuntimeStatus,
+    AgentStreamEventType,
     AgentType,
+    ChatMode,
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
     SessionKind,
     WorkspaceSessionRole,
 )
+from claude_hub.services.agent_stream.base import NormalizeContext
 from claude_hub.services.agent_stream.codex_jsonl import (
     CodexJsonlAdapter,
     TraexJsonlAdapter,
@@ -40,6 +44,7 @@ from claude_hub.services.agent_stream.registry import (
     supports_structured,
 )
 from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess, get_agent_command
+from tests.test_agent_stream_native import _FakeProcess, _written_requests
 
 # ``from claude_hub.services import ttyd_manager`` resolves to the manager
 # singleton exported by the package __init__, not the submodule; import the
@@ -298,3 +303,277 @@ def test_traex_working_indicator_classifies_as_working(monkeypatch: pytest.Monke
     assert status == AgentRuntimeStatus.WORKING
     assert status_text == "Working"
     assert detail == "agent is processing"
+
+
+def _ctx() -> NormalizeContext:
+    return NormalizeContext(
+        session_id="sess-traex", tab_id="tab-traex", agent_type=AgentType.TRAEX, run_epoch=1
+    )
+
+
+@pytest.mark.parametrize(
+    ("solo", "mode", "approval", "sandbox"),
+    [
+        (True, ChatMode.DEFAULT, "never", "danger-full-access"),
+        (False, ChatMode.DEFAULT, "on-request", "workspace-write"),
+        (True, ChatMode.PLAN, "on-request", "read-only"),
+    ],
+)
+@pytest.mark.parametrize("resume", [False, True])
+async def test_traex_thread_initialization_applies_tab_settings(
+    solo: bool,
+    mode: ChatMode,
+    approval: str,
+    sandbox: str,
+    resume: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _managed_session()
+    session.solo_mode = solo
+    session.chat_mode = mode
+    session.env = {"CODEX_MODEL": "Seed-Code"}
+    session.agent_session_id = "existing-thread" if resume else None
+    transport = TraexNativeSession(session)
+    proc = _FakeProcess(
+        [
+            json.dumps({"id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {"id": 2, "result": {"thread": {"id": "existing-thread"}, "model": "Seed-Code"}}
+            ).encode()
+            + b"\n",
+        ]
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+    try:
+        await transport.start()
+        request = next(
+            r
+            for r in _written_requests(proc)
+            if r.get("method") == ("thread/resume" if resume else "thread/start")
+        )
+        assert request["params"]["model"] == "Seed-Code"
+        assert request["params"]["cwd"] == session.workspace_path
+        assert request["params"]["approvalPolicy"] == approval
+        assert request["params"]["sandbox"] == sandbox
+    finally:
+        await transport.stop()
+
+
+async def test_traex_interrupt_uses_provider_ids_and_retires_old_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    transport = TraexNativeSession(_managed_session())
+    transport._started = True
+    transport._process = _FakeProcess([])
+    transport._thread_id = "thread-real"
+    seen = []
+
+    async def request(method, params):
+        seen.append((method, params))
+        if method == "turn/start":
+            return {"turn": {"id": "turn-real"}}
+        assert transport.turn_in_flight
+        await transport._handle_notification(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"turnId": "turn-real", "delta": "late"},
+            }
+        )
+        await transport._handle_notification(
+            {
+                "method": "turn/completed",
+                "params": {"turn": {"id": "turn-real", "status": "interrupted"}},
+            }
+        )
+        return {}
+
+    monkeypatch.setattr(transport, "_send_request", request)
+    await transport.send_message("first", [])
+    image = tmp_path / "image.png"
+    image.write_bytes(b"image")
+    transport._inflight_images = [image]
+    await transport._handle_notification(
+        {"method": "item/agentMessage/delta", "params": {"turnId": "turn-real", "delta": "queued"}}
+    )
+    await transport.cancel_active_turn()
+    assert seen[-1] == ("turn/interrupt", {"threadId": "thread-real", "turnId": "turn-real"})
+    assert transport._notification_queue.empty()
+    assert not image.exists()
+    assert not transport.turn_in_flight
+    assert transport._started
+    await transport._handle_notification(
+        {
+            "method": "turn/completed",
+            "params": {"turn": {"id": "turn-real", "status": "interrupted"}},
+        }
+    )
+    await transport._handle_notification(
+        {"method": "item/agentMessage/delta", "params": {"turnId": "next-turn", "delta": "new"}}
+    )
+    assert (await transport.read_line())["params"]["delta"] == "new"
+
+
+async def test_traex_interrupt_failure_terminates_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = TraexNativeSession(_managed_session())
+    proc = _FakeProcess([])
+    transport._process = proc
+    transport._started = True
+    transport._thread_id, transport._provider_turn_id = "thread", "turn"
+    transport._begin_turn()
+    monkeypatch.setattr(
+        transport, "_send_request", AsyncMock(side_effect=RuntimeError("broken RPC"))
+    )
+    await transport.cancel_active_turn()
+    assert proc._terminated
+    assert not transport._started
+    assert not transport.turn_in_flight
+
+
+@pytest.mark.parametrize(
+    "method", ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"]
+)
+@pytest.mark.parametrize(
+    ("selected", "decision"),
+    [("Allow once", "accept"), ("Reject", "decline"), ("anything else", "decline")],
+)
+async def test_traex_permission_card_roundtrip(method: str, selected: str, decision: str) -> None:
+    transport = TraexNativeSession(_managed_session())
+    proc = _FakeProcess([])
+    transport._process = proc
+    await transport._handle_server_request(
+        {
+            "id": "approval-id",
+            "method": method,
+            "params": {
+                "itemId": "cmd-1",
+                "turnId": "turn-1",
+                "command": "touch example.txt",
+                "reason": "Write access",
+            },
+        }
+    )
+    events = TraexJsonlAdapter().normalize_line(await transport.read_line(), _ctx())
+    card = next(e for e in events if e.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    assert "touch example.txt" in card.payload["questions"][0]["prompt"]
+    assert await transport.answer_pending_question(
+        [{"questionId": card.payload["questions"][0]["id"], "selected": [selected]}]
+    )
+    assert _written_requests(proc) == [
+        {"jsonrpc": "2.0", "id": "approval-id", "result": {"decision": decision}}
+    ]
+    assert not transport._pending_permissions
+
+
+def test_traex_command_timeline_and_terminal_errors() -> None:
+    adapter = TraexJsonlAdapter()
+    item = {
+        "id": "call-1",
+        "type": "commandExecution",
+        "command": "false",
+        "cwd": "/tmp",
+        "status": "inProgress",
+    }
+    started = adapter.normalize_line({"method": "item/started", "params": {"item": item}}, _ctx())
+    assert started[0].type == AgentStreamEventType.TOOL_CALL_STARTED
+    assert started[0].payload["args"]["cmd"] == "false"
+    item.update(status="completed", exitCode=1, aggregatedOutput="command failed")
+    completed = adapter.normalize_line(
+        {"method": "item/completed", "params": {"item": item}}, _ctx()
+    )
+    assert completed[0].call_id == started[0].call_id
+    assert completed[0].payload["status"] == "failed"
+    assert completed[0].payload["result"] == "command failed"
+    failed = adapter.normalize_line(
+        {
+            "method": "turn/completed",
+            "params": {"turn": {"status": "failed", "error": {"message": "model unavailable"}}},
+        },
+        _ctx(),
+    )
+    assert [e.type for e in failed] == [
+        AgentStreamEventType.ERROR,
+        AgentStreamEventType.TURN_COMPLETED,
+    ]
+    assert failed[0].payload["message"] == "model unavailable"
+    interrupted = adapter.normalize_line(
+        {"method": "turn/completed", "params": {"turn": {"status": "interrupted"}}}, _ctx()
+    )
+    assert interrupted[0].payload["status"] == "cancelled"
+
+
+async def test_traex_parallel_approval_answers_do_not_resolve_other_requests() -> None:
+    transport = TraexNativeSession(_managed_session())
+    proc = _FakeProcess([])
+    transport._process = proc
+    for req_id in ["first", "second"]:
+        await transport._handle_server_request(
+            {
+                "id": req_id,
+                "method": "item/commandExecution/requestApproval",
+                "params": {"itemId": req_id, "command": "true"},
+            }
+        )
+    await transport._handle_server_request(
+        {
+            "id": "question",
+            "method": "item/tool/requestUserInput",
+            "params": {
+                "itemId": "question-item",
+                "questions": [{"id": "q", "question": "Choose", "options": [{"label": "Yes"}]}],
+            },
+        }
+    )
+    answers = [{"questionId": "permission:first", "selected": ["Allow once"]}]
+    results = await asyncio.gather(
+        transport.answer_pending_question(answers), transport.answer_pending_question(answers)
+    )
+    assert results.count(True) == 1
+    assert [r["id"] for r in _written_requests(proc)] == ["first"]
+    assert "second" in transport._pending_permissions
+    assert "question" in transport._pending_questions
+
+
+async def test_traex_approval_persistence_only_resolves_answered_card() -> None:
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    session = _managed_session()
+    tailer = SessionTailer("ws-1", session.id, TraexJsonlAdapter(), lambda: session)
+    for req_id in ["first", "second"]:
+        tailer._record_approval_card(
+            _ctx().event(
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                {
+                    "questions": [{"id": f"permission:{req_id}"}],
+                },
+                call_id=req_id,
+            )
+        )
+    tailer._publish = AsyncMock()
+    await tailer._emit_approval_resolved(
+        [{"questionId": "permission:first", "selected": ["Allow once"]}]
+    )
+    assert set(tailer._pending_approvals) == {"second"}
+    assert tailer._publish.await_args.args[0].call_id == "first"
+
+
+async def test_traex_permission_changes_apply_on_next_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _managed_session()
+    session.solo_mode = True
+    transport = TraexNativeSession(session)
+    transport._started = True
+    transport._process = _FakeProcess([])
+    transport._thread_id = "thread"
+    send = AsyncMock(return_value={"turn": {"id": "turn"}})
+    monkeypatch.setattr(transport, "_send_request", send)
+    await transport.send_message("run", [])
+    assert send.await_args.args[1]["approvalPolicy"] == "never"
+    assert send.await_args.args[1]["sandboxPolicy"] == {"type": "dangerFullAccess"}
+    transport.acknowledge_turn_complete()
+    transport._current_mode = "plan"
+    transport._mode_discovery_attempted = True
+    transport._thread_model = "Seed-Evolving"
+    transport._mode_presets = {"plan": {"mode": "plan"}}
+    await transport.send_message("plan only", [])
+    assert send.await_args.args[1]["approvalPolicy"] == "on-request"
+    assert send.await_args.args[1]["sandboxPolicy"] == {"type": "readOnly"}

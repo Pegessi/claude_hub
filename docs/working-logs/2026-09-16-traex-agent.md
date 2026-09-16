@@ -44,7 +44,7 @@ Hand-probed `traex app-server` over NDJSON, then drove the real Hub transport:
 - One real turn emitted, in order: `turn/started`, `item/reasoning/textDelta`,
   `item/agentMessage/delta`, `turn/completed` with
   `params.turn.status = "completed"` — identical names to Codex. Extra
-  notifications (`hook/*`, `item/started|completed`, `thread/tokenUsage/updated`,
+  notifications (`hook/*`, `thread/tokenUsage/updated`,
   `skills/changed`, `remoteControl/status/changed`) are silently ignored by the
   existing Codex adapter, as designed.
 
@@ -60,18 +60,19 @@ Chat (which pins the app-server `threadId` and resumes via `thread/resume`).
 
 ## Design
 
-Structured Chat reuses the Codex stack almost verbatim:
+Structured Chat reuses Codex framing with explicit TraeX protocol handling:
 
-- `TraexNativeSession(CodexNativeSession)` — overrides only `_build_command()`
-  → `["traex", "app-server"]` and `adapter_id = "traex-native"`. Everything
-  else (NDJSON framing, three-way response/request/notification dispatch,
-  initialize→thread lifecycle, `turn/start|cancel`, model injection via
-  `collaborationMode.settings.model`, EOF fatal, image staging, question
-  request/response) is inherited.
-- Registry maps `TRAEX → CodexJsonlAdapter` (method-driven, protocol-neutral).
+- `TraexNativeSession(CodexNativeSession)` launches `["traex", "app-server"]`
+  and shares NDJSON dispatch, initialization, image staging and mode discovery.
+  It supplies thread/turn model and permission configuration, uses
+  `turn/interrupt` with provider IDs, filters retired output and handles
+  command/file approval responses.
+- Registry maps `TRAEX → TraexJsonlAdapter`, sharing live Codex normalization
+  while disabling transcript discovery. Tool items and errors appear in Chat.
 - Model override still rides `CODEX_MODEL` (the env key is just the carrier;
   the persistent app-server ignores it as an env var and receives the slug via
-  the collaboration-mode channel). Frontend maps `traex → CODEX_MODEL`.
+  thread initialization and collaboration-mode channels). Frontend maps
+  `traex → CODEX_MODEL`.
 - Static model list keyed `"traex"` (20 slugs from `traex models`).
 
 Terminal TUI mirrors the Codex/Cursor launch shape but is deliberately
@@ -90,7 +91,7 @@ Backend:
   `ensure_tmux_session` and `_build_ttyd_command`.
 - `services/agent_stream/native.py` — binary map, `"traex"` static models,
   `TraexNativeSession`, factory.
-- `services/agent_stream/registry.py` — `TRAEX → CodexJsonlAdapter`.
+- `services/agent_stream/registry.py` — `TRAEX → TraexJsonlAdapter`.
 - `api/terminal.py` — TUI probe-filter whitelist + injected `IS_AGENT_TUI`.
 - `cli/commands/rest.py` — interactive tab `--agent-type` choice.
   (`tasks.py` worker choices intentionally left out: workers aren't supported.)
@@ -100,7 +101,7 @@ Frontend:
 
 - `types/index.ts` union; `AgentConfigFields.vue` option + solo hint;
   `AgentAvatar.vue` glyph/color; `TabBar.vue` solo support + label;
-  `ScheduledTasksPanel.vue` option; `StructuredPane.vue` `MODEL_ENV_VAR`;
+  `StructuredPane.vue` `MODEL_ENV_VAR`;
   `terminalSwitchPolicy.ts` + `TerminalView.vue` TUI/clipboard whitelist.
 
 ## Pitfalls
@@ -110,18 +111,12 @@ Frontend:
   `_tmux_shell_command`; a new agent type must be handled consistently or
   pre-creation (workspace prompt injection) and the ttyd lazy-attach diverge.
 - **`--stdio` is rejected by traex** — use the bare `traex app-server`.
-- **Running real-tmux tests inside a linked worktree appends an isolated
-  socket** (`-L ch-<worktree-slug>`, here `ch-traex-agent`) via
-  `runtime_isolation.tmux_socket_args`. That later `-L` overrides the
-  per-run socket injected by `test_real_cold_restart_7tab_bijection`'s tmux
-  wrapper and makes the bijection test fail (all tabs land on one server). It
-  passes in the main checkout (slug → no `-L`) and in the worktree with
-  `CLAUDE_HUB_TMUX_SOCKET=` + `CLAUDE_HUB_ALLOW_LIVE_RUNTIME=1`. Environmental,
-  not a code regression.
-- Local mypy/isort versions differ from the CI-locked toolchain (pre-existing
-  test-only pydantic `call-arg` noise and an import-order nit in `native.py`
-  present on main too); compare against a main baseline rather than chasing a
-  zero count locally.
+- **Runtime isolation is mandatory in tests.** Use a fresh `CLAUDE_HUB_HOME`
+  and an explicit non-default `CLAUDE_HUB_TMUX_SOCKET`. Do not disable the live
+  runtime guard to work around a test wrapper.
+- **A greeting does not verify protocol equivalence.** The initial smoke
+  missed interrupt, permission and tool-item contracts; see
+  [the follow-up review](2026-09-17-traex-agent-review.md).
 
 ## Adversarial-review follow-up (same day)
 

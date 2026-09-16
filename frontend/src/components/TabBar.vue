@@ -944,7 +944,7 @@ function agentTypeLabel(agentType: AgentType): string {
     case 'codex':
       return 'Codex'
     case 'traex':
-      return 'Trae'
+      return 'TraeX'
     case 'cursor':
       return 'Cursor'
     case 'terminal':

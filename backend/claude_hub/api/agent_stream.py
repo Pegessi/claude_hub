@@ -296,7 +296,7 @@ async def _tab_capabilities_for(
         not caps.structured
         and adapter is not None
         and not manager.hard_failed(session.id)
-        and getattr(adapter, "supports_transcript_discovery", True)
+        and adapter.supports_transcript_discovery
     ):
         # Providers with a wired on-disk transcript (Claude/Codex) are promoted
         # to structured lazily before their first rollout exists. Adapters that

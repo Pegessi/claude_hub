@@ -62,8 +62,8 @@ from ...models import (
     ChatMode,
     ManagedSession,
     StreamCapabilities,
-    StreamModeOption,
     StreamModelOption,
+    StreamModeOption,
 )
 
 logger = logging.getLogger(__name__)
@@ -991,6 +991,10 @@ class ProviderSession(ABC):
         """
         return False
 
+    def accepts_notification(self, record: Dict[str, Any]) -> bool:
+        """Whether a dequeued record still belongs to a live provider turn."""
+        return True
+
     @abstractmethod
     async def _send_text(self, text: str) -> None:
         """Provider-specific turn submission (lock-free).
@@ -1494,12 +1498,13 @@ class CodexNativeSession(ProviderSession):
         super().__init__(session, conversation_id_persist=conversation_id_persist)
         self._jsonrpc_id = 0
         self._thread_id: Optional[str] = None
+        self._provider_turn_id: Optional[str] = None
         # Per-request response futures keyed by JSON-RPC id.
         self._pending_requests: Dict[int, asyncio.Future[Dict[str, Any]]] = {}
         # Server→client question requests awaiting an answer, keyed by the
         # server's JSON-RPC id. The value is the request params (with
         # ``questions``); consumed by :meth:`answer_pending_question`.
-        self._pending_questions: Dict[int, Dict[str, Any]] = {}
+        self._pending_questions: Dict[Any, Dict[str, Any]] = {}
         # Notifications (no ``id``) are placed here for the tailer to consume.
         self._notification_queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
         # Staged image temp files for the next turn/start.
@@ -1609,7 +1614,7 @@ class CodexNativeSession(ProviderSession):
         if self._conversation_id:
             try:
                 resume_resp = await self._send_request(
-                    "thread/resume", {"threadId": self._conversation_id}
+                    "thread/resume", {"threadId": self._conversation_id, **self._thread_config()}
                 )
                 if isinstance(resume_resp, dict):
                     self._capture_thread_model(resume_resp)
@@ -1620,13 +1625,19 @@ class CodexNativeSession(ProviderSession):
             except RuntimeError:
                 # Resume failed (e.g. thread not found); fall through to start.
                 logger.warning("codex thread/resume failed; starting a new thread")
-        thread_resp = await self._send_request("thread/start", {})
+        thread_resp = await self._send_request("thread/start", self._thread_config())
         if isinstance(thread_resp, dict):
             self._capture_thread_model(thread_resp)
             thread = thread_resp.get("thread")
             if isinstance(thread, dict) and thread.get("id"):
                 self._thread_id = thread["id"]
                 self._persist_conversation_id(thread["id"])
+
+    def _thread_config(self) -> Dict[str, Any]:
+        return {}
+
+    def _turn_config(self) -> Dict[str, Any]:
+        return {}
 
     def _capture_thread_model(self, response: Dict[str, Any]) -> None:
         model = response.get("model")
@@ -1757,6 +1768,7 @@ class CodexNativeSession(ProviderSession):
         params: Dict[str, Any] = {
             "threadId": self._thread_id,
             "input": input_items,
+            **self._turn_config(),
         }
         collaboration_mode = self._collaboration_mode_payload()
         if collaboration_mode is not None:
@@ -1768,7 +1780,9 @@ class CodexNativeSession(ProviderSession):
         # handler would see an empty list and the temp files would leak.
         self._inflight_images = image_paths
         try:
-            await self._send_request("turn/start", params)
+            response = await self._send_request("turn/start", params)
+            turn = response.get("turn") if isinstance(response, dict) else None
+            self._provider_turn_id = turn.get("id") if isinstance(turn, dict) else None
         except Exception:
             # The turn never started (or the server rejected it). The image
             # temp files are still ours to clean up; the turn/completed
@@ -1923,7 +1937,7 @@ class CodexNativeSession(ProviderSession):
         """
         method = record.get("method")
         req_id = record.get("id")
-        if method in _CODEX_QUESTION_METHODS and isinstance(req_id, int):
+        if method in _CODEX_QUESTION_METHODS and isinstance(req_id, (int, str)):
             params = record.get("params")
             if isinstance(params, dict):
                 # Auto-dismiss a request whose questions are ALL skipped by
@@ -2009,6 +2023,15 @@ class CodexNativeSession(ProviderSession):
         """Await one server notification, or ``None`` on EOF."""
         return await self._notification_queue.get()
 
+    async def _handle_notification(self, record: Dict[str, Any]) -> None:
+        self._handshake_complete = True
+        if record.get("method") == "turn/completed":
+            # Keep the turn guard until the tailer consumes completion.
+            inflight = self._inflight_images
+            self._inflight_images = []
+            self._cleanup_images(inflight)
+        await self._notification_queue.put(record)
+
     async def _drain_stdout(self) -> None:
         """Parse stdout lines and dispatch responses vs requests vs notifications.
 
@@ -2058,21 +2081,7 @@ class CodexNativeSession(ProviderSession):
                                 if future is not None and not future.done():
                                     future.set_result(record)
                     else:
-                        # Notification: forward to the tailer.
-                        self._handshake_complete = True
-                        method = record.get("method")
-                        if method == "turn/completed":
-                            # The turn has finished. Clean up any image temp files
-                            # that were owned by this turn. The turn guard is
-                            # released by the tailer via
-                            # ``acknowledge_turn_complete`` after it processes this
-                            # notification — NOT here, so a concurrent send cannot
-                            # overwrite ``_active_turn_id`` while this
-                            # ``turn/completed`` record is still queued.
-                            inflight = self._inflight_images
-                            self._inflight_images = []
-                            self._cleanup_images(inflight)
-                        await self._notification_queue.put(record)
+                        await self._handle_notification(record)
             # Process any trailing data without a newline.
             if buffer:
                 text = buffer.decode("utf-8", errors="ignore").strip()
@@ -2092,8 +2101,7 @@ class CodexNativeSession(ProviderSession):
                                     if future is not None and not future.done():
                                         future.set_result(record)
                         else:
-                            self._handshake_complete = True
-                            await self._notification_queue.put(record)
+                            await self._handle_notification(record)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2123,28 +2131,10 @@ class CodexNativeSession(ProviderSession):
 
 
 class TraexNativeSession(CodexNativeSession):
-    """TraeX (``traex``) native transport.
+    """TraeX 0.205.1: shared JSON-RPC framing, explicit v2 turn contracts.
 
-    TraeX is a branded fork of the Codex CLI: its ``app-server`` speaks the
-    same JSON-RPC 2.0 / NDJSON protocol (verified against 0.205.1 — the
-    initialize/thread/start/turn handshake and the ``item/agentMessage/delta``
-    / ``item/reasoning/textDelta`` / ``turn/completed`` notifications are
-    identical, and the server identifies itself as ``Codex Desktop``). So this
-    session reuses the entire Codex engine and only changes the launch command
-    and the reported adapter id.
-
-    Two launch differences vs. upstream Codex:
-
-    * the binary is ``traex`` and the stdio listener is the default
-      (``--listen stdio://``); traex rejects codex's ``--stdio`` flag, so the
-      command is the bare ``traex app-server``;
-    * its config/session home is ``~/.trae`` rather than ``~/.codex`` — that
-      only affects on-disk rollout discovery, not the live protocol.
-
-    The composer's model override still rides the inherited
-    ``collaborationMode.settings.model`` channel. The picker should write the
-    traex model slug (e.g. ``Seed-Evolving``); reuse ``CODEX_MODEL`` as the env
-    key so no base-class plumbing changes.
+    Model overrides use Hub's CODEX_MODEL key. TraeX requires turn/interrupt
+    with provider IDs, and command/file approvals use decision responses.
     """
 
     adapter_id = "traex-native"
@@ -2152,6 +2142,198 @@ class TraexNativeSession(CodexNativeSession):
     def _build_command(self) -> List[str]:
         # traex has no ``--stdio`` flag; stdio:// is the default listener.
         return ["traex", "app-server"]
+
+    def __init__(
+        self,
+        session: ManagedSession,
+        conversation_id_persist: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        super().__init__(session, conversation_id_persist=conversation_id_persist)
+        self._discard_turn_id: Optional[str] = None
+        self._interrupted = asyncio.Event()
+        self._pending_permissions: Dict[Any, Dict[str, str]] = {}
+
+    def _thread_config(self) -> Dict[str, Any]:
+        config: Dict[str, Any] = {"cwd": self._cwd, **self._permission_config()}
+        model = self._selected_model_override()
+        if model:
+            config["model"] = model
+        return config
+
+    def _permission_config(self) -> Dict[str, Any]:
+        plan = self._current_mode == ChatMode.PLAN.value
+        solo = self.session.solo_mode and not plan
+        return {
+            "approvalPolicy": "never" if solo else "on-request",
+            "sandbox": (
+                "read-only" if plan else ("danger-full-access" if solo else "workspace-write")
+            ),
+        }
+
+    def _turn_config(self) -> Dict[str, Any]:
+        config = self._permission_config()
+        sandbox = {
+            "read-only": "readOnly",
+            "workspace-write": "workspaceWrite",
+            "danger-full-access": "dangerFullAccess",
+        }[config.pop("sandbox")]
+        return {**config, "sandboxPolicy": {"type": sandbox}}
+
+    @staticmethod
+    def _notification_turn_id(record: Dict[str, Any]) -> Optional[str]:
+        params = record.get("params", {})
+        if not isinstance(params, dict):
+            return None
+        turn = params.get("turn")
+        value = turn.get("id") if isinstance(turn, dict) else params.get("turnId")
+        return value if isinstance(value, str) else None
+
+    async def _handle_notification(self, record: Dict[str, Any]) -> None:
+        if not self.accepts_notification(record):
+            if record.get("method") == "turn/completed":
+                self._interrupted.set()
+            return
+        await super()._handle_notification(record)
+
+    def accepts_notification(self, record: Dict[str, Any]) -> bool:
+        return not (
+            self._discard_turn_id and self._notification_turn_id(record) == self._discard_turn_id
+        )
+
+    async def cancel_active_turn(self) -> None:
+        if not self._turn_in_flight:
+            return
+        self._discard_turn_id = self._provider_turn_id
+        self._interrupted.clear()
+        # Discard already queued output too: the tailer has published the
+        # cancelled state and must never stamp old deltas with the next turn.
+        retained = []
+        while not self._notification_queue.empty():
+            record = self._notification_queue.get_nowait()
+            if record is not None and self._notification_turn_id(record) == self._discard_turn_id:
+                if record.get("method") == "turn/completed":
+                    self._interrupted.set()
+            else:
+                retained.append(record)
+        for record in retained:
+            self._notification_queue.put_nowait(record)
+        try:
+            if not self._interrupted.is_set():
+                if not self._thread_id or not self._provider_turn_id:
+                    raise RuntimeError("TraeX did not return an active turn id")
+                await self._send_request(
+                    "turn/interrupt",
+                    {"threadId": self._thread_id, "turnId": self._provider_turn_id},
+                )
+                await asyncio.wait_for(self._interrupted.wait(), timeout=_STARTUP_GRACE_S)
+        except Exception:
+            # An unconfirmed interrupt must actually stop execution. EOF then
+            # makes the tailer fail closed and exposes Retry in Chat.
+            logger.exception("TraeX interrupt failed; stopping app-server")
+            await self.stop()
+        finally:
+            self._pending_questions.clear()
+            self._pending_permissions.clear()
+            self._clear_staged_images()
+            self._cleanup_images(self._inflight_images)
+            self._inflight_images = []
+            self._end_turn()
+
+    async def stop(self) -> None:
+        self._pending_permissions.clear()
+        await super().stop()
+
+    async def _handle_server_request(self, record: Dict[str, Any]) -> None:
+        method = record.get("method")
+        if not self.accepts_notification(record):
+            # A permission request already in transit when Stop was pressed
+            # must not reopen a card or leave the interrupted turn blocked.
+            await self._send_jsonrpc_response(
+                record.get("id"), error={"code": -32600, "message": "turn interrupted"}
+            )
+            return
+        if method not in {
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+        }:
+            await super()._handle_server_request(record)
+            return
+        req_id = record.get("id")
+        params = record.get("params", {})
+        if not isinstance(params, dict):
+            await self._send_jsonrpc_response(req_id, result={"decision": "decline"})
+            return
+        decisions = params.get("availableDecisions")
+        allowed = decisions if isinstance(decisions, list) else ["accept", "decline"]
+        choices = {
+            label: decision
+            for label, decision in [
+                ("Allow once", "accept"),
+                ("Reject", "decline"),
+                ("Cancel turn", "cancel"),
+            ]
+            if decision in allowed
+        }
+        if not choices:
+            await self._send_jsonrpc_response(req_id, result={"decision": "cancel"})
+            return
+        question_id = f"permission:{req_id}"
+        self._pending_permissions[req_id] = choices
+        command = params.get("command") or "Apply file changes"
+        reason = params.get("reason") or "Approval required"
+        await self._notification_queue.put(
+            {
+                "method": _CODEX_QUESTION_METHODS[0],
+                "params": {
+                    "itemId": question_id,
+                    "turnId": params.get("turnId"),
+                    "questions": [
+                        {
+                            "id": question_id,
+                            "header": "Permission",
+                            "question": f"{reason}\n{command}",
+                            "options": [{"label": label, "description": ""} for label in choices],
+                        }
+                    ],
+                },
+            }
+        )
+
+    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+        selected = {
+            a["questionId"]: a.get("selected")
+            for a in answers
+            if isinstance(a, dict) and isinstance(a.get("questionId"), str)
+        }
+        responses: List[Tuple[Any, Dict[str, Any]]] = []
+        for req_id, choices in list(self._pending_permissions.items()):
+            question_id = f"permission:{req_id}"
+            if answers and question_id not in selected:
+                continue
+            values = selected.get(question_id)
+            decision = (
+                choices.get(values[0], "decline")
+                if isinstance(values, list) and len(values) == 1 and isinstance(values[0], str)
+                else "decline"
+            )
+            self._pending_permissions.pop(req_id, None)
+            responses.append((req_id, {"decision": decision}))
+        for req_id, params in list(self._pending_questions.items()):
+            questions = codex_normalize_questions(params.get("questions"))
+            ids = {question["id"] for question in questions}
+            if answers and not ids <= selected.keys():
+                continue
+            result = {
+                question_id: {"answers": [value for value in values if isinstance(value, str)]}
+                for question_id, values in selected.items()
+                if question_id in ids and isinstance(values, list)
+            }
+            self._pending_questions.pop(req_id, None)
+            responses.append((req_id, {"answers": result}))
+        # Claim the entire response batch before yielding to concurrent clicks.
+        for req_id, result in responses:
+            await self._send_jsonrpc_response(req_id, result=result)
+        return bool(responses)
 
 
 # ── Cursor ───────────────────────────────────────────────────────────────────

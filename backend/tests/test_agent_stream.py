@@ -333,7 +333,7 @@ def test_tailer_manager_set_env_propagates_to_live_transport() -> None:
     transport so it takes effect on the next turn."""
     from claude_hub.services.agent_stream.tailer import TailerManager
 
-    session = SimpleNamespace(id="sess-env-live")
+    session = SimpleNamespace(id="sess-env-live", solo_mode=True)
     transport = MagicMock()
     tailer = SessionTailer(
         "ws-env",
@@ -348,6 +348,7 @@ def test_tailer_manager_set_env_propagates_to_live_transport() -> None:
     manager.set_env(session, {"FOO": "bar"})
 
     transport.update_env.assert_called_once_with({"FOO": "bar"})
+    assert transport.session.solo_mode is True
 
 
 def test_tailer_manager_set_env_skips_when_tailer_missing_or_errored() -> None:
@@ -2212,6 +2213,9 @@ class _FakeNativeTransport:
     Records pushed onto ``_records`` are returned by ``read_line``. The
     tailer's push consumer awaits ``read_line`` directly — no polling.
     """
+
+    def accepts_notification(self, record):
+        return True
 
     def __init__(self, eof_is_fatal: bool = False) -> None:
         self._started = True

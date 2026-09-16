@@ -23,10 +23,6 @@ from .cursor_cli_transcript import CursorCliTranscriptAdapter
 _ADAPTERS: Dict[AgentType, Type[AgentStreamAdapter]] = {
     AgentType.CLAUDE: ClaudeJsonlAdapter,
     AgentType.CODEX: CodexJsonlAdapter,
-    # TraeX speaks the same live app-server protocol as Codex (verified against
-    # traex 0.205.1), so notification normalization is reused — but transcript
-    # discovery is disabled because its rollouts live under ~/.trae and terminal
-    # discovery/edit-resend are not wired this wave (fail closed).
     AgentType.TRAEX: TraexJsonlAdapter,
     AgentType.CURSOR: CursorCliTranscriptAdapter,
 }
