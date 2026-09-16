@@ -1890,7 +1890,7 @@ asyncio.run(_main())
             )
         if self.agent_type == AgentType.TRAEX:
             # TraeX is a Codex fork and its TUI accepts the same bypass flags.
-            return "traex --ask-for-approval never --sandbox danger-full-access"
+            return self._traex_launch_command()
         if self.agent_type == AgentType.CLAUDE:
             return (
                 "IS_SANDBOX=1 claude --dangerously-skip-permissions"
@@ -1976,7 +1976,7 @@ asyncio.run(_main())
                     ]
                 )
             )
-        elif self.agent_type == AgentType.CURSOR:
+        elif self.agent_type in {AgentType.CURSOR, AgentType.TRAEX}:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
                 shlex.join(
@@ -1984,21 +1984,6 @@ asyncio.run(_main())
                         user_shell,
                         "-c",
                         f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
-                    ]
-                )
-            )
-        elif self.agent_type == AgentType.TRAEX:
-            # TraeX TUI (a Codex fork). Always wrapped in the user shell so the
-            # pane returns to a prompt when the agent exits, for both solo and
-            # non-solo launches. Terminal resume/session-discovery is not wired
-            # (Chat persistence is provided by the app-server's thread/resume).
-            user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.append(
-                shlex.join(
-                    [
-                        user_shell,
-                        "-c",
-                        f"{self._with_env(self._traex_launch_command())}; exec {user_shell}",
                     ]
                 )
             )
@@ -2194,26 +2179,13 @@ asyncio.run(_main())
                     f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
                 ]
             )
-        elif self.agent_type == AgentType.CURSOR and not session_exists:
+        elif self.agent_type in {AgentType.CURSOR, AgentType.TRAEX} and not session_exists:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.extend(
                 [
                     user_shell,
                     "-c",
                     f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
-                ]
-            )
-        elif self.agent_type == AgentType.TRAEX and not session_exists:
-            # Live tmux sessions are reattached below; only a missing session
-            # launches the TraeX TUI (solo or not — the bypass flags are added
-            # inside _traex_launch_command), wrapped so the pane falls back to
-            # a shell on exit.
-            user_shell = os.environ.get("SHELL", "/bin/bash")
-            cmd.extend(
-                [
-                    user_shell,
-                    "-c",
-                    f"{self._with_env(self._traex_launch_command())}; exec {user_shell}",
                 ]
             )
         elif self.agent_type == AgentType.CLAUDE and not session_exists:

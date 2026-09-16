@@ -30,23 +30,32 @@
         :disabled="disabled"
         @change="onAgentTypeChange(($event.target as HTMLSelectElement).value)"
       >
-        <option value="claude">
+        <option
+          v-if="!excludeTypes.includes('claude')"
+          value="claude"
+        >
           Claude
         </option>
-        <option value="codex">
+        <option
+          v-if="!excludeTypes.includes('codex')"
+          value="codex"
+        >
           Codex
         </option>
         <option
           v-if="!excludeTypes.includes('traex')"
           value="traex"
         >
-          Trae
+          TraeX
         </option>
-        <option value="cursor">
+        <option
+          v-if="!excludeTypes.includes('cursor')"
+          value="cursor"
+        >
           Cursor
         </option>
         <option
-          v-if="allowTerminal"
+          v-if="allowTerminal && !excludeTypes.includes('terminal')"
           value="terminal"
         >
           Terminal
@@ -130,9 +139,7 @@ interface Props {
   envText: string
   variant?: 'modal' | 'form'
   allowTerminal?: boolean
-  // Agent types to hide from the selector — used by workspace/resident entry
-  // points that only support autonomous-worker-capable agents (TraeX is not a
-  // workspace worker this wave). The top-level tab launcher leaves this empty.
+  // Workspace launchers exclude providers without managed-worker support.
   excludeTypes?: AgentType[]
   typeLabel?: string
   soloLabel?: string
@@ -142,7 +149,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   variant: 'modal',
   allowTerminal: true,
-  excludeTypes: () => [] as AgentType[],
+  excludeTypes: () => [],
   typeLabel: 'Agent Type',
   soloLabel: 'YOLO mode',
   disabled: false,

@@ -172,14 +172,7 @@ class AgentStreamAdapter:
     schema_version: int = 0
     supports_approval_ui: bool = False
     supports_tool_timeline: bool = False
-    # Whether a TERMINAL-kind tab of this agent type is allowed to offer the
-    # transcript-based structured surface (and the lazy "promote to structured
-    # before the first rollout exists" view). Providers whose on-disk transcript
-    # is not wired (e.g. TraeX, which writes under ~/.trae and is driven live
-    # via its native app-server) set this False so a terminal tab fails closed
-    # to the raw terminal instead of being mistaken for another provider's
-    # transcript. Chat sessions ignore this — their source is the native
-    # transport, not a file.
+    # Allow transcript-backed Terminal views; native Chat uses its transport.
     supports_transcript_discovery: bool = True
 
     def __init__(self) -> None:
