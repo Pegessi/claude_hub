@@ -697,12 +697,12 @@
                 class="composer-mode-trigger"
                 aria-haspopup="menu"
                 :aria-expanded="isModelMenuOpen"
-                :aria-label="`Model: ${currentModel || 'default'}`"
-                :title="`Model: ${currentModel || 'default'}`"
+                :aria-label="`Model: ${currentModelLabel}`"
+                :title="`Model: ${currentModelLabel}`"
                 :disabled="modeInteractionLocked || isUpdatingModel"
                 @click="toggleModelMenu"
               >
-                <span class="composer-mode-trigger-label">{{ currentModel || 'default' }}</span>
+                <span class="composer-mode-trigger-label">{{ currentModelLabel }}</span>
                 <span
                   class="composer-mode-chevron"
                   aria-hidden="true"
@@ -717,16 +717,16 @@
               >
                 <button
                   v-for="model in modelOptions"
-                  :key="model"
+                  :key="model.id"
                   type="button"
                   class="composer-mode-menu-item"
                   role="menuitemradio"
-                  :aria-checked="currentModel === model"
-                  @click="selectModel(model)"
+                  :aria-checked="currentModel === model.id"
+                  @click="selectModel(model.id)"
                 >
-                  <span>{{ model }}</span>
+                  <span>{{ model.label }}</span>
                   <span
-                    v-if="currentModel === model"
+                    v-if="currentModel === model.id"
                     class="composer-mode-check"
                     aria-hidden="true"
                   >✓</span>
@@ -822,7 +822,7 @@ import {
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 import { useTerminalStore } from '@/stores/terminalStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import type { WorkspaceAttachmentCreate } from '@/types'
+import type { StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
   /** A top-level Chat tab owns its transcript directly. */
@@ -938,37 +938,10 @@ const MODEL_ENV_VAR: Record<string, string> = {
   cursor: 'CURSOR_MODEL',
 }
 
-// Curated common models per agent type. The user can also type a custom model
-// id into the picker's text input.
-const MODEL_OPTIONS: Record<string, string[]> = {
-  claude: [
-    'claude-opus-4-8',
-    'claude-sonnet-4-6',
-    'claude-haiku-4-5',
-    'doubao-seed-2.0-code',
-  ],
-  codex: [
-    'gpt-5.6-sol',
-    'gpt-5.6-terra',
-    'gpt-5.6-luna',
-    'gpt-5.5',
-    'gpt-5.4',
-    'gpt-5.4-mini',
-    'gpt-5.3-codex-spark',
-  ],
-  cursor: [
-    'claude-opus-4-8-thinking-high',
-    'claude-opus-4-8-high',
-    'claude-4.6-sonnet-medium-thinking',
-    'claude-4.6-sonnet-medium',
-    'claude-4.5-sonnet',
-    'gpt-5.2',
-    'gpt-5.3-codex',
-    'gemini-3.7-flash-high',
-    'cursor-grok-4.6-high',
-  ],
-}
-
+// Models are discovered at runtime by the backend (cursor via
+// ``agent --list-models``; claude/codex via a curated static list) and
+// surfaced on the session capabilities. The user can still type a custom
+// model id into the picker's text input.
 const currentTab = computed(() =>
   terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
 )
@@ -981,9 +954,13 @@ const currentModel = computed(() => {
   const key = modelEnvVar.value
   return key ? env[key] ?? '' : ''
 })
-const modelOptions = computed(() => {
-  const at = currentTab.value?.agent_type
-  return at ? MODEL_OPTIONS[at] ?? [] : []
+const modelOptions = computed<StreamModelOption[]>(
+  () => capabilities.value?.available_models ?? [],
+)
+const currentModelLabel = computed(() => {
+  const id = currentModel.value
+  if (!id) return 'default'
+  return modelOptions.value.find(m => m.id === id)?.label ?? id
 })
 const isModelPickerAvailable = computed(() => modelEnvVar.value !== null)
 const isModelMenuOpen = ref(false)

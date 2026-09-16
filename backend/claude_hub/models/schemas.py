@@ -59,6 +59,14 @@ class StreamModeOption(BaseModel):
     description: str
 
 
+class StreamModelOption(BaseModel):
+    """One provider-verified model exposed by the structured Chat surface."""
+
+    id: str
+    label: str
+    description: str = ""
+
+
 class StreamCapabilities(BaseModel):
     """What the structured observation plane can offer for a session.
 
@@ -76,6 +84,7 @@ class StreamCapabilities(BaseModel):
     available_modes: List[StreamModeOption] = Field(default_factory=list)
     current_mode: Optional[str] = None
     supports_dynamic_modes: bool = False
+    available_models: List[StreamModelOption] = Field(default_factory=list)
 
 
 class ExecutionTarget(str, Enum):
