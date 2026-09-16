@@ -2174,6 +2174,50 @@ async def test_available_models_caches_single_probe() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_probes_dedup() -> None:
+    """Concurrent calls within the TTL spawn the probe exactly once (the global
+    lock's double-checked checking) and both return the same cached list."""
+    proc = _FakeListModelsProc(_SAMPLE_LIST_MODELS.encode())
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as spawn:
+        results = await asyncio.gather(
+            native_module.available_models_for("cursor"),
+            native_module.available_models_for("cursor"),
+        )
+
+    assert spawn.call_count == 1
+    assert results[0] is results[1]
+
+
+@pytest.mark.asyncio
+async def test_probe_cancelled_kills_process() -> None:
+    """If the calling task is cancelled mid-probe, the process is killed and
+    ``CancelledError`` propagates (no leaked hung probe)."""
+
+    class _BlockingProc(_FakeListModelsProc):
+        def __init__(self) -> None:
+            super().__init__(b"")
+            self._unblock = asyncio.Event()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await self._unblock.wait()  # blocks until cancelled
+            return self._stdout, b""
+
+    proc = _BlockingProc()
+
+    async def _probe() -> List[Any]:
+        return await native_module.available_models_for("cursor")
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        task = asyncio.create_task(_probe())
+        await asyncio.sleep(0.05)  # let it block inside communicate()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert proc.killed is True
+
+
+@pytest.mark.asyncio
 async def test_claude_codex_return_static_without_probe() -> None:
     """claude/codex have no list-models flag, so they return the curated static
     list without spawning a subprocess."""

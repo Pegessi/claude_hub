@@ -337,6 +337,7 @@ def _help_confirms_plan_mode(binary: str, flag: str) -> bool:
 # on every capabilities fetch.
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
 _MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
 _MODELS_NEGATIVE_TTL_S = 60.0  # failed probe (static fallback): 1 minute
@@ -390,6 +391,7 @@ def _parse_list_models(raw: str) -> List[StreamModelOption]:
     options: List[StreamModelOption] = []
     seen: set[str] = set()
     for line in raw.splitlines():
+        line = _OSC_RE.sub("", line)
         line = _ANSI_RE.sub("", line).strip()
         if not line or " - " not in line:
             continue
@@ -403,12 +405,26 @@ def _parse_list_models(raw: str) -> List[StreamModelOption]:
     return options
 
 
+def _safe_kill(proc: Any) -> None:
+    """Kill a probe subprocess, ignoring the race where it already exited."""
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
 async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
     """Run ``agent --list-models`` and return ``(options, is_fallback)``.
 
     ``is_fallback=True`` means the probe failed (binary missing, timeout, or
     unparseable output) and the static curated list was returned instead; the
     caller applies the short negative TTL so recovery is quick.
+
+    The probe deliberately inherits the backend process environment rather
+    than the session env: the catalog is cached globally per agent type, so a
+    session-specific ``agent`` binary or credentials would leak one session's
+    models into another's. The backend runs as the user, so ``agent`` auth
+    works.
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -421,10 +437,16 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
         return _static_options("cursor"), True
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_MODELS_PROBE_TIMEOUT_S)
+    except asyncio.CancelledError:
+        # The calling task was cancelled mid-probe. ``wait_for`` propagates
+        # this without killing the process, so do so explicitly to avoid a
+        # leaked (possibly hung) probe, then re-raise.
+        _safe_kill(proc)
+        raise
     except Exception:
-        # ``wait_for`` cancels the communicate coroutine but does not kill the
-        # underlying process; do so explicitly to avoid a leaked probe.
-        proc.kill()
+        # Timeout or other failure: ``wait_for`` cancels the communicate
+        # coroutine but does not kill the underlying process.
+        _safe_kill(proc)
         return _static_options("cursor"), True
     parsed = _parse_list_models(stdout.decode("utf-8", errors="replace"))
     return (parsed, False) if parsed else (_static_options("cursor"), True)

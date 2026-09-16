@@ -721,12 +721,12 @@
                   type="button"
                   class="composer-mode-menu-item"
                   role="menuitemradio"
-                  :aria-checked="currentModel === model.id"
+                  :aria-checked="isModelActive(model.id)"
                   @click="selectModel(model.id)"
                 >
                   <span>{{ model.label }}</span>
                   <span
-                    v-if="currentModel === model.id"
+                    v-if="isModelActive(model.id)"
                     class="composer-mode-check"
                     aria-hidden="true"
                   >✓</span>
@@ -959,9 +959,20 @@ const modelOptions = computed<StreamModelOption[]>(
 )
 const currentModelLabel = computed(() => {
   const id = currentModel.value
-  if (!id) return 'default'
+  if (!id) {
+    // No explicit model: the provider uses its default (auto) selection.
+    return modelOptions.value.some(m => m.id === 'auto') ? 'Auto' : 'default'
+  }
   return modelOptions.value.find(m => m.id === id)?.label ?? id
 })
+// Whether a model row is the active selection. The empty-env state (no
+// explicit model) matches the provider's ``auto`` row.
+function isModelActive(modelId: string) {
+  if (modelId === 'auto') {
+    return currentModel.value === '' || currentModel.value === 'auto'
+  }
+  return currentModel.value === modelId
+}
 const isModelPickerAvailable = computed(() => modelEnvVar.value !== null)
 const isModelMenuOpen = ref(false)
 const isUpdatingModel = ref(false)
