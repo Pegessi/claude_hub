@@ -3,8 +3,8 @@
     class="agent-avatar"
     :class="`agent-avatar--${kind}`"
     :data-size="size"
-    :title="title"
-    :aria-label="title"
+    :title="resolvedTitle"
+    :aria-label="resolvedTitle"
   >
     <!-- claude: official Claude/Anthropic mark (Simple Icons CC0) -->
     <svg
@@ -69,9 +69,11 @@ type AvatarKind = AgentType
 const props = withDefaults(defineProps<{
   agentType?: AgentType | null
   size?: 'sm' | 'md'
+  title?: string
 }>(), {
   agentType: 'terminal',
   size: 'md',
+  title: undefined,
 })
 
 const kind = computed<AvatarKind>(() => {
@@ -80,7 +82,9 @@ const kind = computed<AvatarKind>(() => {
   return 'terminal'
 })
 
-const title = computed(() => `${kind.value} agent`)
+// Caller-provided title wins (used for both the tooltip and the accessible
+// name so they never diverge); otherwise fall back to a generic label.
+const resolvedTitle = computed(() => props.title?.trim() || `${kind.value} agent`)
 </script>
 
 <style scoped>

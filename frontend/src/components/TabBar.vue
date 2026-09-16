@@ -47,7 +47,6 @@
             class="tab-kind"
             :agent-type="tab.agent_type"
             size="sm"
-            :data-kind="tab.session_kind"
             :title="tab.session_kind === 'chat' ? 'Chat session' : 'Terminal session'"
           />
           <span
