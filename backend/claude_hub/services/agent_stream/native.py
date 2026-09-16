@@ -64,6 +64,7 @@ from ...models import (
     StreamCapabilities,
     StreamModelOption,
     StreamModeOption,
+    StreamReasoningEffortOption,
 )
 
 logger = logging.getLogger(__name__)
@@ -343,6 +344,7 @@ _MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
 _MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
 _MODELS_NEGATIVE_TTL_S = 60.0  # failed probe (static fallback): 1 minute
 _MODELS_PROBE_TIMEOUT_S = 5.0
+_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 _STATIC_MODELS: Dict[str, List[str]] = {
     "claude": [
@@ -908,6 +910,11 @@ class ProviderSession(ABC):
     def available_modes(self) -> List[StreamModeOption]:
         return [_DEFAULT_MODE]
 
+    def current_model(self) -> Optional[str]:
+        """Return the provider's effective model when it is known."""
+
+        return None
+
     async def prepare_capabilities(self) -> None:
         """Discover the available models for this session's agent type.
 
@@ -1172,6 +1179,7 @@ class ProviderSession(ABC):
             current_mode=self._current_mode,
             supports_dynamic_modes=len(available_modes) > 1,
             available_models=self._available_models,
+            current_model=self.current_model(),
         )
 
     @property
@@ -1700,6 +1708,9 @@ class CodexNativeSession(ProviderSession):
             return model.strip()
         return None
 
+    def current_model(self) -> Optional[str]:
+        return self._selected_model_override() or self._thread_model
+
     def _collaboration_mode_payload(self) -> Optional[Dict[str, Any]]:
         model_override = self._selected_model_override()
         preset = self._mode_presets.get(self._current_mode)
@@ -2138,6 +2149,7 @@ class TraexNativeSession(CodexNativeSession):
     """
 
     adapter_id = "traex-native"
+    _REASONING_EFFORT_ENV = "TRAEX_REASONING_EFFORT"
 
     def _build_command(self) -> List[str]:
         # traex has no ``--stdio`` flag; stdio:// is the default listener.
@@ -2152,6 +2164,94 @@ class TraexNativeSession(CodexNativeSession):
         self._discard_turn_id: Optional[str] = None
         self._interrupted = asyncio.Event()
         self._pending_permissions: Dict[Any, Dict[str, str]] = {}
+        self._model_discovery_attempted = False
+        self._traex_model_options: Optional[List[StreamModelOption]] = None
+
+    async def prepare_capabilities(self) -> None:
+        """Discover TraeX's live model catalog, including effort levels."""
+
+        await super().prepare_capabilities()
+        # Codex's base hook refreshes its curated static catalog on every
+        # capabilities request. Restore the provider-discovered TraeX catalog
+        # after that call so a second poll cannot silently erase effort data.
+        if self._traex_model_options is not None:
+            self._available_models = self._traex_model_options
+            return
+        if self._model_discovery_attempted:
+            return
+        self._model_discovery_attempted = True
+        try:
+            response = await self._send_request("model/list", {})
+        except RuntimeError:
+            logger.warning("traex model/list unavailable; using static model fallback")
+            return
+        data = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(data, list):
+            return
+        options: List[StreamModelOption] = []
+        seen: set[str] = set()
+        for item in data:
+            if not isinstance(item, dict) or item.get("hidden") is True:
+                continue
+            model = item.get("model")
+            if not isinstance(model, str) or not model or model in seen:
+                continue
+            seen.add(model)
+            efforts: List[StreamReasoningEffortOption] = []
+            raw_efforts = item.get("supportedReasoningEfforts")
+            if isinstance(raw_efforts, list):
+                for raw_effort in raw_efforts:
+                    if not isinstance(raw_effort, dict):
+                        continue
+                    effort = raw_effort.get("reasoningEffort")
+                    if not isinstance(effort, str) or effort not in _REASONING_EFFORTS:
+                        continue
+                    description = raw_effort.get("description")
+                    efforts.append(
+                        StreamReasoningEffortOption(
+                            id=effort,
+                            description=description if isinstance(description, str) else "",
+                        )
+                    )
+            default_effort = item.get("defaultReasoningEffort")
+            if not isinstance(default_effort, str) or default_effort not in _REASONING_EFFORTS:
+                default_effort = None
+            label = item.get("displayName")
+            description = item.get("description")
+            options.append(
+                StreamModelOption(
+                    id=model,
+                    label=label if isinstance(label, str) and label else model,
+                    description=description if isinstance(description, str) else "",
+                    default_reasoning_effort=default_effort,
+                    supported_reasoning_efforts=efforts,
+                )
+            )
+        if options:
+            self._traex_model_options = options
+            self._available_models = self._traex_model_options
+
+    def _selected_reasoning_effort(self) -> Optional[str]:
+        effort = self.session.env.get(self._REASONING_EFFORT_ENV)
+        if isinstance(effort, str) and effort.strip() in _REASONING_EFFORTS:
+            return effort.strip()
+        return None
+
+    def _collaboration_mode_payload(self) -> Optional[Dict[str, Any]]:
+        payload = super()._collaboration_mode_payload()
+        effort = self._selected_reasoning_effort()
+        if effort is None:
+            return payload
+        if payload is None:
+            model = self.current_model()
+            if model is None:
+                raise RuntimeError("TraeX reasoning effort requires the active thread model")
+            payload = {
+                "mode": ChatMode.DEFAULT.value,
+                "settings": {"model": model, "developer_instructions": None},
+            }
+        payload["settings"]["reasoning_effort"] = effort
+        return payload
 
     def _thread_config(self) -> Dict[str, Any]:
         config: Dict[str, Any] = {"cwd": self._cwd, **self._permission_config()}

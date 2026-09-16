@@ -591,6 +591,13 @@ export interface StreamModelOption {
   id: string
   label: string
   description?: string | null
+  default_reasoning_effort?: string | null
+  supported_reasoning_efforts: StreamReasoningEffortOption[]
+}
+
+export interface StreamReasoningEffortOption {
+  id: string
+  description?: string | null
 }
 
 export interface StreamCapabilities {
@@ -605,6 +612,7 @@ export interface StreamCapabilities {
   available_modes: StreamModeOption[]
   current_mode: string | null
   available_models: StreamModelOption[]
+  current_model: string | null
 }
 
 export type AgentStreamEventType =

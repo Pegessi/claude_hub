@@ -60,12 +60,21 @@ class StreamModeOption(BaseModel):
     description: str
 
 
+class StreamReasoningEffortOption(BaseModel):
+    """One reasoning-effort level advertised for a specific model."""
+
+    id: str
+    description: str = ""
+
+
 class StreamModelOption(BaseModel):
     """One provider-verified model exposed by the structured Chat surface."""
 
     id: str
     label: str
     description: str = ""
+    default_reasoning_effort: Optional[str] = None
+    supported_reasoning_efforts: List[StreamReasoningEffortOption] = Field(default_factory=list)
 
 
 class StreamCapabilities(BaseModel):
@@ -86,6 +95,7 @@ class StreamCapabilities(BaseModel):
     current_mode: Optional[str] = None
     supports_dynamic_modes: bool = False
     available_models: List[StreamModelOption] = Field(default_factory=list)
+    current_model: Optional[str] = None
 
 
 class ExecutionTarget(str, Enum):
