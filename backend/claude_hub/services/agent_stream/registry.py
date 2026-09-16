@@ -23,6 +23,9 @@ from .cursor_cli_transcript import CursorCliTranscriptAdapter
 _ADAPTERS: Dict[AgentType, Type[AgentStreamAdapter]] = {
     AgentType.CLAUDE: ClaudeJsonlAdapter,
     AgentType.CODEX: CodexJsonlAdapter,
+    # TraeX speaks the same app-server JSON-RPC protocol as Codex (verified
+    # against traex 0.205.1), so it reuses the method-driven adapter verbatim.
+    AgentType.TRAEX: CodexJsonlAdapter,
     AgentType.CURSOR: CursorCliTranscriptAdapter,
 }
 

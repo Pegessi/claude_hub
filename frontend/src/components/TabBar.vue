@@ -897,7 +897,9 @@ const switchEnvForm = reactive({
   solo_mode: false,
 })
 
-const supportsSoloMode = computed(() => form.agent_type === 'claude' || form.agent_type === 'codex')
+const supportsSoloMode = computed(
+  () => form.agent_type === 'claude' || form.agent_type === 'codex' || form.agent_type === 'traex'
+)
 
 // File browser state
 const browserCurrentPath = ref('')
@@ -941,6 +943,8 @@ function agentTypeLabel(agentType: AgentType): string {
   switch (agentType) {
     case 'codex':
       return 'Codex'
+    case 'traex':
+      return 'Trae'
     case 'cursor':
       return 'Cursor'
     case 'terminal':

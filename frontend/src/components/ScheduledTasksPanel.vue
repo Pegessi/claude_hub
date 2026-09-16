@@ -345,6 +345,9 @@
             <option value="codex">
               codex
             </option>
+            <option value="traex">
+              trae
+            </option>
             <option value="cursor">
               cursor
             </option>
