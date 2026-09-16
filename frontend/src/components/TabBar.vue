@@ -43,11 +43,13 @@
             class="tab-name"
             @dblclick.stop="startRename(tab)"
           >{{ tab.name }}</span>
-          <span
+          <AgentAvatar
             class="tab-kind"
+            :agent-type="tab.agent_type"
+            size="sm"
             :data-kind="tab.session_kind"
             :title="tab.session_kind === 'chat' ? 'Chat session' : 'Terminal session'"
-          >{{ tab.session_kind === 'chat' ? 'C' : '>_' }}</span>
+          />
           <span
             v-if="tab.session_kind === 'chat' || tab.is_active"
             class="tab-indicator"
@@ -721,6 +723,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { CSSProperties } from 'vue'
 import { storeToRefs } from 'pinia'
+import AgentAvatar from '@/components/AgentAvatar.vue'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
@@ -1724,23 +1727,8 @@ async function handleCreateTab() {
 }
 
 .tab-kind {
-  min-width: 18px;
-  padding: 2px 4px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: 999px;
-  color: var(--ch-color-text-subtle);
-  background: var(--ch-color-surface-sunken);
-  font-family: var(--ch-font-mono);
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 1;
-  text-align: center;
-}
-
-.tab-kind[data-kind='chat'] {
-  color: var(--ch-color-accent);
-  border-color: var(--ch-color-accent-ring-strong);
-  background: var(--ch-color-accent-soft);
+  margin: 0 2px;
+  flex: 0 0 auto;
 }
 
 .tab-name-input {
