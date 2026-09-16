@@ -5,9 +5,12 @@ from .agent_stream import (  # noqa: E402
 )
 from .goal_run import (
     DEFAULT_GOAL_MAX_TURNS,
+    GOAL_CHECKPOINT_HISTORY_LIMIT,
     GOAL_OBJECTIVE_MAX_LENGTH,
     HARD_GOAL_MAX_TURNS,
+    TERMINAL_GOAL_STATUSES,
     GoalBudgetUpdate,
+    GoalCheckpoint,
     GoalDispatchState,
     GoalMutationRequest,
     GoalRun,
@@ -15,6 +18,7 @@ from .goal_run import (
     GoalRunStatus,
     GoalTurnUsage,
     GoalUsageQuality,
+    GoalVerifiedProgress,
 )
 from .schemas import (
     PUBLIC_REDACTED_ENV_VALUE,
@@ -89,8 +93,8 @@ from .schemas import (
     SpawnWorkerRequest,
     StartTaskRequest,
     StreamCapabilities,
-    StreamModeOption,
     StreamModelOption,
+    StreamModeOption,
     SwitchEnvRequest,
     TaskCleanupResult,
     TaskFollowupRequest,
@@ -127,9 +131,12 @@ from .schemas import (
 
 __all__ = [
     "DEFAULT_GOAL_MAX_TURNS",
+    "GOAL_CHECKPOINT_HISTORY_LIMIT",
     "GOAL_OBJECTIVE_MAX_LENGTH",
     "HARD_GOAL_MAX_TURNS",
+    "TERMINAL_GOAL_STATUSES",
     "GoalBudgetUpdate",
+    "GoalCheckpoint",
     "GoalDispatchState",
     "GoalMutationRequest",
     "GoalRun",
@@ -137,6 +144,7 @@ __all__ = [
     "GoalRunStatus",
     "GoalTurnUsage",
     "GoalUsageQuality",
+    "GoalVerifiedProgress",
     "TerminalTab",
     "TerminalTabBase",
     "TerminalTabCreate",

@@ -8,7 +8,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from ...models.goal_run import TERMINAL_GOAL_STATUSES, GoalRun
+from ...models.goal_run import TERMINAL_GOAL_STATUSES, GoalRun, GoalRunCreate
 
 
 class GoalRunStore:
@@ -70,26 +70,45 @@ class GoalRunStore:
             candidates = [
                 goal
                 for goal in self._goals.values()
-                if goal.tab_id == tab_id and goal.status not in TERMINAL_GOAL_STATUSES
+                if goal.tab_id == tab_id and goal.status.value != "cancelled"
             ]
             if not candidates:
                 return None
             return max(candidates, key=lambda goal: goal.created_at).model_copy(deep=True)
 
+    def replay_create(self, tab_id: str, request: GoalRunCreate) -> GoalRun | None:
+        """Return an exact create replay, rejecting request-id reuse with new input."""
+        with self._lock:
+            prior_id = self._create_requests.get(request.client_request_id)
+            if prior_id is None:
+                return None
+            prior = self._goals[prior_id]
+            if (
+                prior.tab_id != tab_id
+                or prior.objective != request.objective
+                or prior.token_budget != request.token_budget
+                or prior.max_turns != request.max_turns
+            ):
+                raise ValueError("client_request_id was already used for another create")
+            return prior.model_copy(deep=True)
+
     def create(self, goal: GoalRun, client_request_id: str) -> GoalRun:
         with self._lock:
-            prior_id = self._create_requests.get(client_request_id)
-            if prior_id is not None:
-                prior = self._goals[prior_id]
-                if (
-                    prior.tab_id != goal.tab_id
-                    or prior.objective != goal.objective
-                    or prior.token_budget != goal.token_budget
-                    or prior.max_turns != goal.max_turns
-                ):
-                    raise ValueError("client_request_id was already used for another create")
-                return prior.model_copy(deep=True)
-            if self.current_for_tab(goal.tab_id) is not None:
+            replay = self.replay_create(
+                goal.tab_id,
+                GoalRunCreate(
+                    objective=goal.objective,
+                    token_budget=goal.token_budget,
+                    max_turns=goal.max_turns,
+                    client_request_id=client_request_id,
+                ),
+            )
+            if replay is not None:
+                return replay
+            if any(
+                existing.tab_id == goal.tab_id and existing.status not in TERMINAL_GOAL_STATUSES
+                for existing in self._goals.values()
+            ):
                 raise ValueError("tab already has an unfinished goal")
             self._goals[goal.id] = goal.model_copy(deep=True)
             self._create_requests[client_request_id] = goal.id

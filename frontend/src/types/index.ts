@@ -622,6 +622,16 @@ export type ChatGoalStatus =
 export type ChatGoalUsageQuality = 'exact' | 'estimated' | 'unavailable'
 export type ChatGoalDispatchState = 'idle' | 'pending' | 'dispatched' | 'uncertain'
 
+export interface ChatGoalCheckpoint {
+  turn_id: string
+  verified_progress: Array<{ item: string; evidence: string }>
+  decisions: string[]
+  remaining: string[]
+  blocker?: string | null
+  next_step?: string | null
+  created_at: string
+}
+
 export interface ChatGoal {
   id: string
   tab_id: string
@@ -636,6 +646,9 @@ export interface ChatGoal {
   pending_step_id?: string | null
   current_turn_id?: string | null
   completed_turn_ids?: string[]
+  checkpoint?: ChatGoalCheckpoint | null
+  checkpoint_history?: ChatGoalCheckpoint[]
+  checkpoint_warning?: string | null
   status_message?: string | null
   created_at: string
   updated_at: string

@@ -1696,10 +1696,10 @@ class CodexNativeSession(ProviderSession):
 
     def capabilities(self) -> StreamCapabilities:
         caps = super().capabilities()
-        # Provider-native ownership is advertised only after a goal RPC has
-        # succeeded. Unknown and method-not-found states safely use Hub Goal.
-        owner = "provider_native" if self._provider_goal_api_available is True else "hub_managed"
-        return caps.model_copy(update={"goal_execution_owner": owner})
+        # Hub remains the only scheduler until provider Goal state is fully
+        # reconciled into GoalRun. RPC availability alone must never switch
+        # ownership and accidentally enable two continuation schedulers.
+        return caps.model_copy(update={"goal_execution_owner": "hub_managed"})
 
     def _thread_config(self) -> Dict[str, Any]:
         return {}
