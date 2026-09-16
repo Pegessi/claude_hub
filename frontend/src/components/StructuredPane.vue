@@ -710,7 +710,6 @@
               </button>
               <div
                 v-if="isModelMenuOpen"
-                ref="modelMenuEl"
                 class="composer-mode-menu"
                 role="menu"
                 aria-label="Model"
@@ -721,6 +720,7 @@
                     type="text"
                     class="composer-textarea composer-mode-search-input"
                     placeholder="Search models…"
+                    aria-label="Search models"
                     :value="modelSearch"
                     @input="modelSearch = ($event.target as HTMLInputElement).value"
                   >
@@ -735,7 +735,7 @@
                     :aria-checked="isModelActive(model.id)"
                     @click="selectModel(model.id)"
                   >
-                    <span>{{ model.label }}</span>
+                    <span class="composer-mode-item-label">{{ model.label }}</span>
                     <span
                       v-if="isModelActive(model.id)"
                       class="composer-mode-check"
@@ -998,6 +998,14 @@ const filteredModelOptions = computed(() => {
   )
 })
 const isModelPickerAvailable = computed(() => modelEnvVar.value !== null)
+// Reset picker state if it unmounts while open (e.g. the agent type changes),
+// so a remount does not reopen with a stale menu/query.
+watch(isModelPickerAvailable, available => {
+  if (!available) {
+    isModelMenuOpen.value = false
+    modelSearch.value = ''
+  }
+})
 const isModelMenuOpen = ref(false)
 const isUpdatingModel = ref(false)
 
@@ -1053,7 +1061,6 @@ function handleModelOutsidePointer(e: PointerEvent) {
 
 const modelPickerEl = ref<HTMLElement | null>(null)
 const modelTriggerEl = ref<HTMLButtonElement | null>(null)
-const modelMenuEl = ref<HTMLElement | null>(null)
 const modelInputEl = ref<HTMLInputElement | null>(null)
 const modelSearchEl = ref<HTMLInputElement | null>(null)
 
@@ -1213,6 +1220,11 @@ function closeImageLightbox() {
 }
 
 function handleDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isModelMenuOpen.value) {
+    event.preventDefault()
+    closeModelMenu(true)
+    return
+  }
   if (event.key === 'Escape' && isModeMenuOpen.value) {
     event.preventDefault()
     closeModeMenu(true)
@@ -2534,6 +2546,7 @@ onUnmounted(() => {
 
 .composer-mode-list {
   flex: 1 1 auto;
+  min-height: 0;
   padding: 4px;
   overflow-y: auto;
 }
@@ -2547,8 +2560,24 @@ onUnmounted(() => {
 
 .composer-mode-custom {
   flex: 0 0 auto;
+  display: flex;
   padding: 6px 8px;
   border-top: 1px solid var(--ch-color-border-strong);
+}
+
+.composer-mode-custom .composer-textarea {
+  flex: 1 1 auto;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.composer-mode-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-mode-menu-item {
