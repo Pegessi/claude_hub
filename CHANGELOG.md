@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### fix: sidebar status-light styling, shared session actions, and launcher UX
+
+- **Status light.** The sidebar's working light used the blue accent (with a
+  pulse) and attention used amber, diverging from the TabBar indicator. Colors
+  now match the TabBar: working is warning yellow with a glow, idle green,
+  attention red with a glow, offline dim. The unread "ping" ripple is smaller
+  and paired with a persistent accent halo so the unread state stays legible
+  between animation frames. The ripple ring was also rendering down-right of
+  the dot: the global `* { box-sizing: border-box }` reset does not reach
+  pseudo-elements, so the 1.5px border added onto the 8px ring (content-box);
+  the `::after` now sets `box-sizing: border-box` and stays concentric through
+  the whole animation.
+- **Session actions in the sidebar.** Rename / Duplicate / Archive / Copy Link
+  / Switch Env / Model used to exist only in the TabBar's ⋯ menu. They move
+  into a new shared `TabActionsMenu.vue` mounted by both the TabBar and every
+  sidebar row (hover-revealed, keyboard reachable, with inline row rename). The
+  Switch Env modal and its preset manager move with it and additionally covers
+  TraeX chat sessions (terminal-kind TraeX stays hidden — the backend rejects
+  it). Sidebar rows use a container + inner primary button so the menu sits as
+  a valid sibling control; the popover re-measures on open and on
+  scroll/resize, opens mutually exclusively, and a failed create no longer
+  records the directory or dismisses the dialog.
+- **Launcher history and solo default.** The Create Session dialog remembers
+  recently used working directories per target (local, or per remote server)
+  in `localStorage` and offers them through a native dropdown on the Working
+  Directory field, prefilled with the most recent one. New sessions now
+  default to Solo Mode (still auto-off for Cursor/Terminal).
+- **Tests.** Structural tests pin the shared menu on both surfaces, the
+  aligned status colors, the cwd-history wiring, and solo default-on; lint,
+  type-check, and the full frontend unit suite (400) pass.
+
 ### fix: harden the unified model and thinking-effort picker
 
 - Cursor only groups effort-suffixed IDs when the live catalog provides family

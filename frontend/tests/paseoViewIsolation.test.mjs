@@ -18,6 +18,10 @@ const tabBar = readFileSync(
   new URL('../src/components/TabBar.vue', import.meta.url),
   'utf8',
 )
+const tabActionsMenu = readFileSync(
+  new URL('../src/components/TabActionsMenu.vue', import.meta.url),
+  'utf8',
+)
 const useTabStatus = readFileSync(
   new URL('../src/composables/useTabStatus.ts', import.meta.url),
   'utf8',
@@ -58,9 +62,11 @@ test('new-session launcher requires an explicit Chat or Terminal surface', () =>
   assert.match(structuredPane, /Waiting for response…/)
   assert.match(structuredPane, /Waiting for model activity…/)
   assert.match(structuredPane, /This chat does not support image attachments/)
-  assert.match(tabBar, /The chat provider will restart/)
-  assert.match(tabBar, />\s*Restart Provider\s*</)
-  assert.match(tabBar, /Chat is resuming its conversation/)
+  // Switch Env / restart UI is shared between the TabBar and sidebar via
+  // TabActionsMenu, so it lives in that component now.
+  assert.match(tabActionsMenu, /The chat provider will restart/)
+  assert.match(tabActionsMenu, />\s*Restart Provider\s*</)
+  assert.match(tabActionsMenu, /Chat is resuming its conversation/)
 })
 
 test('Chat tab status is backend-derived, accessible, and independent from pane count', () => {
