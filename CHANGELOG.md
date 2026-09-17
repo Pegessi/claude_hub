@@ -50,23 +50,18 @@
   new prop.
 - **Tests.** New structural tests pin the merged TabBar, the status light, and
   the session-name pill; lint, type-check, and the full unit suite stay green.
-### fix: add model-aware TraeX reasoning effort selection
+### feat: unify model and thinking-effort selection
 
-- Discover TraeX models through the live app-server `model/list` API and
-  expose each model's supported/default reasoning efforts to structured Chat.
-  The static catalog remains the fail-safe fallback when discovery is
-  unavailable.
-- Add a TraeX-only Thinking picker beside the model selector. The override is
-  persisted in the tab environment, takes effect on the next turn without an
-  app-server restart, and is cleared when switching to a model that does not
-  support the selected effort.
-- Inject the choice into `collaborationMode.settings.reasoning_effort`, which
-  is the effective protocol channel because TraeX collaboration modes override
-  the top-level `turn/start.effort` field. Preserve the live catalog across
-  repeated capabilities polls instead of reverting to static metadata.
-- Validation: focused backend stream/TraeX suites (221 tests), frontend unit
-  coverage, lint and production build; isolated browser verification on
-  5279/8279; live TraeX 0.205.1 turn with a selected `high` effort.
+- Replace the flat model picker and separate TraeX control with one compact
+  `Model · Effort` trigger. Its two-column menu selects a model first and then
+  one of that model's supported thinking levels; mobile uses a stacked layout.
+- Discover model-specific effort metadata from the shared Codex/TraeX
+  app-server `model/list` API. Persist the selected effort and inject it into
+  `collaborationMode.settings.reasoning_effort` on the next turn.
+- Normalize Cursor's parameterized model IDs into the same model/effort shape
+  while preserving the exact provider model ID selected by the user. This
+  removes the long flat list of near-duplicate Cursor models.
+- Keep custom model IDs and static provider catalogs as fail-safe fallbacks.
 
 ### fix: complete TraeX Chat protocol handling
 

@@ -55,22 +55,17 @@ test('mode trigger locks for the whole turn and mobile targets remain reachable'
   )
 })
 
-test('TraeX reasoning picker follows the selected model and persists an override', () => {
-  assert.match(structuredPane, /const TRAEX_REASONING_EFFORT_ENV = 'TRAEX_REASONING_EFFORT'/)
-  assert.match(structuredPane, /currentTab\.value\?\.agent_type === 'traex'/)
-  assert.match(structuredPane, /currentModelOption\.value\?\.supported_reasoning_efforts/)
-  assert.match(structuredPane, /currentModelOption\.value\?\.default_reasoning_effort/)
-  assert.match(structuredPane, /aria-label="Reasoning effort"/)
-  assert.match(structuredPane, /v-for="effort in reasoningEffortOptions"/)
-  assert.match(structuredPane, /@click="selectReasoningEffort\(effort\.id\)"/)
-  assert.match(structuredPane, /env\[TRAEX_REASONING_EFFORT_ENV\] = effort/)
-  assert.match(structuredPane, /delete env\[TRAEX_REASONING_EFFORT_ENV\]/)
+test('model picker presents model and thinking effort as a unified two-level menu', () => {
+  assert.match(structuredPane, /aria-label="Model and thinking effort"/)
+  assert.match(structuredPane, /class="composer-model-columns"/)
+  assert.match(structuredPane, /v-for="model in filteredModelOptions"/)
+  assert.match(structuredPane, /v-for="effort in selectedMenuModel\.supported_reasoning_efforts"/)
+  assert.match(structuredPane, /@click="selectModelAndEffort\(selectedMenuModel, effort\.id\)"/)
+  assert.match(structuredPane, /codex: 'CODEX_REASONING_EFFORT'/)
+  assert.match(structuredPane, /traex: 'CODEX_REASONING_EFFORT'/)
+  assert.match(structuredPane, /effort\.provider_model_id === currentModel\.value/)
   assert.match(
     structuredPane,
     /:disabled="modeInteractionLocked \|\| isUpdatingModel \|\| isUpdatingReasoningEffort"/,
-  )
-  assert.match(
-    structuredPane,
-    /if \(!isReasoningEffortPickerAvailable\.value \|\| isUpdatingModel\.value\) return/,
   )
 })

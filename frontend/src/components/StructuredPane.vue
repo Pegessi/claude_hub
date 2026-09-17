@@ -697,12 +697,12 @@
                 class="composer-mode-trigger"
                 aria-haspopup="menu"
                 :aria-expanded="isModelMenuOpen"
-                :aria-label="`Model: ${currentModelLabel}`"
-                :title="`Model: ${currentModelLabel}`"
+                :aria-label="`Model and thinking effort: ${combinedModelLabel}`"
+                :title="combinedModelLabel"
                 :disabled="modeInteractionLocked || isUpdatingModel || isUpdatingReasoningEffort"
                 @click="toggleModelMenu"
               >
-                <span class="composer-mode-trigger-label">{{ currentModelLabel }}</span>
+                <span class="composer-mode-trigger-label">{{ combinedModelLabel }}</span>
                 <span
                   class="composer-mode-chevron"
                   aria-hidden="true"
@@ -710,9 +710,9 @@
               </button>
               <div
                 v-if="isModelMenuOpen"
-                class="composer-mode-menu"
+                class="composer-mode-menu composer-model-menu"
                 role="menu"
-                aria-label="Model"
+                aria-label="Model and thinking effort"
               >
                 <div class="composer-mode-search">
                   <input
@@ -725,28 +725,76 @@
                     @input="modelSearch = ($event.target as HTMLInputElement).value"
                   >
                 </div>
-                <div class="composer-mode-list">
-                  <button
-                    v-for="model in filteredModelOptions"
-                    :key="model.id"
-                    type="button"
-                    class="composer-mode-menu-item"
-                    role="menuitemradio"
-                    :aria-checked="isModelActive(model.id)"
-                    @click="selectModel(model.id)"
-                  >
-                    <span class="composer-mode-item-label">{{ model.label }}</span>
-                    <span
-                      v-if="isModelActive(model.id)"
-                      class="composer-mode-check"
-                      aria-hidden="true"
-                    >✓</span>
-                  </button>
+                <div class="composer-model-columns">
                   <div
-                    v-if="filteredModelOptions.length === 0"
-                    class="composer-mode-empty"
+                    class="composer-mode-list composer-model-list"
+                    aria-label="Models"
                   >
-                    No matching models
+                    <button
+                      v-for="model in filteredModelOptions"
+                      :key="model.id"
+                      type="button"
+                      class="composer-mode-menu-item"
+                      role="menuitemradio"
+                      :aria-checked="selectedMenuModel?.id === model.id"
+                      @click="chooseMenuModel(model)"
+                    >
+                      <span class="composer-mode-item-label">{{ model.label }}</span>
+                      <span
+                        v-if="model.supported_reasoning_efforts.length"
+                        aria-hidden="true"
+                      >›</span>
+                    </button>
+                    <div
+                      v-if="filteredModelOptions.length === 0"
+                      class="composer-mode-empty"
+                    >
+                      No matching models
+                    </div>
+                  </div>
+                  <div
+                    v-if="selectedMenuModel"
+                    class="composer-effort-list"
+                    aria-label="Thinking effort"
+                  >
+                    <div class="composer-effort-heading">
+                      <strong>{{ selectedMenuModel.label }}</strong>
+                      <span>Thinking effort</span>
+                    </div>
+                    <button
+                      v-if="selectedMenuModel.supported_reasoning_efforts.length === 0"
+                      type="button"
+                      class="composer-mode-menu-item"
+                      role="menuitemradio"
+                      :aria-checked="isModelActive(selectedMenuModel)"
+                      @click="selectModelAndEffort(selectedMenuModel, '')"
+                    >
+                      <span>Use model</span><span v-if="isModelActive(selectedMenuModel)">✓</span>
+                    </button>
+                    <button
+                      v-else
+                      type="button"
+                      class="composer-mode-menu-item"
+                      role="menuitemradio"
+                      :aria-checked="isModelEffortActive(selectedMenuModel, '')"
+                      @click="selectModelAndEffort(selectedMenuModel, '')"
+                    >
+                      <span>Default ({{ effortLabel(selectedMenuModel.default_reasoning_effort) }})</span>
+                      <span v-if="isModelEffortActive(selectedMenuModel, '')">✓</span>
+                    </button>
+                    <button
+                      v-for="effort in selectedMenuModel.supported_reasoning_efforts"
+                      :key="effort.id"
+                      type="button"
+                      class="composer-mode-menu-item"
+                      role="menuitemradio"
+                      :aria-checked="isModelEffortActive(selectedMenuModel, effort.id)"
+                      :title="effort.description || effort.label || effort.id"
+                      @click="selectModelAndEffort(selectedMenuModel, effort.id)"
+                    >
+                      <span>{{ effort.label || effortLabel(effort.id) }}</span>
+                      <span v-if="isModelEffortActive(selectedMenuModel, effort.id)">✓</span>
+                    </button>
                   </div>
                 </div>
                 <div class="composer-mode-custom">
@@ -759,69 +807,6 @@
                     @keydown.enter="selectModel(($event.target as HTMLInputElement).value)"
                   >
                 </div>
-              </div>
-            </div>
-            <div
-              v-if="isReasoningEffortPickerAvailable"
-              ref="reasoningEffortPickerEl"
-              class="composer-mode-picker"
-            >
-              <button
-                ref="reasoningEffortTriggerEl"
-                type="button"
-                class="composer-mode-trigger"
-                aria-haspopup="menu"
-                :aria-expanded="isReasoningEffortMenuOpen"
-                :aria-label="`Reasoning effort: ${currentReasoningEffortLabel}`"
-                :title="`Reasoning effort: ${currentReasoningEffortLabel}`"
-                :disabled="modeInteractionLocked || isUpdatingModel || isUpdatingReasoningEffort"
-                @click="toggleReasoningEffortMenu"
-              >
-                <span class="composer-mode-trigger-label">Thinking: {{ currentReasoningEffortLabel }}</span>
-                <span
-                  class="composer-mode-chevron"
-                  aria-hidden="true"
-                >▴</span>
-              </button>
-              <div
-                v-if="isReasoningEffortMenuOpen"
-                class="composer-mode-menu composer-reasoning-menu"
-                role="menu"
-                aria-label="Reasoning effort"
-              >
-                <button
-                  type="button"
-                  class="composer-mode-menu-item"
-                  role="menuitemradio"
-                  :aria-checked="currentReasoningEffort === ''"
-                  @click="selectReasoningEffort('')"
-                >
-                  <span class="composer-mode-item-label">
-                    Default<span v-if="defaultReasoningEffort"> ({{ defaultReasoningEffort }})</span>
-                  </span>
-                  <span
-                    v-if="currentReasoningEffort === ''"
-                    class="composer-mode-check"
-                    aria-hidden="true"
-                  >✓</span>
-                </button>
-                <button
-                  v-for="effort in reasoningEffortOptions"
-                  :key="effort.id"
-                  type="button"
-                  class="composer-mode-menu-item"
-                  role="menuitemradio"
-                  :aria-checked="currentReasoningEffort === effort.id"
-                  :title="effort.description || effort.id"
-                  @click="selectReasoningEffort(effort.id)"
-                >
-                  <span class="composer-mode-item-label">{{ effort.id }}</span>
-                  <span
-                    v-if="currentReasoningEffort === effort.id"
-                    class="composer-mode-check"
-                    aria-hidden="true"
-                  >✓</span>
-                </button>
               </div>
             </div>
           </div>
@@ -900,7 +885,7 @@ import {
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 import { useTerminalStore } from '@/stores/terminalStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import type { StreamModelOption, StreamReasoningEffortOption, WorkspaceAttachmentCreate } from '@/types'
+import type { StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
   /** A top-level Chat tab owns its transcript directly. */
@@ -1018,7 +1003,11 @@ const MODEL_ENV_VAR: Record<string, string> = {
   traex: 'CODEX_MODEL',
   cursor: 'CURSOR_MODEL',
 }
-const TRAEX_REASONING_EFFORT_ENV = 'TRAEX_REASONING_EFFORT'
+const REASONING_EFFORT_ENV: Record<string, string> = {
+  codex: 'CODEX_REASONING_EFFORT',
+  traex: 'CODEX_REASONING_EFFORT',
+}
+const LEGACY_TRAEX_REASONING_EFFORT_ENV = 'TRAEX_REASONING_EFFORT'
 
 // Models are discovered at runtime by the backend (cursor via
 // ``agent --list-models``; claude/codex via a curated static list) and
@@ -1048,23 +1037,63 @@ const effectiveCurrentModel = computed(() => {
   return capabilities.value?.current_model ?? ''
 })
 const currentModelOption = computed(() =>
-  modelOptions.value.find(model => model.id === effectiveCurrentModel.value) ?? null,
+  modelOptions.value.find(model =>
+    model.id === effectiveCurrentModel.value
+    || model.provider_model_id === currentModel.value
+    || model.supported_reasoning_efforts.some(effort => effort.provider_model_id === currentModel.value),
+  ) ?? null,
 )
 const currentModelLabel = computed(() => {
   const id = currentModel.value
   if (!id) {
-    // No explicit model: the provider uses its default (auto) selection.
-    return modelOptions.value.some(m => m.id === 'auto') ? 'Auto' : 'default'
+    // Codex-family providers report their effective thread model. Cursor
+    // exposes an explicit Auto row instead.
+    return currentModelOption.value?.label
+      ?? (modelOptions.value.some(m => m.id === 'auto') ? 'Auto' : 'default')
   }
-  return modelOptions.value.find(m => m.id === id)?.label ?? id
+  return currentModelOption.value?.label ?? id
+})
+const reasoningEffortEnvVar = computed(() => {
+  const at = currentTab.value?.agent_type
+  return at ? REASONING_EFFORT_ENV[at] ?? null : null
+})
+const currentReasoningEffort = computed(() => {
+  if (currentTab.value?.agent_type === 'cursor') {
+    if (currentModel.value === currentModelOption.value?.provider_model_id) return ''
+    return currentModelOption.value?.supported_reasoning_efforts.find(
+      effort => effort.provider_model_id === currentModel.value,
+    )?.id ?? ''
+  }
+  const key = reasoningEffortEnvVar.value
+  if (!key) return ''
+  return currentTab.value?.env?.[key]
+    ?? (currentTab.value?.agent_type === 'traex'
+      ? currentTab.value?.env?.[LEGACY_TRAEX_REASONING_EFFORT_ENV]
+      : '')
+    ?? ''
+})
+const currentReasoningEffortLabel = computed(() =>
+  effortLabel(currentReasoningEffort.value || currentModelOption.value?.default_reasoning_effort),
+)
+const combinedModelLabel = computed(() => {
+  if (!currentModelOption.value?.supported_reasoning_efforts.length) return currentModelLabel.value
+  return `${currentModelLabel.value} · ${currentReasoningEffortLabel.value}`
 })
 // Whether a model row is the active selection. The empty-env state (no
 // explicit model) matches the provider's ``auto`` row.
-function isModelActive(modelId: string) {
-  if (modelId === 'auto') {
+function isModelActive(model: StreamModelOption) {
+  if (model.id === 'auto') {
     return currentModel.value === '' || currentModel.value === 'auto'
   }
-  return currentModel.value === modelId
+  return currentModelOption.value?.id === model.id
+}
+function isModelEffortActive(model: StreamModelOption, effort: string) {
+  return isModelActive(model) && currentReasoningEffort.value === effort
+}
+function effortLabel(effort?: string | null) {
+  if (!effort) return 'Default'
+  return ({ xhigh: 'Extra High' } as Record<string, string>)[effort]
+    ?? effort.replace(/(^|[-_])\w/g, part => part.replace(/[-_]/, ' ').toUpperCase())
 }
 // Search filter for the picker. Matches id or label, case-insensitive.
 const modelSearch = ref('')
@@ -1086,42 +1115,63 @@ watch(isModelPickerAvailable, available => {
 })
 const isModelMenuOpen = ref(false)
 const isUpdatingModel = ref(false)
+const isUpdatingReasoningEffort = ref(false)
+const selectedMenuModelId = ref('')
+const selectedMenuModel = computed(() =>
+  modelOptions.value.find(model => model.id === selectedMenuModelId.value)
+  ?? currentModelOption.value
+  ?? filteredModelOptions.value[0]
+  ?? null,
+)
+function chooseMenuModel(model: StreamModelOption) {
+  selectedMenuModelId.value = model.id
+  if (model.supported_reasoning_efforts.length === 0) {
+    void selectModelAndEffort(model, '')
+  }
+}
 
-async function selectModel(model: string) {
+async function selectModelAndEffort(model: StreamModelOption, effort: string) {
   closeModelMenu(true)
-  if (isUpdatingReasoningEffort.value) return
   const key = modelEnvVar.value
   if (!key) return
   const tab = currentTab.value
   if (!tab) return
-  if (currentModel.value === model) return
   const epoch = preparationEpoch.value
   isUpdatingModel.value = true
+  isUpdatingReasoningEffort.value = true
   try {
     const env = { ...(tab.env ?? {}) }
-    if (model) {
-      env[key] = model
-    } else {
-      delete env[key]
+    const selectedEffort = model.supported_reasoning_efforts.find(option => option.id === effort)
+    const providerModelId = selectedEffort?.provider_model_id ?? model.provider_model_id ?? model.id
+    if (providerModelId) env[key] = providerModelId
+    else delete env[key]
+    const effortKey = reasoningEffortEnvVar.value
+    if (effortKey) {
+      if (effort) env[effortKey] = effort
+      else delete env[effortKey]
     }
-    // An effort is model-specific. Clear an override atomically when the new
-    // model does not advertise it, rather than sending an invalid stale value
-    // on the next turn.
-    const nextModel = modelOptions.value.find(option => option.id === model)
-    const selectedEffort = env[TRAEX_REASONING_EFFORT_ENV]
-    if (selectedEffort && !nextModel?.supported_reasoning_efforts.some(
-      effort => effort.id === selectedEffort,
-    )) {
-      delete env[TRAEX_REASONING_EFFORT_ENV]
-    }
+    if (tab.agent_type === 'traex') delete env[LEGACY_TRAEX_REASONING_EFFORT_ENV]
     // Errors surface via the store's notifyError toast; swallow so the
     // rejection is not unhandled.
     await terminalStore.switchEnv(tab.id, { env })
   } catch {
     // Swallow: error feedback comes from terminalStore.switchEnv's toast.
   } finally {
-    if (preparationEpoch.value === epoch) isUpdatingModel.value = false
+    if (preparationEpoch.value === epoch) {
+      isUpdatingModel.value = false
+      isUpdatingReasoningEffort.value = false
+    }
   }
+}
+
+async function selectModel(model: string) {
+  const option = modelOptions.value.find(item => item.id === model)
+  if (option) {
+    await selectModelAndEffort(option, '')
+    return
+  }
+  const custom: StreamModelOption = { id: model, label: model, supported_reasoning_efforts: [] }
+  await selectModelAndEffort(custom, '')
 }
 
 function closeModelMenu(focusTrigger: boolean) {
@@ -1141,6 +1191,7 @@ function toggleModelMenu() {
     return
   }
   isModelMenuOpen.value = true
+  selectedMenuModelId.value = currentModelOption.value?.id ?? filteredModelOptions.value[0]?.id ?? ''
   void nextTick(() => {
     modelSearchEl.value?.focus()
   })
@@ -1156,86 +1207,6 @@ const modelPickerEl = ref<HTMLElement | null>(null)
 const modelTriggerEl = ref<HTMLButtonElement | null>(null)
 const modelInputEl = ref<HTMLInputElement | null>(null)
 const modelSearchEl = ref<HTMLInputElement | null>(null)
-
-// ── TraeX reasoning-effort picker ─────────────────────────────────────────
-// TraeX advertises effort choices per model through app-server model/list.
-// The selected override shares the existing tab-env persistence/hot-update
-// path with the model picker and is injected into collaborationMode settings
-// by the backend on the next turn.
-const reasoningEffortOptions = computed<StreamReasoningEffortOption[]>(
-  () => currentModelOption.value?.supported_reasoning_efforts ?? [],
-)
-const defaultReasoningEffort = computed(
-  () => currentModelOption.value?.default_reasoning_effort ?? '',
-)
-const currentReasoningEffort = computed(() => {
-  if (currentTab.value?.agent_type !== 'traex') return ''
-  return currentTab.value.env?.[TRAEX_REASONING_EFFORT_ENV] ?? ''
-})
-const currentReasoningEffortLabel = computed(
-  () => currentReasoningEffort.value || defaultReasoningEffort.value || 'default',
-)
-const isReasoningEffortPickerAvailable = computed(
-  () => currentTab.value?.agent_type === 'traex' && reasoningEffortOptions.value.length > 0,
-)
-const isReasoningEffortMenuOpen = ref(false)
-const isUpdatingReasoningEffort = ref(false)
-const reasoningEffortPickerEl = ref<HTMLElement | null>(null)
-const reasoningEffortTriggerEl = ref<HTMLButtonElement | null>(null)
-
-async function selectReasoningEffort(effort: string) {
-  closeReasoningEffortMenu(true)
-  if (!isReasoningEffortPickerAvailable.value || isUpdatingModel.value) return
-  const tab = currentTab.value
-  if (!tab || currentReasoningEffort.value === effort) return
-  const allowed = reasoningEffortOptions.value.some(option => option.id === effort)
-  if (effort && !allowed) return
-  const epoch = preparationEpoch.value
-  isUpdatingReasoningEffort.value = true
-  try {
-    const env = { ...(tab.env ?? {}) }
-    if (effort) {
-      env[TRAEX_REASONING_EFFORT_ENV] = effort
-    } else {
-      delete env[TRAEX_REASONING_EFFORT_ENV]
-    }
-    await terminalStore.switchEnv(tab.id, { env })
-  } catch {
-    // Error feedback comes from terminalStore.switchEnv's toast.
-  } finally {
-    if (preparationEpoch.value === epoch) isUpdatingReasoningEffort.value = false
-  }
-}
-
-function closeReasoningEffortMenu(focusTrigger: boolean) {
-  isReasoningEffortMenuOpen.value = false
-  if (focusTrigger) reasoningEffortTriggerEl.value?.focus()
-}
-
-function toggleReasoningEffortMenu() {
-  if (
-    modeInteractionLocked.value
-    || isUpdatingModel.value
-    || isUpdatingReasoningEffort.value
-  ) return
-  if (isReasoningEffortMenuOpen.value) {
-    closeReasoningEffortMenu(false)
-    return
-  }
-  isReasoningEffortMenuOpen.value = true
-}
-
-function handleReasoningEffortOutsidePointer(event: PointerEvent) {
-  if (
-    !isReasoningEffortMenuOpen.value
-    || reasoningEffortPickerEl.value?.contains(event.target as Node)
-  ) return
-  closeReasoningEffortMenu(false)
-}
-
-watch(isReasoningEffortPickerAvailable, available => {
-  if (!available) closeReasoningEffortMenu(false)
-})
 
 const pendingTurns = computed(() => {
   const observedTurnIds = new Set(authoritativeTurns.value.map(turn => turn.turnId).filter(Boolean))
@@ -1304,7 +1275,6 @@ onMounted(() => {
   document.addEventListener('keydown', handleDocumentKeydown)
   document.addEventListener('pointerdown', handleModeOutsidePointer)
   document.addEventListener('pointerdown', handleModelOutsidePointer)
-  document.addEventListener('pointerdown', handleReasoningEffortOutsidePointer)
 })
 
 // KeepAlive lifecycle. The pane is keyed by tabId (see TerminalPane), so each
@@ -1339,7 +1309,6 @@ onUnmounted(() => {
   document.removeEventListener('keydown', handleDocumentKeydown)
   document.removeEventListener('pointerdown', handleModeOutsidePointer)
   document.removeEventListener('pointerdown', handleModelOutsidePointer)
-  document.removeEventListener('pointerdown', handleReasoningEffortOutsidePointer)
   window.removeEventListener('resize', handleViewportResize)
   dismissImageLightbox(false)
   stop()
@@ -1395,11 +1364,6 @@ function closeImageLightbox() {
 }
 
 function handleDocumentKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && isReasoningEffortMenuOpen.value) {
-    event.preventDefault()
-    closeReasoningEffortMenu(true)
-    return
-  }
   if (event.key === 'Escape' && isModelMenuOpen.value) {
     event.preventDefault()
     closeModelMenu(true)
@@ -1519,10 +1483,6 @@ watch([modeInteractionLocked, isUpdatingMode], ([locked, updating]) => {
 
 watch([modeInteractionLocked, isUpdatingModel], ([locked, updating]) => {
   if (locked || updating) closeModelMenu(false)
-})
-
-watch([modeInteractionLocked, isUpdatingReasoningEffort], ([locked, updating]) => {
-  if (locked || updating) closeReasoningEffortMenu(false)
 })
 
 function triggerFilePicker() {
@@ -2654,7 +2614,7 @@ onUnmounted(() => {
   justify-content: center;
   gap: 4px;
   width: auto;
-  max-width: 120px;
+  max-width: 210px;
   height: 32px;
   padding: 0 8px;
   border: 1px solid transparent;
@@ -2735,6 +2695,45 @@ onUnmounted(() => {
   min-height: 0;
   padding: 4px;
   overflow-y: auto;
+}
+
+.composer-model-menu {
+  width: min(560px, calc(100vw - 32px));
+  max-width: min(560px, calc(100vw - 32px));
+}
+
+.composer-model-columns {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.25fr) minmax(160px, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.composer-model-list {
+  border-right: 1px solid var(--ch-color-border-strong);
+}
+
+.composer-effort-list {
+  min-height: 0;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.composer-effort-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px 8px;
+  color: var(--ch-color-text);
+  font-size: 12px;
+}
+
+.composer-effort-heading span {
+  color: var(--ch-color-text-subtle);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .composer-mode-empty {
@@ -3844,12 +3843,28 @@ onUnmounted(() => {
   }
 
   .composer-mode-trigger {
-    max-width: 104px;
+    max-width: 170px;
     padding: 0 7px;
   }
 
   .composer-mode-menu {
     max-width: min(220px, calc(100vw - 24px));
+  }
+
+  .composer-model-menu {
+    width: min(320px, calc(100vw - 24px));
+    max-width: min(320px, calc(100vw - 24px));
+  }
+
+  .composer-model-columns {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .composer-model-list {
+    max-height: 210px;
+    border-right: 0;
+    border-bottom: 1px solid var(--ch-color-border-strong);
   }
 
   .composer-mode-menu-item {
