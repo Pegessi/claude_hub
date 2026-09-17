@@ -15,6 +15,10 @@ const chatSidebar = readFileSync(
   new URL('../src/components/ChatSidebar.vue', import.meta.url),
   'utf8',
 )
+const useTabStatus = readFileSync(
+  new URL('../src/composables/useTabStatus.ts', import.meta.url),
+  'utf8',
+)
 
 test('desktop TabBar is merged into the app-mode-bar, terminal-mode only', () => {
   // Desktop TabBar renders inside the app-mode-bar and is terminal-mode only
@@ -26,12 +30,14 @@ test('desktop TabBar is merged into the app-mode-bar, terminal-mode only', () =>
   assert.match(app, /const \{ isMobile \} = useViewport\(\)/)
 })
 
-test('a status light in the sidebar shows working, idle, attention, and error', () => {
+test('a status light in the sidebar shows working, idle, attention, and offline', () => {
   assert.match(chatSidebar, /class="chat-sidebar__item-status"/)
-  // the status map is built from the backend-reported agent statuses
-  assert.match(chatSidebar, /const tabStatusById = computed/)
-  assert.match(chatSidebar, /function getTabStatus\(tab: TerminalTab\)/)
-  assert.match(chatSidebar, /function getTabStatusLabel\(tab: TerminalTab\)/)
+  // the sidebar uses the shared useTabStatus composable (no duplicated logic)
+  assert.match(chatSidebar, /const \{ getTabStatus, getTabStatusLabel \} = useTabStatus\(agentStatuses\)/)
+  // the status logic lives in the composable
+  assert.match(useTabStatus, /const tabStatusById = computed/)
+  assert.match(useTabStatus, /function getTabStatus\(tab: TerminalTab\)/)
+  assert.match(useTabStatus, /function getTabStatusLabel\(tab: TerminalTab\)/)
   // the per-state colors
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='working'\]/)
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]/)
