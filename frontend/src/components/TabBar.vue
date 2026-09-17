@@ -736,12 +736,13 @@ import AgentConfigFields from '@/components/AgentConfigFields.vue'
 import CodexSessionSelector from '@/components/CodexSessionSelector.vue'
 import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
+import { useTabStatus } from '@/composables/useTabStatus'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { writeClipboard } from '@/utils/clipboard'
 import { buildTabShareText } from '@/utils/deepLink'
-import type { AppMode, RemoteProfile, TerminalAgentStatus, TerminalTab } from '@/types'
-import type { AgentRuntimeStatus, AgentType, SessionKind, SwitchEnvRequest } from '@/types'
+import type { AppMode, RemoteProfile, TerminalTab } from '@/types'
+import type { AgentType, SessionKind, SwitchEnvRequest } from '@/types'
 
 interface FileInfo {
   name: string
@@ -765,37 +766,8 @@ const { mode, colorScheme } = storeToRefs(appStore)
 // Expose notification actions so template can call them (F5 toast stack)
 const { dismissNotification } = store
 
-const tabStatusById = computed<Record<string, TerminalAgentStatus>>(() => {
-  const map: Record<string, TerminalAgentStatus> = {}
-  for (const s of agentStatuses.value) {
-    map[s.tab_id] = s
-  }
-  return map
-})
-
-function getTabStatus(tab: TerminalTab): AgentRuntimeStatus {
-  return tabStatusById.value[tab.id]?.status ?? (
-    tab.session_kind === 'chat' ? 'offline' : tab.is_active ? 'idle' : 'offline'
-  )
-}
-
-const TAB_STATUS_LABELS: Record<AgentRuntimeStatus, string> = {
-  idle: 'Idle',
-  working: 'Working',
-  attention: 'Needs attention',
-  offline: 'Offline',
-}
-
-function getTabStatusLabel(tab: TerminalTab): string {
-  const status = getTabStatus(tab)
-  const statusLabel = TAB_STATUS_LABELS[status]
-  const surfaceLabel = tab.session_kind === 'chat' ? 'Chat' : 'Terminal'
-  const detail = tabStatusById.value[tab.id]?.status_text?.trim()
-  if (!detail || detail.toLocaleLowerCase() === statusLabel.toLocaleLowerCase()) {
-    return `${surfaceLabel} status: ${statusLabel}`
-  }
-  return `${surfaceLabel} status: ${statusLabel} — ${detail}`
-}
+// Tab-status logic is shared with the session sidebar via useTabStatus.
+const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
 
 // Drag and drop state for tab reordering
 const draggedTabId = ref<string | null>(null)

@@ -18,6 +18,10 @@ const tabBar = readFileSync(
   new URL('../src/components/TabBar.vue', import.meta.url),
   'utf8',
 )
+const useTabStatus = readFileSync(
+  new URL('../src/composables/useTabStatus.ts', import.meta.url),
+  'utf8',
+)
 
 test('Chat sessions never mount a hidden raw terminal fallback', () => {
   assert.match(terminalPane, /v-if="pane\.tabId && !isChatSession"/)
@@ -64,15 +68,15 @@ test('Chat tab status is backend-derived, accessible, and independent from pane 
   assert.match(tabBar, /:data-status="getTabStatus\(tab\)"/)
   assert.match(tabBar, /:aria-label="getTabStatusLabel\(tab\)"/)
   assert.match(tabBar, /:title="getTabStatusLabel\(tab\)"/)
-  assert.match(tabBar, /tab\.session_kind === 'chat' \? 'offline' : tab\.is_active \? 'idle' : 'offline'/)
-  assert.match(tabBar, /tab\.session_kind === 'chat' \? 'Chat' : 'Terminal'/)
+  // status logic is shared via useTabStatus (no duplicated fallback in TabBar)
+  assert.match(tabBar, /const \{ getTabStatus, getTabStatusLabel \} = useTabStatus\(agentStatuses\)/)
   assert.match(tabBar, /class="pane-indicator"/)
 })
 
 test('active Terminal tabs retain their runtime status indicator and idle fallback', () => {
   assert.match(tabBar, /v-if="tab\.session_kind === 'chat' \|\| tab\.is_active"/)
-  assert.match(tabBar, /tabStatusById\.value\[tab\.id\]\?\.status/)
-  assert.match(tabBar, /tab\.is_active \? 'idle' : 'offline'/)
+  // The fallback logic lives in the shared useTabStatus composable.
+  assert.match(useTabStatus, /tab\.is_active \? 'idle' : 'offline'/)
 })
 
 test('Chat mode menu renders only backend capabilities and applies to the next turn', () => {

@@ -211,7 +211,7 @@ import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { cwdLabel } from '@/utils/chatGroups'
 import { relativeTime } from '@/utils/time'
-import type { AgentRuntimeStatus, TerminalAgentStatus, TerminalTab } from '@/types'
+import { useTabStatus } from '@/composables/useTabStatus'
 
 defineEmits<{
   (e: 'open-archive'): void
@@ -227,38 +227,8 @@ const {
 } = storeToRefs(store)
 const { toggleSidebar, setActiveTab, archiveTab } = store
 
-// Index the backend-reported agent statuses by tab id so each sidebar row can
-// show a status light without a per-tab lookup.
-const tabStatusById = computed<Record<string, TerminalAgentStatus>>(() => {
-  const map: Record<string, TerminalAgentStatus> = {}
-  for (const s of agentStatuses.value) {
-    map[s.tab_id] = s
-  }
-  return map
-})
-
-const TAB_STATUS_LABELS: Record<AgentRuntimeStatus, string> = {
-  idle: 'Idle',
-  working: 'Working',
-  attention: 'Needs attention',
-  offline: 'Offline',
-}
-
-function getTabStatus(tab: TerminalTab): AgentRuntimeStatus {
-  return tabStatusById.value[tab.id]?.status ?? (
-    tab.session_kind === 'chat' ? 'offline' : tab.is_active ? 'idle' : 'offline'
-  )
-}
-
-function getTabStatusLabel(tab: TerminalTab): string {
-  const status = getTabStatus(tab)
-  const statusLabel = TAB_STATUS_LABELS[status]
-  const detail = tabStatusById.value[tab.id]?.status_text?.trim()
-  if (!detail || detail.toLocaleLowerCase() === statusLabel.toLocaleLowerCase()) {
-    return statusLabel
-  }
-  return `${statusLabel} — ${detail}`
-}
+// Tab-status logic is shared with the TabBar via useTabStatus.
+const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
 
 const filterText = ref('')
 const collapsedGroups = ref<Set<string>>(new Set())

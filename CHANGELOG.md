@@ -18,10 +18,12 @@
   backend-reported `agentStatuses` the TabBar uses: working (pulsing accent),
   idle (green), attention (amber), offline (dim). The status label (including
   any `status_text` detail) is exposed as the light's tooltip and accessible
-  name.
-- **Tests.** The structural test now pins the sidebar status light (and its
-  per-state colors) instead of the removed composer light; lint, type-check,
-  and the full unit suite stay green.
+  name. The tab-status logic (status map, fallback, label) is extracted into a
+  shared `useTabStatus` composable used by both the TabBar and the sidebar, so
+  it lives in one place and cannot drift between the two.
+- **Tests.** The structural tests pin the sidebar status light (and its
+  per-state colors) and the shared `useTabStatus` composable, instead of the
+  removed composer light; lint, type-check, and the full unit suite stay green.
 
 ### feat: the TabBar joins the top bar (desktop), and a status light sits by Send
 
