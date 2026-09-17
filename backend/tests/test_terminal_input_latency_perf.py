@@ -190,7 +190,7 @@ def _summary(label: str, values: list[float]) -> dict[str, Any]:
     }
 
 
-def test_keystroke_to_glyph_latency(page: Page) -> None:
+def test_keystroke_to_glyph_latency(backend_server: None, page: Page) -> None:
     """Measure keystroke-to-glyph latency, idle vs under heavy output."""
     session = local_requests_session()
     resp = session.post(

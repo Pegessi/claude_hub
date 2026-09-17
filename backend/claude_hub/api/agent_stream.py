@@ -89,7 +89,12 @@ async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
         event.tab_id,
         event.turn_id,
         str(payload.get("status") or "failed"),
-        str(payload.get("assistant_text") or payload.get("summary") or ""),
+        str(
+            payload.get("_goal_protocol_text")
+            or payload.get("assistant_text")
+            or payload.get("summary")
+            or ""
+        ),
         payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
     )
 
@@ -1163,6 +1168,9 @@ async def _send_to_native(
     session: ManagedSession,
     payload: AgentStreamSendRequest,
     manager: TailerManager,
+    *,
+    visible_text: Optional[str] = None,
+    turn_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Deliver composer input to the native provider transport atomically.
 
@@ -1194,6 +1202,8 @@ async def _send_to_native(
         payload.client_turn_id,
         previews=previews,
         delivery=payload.delivery,
+        visible_text=visible_text,
+        turn_metadata=turn_metadata,
     )
 
 

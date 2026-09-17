@@ -113,8 +113,8 @@ async def test_goal_runtime_callbacks_use_direct_chat_transport(monkeypatch, tmp
         )
     )
 
-    async def send(session_arg, payload, manager_arg):
-        sent.append((session_arg, payload, manager_arg))
+    async def send(session_arg, payload, manager_arg, **kwargs):
+        sent.append((session_arg, payload, manager_arg, kwargs))
 
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda tab_id: session)
     monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
@@ -130,6 +130,14 @@ async def test_goal_runtime_callbacks_use_direct_chat_transport(monkeypatch, tmp
     assert sent[0][0] is session
     assert sent[0][1].client_turn_id == "step-1"
     assert sent[0][1].text == "continue safely"
+    assert sent[0][2] is manager
+    assert sent[0][3] == {
+        "visible_text": "Continue active Goal",
+        "turn_metadata": {
+            "origin": "goal",
+            "protocol": "goal-continuation-v1",
+        },
+    }
     await goal_api._cancel_goal_turn(goal)
     assert cancelled == [(session, None)]
 

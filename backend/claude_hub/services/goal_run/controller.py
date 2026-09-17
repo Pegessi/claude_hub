@@ -108,6 +108,10 @@ class GoalRunController:
         self.dispatch = dispatch
         self.cancel = cancel
         self._locks: dict[str, asyncio.Lock] = {}
+        # A terminal mutation waits for an in-progress provider acceptance
+        # before cancelling. The callback itself stays outside the state lock
+        # so a provider may report synchronous completion without deadlocking.
+        self._dispatch_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def _lock_for(self, goal_id: str) -> asyncio.Lock:
         return self._locks.setdefault(goal_id, asyncio.Lock())
@@ -137,8 +141,10 @@ class GoalRunController:
                 goal.status == GoalRunStatus.ACTIVE
                 and goal.dispatch_state == GoalDispatchState.IDLE
             ):
-                goal = await self._dispatch_next_locked(goal.id)
-            return goal
+                goal = self._prepare_dispatch_locked(goal.id)
+        if goal.dispatch_state == GoalDispatchState.PENDING:
+            return await self._dispatch_prepared(goal)
+        return goal
 
     def get(self, goal_id: str) -> GoalRun:
         return self.store.get(goal_id)
@@ -168,28 +174,42 @@ class GoalRunController:
         return self.store.put(goal)
 
     async def _cancel_current(self, goal: GoalRun) -> GoalRun:
-        if goal.current_turn_id is None:
+        if goal.current_turn_id is None and goal.dispatch_state not in {
+            GoalDispatchState.PENDING,
+            GoalDispatchState.DISPATCHED,
+            GoalDispatchState.UNCERTAIN,
+        }:
             return goal
         if self.cancel is None:
             goal.current_turn_id = None
+            goal.dispatch_state = GoalDispatchState.IDLE
+            goal.pending_step_id = None
             return self.store.put(goal)
         try:
-            result = self.cancel(goal.model_copy(deep=True))
+            dispatch_task = self._dispatch_tasks.get(goal.id)
+            if dispatch_task is not None and dispatch_task is not asyncio.current_task():
+                await asyncio.shield(dispatch_task)
+            latest = self.store.get(goal.id)
+            result = self.cancel(latest.model_copy(deep=True))
             if inspect.isawaitable(result):
                 await result
         except Exception as exc:
             latest = self.store.get(goal.id)
+            latest.dispatch_state = GoalDispatchState.UNCERTAIN
             latest.status_message = f"turn cancellation failed: {exc}"
             return self.store.put(latest)
         latest = self.store.get(goal.id)
         latest.current_turn_id = None
+        latest.dispatch_state = GoalDispatchState.IDLE
+        latest.pending_step_id = None
         return self.store.put(latest)
 
     async def pause(self, goal_id: str, client_request_id: str) -> GoalRun:
         async with self._lock_for(goal_id):
-            return await self._pause_locked(goal_id, client_request_id)
+            goal = self._pause_locked(goal_id, client_request_id)
+        return await self._cancel_current(goal)
 
-    async def _pause_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
+    def _pause_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
         existing = self.store.get(goal_id)
         replay = existing.idempotency.get(client_request_id)
         if replay is not None:
@@ -201,15 +221,15 @@ class GoalRunController:
             ensure_unfinished(goal)
             goal.status = GoalRunStatus.PAUSED
             goal.paused_at = utc_now()
-            goal.dispatch_state = GoalDispatchState.IDLE
-            goal.pending_step_id = None
 
-        goal = self._mutate_once(goal_id, client_request_id, "pause", apply)
-        return await self._cancel_current(goal)
+        return self._mutate_once(goal_id, client_request_id, "pause", apply)
 
     async def resume(self, goal_id: str, client_request_id: str) -> GoalRun:
         async with self._lock_for(goal_id):
-            return await self._resume_locked(goal_id, client_request_id)
+            goal = await self._resume_locked(goal_id, client_request_id)
+        if goal.dispatch_state == GoalDispatchState.PENDING:
+            return await self._dispatch_prepared(goal)
+        return goal
 
     async def _resume_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
         existing = self.store.get(goal_id)
@@ -242,13 +262,14 @@ class GoalRunController:
         goal = self._mutate_once(goal_id, client_request_id, "resume", apply)
         if goal.dispatch_state != GoalDispatchState.IDLE:
             return goal
-        return await self._dispatch_next_locked(goal.id)
+        return self._prepare_dispatch_locked(goal.id)
 
     async def complete(self, goal_id: str, client_request_id: str) -> GoalRun:
         async with self._lock_for(goal_id):
-            return await self._complete_locked(goal_id, client_request_id)
+            goal = self._complete_locked(goal_id, client_request_id)
+        return await self._cancel_current(goal)
 
-    async def _complete_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
+    def _complete_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
         existing = self.store.get(goal_id)
         replay = existing.idempotency.get(client_request_id)
         if replay is not None:
@@ -260,17 +281,15 @@ class GoalRunController:
             ensure_unfinished(goal)
             goal.status = GoalRunStatus.COMPLETE
             goal.completed_at = utc_now()
-            goal.dispatch_state = GoalDispatchState.IDLE
-            goal.pending_step_id = None
 
-        goal = self._mutate_once(goal_id, client_request_id, "complete", apply)
-        return await self._cancel_current(goal)
+        return self._mutate_once(goal_id, client_request_id, "complete", apply)
 
     async def clear(self, goal_id: str, client_request_id: str) -> GoalRun:
         async with self._lock_for(goal_id):
-            return await self._clear_locked(goal_id, client_request_id)
+            goal = self._clear_locked(goal_id, client_request_id)
+        return await self._cancel_current(goal)
 
-    async def _clear_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
+    def _clear_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
         existing = self.store.get(goal_id)
         replay = existing.idempotency.get(client_request_id)
         if replay is not None:
@@ -281,11 +300,8 @@ class GoalRunController:
         def apply(goal: GoalRun) -> None:
             goal.status = GoalRunStatus.CANCELLED
             goal.completed_at = utc_now()
-            goal.dispatch_state = GoalDispatchState.IDLE
-            goal.pending_step_id = None
 
-        goal = self._mutate_once(goal_id, client_request_id, "clear", apply)
-        return await self._cancel_current(goal)
+        return self._mutate_once(goal_id, client_request_id, "clear", apply)
 
     def update_budget(
         self, goal_id: str, client_request_id: str, token_budget: int | None
@@ -328,11 +344,12 @@ class GoalRunController:
         if goal is None:
             return None
         async with self._lock_for(goal.id):
-            return await self._on_turn_completed_locked(
-                tab_id, turn_id, status, assistant_text, usage
-            )
+            result = self._on_turn_completed_locked(tab_id, turn_id, status, assistant_text, usage)
+        if result is not None and result.dispatch_state == GoalDispatchState.PENDING:
+            return await self._dispatch_prepared(result)
+        return result
 
-    async def _on_turn_completed_locked(
+    def _on_turn_completed_locked(
         self,
         tab_id: str,
         turn_id: str,
@@ -345,7 +362,10 @@ class GoalRunController:
             return goal
         if goal.status != GoalRunStatus.ACTIVE:
             return goal
-        if goal.dispatch_state != GoalDispatchState.DISPATCHED or goal.current_turn_id != turn_id:
+        if (
+            goal.dispatch_state not in {GoalDispatchState.PENDING, GoalDispatchState.DISPATCHED}
+            or goal.current_turn_id != turn_id
+        ):
             return goal
 
         goal.completed_turn_ids.append(turn_id)
@@ -427,14 +447,17 @@ class GoalRunController:
         # Commit this turn and its accounting before the transport can observe
         # or act on the next durable dispatch intent.
         self.store.put(goal)
-        return await self._dispatch_next_locked(goal.id)
+        return self._prepare_dispatch_locked(goal.id)
 
     async def dispatch_next(self, goal_id: str) -> GoalRun:
         """Persist dispatch intent, then invoke the injected transport callback."""
         async with self._lock_for(goal_id):
-            return await self._dispatch_next_locked(goal_id)
+            goal = self._prepare_dispatch_locked(goal_id)
+        if goal.dispatch_state == GoalDispatchState.PENDING:
+            return await self._dispatch_prepared(goal)
+        return goal
 
-    async def _dispatch_next_locked(self, goal_id: str) -> GoalRun:
+    def _prepare_dispatch_locked(self, goal_id: str) -> GoalRun:
         goal = self.store.get(goal_id)
         if goal.status != GoalRunStatus.ACTIVE:
             return goal
@@ -451,27 +474,65 @@ class GoalRunController:
             return goal
 
         goal.pending_step_id = str(uuid4())
+        # The Hub-generated step id is also the provider turn id. Persist it
+        # before crossing the transport boundary so a provider that completes
+        # synchronously can be correlated while dispatch is still pending.
+        goal.current_turn_id = goal.pending_step_id
         goal.dispatch_state = GoalDispatchState.PENDING
-        goal = self.store.put(goal)
+        return self.store.put(goal)
+
+    async def _dispatch_prepared(self, prepared: GoalRun) -> GoalRun:
+        step_id = prepared.pending_step_id
+        if prepared.dispatch_state != GoalDispatchState.PENDING or step_id is None:
+            return self.store.get(prepared.id)
+        dispatch_task = asyncio.current_task()
+        if dispatch_task is not None:
+            self._dispatch_tasks[prepared.id] = dispatch_task
         try:
-            result = self.dispatch(goal.model_copy(deep=True), build_continuation_prompt(goal))
+            latest = self.store.get(prepared.id)
+            if (
+                latest.status != GoalRunStatus.ACTIVE
+                or latest.dispatch_state != GoalDispatchState.PENDING
+                or latest.pending_step_id != step_id
+            ):
+                return latest
+            assert self.dispatch is not None
+            result = self.dispatch(
+                prepared.model_copy(deep=True), build_continuation_prompt(prepared)
+            )
             next_turn_id = await result if inspect.isawaitable(result) else result
         except Exception as exc:
-            goal = self.store.get(goal.id)
-            if goal.status == GoalRunStatus.ACTIVE:
-                goal.status = GoalRunStatus.FAILED
-                goal.status_message = f"continuation dispatch failed: {exc}"
-                goal.completed_at = utc_now()
-                goal.dispatch_state = GoalDispatchState.IDLE
-                goal.pending_step_id = None
-                return self.store.put(goal)
-            return goal
-        goal = self.store.get(goal.id)
-        if goal.status != GoalRunStatus.ACTIVE:
-            return goal
-        goal.current_turn_id = next_turn_id or goal.pending_step_id
-        goal.dispatch_state = GoalDispatchState.DISPATCHED
-        return self.store.put(goal)
+            async with self._lock_for(prepared.id):
+                goal = self.store.get(prepared.id)
+                # A completion observed while dispatch was awaiting the provider
+                # is stronger evidence than the callback's eventual exception.
+                if (
+                    goal.status == GoalRunStatus.ACTIVE
+                    and goal.dispatch_state == GoalDispatchState.PENDING
+                    and goal.pending_step_id == step_id
+                ):
+                    goal.status = GoalRunStatus.FAILED
+                    goal.status_message = f"continuation dispatch failed: {exc}"
+                    goal.completed_at = utc_now()
+                    goal.current_turn_id = None
+                    goal.dispatch_state = GoalDispatchState.IDLE
+                    goal.pending_step_id = None
+                    return self.store.put(goal)
+                return goal
+        finally:
+            if self._dispatch_tasks.get(prepared.id) is dispatch_task:
+                self._dispatch_tasks.pop(prepared.id, None)
+        async with self._lock_for(prepared.id):
+            goal = self.store.get(prepared.id)
+            if (
+                goal.status != GoalRunStatus.ACTIVE
+                or goal.dispatch_state != GoalDispatchState.PENDING
+                or goal.pending_step_id != step_id
+            ):
+                return goal
+            goal.current_turn_id = next_turn_id or step_id
+            goal.dispatch_state = GoalDispatchState.DISPATCHED
+            return self.store.put(goal)
 
     def recover(self) -> list[GoalRun]:
         """Fail closed for dispatches whose provider acceptance is uncertain."""

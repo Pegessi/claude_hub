@@ -1210,6 +1210,25 @@ def test_plain_terminal_authoritative_replay_skips_initial_setup_resync() -> Non
     assert "initialReplayNeedsReconcile = false" in remote_stable
 
 
+def test_agent_replay_input_release_keeps_bootstrap_reconcile_gate() -> None:
+    """Discarded initial WS frames require a successful authoritative refresh."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal.py"
+    ).read_text()
+    full_replay = source.split("function releaseReplayForUserInput()", 1)[1].split(
+        "function hasExpectedReplayBuffer()", 1
+    )[0]
+    release = full_replay.split("function flushReplayBufferThen", 1)[0]
+    flush = full_replay.split("function flushBuffer(discardWrites)", 1)[1]
+
+    assert "replayReleasedForInput = true" in release
+    assert "flushBuffer(true)" in release
+    assert "initialReplayNeedsReconcile = replayReleasedForInput" in flush
+    assert "flushPendingBootstrapCorrelations()" in flush
+
+
 def test_non_manual_refresh_preserves_scroll_position(terminal_tab: dict, page: Page) -> None:
     """A non-manual history refresh (e.g. tab-switch, auto-round-complete) must
     not yank a scrolled-up user back to the bottom. Only the manual ↻ refresh

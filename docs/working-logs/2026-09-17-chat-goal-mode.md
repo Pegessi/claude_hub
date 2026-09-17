@@ -83,6 +83,19 @@ the authoritative objective and latest checkpoint, while being required to
 re-verify repository and runtime facts. This is deliberately working memory,
 not a second Task Graph.
 
+The provider receives the full continuation envelope, while the public Chat
+timeline records only a neutral `Continue active Goal` user summary. Assistant
+checkpoint/status blocks are removed incrementally even when tags cross stream
+deltas or end malformed. Raw protocol text is handed only to the in-process Goal
+observer and is never stored in or broadcast with transcript events.
+
+Dispatch intent and provider acceptance are separate phases. A generated step id
+is persisted as the expected turn id before transport I/O, so synchronous
+completion cannot be lost. Terminal mutations persist their state first, wait for
+any pending acceptance boundary, then cancel the exact turn. Cancellation failure
+retains identity in `uncertain`; idempotent retry or resume reconciliation must
+resolve it before another dispatch is allowed.
+
 ## UI
 
 Goal is a separate composer control beside the Agent/Plan picker. Creation asks
@@ -94,6 +107,12 @@ show the complete objective, blocker, turn count, and timestamps.
 The active conversation exposes compact Goal state immediately above the
 composer. Status is always conveyed by text as well as color. Cross-tab Goal
 badges are intentionally deferred until Goal summaries join the tab-list API.
+While a Goal is active, manual Send/Queue/Steer and attachments are disabled so
+the Hub remains the sole turn scheduler; provider approval answers remain usable.
+After a transcript completion, the UI performs a bounded, version-aware refresh
+because the durable Goal observer commits asynchronously. The disclosure exposes
+live status semantics, Escape handling, labelled details, and coarse-pointer touch
+targets.
 
 ## Historical branch decision
 
@@ -111,6 +130,13 @@ and fixed provider assignments are not.
 - Claude/Cursor one-shot and Codex/TraeX persistent transport fixtures.
 - UI policy, keyboard/focus, 375 px layout, and Goal/provider-mode independence.
 - Existing agent-stream, tab persistence, frontend lint/typecheck/build suites.
+- Deterministic interleavings for synchronous completion, pending dispatch versus
+  pause, cancel failure/retry, and restart reconciliation.
+- Transcript tests for split, malformed, and truncated Goal control tags, including
+  proof that raw protocol fields never enter the durable event store.
+- The full backend suite runs against a unique runtime home, HTTP port, and tmux
+  socket; terminal input interrupts replay buffering and performs a later
+  reconciliation instead of dropping live input.
 
 ## References
 

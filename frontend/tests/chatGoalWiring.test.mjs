@@ -44,6 +44,28 @@ test('active Goal guards manual history edits and start waits for an idle turn',
   assert.ok(pane.includes('goalEditReason'))
 })
 
+test('turn completion uses bounded version-aware Goal reconciliation', () => {
+  assert.ok(pane.includes('GOAL_REFRESH_DELAYS_MS'))
+  assert.ok(pane.includes('goalSnapshotVersion() !== baselineVersion'))
+  assert.ok(pane.includes("latest[index].type === 'turn_completed'"))
+  assert.ok(pane.includes('current.completed_turn_ids?.includes(turnId)'))
+})
+
+test('active Goal locks composer actions and queued draft flushing', () => {
+  assert.ok(pane.includes("goal.value?.status === 'active'"))
+  assert.match(pane, /:disabled="isSending || connectionState !== 'live' || goalComposerLocked"/)
+  assert.ok(pane.includes('while (draftQueue.value.length > 0 && !turnInFlight.value && !isSending.value && !goalComposerLocked.value)'))
+  assert.ok(pane.includes('if (!messageOverride && goalComposerLocked.value)'))
+  assert.ok(pane.includes('Pause or complete the active Goal before sending messages'))
+})
+
+test('Goal status disclosure exposes accessible state and controls', () => {
+  assert.ok(statusBar.includes('aria-live="polite"'))
+  assert.ok(statusBar.includes(':aria-controls="detailsId"'))
+  assert.ok(statusBar.includes('@keydown.esc="expanded = false"'))
+  assert.ok(statusBar.includes('@media (pointer: coarse)'))
+})
+
 test('Goal errors remain visible and setup traps focus', () => {
   assert.ok(statusBar.includes('error && !expanded'))
   const dialog = readFileSync(new URL('../src/components/GoalSetupDialog.vue', import.meta.url), 'utf8')

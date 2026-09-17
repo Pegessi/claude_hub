@@ -568,6 +568,10 @@ async def proxy_terminal_request(
             runBootstrapRecoveryRefresh(rid);
             return;
           }}
+          if (initialReplayNeedsReconcile) {{
+            runBootstrapRecoveryRefresh(rid);
+            return;
+          }}
           if (!term || !term.__claudeHubReplayDone) return;
           if (term.__claudeHubReplayBuffering === true) {{
             bootstrapPendingRequestIds.add(rid);
@@ -599,6 +603,7 @@ async def proxy_terminal_request(
             if (bootstrapReadyPostedRequestIds.has(requestId)) return;
             bootstrapReadyPostedRequestIds.add(requestId);
             if (ok !== false) {{
+              initialReplayNeedsReconcile = false;
               if (term.__claudeHubInitialReplayFailed) {{
                 term.__claudeHubInitialReplayFailed = false;
               }}
@@ -721,6 +726,7 @@ async def proxy_terminal_request(
           let lastCaptureBufferedAt = 0;
           let fetchAttempts = 0;
           let phase = 'capturing';
+          let inputListenerRegistered = false;
 
           function isCapturePhase() {{
             return phase === 'capturing' || phase === 'finalizing';
@@ -768,9 +774,17 @@ async def proxy_terminal_request(
             }}
           }}
 
+          function removeInputListener() {{
+            if (!inputListenerRegistered) return;
+            inputListenerRegistered = false;
+            const index = terminalUserInputListeners.indexOf(releaseForUserInput);
+            if (index >= 0) terminalUserInputListeners.splice(index, 1);
+          }}
+
           function emitResultOnce(success, detail) {{
             if (phase === 'settled') return;
             phase = 'settled';
+            removeInputListener();
             restoreWriteOnce();
             try {{
               if (success) {{
@@ -796,6 +810,23 @@ async def proxy_terminal_request(
           function discardRemainingCaptureCallbacks() {{
             const remaining = captureBuffer.splice(0, captureBuffer.length);
             remaining.forEach(invokeItemCbOnce);
+          }}
+
+          function releaseForUserInput() {{
+            if (phase === 'settled') return;
+            // The fetched snapshot remains the visible baseline. Buffered WS
+            // frames all predate this keypress and may be recovered from tmux,
+            // so restore live writes before acknowledging them. A write callback
+            // may synchronously release another WS frame; after the phase change
+            // that frame must go directly to xterm rather than back into capture.
+            phase = 'settled';
+            removeInputListener();
+            restoreWriteOnce();
+            discardRemainingCaptureCallbacks();
+            clearRefetchFallback();
+            if (options && typeof options.onUserInput === 'function') {{
+              options.onUserInput();
+            }}
           }}
 
           function deferCaptureToRefetchFallback() {{
@@ -942,6 +973,10 @@ async def proxy_terminal_request(
               }});
           }}
 
+          if (options && options.releaseOnUserInput) {{
+            inputListenerRegistered = true;
+            terminalUserInputListeners.push(releaseForUserInput);
+          }}
           attemptFetch();
         }}
 
@@ -1202,6 +1237,18 @@ async def proxy_terminal_request(
             term.__claudeHubReplayBuffering = true;
             runBufferedCaptureHistorySync(term, {{
               fetchLines: INITIAL_HISTORY_LINES,
+              releaseOnUserInput: true,
+              onUserInput: function() {{
+                term.__claudeHubReplayDone = true;
+                term.__claudeHubReplayBuffering = false;
+                // The interrupted fetch did not establish an authoritative
+                // boundary. Keep reconciliation required until the quiet-period
+                // refresh succeeds instead of reporting false bootstrap success.
+                initialReplayNeedsReconcile = true;
+                setupHistoryResync(term);
+                scheduleReplayRecoveryAfterInputQuiet();
+                flushPendingBootstrapCorrelations();
+              }},
               onSuccess: function() {{
                 term.__claudeHubReplayDone = true;
                 term.__claudeHubReplayBuffering = false;
@@ -1351,11 +1398,16 @@ async def proxy_terminal_request(
             if (historyDone || !fullReplay) return;
             replayReleasedForInput = true;
             fullReplayFinalizing = true;
-            flushBuffer();
+            // Buffered ttyd frames predate this keystroke and can take long
+            // enough to render that the shell echo feels blocked. The replay
+            // snapshot is already visible, so acknowledge those stale writes
+            // without rendering them, restore live term.write immediately,
+            // and reconcile from tmux after the input quiet period.
+            flushBuffer(true);
             scheduleReplayRecoveryAfterInputQuiet();
           }}
 
-          function flushReplayBufferThen(callback) {{
+          function flushReplayBufferThen(callback, discardWrites) {{
             const filterDuplicateFrames = fullReplay && !AUTO_HISTORY_REPLAY_ENABLED;
             function drainBatch() {{
               if (buffer.length === 0) {{
@@ -1373,7 +1425,7 @@ async def proxy_terminal_request(
                     if (pending === 0) drainBatch();
                   }}
                 }}
-                if (filterDuplicateFrames && isDuplicateInitialFrame(item.data)) {{
+                if (discardWrites || (filterDuplicateFrames && isDuplicateInitialFrame(item.data))) {{
                   onItemDone();
                   return;
                 }}
@@ -1383,7 +1435,7 @@ async def proxy_terminal_request(
             drainBatch();
           }}
 
-          function flushBuffer() {{
+          function flushBuffer(discardWrites) {{
             if (historyDone) return;
             if (fullReplayHoldTimer) {{
               clearTimeout(fullReplayHoldTimer);
@@ -1396,7 +1448,10 @@ async def proxy_terminal_request(
               term.write = originalWrite;
               term.__claudeHubReplayDone = true;
               term.__claudeHubReplayBuffering = false;
-              initialReplayNeedsReconcile = false;
+              // Input-triggered release deliberately discarded buffered ttyd
+              // frames. Keep bootstrap gated until an authoritative tmux
+              // refresh succeeds; normal replay completion is already whole.
+              initialReplayNeedsReconcile = replayReleasedForInput;
               setupHistoryResync(term);
               startPostReplayWatch();
               flushPendingBootstrapCorrelations();
@@ -1405,7 +1460,7 @@ async def proxy_terminal_request(
                   refreshHistoryWhenReady({{ reason: 'post-replay-flush', scrollToBottom: true }}, 50);
                 }}, 0);
               }}
-            }});
+            }}, discardWrites === true);
           }}
 
           function hasExpectedReplayBuffer() {{

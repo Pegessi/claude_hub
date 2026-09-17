@@ -43,6 +43,8 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
         session,
         AgentStreamSendRequest(text=prompt, client_turn_id=turn_id),
         _get_tab_tailer_manager(),
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
     )
     return turn_id
 

@@ -13,10 +13,13 @@ async def test_health_check(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_root_endpoint(client: AsyncClient) -> None:
-    """Test that the root endpoint returns correct information."""
+    """The configured root serves either the production SPA or API metadata."""
     response = await client.get("/")
     assert response.status_code == 200
-    data = response.json()
-    assert "message" in data
-    assert "version" in data
-    assert "docs" in data
+    if response.headers["content-type"].startswith("text/html"):
+        assert "<!doctype html" in response.text.lower()
+    else:
+        data = response.json()
+        assert data["message"] == "Claude Hub API"
+        assert "version" in data
+        assert data["docs"] == "/docs"

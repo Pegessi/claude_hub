@@ -1,5 +1,9 @@
 import os
 import re
+import shutil
+import socket
+import tempfile
+import uuid
 from difflib import unified_diff
 from pathlib import Path
 from typing import AsyncGenerator, Generator
@@ -10,8 +14,31 @@ import requests
 from httpx import ASGITransport, AsyncClient
 from playwright.sync_api import Page
 
-BACKEND_URL = os.environ.get("CLAUDE_HUB_TEST_BACKEND_URL", "http://127.0.0.1:8173").rstrip("/")
+_EXTERNAL_TEST_BACKEND = os.environ.get("CLAUDE_HUB_TEST_BACKEND_URL")
+_OWNED_TEST_RUNTIME: Path | None = None
+if _EXTERNAL_TEST_BACKEND:
+    BACKEND_URL = _EXTERNAL_TEST_BACKEND.rstrip("/")
+else:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _port_probe:
+        _port_probe.bind(("127.0.0.1", 0))
+        _test_backend_port = _port_probe.getsockname()[1]
+    BACKEND_URL = f"http://127.0.0.1:{_test_backend_port}"
+    _OWNED_TEST_RUNTIME = Path(tempfile.mkdtemp(prefix="claude-hub-pytest-"))
+    os.environ["CLAUDE_HUB_HOME"] = str(_OWNED_TEST_RUNTIME)
+    os.environ["CLAUDE_HUB_TMUX_SOCKET"] = f"ch-pytest-{uuid.uuid4().hex[:12]}"
+
+# Import only after owned-test isolation is installed. Importing this module
+# initializes the services package, whose managers bind runtime paths eagerly.
+from claude_hub.services.runtime_isolation import tmux_command  # noqa: E402
+
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _test_tmux_command(*args: str) -> list[str]:
+    """Use an explicit test socket when supplied, else preserve legacy default."""
+    if os.environ.get("CLAUDE_HUB_TMUX_SOCKET"):
+        return tmux_command(*args)
+    return ["tmux", *args]
 
 
 def _e2e_timeout_scale() -> float:
@@ -66,7 +93,7 @@ def capture_pane_sync(session_name: str, start: str = "-100000", end: str = "") 
     """Run tmux capture-pane synchronously and return stdout."""
     import subprocess
 
-    args = ["tmux", "capture-pane", "-p", "-e", "-S", start, "-t", session_name]
+    args = _test_tmux_command("capture-pane", "-p", "-e", "-S", start, "-t", session_name)
     if end:
         args.extend(["-E", end])
     result = subprocess.run(args, capture_output=True, text=True)
@@ -78,7 +105,7 @@ def send_keys_sync(session_name: str, *keys: str) -> None:
     import subprocess
 
     subprocess.run(
-        ["tmux", "send-keys", "-t", session_name, *keys],
+        _test_tmux_command("send-keys", "-t", session_name, *keys),
         capture_output=True,
     )
 
@@ -88,7 +115,7 @@ def tmux_session_exists(session_name: str) -> bool:
     import subprocess
 
     result = subprocess.run(
-        ["tmux", "has-session", "-t", session_name],
+        _test_tmux_command("has-session", "-t", session_name),
         capture_output=True,
     )
     return result.returncode == 0
@@ -147,17 +174,33 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     items[:] = ordered + deferred
 
 
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Clean an owned test runtime even when no backend fixture was requested."""
+    if _OWNED_TEST_RUNTIME is None:
+        return
+    import subprocess
+
+    subprocess.run(tmux_command("kill-server"), capture_output=True)
+    shutil.rmtree(_OWNED_TEST_RUNTIME, ignore_errors=True)
+
+
 # ── fixtures ─────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(scope="session")
 def backend_server() -> Generator[None, None, None]:
-    """Start the real FastAPI backend on port 8173 in a background process."""
+    """Start an isolated backend, unless an external URL was explicitly supplied."""
     import subprocess
     import time
 
     session = local_requests_session()
-    if backend_health_ok(session):
+    if _EXTERNAL_TEST_BACKEND:
+        if not backend_health_ok(session):
+            raise RuntimeError(
+                f"Explicit test backend is not healthy: {BACKEND_URL}. "
+                "Start it first or unset CLAUDE_HUB_TEST_BACKEND_URL to use "
+                "the isolated pytest-managed backend."
+            )
         yield
         return
 
@@ -220,6 +263,9 @@ def backend_server() -> Generator[None, None, None]:
         except subprocess.TimeoutExpired:
             proc.kill()
         log_file.close()
+        if _OWNED_TEST_RUNTIME is not None:
+            subprocess.run(tmux_command("kill-server"), capture_output=True)
+            shutil.rmtree(_OWNED_TEST_RUNTIME, ignore_errors=True)
 
 
 @pytest.fixture(scope="session", autouse=True)
