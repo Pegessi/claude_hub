@@ -909,13 +909,31 @@ class SessionTailer:
                     self._turn_in_flight_since = time.monotonic()
             elif self._turn_in_flight_since is not None:
                 self._turn_in_flight_since = None
+            # Hung-turn safety cap: a turn stuck past MAX_TURN_DURATION_S is
+            # genuinely hung. This runs independent of subscriber presence on
+            # purpose — a session the user is actively watching must also be
+            # protected, not left to hang forever. Terminalize the turn and
+            # reap the subprocess so the tailer does not live indefinitely.
+            if transport.turn_in_flight and self._turn_exceeds_hard_cap():
+                try:
+                    async with self._send_lock:
+                        if transport.turn_in_flight and self._turn_exceeds_hard_cap():
+                            await self._cancel_active_turn_locked(
+                                transport,
+                                error_message=_HUNG_TURN_MESSAGE,
+                            )
+                            await transport.stop()
+                except Exception:
+                    logger.exception(
+                        "native hung-turn reap failed for session %s",
+                        self.session_id,
+                    )
+                break
             # Idle reaping: with no subscribers for IDLE_TTL_S, reap an idle
             # tailer. A healthy in-flight turn is NEVER cancelled just because
             # viewers vanished (e.g. mobile backgrounding kills SSE and the
             # long-poll self-expires) — it completes on its own and the next
-            # idle check reaps it. Only a turn that exceeds the hard duration
-            # cap (genuinely hung) is reaped, with a distinct message because
-            # the runtime is healthy — the turn itself is stuck.
+            # idle check reaps it.
             if not self._subscribers and (time.monotonic() - self._last_subscriber_at > IDLE_TTL_S):
                 if not transport.turn_in_flight:
                     # Stop the native transport so the provider subprocess
@@ -926,23 +944,6 @@ class SessionTailer:
                     except Exception:
                         logger.exception(
                             "native transport stop failed during idle reap for session %s",
-                            self.session_id,
-                        )
-                    break
-                if self._turn_exceeds_hard_cap():
-                    # Genuinely hung turn: terminalize it and reap the
-                    # subprocess so the tailer does not live forever.
-                    try:
-                        async with self._send_lock:
-                            if transport.turn_in_flight and self._turn_exceeds_hard_cap():
-                                await self._cancel_active_turn_locked(
-                                    transport,
-                                    error_message=_HUNG_TURN_MESSAGE,
-                                )
-                                await transport.stop()
-                    except Exception:
-                        logger.exception(
-                            "native hung-turn reap failed for session %s",
                             self.session_id,
                         )
                     break

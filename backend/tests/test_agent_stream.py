@@ -2815,6 +2815,65 @@ async def test_idle_reap_cancels_hung_turn_past_hard_cap(
 
 
 @pytest.mark.asyncio
+async def test_hung_turn_reap_fires_with_subscribers_present(
+    store: AgentStreamStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn stuck past the hard cap is reaped even while viewers watch.
+
+    Regression for the watched-session hang: the hung-turn cap used to be
+    nested inside the zero-subscriber idle-reap gate, so a session the user
+    was actively viewing was never protected — the tailer blocked on
+    ``read_line`` forever. The cap now runs independent of subscriber
+    presence.
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(tailer_module, "MAX_TURN_DURATION_S", 0.0)
+
+    session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.session = session
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+    queue = await tailer.subscribe()
+    await tailer.send_message("hello", [], client_turn_id="turn-hung-watched")
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
+        AgentStreamEventType.TURN_STARTED
+    )
+
+    # Keep the subscriber attached (the user is watching). Force the observed
+    # in-flight duration past the (zeroed) cap.
+    tailer._turn_in_flight_since = time.monotonic() - 1.0
+
+    await asyncio.sleep(0.3)
+    # The hung turn is terminalized (cancelled) and the subprocess reaped,
+    # even though a subscriber is still present.
+    assert transport.turn_in_flight is False
+    assert transport.stop_called is True
+    assert tailer.is_running() is False
+    page = await store.read_since(-1, limit=50)
+    assert page.events[-1].type == AgentStreamEventType.TURN_COMPLETED
+    assert page.events[-1].payload["status"] == "cancelled"
+    hung = [
+        event
+        for event in page.events
+        if event.type == AgentStreamEventType.ERROR
+        and event.payload.get("message")
+        == "Turn stopped after exceeding the maximum allowed duration."
+    ]
+    assert len(hung) == 1
+
+
+@pytest.mark.asyncio
 async def test_retry_preserves_healthy_inflight_tailer(monkeypatch: pytest.MonkeyPatch) -> None:
     """A manual Retry must not cancel a healthy in-flight turn (AC2).
 
