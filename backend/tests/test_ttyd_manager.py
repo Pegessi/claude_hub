@@ -4608,6 +4608,71 @@ async def test_fork_tab_copies_history_up_to_ordinal(
     assert await manager.fork_tab("nonexistent-tab", 0) is None
 
 
+async def test_compute_tab_unread_flags_completed_turn(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    # Same setup as the fork tests: a bare manager with a real tab and an event
+    # stream, so compute_tab_unread runs against real data (no monkeypatched
+    # store) and the timezone/import bugs would surface here.
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12020
+    manager.processes = {}
+    manager._tab_order = []
+
+    async def fake_start(self: TTYDProcess) -> None:
+        return None
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return False
+
+    def fake_save_state() -> None:
+        return None
+
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(manager, "_save_state", fake_save_state)
+
+    tab = await manager.create_tab(
+        name="Source",
+        shell="/bin/zsh",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    process = manager.processes[tab.id]
+
+    # No completed turn yet → not unread.
+    assert await manager.compute_tab_unread(process) is False
+
+    def make_event(event_type: AgentStreamEventType) -> AgentStreamEvent:
+        return AgentStreamEvent(
+            stream_sequence=0,
+            session_id=f"terminal-tab-{tab.id}",
+            tab_id=tab.id,
+            agent_type=AgentType.CLAUDE,
+            type=event_type,
+            turn_id="turn-a",
+            payload={"status": "completed"},
+            created_at=datetime.now(timezone.utc),
+        )
+
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab.id}")
+    await store.append(make_event(AgentStreamEventType.TURN_COMPLETED))
+
+    # A completed turn that was never viewed → unread.
+    assert await manager.compute_tab_unread(process) is True
+
+    # Mark viewed → no longer unread.
+    assert manager.mark_tab_viewed(tab.id) is True
+    assert await manager.compute_tab_unread(process) is False
+
+
 def _make_fork_test_manager(
     monkeypatch: MonkeyPatch, tmp_path: Path, start_port: int
 ) -> TTYDManager:
