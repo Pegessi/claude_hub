@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### fix: the hung-turn cap fires even while a session is being watched
+
+- **Why now.** A TraeX chat session hung mid-turn (the model API stopped
+  responding) and stayed stuck for ~3 hours with the Stop button doing
+  nothing. The hung-turn safety cap (`MAX_TURN_DURATION_S`) was nested
+  inside the zero-subscriber idle-reap gate, so a session the user was
+  actively viewing was never protected — the tailer blocked on `read_line`
+  forever, and after a backend restart the in-flight turn was gone, leaving
+  Stop as a no-op.
+- **The change.** Move the hung-turn cap out of the subscriber gate so it
+  runs independent of subscriber presence: a turn stuck past the cap is
+  terminalized (cancelled) and its subprocess reaped whether or not a viewer
+  is attached. The idle-reap behavior for healthy in-flight turns is
+  unchanged — they still complete on their own.
+- **Tests.** A new regression test keeps a subscriber present and asserts
+  the hung turn is cancelled, the transport stopped, and the terminal
+  `TURN_COMPLETED (cancelled)` + `ERROR` events persisted. The full
+  agent-stream suite (190 tests) and black/isort/mypy stay green.
+
 ### fix: harden the unified model and thinking-effort picker
 
 - Cursor only groups effort-suffixed IDs when the live catalog provides family
