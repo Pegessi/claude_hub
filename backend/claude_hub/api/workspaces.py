@@ -194,6 +194,14 @@ async def run_resident_now(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.get("/{workspace_id}/resident/events", include_in_schema=False)
+@router.post("/{workspace_id}/resident/wait", include_in_schema=False)
+@router.post("/{workspace_id}/resident/ack", include_in_schema=False)
+async def removed_resident_mailbox_routes(workspace_id: str) -> None:
+    """Preserve the removed mailbox surface as an explicit 404 tombstone."""
+    raise HTTPException(status_code=404, detail="Resident mailbox route removed")
+
+
 @router.delete("/{workspace_id}", status_code=204)
 async def delete_workspace(
     workspace_id: str,

@@ -3,11 +3,19 @@
     class="goal-status"
     :data-status="goal.status"
     aria-label="Chat Goal status"
+    :aria-busy="busy || undefined"
+    @keydown.esc="expanded = false"
   >
+    <span
+      class="sr-only"
+      aria-live="polite"
+      aria-atomic="true"
+    >{{ liveStatus }}</span>
     <button
       type="button"
       class="goal-status-summary"
       :aria-expanded="expanded"
+      :aria-controls="detailsId"
       @click="expanded = !expanded"
     >
       <span
@@ -21,7 +29,10 @@
     </button>
     <div
       v-if="expanded"
+      :id="detailsId"
       class="goal-status-details"
+      role="region"
+      aria-label="Chat Goal details"
     >
       <p>{{ goal.objective }}</p>
       <div class="goal-status-meta">
@@ -111,13 +122,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { ChatGoal } from '@/types'
 import { goalStatusLabel, goalUsageLabel, isGoalTerminal } from '@/utils/chatGoalPolicy'
 
-defineProps<{ goal: ChatGoal; busy?: boolean; error?: string | null }>()
+const props = defineProps<{ goal: ChatGoal; busy?: boolean; error?: string | null }>()
 const emit = defineEmits<{ pause: []; resume: []; complete: []; clear: [] }>()
 const expanded = ref(false)
+const detailsId = computed(() => `goal-status-details-${props.goal.id}`)
+const liveStatus = computed(() => [
+  `Goal ${goalStatusLabel(props.goal.status)}`,
+  `${props.goal.turns_completed} of ${props.goal.max_turns} turns`,
+  goalUsageLabel(props.goal.token_usage, props.goal.token_budget, props.goal.usage_quality),
+].join(', '))
 function formatTime(value: string): string { return new Date(value).toLocaleString() }
 </script>
 
@@ -142,5 +159,7 @@ function formatTime(value: string): string { return new Date(value).toLocaleStri
 .goal-checkpoint { padding-top: 8px; border-top: 1px solid var(--ch-color-border-muted); }
 .goal-checkpoint p { margin: 5px 0 0; color: var(--ch-color-text-muted); }
 .goal-checkpoint-warning { color: var(--ch-color-warning, #e0a800); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (pointer: coarse) { .goal-status-summary, .goal-status-actions button { min-height: 44px; } .goal-status-actions button { min-width: 44px; } }
 @media (max-width: 640px) { .goal-status { flex-wrap: wrap; padding: 7px 12px; } .goal-usage { display: none; } .goal-status-actions { width: 100%; justify-content: flex-end; } .goal-status-details { right: 12px; left: 12px; } }
 </style>

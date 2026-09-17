@@ -634,7 +634,8 @@
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
-            :disabled="isSending || connectionState !== 'live'"
+            :disabled="isSending || connectionState !== 'live' || goalComposerLocked"
+            :title="goalComposerReason || undefined"
             @compositionstart="isComposing = true"
             @compositionend="isComposing = false"
             @keydown.enter.exact="handleComposerEnter"
@@ -659,7 +660,7 @@
               class="composer-attach-btn"
               aria-label="Attach image"
               :title="supportsImages ? 'Attach image' : 'This chat does not support image attachments'"
-              :disabled="!supportsImages || isSending || isPreparingAttachments"
+              :disabled="!supportsImages || isSending || isPreparingAttachments || goalComposerLocked"
               @click="triggerFilePicker"
             >
               <span aria-hidden="true">📎</span>
@@ -810,6 +811,7 @@
             type="button"
             class="composer-send-btn"
             :disabled="!canSend || isSending"
+            :title="goalComposerReason || undefined"
             @click="() => submit('normal')"
           >
             {{ isSending ? 'Sending…' : (turnInFlight ? 'Queue' : 'Send') }}
@@ -819,9 +821,14 @@
           v-if="!isMobileViewport"
           class="composer-hints"
         >
-          <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
-          <span>⌘/Ctrl+Enter steer</span>
-          <span>Shift+Enter newline</span>
+          <template v-if="goalComposerLocked">
+            <span>{{ goalComposerReason }}</span>
+          </template>
+          <template v-else>
+            <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
+            <span>⌘/Ctrl+Enter steer</span>
+            <span>Shift+Enter newline</span>
+          </template>
         </div>
       </div>
     </div>
@@ -909,6 +916,10 @@ const isGoalSetupOpen = ref(false)
 const goalPlanReason = computed(() => goalPlanLockReason(goal.value))
 const goalEditReason = computed(() => goal.value && !isGoalTerminal(goal.value.status)
   ? 'Pause or finish the active Goal before editing history'
+  : null)
+const goalComposerLocked = computed(() => goal.value?.status === 'active')
+const goalComposerReason = computed(() => goalComposerLocked.value
+  ? 'Pause or complete the active Goal before sending messages'
   : null)
 
 async function startGoal(input: { objective: string; token_budget?: number; max_turns?: number }) {
@@ -1190,15 +1201,68 @@ watch(
   { immediate: true },
 )
 
+const GOAL_REFRESH_DELAYS_MS = [0, 120, 300, 650, 1200] as const
+let goalRefreshEpoch = 0
+
+function goalSnapshotVersion(): string {
+  const current = goal.value
+  if (!current) return 'none'
+  return [
+    current.updated_at,
+    current.status,
+    current.turns_completed,
+    current.checkpoint?.turn_id ?? '',
+  ].join('\u0000')
+}
+
+function goalReflectsCompletedTurn(turnId: string | null, baselineVersion: string): boolean {
+  const current = goal.value
+  if (!current || current.status !== 'active') return true
+  if (turnId && (
+    current.completed_turn_ids?.includes(turnId) ||
+    current.checkpoint?.turn_id === turnId
+  )) return true
+  return goalSnapshotVersion() !== baselineVersion
+}
+
+function waitForGoalRefresh(delayMs: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, delayMs))
+}
+
+/**
+ * Goal observation runs asynchronously after the transcript commits a
+ * turn_completed event. The first GET may therefore still return the prior
+ * snapshot. Retry with a short bounded backoff until either the completed turn
+ * is visible or the authoritative Goal version advances.
+ */
+async function refreshGoalAfterTurn(turnId: string | null): Promise<void> {
+  const refreshEpoch = ++goalRefreshEpoch
+  const baselineVersion = goalSnapshotVersion()
+  for (const delayMs of GOAL_REFRESH_DELAYS_MS) {
+    if (delayMs > 0) await waitForGoalRefresh(delayMs)
+    if (refreshEpoch !== goalRefreshEpoch || timelineDisposed) return
+    await hydrateGoal()
+    if (refreshEpoch !== goalRefreshEpoch || timelineDisposed) return
+    if (goalReflectsCompletedTurn(turnId, baselineVersion)) return
+  }
+}
+
 // Chat lifecycle edges are authoritative status boundaries. Refresh the tab
-// status exactly once when a committed batch introduces turn_started,
-// turn_completed, or error; text/thinking deltas never trigger this watcher.
+// status once per committed boundary. Goal completion gets a bounded poll
+// because its observer updates the separate control plane asynchronously.
 watch(events, (latest, previous) => {
   if (hasChatStatusRefreshBoundary(previous, latest)) {
     void terminalStore.fetchAgentStatuses()
-    // Goal lifecycle is a separate control plane. Reconcile its authoritative
-    // snapshot at turn boundaries rather than deriving state from transcript.
-    void hydrateGoal()
+    const previousLength = previous.length <= latest.length ? previous.length : 0
+    let completed = null as (typeof latest)[number] | null
+    for (let index = latest.length - 1; index >= previousLength; index -= 1) {
+      if (latest[index].type === 'turn_completed') {
+        completed = latest[index]
+        break
+      }
+    }
+    if (completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
+    else void hydrateGoal()
   }
 })
 
@@ -1231,6 +1295,7 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
+  goalRefreshEpoch++
   stop()
   timelineDisposed = true
   timelineResizeObserver?.disconnect()
@@ -1239,6 +1304,7 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
+  goalRefreshEpoch++
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
   preparationEpoch.value++
@@ -1364,6 +1430,7 @@ let timelineVerificationFrame: number | null = null
 let timelineDisposed = false
 
 const canSend = computed(() => connectionState.value === 'live' &&
+  !goalComposerLocked.value &&
   !isPreparingAttachments.value &&
   !isUpdatingMode.value &&
   (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
@@ -1644,6 +1711,10 @@ function syncComposerTextareaHeight() {
 }
 
 function handleComposerEnter(event: KeyboardEvent) {
+  if (goalComposerLocked.value) {
+    composerError.value = goalComposerReason.value
+    return
+  }
   const action = resolveComposerEnterAction({
     isComposing: isComposing.value,
     shiftKey: event.shiftKey,
@@ -1664,6 +1735,10 @@ function handleComposerEnter(event: KeyboardEvent) {
 }
 
 function enqueueDraft() {
+  if (goalComposerLocked.value) {
+    composerError.value = goalComposerReason.value
+    return
+  }
   if (!canSend.value) return
   draftQueue.value.push({
     message: draftMessage.value,
@@ -1676,7 +1751,7 @@ function enqueueDraft() {
 }
 
 async function flushDraftQueue() {
-  while (draftQueue.value.length > 0 && !turnInFlight.value && !isSending.value) {
+  while (draftQueue.value.length > 0 && !turnInFlight.value && !isSending.value && !goalComposerLocked.value) {
     const next = draftQueue.value.shift()
     if (!next) break
     draftMessage.value = next.message
@@ -1687,9 +1762,9 @@ async function flushDraftQueue() {
 }
 
 watch(
-  [turnInFlight, () => draftQueue.value.length, isSending],
+  [turnInFlight, () => draftQueue.value.length, isSending, goalComposerLocked],
   () => {
-    if (!turnInFlight.value && draftQueue.value.length > 0 && !isSending.value) {
+    if (!turnInFlight.value && draftQueue.value.length > 0 && !isSending.value && !goalComposerLocked.value) {
       void flushDraftQueue()
     }
   },
@@ -1986,6 +2061,10 @@ async function submit(
   messageOverride?: string,
 ) {
   if (isSending.value) return
+  if (!messageOverride && goalComposerLocked.value) {
+    composerError.value = goalComposerReason.value
+    return
+  }
   const message = messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || attachments.value.length > 0
   if (!hasContent) return

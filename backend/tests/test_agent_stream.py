@@ -2296,13 +2296,13 @@ class _FakeNativeTransport:
         pass
 
 
-def _native_session() -> ManagedSession:
+def _native_session(agent_type: AgentType = AgentType.CLAUDE) -> ManagedSession:
     return ManagedSession(
         id="sess-native",
         workspace_id="ws-1",
         tab_id="tab-native",
         role=WorkspaceSessionRole.WORKER,
-        agent_type=AgentType.CLAUDE,
+        agent_type=agent_type,
         status=ManagedSessionStatus.IDLE,
         title="native",
         workspace_path="/tmp",
@@ -3056,6 +3056,231 @@ async def test_native_first_turn_is_fanned_out_not_swallowed_by_backfill() -> No
     turn_started = next(e for e in events if e.type == AgentStreamEventType.TURN_STARTED)
     assert turn_started.turn_id == "turn-1"
     assert turn_started.message_id == "turn-1:user"
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_hides_internal_prompt_and_protocol_from_visible_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Goal protocol stays provider/audit-visible but not timeline-visible."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    observed: List[AgentStreamEvent] = []
+
+    async def observer(event: AgentStreamEvent) -> None:
+        observed.append(event)
+
+    tailer = SessionTailer(
+        workspace_id="ws-goal-visible",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+        post_persist_observers=[observer],
+    )
+    await tailer.start()
+    prompt = "Continue the active Goal.\nObjective: secret internal objective"
+    await tailer.send_message(
+        prompt,
+        [],
+        client_turn_id="goal-turn",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+
+    for delta in (
+        "Visible progress.\n<goal-check",
+        'point>{"remaining":["tests"]}</goal-checkpoint>\n<goal-status ',
+        'state="complete">done</goal-status>',
+    ):
+        transport._records.put_nowait(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": delta},
+                },
+            }
+        )
+    transport._records.put_nowait({"type": "result"})
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    await asyncio.sleep(0)
+    page = await tailer._store.read_since(-1, limit=100)
+    started = next(
+        event for event in page.events if event.type == AgentStreamEventType.TURN_STARTED
+    )
+    visible = "".join(
+        str(event.payload.get("text") or "")
+        for event in page.events
+        if event.type == AgentStreamEventType.TEXT_DELTA
+    )
+
+    assert transport.sent_messages[0][0] == prompt
+    assert started.payload["summary"] == "Continue active Goal"
+    assert started.payload["metadata"]["protocol"] == "goal-continuation-v1"
+    assert visible == "Visible progress.\n\n"
+    assert "goal-checkpoint" not in visible
+    assert completed.payload["assistant_text"] == visible
+    assert "_goal_protocol_text" not in completed.payload
+    assert observed and "<goal-checkpoint>" in observed[-1].payload["_goal_protocol_text"]
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_drops_unclosed_control_block_from_visible_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-goal-malformed",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "internal prompt",
+        [],
+        client_turn_id="goal-malformed",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "Visible.<goal-checkpoint>{secret}",
+                },
+            },
+        }
+    )
+    transport._records.put_nowait({"type": "result"})
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    page = await tailer._store.read_since(-1, limit=100)
+    visible = "".join(
+        str(event.payload.get("text") or "")
+        for event in page.events
+        if event.type == AgentStreamEventType.TEXT_DELTA
+    )
+    assert visible == "Visible."
+    assert completed.payload["assistant_text"] == "Visible."
+    assert "_goal_protocol_text" not in completed.payload
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_drops_partial_control_opener_at_eof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-goal-partial",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "internal prompt",
+        [],
+        client_turn_id="goal-partial",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Visible.<goal-che"},
+            },
+        }
+    )
+    transport._records.put_nowait({"type": "result"})
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    page = await tailer._store.read_since(-1, limit=100)
+    visible = "".join(
+        str(event.payload.get("text") or "")
+        for event in page.events
+        if event.type == AgentStreamEventType.TEXT_DELTA
+    )
+    assert visible == "Visible."
+    assert completed.payload["assistant_text"] == "Visible."
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_codex_goal_completion_summary_does_not_persist_protocol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session(agent_type=AgentType.CODEX)
+    observed: List[AgentStreamEvent] = []
+    observer_called = asyncio.Event()
+
+    async def observer(event: AgentStreamEvent) -> None:
+        observed.append(event)
+        observer_called.set()
+
+    tailer = SessionTailer(
+        workspace_id="ws-codex-goal-summary",
+        session_id=session.id,
+        adapter=CodexJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+        post_persist_observers=[observer],
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "internal prompt",
+        [],
+        client_turn_id="codex-goal",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    raw = (
+        "Visible result.\n"
+        '<goal-checkpoint>{"remaining":[]}</goal-checkpoint>\n'
+        '<goal-status state="complete">done</goal-status>'
+    )
+    transport._records.put_nowait(
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "last_agent_message": raw},
+        }
+    )
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    await asyncio.wait_for(observer_called.wait(), timeout=1.0)
+    assert completed.payload["summary"] == "Visible result.\n\n"
+    assert "goal-checkpoint" not in json.dumps(completed.payload)
+    assert observed[-1].payload["_goal_protocol_text"] == raw
     await tailer.stop()
 
 

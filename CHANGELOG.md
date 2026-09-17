@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+### fix: isolate terminal recovery tests and prioritize live input
+
+- Keep real ttyd and HMR recovery tests on a unique tmux socket even when the
+  suite runs from a linked worktree, preventing reruns from reattaching stale
+  sessions or pruning another test's panes.
+- Release plain-terminal replay buffering immediately on user input, preserve
+  write callbacks, and reconcile history again after input becomes quiet.
+- Preserve production SPA root serving while returning explicit 404 responses
+  for the removed resident mailbox endpoints.
+- Start the E2E backend on an isolated random port/runtime by default so tests do
+  not silently reuse or mutate a developer's live Claude Hub service.
+
 ### feat: add persistent Goal mode to structured Chat
 
 - Add one persistent Goal per direct Chat with pause, resume, complete, clear,
@@ -19,6 +31,14 @@
   updates retain the prior value.
 - Serialize Goal admission with manual sends and Plan-mode changes per Chat tab,
   and reconcile uncertain restart state before an explicit resume dispatches.
+- Preserve dispatch identity across fast completion and cancellation races; wait
+  for pending provider acceptance before terminal mutations cancel, and keep
+  failed cancellations uncertain and safely retriable.
+- Hide continuation prompts and checkpoint/status control blocks from the public
+  transcript while retaining raw protocol only for the in-process Goal observer.
+- Lock manual composer actions during active Goals, reconcile status with bounded
+  version-aware refreshes, and improve status disclosure keyboard, screen-reader,
+  and touch accessibility.
 - See `docs/working-logs/2026-09-17-chat-goal-mode.md` for architecture, provider
   ownership, safety boundaries, and validation scope.
 

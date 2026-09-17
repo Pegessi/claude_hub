@@ -111,6 +111,88 @@ _TAILER_MANAGERS: Any = weakref.WeakSet()
 PostPersistObserver = Callable[[AgentStreamEvent], Awaitable[None]]
 
 
+class _GoalProtocolSanitizer:
+    """Incrementally remove Goal control blocks from visible assistant text.
+
+    Provider deltas may split either tag at any byte boundary.  The sanitizer
+    therefore retains only a short possible opener/closer suffix between
+    calls, while the tailer separately retains the complete raw assistant text
+    for the in-process Goal observer.
+    """
+
+    _OPENERS = ("<goal-checkpoint", "<goal-status")
+    _CLOSERS = {"checkpoint": "</goal-checkpoint>", "status": "</goal-status>"}
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._inside: Optional[str] = None
+
+    @staticmethod
+    def _possible_opener_suffix(text: str) -> int:
+        lowered = text.lower()
+        best = 0
+        for opener in _GoalProtocolSanitizer._OPENERS:
+            for length in range(1, min(len(lowered), len(opener) - 1) + 1):
+                if lowered.endswith(opener[:length]):
+                    best = max(best, length)
+        return best
+
+    def feed(self, text: str, *, final: bool = False) -> str:
+        self._pending += text
+        visible: List[str] = []
+        while self._pending:
+            lowered = self._pending.lower()
+            if self._inside is not None:
+                closer = self._CLOSERS[self._inside]
+                close_at = lowered.find(closer)
+                if close_at < 0:
+                    # Raw text is retained by ``_assistant_text``; only keep a
+                    # possible split closing tag here so malformed/large blocks
+                    # cannot grow this display-only buffer without bound.
+                    keep = min(len(self._pending), len(closer) - 1)
+                    self._pending = self._pending[-keep:] if keep else ""
+                    break
+                self._pending = self._pending[close_at + len(closer) :]
+                self._inside = None
+                continue
+
+            starts = [
+                (lowered.find(opener), name)
+                for opener, name in (
+                    (self._OPENERS[0], "checkpoint"),
+                    (self._OPENERS[1], "status"),
+                )
+            ]
+            starts = [(index, name) for index, name in starts if index >= 0]
+            if starts:
+                start, name = min(starts)
+                visible.append(self._pending[:start])
+                tag_end = self._pending.find(">", start)
+                if tag_end < 0:
+                    self._pending = self._pending[start:]
+                    break
+                self._pending = self._pending[tag_end + 1 :]
+                self._inside = name
+                continue
+
+            if final:
+                # Do not reveal a truncated control opener at EOF. Ordinary
+                # prose before that prefix remains visible.
+                keep = self._possible_opener_suffix(self._pending)
+                visible.append(
+                    self._pending[: len(self._pending) - keep] if keep else self._pending
+                )
+                self._pending = ""
+                break
+            keep = self._possible_opener_suffix(self._pending)
+            emit_end = len(self._pending) - keep
+            visible.append(self._pending[:emit_end])
+            self._pending = self._pending[emit_end:]
+            break
+
+        return "".join(visible)
+
+
 @dataclass(frozen=True)
 class NativeRuntimeSnapshot:
     """Read-only runtime state derived from the sole native transport owner."""
@@ -262,6 +344,8 @@ class SessionTailer:
         # ``turn_completed`` must be synthesized (nonzero exit or early EOF
         # with no completion record).
         self._turn_completed_seen: bool = False
+        self._goal_protocol_sanitizer: Optional[_GoalProtocolSanitizer] = None
+        self._visible_assistant_text: str = ""
         # Runtime status is terminalized as soon as the authoritative
         # TURN_COMPLETED event has been persisted and fanned out. The turn
         # guard (``turn_in_flight``) is also released at TURN_COMPLETED for
@@ -366,6 +450,8 @@ class SessionTailer:
         previews: Optional[List[bytes]] = None,
         delivery: str = "normal",
         reuse_attachments: Optional[List[Dict[str, Any]]] = None,
+        visible_text: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -522,6 +608,12 @@ class SessionTailer:
             #    the store and is fanned out to subscribers.
             self._active_turn_id = client_turn_id
             self._assistant_text = ""
+            self._visible_assistant_text = ""
+            self._goal_protocol_sanitizer = (
+                _GoalProtocolSanitizer()
+                if turn_metadata and turn_metadata.get("protocol") == "goal-continuation-v1"
+                else None
+            )
             self._run_epoch += 1
             self._turn_completed_seen = False
             ctx = NormalizeContext(
@@ -533,9 +625,15 @@ class SessionTailer:
             )
             # The event carries only opaque attachment metadata (id, mime_type,
             # bytes, width, height) — never raw bytes or local paths.
+            turn_started_payload: Dict[str, Any] = {
+                "summary": text if visible_text is None else visible_text,
+                "attachments": attachment_metas,
+            }
+            if turn_metadata:
+                turn_started_payload["metadata"] = dict(turn_metadata)
             turn_started = ctx.event(
                 AgentStreamEventType.TURN_STARTED,
-                {"summary": text, "attachments": attachment_metas},
+                turn_started_payload,
             )
             turn_started = redact_event(turn_started)
             try:
@@ -1110,8 +1208,50 @@ class SessionTailer:
                     text = event.payload.get("text")
                     if isinstance(text, str):
                         self._assistant_text += text
+                        if self._goal_protocol_sanitizer is not None:
+                            visible = self._goal_protocol_sanitizer.feed(text)
+                            if not visible:
+                                continue
+                            event.payload["text"] = visible
+                            self._visible_assistant_text += visible
+                goal_protocol_text: Optional[str] = None
                 if is_turn_completed and self._assistant_text:
-                    event.payload.setdefault("assistant_text", self._assistant_text)
+                    if self._goal_protocol_sanitizer is None:
+                        event.payload.setdefault("assistant_text", self._assistant_text)
+                    else:
+                        # The Goal controller needs the raw control envelope,
+                        # but it must never enter the durable/public event.
+                        goal_protocol_text = self._assistant_text
+                if is_turn_completed and self._goal_protocol_sanitizer is not None:
+                    raw_summary = event.payload.get("summary")
+                    if isinstance(raw_summary, str) and raw_summary:
+                        # Codex/TraeX repeat the final assistant message in
+                        # task_complete.last_agent_message. Treat that copy as
+                        # protocol input too; otherwise the control envelope
+                        # would still enter the durable completion summary.
+                        goal_protocol_text = raw_summary
+                        summary_sanitizer = _GoalProtocolSanitizer()
+                        event.payload["summary"] = summary_sanitizer.feed(raw_summary, final=True)
+                    visible = self._goal_protocol_sanitizer.feed("", final=True)
+                    if visible:
+                        self._visible_assistant_text += visible
+                        await self._publish(
+                            ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": visible})
+                        )
+                    event.payload.setdefault("assistant_text", self._visible_assistant_text)
+                observer_event = (
+                    event.model_copy(
+                        deep=True,
+                        update={
+                            "payload": {
+                                **event.payload,
+                                "_goal_protocol_text": goal_protocol_text,
+                            }
+                        },
+                    )
+                    if goal_protocol_text is not None
+                    else event
+                )
                 event = redact_event(event)
                 try:
                     await self._publish(event)
@@ -1160,8 +1300,10 @@ class SessionTailer:
                     # completion.
                     self._active_turn_id = None
                     transport.acknowledge_turn_complete()
-                    self._notify_post_persist(event)
+                    self._notify_post_persist(observer_event)
                     self._assistant_text = ""
+                    self._visible_assistant_text = ""
+                    self._goal_protocol_sanitizer = None
 
     def _notify_post_persist(self, event: AgentStreamEvent) -> None:
         """Schedule observers after completion persistence and guard release."""
@@ -1807,6 +1949,8 @@ class TailerManager:
         *,
         previews: Optional[List[bytes]] = None,
         delivery: str = "normal",
+        visible_text: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
@@ -1826,6 +1970,8 @@ class TailerManager:
             client_turn_id,
             previews=previews,
             delivery=delivery,
+            visible_text=visible_text,
+            turn_metadata=turn_metadata,
         )
 
     async def cancel_turn(
