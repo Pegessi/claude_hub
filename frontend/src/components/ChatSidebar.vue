@@ -114,6 +114,7 @@
               <span
                 class="chat-sidebar__item-status"
                 :data-status="getTabStatus(tab)"
+                :data-unread="tab.is_unread ? 'true' : 'false'"
                 role="img"
                 :aria-label="`Session status: ${getTabStatusLabel(tab)}`"
                 :title="`Session status: ${getTabStatusLabel(tab)}`"
@@ -460,6 +461,7 @@ const filteredGroups = computed(() => {
 }
 
 .chat-sidebar__item-status {
+  position: relative;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -484,6 +486,25 @@ const filteredGroups = computed(() => {
 
 .chat-sidebar__item-status[data-status='offline'] {
   background: var(--ch-color-text-subtle);
+}
+
+/* Unread ping: an accent ring that expands outward from the dot and fades,
+   repeating. Shown only for tabs with an unread completed turn. */
+.chat-sidebar__item-status[data-unread='true']::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 1.5px solid var(--ch-color-accent);
+  animation: sidebar-unread-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes sidebar-unread-ping {
+  0% { transform: scale(1); opacity: 0.9; }
+  75%, 100% { transform: scale(2.8); opacity: 0; }
 }
 
 @keyframes sidebar-status-pulse {

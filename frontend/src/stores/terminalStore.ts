@@ -560,11 +560,24 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
+  // Best-effort: tell the backend the user opened this tab so its unread flag
+  // clears. Also clear it locally for immediate feedback; the next poll re-syncs.
+  async function markTabViewed(tabId: string) {
+    const tab = tabs.value.find(t => t.id === tabId)
+    if (tab) tab.is_unread = false
+    try {
+      await fetch(`${API_BASE}/tabs/${tabId}/view`, { method: 'POST' })
+    } catch {
+      // transient; the unread state re-syncs on the next tab-list poll
+    }
+  }
+
   function setActiveTab(tabId: string) {
     if (tabs.value.some(tab => tab.id === tabId)) {
       activeTabId.value = tabId
       // Also assign to active pane
       assignTabToPane(tabId)
+      markTabViewed(tabId)
     }
   }
 

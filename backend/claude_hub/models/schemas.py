@@ -587,6 +587,14 @@ class TerminalTab(TerminalTabBase):
         None,
         description="When the tab was archived; None while active.",
     )
+    last_viewed_at: Optional[datetime] = Field(
+        None,
+        description="When the user last opened/viewed this tab; drives the unread flag.",
+    )
+    is_unread: Optional[bool] = Field(
+        None,
+        description="True when the tab's latest completed turn is newer than last_viewed_at.",
+    )
 
     class Config:
         from_attributes = True
