@@ -64,7 +64,9 @@ class StreamReasoningEffortOption(BaseModel):
     """One reasoning-effort level advertised for a specific model."""
 
     id: str
+    label: str = ""
     description: str = ""
+    provider_model_id: Optional[str] = None
 
 
 class StreamModelOption(BaseModel):
@@ -73,6 +75,7 @@ class StreamModelOption(BaseModel):
     id: str
     label: str
     description: str = ""
+    provider_model_id: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     supported_reasoning_efforts: List[StreamReasoningEffortOption] = Field(default_factory=list)
 

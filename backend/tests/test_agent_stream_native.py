@@ -671,7 +671,8 @@ async def test_codex_plan_mode_uses_schema_verified_collaboration_mode_payload()
                 }
             ).encode()
             + b"\n",
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"data": []}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-1"}}}).encode()
             + b"\n",
         ]
     )
@@ -738,7 +739,8 @@ async def test_codex_selected_model_overrides_thread_model_in_default_mode() -> 
                 }
             ).encode()
             + b"\n",
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"data": []}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-1"}}}).encode()
             + b"\n",
         ]
     )
@@ -839,7 +841,8 @@ async def test_codex_selected_model_overrides_in_plan_mode() -> None:
                 }
             ).encode()
             + b"\n",
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"data": []}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-1"}}}).encode()
             + b"\n",
         ]
     )
@@ -896,7 +899,8 @@ async def test_codex_no_model_selection_falls_back_to_thread_model() -> None:
                 }
             ).encode()
             + b"\n",
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"data": []}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-1"}}}).encode()
             + b"\n",
         ]
     )
@@ -951,7 +955,8 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
                 }
             ).encode()
             + b"\n",
-            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"turn": {"id": "tu-1"}}}).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 4, "result": {"data": []}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-1"}}}).encode()
             + b"\n",
         ]
     )
@@ -987,7 +992,7 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
         # Switch model mid-session (the model-picker path).
         native.update_env({"CODEX_MODEL": "gpt-5.4"})
         proc.stdout.push(
-            json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"turn": {"id": "tu-2"}}}).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 6, "result": {"turn": {"id": "tu-2"}}}).encode()
             + b"\n"
         )
         await native.send_message("second", [])
@@ -996,7 +1001,7 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
         # Clear the selection -> revert to the thread model.
         native.update_env({})
         proc.stdout.push(
-            json.dumps({"jsonrpc": "2.0", "id": 6, "result": {"turn": {"id": "tu-3"}}}).encode()
+            json.dumps({"jsonrpc": "2.0", "id": 7, "result": {"turn": {"id": "tu-3"}}}).encode()
             + b"\n"
         )
         await native.send_message("third", [])
@@ -2110,6 +2115,82 @@ def test_parse_list_models_strips_ansi_and_markers() -> None:
     }
 
 
+def test_cursor_model_variants_group_into_effort_options() -> None:
+    grouped = native_module._group_cursor_model_options(
+        native_module._parse_list_models(
+            "gpt-5.6-sol-low - GPT-5.6 Sol Low\n"
+            "gpt-5.6-sol-medium - GPT-5.6 Sol\n"
+            "gpt-5.6-sol-high - GPT-5.6 Sol High\n"
+        )
+    )
+
+    assert len(grouped) == 1
+    assert grouped[0].id == "gpt-5.6-sol"
+    assert grouped[0].label == "GPT-5.6 Sol"
+    assert grouped[0].default_reasoning_effort == "medium"
+    assert [
+        (item.id, item.provider_model_id) for item in grouped[0].supported_reasoning_efforts
+    ] == [
+        ("low", "gpt-5.6-sol-low"),
+        ("medium", "gpt-5.6-sol-medium"),
+        ("high", "gpt-5.6-sol-high"),
+    ]
+
+
+def test_codex_reasoning_effort_overrides_mode_preset() -> None:
+    session = _session(AgentType.CODEX)
+    session.env = {
+        "CODEX_MODEL": "gpt-5.6-sol",
+        "CODEX_REASONING_EFFORT": "high",
+    }
+    native = CodexNativeSession(session)
+    native._current_mode = ChatMode.PLAN.value
+    native._mode_presets[ChatMode.PLAN.value] = {
+        "mode": "read",
+        "model": None,
+        "reasoning_effort": "medium",
+    }
+
+    assert native._collaboration_mode_payload() == {
+        "mode": "read",
+        "settings": {
+            "model": "gpt-5.6-sol",
+            "developer_instructions": None,
+            "reasoning_effort": "high",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_discovers_model_specific_reasoning_efforts() -> None:
+    native = _codex_session()
+    native._send_request = AsyncMock(
+        return_value={
+            "data": [
+                {
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6-Sol",
+                    "description": "Agentic coding model",
+                    "defaultReasoningEffort": "low",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Fast"},
+                        {"reasoningEffort": "high", "description": "Deep"},
+                    ],
+                }
+            ]
+        }
+    )
+
+    await native._discover_models()
+
+    assert native._available_models[0].label == "GPT-5.6-Sol"
+    assert native._available_models[0].default_reasoning_effort == "low"
+    assert [item.id for item in native._available_models[0].supported_reasoning_efforts] == [
+        "low",
+        "high",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_cursor_prepare_capabilities_populates_models() -> None:
     """``prepare_capabilities`` probes ``agent --list-models`` and surfaces the
@@ -2121,11 +2202,18 @@ async def test_cursor_prepare_capabilities_populates_models() -> None:
 
     caps = session.capabilities()
     ids = [m.id for m in caps.available_models]
-    assert "claude-opus-5-thinking-max" in ids
+    assert "claude-opus-5-thinking" in ids
     assert "auto" in ids
     labels = {m.id: m.label for m in caps.available_models}
-    assert labels["claude-opus-4-8-thinking-high"] == "Claude Opus 4.8 1M Thinking"
+    assert labels["claude-opus-4-8-thinking"] == "Claude Opus 4.8 1M Thinking"
     assert labels["auto"] == "Auto"
+    opus = next(model for model in caps.available_models if model.id == "claude-opus-5-thinking")
+    assert [
+        (effort.id, effort.provider_model_id) for effort in opus.supported_reasoning_efforts
+    ] == [
+        ("high", "claude-opus-5-thinking-high"),
+        ("max", "claude-opus-5-thinking-max"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2136,7 +2224,8 @@ async def test_cursor_probe_failure_falls_back_to_static() -> None:
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         options = await native_module.available_models_for("cursor")
 
-    assert [m.id for m in options] == native_module._STATIC_MODELS["cursor"]
+    assert options
+    assert any(model.supported_reasoning_efforts for model in options)
     entry = native_module._models_cache["cursor"]
     assert entry.options is options
 
@@ -2157,7 +2246,8 @@ async def test_cursor_probe_timeout_kills_process(monkeypatch: MonkeyPatch) -> N
         options = await native_module.available_models_for("cursor")
 
     assert proc.killed is True
-    assert [m.id for m in options] == native_module._STATIC_MODELS["cursor"]
+    assert options
+    assert any(model.supported_reasoning_efforts for model in options)
 
 
 @pytest.mark.asyncio

@@ -591,13 +591,16 @@ export interface StreamModelOption {
   id: string
   label: string
   description?: string | null
+  provider_model_id?: string | null
   default_reasoning_effort?: string | null
   supported_reasoning_efforts: StreamReasoningEffortOption[]
 }
 
 export interface StreamReasoningEffortOption {
   id: string
+  label?: string | null
   description?: string | null
+  provider_model_id?: string | null
 }
 
 export interface StreamCapabilities {
