@@ -63,19 +63,13 @@
           >
             {{ getPaneCountForTab(tab.id) }}
           </span>
-          <!-- Hover-revealed ⋯ dropdown for secondary actions; × close stays always visible on hover -->
-          <button
-            :ref="(el: unknown) => setTabMenuTriggerRef(tab.id, el)"
-            type="button"
-            class="tab-menu-trigger"
-            :class="{ 'is-open': openTabMenuId === tab.id }"
-            :aria-label="`${tab.name} actions`"
-            :aria-expanded="openTabMenuId === tab.id"
-            title="Tab actions"
-            @click.stop="toggleTabMenu(tab.id)"
-          >
-            ⋯
-          </button>
+          <!-- Hover-revealed ⋯ dropdown for secondary actions (shared with
+               the sidebar); × close stays always visible on hover -->
+          <TabActionsMenu
+            :tab="tab"
+            variant="tabbar"
+            @rename="startRename"
+          />
           <button
             class="tab-close"
             title="Close tab"
@@ -86,88 +80,6 @@
         </div>
       </div>
     </div>
-    <!-- Tab menu panel is teleported to body so it escapes the .tabs overflow-y:hidden -->
-    <Teleport to="body">
-      <div
-        v-if="openTabMenuId"
-        ref="tabMenuPanelRef"
-        class="tab-menu-panel"
-        role="menu"
-        :style="tabMenuPanelStyle"
-      >
-        <button
-          v-if="openTabMenuTab"
-          type="button"
-          class="tab-menu-item"
-          role="menuitem"
-          @click="startRename(openTabMenuTab); closeTabMenu(openTabMenuId)"
-        >
-          <span
-            class="tab-menu-item-icon"
-            aria-hidden="true"
-          >✎</span>
-          <span>Rename</span>
-        </button>
-        <LoadingButton
-          v-if="openTabMenuTab"
-          type="button"
-          class="tab-menu-item"
-          role="menuitem"
-          :loading="isPending(tabActionKey('duplicate', openTabMenuTab.id))"
-          loading-label="Duplicating…"
-          @click="handleTabDuplicate(openTabMenuTab.id); closeTabMenu(openTabMenuId)"
-        >
-          <span
-            class="tab-menu-item-icon"
-            aria-hidden="true"
-          >📋</span>
-          <span>Duplicate</span>
-        </LoadingButton>
-        <LoadingButton
-          v-if="openTabMenuTab"
-          type="button"
-          class="tab-menu-item"
-          role="menuitem"
-          :loading="isPending(tabActionKey('archive', openTabMenuTab.id))"
-          loading-label="Archiving…"
-          @click="handleTabArchive(openTabMenuTab.id); closeTabMenu(openTabMenuId)"
-        >
-          <span
-            class="tab-menu-item-icon"
-            aria-hidden="true"
-          >🗄</span>
-          <span>Archive</span>
-        </LoadingButton>
-        <button
-          v-if="openTabMenuTab"
-          type="button"
-          class="tab-menu-item"
-          role="menuitem"
-          @click="handleCopyTabLink(openTabMenuTab.id); closeTabMenu(openTabMenuId)"
-        >
-          <span
-            class="tab-menu-item-icon"
-            aria-hidden="true"
-          >🔗</span>
-          <span>Copy Link</span>
-        </button>
-        <LoadingButton
-          v-if="openTabMenuTab && (openTabMenuTab.agent_type === 'claude' || openTabMenuTab.agent_type === 'codex')"
-          type="button"
-          class="tab-menu-item"
-          role="menuitem"
-          :loading="isPending(tabActionKey('switch-env', openTabMenuTab.id))"
-          loading-label="Switching env…"
-          @click="openSwitchEnvModal(openTabMenuTab); closeTabMenu(openTabMenuId)"
-        >
-          <span
-            class="tab-menu-item-icon"
-            aria-hidden="true"
-          >⚙</span>
-          <span>Switch Env / Model…</span>
-        </LoadingButton>
-      </div>
-    </Teleport>
     <button
       class="add-tab"
       :disabled="isLoading"
@@ -343,8 +255,17 @@
                 id="tabCwd"
                 v-model="form.cwd"
                 type="text"
+                list="tab-cwd-history"
                 :placeholder="form.target === 'remote' ? '~/workspace/project' : 'e.g., ~/Project/my-app'"
+                autocomplete="off"
               >
+              <datalist id="tab-cwd-history">
+                <option
+                  v-for="cwd in recentCwds"
+                  :key="cwd"
+                  :value="cwd"
+                />
+              </datalist>
               <LoadingButton
                 type="button"
                 class="cwd-dropdown-btn"
@@ -356,6 +277,12 @@
                 Browse
               </LoadingButton>
             </div>
+            <p
+              v-if="recentCwds.length > 0"
+              class="form-hint"
+            >
+              Pick a recent directory from the dropdown or type a new one.
+            </p>
           </div>
           <AgentConfigFields
             v-model:agent-type="form.agent_type"
@@ -551,137 +478,6 @@
       </div>
     </div>
 
-    <!-- Switch Env Modal -->
-    <div
-      v-if="showSwitchEnv"
-      class="modal-overlay"
-      @click.self="closeSwitchEnvModal"
-    >
-      <div class="modal switch-env-modal">
-        <div class="switch-env-header">
-          <div
-            class="switch-env-icon"
-            aria-hidden="true"
-          >
-            ⚙
-          </div>
-          <div class="switch-env-title-block">
-            <h3>Switch Environment</h3>
-            <p class="switch-env-subtitle">
-              {{ switchEnvTab?.name }}
-            </p>
-          </div>
-        </div>
-        <p class="switch-env-callout">
-          <span
-            class="switch-env-callout-icon"
-            aria-hidden="true"
-          >↻</span>
-          <span>
-            The chat provider will restart and automatically resume this conversation.
-            In-flight generation will be interrupted.
-          </span>
-        </p>
-        <form @submit.prevent="handleSwitchEnv">
-          <div class="form-group env-editor">
-            <label>Environment Preset</label>
-            <div class="env-preset-row">
-              <select
-                v-model="switchEnvForm.env_preset"
-                class="select-input"
-                @change="applySwitchEnvPreset(switchEnvForm.env_preset)"
-              >
-                <option
-                  v-for="preset in envPresets"
-                  :key="preset.id"
-                  :value="preset.id"
-                >
-                  {{ preset.name }}
-                </option>
-                <option value="custom">
-                  Custom (current values)
-                </option>
-              </select>
-              <button
-                type="button"
-                class="ch-btn ch-btn--sm env-manage-button"
-                @click="openSwitchEnvPresetManager"
-              >
-                Manage
-              </button>
-            </div>
-          </div>
-          <div class="form-group">
-            <label for="switchEnvText">
-              Environment Variables
-              <span class="field-hint-inline">(KEY=VALUE, one per line)</span>
-            </label>
-            <textarea
-              id="switchEnvText"
-              v-model="switchEnvForm.env_text"
-              class="select-input env-textarea"
-              rows="6"
-              placeholder="ANTHROPIC_MODEL=claude-sonnet-4-5&#10;ANTHROPIC_BASE_URL=https://..."
-            />
-            <p class="form-hint">
-              These fully replace the tab's current environment. Include
-              <code>ANTHROPIC_MODEL</code> to switch models.
-            </p>
-          </div>
-          <div class="form-group">
-            <label class="checkbox-label">
-              <div class="checkbox-row">
-                <input
-                  v-model="switchEnvForm.solo_mode"
-                  type="checkbox"
-                  class="checkbox-input"
-                >
-                <span class="checkbox-text">Solo Mode</span>
-              </div>
-              <span
-                v-if="switchEnvTab?.agent_type === 'codex'"
-                class="checkbox-desc"
-              >
-                Relaunch with <code>--ask-for-approval never</code> and
-                <code>--sandbox danger-full-access</code>.
-              </span>
-              <span
-                v-else
-                class="checkbox-desc"
-              >
-                Relaunch with <code>IS_SANDBOX=1</code> and
-                <code>--dangerously-skip-permissions</code>.
-              </span>
-            </label>
-          </div>
-          <div class="modal-actions">
-            <button
-              type="button"
-              class="ch-btn"
-              @click="closeSwitchEnvModal"
-            >
-              Cancel
-            </button>
-            <LoadingButton
-              type="submit"
-              class="ch-btn ch-btn--primary switch-env-submit"
-              :loading="switchEnvTab ? isPending(tabActionKey('switch-env', switchEnvTab.id)) : false"
-              loading-label="Restarting…"
-            >
-              Restart Provider
-            </LoadingButton>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- Env Preset Manager Modal -->
-    <EnvPresetManager
-      v-model:model-value="switchEnvForm.env_preset"
-      :visible="showSwitchEnvManager"
-      @close="closeSwitchEnvPresetManager"
-    />
-
     <!-- Notification / toast stack (F5: replaces single mutable error string) -->
     <div
       v-if="notifications.length"
@@ -720,13 +516,13 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { CSSProperties } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentAvatar from '@/components/AgentAvatar.vue'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+import TabActionsMenu from '@/components/TabActionsMenu.vue'
 import {
   defaultLaunchEnvPresetForAgent,
   parseLaunchEnv,
@@ -734,15 +530,13 @@ import {
 } from '@/composables/useLaunchEnvPresets'
 import AgentConfigFields from '@/components/AgentConfigFields.vue'
 import CodexSessionSelector from '@/components/CodexSessionSelector.vue'
-import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useTabStatus } from '@/composables/useTabStatus'
+import { useCwdHistory } from '@/composables/useCwdHistory'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
-import { writeClipboard } from '@/utils/clipboard'
-import { buildTabShareText } from '@/utils/deepLink'
 import type { AppMode, RemoteProfile, TerminalTab } from '@/types'
-import type { AgentType, SessionKind, SwitchEnvRequest } from '@/types'
+import type { AgentType, SessionKind } from '@/types'
 
 interface FileInfo {
   name: string
@@ -759,7 +553,7 @@ interface DirectoryListing {
 
 const store = useTerminalStore()
 const appStore = useAppStore()
-const { envPresets, getPresetText, defaultPresetTextForAgent } = useLaunchEnvPresets()
+const { defaultPresetTextForAgent } = useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses, notifications } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
@@ -777,83 +571,21 @@ const fromIndex = ref<number | null>(null)
 const showModal = ref(false)
 const showCloseConfirm = ref(false)
 const showFileBrowser = ref(false)
-const showSwitchEnv = ref(false)
-const showSwitchEnvManager = ref(false)
 const tabToClose = ref<TerminalTab | null>(null)
-const switchEnvTab = ref<TerminalTab | null>(null)
 const editingTabId = ref<string | null>(null)
 const editingTabName = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
 const mobileAppMenuRef = ref<HTMLDetailsElement | null>(null)
 const tabsContainerRef = ref<HTMLDivElement | null>(null)
-// ---- Tab actions popover (⋯) ----
-// A single popover is open at a time; we teleport the panel to <body> so it
-// escapes the .tabs { overflow-y: hidden } clipping rectangle, and position
-// it using the trigger button's bounding rect.
-const openTabMenuId = ref<string | null>(null)
-const tabMenuTriggerRefs = new Map<string, HTMLElement>()
-const tabMenuPanelRef = ref<HTMLElement | null>(null)
-
-const openTabMenuTab = computed<TerminalTab | null>(() => {
-  const id = openTabMenuId.value
-  if (!id) return null
-  return manualTabs.value.find(t => t.id === id) ?? null
-})
-
-const tabMenuPanelStyle = computed<CSSProperties>(() => {
-  const id = openTabMenuId.value
-  if (!id) return {}
-  const trigger = tabMenuTriggerRefs.get(id)
-  if (!trigger) return {}
-  const rect = trigger.getBoundingClientRect()
-  // Align the panel's right edge with the trigger's right edge; place it
-  // just below the tab bar with a small gap.
-  const panelWidth = 200
-  const panelHeightEst = 140
-  let top = rect.bottom + 6
-  let left = rect.right - panelWidth
-  // Keep within viewport.
-  const vw = window.innerWidth
-  const vh = window.innerHeight
-  if (left < 8) left = 8
-  if (left + panelWidth > vw - 8) left = vw - panelWidth - 8
-  if (top + panelHeightEst > vh - 8) top = Math.max(8, rect.top - panelHeightEst - 6)
-  return {
-    position: 'fixed',
-    top: `${top}px`,
-    left: `${left}px`,
-    width: `${panelWidth}px`,
-  }
-})
-
-function setTabMenuTriggerRef(tabId: string, el: unknown) {
-  if (el instanceof HTMLElement) {
-    tabMenuTriggerRefs.set(tabId, el)
-  } else {
-    tabMenuTriggerRefs.delete(tabId)
-  }
-}
-
-function toggleTabMenu(tabId: string) {
-  if (openTabMenuId.value === tabId) {
-    openTabMenuId.value = null
-  } else {
-    openTabMenuId.value = tabId
-  }
-}
-
-function closeTabMenu(tabId?: string | null) {
-  if (tabId == null || openTabMenuId.value === tabId) {
-    openTabMenuId.value = null
-  }
-}
 const showLeftFade = ref(false)
 const showRightFade = ref(false)
 const form = reactive({
   name: '',
   cwd: '',
   session_kind: 'chat' as SessionKind,
-  solo_mode: false,
+  // New sessions default to solo/YOLO mode; the toggle still lets users opt
+  // out for providers that support it (claude/codex/traex).
+  solo_mode: true,
   agent_type: 'claude' as AgentType,
   target: 'local' as 'local' | 'remote',
   remote_profile_id: '',
@@ -861,12 +593,6 @@ const form = reactive({
   env_preset: defaultLaunchEnvPresetForAgent('claude'),
   env_text: defaultPresetTextForAgent('claude'),
   agent_session_id: '',
-})
-
-const switchEnvForm = reactive({
-  env_preset: 'custom' as string,
-  env_text: '',
-  solo_mode: false,
 })
 
 const supportsSoloMode = computed(
@@ -887,6 +613,13 @@ const remoteProfilesError = ref<string | null>(null)
 const selectedRemoteProfile = computed(() =>
   remoteProfiles.value.find(profile => profile.id === form.remote_profile_id) || null
 )
+
+// Working-directory history is scoped per launch target (and per remote
+// server) so the create dialog can offer recently used directories.
+const cwdHistoryScope = computed(() =>
+  form.target === 'remote' ? `remote:${form.remote_profile_id || 'none'}` : 'local'
+)
+const { recentCwds, mostRecentCwd, addCwd } = useCwdHistory(cwdHistoryScope)
 const isCreateDisabled = computed(
   () =>
     isLoading.value ||
@@ -1146,101 +879,6 @@ async function handleRenameTab() {
   editingTabName.value = ''
 }
 
-async function handleTabDuplicate(tabId: string) {
-  await runPending(tabActionKey('duplicate', tabId), () => store.duplicateTab(tabId))
-}
-
-async function handleTabArchive(tabId: string) {
-  await runPending(tabActionKey('archive', tabId), () => store.archiveTab(tabId))
-}
-
-async function handleCopyTabLink(tabId: string) {
-  try {
-    await writeClipboard(buildTabShareText(tabId))
-    store.pushNotification({
-      type: 'success',
-      message: 'Link copied',
-      autoDismissMs: 3000,
-    })
-  } catch {
-    store.pushNotification({
-      type: 'error',
-      message: 'Failed to copy link',
-      autoDismissMs: 8000,
-    })
-  }
-}
-
-function serializeEnv(env: Record<string, string> | undefined): string {
-  if (!env) return ''
-  return Object.entries(env)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n')
-}
-
-function openSwitchEnvModal(tab: TerminalTab) {
-  switchEnvTab.value = tab
-  switchEnvForm.env_preset = 'custom'
-  switchEnvForm.env_text = serializeEnv(tab.env)
-  switchEnvForm.solo_mode = tab.solo_mode ?? false
-  showSwitchEnv.value = true
-}
-
-function closeSwitchEnvModal() {
-  showSwitchEnv.value = false
-  showSwitchEnvManager.value = false
-  switchEnvTab.value = null
-}
-
-function applySwitchEnvPreset(presetId: string) {
-  if (presetId === 'custom') return
-  const text = getPresetText(presetId)
-  if (text === null) return
-  switchEnvForm.env_text = text
-}
-
-function openSwitchEnvPresetManager() {
-  showSwitchEnvManager.value = true
-}
-
-function closeSwitchEnvPresetManager() {
-  showSwitchEnvManager.value = false
-  applySwitchEnvPreset(switchEnvForm.env_preset)
-}
-
-async function handleSwitchEnv() {
-  const tab = switchEnvTab.value
-  if (!tab) return
-  const env = parseLaunchEnv(switchEnvForm.env_text)
-  if (!env) {
-    store.pushNotification({
-      type: 'error',
-      message: 'Please provide at least one KEY=VALUE environment variable, or pick a preset.',
-      autoDismissMs: 6000,
-    })
-    return
-  }
-  const payload: SwitchEnvRequest = {
-    env,
-    solo_mode: switchEnvForm.solo_mode,
-  }
-  const tabId = tab.id
-  try {
-    await runPending(tabActionKey('switch-env', tabId), async () => {
-      await store.switchEnv(tabId, payload)
-    })
-    store.pushNotification({
-      type: 'success',
-      message: `Environment switched for "${tab.name}". Chat is resuming its conversation.`,
-      autoDismissMs: 4000,
-    })
-    closeSwitchEnvModal()
-  } catch (e) {
-    // switchEnv already notifies; let the error surface to console too.
-    console.error('switch env failed', e)
-  }
-}
-
 async function confirmCloseTab() {
   if (tabToClose.value) {
     const tabId = tabToClose.value.id
@@ -1253,6 +891,11 @@ async function confirmCloseTab() {
 }
 
 function openCreateModal() {
+  // First-ever open (before any close-reset has run): prefill the last-used
+  // local directory if the field is still blank.
+  if (form.target === 'local' && !form.cwd) {
+    form.cwd = mostRecentCwd.value
+  }
   showModal.value = true
   fetchRemoteProfiles()
 }
@@ -1285,17 +928,6 @@ function handleDocumentPointerDown(event: PointerEvent) {
   if (mobileAppMenuRef.value && !mobileAppMenuRef.value.contains(target)) {
     closeMobileAppMenu()
   }
-  // Close the tab-actions popover when clicking outside both the trigger
-  // button and the (teleported) panel.
-  if (openTabMenuId.value) {
-    const trigger = tabMenuTriggerRefs.get(openTabMenuId.value)
-    const panel = tabMenuPanelRef.value
-    const inTrigger = trigger && trigger.contains(target)
-    const inPanel = panel && panel.contains(target)
-    if (!inTrigger && !inPanel) {
-      openTabMenuId.value = null
-    }
-  }
 }
 
 function closeCreateModal() {
@@ -1306,10 +938,12 @@ function closeCreateModal() {
 watch(showModal, (newVal) => {
   if (!newVal) {
     form.name = ''
-    form.cwd = ''
-    form.solo_mode = false
-    form.agent_type = 'claude'
     form.target = 'local'
+    // Reset target first so the cwd-history scope resolves to 'local'.
+    form.cwd = mostRecentCwd.value
+    // New sessions default to solo/YOLO mode.
+    form.solo_mode = true
+    form.agent_type = 'claude'
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
     form.agent_session_id = ''
@@ -1335,9 +969,11 @@ watch(
   (target) => {
     if (target === 'remote') {
       fetchRemoteProfiles()
-      form.cwd = selectedRemoteProfile.value?.default_cwd || '~'
+      // Prefer this server's most recent dir, then its configured default.
+      form.cwd = mostRecentCwd.value || selectedRemoteProfile.value?.default_cwd || '~'
     } else {
-      form.cwd = ''
+      // Prefill the last-used local directory (empty until one is used).
+      form.cwd = mostRecentCwd.value
       form.remote_reconnect = true
     }
   }
@@ -1346,8 +982,11 @@ watch(
 watch(
   () => form.remote_profile_id,
   () => {
+    // Profile resolved/changed: if the user hasn't typed a real path (still
+    // the blank/'~' sentinel), prefill the new scope's history, then the
+    // server default. Scope already reflects the new profile here.
     if (form.target === 'remote' && (!form.cwd || form.cwd === '~')) {
-      form.cwd = selectedRemoteProfile.value?.default_cwd || '~'
+      form.cwd = mostRecentCwd.value || selectedRemoteProfile.value?.default_cwd || '~'
     }
   }
 )
@@ -1375,22 +1014,12 @@ onMounted(() => {
   })
   window.addEventListener('resize', updateScrollFadeState)
   document.addEventListener('pointerdown', handleDocumentPointerDown)
-  document.addEventListener('keydown', handleDocumentKeyDown)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', updateScrollFadeState)
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
-  document.removeEventListener('keydown', handleDocumentKeyDown)
 })
-
-function handleDocumentKeyDown(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
-    if (openTabMenuId.value) {
-      openTabMenuId.value = null
-    }
-  }
-}
 
 async function handleCreateTab() {
   const defaultName = `Tab ${manualTabs.value.length + 1}`
@@ -1420,7 +1049,10 @@ async function handleCreateTab() {
       : name
 
   await runPending('tab:create', async () => {
-    await store.createTab({
+    // createTab surfaces failures as a notification and returns undefined
+    // (it does not throw); bail without recording history or resetting the
+    // form so a bad directory never enters history and the user can retry.
+    const created = await store.createTab({
       name: tabName,
       session_kind: form.session_kind,
       cwd: target === 'local' ? cwd : undefined,
@@ -1433,13 +1065,18 @@ async function handleCreateTab() {
       env,
       agent_session_id,
     })
+    if (!created) return
+
+    // Remember the directory before the form resets (history is target-scoped).
+    addCwd(cwd)
 
     form.name = ''
-    form.cwd = ''
-    form.solo_mode = false
     form.session_kind = 'chat'
     form.agent_type = 'claude'
+    form.solo_mode = true
     form.target = 'local'
+    // Scope is 'local' now, so this prefills the just-used (or prior) directory.
+    form.cwd = mostRecentCwd.value
     form.remote_profile_id = remoteProfiles.value[0]?.id || ''
     form.remote_reconnect = true
     form.agent_session_id = ''
@@ -1756,23 +1393,11 @@ async function handleCreateTab() {
   text-align: center;
 }
 
-.tab-menu-trigger {
-  background: none;
-  border: none;
-  color: var(--ch-color-text-soft);
-  font-size: 16px;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: var(--ch-radius-sm);
-  cursor: pointer;
+/* The shared TabActionsMenu trigger is ghosted until the tab is hovered or
+   active (its popover/modal styling lives in TabActionsMenu.vue). */
+.tab .tam-trigger {
   opacity: 0;
-  transition:
-    color var(--ch-motion-fast),
-    background var(--ch-motion-fast),
-    opacity var(--ch-motion-standard);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  transition: opacity var(--ch-motion-standard);
 }
 
 .tab-close {
@@ -1791,23 +1416,14 @@ async function handleCreateTab() {
     opacity var(--ch-motion-standard);
 }
 
-.tab:hover .tab-menu-trigger,
-.tab.active .tab-menu-trigger,
-.tab-menu-trigger.is-open,
+.tab:hover .tam-trigger,
+.tab.active .tam-trigger,
+.tab:focus-within .tam-trigger,
+.tab .tam-trigger[aria-expanded='true'],
 .tab:hover .tab-close,
-.tab.active .tab-close {
+.tab.active .tab-close,
+.tab:focus-within .tab-close {
   opacity: 1;
-}
-
-.tab-menu-trigger:hover,
-.tab-menu-trigger.is-open {
-  color: var(--ch-color-text);
-  background: var(--ch-color-chip-bg);
-}
-
-.tab-menu-trigger:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
 .tab-close:hover {
@@ -1818,155 +1434,6 @@ async function handleCreateTab() {
 .tab-close:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
-}
-
-.tab-menu-panel {
-  z-index: 1200;
-  padding: 6px;
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-raised);
-  border: 1px solid var(--ch-color-border);
-  box-shadow: var(--ch-shadow-popover);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  animation: tab-menu-in var(--ch-motion-fast);
-  transform-origin: top right;
-}
-
-@keyframes tab-menu-in {
-  from {
-    opacity: 0;
-    transform: translateY(-4px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-.tab-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
-  color: var(--ch-color-text);
-  font-size: var(--ch-font-size-sm);
-  font-weight: 500;
-  line-height: 1.2;
-  padding: 8px 10px;
-  border-radius: var(--ch-radius-md);
-  cursor: pointer;
-  transition: background var(--ch-motion-fast), color var(--ch-motion-fast);
-}
-
-.tab-menu-item:hover {
-  background: var(--ch-color-row-hover);
-}
-
-.tab-menu-item:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.tab-menu-item:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
-}
-
-.tab-menu-item-icon {
-  flex: 0 0 auto;
-  width: 16px;
-  text-align: center;
-  color: var(--ch-color-text-muted);
-  font-size: var(--ch-font-size-sm);
-}
-
-.switch-env-modal {
-  width: min(480px, calc(100vw - 32px));
-}
-
-.switch-env-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.switch-env-icon {
-  flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-accent-soft);
-  color: var(--ch-color-accent);
-  font-size: 18px;
-}
-
-.switch-env-title-block {
-  min-width: 0;
-}
-
-.switch-env-title-block h3 {
-  margin: 0;
-  font-size: var(--ch-font-size-lg);
-}
-
-.switch-env-subtitle {
-  margin: 2px 0 0;
-  font-size: var(--ch-font-size-sm);
-  color: var(--ch-color-text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.switch-env-callout {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin: 0 0 18px;
-  padding: 10px 12px;
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-soft, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--ch-color-border-muted);
-  border-left: 3px solid var(--ch-color-accent);
-  font-size: var(--ch-font-size-sm);
-  line-height: 1.5;
-  color: var(--ch-color-text-muted);
-}
-
-.switch-env-callout-icon {
-  flex: 0 0 auto;
-  color: var(--ch-color-accent);
-  font-weight: 600;
-  line-height: 1.5;
-}
-
-.field-hint-inline {
-  color: var(--ch-color-text-soft);
-  font-weight: 400;
-}
-
-.switch-env-submit {
-  min-width: 124px;
-}
-
-.switch-env-modal .form-group label code,
-.switch-env-modal .checkbox-desc code,
-.switch-env-modal .form-hint code {
-  font-family: var(--ch-font-mono);
-  font-size: var(--ch-font-size-sm);
-  padding: 1px 5px;
-  border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-control);
-  color: var(--ch-color-text);
 }
 
 .add-tab {
@@ -2356,63 +1823,6 @@ async function handleCreateTab() {
   color: var(--ch-color-text-soft);
   font-size: var(--ch-font-size-sm);
   margin-left: 24px;
-}
-
-.env-editor {
-  gap: 8px;
-}
-
-.env-preset-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.env-manage-button {
-  white-space: nowrap;
-}
-
-.env-template-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-muted);
-  padding: 10px;
-}
-
-.env-preset-name {
-  width: 100%;
-}
-
-.env-textarea {
-  width: 100%;
-  min-height: 92px;
-  height: auto;
-  padding: 10px 12px;
-  resize: vertical;
-  font-family: var(--ch-font-mono) !important;
-  line-height: 1.45;
-}
-
-.env-textarea-preview {
-  margin-top: 8px;
-  width: 100%;
-  resize: none;
-  min-height: 60px;
-  height: auto;
-  padding: 10px 12px;
-  opacity: 0.75;
-  cursor: default;
-  white-space: pre-wrap;
-  font-family: var(--ch-font-mono) !important;
-}
-
-.env-editor-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 
 .modal-actions {
