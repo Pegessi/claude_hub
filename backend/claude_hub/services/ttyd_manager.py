@@ -3036,6 +3036,7 @@ asyncio.run(_main())
             archived=self.archived,
             archived_at=self.archived_at,
             last_viewed_at=self.last_viewed_at,
+            is_unread=None,
         )
 
 
