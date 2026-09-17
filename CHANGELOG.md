@@ -5,24 +5,30 @@
 
 ## Unreleased
 
-### fix: the hung-turn cap fires even while a session is being watched
+### fix: hung turns are reaped even while a session is being watched
 
 - **Why now.** A TraeX chat session hung mid-turn (the model API stopped
   responding) and stayed stuck for ~3 hours with the Stop button doing
-  nothing. The hung-turn safety cap (`MAX_TURN_DURATION_S`) was nested
-  inside the zero-subscriber idle-reap gate, so a session the user was
-  actively viewing was never protected — the tailer blocked on `read_line`
-  forever, and after a backend restart the in-flight turn was gone, leaving
-  Stop as a no-op.
-- **The change.** Move the hung-turn cap out of the subscriber gate so it
-  runs independent of subscriber presence: a turn stuck past the cap is
-  terminalized (cancelled) and its subprocess reaped whether or not a viewer
-  is attached. The idle-reap behavior for healthy in-flight turns is
-  unchanged — they still complete on their own.
-- **Tests.** A new regression test keeps a subscriber present and asserts
-  the hung turn is cancelled, the transport stopped, and the terminal
+  nothing. The hang checks were nested inside the zero-subscriber idle-reap
+  gate, so a session the user was actively viewing was never protected — the
+  tailer blocked on `read_line` forever, and after a backend restart the
+  in-flight turn was gone, leaving Stop as a no-op.
+- **The change.** Two layers, both independent of subscriber presence:
+  - **Stream inactivity timeout (primary).** The model API is streaming, so
+    a healthy turn emits events continuously. If no event arrives for
+    `STREAM_INACTIVITY_TIMEOUT_S` (10 min), the stream is dead — the turn is
+    terminalized (cancelled) and its subprocess reaped. This catches a stuck
+    turn fast.
+  - **Total-duration cap (backstop).** A turn still in flight past
+    `MAX_TURN_DURATION_S` (1 hr) is reaped, covering edge cases the
+    inactivity check might miss.
+  The idle-reap behavior for healthy in-flight turns is unchanged — they
+  complete on their own.
+- **Tests.** New regression tests keep a subscriber present and assert (a) a
+  silent turn past the inactivity timeout and (b) a turn past the duration
+  cap are cancelled, the transport stopped, and the terminal
   `TURN_COMPLETED (cancelled)` + `ERROR` events persisted. The full
-  agent-stream suite (190 tests) and black/isort/mypy stay green.
+  agent-stream suite (191 tests) and black/isort/mypy stay green.
 
 ### fix: harden the unified model and thinking-effort picker
 
