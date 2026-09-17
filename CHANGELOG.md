@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### fix: the status light moves from the composer to the session sidebar
+
+- **Why now.** The status light was added next to the Send button, but the
+  place it is actually useful is the session sidebar: there, a light next to
+  each session shows its status at a glance — which sessions are working,
+  idle, need attention, or are offline — without clicking into any of them.
+  The composer light was redundant (the Send/Stop buttons already convey the
+  sending state) and just cluttered the input row.
+- **The change.** Remove the composer status light (and its `chatStatus`
+  computed). Each sidebar row gains a status light driven by the same
+  backend-reported `agentStatuses` the TabBar uses: working (pulsing accent),
+  idle (green), attention (amber), offline (dim). The status label (including
+  any `status_text` detail) is exposed as the light's tooltip and accessible
+  name.
+- **Tests.** The structural test now pins the sidebar status light (and its
+  per-state colors) instead of the removed composer light; lint, type-check,
+  and the full unit suite stay green.
+
 ### feat: the TabBar joins the top bar (desktop), and a status light sits by Send
 
 - **Why now.** On desktop the app had two stacked rows — the app-mode-bar
