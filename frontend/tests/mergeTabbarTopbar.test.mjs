@@ -45,6 +45,14 @@ test('a status light in the sidebar shows working, idle, attention, and offline'
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='offline'\]/)
 })
 
+test('an unread completed turn shows a ping ripple on the status light', () => {
+  // the status light carries an unread flag
+  assert.match(chatSidebar, /:data-unread="tab\.is_unread \? 'true' : 'false'"/)
+  // the ping ripple: an accent ring expanding outward from the dot
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-unread='true'\]::after/)
+  assert.match(chatSidebar, /@keyframes sidebar-unread-ping/)
+})
+
 test('a session-name pill sits in the top-right corner of each pane', () => {
   assert.match(terminalPane, /class="pane-session-name"/)
   assert.match(terminalPane, /const tabName = computed/)

@@ -35,7 +35,14 @@ class ForkTabRequest(BaseModel):
 @router.get("", response_model=List[TerminalTab])
 async def list_tabs(current_user: User = Depends(get_current_user)) -> List[TerminalTab]:
     """List all terminal tabs."""
-    return ttyd_manager.list_tabs()
+    tabs = ttyd_manager.list_tabs()
+    # Attach the unread flag (computed from the event stream) so the sidebar
+    # can highlight tabs with unread completed turns.
+    for tab in tabs:
+        process = ttyd_manager.processes.get(tab.id)
+        if process is not None:
+            tab.is_unread = await ttyd_manager.compute_tab_unread(process)
+    return tabs
 
 
 @router.get("/status", response_model=List[TerminalAgentStatus])
@@ -207,6 +214,21 @@ async def unarchive_tab(
     return tab
 
 
+@router.post("/{tab_id}/view", response_model=TerminalTab)
+async def mark_tab_viewed(
+    tab_id: str,
+    current_user: User = Depends(get_current_user),
+) -> TerminalTab:
+    """Mark a tab as viewed (clears its unread flag)."""
+    if not ttyd_manager.mark_tab_viewed(tab_id):
+        raise HTTPException(status_code=404, detail="Tab not found")
+    tab = ttyd_manager.get_tab(tab_id)
+    if not tab:
+        raise HTTPException(status_code=404, detail="Tab not found")
+    tab.is_unread = False
+    return tab
+
+
 @router.get("/{tab_id}", response_model=TerminalTab)
 async def get_tab(
     tab_id: str,
@@ -216,6 +238,9 @@ async def get_tab(
     tab = ttyd_manager.get_tab(tab_id)
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
+    process = ttyd_manager.processes.get(tab_id)
+    if process is not None:
+        tab.is_unread = await ttyd_manager.compute_tab_unread(process)
     return tab
 
 

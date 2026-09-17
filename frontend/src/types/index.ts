@@ -81,6 +81,8 @@ export interface TerminalTab {
   cursor_transcript_schema?: string | null
   archived?: boolean
   archived_at?: string | null
+  last_viewed_at?: string | null
+  is_unread?: boolean
 }
 
 export interface TerminalTabCreate {
