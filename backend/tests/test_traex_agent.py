@@ -25,6 +25,7 @@ from claude_hub.models import (
     ManagedSession,
     ManagedSessionStatus,
     SessionKind,
+    StreamModelOption,
     WorkspaceSessionRole,
 )
 from claude_hub.services.agent_stream.base import NormalizeContext
@@ -488,6 +489,30 @@ async def test_traex_selected_reasoning_effort_reaches_collaboration_mode(
             "developer_instructions": None,
             "reasoning_effort": "high",
         },
+    }
+
+
+def test_traex_ignores_legacy_effort_unsupported_by_selected_model() -> None:
+    session = _managed_session()
+    session.env = {
+        "CODEX_MODEL": "Seed-Code",
+        "TRAEX_REASONING_EFFORT": "high",
+    }
+    transport = TraexNativeSession(session)
+    transport._thread_model = "Seed-Code"
+    transport._provider_model_options = [
+        StreamModelOption(
+            id="Seed-Code",
+            label="Seed Code",
+            supported_reasoning_efforts=[],
+        )
+    ]
+    transport._available_models = transport._provider_model_options
+
+    assert transport._selected_reasoning_effort() is None
+    assert transport._collaboration_mode_payload() == {
+        "mode": "default",
+        "settings": {"model": "Seed-Code", "developer_instructions": None},
     }
 
 

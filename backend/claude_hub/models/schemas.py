@@ -99,6 +99,7 @@ class StreamCapabilities(BaseModel):
     supports_dynamic_modes: bool = False
     available_models: List[StreamModelOption] = Field(default_factory=list)
     current_model: Optional[str] = None
+    current_reasoning_effort: Optional[str] = None
 
 
 class ExecutionTarget(str, Enum):

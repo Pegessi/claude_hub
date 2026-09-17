@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from pytest import MonkeyPatch
@@ -2137,6 +2137,34 @@ def test_cursor_model_variants_group_into_effort_options() -> None:
     ]
 
 
+def test_cursor_single_suffix_model_is_not_grouped_without_family_evidence() -> None:
+    grouped = native_module._group_cursor_model_options(
+        native_module._parse_list_models(
+            "claude-4.6-sonnet-medium - Claude Sonnet 4.6 1M\n"
+            "claude-4.6-sonnet-medium-thinking - Claude Sonnet 4.6 1M Thinking\n"
+        )
+    )
+
+    assert [model.id for model in grouped] == [
+        "claude-4.6-sonnet-medium",
+        "claude-4.6-sonnet-medium-thinking",
+    ]
+    assert all(not model.supported_reasoning_efforts for model in grouped)
+
+
+def test_cursor_group_label_removes_effort_before_thinking_suffix() -> None:
+    grouped = native_module._group_cursor_model_options(
+        native_module._parse_list_models(
+            "claude-opus-5-thinking-low - Claude Opus 5 1M Low Thinking\n"
+            "claude-opus-5-thinking-high - Claude Opus 5 1M High Thinking\n"
+        )
+    )
+
+    assert [(model.id, model.label) for model in grouped] == [
+        ("claude-opus-5-thinking", "Claude Opus 5 1M Thinking")
+    ]
+
+
 def test_codex_reasoning_effort_overrides_mode_preset() -> None:
     session = _session(AgentType.CODEX)
     session.env = {
@@ -2189,6 +2217,49 @@ async def test_codex_discovers_model_specific_reasoning_efforts() -> None:
         "low",
         "high",
     ]
+    assert native.current_reasoning_effort() == "low"
+
+
+@pytest.mark.asyncio
+async def test_codex_model_discovery_follows_pagination() -> None:
+    native = _codex_session()
+    native._send_request = AsyncMock(
+        side_effect=[
+            {
+                "data": [{"model": "gpt-first", "displayName": "First"}],
+                "nextCursor": "page-2",
+            },
+            {
+                "data": [{"model": "gpt-second", "displayName": "Second"}],
+                "nextCursor": None,
+            },
+        ]
+    )
+
+    await native._discover_models()
+
+    assert [model.id for model in native._available_models] == ["gpt-first", "gpt-second"]
+    assert native._send_request.await_args_list == [
+        call("model/list", {}),
+        call("model/list", {"cursor": "page-2"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_codex_model_discovery_retries_after_temporary_failure() -> None:
+    native = _codex_session()
+    native._send_request = AsyncMock(
+        side_effect=[
+            RuntimeError("temporary"),
+            {"data": [{"model": "gpt-recovered", "displayName": "Recovered"}]},
+        ]
+    )
+
+    await native._discover_models()
+    await native._discover_models()
+
+    assert [model.id for model in native._available_models] == ["gpt-recovered"]
+    assert native._send_request.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -2205,7 +2276,7 @@ async def test_cursor_prepare_capabilities_populates_models() -> None:
     assert "claude-opus-5-thinking" in ids
     assert "auto" in ids
     labels = {m.id: m.label for m in caps.available_models}
-    assert labels["claude-opus-4-8-thinking"] == "Claude Opus 4.8 1M Thinking"
+    assert labels["claude-opus-4-8-thinking-high"] == "Claude Opus 4.8 1M Thinking"
     assert labels["auto"] == "Auto"
     opus = next(model for model in caps.available_models if model.id == "claude-opus-5-thinking")
     assert [
@@ -2225,7 +2296,8 @@ async def test_cursor_probe_failure_falls_back_to_static() -> None:
         options = await native_module.available_models_for("cursor")
 
     assert options
-    assert any(model.supported_reasoning_efforts for model in options)
+    assert any(model.id == "claude-opus-4-8-thinking-high" for model in options)
+    assert all(model.provider_model_id for model in options)
     entry = native_module._models_cache["cursor"]
     assert entry.options is options
 
@@ -2247,7 +2319,8 @@ async def test_cursor_probe_timeout_kills_process(monkeypatch: MonkeyPatch) -> N
 
     assert proc.killed is True
     assert options
-    assert any(model.supported_reasoning_efforts for model in options)
+    assert any(model.id == "claude-opus-4-8-thinking-high" for model in options)
+    assert all(model.provider_model_id for model in options)
 
 
 @pytest.mark.asyncio
