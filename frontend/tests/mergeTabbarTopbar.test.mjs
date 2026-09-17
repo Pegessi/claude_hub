@@ -3,16 +3,16 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 const app = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
-const structuredPane = readFileSync(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
-  'utf8',
-)
 const terminalPane = readFileSync(
   new URL('../src/components/TerminalPane.vue', import.meta.url),
   'utf8',
 )
 const useViewport = readFileSync(
   new URL('../src/composables/useViewport.ts', import.meta.url),
+  'utf8',
+)
+const chatSidebar = readFileSync(
+  new URL('../src/components/ChatSidebar.vue', import.meta.url),
   'utf8',
 )
 
@@ -26,16 +26,17 @@ test('desktop TabBar is merged into the app-mode-bar, terminal-mode only', () =>
   assert.match(app, /const \{ isMobile \} = useViewport\(\)/)
 })
 
-test('a status light next to Send shows working, idle, and error', () => {
-  assert.match(structuredPane, /class="composer-status-light"/)
-  assert.match(structuredPane, /const chatStatus = computed/)
-  // error on a failed connection
-  assert.match(structuredPane, /connectionState\.value === 'failed'\) return 'error'/)
-  // working covers a turn in flight and the hydrating phase
-  assert.match(
-    structuredPane,
-    /turnInFlight\.value \|\| connectionState\.value === 'hydrating'\) return 'working'/,
-  )
+test('a status light in the sidebar shows working, idle, attention, and error', () => {
+  assert.match(chatSidebar, /class="chat-sidebar__item-status"/)
+  // the status map is built from the backend-reported agent statuses
+  assert.match(chatSidebar, /const tabStatusById = computed/)
+  assert.match(chatSidebar, /function getTabStatus\(tab: TerminalTab\)/)
+  assert.match(chatSidebar, /function getTabStatusLabel\(tab: TerminalTab\)/)
+  // the per-state colors
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='working'\]/)
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]/)
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='attention'\]/)
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='offline'\]/)
 })
 
 test('a session-name pill sits in the top-right corner of each pane', () => {
