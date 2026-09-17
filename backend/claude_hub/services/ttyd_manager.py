@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 from collections import namedtuple
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict
 
@@ -4143,7 +4143,9 @@ class TTYDManager:
         process = self.processes.get(tab_id)
         if process is None:
             return False
-        process.last_viewed_at = datetime.now()
+        # Use aware UTC so it compares cleanly with the event stream's
+        # created_at (which is datetime.now(timezone.utc)).
+        process.last_viewed_at = datetime.now(timezone.utc)
         self._save_state()
         return True
 
@@ -4153,6 +4155,9 @@ class TTYDManager:
         A turn that completed after the user's ``last_viewed_at`` is unread;
         a tab that has never been viewed is unread once it has a completed turn.
         """
+        # Deferred import to avoid a circular import (agent_stream is a
+        # sibling service; the fork code at the top of this file does the same).
+        from .agent_stream.store import AgentStreamStore
         store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
         completed_at_str = await store.latest_turn_completed_at()
         if completed_at_str is None:
