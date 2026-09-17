@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix: harden the unified model and thinking-effort picker
+
+- Cursor only groups effort-suffixed IDs when the live catalog provides family
+  evidence, preserving standalone models whose real name ends in `medium` or
+  `high`; labels are normalized when the effort word precedes `Thinking`.
+- Codex and TraeX model discovery now follows pagination and retries after a
+  transient failure. Unsupported legacy TraeX effort values are not forwarded.
+- The picker reports the current mode's effective default effort, keeps its
+  detail pane within filtered search results, and uses dialog/listbox semantics
+  appropriate for its searchable two-level interaction.
+
 ### fix: the status light moves from the composer to the session sidebar
 
 - **Why now.** The status light was added next to the Send button, but the

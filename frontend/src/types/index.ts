@@ -616,6 +616,7 @@ export interface StreamCapabilities {
   current_mode: string | null
   available_models: StreamModelOption[]
   current_model: string | null
+  current_reasoning_effort: string | null
 }
 
 export type AgentStreamEventType =

@@ -453,7 +453,9 @@ def _group_cursor_model_options(options: List[StreamModelOption]) -> List[Stream
     grouped: Dict[Tuple[str, bool], StreamModelOption] = {}
     ordered: List[StreamModelOption] = []
     effort_suffixes = sorted(_REASONING_EFFORTS, key=len, reverse=True)
-    label_suffixes = ["Extra High", "Minimal", "Medium", "High", "None", "Low", "Max"]
+    candidates: List[Tuple[StreamModelOption, str, bool, Optional[str]]] = []
+    evidence: Dict[Tuple[str, bool], set[str]] = {}
+    provider_ids = {option.id for option in options}
     for option in options:
         provider_id = option.id
         fast = provider_id.endswith("-fast")
@@ -469,20 +471,36 @@ def _group_cursor_model_options(options: List[StreamModelOption]) -> List[Stream
                     effort = candidate
                     stem = stem[: -(len(candidate) + 1)]
                     break
-        if effort is None:
+        candidates.append((option, stem, fast, effort))
+        if effort is not None:
+            evidence.setdefault((stem, fast), set()).add(effort)
+
+    for option, stem, fast, effort in candidates:
+        provider_id = option.id
+        base_id = f"{stem}-fast" if fast else stem
+        variants = evidence.get((stem, fast), set())
+        # A suffix such as ``-medium`` may be part of a real model name. Only
+        # collapse it when the catalog proves this is an effort family.
+        is_family = len(variants) >= 2 or base_id in provider_ids
+        if effort is None or not is_family:
             standalone = option.model_copy(update={"provider_model_id": provider_id})
             ordered.append(standalone)
             continue
 
-        group_id = f"{stem}-fast" if fast else stem
+        group_id = base_id
         key = (stem, fast)
         group = grouped.get(key)
         if group is None:
-            label = option.label
-            for suffix in label_suffixes:
-                if label.lower().endswith(f" {suffix.lower()}"):
-                    label = label[: -(len(suffix) + 1)]
-                    break
+            effort_labels = "|".join(
+                re.escape(label)
+                for label in ("Extra High", "Minimal", "Medium", "High", "None", "Low", "Max")
+            )
+            label = re.sub(
+                rf"\s+(?:{effort_labels})(?=\s+Thinking$|$)",
+                "",
+                option.label,
+                flags=re.IGNORECASE,
+            )
             if fast and not label.lower().endswith(" fast"):
                 label = f"{label} Fast"
             group = StreamModelOption(
@@ -1019,6 +1037,11 @@ class ProviderSession(ABC):
 
         return None
 
+    def current_reasoning_effort(self) -> Optional[str]:
+        """Return the effective reasoning effort when it is known."""
+
+        return None
+
     async def prepare_capabilities(self) -> None:
         """Discover the available models for this session's agent type.
 
@@ -1284,6 +1307,7 @@ class ProviderSession(ABC):
             supports_dynamic_modes=len(available_modes) > 1,
             available_models=self._available_models,
             current_model=self.current_model(),
+            current_reasoning_effort=self.current_reasoning_effort(),
         )
 
     @property
@@ -1799,17 +1823,28 @@ class CodexNativeSession(ProviderSession):
     async def _discover_models(self) -> None:
         """Load the app-server's model-specific reasoning capabilities."""
 
+        pages: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        seen_cursors: set[str] = set()
+        while True:
+            params = {"cursor": cursor} if cursor is not None else {}
+            try:
+                response = await self._send_request("model/list", params)
+            except RuntimeError:
+                logger.warning("%s model/list unavailable; using static fallback", self.adapter_id)
+                return
+            if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+                return
+            pages.append(response)
+            next_cursor = response.get("nextCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
         self._model_discovery_attempted = True
-        try:
-            response = await self._send_request("model/list", {})
-        except RuntimeError:
-            logger.warning("%s model/list unavailable; using static fallback", self.adapter_id)
-            return
-        data = response.get("data") if isinstance(response, dict) else None
-        if not isinstance(data, list):
-            return
         options: List[StreamModelOption] = []
         seen: set[str] = set()
+        data = [item for page in pages for item in page["data"]]
         for item in data:
             if not isinstance(item, dict) or item.get("hidden") is True:
                 continue
@@ -1880,11 +1915,33 @@ class CodexNativeSession(ProviderSession):
         if self.session.agent_type == AgentType.TRAEX:
             effort = effort or self.session.env.get("TRAEX_REASONING_EFFORT")
         if isinstance(effort, str) and effort.strip() in _REASONING_EFFORTS:
-            return effort.strip()
+            selected = effort.strip()
+            model_id = self.current_model()
+            catalog = self._provider_model_options or []
+            model = next((item for item in catalog if item.id == model_id), None)
+            if model is not None and selected not in {
+                item.id for item in model.supported_reasoning_efforts
+            }:
+                return None
+            return selected
         return None
 
     def current_model(self) -> Optional[str]:
         return self._selected_model_override() or self._thread_model
+
+    def current_reasoning_effort(self) -> Optional[str]:
+        """Return the effort used when no explicit picker override exists."""
+
+        preset = self._mode_presets.get(self._current_mode, {})
+        preset_effort = preset.get("reasoning_effort")
+        if isinstance(preset_effort, str) and preset_effort in _REASONING_EFFORTS:
+            return preset_effort
+        catalog = self._provider_model_options or self._available_models
+        model_id = self.current_model()
+        if model_id is None and len(catalog) == 1:
+            model_id = catalog[0].id
+        model = next((item for item in catalog if item.id == model_id), None)
+        return model.default_reasoning_effort if model is not None else None
 
     def _collaboration_mode_payload(self) -> Optional[Dict[str, Any]]:
         model_override = self._selected_model_override()

@@ -695,7 +695,7 @@
                 ref="modelTriggerEl"
                 type="button"
                 class="composer-mode-trigger"
-                aria-haspopup="menu"
+                aria-haspopup="dialog"
                 :aria-expanded="isModelMenuOpen"
                 :aria-label="`Model and thinking effort: ${combinedModelLabel}`"
                 :title="combinedModelLabel"
@@ -711,7 +711,7 @@
               <div
                 v-if="isModelMenuOpen"
                 class="composer-mode-menu composer-model-menu"
-                role="menu"
+                role="dialog"
                 aria-label="Model and thinking effort"
               >
                 <div class="composer-mode-search">
@@ -728,6 +728,7 @@
                 <div class="composer-model-columns">
                   <div
                     class="composer-mode-list composer-model-list"
+                    role="listbox"
                     aria-label="Models"
                   >
                     <button
@@ -735,8 +736,8 @@
                       :key="model.id"
                       type="button"
                       class="composer-mode-menu-item"
-                      role="menuitemradio"
-                      :aria-checked="selectedMenuModel?.id === model.id"
+                      role="option"
+                      :aria-selected="selectedMenuModel?.id === model.id"
                       @click="chooseMenuModel(model)"
                     >
                       <span class="composer-mode-item-label">{{ model.label }}</span>
@@ -755,6 +756,7 @@
                   <div
                     v-if="selectedMenuModel"
                     class="composer-effort-list"
+                    role="listbox"
                     aria-label="Thinking effort"
                   >
                     <div class="composer-effort-heading">
@@ -765,8 +767,8 @@
                       v-if="selectedMenuModel.supported_reasoning_efforts.length === 0"
                       type="button"
                       class="composer-mode-menu-item"
-                      role="menuitemradio"
-                      :aria-checked="isModelActive(selectedMenuModel)"
+                      role="option"
+                      :aria-selected="isModelActive(selectedMenuModel)"
                       @click="selectModelAndEffort(selectedMenuModel, '')"
                     >
                       <span>Use model</span><span v-if="isModelActive(selectedMenuModel)">✓</span>
@@ -775,11 +777,11 @@
                       v-else
                       type="button"
                       class="composer-mode-menu-item"
-                      role="menuitemradio"
-                      :aria-checked="isModelEffortActive(selectedMenuModel, '')"
+                      role="option"
+                      :aria-selected="isModelEffortActive(selectedMenuModel, '')"
                       @click="selectModelAndEffort(selectedMenuModel, '')"
                     >
-                      <span>Default ({{ effortLabel(selectedMenuModel.default_reasoning_effort) }})</span>
+                      <span>Default ({{ defaultReasoningEffortLabel(selectedMenuModel) }})</span>
                       <span v-if="isModelEffortActive(selectedMenuModel, '')">✓</span>
                     </button>
                     <button
@@ -787,8 +789,8 @@
                       :key="effort.id"
                       type="button"
                       class="composer-mode-menu-item"
-                      role="menuitemradio"
-                      :aria-checked="isModelEffortActive(selectedMenuModel, effort.id)"
+                      role="option"
+                      :aria-selected="isModelEffortActive(selectedMenuModel, effort.id)"
                       :title="effort.description || effort.label || effort.id"
                       @click="selectModelAndEffort(selectedMenuModel, effort.id)"
                     >
@@ -1066,14 +1068,24 @@ const currentReasoningEffort = computed(() => {
   }
   const key = reasoningEffortEnvVar.value
   if (!key) return ''
-  return currentTab.value?.env?.[key]
+  const selected = currentTab.value?.env?.[key]
     ?? (currentTab.value?.agent_type === 'traex'
       ? currentTab.value?.env?.[LEGACY_TRAEX_REASONING_EFFORT_ENV]
       : '')
     ?? ''
+  if (
+    selected
+    && currentModelOption.value
+    && !currentModelOption.value.supported_reasoning_efforts.some(effort => effort.id === selected)
+  ) return ''
+  return selected
 })
 const currentReasoningEffortLabel = computed(() =>
-  effortLabel(currentReasoningEffort.value || currentModelOption.value?.default_reasoning_effort),
+  effortLabel(
+    currentReasoningEffort.value
+    || capabilities.value?.current_reasoning_effort
+    || currentModelOption.value?.default_reasoning_effort,
+  ),
 )
 const combinedModelLabel = computed(() => {
   if (!currentModelOption.value?.supported_reasoning_efforts.length) return currentModelLabel.value
@@ -1094,6 +1106,11 @@ function effortLabel(effort?: string | null) {
   if (!effort) return 'Default'
   return ({ xhigh: 'Extra High' } as Record<string, string>)[effort]
     ?? effort.replace(/(^|[-_])\w/g, part => part.replace(/[-_]/, ' ').toUpperCase())
+}
+function defaultReasoningEffortLabel(model: StreamModelOption) {
+  return effortLabel(
+    capabilities.value?.current_reasoning_effort ?? model.default_reasoning_effort,
+  )
 }
 // Search filter for the picker. Matches id or label, case-insensitive.
 const modelSearch = ref('')
@@ -1118,8 +1135,8 @@ const isUpdatingModel = ref(false)
 const isUpdatingReasoningEffort = ref(false)
 const selectedMenuModelId = ref('')
 const selectedMenuModel = computed(() =>
-  modelOptions.value.find(model => model.id === selectedMenuModelId.value)
-  ?? currentModelOption.value
+  filteredModelOptions.value.find(model => model.id === selectedMenuModelId.value)
+  ?? filteredModelOptions.value.find(model => model.id === currentModelOption.value?.id)
   ?? filteredModelOptions.value[0]
   ?? null,
 )
