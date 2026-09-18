@@ -3342,7 +3342,8 @@ async def test_native_codex_answer_emits_persisted_approval_resolved(
     answer = json.dumps(
         {"type": "ask_question_response", "answers": [{"questionId": "q1", "selected": ["red"]}]}
     )
-    await tailer.send_message(answer, [], client_turn_id="turn-codex-answer")
+    assert not await tailer.answer_pending_question(answer, "wrong-turn")
+    assert await tailer.answer_pending_question(answer, "turn-codex")
 
     resolved = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_RESOLVED)
     assert resolved.payload["tool_call_id"] == "it-9"
@@ -3413,6 +3414,9 @@ async def test_native_claude_answer_emits_persisted_approval_resolved(
     answer = json.dumps(
         {"type": "ask_question_response", "answers": [{"questionId": "0", "selected": ["Fast"]}]}
     )
+    assert tailer.accepts_question_followup(answer, "turn-claude")
+    assert not tailer.accepts_question_followup(answer, "wrong-turn")
+    assert not tailer.accepts_question_followup("ordinary message", "turn-claude")
     await tailer.send_message(answer, [], client_turn_id="turn-claude-answer", delivery="steer")
 
     resolved = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_RESOLVED)

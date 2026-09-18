@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 import weakref
@@ -121,6 +122,7 @@ class _GoalProtocolSanitizer:
     """
 
     _OPENERS = ("<goal-checkpoint", "<goal-status")
+    _OPENING_TAG = re.compile(r"<goal-(checkpoint|status)(?=[\s>])", re.IGNORECASE)
     _CLOSERS = {"checkpoint": "</goal-checkpoint>", "status": "</goal-status>"}
 
     def __init__(self) -> None:
@@ -132,7 +134,7 @@ class _GoalProtocolSanitizer:
         lowered = text.lower()
         best = 0
         for opener in _GoalProtocolSanitizer._OPENERS:
-            for length in range(1, min(len(lowered), len(opener) - 1) + 1):
+            for length in range(1, min(len(lowered), len(opener)) + 1):
                 if lowered.endswith(opener[:length]):
                     best = max(best, length)
         return best
@@ -156,23 +158,13 @@ class _GoalProtocolSanitizer:
                 self._inside = None
                 continue
 
-            starts = [
-                (lowered.find(opener), name)
-                for opener, name in (
-                    (self._OPENERS[0], "checkpoint"),
-                    (self._OPENERS[1], "status"),
-                )
-            ]
-            starts = [(index, name) for index, name in starts if index >= 0]
-            if starts:
-                start, name = min(starts)
-                visible.append(self._pending[:start])
-                tag_end = self._pending.find(">", start)
-                if tag_end < 0:
-                    self._pending = self._pending[start:]
-                    break
-                self._pending = self._pending[tag_end + 1 :]
-                self._inside = name
+            opener = self._OPENING_TAG.search(self._pending)
+            if opener:
+                visible.append(self._pending[: opener.start()])
+                self._pending = self._pending[opener.end() :]
+                # The delimiter establishes a control block. Its opening
+                # attributes need not accumulate while awaiting a closing tag.
+                self._inside = opener.group(1).lower()
                 continue
 
             if final:
@@ -439,6 +431,44 @@ class SessionTailer:
         self._native_terminal_status = NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.ATTENTION,
             detail=f"native provider turn {status or 'failed'}",
+        )
+
+    async def answer_pending_question(self, text: str, expected_turn_id: str) -> bool:
+        """Answer the current native question without ever starting a turn."""
+        answers = parse_ask_question_response(text)
+        transport = self._native_transport
+        if (
+            answers is None
+            or transport is None
+            or self._active_turn_id != expected_turn_id
+            or not transport.turn_in_flight
+        ):
+            return False
+        consumed = await transport.answer_pending_question(answers)
+        if consumed:
+            await self._emit_approval_resolved(answers)
+        return consumed
+
+    def accepts_question_followup(self, text: str, expected_turn_id: str) -> bool:
+        """Claude/Cursor questions need a normal follow-up after Goal pauses."""
+        session = self._session_getter()
+        answers = parse_ask_question_response(text)
+        if session is None or session.agent_type not in {AgentType.CLAUDE, AgentType.CURSOR}:
+            return False
+        if answers is None:
+            return False
+        ids = {
+            answer["questionId"]
+            for answer in answers
+            if isinstance(answer, dict)
+            and isinstance(answer.get("questionId"), str)
+            and isinstance(answer.get("selected"), list)
+        }
+        return any(
+            card.turn_id == expected_turn_id
+            and bool(card.question_ids)
+            and (not answers or card.question_ids <= ids)
+            for card in self._pending_approvals.values()
         )
 
     async def send_message(
@@ -1981,11 +2011,23 @@ class TailerManager:
         tailer = await self._get_or_create(session)
         return await tailer.cancel_turn(expected_turn_id)
 
+    async def answer_pending_question(
+        self, session: ManagedSession, text: str, expected_turn_id: str
+    ) -> bool:
+        tailer = await self._get_or_create(session)
+        return await tailer.answer_pending_question(text, expected_turn_id)
+
     async def turn_in_flight(self, session: ManagedSession) -> bool:
         """Return the authoritative native transport turn guard."""
         tailer = await self._get_or_create(session)
         transport = tailer._native_transport
         return bool(transport is not None and transport.turn_in_flight)
+
+    async def accepts_question_followup(
+        self, session: ManagedSession, text: str, expected_turn_id: str
+    ) -> bool:
+        tailer = await self._get_or_create(session)
+        return tailer.accepts_question_followup(text, expected_turn_id)
 
     async def edit_resend(
         self,

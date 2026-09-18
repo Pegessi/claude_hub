@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth.dependencies import get_current_user
 from ..models import (
+    ChatMode,
     GoalBudgetUpdate,
     GoalMutationRequest,
     GoalRun,
@@ -77,6 +78,18 @@ def _direct_chat_tab(tab_id: str) -> None:
         )
 
 
+async def _ensure_goal_ready(tab_id: str, *, check_busy: bool = True) -> None:
+    from .agent_stream import _get_tab_tailer_manager, _terminal_tab_session_or_404
+
+    session = _terminal_tab_session_or_404(tab_id)
+    if session.chat_mode == ChatMode.PLAN:
+        raise GoalPolicyError("Switch to Agent mode before starting or resuming a Goal")
+    if check_busy and await _get_tab_tailer_manager().turn_in_flight(session):
+        raise GoalPolicyError(
+            "Wait for the current Chat turn to finish before starting or resuming a Goal"
+        )
+
+
 def _call(operation: Callable[..., GoalRun], *args: object) -> GoalRun:
     try:
         return operation(*args)
@@ -99,15 +112,8 @@ async def create_goal(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
         if replay is not None:
             return replay
-        from .agent_stream import _get_tab_tailer_manager, _terminal_tab_session_or_404
-
-        session = _terminal_tab_session_or_404(tab_id)
-        if await _get_tab_tailer_manager().turn_in_flight(session):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Wait for the current Chat turn to finish before starting a Goal",
-            )
         try:
+            await _ensure_goal_ready(tab_id)
             return await manager.create_and_start(tab_id, body)
         except (ValueError, GoalPolicyError) as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
@@ -149,6 +155,11 @@ async def resume_goal(
         manager = get_goal_manager()
         goal = manager.get(goal_id)
         async with get_goal_admission_lock(goal.tab_id):
+            goal = manager.get(goal_id)
+            if body.client_request_id not in goal.idempotency and goal.status.value != "active":
+                await _ensure_goal_ready(
+                    goal.tab_id, check_busy=goal.dispatch_state.value == "idle"
+                )
             return await manager.resume(goal_id, body.client_request_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None

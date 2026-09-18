@@ -1,4 +1,4 @@
-import { computed, onUnmounted, ref, type Ref } from 'vue'
+import { computed, onUnmounted, ref, watch, type Ref } from 'vue'
 import type { ChatGoal, ChatGoalCreate } from '@/types'
 
 type GoalMutation = 'pause' | 'resume' | 'complete' | 'clear'
@@ -26,6 +26,7 @@ export function useChatGoal(tabId: Ref<string>) {
   let epoch = 0
   let mutationEpoch = 0
   let hydrationController: AbortController | null = null
+  let mutationController: AbortController | null = null
 
   async function hydrate(): Promise<void> {
     if (isMutating.value) return
@@ -33,6 +34,7 @@ export function useChatGoal(tabId: Ref<string>) {
     hydrationController?.abort()
     const controller = new AbortController()
     hydrationController = controller
+    const timeout = setTimeout(() => controller.abort(), 15_000)
     isHydrating.value = true
     error.value = null
     try {
@@ -53,19 +55,21 @@ export function useChatGoal(tabId: Ref<string>) {
         isHydrated.value = true
       }
     } catch (cause) {
-      if (controller.signal.aborted || requestEpoch !== epoch) return
+      if (requestEpoch !== epoch) return
       error.value = cause instanceof Error ? cause.message : 'Failed to load Goal.'
     } finally {
+      clearTimeout(timeout)
       if (requestEpoch === epoch) isHydrating.value = false
     }
   }
 
   async function create(input: Omit<ChatGoalCreate, 'client_request_id'>): Promise<boolean> {
-    return run(async () => {
+    return run(async signal => {
       const response = await fetch(`/api/tabs/${tabId.value}/goal`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
+        signal,
         body: JSON.stringify({ ...input, client_request_id: requestId() }),
       })
       if (!response.ok) throw new Error(await errorDetail(response))
@@ -76,20 +80,38 @@ export function useChatGoal(tabId: Ref<string>) {
   async function mutate(operation: GoalMutation): Promise<boolean> {
     const current = goal.value
     if (!current) return false
-    return run(async () => {
+    return run(async signal => {
       const response = await fetch(`/api/goals/${current.id}/${operation}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
+        signal,
         body: JSON.stringify({ client_request_id: requestId() }),
       })
       if (!response.ok) throw new Error(await errorDetail(response))
-      if (operation === 'clear' || response.status === 204) return null
+      if (response.status === 204) return null
+      const result = await response.json() as ChatGoal
+      return result.status === 'cancelled' && result.dispatch_state === 'idle' ? null : result
+    })
+  }
+
+  async function updateBudget(tokenBudget: number | null): Promise<boolean> {
+    const current = goal.value
+    if (!current) return false
+    return run(async signal => {
+      const response = await fetch(`/api/goals/${current.id}/budget`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        signal,
+        body: JSON.stringify({ token_budget: tokenBudget, client_request_id: requestId() }),
+      })
+      if (!response.ok) throw new Error(await errorDetail(response))
       return await response.json() as ChatGoal
     })
   }
 
-  async function run(action: () => Promise<ChatGoal | null>): Promise<boolean> {
+  async function run(action: (signal: AbortSignal) => Promise<ChatGoal | null>): Promise<boolean> {
     if (isMutating.value) return false
     epoch++
     const requestMutationEpoch = ++mutationEpoch
@@ -97,17 +119,27 @@ export function useChatGoal(tabId: Ref<string>) {
     isHydrating.value = false
     isMutating.value = true
     error.value = null
+    const controller = new AbortController()
+    mutationController = controller
+    const timeout = setTimeout(() => controller.abort(), 30_000)
     try {
-      const nextGoal = await action()
+      const nextGoal = await action(controller.signal)
       if (requestMutationEpoch !== mutationEpoch) return false
       goal.value = nextGoal
+      isHydrated.value = true
       return true
     } catch (cause) {
       if (requestMutationEpoch === mutationEpoch) {
-        error.value = cause instanceof Error ? cause.message : 'Goal action failed.'
+        const message = cause instanceof Error ? cause.message : 'Goal action failed.'
+        // A lost response does not imply the server rejected the operation.
+        // Reconcile before letting the UI offer a conflicting action.
+        isMutating.value = false
+        await hydrate()
+        if (requestMutationEpoch === mutationEpoch) error.value = message
       }
       return false
     } finally {
+      clearTimeout(timeout)
       if (requestMutationEpoch === mutationEpoch) isMutating.value = false
     }
   }
@@ -116,8 +148,17 @@ export function useChatGoal(tabId: Ref<string>) {
     epoch++
     mutationEpoch++
     hydrationController?.abort()
+    mutationController?.abort()
     hydrationController = null
   }
+
+  watch(tabId, () => {
+    dispose()
+    goal.value = null
+    isHydrated.value = false
+    isMutating.value = false
+    void hydrate()
+  }, { flush: 'sync' })
 
   onUnmounted(dispose)
 
@@ -130,6 +171,7 @@ export function useChatGoal(tabId: Ref<string>) {
     hasGoal: computed(() => goal.value !== null),
     hydrate,
     create,
+    updateBudget,
     pause: () => mutate('pause'),
     resume: () => mutate('resume'),
     complete: () => mutate('complete'),

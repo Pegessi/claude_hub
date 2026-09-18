@@ -2058,18 +2058,13 @@ class CodexNativeSession(ProviderSession):
 
         Maps the composer's ``[{questionId, selected: [labels]}]`` payload to
         the app-server's ``{answers: {questionId: {answers: [labels]}}}``
-        shape and sends it as the JSON-RPC response for every pending question
-        request. An empty answers list (dismissal) yields ``{"answers": {}}``.
+        shape and responds only to matching pending question requests.
+        An empty answers list (dismissal) yields ``{"answers": {}}``.
         Returns ``False`` when no question is pending so the caller can
         deliver the text normally.
         """
         if not self._pending_questions:
             return False
-        # Snapshot and clear BEFORE awaiting so a concurrent answer call cannot
-        # observe a partially-popped map and re-send responses for the ids the
-        # first call is still draining.
-        pending = list(self._pending_questions.items())
-        self._pending_questions.clear()
         codex_answers: Dict[str, Dict[str, List[str]]] = {}
         for entry in answers:
             if not isinstance(entry, dict):
@@ -2080,10 +2075,25 @@ class CodexNativeSession(ProviderSession):
                 continue
             values = [value for value in selected if isinstance(value, str)]
             codex_answers[question_id] = {"answers": values}
-        result = {"answers": codex_answers}
-        for req_id, _params in pending:
+        responses: List[Tuple[Any, Dict[str, Any]]] = []
+        for req_id, params in list(self._pending_questions.items()):
+            ids = {
+                question["id"] for question in codex_normalize_questions(params.get("questions"))
+            }
+            if answers and (not ids or not ids <= codex_answers.keys()):
+                continue
+            self._pending_questions.pop(req_id)
+            responses.append(
+                (
+                    req_id,
+                    {"answers": {key: value for key, value in codex_answers.items() if key in ids}},
+                )
+            )
+        # Claim matching requests before yielding so concurrent clicks cannot
+        # answer a request twice or dismiss an unrelated question.
+        for req_id, result in responses:
             await self._send_jsonrpc_response(req_id, result=result)
-        return True
+        return bool(responses)
 
     # ── output override ─────────────────────────────────────────────────────
 
