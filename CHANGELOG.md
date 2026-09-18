@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### fix: close Goal lifecycle and question-answering gaps
+
+- Claim each continuation once and wait only for its provider acceptance before
+  cancellation. Replaying an old pause cannot cancel a resumed turn.
+- Keep uncertain stops visible and block replacement Goals until reconciled;
+  clearing the latest Goal no longer resurrects an older completed Goal.
+- Answer native blocking questions in-place. Claude/Cursor question follow-ups
+  pause the Goal before delivery, and rejected answers keep their cards open.
+- Preserve original create inputs for retries, refresh snapshot timestamps on
+  automatic progress, and account for a running turn after a budget reduction.
+- Add budget editing and retry-stop controls, reconcile lost mutation responses,
+  and keep similar-looking ordinary text visible when filtering control blocks.
+
 ### fix: isolate terminal recovery tests and prioritize live input
 
 - Keep real ttyd and HMR recovery tests on a unique tmux socket even when the

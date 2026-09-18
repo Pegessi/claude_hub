@@ -470,7 +470,9 @@ async def _set_stream_mode_for(
         async with admission:
             if direct_tab and mode == ChatMode.PLAN.value:
                 goal = get_goal_manager().current(tab_id)
-                if goal is not None and goal.status.value == "active":
+                if goal is not None and (
+                    goal.status.value == "active" or goal.dispatch_state.value != "idle"
+                ):
                     raise HTTPException(
                         status_code=409,
                         detail="Pause or finish the active Goal before switching to Plan mode",
@@ -1257,14 +1259,32 @@ async def send_tab_stream_input(
 
     async with get_goal_admission_lock(tab_id):
         goal = get_goal_manager().current(tab_id)
-        if goal is not None and goal.status.value == "active":
-            raise HTTPException(
-                status_code=409,
-                detail="Pause or finish the active Goal before sending a manual turn",
-            )
         session = _terminal_tab_session_or_404(tab_id)
         manager = _get_tab_tailer_manager()
         try:
+            if goal is not None and (
+                goal.status.value == "active" or goal.dispatch_state.value != "idle"
+            ):
+                if (
+                    goal.status.value == "active"
+                    and goal.current_turn_id
+                    and not payload.attachments
+                ):
+                    if await manager.answer_pending_question(
+                        session, payload.text, goal.current_turn_id
+                    ):
+                        return {"ok": True}
+                    if await manager.accepts_question_followup(
+                        session, payload.text, goal.current_turn_id
+                    ):
+                        goal = await get_goal_manager().pause(
+                            goal.id, f"answer:{payload.client_turn_id}"
+                        )
+                if goal.status.value == "active" or goal.dispatch_state.value != "idle":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pause or finish the active Goal before sending a manual turn",
+                    )
             await _send_to_native(session, payload, manager)
         except StructuredSourceUnavailable as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -1393,27 +1413,30 @@ async def edit_resend_tab_stream(
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Edit-resend for a direct Agent tab."""
-    from ..services.goal_run import get_goal_manager
+    from ..services.goal_run import get_goal_admission_lock, get_goal_manager
 
-    goal = get_goal_manager().current(tab_id)
-    if goal is not None and goal.status not in TERMINAL_GOAL_STATUSES:
-        raise HTTPException(
-            status_code=409,
-            detail="Pause or finish the active Goal before editing conversation history",
-        )
-    session = _terminal_tab_session_or_404(tab_id)
-    manager = _get_tab_tailer_manager()
-    try:
-        await manager.edit_resend(
-            session,
-            payload.text,
-            payload.client_turn_id,
-            payload.turn_id,
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _map_edit_resend_exception(exc) from exc
+    async with get_goal_admission_lock(tab_id):
+        goal = get_goal_manager().current(tab_id)
+        if goal is not None and (
+            goal.status not in TERMINAL_GOAL_STATUSES or goal.dispatch_state.value != "idle"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Finish or clear the Goal before editing conversation history",
+            )
+        session = _terminal_tab_session_or_404(tab_id)
+        manager = _get_tab_tailer_manager()
+        try:
+            await manager.edit_resend(
+                session,
+                payload.text,
+                payload.client_turn_id,
+                payload.turn_id,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _map_edit_resend_exception(exc) from exc
     return {"ok": True}
 
 

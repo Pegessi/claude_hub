@@ -558,6 +558,7 @@
       @resume="resumeGoal"
       @complete="completeGoal"
       @clear="clearGoal"
+      @budget="updateGoalBudget"
     />
 
     <!-- Composer -->
@@ -880,7 +881,7 @@ import { IncrementalTimelineReducer, foldTurnParts, messageClockLabel, splitTurn
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
-import { goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
+import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
@@ -911,13 +912,14 @@ const {
   resume: resumeGoal,
   complete: completeGoal,
   clear: clearGoal,
+  updateBudget: updateGoalBudget,
 } = useChatGoal(toRef(props, 'tabId'))
 const isGoalSetupOpen = ref(false)
 const goalPlanReason = computed(() => goalPlanLockReason(goal.value))
-const goalEditReason = computed(() => goal.value && !isGoalTerminal(goal.value.status)
-  ? 'Pause or finish the active Goal before editing history'
+const goalEditReason = computed(() => goal.value && (!isGoalTerminal(goal.value.status) || goalBlocksPlan(goal.value))
+  ? 'Finish or clear the Goal before editing history'
   : null)
-const goalComposerLocked = computed(() => goal.value?.status === 'active')
+const goalComposerLocked = computed(() => goalBlocksPlan(goal.value))
 const goalComposerReason = computed(() => goalComposerLocked.value
   ? 'Pause or complete the active Goal before sending messages'
   : null)
@@ -1222,7 +1224,7 @@ function goalReflectsCompletedTurn(turnId: string | null, baselineVersion: strin
     current.completed_turn_ids?.includes(turnId) ||
     current.checkpoint?.turn_id === turnId
   )) return true
-  return goalSnapshotVersion() !== baselineVersion
+  return turnId ? false : goalSnapshotVersion() !== baselineVersion
 }
 
 function waitForGoalRefresh(delayMs: number): Promise<void> {
@@ -1898,8 +1900,9 @@ async function submitQuestionResponse(approval: TimelineApproval) {
     composerError.value = '请选择所有问题的选项后再提交。'
     return
   }
-  await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))
-  markResolved(approval.key)
+  if (await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))) {
+    markResolved(approval.key)
+  }
 }
 
 async function cancelActiveTurn() {
@@ -2123,12 +2126,14 @@ async function submit(
     }
     requestLatestAnchor(true)
     await sendToStream(message, atts, clientTurnId, delivery)
+    if (messageOverride) await hydrateGoal()
     // The POST acknowledgement means provider dispatch has begun. Refresh the
     // backend-native tab status now rather than waiting for the 5s poll phase;
     // turn_started/completed/error boundaries above provide subsequent edges.
     void terminalStore.fetchAgentStatuses()
     // Success: composer already cleared; nothing more to do.
     void nextTick(() => syncComposerTextareaHeight())
+    return true
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
     if (!messageOverride) {
@@ -2136,6 +2141,7 @@ async function submit(
       attachments.value = draftAtts
     }
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
+    return false
   } finally {
     isSending.value = false
   }

@@ -22,7 +22,7 @@
         class="goal-status-dot"
         aria-hidden="true"
       />
-      <strong>{{ goalStatusLabel(goal.status) }}</strong>
+      <strong>{{ needsReconciliation ? 'Stop unconfirmed' : goalStatusLabel(goal.status) }}</strong>
       <span class="goal-objective">{{ goal.objective }}</span>
       <span class="goal-usage">{{ goalUsageLabel(goal.token_usage, goal.token_budget, goal.usage_quality) }}</span>
       <span aria-hidden="true">{{ expanded ? '▾' : '▸' }}</span>
@@ -40,6 +40,28 @@
         <span>Started {{ formatTime(goal.created_at) }}</span>
         <span>Updated {{ formatTime(goal.updated_at) }}</span>
       </div>
+      <form
+        v-if="!isGoalTerminal(goal.status)"
+        class="goal-budget-form"
+        @submit.prevent="saveBudget"
+      >
+        <label :for="`${detailsId}-budget`">Token budget (blank for no limit)</label>
+        <input
+          :id="`${detailsId}-budget`"
+          v-model="budgetDraft"
+          type="number"
+          min="1"
+          step="1"
+          :disabled="busy"
+        >
+        <button
+          type="submit"
+          :disabled="busy"
+        >
+          Save budget
+        </button>
+        <span v-if="goal.turns_completed >= goal.max_turns">Turn limit reached. Start a new Goal to continue.</span>
+      </form>
       <p
         v-if="goal.status_message"
         class="goal-status-message"
@@ -87,6 +109,14 @@
     </p>
     <div class="goal-status-actions">
       <button
+        v-if="needsReconciliation"
+        type="button"
+        :disabled="busy"
+        @click="retryStop"
+      >
+        Retry stop
+      </button>
+      <button
         v-if="goal.status === 'active'"
         type="button"
         :disabled="busy"
@@ -95,12 +125,20 @@
         Pause
       </button>
       <button
-        v-if="goal.status === 'paused' || goal.status === 'blocked'"
+        v-if="!needsReconciliation && (goal.status === 'paused' || goal.status === 'blocked')"
         type="button"
         :disabled="busy"
         @click="emit('resume')"
       >
         Resume
+      </button>
+      <button
+        v-if="goal.status === 'budget_limited'"
+        type="button"
+        :disabled="busy"
+        @click="expanded = true"
+      >
+        Adjust budget
       </button>
       <button
         v-if="!isGoalTerminal(goal.status)"
@@ -122,16 +160,29 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { ChatGoal } from '@/types'
 import { goalStatusLabel, goalUsageLabel, isGoalTerminal } from '@/utils/chatGoalPolicy'
 
 const props = defineProps<{ goal: ChatGoal; busy?: boolean; error?: string | null }>()
-const emit = defineEmits<{ pause: []; resume: []; complete: []; clear: [] }>()
+const emit = defineEmits<{ pause: []; resume: []; complete: []; clear: []; budget: [value: number | null] }>()
 const expanded = ref(false)
+const budgetDraft = ref('')
+watch(() => props.goal.token_budget, value => { budgetDraft.value = value?.toString() ?? '' }, { immediate: true })
+const needsReconciliation = computed(() => props.goal.dispatch_state === 'uncertain')
+function retryStop() {
+  if (props.goal.status === 'cancelled' || isGoalTerminal(props.goal.status)) emit('clear')
+  else emit('pause')
+}
+function saveBudget() {
+  const value = String(budgetDraft.value).trim()
+  const budget = value === '' ? null : Number(value)
+  if (budget !== null && (!Number.isSafeInteger(budget) || budget < 1)) return
+  emit('budget', budget)
+}
 const detailsId = computed(() => `goal-status-details-${props.goal.id}`)
 const liveStatus = computed(() => [
-  `Goal ${goalStatusLabel(props.goal.status)}`,
+  `Goal ${needsReconciliation.value ? 'stop unconfirmed' : goalStatusLabel(props.goal.status)}`,
   `${props.goal.turns_completed} of ${props.goal.max_turns} turns`,
   goalUsageLabel(props.goal.token_usage, props.goal.token_budget, props.goal.usage_quality),
 ].join(', '))
@@ -153,6 +204,9 @@ function formatTime(value: string): string { return new Date(value).toLocaleStri
 .goal-status-details { position: absolute; right: 28px; bottom: 72px; left: 28px; z-index: 4; max-height: min(60dvh, 480px); padding: 12px; overflow-y: auto; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-elevated, var(--ch-color-surface)); box-shadow: var(--ch-shadow-md); }
 .goal-status-details p { margin: 0 0 8px; white-space: pre-wrap; }
 .goal-status-meta { display: flex; flex-wrap: wrap; gap: 12px; color: var(--ch-color-text-subtle); }
+.goal-budget-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.goal-budget-form input { width: 120px; padding: 4px; color: inherit; background: var(--ch-color-surface); border: 1px solid var(--ch-color-border); }
+.goal-budget-form button { padding: 4px 8px; color: inherit; background: transparent; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-sm); cursor: pointer; }
 .goal-status-message, .goal-status-error { color: var(--ch-color-warning, #e0a800); }
 .goal-status-error { color: var(--ch-color-danger, #e5484d); }
 .goal-status-error--summary { max-width: 260px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

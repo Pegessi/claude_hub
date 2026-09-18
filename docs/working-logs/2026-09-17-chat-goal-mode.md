@@ -138,6 +138,42 @@ and fixed provider assignments are not.
   socket; terminal input interrupts replay buffering and performs a later
   reconciliation instead of dropping live input.
 
+## Follow-up review (2026-09-18)
+
+The review reproduced duplicate sends of one durable step, stale pause retries
+cancelling a resumed turn, hidden failed cancellations, resurrection of older
+Goals after clear, mutable-budget create replay conflicts, lost accounting after
+lowering the budget mid-turn, and rejected answers to active native questions.
+
+The controller now claims each step with a short-lived acceptance future.
+Lifecycle mutations serialize separately from the completion state lock, so a
+provider can report completion while cancellation waits. Transport failures
+retain uncertain identity and pause, allowing explicit reconciliation instead
+of losing the task. A cancelled Goal remains current until its dispatch is idle;
+the store checks unfinished execution as well as display status before replacement.
+
+Codex/TraeX question answers use a strict current-turn path with no new-turn
+fallback. Codex matches pending question IDs instead of dismissing every request.
+Claude/Cursor do not have that blocking response channel: an answer to a tracked
+card pauses the Goal and uses the existing follow-up path; the user resumes the
+Goal when that exchange finishes. Ordinary manual sends remain locked while
+execution is active or stopping. New/resumed Goals require Agent/Default mode.
+
+Budget edits apply to the next dispatch decision; an already running turn still
+completes and contributes usage. Expanded details expose budget editing, and an
+uncertain stop has a visible retry action. A lost mutation response triggers an
+authoritative refresh. A failed question submission no longer marks its card
+resolved. Every snapshot write refreshes updated_at. Known turn IDs, rather than
+unrelated version changes, govern completion reconciliation in the UI.
+
+Validation includes deterministic interleavings, persisted cold-load retries,
+provider question fixtures, split-tag parser tests, composable behavior tests,
+and opt-in Playwright checks at 1280 px and 375 px. Run the latter with a dedicated
+Vite server and `GOAL_UI_REVIEW_URL=http://127.0.0.1:<port> uv run pytest
+tests/test_goal_ui_browser.py`; API replies are stubbed and no provider is invoked.
+These checks establish lifecycle/UI behavior, not an empirical guarantee of
+semantic goal fidelity for arbitrarily long live model conversations.
+
 ## References
 
 - OpenAI Codex Goal protocol and runtime at commit `3c6f32c`: `ThreadGoal`,

@@ -7,7 +7,7 @@ export function isGoalTerminal(status: ChatGoalStatus): boolean {
 }
 
 export function goalBlocksPlan(goal: ChatGoal | null | undefined): boolean {
-  return goal?.status === 'active'
+  return goal?.status === 'active' || Boolean(goal && goal.dispatch_state && goal.dispatch_state !== 'idle')
 }
 
 export function goalPlanLockReason(goal: ChatGoal | null | undefined): string | null {

@@ -551,3 +551,164 @@ def test_budget_update_idempotency_includes_payload(tmp_path: Path) -> None:
     assert manager.update_budget(goal.id, "budget-1", 20).token_budget == 20
     with pytest.raises(GoalPolicyError, match="another mutation"):
         manager.update_budget(goal.id, "budget-1", 30)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_dispatch_and_unrelated_completion_do_not_resend(tmp_path: Path) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    dispatched = []
+
+    async def dispatch(goal, prompt):
+        dispatched.append(goal.pending_step_id)
+        entered.set()
+        await release.wait()
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch)
+    start = asyncio.create_task(manager.create_and_start("tab-1", request()))
+    await entered.wait()
+    goal = manager.current("tab-1")
+    duplicates = [
+        asyncio.create_task(manager.create_and_start("tab-1", request())),
+        asyncio.create_task(manager.dispatch_next(goal.id)),
+        asyncio.create_task(manager.on_turn_completed("tab-1", "unrelated", "complete", "")),
+    ]
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(start, *duplicates)
+    assert len(dispatched) == 1
+
+
+@pytest.mark.asyncio
+async def test_old_pause_replay_cannot_cancel_resumed_turn(tmp_path: Path) -> None:
+    cancelled = []
+
+    async def cancel(goal):
+        cancelled.append(goal.current_turn_id)
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), lambda goal, prompt: goal.pending_step_id, cancel
+    )
+    goal = await manager.create_and_start("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    resumed = await manager.resume(goal.id, "resume")
+    replay = await manager.pause(goal.id, "pause")
+    assert replay.current_turn_id == resumed.current_turn_id
+    assert replay.dispatch_state == GoalDispatchState.DISPATCHED
+    assert cancelled == [goal.current_turn_id]
+
+
+@pytest.mark.asyncio
+async def test_clear_failure_stays_visible_and_blocks_replacement(tmp_path: Path) -> None:
+    async def cancel(goal):
+        raise RuntimeError("unreachable")
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), cancel=cancel)
+    goal = manager.create("tab-1", request())
+    arm_goal(manager, goal.id, "running")
+    cleared = await manager.clear(goal.id, "clear")
+    assert manager.current("tab-1") == cleared
+    with pytest.raises(ValueError, match="unfinished"):
+        manager.create("tab-1", request("replacement"))
+
+
+@pytest.mark.asyncio
+async def test_clearing_latest_goal_does_not_resurrect_previous_goal(tmp_path: Path) -> None:
+    manager = controller(tmp_path)
+    first = manager.create("tab-1", request())
+    await manager.complete(first.id, "complete")
+    second = manager.create("tab-1", request("second"))
+    await manager.clear(second.id, "clear")
+    assert manager.current("tab-1") is None
+
+
+def test_create_replay_uses_original_budget_after_budget_edit(tmp_path: Path) -> None:
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request(token_budget=10))
+    manager.update_budget(goal.id, "budget", 20)
+    cold = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"))
+    assert cold.replay_create("tab-1", request(token_budget=10)).id == goal.id
+
+
+@pytest.mark.asyncio
+async def test_lower_budget_during_turn_keeps_completion_accounting(tmp_path: Path) -> None:
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request(token_budget=100))
+    arm_goal(manager, goal.id, "running")
+    stored = manager.get(goal.id)
+    stored.token_usage = 20
+    manager.store.put(stored)
+    manager.update_budget(goal.id, "budget", 10)
+    result = await manager.on_turn_completed(
+        "tab-1", "running", "complete", response_with_checkpoint(), {"total": 5}
+    )
+    assert result.token_usage == 25
+    assert result.status == GoalRunStatus.BUDGET_LIMITED
+    assert result.current_turn_id is None
+
+
+@pytest.mark.asyncio
+async def test_resume_reconciliation_allows_synchronous_completion_callback(tmp_path: Path) -> None:
+    async def cancel(goal):
+        await manager.on_turn_completed(goal.tab_id, "old", "cancelled", "")
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"), lambda goal, prompt: goal.pending_step_id, cancel
+    )
+    goal = manager.create("tab-1", request())
+    goal.status = GoalRunStatus.PAUSED
+    goal.dispatch_state = GoalDispatchState.UNCERTAIN
+    manager.store.put(goal)
+    result = await asyncio.wait_for(manager.resume(goal.id, "resume"), timeout=1)
+    assert result.dispatch_state == GoalDispatchState.DISPATCHED
+
+
+@pytest.mark.asyncio
+async def test_failed_reconciliation_without_turn_id_cannot_resume(tmp_path: Path) -> None:
+    async def cancel(goal):
+        raise RuntimeError("offline")
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), cancel=cancel)
+    goal = manager.create("tab-1", request())
+    goal.status = GoalRunStatus.PAUSED
+    goal.dispatch_state = GoalDispatchState.UNCERTAIN
+    manager.store.put(goal)
+    with pytest.raises(GoalPolicyError, match="offline"):
+        await manager.resume(goal.id, "resume")
+
+
+@pytest.mark.asyncio
+async def test_pause_waits_only_for_acceptance_not_dispatch_callers_lifetime(
+    tmp_path: Path,
+) -> None:
+    entered, release, caller_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    cancelled = []
+
+    async def dispatch(goal, prompt):
+        entered.set()
+        await release.wait()
+        return "provider-turn"
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"),
+        dispatch,
+        lambda goal: cancelled.append(goal.current_turn_id),
+    )
+
+    async def caller():
+        await manager.create_and_start("tab-1", request())
+        await caller_finished.wait()
+
+    task = asyncio.create_task(caller())
+    await entered.wait()
+    goal = manager.current("tab-1")
+    pause = asyncio.create_task(manager.pause(goal.id, "pause"))
+    await asyncio.sleep(0)
+    release.set()
+    try:
+        result = await asyncio.wait_for(pause, timeout=1)
+        assert result.dispatch_state == GoalDispatchState.IDLE
+        assert cancelled == ["provider-turn"]
+    finally:
+        caller_finished.set()
+        await task

@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from ...models.goal_run import (
     GOAL_CHECKPOINT_HISTORY_LIMIT,
-    TERMINAL_GOAL_STATUSES,
     GoalCheckpoint,
     GoalDispatchState,
     GoalRun,
@@ -108,13 +107,16 @@ class GoalRunController:
         self.dispatch = dispatch
         self.cancel = cancel
         self._locks: dict[str, asyncio.Lock] = {}
-        # A terminal mutation waits for an in-progress provider acceptance
-        # before cancelling. The callback itself stays outside the state lock
-        # so a provider may report synchronous completion without deadlocking.
-        self._dispatch_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._mutation_locks: dict[str, asyncio.Lock] = {}
+        # Claim each durable step once. Cancellation waits only for provider
+        # acceptance, never for the HTTP/observer task that called dispatch.
+        self._acceptances: dict[str, asyncio.Future[None]] = {}
 
     def _lock_for(self, goal_id: str) -> asyncio.Lock:
         return self._locks.setdefault(goal_id, asyncio.Lock())
+
+    def _mutation_lock_for(self, goal_id: str) -> asyncio.Lock:
+        return self._mutation_locks.setdefault(goal_id, asyncio.Lock())
 
     def set_dispatch_callback(self, dispatch: DispatchCallback | None) -> None:
         self.dispatch = dispatch
@@ -170,7 +172,6 @@ class GoalRunController:
             return goal
         mutate(goal)
         goal.idempotency[client_request_id] = operation
-        goal.updated_at = utc_now()
         return self.store.put(goal)
 
     async def _cancel_current(self, goal: GoalRun) -> GoalRun:
@@ -186,17 +187,20 @@ class GoalRunController:
             goal.pending_step_id = None
             return self.store.put(goal)
         try:
-            dispatch_task = self._dispatch_tasks.get(goal.id)
-            if dispatch_task is not None and dispatch_task is not asyncio.current_task():
-                await asyncio.shield(dispatch_task)
+            acceptance = self._acceptances.get(goal.pending_step_id or "")
+            if acceptance is not None:
+                await asyncio.shield(acceptance)
             latest = self.store.get(goal.id)
             result = self.cancel(latest.model_copy(deep=True))
             if inspect.isawaitable(result):
                 await result
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             latest = self.store.get(goal.id)
             latest.dispatch_state = GoalDispatchState.UNCERTAIN
             latest.status_message = f"turn cancellation failed: {exc}"
+            if isinstance(exc, asyncio.CancelledError):
+                self.store.put(latest)
+                raise
             return self.store.put(latest)
         latest = self.store.get(goal.id)
         latest.current_turn_id = None
@@ -205,9 +209,13 @@ class GoalRunController:
         return self.store.put(latest)
 
     async def pause(self, goal_id: str, client_request_id: str) -> GoalRun:
-        async with self._lock_for(goal_id):
-            goal = self._pause_locked(goal_id, client_request_id)
-        return await self._cancel_current(goal)
+        async with self._mutation_lock_for(goal_id):
+            async with self._lock_for(goal_id):
+                goal = self._pause_locked(goal_id, client_request_id)
+            # Replaying a pause after resume must not cancel the newer turn.
+            if goal.status != GoalRunStatus.PAUSED:
+                return goal
+            return await self._cancel_current(goal)
 
     def _pause_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
         existing = self.store.get(goal_id)
@@ -225,28 +233,34 @@ class GoalRunController:
         return self._mutate_once(goal_id, client_request_id, "pause", apply)
 
     async def resume(self, goal_id: str, client_request_id: str) -> GoalRun:
-        async with self._lock_for(goal_id):
-            goal = await self._resume_locked(goal_id, client_request_id)
+        async with self._mutation_lock_for(goal_id):
+            existing = self.store.get(goal_id)
+            if client_request_id not in existing.idempotency:
+                ensure_unfinished(existing)
+                if (
+                    existing.status != GoalRunStatus.ACTIVE
+                    and existing.dispatch_state != GoalDispatchState.IDLE
+                ):
+                    # The provider may call the completion observer while we
+                    # await cancellation; never hold its state lock here.
+                    reconciled = await self._cancel_current(existing)
+                    if reconciled.dispatch_state != GoalDispatchState.IDLE:
+                        raise GoalPolicyError(
+                            reconciled.status_message or "Goal turn could not be reconciled"
+                        )
+            async with self._lock_for(goal_id):
+                goal = self._resume_locked(goal_id, client_request_id)
         if goal.dispatch_state == GoalDispatchState.PENDING:
             return await self._dispatch_prepared(goal)
         return goal
 
-    async def _resume_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
+    def _resume_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
         existing = self.store.get(goal_id)
         replay = existing.idempotency.get(client_request_id)
         if replay is not None:
             if replay != "resume":
                 raise GoalPolicyError("client_request_id was already used for another mutation")
             return existing
-        if existing.dispatch_state == GoalDispatchState.UNCERTAIN:
-            reconciled = await self._cancel_current(existing)
-            if reconciled.current_turn_id is not None:
-                raise GoalPolicyError(
-                    reconciled.status_message or "uncertain Goal turn could not be reconciled"
-                )
-            reconciled.dispatch_state = GoalDispatchState.IDLE
-            reconciled.pending_step_id = None
-            self.store.put(reconciled)
 
         def apply(goal: GoalRun) -> None:
             ensure_unfinished(goal)
@@ -265,9 +279,10 @@ class GoalRunController:
         return self._prepare_dispatch_locked(goal.id)
 
     async def complete(self, goal_id: str, client_request_id: str) -> GoalRun:
-        async with self._lock_for(goal_id):
-            goal = self._complete_locked(goal_id, client_request_id)
-        return await self._cancel_current(goal)
+        async with self._mutation_lock_for(goal_id):
+            async with self._lock_for(goal_id):
+                goal = self._complete_locked(goal_id, client_request_id)
+            return await self._cancel_current(goal)
 
     def _complete_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
         existing = self.store.get(goal_id)
@@ -285,9 +300,10 @@ class GoalRunController:
         return self._mutate_once(goal_id, client_request_id, "complete", apply)
 
     async def clear(self, goal_id: str, client_request_id: str) -> GoalRun:
-        async with self._lock_for(goal_id):
-            goal = self._clear_locked(goal_id, client_request_id)
-        return await self._cancel_current(goal)
+        async with self._mutation_lock_for(goal_id):
+            async with self._lock_for(goal_id):
+                goal = self._clear_locked(goal_id, client_request_id)
+            return await self._cancel_current(goal)
 
     def _clear_locked(self, goal_id: str, client_request_id: str) -> GoalRun:
         existing = self.store.get(goal_id)
@@ -310,7 +326,7 @@ class GoalRunController:
             ensure_unfinished(goal)
             goal.token_budget = token_budget
             allowed, reason = can_continue(goal)
-            if not allowed:
+            if not allowed and goal.dispatch_state == GoalDispatchState.IDLE:
                 goal.status = GoalRunStatus.BUDGET_LIMITED
                 goal.status_message = reason
             elif goal.status == GoalRunStatus.BUDGET_LIMITED:
@@ -372,6 +388,7 @@ class GoalRunController:
         goal.turns_completed += 1
         goal.current_turn_id = None
         goal.dispatch_state = GoalDispatchState.IDLE
+        goal.pending_step_id = None
         turn_usage = self._usage(usage)
         previous_quality = goal.usage_quality
         if turn_usage.total_tokens is not None:
@@ -461,6 +478,8 @@ class GoalRunController:
         goal = self.store.get(goal_id)
         if goal.status != GoalRunStatus.ACTIVE:
             return goal
+        if goal.dispatch_state != GoalDispatchState.IDLE:
+            return goal
         allowed, reason = can_continue(goal)
         if not allowed:
             goal.status = GoalRunStatus.BUDGET_LIMITED
@@ -470,9 +489,6 @@ class GoalRunController:
             goal.status = GoalRunStatus.PAUSED
             goal.status_message = "automatic continuation is not connected"
             return self.store.put(goal)
-        if goal.dispatch_state != GoalDispatchState.IDLE:
-            return goal
-
         goal.pending_step_id = str(uuid4())
         # The Hub-generated step id is also the provider turn id. Persist it
         # before crossing the transport boundary so a provider that completes
@@ -485,9 +501,12 @@ class GoalRunController:
         step_id = prepared.pending_step_id
         if prepared.dispatch_state != GoalDispatchState.PENDING or step_id is None:
             return self.store.get(prepared.id)
-        dispatch_task = asyncio.current_task()
-        if dispatch_task is not None:
-            self._dispatch_tasks[prepared.id] = dispatch_task
+        # No await between checking and claiming: duplicates can observe this
+        # step but cannot invoke the transport again.
+        if step_id in self._acceptances:
+            return self.store.get(prepared.id)
+        acceptance = asyncio.get_running_loop().create_future()
+        self._acceptances[step_id] = acceptance
         try:
             latest = self.store.get(prepared.id)
             if (
@@ -501,48 +520,47 @@ class GoalRunController:
                 prepared.model_copy(deep=True), build_continuation_prompt(prepared)
             )
             next_turn_id = await result if inspect.isawaitable(result) else result
-        except Exception as exc:
+            async with self._lock_for(prepared.id):
+                goal = self.store.get(prepared.id)
+                if (
+                    goal.dispatch_state != GoalDispatchState.PENDING
+                    or goal.pending_step_id != step_id
+                ):
+                    return goal
+                goal.current_turn_id = next_turn_id or step_id
+                goal.dispatch_state = GoalDispatchState.DISPATCHED
+                return self.store.put(goal)
+        except (Exception, asyncio.CancelledError) as exc:
             async with self._lock_for(prepared.id):
                 goal = self.store.get(prepared.id)
                 # A completion observed while dispatch was awaiting the provider
                 # is stronger evidence than the callback's eventual exception.
                 if (
-                    goal.status == GoalRunStatus.ACTIVE
-                    and goal.dispatch_state == GoalDispatchState.PENDING
+                    goal.dispatch_state == GoalDispatchState.PENDING
                     and goal.pending_step_id == step_id
                 ):
-                    goal.status = GoalRunStatus.FAILED
+                    if goal.status == GoalRunStatus.ACTIVE:
+                        goal.status = GoalRunStatus.PAUSED
                     goal.status_message = f"continuation dispatch failed: {exc}"
-                    goal.completed_at = utc_now()
-                    goal.current_turn_id = None
-                    goal.dispatch_state = GoalDispatchState.IDLE
-                    goal.pending_step_id = None
-                    return self.store.put(goal)
+                    goal.dispatch_state = GoalDispatchState.UNCERTAIN
+                    self.store.put(goal)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 return goal
         finally:
-            if self._dispatch_tasks.get(prepared.id) is dispatch_task:
-                self._dispatch_tasks.pop(prepared.id, None)
-        async with self._lock_for(prepared.id):
-            goal = self.store.get(prepared.id)
-            if (
-                goal.status != GoalRunStatus.ACTIVE
-                or goal.dispatch_state != GoalDispatchState.PENDING
-                or goal.pending_step_id != step_id
-            ):
-                return goal
-            goal.current_turn_id = next_turn_id or step_id
-            goal.dispatch_state = GoalDispatchState.DISPATCHED
-            return self.store.put(goal)
+            self._acceptances.pop(step_id, None)
+            acceptance.set_result(None)
 
     def recover(self) -> list[GoalRun]:
         """Fail closed for dispatches whose provider acceptance is uncertain."""
         recovered: list[GoalRun] = []
         for goal in self.store.list():
-            if goal.status == GoalRunStatus.ACTIVE and goal.dispatch_state in {
+            if goal.dispatch_state in {
                 GoalDispatchState.PENDING,
                 GoalDispatchState.DISPATCHED,
             }:
-                goal.status = GoalRunStatus.PAUSED
+                if goal.status == GoalRunStatus.ACTIVE:
+                    goal.status = GoalRunStatus.PAUSED
                 goal.dispatch_state = GoalDispatchState.UNCERTAIN
                 goal.status_message = (
                     "restart occurred during continuation dispatch; resume explicitly"

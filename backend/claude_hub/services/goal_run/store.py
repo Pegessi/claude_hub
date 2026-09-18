@@ -8,7 +8,14 @@ import tempfile
 import threading
 from pathlib import Path
 
-from ...models.goal_run import TERMINAL_GOAL_STATUSES, GoalRun, GoalRunCreate
+from ...models.goal_run import (
+    TERMINAL_GOAL_STATUSES,
+    GoalDispatchState,
+    GoalRun,
+    GoalRunCreate,
+    GoalRunStatus,
+    utc_now,
+)
 
 
 class GoalRunStore:
@@ -17,6 +24,7 @@ class GoalRunStore:
         self._lock = threading.RLock()
         self._goals: dict[str, GoalRun] = {}
         self._create_requests: dict[str, str] = {}
+        self._create_inputs: dict[str, dict[str, object]] = {}
         self.load()
 
     def load(self) -> None:
@@ -29,6 +37,7 @@ class GoalRunStore:
             goals = [GoalRun.model_validate(item) for item in payload.get("goals", [])]
             self._goals = {goal.id: goal for goal in goals}
             self._create_requests = dict(payload.get("create_requests", {}))
+            self._create_inputs = dict(payload.get("create_inputs", {}))
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,6 +45,7 @@ class GoalRunStore:
             "version": 1,
             "goals": [self._persisted_goal(goal) for goal in self._goals.values()],
             "create_requests": self._create_requests,
+            "create_inputs": self._create_inputs,
         }
         fd, raw_tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
         tmp = Path(raw_tmp)
@@ -67,14 +77,16 @@ class GoalRunStore:
 
     def current_for_tab(self, tab_id: str) -> GoalRun | None:
         with self._lock:
-            candidates = [
-                goal
-                for goal in self._goals.values()
-                if goal.tab_id == tab_id and goal.status.value != "cancelled"
-            ]
+            candidates = [goal for goal in self._goals.values() if goal.tab_id == tab_id]
             if not candidates:
                 return None
-            return max(candidates, key=lambda goal: goal.created_at).model_copy(deep=True)
+            current = max(candidates, key=lambda goal: goal.created_at)
+            if (
+                current.status == GoalRunStatus.CANCELLED
+                and current.dispatch_state == GoalDispatchState.IDLE
+            ):
+                return None
+            return current.model_copy(deep=True)
 
     def replay_create(self, tab_id: str, request: GoalRunCreate) -> GoalRun | None:
         """Return an exact create replay, rejecting request-id reuse with new input."""
@@ -83,12 +95,17 @@ class GoalRunStore:
             if prior_id is None:
                 return None
             prior = self._goals[prior_id]
-            if (
-                prior.tab_id != tab_id
-                or prior.objective != request.objective
-                or prior.token_budget != request.token_budget
-                or prior.max_turns != request.max_turns
-            ):
+            original = self._create_inputs.get(
+                request.client_request_id,
+                {
+                    "tab_id": prior.tab_id,
+                    "objective": prior.objective,
+                    "token_budget": prior.token_budget,
+                    "max_turns": prior.max_turns,
+                },
+            )
+            supplied = {"tab_id": tab_id, **request.model_dump(exclude={"client_request_id"})}
+            if original != supplied:
                 raise ValueError("client_request_id was already used for another create")
             return prior.model_copy(deep=True)
 
@@ -106,17 +123,28 @@ class GoalRunStore:
             if replay is not None:
                 return replay
             if any(
-                existing.tab_id == goal.tab_id and existing.status not in TERMINAL_GOAL_STATUSES
+                existing.tab_id == goal.tab_id
+                and (
+                    existing.status not in TERMINAL_GOAL_STATUSES
+                    or existing.dispatch_state != GoalDispatchState.IDLE
+                )
                 for existing in self._goals.values()
             ):
                 raise ValueError("tab already has an unfinished goal")
             self._goals[goal.id] = goal.model_copy(deep=True)
             self._create_requests[client_request_id] = goal.id
+            self._create_inputs[client_request_id] = {
+                "tab_id": goal.tab_id,
+                "objective": goal.objective,
+                "token_budget": goal.token_budget,
+                "max_turns": goal.max_turns,
+            }
             try:
                 self._save()
             except Exception:
                 self._goals.pop(goal.id, None)
                 self._create_requests.pop(client_request_id, None)
+                self._create_inputs.pop(client_request_id, None)
                 raise
             return goal.model_copy(deep=True)
 
@@ -125,6 +153,8 @@ class GoalRunStore:
             if goal.id not in self._goals:
                 raise KeyError(f"goal '{goal.id}' not found")
             previous = self._goals[goal.id]
+            goal = goal.model_copy(deep=True)
+            goal.updated_at = utc_now()
             self._goals[goal.id] = goal.model_copy(deep=True)
             try:
                 self._save()

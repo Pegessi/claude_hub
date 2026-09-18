@@ -27,6 +27,11 @@ test('usage labels never present estimated or unavailable accounting as exact', 
   assert.equal(policy.goalUsageLabel(null, 5000, 'unavailable'), 'Usage unavailable · 5,000 token budget')
 })
 
+test('unconfirmed cancellation prevents starting a competing turn or switching Plan', () => {
+  assert.equal(policy.goalBlocksPlan({ status: 'cancelled', dispatch_state: 'uncertain' }), true)
+  assert.equal(policy.goalBlocksPlan({ status: 'paused', dispatch_state: 'pending' }), true)
+})
+
 test('terminal and display states cover the public Goal contract', () => {
   assert.equal(policy.isGoalTerminal('complete'), true)
   assert.equal(policy.isGoalTerminal('cancelled'), true)
