@@ -54,3 +54,35 @@ test('mode trigger locks for the whole turn and mobile targets remain reachable'
     /@media \(max-width: 640px\)[\s\S]*?\.composer-mode-menu-item\s*\{[\s\S]*?min-height:\s*44px/,
   )
 })
+
+test('model picker presents model and thinking effort as a unified two-level menu', () => {
+  assert.match(structuredPane, /aria-label="Model and thinking effort"/)
+  assert.match(
+    structuredPane,
+    /ref="modelTriggerEl"[\s\S]*?aria-haspopup="dialog"[\s\S]*?:aria-expanded="isModelMenuOpen"/,
+  )
+  assert.match(structuredPane, /class="composer-mode-menu composer-model-menu"[\s\S]*?role="dialog"/)
+  assert.match(structuredPane, /class="composer-mode-list composer-model-list"[\s\S]*?role="listbox"/)
+  assert.match(structuredPane, /role="option"/)
+  assert.match(structuredPane, /class="composer-model-columns"/)
+  assert.match(structuredPane, /v-for="model in filteredModelOptions"/)
+  assert.match(structuredPane, /v-for="effort in selectedMenuModel\.supported_reasoning_efforts"/)
+  assert.match(structuredPane, /@click="selectModelAndEffort\(selectedMenuModel, effort\.id\)"/)
+  assert.match(structuredPane, /codex: 'CODEX_REASONING_EFFORT'/)
+  assert.match(structuredPane, /traex: 'CODEX_REASONING_EFFORT'/)
+  assert.match(structuredPane, /effort\.provider_model_id === currentModel\.value/)
+  assert.match(
+    structuredPane,
+    /filteredModelOptions\.value\.find\(model => model\.id === selectedMenuModelId\.value\)/,
+  )
+  assert.match(structuredPane, /capabilities\.value\?\.current_reasoning_effort/)
+  assert.match(structuredPane, /defaultReasoningEffortLabel\(selectedMenuModel\)/)
+  assert.match(
+    structuredPane,
+    /!currentModelOption\.value\.supported_reasoning_efforts\.some\(effort => effort\.id === selected\)/,
+  )
+  assert.match(
+    structuredPane,
+    /:disabled="modeInteractionLocked \|\| isUpdatingModel \|\| isUpdatingReasoningEffort"/,
+  )
+})

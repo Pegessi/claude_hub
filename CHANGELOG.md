@@ -17,6 +17,8 @@
   automatic progress, and account for a running turn after a budget reduction.
 - Add budget editing and retry-stop controls, reconcile lost mutation responses,
   and keep similar-looking ordinary text visible when filtering control blocks.
+- Pause Goals recovered between turns after a restart; never cancel an unrelated
+  Chat turn when a recovered Goal has no known turn identity.
 
 ### fix: isolate terminal recovery tests and prioritize live input
 
@@ -54,6 +56,131 @@
   and touch accessibility.
 - See `docs/working-logs/2026-09-17-chat-goal-mode.md` for architecture, provider
   ownership, safety boundaries, and validation scope.
+
+### fix: hung turns are reaped even while a session is being watched
+
+- **Why now.** A TraeX chat session hung mid-turn (the model API stopped
+  responding) and stayed stuck for ~3 hours with the Stop button doing
+  nothing. The hang checks were nested inside the zero-subscriber idle-reap
+  gate, so a session the user was actively viewing was never protected — the
+  tailer blocked on `read_line` forever, and after a backend restart the
+  in-flight turn was gone, leaving Stop as a no-op.
+- **The change.** Two layers, both independent of subscriber presence:
+  - **Stream inactivity timeout (primary).** The model API is streaming, so
+    a healthy turn emits events continuously. If no event arrives for
+    `STREAM_INACTIVITY_TIMEOUT_S` (10 min), the stream is dead — the turn is
+    terminalized (cancelled) and its subprocess reaped. This catches a stuck
+    turn fast.
+  - **Total-duration cap (backstop).** A turn still in flight past
+    `MAX_TURN_DURATION_S` (1 hr) is reaped, covering edge cases the
+    inactivity check might miss.
+  The idle-reap behavior for healthy in-flight turns is unchanged — they
+  complete on their own.
+- **Tests.** New regression tests keep a subscriber present and assert (a) a
+  silent turn past the inactivity timeout and (b) a turn past the duration
+  cap are cancelled, the transport stopped, and the terminal
+  `TURN_COMPLETED (cancelled)` + `ERROR` events persisted. The full
+  agent-stream suite (191 tests) and black/isort/mypy stay green.
+
+### fix: sidebar status-light styling, shared session actions, and launcher UX
+
+- **Status light.** The sidebar's working light used the blue accent (with a
+  pulse) and attention used amber, diverging from the TabBar indicator. Colors
+  now match the TabBar: working is warning yellow with a glow, idle green,
+  attention red with a glow, offline dim. The unread "ping" ripple is smaller
+  and paired with a persistent accent halo so the unread state stays legible
+  between animation frames. The ripple ring was also rendering down-right of
+  the dot: the global `* { box-sizing: border-box }` reset does not reach
+  pseudo-elements, so the 1.5px border added onto the 8px ring (content-box);
+  the `::after` now sets `box-sizing: border-box` and stays concentric through
+  the whole animation.
+- **Session actions in the sidebar.** Rename / Duplicate / Archive / Copy Link
+  / Switch Env / Model used to exist only in the TabBar's ⋯ menu. They move
+  into a new shared `TabActionsMenu.vue` mounted by both the TabBar and every
+  sidebar row (hover-revealed, keyboard reachable, with inline row rename). The
+  Switch Env modal and its preset manager move with it and additionally covers
+  TraeX chat sessions (terminal-kind TraeX stays hidden — the backend rejects
+  it). Sidebar rows use a container + inner primary button so the menu sits as
+  a valid sibling control; the popover re-measures on open and on
+  scroll/resize, opens mutually exclusively, and a failed create no longer
+  records the directory or dismisses the dialog.
+- **Launcher history and solo default.** The Create Session dialog remembers
+  recently used working directories per target (local, or per remote server)
+  in `localStorage` and offers them through a native dropdown on the Working
+  Directory field, prefilled with the most recent one. New sessions now
+  default to Solo Mode (still auto-off for Cursor/Terminal).
+- **Tests.** Structural tests pin the shared menu on both surfaces, the
+  aligned status colors, the cwd-history wiring, and solo default-on; lint,
+  type-check, and the full frontend unit suite (401) pass.
+
+### fix: harden the unified model and thinking-effort picker
+
+- Cursor only groups effort-suffixed IDs when the live catalog provides family
+  evidence, preserving standalone models whose real name ends in `medium` or
+  `high`; labels are normalized when the effort word precedes `Thinking`.
+- Codex and TraeX model discovery now follows pagination and retries after a
+  transient failure. Unsupported legacy TraeX effort values are not forwarded.
+- The picker reports the current mode's effective default effort, keeps its
+  detail pane within filtered search results, and uses dialog/listbox semantics
+  appropriate for its searchable two-level interaction.
+
+### fix: the status light moves from the composer to the session sidebar
+
+- **Why now.** The status light was added next to the Send button, but the
+  place it is actually useful is the session sidebar: there, a light next to
+  each session shows its status at a glance — which sessions are working,
+  idle, need attention, or are offline — without clicking into any of them.
+  The composer light was redundant (the Send/Stop buttons already convey the
+  sending state) and just cluttered the input row.
+- **The change.** Remove the composer status light (and its `chatStatus`
+  computed). Each sidebar row gains a status light driven by the same
+  backend-reported `agentStatuses` the TabBar uses: working (pulsing accent),
+  idle (green), attention (amber), offline (dim). The status label (including
+  any `status_text` detail) is exposed as the light's tooltip and accessible
+  name. The tab-status logic (status map, fallback, label) is extracted into a
+  shared `useTabStatus` composable used by both the TabBar and the sidebar, so
+  it lives in one place and cannot drift between the two.
+- **Tests.** The structural tests pin the sidebar status light (and its
+  per-state colors) and the shared `useTabStatus` composable, instead of the
+  removed composer light; lint, type-check, and the full unit suite stay green.
+
+### feat: the TabBar joins the top bar (desktop), and a status light sits by Send
+
+- **Why now.** On desktop the app had two stacked rows — the app-mode-bar
+  (mode switch + tools) and, below it, the TabBar (tabs + new-tab). Merging
+  them reclaims a row of vertical space for the conversation. Separately,
+  once the per-pane header was gone there was no at-a-glance way to see
+  whether a chat was running, idle, or failed.
+- **The change.** On desktop the TabBar now renders inside the app-mode-bar —
+  one unified row: mode switch, tabs (scrollable, taking the middle space),
+  new-tab, and tools. The TabBar stays terminal-mode only (it is not shown in
+  workspace mode, where it would have no effect). Mobile is unchanged: the
+  app-mode-bar stays hidden and the TabBar remains the top row with its ⋯ menu.
+  A small status light next to the Send button shows working (pulsing), idle
+  (green), or error (red).
+- **Restoring a minimal session label.** The previous change removed the
+  per-pane header entirely, which left no session name in the content area —
+  hard to distinguish panes at a glance. A minimal session-name pill now sits
+  in the top-right corner of each pane (terminal and chat), so a pane can be
+  identified without the cost of a full header row. The pill has a solid
+  background so content does not show through.
+- **Plumbing.** A shared `useViewport` composable backs the desktop/mobile
+  switch; the TabBar is restyled via `.app-mode-bar .tab-bar` rather than a
+  new prop.
+- **Tests.** New structural tests pin the merged TabBar, the status light, and
+  the session-name pill; lint, type-check, and the full unit suite stay green.
+### feat: unify model and thinking-effort selection
+
+- Replace the flat model picker and separate TraeX control with one compact
+  `Model · Effort` trigger. Its two-column menu selects a model first and then
+  one of that model's supported thinking levels; mobile uses a stacked layout.
+- Discover model-specific effort metadata from the shared Codex/TraeX
+  app-server `model/list` API. Persist the selected effort and inject it into
+  `collaborationMode.settings.reasoning_effort` on the next turn.
+- Normalize Cursor's parameterized model IDs into the same model/effort shape
+  while preserving the exact provider model ID selected by the user. This
+  removes the long flat list of near-duplicate Cursor models.
+- Keep custom model IDs and static provider catalogs as fail-safe fallbacks.
 
 ### fix: complete TraeX Chat protocol handling
 

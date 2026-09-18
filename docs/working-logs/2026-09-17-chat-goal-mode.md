@@ -174,6 +174,24 @@ tests/test_goal_ui_browser.py`; API replies are stubbed and no provider is invok
 These checks establish lifecycle/UI behavior, not an empirical guarantee of
 semantic goal fidelity for arbitrarily long live model conversations.
 
+Integration follow-up synchronized `origin/main` at `cc3dfe7` into the feature
+branch, preserving the model/effort picker and stream inactivity timeout.
+Recovery now also pauses active Goals found between turns at restart. If an
+old snapshot lacks a turn identity, reconciliation will not cancel an unrelated
+in-flight Chat turn. Full-suite validation exposed a test ordering issue:
+the async real-tmux recovery test was deferred past sync Playwright fixtures.
+Only sync browser modules are now deferred, including the opt-in Goal UI check.
+
+Final validation: merged-tree backend suite passed 1642 tests with 3 skips and
+no reruns; the final between-turn restart regression and Goal/API suite passed
+43 tests separately. Frontend unit tests, ESLint, vue-tsc/build, backend mypy
+(101 source files), touched-file Black and isort checks passed. Real Chromium
+checks passed at both widths against the isolated 5198 Vite server with stubbed
+API responses; the server was stopped afterwards. Remaining warnings are
+existing Pydantic/httpx deprecations, OpenAPI operation-ID duplication, and the
+frontend bundle-size advisory. No live provider run or production restart was
+performed, and no changes were merged or pushed to main.
+
 ## References
 
 - OpenAI Codex Goal protocol and runtime at commit `3c6f32c`: `ThreadGoal`,

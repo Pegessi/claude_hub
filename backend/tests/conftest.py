@@ -149,14 +149,14 @@ def backend_bind() -> tuple[str, int]:
     return parsed.hostname or "127.0.0.1", parsed.port or 8173
 
 
-# Playwright sync E2E leaves a running asyncio loop on py3.12+, which breaks
+# Playwright sync E2E leaves a running asyncio loop, which breaks
 # pytest-asyncio's Runner.run() for every subsequent async test in the session.
 _PLAYWRIGHT_DEFER_MODULES = frozenset(
     {
         "tests.test_terminal_input_latency_perf",
         "tests.test_terminal_replay",
         "tests.test_terminal_hmr_recovery_e2e",
-        "tests.test_recovery_real_ttyd",
+        "tests.test_goal_ui_browser",
     }
 )
 

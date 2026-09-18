@@ -25,6 +25,7 @@ from claude_hub.models import (
     ManagedSession,
     ManagedSessionStatus,
     SessionKind,
+    StreamModelOption,
     WorkspaceSessionRole,
 )
 from claude_hub.services.agent_stream.base import NormalizeContext
@@ -357,6 +358,162 @@ async def test_traex_thread_initialization_applies_tab_settings(
         assert request["params"]["sandbox"] == sandbox
     finally:
         await transport.stop()
+
+
+async def test_traex_capabilities_use_live_model_reasoning_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The picker must follow TraeX's live, model-specific effort catalog."""
+    transport = TraexNativeSession(_managed_session())
+    proc = _FakeProcess(
+        [
+            json.dumps({"id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {"id": 2, "result": {"thread": {"id": "thread-1"}, "model": "GPT-5.6-Sol"}}
+            ).encode()
+            + b"\n",
+            json.dumps(
+                {
+                    "id": 3,
+                    "result": {
+                        "data": [
+                            {
+                                "name": "Default",
+                                "mode": "default",
+                                "model": None,
+                                "reasoning_effort": None,
+                            }
+                        ]
+                    },
+                }
+            ).encode()
+            + b"\n",
+            json.dumps(
+                {
+                    "id": 4,
+                    "result": {
+                        "data": [
+                            {
+                                "model": "GPT-5.6-Sol",
+                                "displayName": "GPT 5.6 Sol",
+                                "description": "Fast coding model",
+                                "hidden": False,
+                                "defaultReasoningEffort": "medium",
+                                "supportedReasoningEfforts": [
+                                    {"reasoningEffort": "low", "description": "Faster"},
+                                    {"reasoningEffort": "medium", "description": "Balanced"},
+                                    {"reasoningEffort": "high", "description": "Deeper"},
+                                ],
+                            },
+                            {
+                                "model": "hidden-model",
+                                "displayName": "Hidden",
+                                "hidden": True,
+                                "defaultReasoningEffort": "high",
+                                "supportedReasoningEfforts": [],
+                            },
+                        ]
+                    },
+                }
+            ).encode()
+            + b"\n",
+        ]
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+    try:
+        await transport.prepare_capabilities()
+        capabilities = transport.capabilities()
+        assert capabilities.current_model == "GPT-5.6-Sol"
+        assert len(capabilities.available_models) == 1
+        model = capabilities.available_models[0]
+        assert (model.id, model.label, model.description) == (
+            "GPT-5.6-Sol",
+            "GPT 5.6 Sol",
+            "Fast coding model",
+        )
+        assert model.default_reasoning_effort == "medium"
+        assert [(item.id, item.description) for item in model.supported_reasoning_efforts] == [
+            ("low", "Faster"),
+            ("medium", "Balanced"),
+            ("high", "Deeper"),
+        ]
+
+        # A later capabilities poll must not let the inherited static-catalog
+        # refresh erase TraeX's richer model/list metadata.
+        await transport.prepare_capabilities()
+        refreshed = transport.capabilities().available_models
+        assert refreshed == capabilities.available_models
+        assert sum(req.get("method") == "model/list" for req in _written_requests(proc)) == 1
+    finally:
+        await transport.stop()
+
+
+@pytest.mark.parametrize(
+    ("mode", "preset_effort"),
+    [(ChatMode.DEFAULT, None), (ChatMode.PLAN, "medium")],
+)
+async def test_traex_selected_reasoning_effort_reaches_collaboration_mode(
+    mode: ChatMode, preset_effort: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """collaborationMode overrides top-level effort, so the choice belongs in its settings."""
+    session = _managed_session()
+    session.chat_mode = mode
+    session.env = {"TRAEX_REASONING_EFFORT": "high"}
+    transport = TraexNativeSession(session)
+    transport._started = True
+    transport._process = _FakeProcess([])
+    transport._thread_id = "thread-1"
+    transport._thread_model = "GPT-5.6-Sol"
+    transport._mode_presets[mode.value] = {
+        "name": mode.value.title(),
+        "mode": mode.value,
+        "model": None,
+        "reasoning_effort": preset_effort,
+    }
+    transport._mode_discovery_attempted = True
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    async def request(method: str, params: dict[str, object]) -> dict[str, object]:
+        seen.append((method, params))
+        return {"turn": {"id": "turn-1"}}
+
+    monkeypatch.setattr(transport, "_send_request", request)
+    await transport.send_message("hello", [])
+
+    params = next(params for method, params in seen if method == "turn/start")
+    assert "effort" not in params
+    assert params["collaborationMode"] == {
+        "mode": mode.value,
+        "settings": {
+            "model": "GPT-5.6-Sol",
+            "developer_instructions": None,
+            "reasoning_effort": "high",
+        },
+    }
+
+
+def test_traex_ignores_legacy_effort_unsupported_by_selected_model() -> None:
+    session = _managed_session()
+    session.env = {
+        "CODEX_MODEL": "Seed-Code",
+        "TRAEX_REASONING_EFFORT": "high",
+    }
+    transport = TraexNativeSession(session)
+    transport._thread_model = "Seed-Code"
+    transport._provider_model_options = [
+        StreamModelOption(
+            id="Seed-Code",
+            label="Seed Code",
+            supported_reasoning_efforts=[],
+        )
+    ]
+    transport._available_models = transport._provider_model_options
+
+    assert transport._selected_reasoning_effort() is None
+    assert transport._collaboration_mode_payload() == {
+        "mode": "default",
+        "settings": {"model": "Seed-Code", "developer_instructions": None},
+    }
 
 
 async def test_traex_interrupt_uses_provider_ids_and_retires_old_output(

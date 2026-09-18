@@ -59,7 +59,12 @@ async def _cancel_goal_turn(goal: GoalRun) -> None:
 
     session = _terminal_tab_session_or_404(goal.tab_id)
     manager = _get_tab_tailer_manager()
-    cancelled = await manager.cancel_turn(session, expected_turn_id=goal.current_turn_id)
+    turn_id = goal.current_turn_id or goal.pending_step_id
+    if turn_id is None:
+        if await manager.turn_in_flight(session):
+            raise RuntimeError("Goal turn identity is unknown; stop the current Chat turn first")
+        return
+    cancelled = await manager.cancel_turn(session, expected_turn_id=turn_id)
     if not cancelled and await manager.turn_in_flight(session):
         raise RuntimeError("a newer Chat turn is already in flight")
 

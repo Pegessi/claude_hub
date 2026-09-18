@@ -81,6 +81,8 @@ export interface TerminalTab {
   cursor_transcript_schema?: string | null
   archived?: boolean
   archived_at?: string | null
+  last_viewed_at?: string | null
+  is_unread?: boolean
 }
 
 export interface TerminalTabCreate {
@@ -589,6 +591,16 @@ export interface StreamModelOption {
   id: string
   label: string
   description?: string | null
+  provider_model_id?: string | null
+  default_reasoning_effort?: string | null
+  supported_reasoning_efforts: StreamReasoningEffortOption[]
+}
+
+export interface StreamReasoningEffortOption {
+  id: string
+  label?: string | null
+  description?: string | null
+  provider_model_id?: string | null
 }
 
 export interface StreamCapabilities {
@@ -606,6 +618,8 @@ export interface StreamCapabilities {
   available_modes: StreamModeOption[]
   current_mode: string | null
   available_models: StreamModelOption[]
+  current_model: string | null
+  current_reasoning_effort: string | null
 }
 
 // ── Chat Goal control plane ────────────────────────────────────────────────

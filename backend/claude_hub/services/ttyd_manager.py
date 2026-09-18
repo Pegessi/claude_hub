@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 from collections import namedtuple
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict
 
@@ -1412,6 +1412,7 @@ class TTYDProcess:
         forked_from_ordinal: Optional[int] = None,
         archived: bool = False,
         archived_at: Optional[datetime] = None,
+        last_viewed_at: Optional[datetime] = None,
     ):
         self.tab_id = tab_id
         self.port = port
@@ -1459,6 +1460,9 @@ class TTYDProcess:
         # drives the archived-browser sort order.
         self.archived: bool = bool(archived)
         self.archived_at: Optional[datetime] = archived_at
+        # When the user last opened this tab. Drives the unread flag: a turn
+        # that completed after this is "unread".
+        self.last_viewed_at: Optional[datetime] = last_viewed_at
         self.tmux_session = _tmux_session_name(tab_id)
         # Stable per-tab agent conversation id. Pinned at first launch via the
         # agent CLI's --session-id flag (for agents that support it) or
@@ -2996,6 +3000,7 @@ asyncio.run(_main())
             "forked_from_ordinal": self.forked_from_ordinal,
             "archived": bool(self.archived),
             "archived_at": self.archived_at.isoformat() if self.archived_at else None,
+            "last_viewed_at": self.last_viewed_at.isoformat() if self.last_viewed_at else None,
         }
 
     def to_schema(self) -> TerminalTab:
@@ -3030,6 +3035,8 @@ asyncio.run(_main())
             forked_from_ordinal=self.forked_from_ordinal,
             archived=self.archived,
             archived_at=self.archived_at,
+            last_viewed_at=self.last_viewed_at,
+            is_unread=None,
         )
 
 
@@ -3182,6 +3189,7 @@ class TTYDManager:
                             forked_from_ordinal=tab_data.get("forked_from_ordinal"),
                             archived=tab_data.get("archived", False),
                             archived_at=_parse_optional_iso(tab_data.get("archived_at")),
+                            last_viewed_at=_parse_optional_iso(tab_data.get("last_viewed_at")),
                         )
                         self.processes[process.tab_id] = process
                         if process.port > max_port:
@@ -4127,6 +4135,41 @@ class TTYDManager:
             "no activity indicators",
             last_changed_at,
         )
+
+    def mark_tab_viewed(self, tab_id: str) -> bool:
+        """Record that the user opened this tab (clears its unread flag).
+
+        Returns True if the tab exists, False otherwise.
+        """
+        process = self.processes.get(tab_id)
+        if process is None:
+            return False
+        # Use aware UTC so it compares cleanly with the event stream's
+        # created_at (which is datetime.now(timezone.utc)).
+        process.last_viewed_at = datetime.now(timezone.utc)
+        self._save_state()
+        return True
+
+    async def compute_tab_unread(self, process: TTYDProcess) -> bool:
+        """Return True when the tab's latest completed turn is unread.
+
+        A turn that completed after the user's ``last_viewed_at`` is unread;
+        a tab that has never been viewed is unread once it has a completed turn.
+        """
+        # Deferred import to avoid a circular import (agent_stream is a
+        # sibling service; the fork code at the top of this file does the same).
+        from .agent_stream.store import AgentStreamStore
+        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
+        completed_at_str = await store.latest_turn_completed_at()
+        if completed_at_str is None:
+            return False
+        try:
+            completed_at = datetime.fromisoformat(completed_at_str)
+        except ValueError:
+            return False
+        if process.last_viewed_at is None:
+            return True
+        return completed_at > process.last_viewed_at
 
     async def get_tab_agent_status(
         self,

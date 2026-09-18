@@ -64,6 +64,7 @@ from ...models import (
     StreamCapabilities,
     StreamModelOption,
     StreamModeOption,
+    StreamReasoningEffortOption,
 )
 
 logger = logging.getLogger(__name__)
@@ -354,6 +355,17 @@ _MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
 _MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
 _MODELS_NEGATIVE_TTL_S = 60.0  # failed probe (static fallback): 1 minute
 _MODELS_PROBE_TIMEOUT_S = 5.0
+_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+_REASONING_LABELS = {
+    "none": "None",
+    "minimal": "Minimal",
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "Extra High",
+    "max": "Max",
+    "ultra": "Ultra",
+}
 
 _STATIC_MODELS: Dict[str, List[str]] = {
     "claude": [
@@ -440,6 +452,109 @@ def _parse_list_models(raw: str) -> List[StreamModelOption]:
     return options
 
 
+def _group_cursor_model_options(options: List[StreamModelOption]) -> List[StreamModelOption]:
+    """Collapse Cursor's parameterized model ids into model + effort groups.
+
+    Cursor exposes effort as part of the provider model id (for example
+    ``gpt-5.6-sol-high``), unlike Codex-family app servers which accept model
+    and effort separately.  Capabilities normalize both representations while
+    retaining the exact Cursor id on each effort option.
+    """
+
+    grouped: Dict[Tuple[str, bool], StreamModelOption] = {}
+    ordered: List[StreamModelOption] = []
+    effort_suffixes = sorted(_REASONING_EFFORTS, key=len, reverse=True)
+    candidates: List[Tuple[StreamModelOption, str, bool, Optional[str]]] = []
+    evidence: Dict[Tuple[str, bool], set[str]] = {}
+    provider_ids = {option.id for option in options}
+    for option in options:
+        provider_id = option.id
+        fast = provider_id.endswith("-fast")
+        stem = provider_id[:-5] if fast else provider_id
+        effort: Optional[str] = None
+        # Older Cursor catalogs spell xhigh as ``extra-high`` in some ids.
+        if stem.endswith("-extra-high"):
+            effort = "xhigh"
+            stem = stem[:-11]
+        else:
+            for candidate in effort_suffixes:
+                if stem.endswith(f"-{candidate}"):
+                    effort = candidate
+                    stem = stem[: -(len(candidate) + 1)]
+                    break
+        candidates.append((option, stem, fast, effort))
+        if effort is not None:
+            evidence.setdefault((stem, fast), set()).add(effort)
+
+    for option, stem, fast, effort in candidates:
+        provider_id = option.id
+        base_id = f"{stem}-fast" if fast else stem
+        variants = evidence.get((stem, fast), set())
+        # A suffix such as ``-medium`` may be part of a real model name. Only
+        # collapse it when the catalog proves this is an effort family.
+        is_family = len(variants) >= 2 or base_id in provider_ids
+        if effort is None or not is_family:
+            standalone = option.model_copy(update={"provider_model_id": provider_id})
+            ordered.append(standalone)
+            continue
+
+        group_id = base_id
+        key = (stem, fast)
+        group = grouped.get(key)
+        if group is None:
+            effort_labels = "|".join(
+                re.escape(label)
+                for label in ("Extra High", "Minimal", "Medium", "High", "None", "Low", "Max")
+            )
+            label = re.sub(
+                rf"\s+(?:{effort_labels})(?=\s+Thinking$|$)",
+                "",
+                option.label,
+                flags=re.IGNORECASE,
+            )
+            if fast and not label.lower().endswith(" fast"):
+                label = f"{label} Fast"
+            group = StreamModelOption(
+                id=group_id,
+                label=label,
+                description=option.description,
+                provider_model_id=provider_id,
+                default_reasoning_effort=effort,
+                supported_reasoning_efforts=[],
+            )
+            grouped[key] = group
+            ordered.append(group)
+        group.supported_reasoning_efforts.append(
+            StreamReasoningEffortOption(
+                id=effort,
+                label=_REASONING_LABELS[effort],
+                provider_model_id=provider_id,
+            )
+        )
+        # Prefer medium, then high, as the representative id used by Default.
+        if effort == "medium" or (effort == "high" and group.default_reasoning_effort != "medium"):
+            group.default_reasoning_effort = effort
+            group.provider_model_id = provider_id
+    grouped_ids = {item.id for item in grouped.values()}
+    standalone_by_id = {item.id: item for item in ordered if not item.supported_reasoning_efforts}
+    for group in grouped.values():
+        default_option = standalone_by_id.get(group.id)
+        if default_option is not None:
+            group.provider_model_id = default_option.provider_model_id
+            group.default_reasoning_effort = "medium"
+            if not any(item.id == "medium" for item in group.supported_reasoning_efforts):
+                group.supported_reasoning_efforts.append(
+                    StreamReasoningEffortOption(
+                        id="medium",
+                        label=_REASONING_LABELS["medium"],
+                        provider_model_id=default_option.provider_model_id,
+                    )
+                )
+    return [
+        item for item in ordered if item.supported_reasoning_efforts or item.id not in grouped_ids
+    ]
+
+
 def _safe_kill(proc: Any) -> None:
     """Kill a probe subprocess, ignoring the race where it already exited."""
     try:
@@ -469,7 +584,7 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
             stderr=asyncio.subprocess.PIPE,
         )
     except (OSError, NotImplementedError):
-        return _static_options("cursor"), True
+        return _group_cursor_model_options(_static_options("cursor")), True
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_MODELS_PROBE_TIMEOUT_S)
     except asyncio.CancelledError:
@@ -482,9 +597,18 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
         # Timeout or other failure: ``wait_for`` cancels the communicate
         # coroutine but does not kill the underlying process.
         _safe_kill(proc)
-        return _static_options("cursor"), True
-    parsed = _parse_list_models(stdout.decode("utf-8", errors="replace"))
-    return (parsed, False) if parsed else (_static_options("cursor"), True)
+        return _group_cursor_model_options(_static_options("cursor")), True
+    parsed = _group_cursor_model_options(
+        _parse_list_models(stdout.decode("utf-8", errors="replace"))
+    )
+    return (
+        (parsed, False)
+        if parsed
+        else (
+            _group_cursor_model_options(_static_options("cursor")),
+            True,
+        )
+    )
 
 
 @dataclass
@@ -927,6 +1051,16 @@ class ProviderSession(ABC):
     def available_modes(self) -> List[StreamModeOption]:
         return [_DEFAULT_MODE]
 
+    def current_model(self) -> Optional[str]:
+        """Return the provider's effective model when it is known."""
+
+        return None
+
+    def current_reasoning_effort(self) -> Optional[str]:
+        """Return the effective reasoning effort when it is known."""
+
+        return None
+
     async def prepare_capabilities(self) -> None:
         """Discover the available models for this session's agent type.
 
@@ -1194,6 +1328,8 @@ class ProviderSession(ABC):
             supports_goals=self.supports_goals,
             goal_execution_owner=self.goal_execution_owner,
             goal_usage_quality=self.goal_usage_quality,
+            current_model=self.current_model(),
+            current_reasoning_effort=self.current_reasoning_effort(),
         )
 
     @property
@@ -1548,6 +1684,8 @@ class CodexNativeSession(ProviderSession):
         self._mode_presets: Dict[str, Dict[str, Any]] = {}
         self._mode_discovery_attempted = False
         self._provider_goal_api_available: Optional[bool] = None
+        self._model_discovery_attempted = False
+        self._provider_model_options: Optional[List[StreamModelOption]] = None
 
     def _build_command(self) -> List[str]:
         return ["codex", "app-server", "--stdio"]
@@ -1745,6 +1883,78 @@ class CodexNativeSession(ProviderSession):
         await self.start()
         if not self._mode_discovery_attempted:
             await self._discover_modes()
+        if self._provider_model_options is not None:
+            self._available_models = self._provider_model_options
+        elif not self._model_discovery_attempted:
+            await self._discover_models()
+
+    async def _discover_models(self) -> None:
+        """Load the app-server's model-specific reasoning capabilities."""
+
+        pages: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        seen_cursors: set[str] = set()
+        while True:
+            params = {"cursor": cursor} if cursor is not None else {}
+            try:
+                response = await self._send_request("model/list", params)
+            except RuntimeError:
+                logger.warning("%s model/list unavailable; using static fallback", self.adapter_id)
+                return
+            if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+                return
+            pages.append(response)
+            next_cursor = response.get("nextCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        self._model_discovery_attempted = True
+        options: List[StreamModelOption] = []
+        seen: set[str] = set()
+        data = [item for page in pages for item in page["data"]]
+        for item in data:
+            if not isinstance(item, dict) or item.get("hidden") is True:
+                continue
+            model = item.get("model")
+            if not isinstance(model, str) or not model or model in seen:
+                continue
+            seen.add(model)
+            efforts: List[StreamReasoningEffortOption] = []
+            raw_efforts = item.get("supportedReasoningEfforts")
+            if isinstance(raw_efforts, list):
+                for raw_effort in raw_efforts:
+                    if not isinstance(raw_effort, dict):
+                        continue
+                    effort = raw_effort.get("reasoningEffort")
+                    if not isinstance(effort, str) or effort not in _REASONING_EFFORTS:
+                        continue
+                    description = raw_effort.get("description")
+                    efforts.append(
+                        StreamReasoningEffortOption(
+                            id=effort,
+                            label=_REASONING_LABELS[effort],
+                            description=description if isinstance(description, str) else "",
+                        )
+                    )
+            default_effort = item.get("defaultReasoningEffort")
+            if not isinstance(default_effort, str) or default_effort not in _REASONING_EFFORTS:
+                default_effort = None
+            label = item.get("displayName")
+            description = item.get("description")
+            options.append(
+                StreamModelOption(
+                    id=model,
+                    label=label if isinstance(label, str) and label else model,
+                    description=description if isinstance(description, str) else "",
+                    provider_model_id=model,
+                    default_reasoning_effort=default_effort,
+                    supported_reasoning_efforts=efforts,
+                )
+            )
+        if options:
+            self._provider_model_options = options
+            self._available_models = options
 
     def available_modes(self) -> List[StreamModeOption]:
         options = [_DEFAULT_MODE]
@@ -1768,6 +1978,39 @@ class CodexNativeSession(ProviderSession):
             return model.strip()
         return None
 
+    def _selected_reasoning_effort(self) -> Optional[str]:
+        effort = self.session.env.get("CODEX_REASONING_EFFORT")
+        if self.session.agent_type == AgentType.TRAEX:
+            effort = effort or self.session.env.get("TRAEX_REASONING_EFFORT")
+        if isinstance(effort, str) and effort.strip() in _REASONING_EFFORTS:
+            selected = effort.strip()
+            model_id = self.current_model()
+            catalog = self._provider_model_options or []
+            model = next((item for item in catalog if item.id == model_id), None)
+            if model is not None and selected not in {
+                item.id for item in model.supported_reasoning_efforts
+            }:
+                return None
+            return selected
+        return None
+
+    def current_model(self) -> Optional[str]:
+        return self._selected_model_override() or self._thread_model
+
+    def current_reasoning_effort(self) -> Optional[str]:
+        """Return the effort used when no explicit picker override exists."""
+
+        preset = self._mode_presets.get(self._current_mode, {})
+        preset_effort = preset.get("reasoning_effort")
+        if isinstance(preset_effort, str) and preset_effort in _REASONING_EFFORTS:
+            return preset_effort
+        catalog = self._provider_model_options or self._available_models
+        model_id = self.current_model()
+        if model_id is None and len(catalog) == 1:
+            model_id = catalog[0].id
+        model = next((item for item in catalog if item.id == model_id), None)
+        return model.default_reasoning_effort if model is not None else None
+
     def _collaboration_mode_payload(self) -> Optional[Dict[str, Any]]:
         model_override = self._selected_model_override()
         preset = self._mode_presets.get(self._current_mode)
@@ -1781,14 +2024,21 @@ class CodexNativeSession(ProviderSession):
             # silently dropped. Verified against codex app-server 0.151.0:
             # a default-mode collaborationMode with settings.model is accepted
             # and surfaces in thread/settings/updated.
-            if model_override is None:
+            effort_override = self._selected_reasoning_effort()
+            if model_override is None and effort_override is None:
                 return None
+            model = model_override or self._thread_model
+            if not isinstance(model, str) or not model:
+                raise RuntimeError("Codex reasoning effort requires the active thread model")
+            default_settings: Dict[str, Any] = {
+                "model": model,
+                "developer_instructions": None,
+            }
+            if effort_override is not None:
+                default_settings["reasoning_effort"] = effort_override
             return {
                 "mode": ChatMode.DEFAULT.value,
-                "settings": {
-                    "model": model_override,
-                    "developer_instructions": None,
-                },
+                "settings": default_settings,
             }
         model = model_override or preset.get("model") or self._thread_model
         if not isinstance(model, str) or not model:
@@ -1797,7 +2047,7 @@ class CodexNativeSession(ProviderSession):
             "model": model,
             "developer_instructions": None,
         }
-        effort = preset.get("reasoning_effort")
+        effort = self._selected_reasoning_effort() or preset.get("reasoning_effort")
         if isinstance(effort, str) and effort:
             settings["reasoning_effort"] = effort
         provider_mode = preset.get("mode")
