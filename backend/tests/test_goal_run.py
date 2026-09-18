@@ -250,6 +250,17 @@ def test_recovery_pauses_uncertain_dispatch(tmp_path: Path) -> None:
     assert recovered[0].dispatch_state.value == "uncertain"
 
 
+def test_restart_between_turns_does_not_leave_goal_active_without_a_scheduler(
+    tmp_path: Path,
+) -> None:
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request())
+    recovered = manager.recover()
+    assert recovered[0].id == goal.id
+    assert recovered[0].status == GoalRunStatus.PAUSED
+    assert recovered[0].dispatch_state == GoalDispatchState.IDLE
+
+
 @pytest.mark.asyncio
 async def test_resume_reconciles_uncertain_turn_and_dispatches_once(tmp_path: Path) -> None:
     dispatched: list[str] = []

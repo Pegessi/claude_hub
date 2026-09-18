@@ -555,15 +555,20 @@ class GoalRunController:
         """Fail closed for dispatches whose provider acceptance is uncertain."""
         recovered: list[GoalRun] = []
         for goal in self.store.list():
+            was_active = goal.status == GoalRunStatus.ACTIVE
+            if was_active:
+                goal.status = GoalRunStatus.PAUSED
+                goal.paused_at = utc_now()
+                goal.status_message = "backend restarted; resume the Goal explicitly"
             if goal.dispatch_state in {
                 GoalDispatchState.PENDING,
                 GoalDispatchState.DISPATCHED,
             }:
-                if goal.status == GoalRunStatus.ACTIVE:
-                    goal.status = GoalRunStatus.PAUSED
                 goal.dispatch_state = GoalDispatchState.UNCERTAIN
                 goal.status_message = (
                     "restart occurred during continuation dispatch; resume explicitly"
                 )
+                recovered.append(self.store.put(goal))
+            elif was_active:
                 recovered.append(self.store.put(goal))
         return recovered

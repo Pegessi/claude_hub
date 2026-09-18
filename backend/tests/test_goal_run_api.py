@@ -124,6 +124,7 @@ async def test_goal_runtime_callbacks_use_direct_chat_transport(monkeypatch, tmp
         "tab-1", GoalRunCreate(objective="Finish it", client_request_id="create-1")
     )
     goal.pending_step_id = "step-1"
+    goal.current_turn_id = "step-1"
 
     turn_id = await goal_api._dispatch_goal_turn(goal, "continue safely")
     assert turn_id == "step-1"
@@ -139,7 +140,27 @@ async def test_goal_runtime_callbacks_use_direct_chat_transport(monkeypatch, tmp
         },
     }
     await goal_api._cancel_goal_turn(goal)
-    assert cancelled == [(session, None)]
+    assert cancelled == [(session, "step-1")]
+
+
+@pytest.mark.asyncio
+async def test_unknown_goal_turn_identity_never_cancels_an_unrelated_turn(monkeypatch, tmp_path):
+    calls = []
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda tab_id: session)
+    monkeypatch.setattr(
+        stream_api,
+        "_get_tab_tailer_manager",
+        lambda: SimpleNamespace(
+            turn_in_flight=lambda session: _return_true(),
+            cancel_turn=lambda *args, **kwargs: _record_cancel(calls, args),
+        ),
+    )
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"))
+    goal = manager.create("tab-1", GoalRunCreate(objective="Finish it", client_request_id="create"))
+    with pytest.raises(RuntimeError, match="identity"):
+        await goal_api._cancel_goal_turn(goal)
+    assert calls == []
 
 
 async def _record_cancel(calls: list[object], session: object) -> bool:

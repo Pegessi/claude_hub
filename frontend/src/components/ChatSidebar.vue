@@ -103,35 +103,49 @@
             v-if="!collapsedGroups.has(group.cwd)"
             class="chat-sidebar__group-items"
           >
-            <button
+            <div
               v-for="tab in group.tabs"
               :key="tab.id"
-              type="button"
               class="chat-sidebar__item"
               :class="{ active: tab.id === activeTabId }"
-              @click="setActiveTab(tab.id)"
             >
-              <span class="chat-sidebar__item-name">{{ tab.name || 'Untitled' }}</span>
-              <span class="chat-sidebar__item-time">{{ relativeTime(tab.created_at) }}</span>
-              <span
-                class="chat-sidebar__item-archive"
-                title="Archive session"
-                aria-label="Archive session"
-                @click.stop="archiveTab(tab.id)"
+              <button
+                v-if="renamingTabId !== tab.id"
+                type="button"
+                class="chat-sidebar__item-main"
+                @click="setActiveTab(tab.id)"
               >
-                <svg
-                  viewBox="0 0 16 16"
-                  width="13"
-                  height="13"
-                  aria-hidden="true"
-                >
-                  <path
-                    fill="currentColor"
-                    d="M2 3.5h12v2h-.6l-.8 7.5H3.4L2.6 5.5H2v-2zm1.7 2 .6 6.5h7.4l.6-6.5H3.7zM6 7h1v4H6V7zm3 0h1v4H9V7zM4 4.5h8v-1H4v1z"
-                  />
-                </svg>
-              </span>
-            </button>
+                <span
+                  class="chat-sidebar__item-status"
+                  :data-status="getTabStatus(tab)"
+                  :data-unread="tab.is_unread ? 'true' : 'false'"
+                  role="img"
+                  :aria-label="`Session status: ${getTabStatusLabel(tab)}`"
+                  :title="`Session status: ${getTabStatusLabel(tab)}`"
+                />
+                <span class="chat-sidebar__item-name">{{ tab.name || 'Untitled' }}</span>
+                <span class="chat-sidebar__item-time">{{ relativeTime(tab.created_at) }}</span>
+              </button>
+              <input
+                v-else
+                :ref="setRenameInputRef"
+                v-model="renamingTabName"
+                type="text"
+                class="chat-sidebar__rename-input"
+                aria-label="Rename session"
+                @blur="handleRenameTab(tab.id)"
+                @keyup.enter="handleRenameTab(tab.id)"
+                @keyup.escape="cancelRename(tab.id)"
+              >
+              <!-- Same ⋯ actions as the TabBar (rename / duplicate / archive /
+                   copy link / switch env). Hover-revealed like the old archive. -->
+              <TabActionsMenu
+                class="chat-sidebar__item-menu"
+                :tab="tab"
+                variant="sidebar"
+                @rename="startRename"
+              />
+            </div>
           </div>
         </div>
 
@@ -199,11 +213,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { nextTick, ref, computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { cwdLabel } from '@/utils/chatGroups'
 import { relativeTime } from '@/utils/time'
+import { useTabStatus } from '@/composables/useTabStatus'
+import TabActionsMenu from '@/components/TabActionsMenu.vue'
+import type { TerminalTab } from '@/types'
 
 defineEmits<{
   (e: 'open-archive'): void
@@ -215,11 +232,70 @@ const {
   activeTabId,
   sidebarCollapsed,
   archivedTabs,
+  agentStatuses,
 } = storeToRefs(store)
-const { toggleSidebar, setActiveTab, archiveTab } = store
+const { toggleSidebar, setActiveTab } = store
+
+// Tab-status logic is shared with the TabBar via useTabStatus.
+const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
 
 const filterText = ref('')
 const collapsedGroups = ref<Set<string>>(new Set())
+
+// Inline row rename (mirrors the TabBar's double-click rename).
+const renamingTabId = ref<string | null>(null)
+const renamingTabName = ref('')
+// Tab whose rename PUT is in flight, so a late Enter/blur cannot double-submit
+// or have one row's continuation cancel another row's rename.
+const savingRenameId = ref<string | null>(null)
+const renameInputRef = ref<HTMLInputElement | null>(null)
+
+function setRenameInputRef(el: unknown) {
+  renameInputRef.value = el instanceof HTMLInputElement ? el : null
+}
+
+function startRename(tab: TerminalTab) {
+  // A save is in flight on another row; ignore so its continuation cannot
+  // unmount this input mid-edit (the window is one PUT, typically <100ms).
+  if (savingRenameId.value) return
+  renamingTabId.value = tab.id
+  renamingTabName.value = tab.name
+  nextTick(() => {
+    renameInputRef.value?.focus()
+    renameInputRef.value?.select()
+  })
+}
+
+function cancelRename(tabId: string) {
+  // Ignore Esc on a row that isn't actively renaming, or one whose save is
+  // already in flight (the continuation will close it).
+  if (renamingTabId.value !== tabId || savingRenameId.value) return
+  renamingTabId.value = null
+  renamingTabName.value = ''
+}
+
+async function handleRenameTab(tabId: string) {
+  // A late blur/Enter from a different (already unmounted) row's input, or a
+  // duplicate event while this row's PUT is in flight: do nothing.
+  if (renamingTabId.value !== tabId || savingRenameId.value) return
+  const name = renamingTabName.value.trim()
+  // Blank name: just close without saving.
+  if (!name) {
+    renamingTabId.value = null
+    renamingTabName.value = ''
+    return
+  }
+  savingRenameId.value = tabId
+  try {
+    await store.updateTab(tabId, { name })
+  } finally {
+    if (renamingTabId.value === tabId) {
+      renamingTabId.value = null
+      renamingTabName.value = ''
+    }
+    savingRenameId.value = null
+  }
+}
 
 function toggleGroup(cwd: string) {
   const next = new Set(collapsedGroups.value)
@@ -421,7 +497,8 @@ const filteredGroups = computed(() => {
   margin: 2px 0 4px;
 }
 
-/* Chat rows */
+/* Chat rows: a plain container; the clickable surface is the inner main
+   button so the ⋯ menu can sit beside it as a valid sibling control. */
 .chat-sidebar__item {
   position: relative;
   display: flex;
@@ -429,12 +506,10 @@ const filteredGroups = computed(() => {
   gap: 6px;
   width: 100%;
   padding: 6px 8px;
-  border: none;
   border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text);
   font-size: var(--ch-font-size-sm);
-  cursor: pointer;
   transition: background var(--ch-motion-fast);
 }
 
@@ -445,6 +520,101 @@ const filteredGroups = computed(() => {
 .chat-sidebar__item.active {
   background: var(--ch-color-surface-selected);
   color: var(--ch-color-text-strong);
+}
+
+.chat-sidebar__item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-sidebar__item-main:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--ch-color-accent-ring);
+}
+
+/* While the absolute ⋯ menu is shown, reserve its column inside the main
+   button so the longest names ellipsize instead of running under it. */
+.chat-sidebar__item:hover .chat-sidebar__item-main,
+.chat-sidebar__item:focus-within .chat-sidebar__item-main {
+  padding-right: 26px;
+}
+
+.chat-sidebar__item-status {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  align-self: center;
+  background: var(--ch-color-text-subtle);
+}
+
+/* Colors mirror the TabBar's .tab-indicator so the two surfaces agree. */
+.chat-sidebar__item-status[data-status='working'] {
+  background: var(--ch-color-warning);
+  box-shadow: 0 0 6px var(--ch-color-warning-bg);
+}
+
+.chat-sidebar__item-status[data-status='idle'] {
+  background: var(--ch-color-success);
+}
+
+.chat-sidebar__item-status[data-status='attention'] {
+  background: var(--ch-color-attention);
+  box-shadow: 0 0 6px var(--ch-color-attention-bg);
+}
+
+.chat-sidebar__item-status[data-status='offline'] {
+  background: var(--ch-color-text-subtle);
+}
+
+/* Unread ping: a soft accent halo plus an accent ring that expands outward
+   from the dot and fades, repeating. Shown only for tabs with an unread
+   completed turn. The halo keeps the state legible between ripple frames.
+   For working/attention the halo is stacked with the status glow so neither
+   signal is suppressed. */
+.chat-sidebar__item-status[data-unread='true'] {
+  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
+}
+
+.chat-sidebar__item-status[data-status='working'][data-unread='true'] {
+  box-shadow: 0 0 6px var(--ch-color-warning-bg), 0 0 0 2px var(--ch-color-accent-ring);
+}
+
+.chat-sidebar__item-status[data-status='attention'][data-unread='true'] {
+  box-shadow: 0 0 6px var(--ch-color-attention-bg), 0 0 0 2px var(--ch-color-accent-ring);
+}
+
+.chat-sidebar__item-status[data-unread='true']::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* The global `* { box-sizing: border-box }` reset does NOT reach
+     pseudo-elements; without this the 1.5px border adds onto width:100%
+     (content-box), making the 11px ring sit down-right of the 8px dot. */
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 1.5px solid var(--ch-color-accent);
+  animation: sidebar-unread-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes sidebar-unread-ping {
+  0% { transform: scale(1); opacity: 0.9; }
+  75%, 100% { transform: scale(2.4); opacity: 0; }
 }
 
 .chat-sidebar__item-name {
@@ -465,31 +635,38 @@ const filteredGroups = computed(() => {
   color: var(--ch-color-text-muted);
 }
 
-/* Hover-revealed archive shortcut */
-.chat-sidebar__item-archive {
+/* Hover-revealed ⋯ actions menu (same actions as the TabBar). Absolute,
+   over the timestamp; focus-within keeps it reachable via keyboard. */
+.chat-sidebar__item-menu {
   position: absolute;
   right: 4px;
   display: none;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--ch-radius-sm);
-  color: var(--ch-color-text-subtle);
 }
 
-.chat-sidebar__item:hover .chat-sidebar__item-archive {
+.chat-sidebar__item:hover .chat-sidebar__item-menu,
+.chat-sidebar__item:focus-within .chat-sidebar__item-menu {
   display: inline-flex;
 }
 
-.chat-sidebar__item-archive:hover {
-  background: var(--ch-color-surface-control-hover);
-  color: var(--ch-color-text);
+/* Hide the timestamp while the actions menu is shown to avoid overlap */
+.chat-sidebar__item:hover .chat-sidebar__item-time,
+.chat-sidebar__item:focus-within .chat-sidebar__item-time {
+  visibility: hidden;
 }
 
-/* Hide the timestamp when the archive button is revealed to avoid overlap */
-.chat-sidebar__item:hover .chat-sidebar__item-time {
-  visibility: hidden;
+.chat-sidebar__rename-input {
+  flex: 1;
+  min-width: 0;
+  /* Align with the name text inside the main button (8px dot + 6px gap). */
+  margin-left: 14px;
+  height: 22px;
+  padding: 1px 6px;
+  border: 1px solid var(--ch-color-accent);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-sm);
+  outline: none;
 }
 
 .chat-sidebar__empty {

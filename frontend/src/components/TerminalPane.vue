@@ -9,8 +9,16 @@
   >
     <!-- The session kind is fixed at creation: Chat sessions own the
          structured conversation surface, while Terminal sessions own raw PTY.
-         No per-pane info header: the TabBar already identifies the active tab,
-         so a header would just duplicate it and cost a row of space. -->
+         No full info header: the TabBar already identifies the active tab, so
+         a header would just duplicate it and cost a row of space. -->
+    <!-- Minimal session name in the top-right corner so a pane can still be
+         identified at a glance (multi-pane layouts, or when reviewing history)
+         without the cost of a full header row. -->
+    <span
+      v-if="pane.tabId"
+      class="pane-session-name"
+      :title="tabName"
+    >{{ tabName }}</span>
 
     <!-- 空状态 -->
     <div
@@ -81,6 +89,7 @@ const paneTab = computed<TerminalTab | undefined>(() =>
   props.pane.tabId ? tabs.value.find((t: TerminalTab) => t.id === props.pane.tabId) : undefined
 )
 const agentType = computed(() => paneTab.value?.agent_type)
+const tabName = computed(() => paneTab.value?.name || '')
 // workspace_id is optional display metadata on direct top-level sessions.
 // Only a workspace role marks an internal Agent Workspace runner.
 const isManagedTab = computed(() => Boolean(paneTab.value?.workspace_role))
@@ -167,6 +176,26 @@ onUnmounted(() => {
 .terminal-pane.drag-over {
   border-color: var(--ch-color-success-strong);
   background-color: var(--ch-color-success-bg);
+}
+
+.pane-session-name {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 5;
+  max-width: 45%;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--ch-color-surface-raised);
+  border: 1px solid var(--ch-color-border-muted);
+  box-shadow: 0 1px 4px var(--ch-shadow-color-soft);
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .pane-empty {

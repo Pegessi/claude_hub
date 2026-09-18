@@ -60,12 +60,24 @@ class StreamModeOption(BaseModel):
     description: str
 
 
+class StreamReasoningEffortOption(BaseModel):
+    """One reasoning-effort level advertised for a specific model."""
+
+    id: str
+    label: str = ""
+    description: str = ""
+    provider_model_id: Optional[str] = None
+
+
 class StreamModelOption(BaseModel):
     """One provider-verified model exposed by the structured Chat surface."""
 
     id: str
     label: str
     description: str = ""
+    provider_model_id: Optional[str] = None
+    default_reasoning_effort: Optional[str] = None
+    supported_reasoning_efforts: List[StreamReasoningEffortOption] = Field(default_factory=list)
 
 
 class StreamCapabilities(BaseModel):
@@ -89,6 +101,8 @@ class StreamCapabilities(BaseModel):
     supports_goals: bool = False
     goal_execution_owner: Optional[Literal["provider_native", "hub_managed"]] = None
     goal_usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
+    current_model: Optional[str] = None
+    current_reasoning_effort: Optional[str] = None
 
 
 class ExecutionTarget(str, Enum):
@@ -589,6 +603,14 @@ class TerminalTab(TerminalTabBase):
     archived_at: Optional[datetime] = Field(
         None,
         description="When the tab was archived; None while active.",
+    )
+    last_viewed_at: Optional[datetime] = Field(
+        None,
+        description="When the user last opened/viewed this tab; drives the unread flag.",
+    )
+    is_unread: Optional[bool] = Field(
+        None,
+        description="True when the tab's latest completed turn is newer than last_viewed_at.",
     )
 
     class Config:

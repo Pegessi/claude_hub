@@ -96,6 +96,13 @@ IDLE_TTL_S = 300.0
 # generous: it fires on in-flight duration, never on subscriber presence, so it
 # cannot interrupt a healthy turn that was merely backgrounded on mobile.
 MAX_TURN_DURATION_S = 3600.0
+# Stream inactivity timeout. The model API is streaming, so a healthy turn
+# emits events continuously; if no event arrives for this long during an
+# in-flight turn, the stream is dead (e.g. the model backend stopped
+# responding). This is the primary hang check — it fires on inactivity, so
+# it catches a stuck turn far faster than MAX_TURN_DURATION_S (a backstop on
+# total turn duration). Uniform on purpose: no tool-state tracking.
+STREAM_INACTIVITY_TIMEOUT_S = 600.0
 DISCOVERY_GRACE_S = 30.0
 SUBSCRIBER_QUEUE_MAX = 2000
 _STOP_JOIN_TIMEOUT_S = 5.0
@@ -106,6 +113,10 @@ _RUNTIME_INTERRUPTED_MESSAGE = (
 # turn itself is stuck past the hard cap. Surfaced so the user knows why a
 # long-running turn was stopped rather than seeing an immortal spinner.
 _HUNG_TURN_MESSAGE = "Turn stopped after exceeding the maximum allowed duration."
+# Distinct from the duration cap: the stream went silent (no events for
+# STREAM_INACTIVITY_TIMEOUT_S), the primary signal that the model backend
+# stopped responding mid-turn.
+_INACTIVITY_TIMEOUT_MESSAGE = "Turn stopped after the stream went silent."
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
@@ -354,6 +365,11 @@ class SessionTailer:
         # observed active; ``None`` when no turn is in flight. Drives the
         # hung-turn safety cap in ``_run_native`` (independent of subscribers).
         self._turn_in_flight_since: Optional[float] = None
+        # Wall-clock stamp of the last accepted event in the current turn.
+        # Initialized on turn start and updated on every accepted record;
+        # ``None`` when no turn is in flight. Drives the stream inactivity
+        # timeout in ``_run_native``.
+        self._last_event_at: Optional[float] = None
         self._hard_failed = False
         self._discovery_deadline: Optional[float] = None
         self._stopped = False
@@ -806,6 +822,17 @@ class SessionTailer:
         since = self._turn_in_flight_since
         return since is not None and (time.monotonic() - since > MAX_TURN_DURATION_S)
 
+    def _stream_inactive(self) -> bool:
+        """True if no event has arrived for ``STREAM_INACTIVITY_TIMEOUT_S``.
+
+        The model API is streaming, so a healthy turn emits events
+        continuously; a gap longer than this means the stream is dead. This
+        is the primary hang check — it fires on inactivity, so it catches a
+        stuck turn far faster than the total-duration backstop.
+        """
+        last = self._last_event_at
+        return last is not None and (time.monotonic() - last > STREAM_INACTIVITY_TIMEOUT_S)
+
     async def _cancel_active_turn_locked(
         self,
         transport: ProviderSession,
@@ -1045,22 +1072,65 @@ class SessionTailer:
             self._hard_failed = False
             _HARD_FAILED_SESSION_IDS.discard(self.session_id)
             self._last_error = None
-            # Track the current turn's wall-clock duration for the hung-turn
-            # safety cap below. ``turn_in_flight`` is the authoritative guard
-            # (released at TURN_COMPLETED), so this stamps the first tick on
-            # which a turn is observed active and clears on completion.
+            # Track the current turn's wall-clock duration and last-activity
+            # time for the hung-turn safety caps below. ``turn_in_flight`` is
+            # the authoritative guard (released at TURN_COMPLETED), so this
+            # stamps the first tick on which a turn is observed active and
+            # clears on completion.
             if transport.turn_in_flight:
                 if self._turn_in_flight_since is None:
+                    # Fresh turn: start both the duration and inactivity clocks.
                     self._turn_in_flight_since = time.monotonic()
+                    self._last_event_at = time.monotonic()
             elif self._turn_in_flight_since is not None:
                 self._turn_in_flight_since = None
+                self._last_event_at = None
+            # Hung-turn safety cap: a turn stuck past MAX_TURN_DURATION_S is
+            # genuinely hung. This runs independent of subscriber presence on
+            # purpose — a session the user is actively watching must also be
+            # protected, not left to hang forever. Terminalize the turn and
+            # reap the subprocess so the tailer does not live indefinitely.
+            if transport.turn_in_flight and self._turn_exceeds_hard_cap():
+                try:
+                    async with self._send_lock:
+                        if transport.turn_in_flight and self._turn_exceeds_hard_cap():
+                            await self._cancel_active_turn_locked(
+                                transport,
+                                error_message=_HUNG_TURN_MESSAGE,
+                            )
+                            await transport.stop()
+                except Exception:
+                    logger.exception(
+                        "native hung-turn reap failed for session %s",
+                        self.session_id,
+                    )
+                break
+            # Stream inactivity timeout: the model API is streaming, so a
+            # healthy turn emits events continuously. If no event arrives for
+            # STREAM_INACTIVITY_TIMEOUT_S, the stream is dead — terminalize
+            # the turn and reap the subprocess. This is the primary hang
+            # check: it fires on inactivity, so it catches a stuck turn far
+            # faster than the duration cap above.
+            if transport.turn_in_flight and self._stream_inactive():
+                try:
+                    async with self._send_lock:
+                        if transport.turn_in_flight and self._stream_inactive():
+                            await self._cancel_active_turn_locked(
+                                transport,
+                                error_message=_INACTIVITY_TIMEOUT_MESSAGE,
+                            )
+                            await transport.stop()
+                except Exception:
+                    logger.exception(
+                        "native stream inactivity reap failed for session %s",
+                        self.session_id,
+                    )
+                break
             # Idle reaping: with no subscribers for IDLE_TTL_S, reap an idle
             # tailer. A healthy in-flight turn is NEVER cancelled just because
             # viewers vanished (e.g. mobile backgrounding kills SSE and the
             # long-poll self-expires) — it completes on its own and the next
-            # idle check reaps it. Only a turn that exceeds the hard duration
-            # cap (genuinely hung) is reaped, with a distinct message because
-            # the runtime is healthy — the turn itself is stuck.
+            # idle check reaps it.
             if not self._subscribers and (time.monotonic() - self._last_subscriber_at > IDLE_TTL_S):
                 if not transport.turn_in_flight:
                     # Stop the native transport so the provider subprocess
@@ -1071,23 +1141,6 @@ class SessionTailer:
                     except Exception:
                         logger.exception(
                             "native transport stop failed during idle reap for session %s",
-                            self.session_id,
-                        )
-                    break
-                if self._turn_exceeds_hard_cap():
-                    # Genuinely hung turn: terminalize it and reap the
-                    # subprocess so the tailer does not live forever.
-                    try:
-                        async with self._send_lock:
-                            if transport.turn_in_flight and self._turn_exceeds_hard_cap():
-                                await self._cancel_active_turn_locked(
-                                    transport,
-                                    error_message=_HUNG_TURN_MESSAGE,
-                                )
-                                await transport.stop()
-                    except Exception:
-                        logger.exception(
-                            "native hung-turn reap failed for session %s",
                             self.session_id,
                         )
                     break
@@ -1188,6 +1241,9 @@ class SessionTailer:
             # before wait_for resumes this consumer. Recheck at consumption.
             if not transport.accepts_notification(record):
                 continue
+            # Accepted record: the turn is making progress, so reset the
+            # stream inactivity clock.
+            self._last_event_at = time.monotonic()
             transport.maybe_capture_conversation_id(record)
             ctx = NormalizeContext(
                 session_id=self.session_id,

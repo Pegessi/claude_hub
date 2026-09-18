@@ -278,3 +278,63 @@ async def test_archive_tab_route_returns_archived_tab(
     data = response.json()
     assert data["archived"] is True
     assert data["archived_at"] is not None
+
+
+async def test_mark_tab_viewed_route_clears_unread(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    def fake_mark_tab_viewed(tab_id: str) -> bool:
+        return True
+
+    def fake_get_tab(tab_id: str) -> TerminalTab:
+        return TerminalTab(
+            id=tab_id,
+            name="Viewed",
+            shell=None,
+            cwd=None,
+            solo_mode=False,
+            agent_type=AgentType.CLAUDE,
+            target=ExecutionTarget.LOCAL,
+            remote_profile_id=None,
+            remote_cwd=None,
+            remote_reconnect=True,
+            port=12345,
+            created_at=datetime.now(),
+            is_active=False,
+            workspace_id=None,
+            workspace_name=None,
+            workspace_role=None,
+            archived=False,
+            archived_at=None,
+            last_viewed_at=datetime.now(),
+            is_unread=False,
+        )
+
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.mark_tab_viewed",
+        fake_mark_tab_viewed,
+    )
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.get_tab", fake_get_tab)
+
+    response = await client.post("/api/tabs/live-tab/view")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_unread"] is False
+    assert data["last_viewed_at"] is not None
+
+
+async def test_mark_tab_viewed_route_returns_404_for_missing_tab(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    def fake_mark_tab_viewed(tab_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "claude_hub.api.tabs.ttyd_manager.mark_tab_viewed",
+        fake_mark_tab_viewed,
+    )
+
+    response = await client.post("/api/tabs/missing-id/view")
+
+    assert response.status_code == 404

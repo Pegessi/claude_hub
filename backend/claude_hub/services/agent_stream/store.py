@@ -316,6 +316,35 @@ class AgentStreamStore:
             return None
         return last
 
+    async def latest_turn_completed_at(self) -> Optional[str]:
+        """Return the ``created_at`` of the last ``turn_completed`` event.
+
+        Used to compute the unread flag: a turn that completed after the
+        user's ``last_viewed_at`` is unread. Returns ``None`` if no turn has
+        completed yet.
+        """
+        if not self._path.exists():
+            return None
+        last: Optional[str] = None
+        try:
+            with self._path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if obj.get("type") != "turn_completed":
+                        continue
+                    ca = obj.get("created_at")
+                    if isinstance(ca, str):
+                        last = ca
+        except OSError:
+            return None
+        return last
+
     async def truncate_before(self, sequence: int) -> int:
         """Remove all events with ``stream_sequence >= sequence``.
 
