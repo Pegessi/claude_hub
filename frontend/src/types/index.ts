@@ -628,7 +628,6 @@ export type ChatGoalStatus =
   | 'active'
   | 'paused'
   | 'blocked'
-  | 'budget_limited'
   | 'complete'
   | 'cancelled'
   | 'failed'
@@ -651,10 +650,8 @@ export interface ChatGoal {
   tab_id: string
   objective: string
   status: ChatGoalStatus
-  token_budget: number | null
   token_usage: number | null
   usage_quality: ChatGoalUsageQuality
-  max_turns: number
   turns_completed: number
   dispatch_state: ChatGoalDispatchState
   pending_step_id?: string | null
@@ -672,8 +669,6 @@ export interface ChatGoal {
 
 export interface ChatGoalCreate {
   objective: string
-  token_budget?: number
-  max_turns?: number
   client_request_id: string
 }
 

@@ -32,17 +32,26 @@ class GoalRunStore:
             if not self.path.exists():
                 return
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-            if payload.get("version") != 1:
+            if payload.get("version") not in {1, 2}:
                 raise ValueError("unsupported goal snapshot version")
+            # Retire old limits without starting previously stopped work. The
+            # user explicitly resumes migrated Goals through the normal guards.
+            for item in payload.get("goals", []):
+                if item.get("status") == "budget_limited":
+                    item["status"] = "paused"
+                    item["status_message"] = "Previous Goal limit removed; resume when ready"
             goals = [GoalRun.model_validate(item) for item in payload.get("goals", [])]
             self._goals = {goal.id: goal for goal in goals}
             self._create_requests = dict(payload.get("create_requests", {}))
-            self._create_inputs = dict(payload.get("create_inputs", {}))
+            self._create_inputs = {
+                key: {name: value[name] for name in ("tab_id", "objective")}
+                for key, value in payload.get("create_inputs", {}).items()
+            }
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 1,
+            "version": 2,
             "goals": [self._persisted_goal(goal) for goal in self._goals.values()],
             "create_requests": self._create_requests,
             "create_inputs": self._create_inputs,
@@ -100,8 +109,6 @@ class GoalRunStore:
                 {
                     "tab_id": prior.tab_id,
                     "objective": prior.objective,
-                    "token_budget": prior.token_budget,
-                    "max_turns": prior.max_turns,
                 },
             )
             supplied = {"tab_id": tab_id, **request.model_dump(exclude={"client_request_id"})}
@@ -115,8 +122,6 @@ class GoalRunStore:
                 goal.tab_id,
                 GoalRunCreate(
                     objective=goal.objective,
-                    token_budget=goal.token_budget,
-                    max_turns=goal.max_turns,
                     client_request_id=client_request_id,
                 ),
             )
@@ -136,8 +141,6 @@ class GoalRunStore:
             self._create_inputs[client_request_id] = {
                 "tab_id": goal.tab_id,
                 "objective": goal.objective,
-                "token_budget": goal.token_budget,
-                "max_turns": goal.max_turns,
             }
             try:
                 self._save()

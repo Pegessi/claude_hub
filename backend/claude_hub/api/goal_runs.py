@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from ..auth.dependencies import get_current_user
 from ..models import (
     ChatMode,
-    GoalBudgetUpdate,
     GoalMutationRequest,
     GoalRun,
     GoalRunCreate,
@@ -202,10 +201,9 @@ async def clear_goal(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
 
 
-@router.patch("/api/goals/{goal_id}/budget", response_model=GoalRun)
-async def update_goal_budget(
-    goal_id: str, body: GoalBudgetUpdate, current_user: User = Depends(get_current_user)
-) -> GoalRun:
-    return _call(
-        get_goal_manager().update_budget, goal_id, body.client_request_id, body.token_budget
+@router.patch("/api/goals/{goal_id}/budget", deprecated=True)
+async def update_goal_budget(goal_id: str, current_user: User = Depends(get_current_user)) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Goal budgets have been removed. Refresh Chat to use the simplified Goal controls.",
     )
