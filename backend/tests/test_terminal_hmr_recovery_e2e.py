@@ -348,6 +348,14 @@ def _start_isolated_backend(tmp_path: Path) -> dict[str, Any]:
 
     env = _isolated_tmux_env(bindir)
     env["HOME"] = str(tmp_home)
+    # Keep the explicit runtime outside the subprocess's computed default
+    # ``$HOME/.claude_hub``; linked-worktree safety intentionally rejects that
+    # exact path even when HOME itself is temporary.
+    env["CLAUDE_HUB_HOME"] = str(tmp_home / "runtime")
+    # Linked-worktree runtime isolation selects its own named socket unless an
+    # explicit override is supplied. Keep backend commands aligned with the
+    # wrapper used by test-side capture/send/cleanup helpers.
+    env["CLAUDE_HUB_TMUX_SOCKET"] = server_name
 
     log_path = tmp_path / "isolated-backend.log"
     log_file = log_path.open("wb")

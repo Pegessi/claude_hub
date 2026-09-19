@@ -3,6 +3,23 @@ from .agent_stream import (  # noqa: E402
     AgentStreamEventPage,
     AgentStreamEventType,
 )
+from .goal_run import (
+    DEFAULT_GOAL_MAX_TURNS,
+    GOAL_CHECKPOINT_HISTORY_LIMIT,
+    GOAL_OBJECTIVE_MAX_LENGTH,
+    HARD_GOAL_MAX_TURNS,
+    TERMINAL_GOAL_STATUSES,
+    GoalBudgetUpdate,
+    GoalCheckpoint,
+    GoalDispatchState,
+    GoalMutationRequest,
+    GoalRun,
+    GoalRunCreate,
+    GoalRunStatus,
+    GoalTurnUsage,
+    GoalUsageQuality,
+    GoalVerifiedProgress,
+)
 from .schemas import (
     PUBLIC_REDACTED_ENV_VALUE,
     AcceptanceCheck,
@@ -114,6 +131,21 @@ from .schemas import (
 )
 
 __all__ = [
+    "DEFAULT_GOAL_MAX_TURNS",
+    "GOAL_CHECKPOINT_HISTORY_LIMIT",
+    "GOAL_OBJECTIVE_MAX_LENGTH",
+    "HARD_GOAL_MAX_TURNS",
+    "TERMINAL_GOAL_STATUSES",
+    "GoalBudgetUpdate",
+    "GoalCheckpoint",
+    "GoalDispatchState",
+    "GoalMutationRequest",
+    "GoalRun",
+    "GoalRunCreate",
+    "GoalRunStatus",
+    "GoalTurnUsage",
+    "GoalUsageQuality",
+    "GoalVerifiedProgress",
     "TerminalTab",
     "TerminalTabBase",
     "TerminalTabCreate",

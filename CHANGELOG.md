@@ -5,6 +5,58 @@
 
 ## Unreleased
 
+### fix: close Goal lifecycle and question-answering gaps
+
+- Claim each continuation once and wait only for its provider acceptance before
+  cancellation. Replaying an old pause cannot cancel a resumed turn.
+- Keep uncertain stops visible and block replacement Goals until reconciled;
+  clearing the latest Goal no longer resurrects an older completed Goal.
+- Answer native blocking questions in-place. Claude/Cursor question follow-ups
+  pause the Goal before delivery, and rejected answers keep their cards open.
+- Preserve original create inputs for retries, refresh snapshot timestamps on
+  automatic progress, and account for a running turn after a budget reduction.
+- Add budget editing and retry-stop controls, reconcile lost mutation responses,
+  and keep similar-looking ordinary text visible when filtering control blocks.
+- Pause Goals recovered between turns after a restart; never cancel an unrelated
+  Chat turn when a recovered Goal has no known turn identity.
+
+### fix: isolate terminal recovery tests and prioritize live input
+
+- Keep real ttyd and HMR recovery tests on a unique tmux socket even when the
+  suite runs from a linked worktree, preventing reruns from reattaching stale
+  sessions or pruning another test's panes.
+- Release plain-terminal replay buffering immediately on user input, preserve
+  write callbacks, and reconcile history again after input becomes quiet.
+- Preserve production SPA root serving while returning explicit 404 responses
+  for the removed resident mailbox endpoints.
+- Start the E2E backend on an isolated random port/runtime by default so tests do
+  not silently reuse or mutate a developer's live Claude Hub service.
+
+### feat: add persistent Goal mode to structured Chat
+
+- Add one persistent Goal per direct Chat with pause, resume, complete, clear,
+  optional token budget, bounded turn count, atomic recovery state, and a
+  capability-driven UI shared by Claude, Cursor, Codex, and TraeX.
+- Continue Hub-managed Goals only after a persisted turn completes and emits a
+  trailing structured status. Codex Goal RPCs and provider-started continuation
+  turns are normalized without allowing two schedulers to own one Goal.
+- Preserve a lightweight, validated checkpoint of verified progress, decisions,
+  remaining work, blocker, and next step. The immutable objective and latest
+  valid checkpoint are re-injected on every continuation; malformed checkpoint
+  updates retain the prior value.
+- Serialize Goal admission with manual sends and Plan-mode changes per Chat tab,
+  and reconcile uncertain restart state before an explicit resume dispatches.
+- Preserve dispatch identity across fast completion and cancellation races; wait
+  for pending provider acceptance before terminal mutations cancel, and keep
+  failed cancellations uncertain and safely retriable.
+- Hide continuation prompts and checkpoint/status control blocks from the public
+  transcript while retaining raw protocol only for the in-process Goal observer.
+- Lock manual composer actions during active Goals, reconcile status with bounded
+  version-aware refreshes, and improve status disclosure keyboard, screen-reader,
+  and touch accessibility.
+- See `docs/working-logs/2026-09-17-chat-goal-mode.md` for architecture, provider
+  ownership, safety boundaries, and validation scope.
+
 ### fix: hung turns are reaped even while a session is being watched
 
 - **Why now.** A TraeX chat session hung mid-turn (the model API stopped

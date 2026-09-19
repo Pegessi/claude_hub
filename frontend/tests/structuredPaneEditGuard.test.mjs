@@ -23,7 +23,11 @@ test('edit button is disabled while a turn is running', () => {
   assert.ok(btnMatch, 'edit-resend hover button must exist')
   const btn = btnMatch[0]
 
-  assert.match(btn, /:disabled="turnInFlight"/, 'edit button must be disabled while turnInFlight')
+  assert.match(
+    btn,
+    /:disabled="turnInFlight \|\| Boolean\(goalEditReason\)"/,
+    'edit button must be disabled while a turn or Goal owns the conversation',
+  )
 })
 
 test('edit button explains why it is disabled via a tooltip', () => {

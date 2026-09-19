@@ -1976,6 +1976,17 @@ async def test_codex_answer_pending_question_returns_false_when_none_pending() -
 
 
 @pytest.mark.asyncio
+async def test_codex_answer_does_not_dismiss_unrelated_pending_question() -> None:
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    sess._pending_questions[42] = _codex_question_request()["params"]
+    assert not await sess.answer_pending_question([{"questionId": "old", "selected": ["red"]}])
+    assert 42 in sess._pending_questions
+    assert _written_requests(proc) == []
+
+
+@pytest.mark.asyncio
 async def test_codex_unknown_server_request_gets_method_not_found() -> None:
     """An unrecognized server→client request is rejected with method-not-found
     so the app-server does not hang waiting for a response we never send."""

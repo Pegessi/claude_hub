@@ -499,6 +499,34 @@ async def test_set_stream_mode_rejects_in_flight_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_tab_plan_mode_rejects_active_goal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.models import GoalRunCreate
+    from claude_hub.services import goal_run as goal_service
+    from claude_hub.services.goal_run import GoalRunController, GoalRunStore
+
+    session = _sse_session("terminal-tabs", "terminal-tab-goal-plan").model_copy(
+        update={"session_kind": SessionKind.CHAT, "tab_id": "goal-plan"}
+    )
+    manager = MagicMock()
+    manager.set_mode = AsyncMock()
+    goals = GoalRunController(GoalRunStore(tmp_path / "goals.json"))
+    goals.create(
+        session.tab_id,
+        GoalRunCreate(objective="Finish", client_request_id="create-plan"),
+    )
+    monkeypatch.setattr(goal_service, "get_goal_manager", lambda: goals)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent_stream_api._set_stream_mode_for(session, manager, "plan", direct_tab=True)
+
+    assert exc_info.value.status_code == 409
+    manager.set_mode.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_workspace_terminal_session_rejects_chat_mode_mutation() -> None:
     from claude_hub.api import agent_stream as agent_stream_api
 
@@ -2268,13 +2296,13 @@ class _FakeNativeTransport:
         pass
 
 
-def _native_session() -> ManagedSession:
+def _native_session(agent_type: AgentType = AgentType.CLAUDE) -> ManagedSession:
     return ManagedSession(
         id="sess-native",
         workspace_id="ws-1",
         tab_id="tab-native",
         role=WorkspaceSessionRole.WORKER,
-        agent_type=AgentType.CLAUDE,
+        agent_type=agent_type,
         status=ManagedSessionStatus.IDLE,
         title="native",
         workspace_path="/tmp",
@@ -2428,6 +2456,43 @@ async def test_user_cancel_does_not_report_runtime_interruption(
 
     session = _native_session()
     transport = _FakeNativeTransport()
+    observed: List[AgentStreamEvent] = []
+    observed_completion = asyncio.Event()
+
+    async def observe(event: AgentStreamEvent) -> None:
+        observed.append(event)
+        observed_completion.set()
+
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=transport,
+        post_persist_observers=[observe],
+    )
+    await tailer.send_message("hello", [], client_turn_id="turn-user-stop")
+
+    assert await tailer.cancel_turn() is True
+    await asyncio.wait_for(observed_completion.wait(), timeout=0.5)
+
+    page = await store.read_since(-1, limit=10)
+    assert AgentStreamEventType.ERROR not in [event.type for event in page.events]
+    assert page.events[-1].type == AgentStreamEventType.TURN_COMPLETED
+    assert page.events[-1].payload["status"] == "cancelled"
+    assert [(event.turn_id, event.payload["status"]) for event in observed] == [
+        ("turn-user-stop", "cancelled")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_turn_rejects_stale_expected_turn_id(store: AgentStreamStore) -> None:
+    """A delayed Goal stop must never cancel a newer user or Goal turn."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    transport = _FakeNativeTransport()
     tailer = SessionTailer(
         workspace_id=session.workspace_id,
         session_id=session.id,
@@ -2436,14 +2501,47 @@ async def test_user_cancel_does_not_report_runtime_interruption(
         store=store,
         native_transport=transport,
     )
-    await tailer.send_message("hello", [], client_turn_id="turn-user-stop")
+    await tailer.send_message("new turn", [], client_turn_id="turn-new")
 
-    assert await tailer.cancel_turn() is True
+    assert await tailer.cancel_turn(expected_turn_id="turn-old") is False
+    assert transport.turn_in_flight is True
+    assert tailer._active_turn_id == "turn-new"
+    assert [event.type for event in (await store.read_since(-1, limit=10)).events] == [
+        AgentStreamEventType.TURN_STARTED
+    ]
 
-    page = await store.read_since(-1, limit=10)
-    assert AgentStreamEventType.ERROR not in [event.type for event in page.events]
-    assert page.events[-1].type == AgentStreamEventType.TURN_COMPLETED
-    assert page.events[-1].payload["status"] == "cancelled"
+    assert await tailer.cancel_turn(expected_turn_id="turn-new") is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_turn_rejects_stale_expected_orphan_id(
+    store: AgentStreamStore,
+) -> None:
+    """The expected-turn fence also applies after a backend restart."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=9,
+        turn_id="turn-new-orphan",
+    )
+    await store.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": "new"}))
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=_FakeNativeTransport(),
+    )
+
+    assert await tailer.cancel_turn(expected_turn_id="turn-old") is False
+    assert [event.type for event in (await store.read_since(-1, limit=10)).events] == [
+        AgentStreamEventType.TURN_STARTED
+    ]
 
 
 @pytest.mark.asyncio
@@ -3078,6 +3176,231 @@ async def test_native_first_turn_is_fanned_out_not_swallowed_by_backfill() -> No
 
 
 @pytest.mark.asyncio
+async def test_goal_turn_hides_internal_prompt_and_protocol_from_visible_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Goal protocol stays provider/audit-visible but not timeline-visible."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    observed: List[AgentStreamEvent] = []
+
+    async def observer(event: AgentStreamEvent) -> None:
+        observed.append(event)
+
+    tailer = SessionTailer(
+        workspace_id="ws-goal-visible",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+        post_persist_observers=[observer],
+    )
+    await tailer.start()
+    prompt = "Continue the active Goal.\nObjective: secret internal objective"
+    await tailer.send_message(
+        prompt,
+        [],
+        client_turn_id="goal-turn",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+
+    for delta in (
+        "Visible progress.\n<goal-check",
+        'point>{"remaining":["tests"]}</goal-checkpoint>\n<goal-status ',
+        'state="complete">done</goal-status>',
+    ):
+        transport._records.put_nowait(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": delta},
+                },
+            }
+        )
+    transport._records.put_nowait({"type": "result"})
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    await asyncio.sleep(0)
+    page = await tailer._store.read_since(-1, limit=100)
+    started = next(
+        event for event in page.events if event.type == AgentStreamEventType.TURN_STARTED
+    )
+    visible = "".join(
+        str(event.payload.get("text") or "")
+        for event in page.events
+        if event.type == AgentStreamEventType.TEXT_DELTA
+    )
+
+    assert transport.sent_messages[0][0] == prompt
+    assert started.payload["summary"] == "Continue active Goal"
+    assert started.payload["metadata"]["protocol"] == "goal-continuation-v1"
+    assert visible == "Visible progress.\n\n"
+    assert "goal-checkpoint" not in visible
+    assert completed.payload["assistant_text"] == visible
+    assert "_goal_protocol_text" not in completed.payload
+    assert observed and "<goal-checkpoint>" in observed[-1].payload["_goal_protocol_text"]
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_drops_unclosed_control_block_from_visible_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-goal-malformed",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "internal prompt",
+        [],
+        client_turn_id="goal-malformed",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "Visible.<goal-checkpoint>{secret}",
+                },
+            },
+        }
+    )
+    transport._records.put_nowait({"type": "result"})
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    page = await tailer._store.read_since(-1, limit=100)
+    visible = "".join(
+        str(event.payload.get("text") or "")
+        for event in page.events
+        if event.type == AgentStreamEventType.TEXT_DELTA
+    )
+    assert visible == "Visible."
+    assert completed.payload["assistant_text"] == "Visible."
+    assert "_goal_protocol_text" not in completed.payload
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_drops_partial_control_opener_at_eof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-goal-partial",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "internal prompt",
+        [],
+        client_turn_id="goal-partial",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Visible.<goal-che"},
+            },
+        }
+    )
+    transport._records.put_nowait({"type": "result"})
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    page = await tailer._store.read_since(-1, limit=100)
+    visible = "".join(
+        str(event.payload.get("text") or "")
+        for event in page.events
+        if event.type == AgentStreamEventType.TEXT_DELTA
+    )
+    assert visible == "Visible."
+    assert completed.payload["assistant_text"] == "Visible."
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_codex_goal_completion_summary_does_not_persist_protocol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session(agent_type=AgentType.CODEX)
+    observed: List[AgentStreamEvent] = []
+    observer_called = asyncio.Event()
+
+    async def observer(event: AgentStreamEvent) -> None:
+        observed.append(event)
+        observer_called.set()
+
+    tailer = SessionTailer(
+        workspace_id="ws-codex-goal-summary",
+        session_id=session.id,
+        adapter=CodexJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+        post_persist_observers=[observer],
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "internal prompt",
+        [],
+        client_turn_id="codex-goal",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    raw = (
+        "Visible result.\n"
+        '<goal-checkpoint>{"remaining":[]}</goal-checkpoint>\n'
+        '<goal-status state="complete">done</goal-status>'
+    )
+    transport._records.put_nowait(
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "last_agent_message": raw},
+        }
+    )
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    await asyncio.wait_for(observer_called.wait(), timeout=1.0)
+    assert completed.payload["summary"] == "Visible result.\n\n"
+    assert "goal-checkpoint" not in json.dumps(completed.payload)
+    assert observed[-1].payload["_goal_protocol_text"] == raw
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
 async def test_native_codex_answer_emits_persisted_approval_resolved(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3135,7 +3458,8 @@ async def test_native_codex_answer_emits_persisted_approval_resolved(
     answer = json.dumps(
         {"type": "ask_question_response", "answers": [{"questionId": "q1", "selected": ["red"]}]}
     )
-    await tailer.send_message(answer, [], client_turn_id="turn-codex-answer")
+    assert not await tailer.answer_pending_question(answer, "wrong-turn")
+    assert await tailer.answer_pending_question(answer, "turn-codex")
 
     resolved = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_RESOLVED)
     assert resolved.payload["tool_call_id"] == "it-9"
@@ -3206,6 +3530,9 @@ async def test_native_claude_answer_emits_persisted_approval_resolved(
     answer = json.dumps(
         {"type": "ask_question_response", "answers": [{"questionId": "0", "selected": ["Fast"]}]}
     )
+    assert tailer.accepts_question_followup(answer, "turn-claude")
+    assert not tailer.accepts_question_followup(answer, "wrong-turn")
+    assert not tailer.accepts_question_followup("ordinary message", "turn-claude")
     await tailer.send_message(answer, [], client_turn_id="turn-claude-answer", delivery="steer")
 
     resolved = await _wait_for_store_event(tailer.store, AgentStreamEventType.APPROVAL_RESOLVED)
@@ -3659,12 +3986,20 @@ async def test_codex_fatal_eof_emits_error_and_failed_turn_completed_once() -> N
     transport = _FakeNativeTransport(eof_is_fatal=True)
     session = _native_session()
     session.agent_type = AgentType.CODEX
+    observed: List[AgentStreamEvent] = []
+    observed_completion = asyncio.Event()
+
+    async def observe(event: AgentStreamEvent) -> None:
+        observed.append(event)
+        observed_completion.set()
+
     tailer = SessionTailer(
         workspace_id="ws-1",
         session_id=session.id,
         adapter=CodexJsonlAdapter(),
         session_getter=lambda: session,
         native_transport=transport,
+        post_persist_observers=[observe],
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -3684,6 +4019,10 @@ async def test_codex_fatal_eof_emits_error_and_failed_turn_completed_once() -> N
     assert completed.type == AgentStreamEventType.TURN_COMPLETED
     assert completed.payload["status"] == "failed"
     assert completed.turn_id == "turn-codex-1"
+    await asyncio.wait_for(observed_completion.wait(), timeout=0.5)
+    assert [(event.turn_id, event.payload["status"]) for event in observed] == [
+        ("turn-codex-1", "failed")
+    ]
 
     # The session must be hard-failed after the app-server dies.
     assert tailer.hard_failed is True
