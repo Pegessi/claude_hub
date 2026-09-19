@@ -16,7 +16,9 @@
   active Goals, and archived Chats wait without interrupting the current turn.
 - Persist per-occurrence run state across backend restarts, recover from the
   durable Agent Stream, serialize runs per Chat, and disable schedules whose
-  target was deleted or changed to another backend.
+  target was deleted or changed to another backend. Preserve every occurrence
+  while bounding each Chat's active backlog at 100; overflow is recorded as a
+  visible skipped run instead of growing memory and state files indefinitely.
 - Expose queued, waiting, running, completed, failed, skipped, and uncertain
   states through the scheduler API and UI.
 

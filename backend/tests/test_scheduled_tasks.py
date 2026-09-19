@@ -736,6 +736,117 @@ async def test_chat_turn_busy_and_goal_wait_then_retry(
     assert dispatched == [run.id]
 
 
+async def test_chat_turn_keeps_each_occurrence_while_busy_and_drains_fifo(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    busy = True
+    dispatched: list[str] = []
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        if busy:
+            raise RuntimeError(
+                "a turn is already in flight; wait for it to complete before sending another message"
+            )
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="keep every occurrence",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="scheduled message",
+        )
+    )
+
+    first_at = task.next_run_at
+    assert first_at is not None
+    await manager._fire_scheduled_task(task, first_at)
+    second_at = task.next_run_at
+    assert second_at is not None
+    await manager._fire_scheduled_task(task, second_at)
+    third_at = task.next_run_at
+    assert third_at is not None
+    await manager._fire_scheduled_task(task, third_at)
+
+    runs = sorted(
+        manager.list_scheduled_task_runs(task.id),
+        key=lambda run: (run.scheduled_for, run.queued_at, run.id),
+    )
+    assert len(runs) == 3
+    assert len({run.id for run in runs}) == 3
+    assert task.run_count == 3
+    assert [run.status for run in runs] == [
+        ScheduledTaskRunStatus.WAITING,
+        ScheduledTaskRunStatus.QUEUED,
+        ScheduledTaskRunStatus.QUEUED,
+    ]
+    assert task.last_run_id == runs[-1].id
+
+    busy = False
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert dispatched == [runs[0].id]
+    await manager.on_scheduled_chat_turn_completed(chat.id, runs[0].client_turn_id, "completed")
+    await manager.on_scheduled_chat_turn_completed(chat.id, runs[1].client_turn_id, "completed")
+
+    assert dispatched == [run.id for run in runs]
+    assert runs[0].status == ScheduledTaskRunStatus.COMPLETED
+    assert runs[1].status == ScheduledTaskRunStatus.COMPLETED
+    assert runs[2].status == ScheduledTaskRunStatus.RUNNING
+    assert task.last_run_id == runs[-1].id
+    assert task.last_status == ScheduledTaskRunStatus.RUNNING.value
+
+
+async def test_chat_turn_backlog_is_bounded_and_overflow_is_auditable(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    monkeypatch.setattr(manager, "_SCHEDULED_CHAT_ACTIVE_RUN_LIMIT", 2)
+
+    async def busy(_run: Any, _task: ScheduledTask) -> None:
+        raise RuntimeError(
+            "a turn is already in flight; wait for it to complete before sending another message"
+        )
+
+    manager.configure_scheduled_chat_dispatch(busy)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="bounded backlog",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="scheduled message",
+        )
+    )
+
+    for _ in range(3):
+        fire_at = task.next_run_at
+        assert fire_at is not None
+        await manager._fire_scheduled_task(task, fire_at)
+
+    runs = sorted(
+        manager.list_scheduled_task_runs(task.id),
+        key=lambda run: (run.scheduled_for, run.queued_at, run.id),
+    )
+    assert task.run_count == 3
+    assert [run.status for run in runs] == [
+        ScheduledTaskRunStatus.WAITING,
+        ScheduledTaskRunStatus.QUEUED,
+        ScheduledTaskRunStatus.SKIPPED,
+    ]
+    assert runs[-1].completed_at is not None
+    assert "backlog limit reached" in (runs[-1].error or "")
+    assert task.last_run_id == runs[-1].id
+    assert task.last_status == ScheduledTaskRunStatus.SKIPPED.value
+    assert "backlog limit reached" in (task.last_error or "")
+
+
 async def test_chat_turn_archived_deleted_and_backend_changed(
     manager: WorkspaceManager, monkeypatch: MonkeyPatch
 ) -> None:
@@ -1149,6 +1260,37 @@ async def test_run_scheduled_task_raises_on_fire_failure(
     assert "tmux down" in (task.last_error or "")
     # A one-shot is still disabled even though its fire failed.
     assert task.enabled is False
+    assert task.run_count == 1
+
+
+async def test_run_scheduled_chat_task_raises_on_immediate_dispatch_failure(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+
+    async def fail_dispatch(_run: Any, _task: ScheduledTask) -> None:
+        raise RuntimeError("provider transport failed")
+
+    manager.configure_scheduled_chat_dispatch(fail_dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="fail native send",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="send now",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="provider transport failed"):
+        await manager.run_scheduled_task(task.id)
+
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.FAILED
+    assert run.error == "provider transport failed"
+    assert task.last_status == ScheduledTaskRunStatus.FAILED.value
     assert task.run_count == 1
 
 
@@ -1758,6 +1900,19 @@ def test_cli_schedule_enable_disable_and_run(monkeypatch: MonkeyPatch) -> None:
 
     assert {"enabled": True} in patched
     assert {"enabled": False} in patched
+
+
+def test_cli_schedule_run_exits_nonzero_on_dispatch_failure(monkeypatch: MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/scheduled-tasks/st-1/run"
+        return httpx.Response(500, json={"detail": "provider transport failed"})
+
+    _patch_get_client(monkeypatch, handler)
+    result = CliRunner().invoke(cli, ["schedule", "run", "st-1"])
+
+    assert result.exit_code != 0
+    assert "provider transport failed" in result.output
 
 
 def test_cli_schedule_get_and_delete(monkeypatch: MonkeyPatch) -> None:

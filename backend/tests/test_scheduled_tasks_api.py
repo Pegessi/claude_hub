@@ -104,3 +104,18 @@ async def test_chat_schedule_create_run_and_list_runs(
 
     missing = await client.get("/api/scheduled-tasks/missing/runs")
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_chat_schedule_run_returns_500_for_immediate_dispatch_failure(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fail_run(_task_id: str) -> ScheduledTask:
+        raise RuntimeError("provider transport failed")
+
+    monkeypatch.setattr(scheduled_api.workspace_manager, "run_scheduled_task", fail_run)
+
+    response = await client.post("/api/scheduled-tasks/schedule-1/run")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "provider transport failed"
