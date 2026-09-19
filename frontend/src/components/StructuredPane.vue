@@ -200,9 +200,9 @@
               v-if="turn.turnId && supportsEditResend"
               type="button"
               class="edit-resend-hover-btn"
-              :disabled="turnInFlight"
-              :title="turnInFlight ? 'A turn is currently running' : 'Edit message'"
-              :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : 'Edit message'"
+              :disabled="turnInFlight || Boolean(goalEditReason)"
+              :title="turnInFlight ? 'A turn is currently running' : (goalEditReason || 'Edit message')"
+              :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : (goalEditReason ? `Edit message (${goalEditReason})` : 'Edit message')"
               @click="startEdit(turn)"
             >
               ✎ 编辑
@@ -549,6 +549,18 @@
       Latest
     </button>
 
+    <GoalStatusBar
+      v-if="goal"
+      :goal="goal"
+      :busy="isGoalMutating"
+      :error="goalError"
+      @pause="pauseGoal"
+      @resume="resumeGoal"
+      @complete="completeGoal"
+      @clear="clearGoal"
+      @budget="updateGoalBudget"
+    />
+
     <!-- Composer -->
     <div class="structured-composer">
       <div class="composer-shell">
@@ -558,6 +570,19 @@
           role="alert"
         >
           {{ modeChangeError }}
+        </div>
+        <div
+          v-if="goalError && !goal && !isGoalSetupOpen"
+          class="composer-mode-error"
+          role="alert"
+        >
+          Goal: {{ goalError }}
+          <button
+            type="button"
+            @click="hydrateGoal"
+          >
+            Retry
+          </button>
         </div>
 
         <!-- Attachment previews -->
@@ -610,7 +635,8 @@
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
-            :disabled="isSending || connectionState !== 'live'"
+            :disabled="isSending || connectionState !== 'live' || goalComposerLocked"
+            :title="goalComposerReason || undefined"
             @compositionstart="isComposing = true"
             @compositionend="isComposing = false"
             @keydown.enter.exact="handleComposerEnter"
@@ -621,11 +647,21 @@
           />
           <div class="composer-tools">
             <button
+              v-if="!goal && capabilities?.supports_goals"
+              type="button"
+              class="composer-goal-btn"
+              :disabled="!isGoalHydrated || Boolean(goalError) || isGoalHydrating || isGoalMutating || turnInFlight"
+              :title="turnInFlight ? 'Wait for the current turn to finish' : 'Start a persistent Chat Goal'"
+              @click="isGoalSetupOpen = true"
+            >
+              {{ isGoalHydrating ? 'Goal…' : 'Goal' }}
+            </button>
+            <button
               type="button"
               class="composer-attach-btn"
               aria-label="Attach image"
               :title="supportsImages ? 'Attach image' : 'This chat does not support image attachments'"
-              :disabled="!supportsImages || isSending || isPreparingAttachments"
+              :disabled="!supportsImages || isSending || isPreparingAttachments || goalComposerLocked"
               @click="triggerFilePicker"
             >
               <span aria-hidden="true">📎</span>
@@ -674,7 +710,8 @@
                   class="composer-mode-menu-item"
                   role="menuitemradio"
                   :aria-checked="currentModeId === option.id"
-                  :title="option.description || `${option.label} mode`"
+                  :disabled="option.id === 'plan' && Boolean(goalPlanReason)"
+                  :title="option.id === 'plan' && goalPlanReason ? goalPlanReason : (option.description || `${option.label} mode`)"
                   @click="selectMode(option.id)"
                 >
                   <span>{{ option.label }}</span>
@@ -825,6 +862,7 @@
             type="button"
             class="composer-send-btn"
             :disabled="!canSend || isSending"
+            :title="goalComposerReason || undefined"
             @click="() => submit('normal')"
           >
             {{ isSending ? 'Sending…' : (turnInFlight ? 'Queue' : 'Send') }}
@@ -834,12 +872,25 @@
           v-if="!isMobileViewport"
           class="composer-hints"
         >
-          <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
-          <span>⌘/Ctrl+Enter steer</span>
-          <span>Shift+Enter newline</span>
+          <template v-if="goalComposerLocked">
+            <span>{{ goalComposerReason }}</span>
+          </template>
+          <template v-else>
+            <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
+            <span>⌘/Ctrl+Enter steer</span>
+            <span>Shift+Enter newline</span>
+          </template>
         </div>
       </div>
     </div>
+
+    <GoalSetupDialog
+      :open="isGoalSetupOpen"
+      :busy="isGoalMutating"
+      :error="goalError"
+      @close="isGoalSetupOpen = false"
+      @submit="startGoal"
+    />
 
     <Teleport to="body">
       <div
@@ -872,13 +923,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
+import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { IncrementalTimelineReducer, foldTurnParts, messageClockLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
+import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
@@ -887,6 +940,8 @@ import {
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 import { useTerminalStore } from '@/stores/terminalStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
+import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
@@ -895,6 +950,33 @@ const props = defineProps<{
 }>()
 
 const terminalStore = useTerminalStore()
+const {
+  goal,
+  error: goalError,
+  isHydrated: isGoalHydrated,
+  isHydrating: isGoalHydrating,
+  isMutating: isGoalMutating,
+  hydrate: hydrateGoal,
+  create: createGoal,
+  pause: pauseGoal,
+  resume: resumeGoal,
+  complete: completeGoal,
+  clear: clearGoal,
+  updateBudget: updateGoalBudget,
+} = useChatGoal(toRef(props, 'tabId'))
+const isGoalSetupOpen = ref(false)
+const goalPlanReason = computed(() => goalPlanLockReason(goal.value))
+const goalEditReason = computed(() => goal.value && (!isGoalTerminal(goal.value.status) || goalBlocksPlan(goal.value))
+  ? 'Finish or clear the Goal before editing history'
+  : null)
+const goalComposerLocked = computed(() => goalBlocksPlan(goal.value))
+const goalComposerReason = computed(() => goalComposerLocked.value
+  ? 'Pause or complete the active Goal before sending messages'
+  : null)
+
+async function startGoal(input: { objective: string; token_budget?: number; max_turns?: number }) {
+  if (await createGoal(input)) isGoalSetupOpen.value = false
+}
 
 const {
   events,
@@ -1275,12 +1357,68 @@ watch(
   { immediate: true },
 )
 
+const GOAL_REFRESH_DELAYS_MS = [0, 120, 300, 650, 1200] as const
+let goalRefreshEpoch = 0
+
+function goalSnapshotVersion(): string {
+  const current = goal.value
+  if (!current) return 'none'
+  return [
+    current.updated_at,
+    current.status,
+    current.turns_completed,
+    current.checkpoint?.turn_id ?? '',
+  ].join('\u0000')
+}
+
+function goalReflectsCompletedTurn(turnId: string | null, baselineVersion: string): boolean {
+  const current = goal.value
+  if (!current || current.status !== 'active') return true
+  if (turnId && (
+    current.completed_turn_ids?.includes(turnId) ||
+    current.checkpoint?.turn_id === turnId
+  )) return true
+  return turnId ? false : goalSnapshotVersion() !== baselineVersion
+}
+
+function waitForGoalRefresh(delayMs: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, delayMs))
+}
+
+/**
+ * Goal observation runs asynchronously after the transcript commits a
+ * turn_completed event. The first GET may therefore still return the prior
+ * snapshot. Retry with a short bounded backoff until either the completed turn
+ * is visible or the authoritative Goal version advances.
+ */
+async function refreshGoalAfterTurn(turnId: string | null): Promise<void> {
+  const refreshEpoch = ++goalRefreshEpoch
+  const baselineVersion = goalSnapshotVersion()
+  for (const delayMs of GOAL_REFRESH_DELAYS_MS) {
+    if (delayMs > 0) await waitForGoalRefresh(delayMs)
+    if (refreshEpoch !== goalRefreshEpoch || timelineDisposed) return
+    await hydrateGoal()
+    if (refreshEpoch !== goalRefreshEpoch || timelineDisposed) return
+    if (goalReflectsCompletedTurn(turnId, baselineVersion)) return
+  }
+}
+
 // Chat lifecycle edges are authoritative status boundaries. Refresh the tab
-// status exactly once when a committed batch introduces turn_started,
-// turn_completed, or error; text/thinking deltas never trigger this watcher.
+// status once per committed boundary. Goal completion gets a bounded poll
+// because its observer updates the separate control plane asynchronously.
 watch(events, (latest, previous) => {
   if (hasChatStatusRefreshBoundary(previous, latest)) {
     void terminalStore.fetchAgentStatuses()
+    const previousLength = previous.length <= latest.length ? previous.length : 0
+    let completed = null as (typeof latest)[number] | null
+    for (let index = latest.length - 1; index >= previousLength; index -= 1) {
+      if (latest[index].type === 'turn_completed') {
+        completed = latest[index]
+        break
+      }
+    }
+    if (completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
+    else void hydrateGoal()
   }
 })
 
@@ -1305,6 +1443,7 @@ onMounted(() => {
 onActivated(() => {
   timelineDisposed = false
   startStream()
+  void hydrateGoal()
   void nextTick(() => {
     if (timelineDisposed) return
     observeTimelineGeometry()
@@ -1312,6 +1451,7 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
+  goalRefreshEpoch++
   stop()
   timelineDisposed = true
   timelineResizeObserver?.disconnect()
@@ -1320,6 +1460,7 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
+  goalRefreshEpoch++
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
   preparationEpoch.value++
@@ -1445,6 +1586,7 @@ let timelineVerificationFrame: number | null = null
 let timelineDisposed = false
 
 const canSend = computed(() => connectionState.value === 'live' &&
+  !goalComposerLocked.value &&
   !isPreparingAttachments.value &&
   !isUpdatingMode.value &&
   !isUpdatingModel.value &&
@@ -1481,6 +1623,10 @@ async function selectMode(modeId: string) {
 
 async function changeMode(modeId: string) {
   if (modeInteractionLocked.value || isUpdatingMode.value || currentModeId.value === modeId) return
+  if (modeId === 'plan' && goalPlanReason.value) {
+    modeChangeError.value = goalPlanReason.value
+    return
+  }
   const epoch = preparationEpoch.value
   isUpdatingMode.value = true
   modeChangeError.value = null
@@ -1723,6 +1869,10 @@ function syncComposerTextareaHeight() {
 }
 
 function handleComposerEnter(event: KeyboardEvent) {
+  if (goalComposerLocked.value) {
+    composerError.value = goalComposerReason.value
+    return
+  }
   const action = resolveComposerEnterAction({
     isComposing: isComposing.value,
     shiftKey: event.shiftKey,
@@ -1743,6 +1893,10 @@ function handleComposerEnter(event: KeyboardEvent) {
 }
 
 function enqueueDraft() {
+  if (goalComposerLocked.value) {
+    composerError.value = goalComposerReason.value
+    return
+  }
   if (!canSend.value) return
   draftQueue.value.push({
     message: draftMessage.value,
@@ -1755,7 +1909,7 @@ function enqueueDraft() {
 }
 
 async function flushDraftQueue() {
-  while (draftQueue.value.length > 0 && !turnInFlight.value && !isSending.value) {
+  while (draftQueue.value.length > 0 && !turnInFlight.value && !isSending.value && !goalComposerLocked.value) {
     const next = draftQueue.value.shift()
     if (!next) break
     draftMessage.value = next.message
@@ -1766,9 +1920,9 @@ async function flushDraftQueue() {
 }
 
 watch(
-  [turnInFlight, () => draftQueue.value.length, isSending],
+  [turnInFlight, () => draftQueue.value.length, isSending, goalComposerLocked],
   () => {
-    if (!turnInFlight.value && draftQueue.value.length > 0 && !isSending.value) {
+    if (!turnInFlight.value && draftQueue.value.length > 0 && !isSending.value && !goalComposerLocked.value) {
       void flushDraftQueue()
     }
   },
@@ -1902,8 +2056,9 @@ async function submitQuestionResponse(approval: TimelineApproval) {
     composerError.value = '请选择所有问题的选项后再提交。'
     return
   }
-  await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))
-  markResolved(approval.key)
+  if (await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))) {
+    markResolved(approval.key)
+  }
 }
 
 async function cancelActiveTurn() {
@@ -1994,6 +2149,10 @@ function startEdit(turn: TimelineTurn) {
   // authoritative (409); this just avoids a round-trip and keeps the button
   // and the action in sync.
   if (turnInFlight.value) return
+  if (goalEditReason.value) {
+    editError.value = goalEditReason.value
+    return
+  }
   editingTurnKey.value = turn.key
   editDraft.value = turn.userText
   editError.value = null
@@ -2061,6 +2220,10 @@ async function submit(
   messageOverride?: string,
 ) {
   if (isSending.value) return
+  if (!messageOverride && goalComposerLocked.value) {
+    composerError.value = goalComposerReason.value
+    return
+  }
   const message = messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || attachments.value.length > 0
   if (!hasContent) return
@@ -2119,12 +2282,14 @@ async function submit(
     }
     requestLatestAnchor(true)
     await sendToStream(message, atts, clientTurnId, delivery)
+    if (messageOverride) await hydrateGoal()
     // The POST acknowledgement means provider dispatch has begun. Refresh the
     // backend-native tab status now rather than waiting for the 5s poll phase;
     // turn_started/completed/error boundaries above provide subsequent edges.
     void terminalStore.fetchAgentStatuses()
     // Success: composer already cleared; nothing more to do.
     void nextTick(() => syncComposerTextareaHeight())
+    return true
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
     if (!messageOverride) {
@@ -2132,6 +2297,7 @@ async function submit(
       attachments.value = draftAtts
     }
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
+    return false
   } finally {
     isSending.value = false
   }

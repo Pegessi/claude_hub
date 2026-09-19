@@ -35,9 +35,11 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..auth.dependencies import get_current_user
 from ..models import (
+    TERMINAL_GOAL_STATUSES,
     AgentRuntimeStatus,
     AgentStreamEvent,
     AgentStreamEventPage,
+    AgentStreamEventType,
     AgentType,
     ChatMode,
     ManagedSession,
@@ -75,6 +77,28 @@ _SSE_HEARTBEAT_S = 15.0
 _tailer_manager: Optional[TailerManager] = None
 _tab_tailer_manager: Optional[TailerManager] = None
 
+
+async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
+    """Bridge persisted stream completion to Goal without a module cycle."""
+    if event.type != AgentStreamEventType.TURN_COMPLETED or not event.turn_id:
+        return
+    from ..services.goal_run import get_goal_manager
+
+    payload = event.payload
+    await get_goal_manager().on_turn_completed(
+        event.tab_id,
+        event.turn_id,
+        str(payload.get("status") or "failed"),
+        str(
+            payload.get("_goal_protocol_text")
+            or payload.get("assistant_text")
+            or payload.get("summary")
+            or ""
+        ),
+        payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
+    )
+
+
 # Terminal-created AI tabs do not have an Agent Workspace record, but their
 # transcript and pinned provider conversation id are just as real as a managed
 # agent's.  Give them an isolated stream namespace rather than inventing a
@@ -108,6 +132,7 @@ def _get_tailer_manager() -> TailerManager:
         _tailer_manager = TailerManager(
             session_getter=lambda sid: workspace_manager.sessions.get(sid),
             persist_session_id=_persist_workspace_agent_session_id,
+            post_persist_observers=[_notify_goal_turn_completed],
         )
     return _tailer_manager
 
@@ -178,6 +203,7 @@ def _get_tab_tailer_manager() -> TailerManager:
             session_getter=_terminal_tab_stream_session_by_id,
             persist_session_id=_persist_tab_agent_session_id,
             persist_mode=_persist_tab_chat_mode,
+            post_persist_observers=[_notify_goal_turn_completed],
         )
     return _tab_tailer_manager
 
@@ -436,8 +462,22 @@ async def _set_stream_mode_for(
         raise HTTPException(
             status_code=400, detail="mode is only available for native Chat sessions"
         )
+    from ..services.goal_run import get_goal_admission_lock, get_goal_manager
+
+    tab_id = session.tab_id
+    admission = get_goal_admission_lock(tab_id) if direct_tab else asyncio.Lock()
     try:
-        await manager.set_mode(session, mode)
+        async with admission:
+            if direct_tab and mode == ChatMode.PLAN.value:
+                goal = get_goal_manager().current(tab_id)
+                if goal is not None and (
+                    goal.status.value == "active" or goal.dispatch_state.value != "idle"
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pause or finish the active Goal before switching to Plan mode",
+                    )
+            await manager.set_mode(session, mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -1130,6 +1170,9 @@ async def _send_to_native(
     session: ManagedSession,
     payload: AgentStreamSendRequest,
     manager: TailerManager,
+    *,
+    visible_text: Optional[str] = None,
+    turn_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Deliver composer input to the native provider transport atomically.
 
@@ -1161,6 +1204,8 @@ async def _send_to_native(
         payload.client_turn_id,
         previews=previews,
         delivery=payload.delivery,
+        visible_text=visible_text,
+        turn_metadata=turn_metadata,
     )
 
 
@@ -1210,16 +1255,43 @@ async def send_tab_stream_input(
     payload: AgentStreamSendRequest,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    session = _terminal_tab_session_or_404(tab_id)
-    manager = _get_tab_tailer_manager()
-    try:
-        await _send_to_native(session, payload, manager)
-    except StructuredSourceUnavailable as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _map_send_exception(exc)
+    from ..services.goal_run import get_goal_admission_lock, get_goal_manager
+
+    async with get_goal_admission_lock(tab_id):
+        goal = get_goal_manager().current(tab_id)
+        session = _terminal_tab_session_or_404(tab_id)
+        manager = _get_tab_tailer_manager()
+        try:
+            if goal is not None and (
+                goal.status.value == "active" or goal.dispatch_state.value != "idle"
+            ):
+                if (
+                    goal.status.value == "active"
+                    and goal.current_turn_id
+                    and not payload.attachments
+                ):
+                    if await manager.answer_pending_question(
+                        session, payload.text, goal.current_turn_id
+                    ):
+                        return {"ok": True}
+                    if await manager.accepts_question_followup(
+                        session, payload.text, goal.current_turn_id
+                    ):
+                        goal = await get_goal_manager().pause(
+                            goal.id, f"answer:{payload.client_turn_id}"
+                        )
+                if goal.status.value == "active" or goal.dispatch_state.value != "idle":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pause or finish the active Goal before sending a manual turn",
+                    )
+            await _send_to_native(session, payload, manager)
+        except StructuredSourceUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _map_send_exception(exc)
     return {"ok": True}
 
 
@@ -1341,19 +1413,30 @@ async def edit_resend_tab_stream(
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Edit-resend for a direct Agent tab."""
-    session = _terminal_tab_session_or_404(tab_id)
-    manager = _get_tab_tailer_manager()
-    try:
-        await manager.edit_resend(
-            session,
-            payload.text,
-            payload.client_turn_id,
-            payload.turn_id,
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _map_edit_resend_exception(exc) from exc
+    from ..services.goal_run import get_goal_admission_lock, get_goal_manager
+
+    async with get_goal_admission_lock(tab_id):
+        goal = get_goal_manager().current(tab_id)
+        if goal is not None and (
+            goal.status not in TERMINAL_GOAL_STATUSES or goal.dispatch_state.value != "idle"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Finish or clear the Goal before editing conversation history",
+            )
+        session = _terminal_tab_session_or_404(tab_id)
+        manager = _get_tab_tailer_manager()
+        try:
+            await manager.edit_resend(
+                session,
+                payload.text,
+                payload.client_turn_id,
+                payload.turn_id,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _map_edit_resend_exception(exc) from exc
     return {"ok": True}
 
 

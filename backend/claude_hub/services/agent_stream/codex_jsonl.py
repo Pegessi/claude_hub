@@ -32,6 +32,7 @@ from ...models import (
     ManagedSession,
     StreamCapabilities,
 )
+from ...models.agent_stream import normalize_provider_usage
 from ..ttyd_manager import (
     _codex_candidates_for_cwd,
     _codex_scan_sessions,
@@ -118,6 +119,10 @@ class CodexJsonlAdapter(AgentStreamAdapter):
     schema_version = 1
     supports_approval_ui = True
     supports_tool_timeline = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._latest_usage: Dict[str, Dict[str, Any]] = {}
 
     def capabilities(self, session: ManagedSession) -> StreamCapabilities:
         """Advertise structured Codex chat only after its rollout exists."""
@@ -219,7 +224,23 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         if not isinstance(params, dict):
             return events
         if method == "turn/started":
-            events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": ""}))
+            turn = params.get("turn")
+            provider_turn_id = turn.get("id") if isinstance(turn, dict) else params.get("turnId")
+            payload: Dict[str, Any] = {"summary": ""}
+            if isinstance(provider_turn_id, str) and provider_turn_id:
+                payload["provider_turn_id"] = provider_turn_id
+            events.append(ctx.event(AgentStreamEventType.TURN_STARTED, payload))
+        elif method == "thread/tokenUsage/updated":
+            usage = normalize_provider_usage(params, "codex")
+            if usage is not None:
+                self._latest_usage[ctx.session_id] = usage
+        elif method.startswith("thread/goal/") or method.startswith("goal/"):
+            events.append(
+                ctx.event(
+                    AgentStreamEventType.STATUS,
+                    {"provider_notification": method, "goal": dict(params)},
+                )
+            )
         elif method == "turn/completed":
             turn = params.get("turn")
             status = "completed"
@@ -234,7 +255,13 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                     events.append(
                         ctx.event(AgentStreamEventType.ERROR, {"message": error["message"]})
                     )
-            events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": status}))
+            completed: Dict[str, Any] = {"status": status}
+            usage = normalize_provider_usage(params, "codex") or self._latest_usage.pop(
+                ctx.session_id, None
+            )
+            if usage is not None:
+                completed["usage"] = usage
+            events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
         elif method == "error":
             error = params.get("error")
             if isinstance(error, dict) and error.get("message"):
@@ -391,6 +418,9 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             summary = payload.get("last_agent_message")
             if isinstance(summary, str) and summary.strip():
                 completed["summary"] = summary
+            usage = normalize_provider_usage(payload, "codex")
+            if usage is not None:
+                completed["usage"] = usage
             events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
         return events
 

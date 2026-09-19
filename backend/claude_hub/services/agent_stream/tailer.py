@@ -33,11 +33,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
+import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from ...models import (
     AgentRuntimeStatus,
@@ -118,6 +120,80 @@ _INACTIVITY_TIMEOUT_MESSAGE = "Turn stopped after the stream went silent."
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
+PostPersistObserver = Callable[[AgentStreamEvent], Awaitable[None]]
+
+
+class _GoalProtocolSanitizer:
+    """Incrementally remove Goal control blocks from visible assistant text.
+
+    Provider deltas may split either tag at any byte boundary.  The sanitizer
+    therefore retains only a short possible opener/closer suffix between
+    calls, while the tailer separately retains the complete raw assistant text
+    for the in-process Goal observer.
+    """
+
+    _OPENERS = ("<goal-checkpoint", "<goal-status")
+    _OPENING_TAG = re.compile(r"<goal-(checkpoint|status)(?=[\s>])", re.IGNORECASE)
+    _CLOSERS = {"checkpoint": "</goal-checkpoint>", "status": "</goal-status>"}
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._inside: Optional[str] = None
+
+    @staticmethod
+    def _possible_opener_suffix(text: str) -> int:
+        lowered = text.lower()
+        best = 0
+        for opener in _GoalProtocolSanitizer._OPENERS:
+            for length in range(1, min(len(lowered), len(opener)) + 1):
+                if lowered.endswith(opener[:length]):
+                    best = max(best, length)
+        return best
+
+    def feed(self, text: str, *, final: bool = False) -> str:
+        self._pending += text
+        visible: List[str] = []
+        while self._pending:
+            lowered = self._pending.lower()
+            if self._inside is not None:
+                closer = self._CLOSERS[self._inside]
+                close_at = lowered.find(closer)
+                if close_at < 0:
+                    # Raw text is retained by ``_assistant_text``; only keep a
+                    # possible split closing tag here so malformed/large blocks
+                    # cannot grow this display-only buffer without bound.
+                    keep = min(len(self._pending), len(closer) - 1)
+                    self._pending = self._pending[-keep:] if keep else ""
+                    break
+                self._pending = self._pending[close_at + len(closer) :]
+                self._inside = None
+                continue
+
+            opener = self._OPENING_TAG.search(self._pending)
+            if opener:
+                visible.append(self._pending[: opener.start()])
+                self._pending = self._pending[opener.end() :]
+                # The delimiter establishes a control block. Its opening
+                # attributes need not accumulate while awaiting a closing tag.
+                self._inside = opener.group(1).lower()
+                continue
+
+            if final:
+                # Do not reveal a truncated control opener at EOF. Ordinary
+                # prose before that prefix remains visible.
+                keep = self._possible_opener_suffix(self._pending)
+                visible.append(
+                    self._pending[: len(self._pending) - keep] if keep else self._pending
+                )
+                self._pending = ""
+                break
+            keep = self._possible_opener_suffix(self._pending)
+            emit_end = len(self._pending) - keep
+            visible.append(self._pending[:emit_end])
+            self._pending = self._pending[emit_end:]
+            break
+
+        return "".join(visible)
 
 
 @dataclass(frozen=True)
@@ -225,6 +301,7 @@ class SessionTailer:
         store: Optional[AgentStreamStore] = None,
         native_transport: Optional[ProviderSession] = None,
         native_error: Optional[str] = None,
+        post_persist_observers: Optional[List[PostPersistObserver]] = None,
     ) -> None:
         self.workspace_id = workspace_id
         self.session_id = session_id
@@ -238,6 +315,7 @@ class SessionTailer:
         # not be created. Fail-closed: never fall back to transcript as a
         # real-time source for agent sessions.
         self._native_error = native_error
+        self._post_persist_observers = post_persist_observers or []
 
         self._offset = 0
         self._inode: Optional[int] = None
@@ -256,6 +334,7 @@ class SessionTailer:
         # the turn completes. Every provider event normalized while this is set
         # is stamped with it so the frontend can upsert by identity.
         self._active_turn_id: Optional[str] = None
+        self._assistant_text: str = ""
         # Approval cards (``approval_required``) awaiting an answer, keyed by
         # the card's ``call_id``. Each entry captures the turn the card was
         # emitted in so ``_emit_approval_resolved`` can stamp the durable
@@ -268,6 +347,8 @@ class SessionTailer:
         # ``turn_completed`` must be synthesized (nonzero exit or early EOF
         # with no completion record).
         self._turn_completed_seen: bool = False
+        self._goal_protocol_sanitizer: Optional[_GoalProtocolSanitizer] = None
+        self._visible_assistant_text: str = ""
         # Runtime status is terminalized as soon as the authoritative
         # TURN_COMPLETED event has been persisted and fanned out. The turn
         # guard (``turn_in_flight``) is also released at TURN_COMPLETED for
@@ -368,6 +449,44 @@ class SessionTailer:
             detail=f"native provider turn {status or 'failed'}",
         )
 
+    async def answer_pending_question(self, text: str, expected_turn_id: str) -> bool:
+        """Answer the current native question without ever starting a turn."""
+        answers = parse_ask_question_response(text)
+        transport = self._native_transport
+        if (
+            answers is None
+            or transport is None
+            or self._active_turn_id != expected_turn_id
+            or not transport.turn_in_flight
+        ):
+            return False
+        consumed = await transport.answer_pending_question(answers)
+        if consumed:
+            await self._emit_approval_resolved(answers)
+        return consumed
+
+    def accepts_question_followup(self, text: str, expected_turn_id: str) -> bool:
+        """Claude/Cursor questions need a normal follow-up after Goal pauses."""
+        session = self._session_getter()
+        answers = parse_ask_question_response(text)
+        if session is None or session.agent_type not in {AgentType.CLAUDE, AgentType.CURSOR}:
+            return False
+        if answers is None:
+            return False
+        ids = {
+            answer["questionId"]
+            for answer in answers
+            if isinstance(answer, dict)
+            and isinstance(answer.get("questionId"), str)
+            and isinstance(answer.get("selected"), list)
+        }
+        return any(
+            card.turn_id == expected_turn_id
+            and bool(card.question_ids)
+            and (not answers or card.question_ids <= ids)
+            for card in self._pending_approvals.values()
+        )
+
     async def send_message(
         self,
         text: str,
@@ -377,6 +496,8 @@ class SessionTailer:
         previews: Optional[List[bytes]] = None,
         delivery: str = "normal",
         reuse_attachments: Optional[List[Dict[str, Any]]] = None,
+        visible_text: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -532,6 +653,13 @@ class SessionTailer:
             #    the provider does anything. This guarantees the turn exists in
             #    the store and is fanned out to subscribers.
             self._active_turn_id = client_turn_id
+            self._assistant_text = ""
+            self._visible_assistant_text = ""
+            self._goal_protocol_sanitizer = (
+                _GoalProtocolSanitizer()
+                if turn_metadata and turn_metadata.get("protocol") == "goal-continuation-v1"
+                else None
+            )
             self._run_epoch += 1
             self._turn_completed_seen = False
             ctx = NormalizeContext(
@@ -543,9 +671,15 @@ class SessionTailer:
             )
             # The event carries only opaque attachment metadata (id, mime_type,
             # bytes, width, height) — never raw bytes or local paths.
+            turn_started_payload: Dict[str, Any] = {
+                "summary": text if visible_text is None else visible_text,
+                "attachments": attachment_metas,
+            }
+            if turn_metadata:
+                turn_started_payload["metadata"] = dict(turn_metadata)
             turn_started = ctx.event(
                 AgentStreamEventType.TURN_STARTED,
-                {"summary": text, "attachments": attachment_metas},
+                turn_started_payload,
             )
             turn_started = redact_event(turn_started)
             try:
@@ -606,7 +740,7 @@ class SessionTailer:
                 self._active_turn_id = None
                 raise
 
-    async def cancel_turn(self) -> bool:
+    async def cancel_turn(self, expected_turn_id: Optional[str] = None) -> bool:
         """Cancel the active native turn or close a durable orphan.
 
         A backend restart loses the process-local ``_active_turn_id`` and
@@ -618,15 +752,19 @@ class SessionTailer:
         transport = self._native_transport
         async with self._send_lock:
             if transport is not None and transport.turn_in_flight:
+                if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
+                    return False
                 await self._cancel_active_turn_locked(transport)
                 return True
 
-            return await self._recover_orphaned_turn_locked()
+            return await self._recover_orphaned_turn_locked(expected_turn_id)
 
-    async def _recover_orphaned_turn_locked(self) -> bool:
+    async def _recover_orphaned_turn_locked(self, expected_turn_id: Optional[str] = None) -> bool:
         """Explain and terminalize a turn owned by an earlier backend."""
         orphan = await self._store.latest_unfinished_turn()
         if orphan is None:
+            return False
+        if expected_turn_id is not None and orphan.turn_id != expected_turn_id:
             return False
         await self._publish_turn_completion(
             turn_id=orphan.turn_id,
@@ -643,7 +781,7 @@ class SessionTailer:
         run_epoch: Optional[int],
         status: str,
         error_message: Optional[str] = None,
-    ) -> None:
+    ) -> AgentStreamEvent:
         """Persist and fan out one authoritative terminal lifecycle edge."""
         session = self._session_getter()
         if session is None:
@@ -673,6 +811,7 @@ class SessionTailer:
         await self._publish(redact_event(completed))
         self._turn_completed_seen = True
         self._terminalize_native_runtime(status)
+        return completed
 
     def _turn_exceeds_hard_cap(self) -> bool:
         """True if the active turn has run longer than ``MAX_TURN_DURATION_S``.
@@ -705,7 +844,7 @@ class SessionTailer:
         publish_error: Optional[Exception] = None
         if turn_id is not None:
             try:
-                await self._publish_turn_completion(
+                completed = await self._publish_turn_completion(
                     turn_id=turn_id,
                     run_epoch=self._run_epoch,
                     status="cancelled",
@@ -719,6 +858,8 @@ class SessionTailer:
                 publish_error = exc
         await transport.cancel_active_turn()
         self._active_turn_id = None
+        if turn_id is not None and publish_error is None:
+            self._notify_post_persist(completed)
         # A cancelled turn can no longer answer a pending card; drop stale
         # tracking so it cannot be resolved against a later turn.
         self._pending_approvals.clear()
@@ -727,7 +868,9 @@ class SessionTailer:
                 publish_error
             )
 
-    async def _fail_active_turn(self, message: str, transport: ProviderSession) -> None:
+    async def _fail_active_turn(
+        self, message: str, transport: ProviderSession
+    ) -> Optional[AgentStreamEvent]:
         """Emit an ``error`` event and a failed ``turn_completed``.
 
         Called when a turn ends without a successful provider completion
@@ -743,10 +886,10 @@ class SessionTailer:
         """
         turn_id = self._active_turn_id
         if turn_id is None:
-            return
+            return None
         session = self._session_getter()
         if session is None:
-            return
+            return None
         ctx = NormalizeContext(
             session_id=self.session_id,
             tab_id=session.tab_id,
@@ -778,8 +921,10 @@ class SessionTailer:
                 "agent_stream store append failed for turn_completed session %s",
                 self.session_id,
             )
+            return None
         self._turn_completed_seen = True
         self._terminalize_native_runtime("failed")
+        return completed
 
     async def poll_once(self) -> None:
         async with self._poll_lock:
@@ -1026,7 +1171,13 @@ class SessionTailer:
                     # any) is abandoned. Emit an error and a failed
                     # turn_completed for the active turn so the frontend
                     # never leaves it pending, then fail the session.
-                    await self._fail_active_turn("native transport process exited", transport)
+                    fatal_failure = await self._fail_active_turn(
+                        "native transport process exited", transport
+                    )
+                    self._active_turn_id = None
+                    transport.acknowledge_turn_complete()
+                    if fatal_failure is not None:
+                        self._notify_post_persist(fatal_failure)
                     self._hard_failed = True
                     self._last_error = "native transport process exited"
                     _HARD_FAILED_SESSION_IDS.add(self.session_id)
@@ -1040,6 +1191,7 @@ class SessionTailer:
                 # completion, even on a nonzero exit, because that would
                 # produce two terminal events for the same turn.
                 exit_error = transport.exit_error
+                failed: Optional[AgentStreamEvent] = None
                 if not self._turn_completed_seen:
                     # A cancelled reader cannot reach this branch: the
                     # transport retires its generation before publishing the
@@ -1058,7 +1210,7 @@ class SessionTailer:
                         self.session_id,
                         exit_error,
                     )
-                    await self._fail_active_turn(
+                    failed = await self._fail_active_turn(
                         exit_error or "provider exited without a completion record",
                         transport,
                     )
@@ -1082,6 +1234,8 @@ class SessionTailer:
                 # completion WAS emitted, these are no-ops.
                 self._active_turn_id = None
                 transport.acknowledge_turn_complete()
+                if failed is not None:
+                    self._notify_post_persist(failed)
                 continue
             # Stop may retire a turn after read_line dequeues its record but
             # before wait_for resumes this consumer. Recheck at consumption.
@@ -1114,11 +1268,76 @@ class SessionTailer:
                     # records that also signal a turn start (Claude
                     # message_start, Codex turn/started) must NOT create a
                     # second turn — skip them.
-                    continue
+                    if self._active_turn_id is not None:
+                        continue
+                    provider_turn_id = event.payload.get("provider_turn_id")
+                    stable_key = (
+                        provider_turn_id
+                        if isinstance(provider_turn_id, str) and provider_turn_id
+                        else f"{self._run_epoch + 1}:{event.created_at.isoformat()}"
+                    )
+                    self._active_turn_id = str(
+                        uuid.uuid5(uuid.NAMESPACE_URL, f"claude-hub:{self.session_id}:{stable_key}")
+                    )
+                    self._run_epoch += 1
+                    self._assistant_text = ""
+                    self._turn_completed_seen = False
+                    transport.acknowledge_provider_turn_started()
+                    event.turn_id = self._active_turn_id
+                    event.message_id = f"{self._active_turn_id}:user"
+                    event.run_epoch = self._run_epoch
                 is_turn_completed = event.type == AgentStreamEventType.TURN_COMPLETED
                 if event.run_epoch is None:
                     event.run_epoch = self._run_epoch
                 self._record_approval_card(event)
+                if event.type == AgentStreamEventType.TEXT_DELTA and not event.payload.get("plan"):
+                    text = event.payload.get("text")
+                    if isinstance(text, str):
+                        self._assistant_text += text
+                        if self._goal_protocol_sanitizer is not None:
+                            visible = self._goal_protocol_sanitizer.feed(text)
+                            if not visible:
+                                continue
+                            event.payload["text"] = visible
+                            self._visible_assistant_text += visible
+                goal_protocol_text: Optional[str] = None
+                if is_turn_completed and self._assistant_text:
+                    if self._goal_protocol_sanitizer is None:
+                        event.payload.setdefault("assistant_text", self._assistant_text)
+                    else:
+                        # The Goal controller needs the raw control envelope,
+                        # but it must never enter the durable/public event.
+                        goal_protocol_text = self._assistant_text
+                if is_turn_completed and self._goal_protocol_sanitizer is not None:
+                    raw_summary = event.payload.get("summary")
+                    if isinstance(raw_summary, str) and raw_summary:
+                        # Codex/TraeX repeat the final assistant message in
+                        # task_complete.last_agent_message. Treat that copy as
+                        # protocol input too; otherwise the control envelope
+                        # would still enter the durable completion summary.
+                        goal_protocol_text = raw_summary
+                        summary_sanitizer = _GoalProtocolSanitizer()
+                        event.payload["summary"] = summary_sanitizer.feed(raw_summary, final=True)
+                    visible = self._goal_protocol_sanitizer.feed("", final=True)
+                    if visible:
+                        self._visible_assistant_text += visible
+                        await self._publish(
+                            ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": visible})
+                        )
+                    event.payload.setdefault("assistant_text", self._visible_assistant_text)
+                observer_event = (
+                    event.model_copy(
+                        deep=True,
+                        update={
+                            "payload": {
+                                **event.payload,
+                                "_goal_protocol_text": goal_protocol_text,
+                            }
+                        },
+                    )
+                    if goal_protocol_text is not None
+                    else event
+                )
                 event = redact_event(event)
                 try:
                     await self._publish(event)
@@ -1167,6 +1386,29 @@ class SessionTailer:
                     # completion.
                     self._active_turn_id = None
                     transport.acknowledge_turn_complete()
+                    self._notify_post_persist(observer_event)
+                    self._assistant_text = ""
+                    self._visible_assistant_text = ""
+                    self._goal_protocol_sanitizer = None
+
+    def _notify_post_persist(self, event: AgentStreamEvent) -> None:
+        """Schedule observers after completion persistence and guard release."""
+        for observer in tuple(self._post_persist_observers):
+            task = asyncio.create_task(self._run_observer(observer, event))
+            task.add_done_callback(self._log_observer_failure)
+
+    @staticmethod
+    async def _run_observer(observer: PostPersistObserver, event: AgentStreamEvent) -> None:
+        await observer(event)
+
+    @staticmethod
+    def _log_observer_failure(task: "asyncio.Task[None]") -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("agent_stream post-persist observer failed")
 
     async def _poll_once(self) -> None:
         session = self._session_getter()
@@ -1691,6 +1933,7 @@ class TailerManager:
         session_getter: Callable[[str], Optional[ManagedSession]],
         persist_session_id: Optional[Callable[[str, str], None]] = None,
         persist_mode: Optional[Callable[[str, str], None]] = None,
+        post_persist_observers: Optional[List[PostPersistObserver]] = None,
     ) -> None:
         self._session_getter = session_getter
         # Optional durable persistence callback for the provider conversation
@@ -1699,6 +1942,7 @@ class TailerManager:
         # the in-memory ManagedSession (used by tests).
         self._persist_session_id_cb = persist_session_id
         self._persist_mode_cb = persist_mode
+        self._post_persist_observers = post_persist_observers or []
         self._tailers: Dict[str, SessionTailer] = {}
         self._lock = asyncio.Lock()
         # Per-session locks that serialize edit-resend attempts.  A second
@@ -1758,6 +2002,7 @@ class TailerManager:
                     session_getter=lambda: self._session_getter(session.id),
                     native_transport=native_transport,
                     native_error=native_error,
+                    post_persist_observers=self._post_persist_observers,
                 )
                 self._tailers[session.id] = tailer
         if existing is not None:
@@ -1790,6 +2035,8 @@ class TailerManager:
         *,
         previews: Optional[List[bytes]] = None,
         delivery: str = "normal",
+        visible_text: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
@@ -1809,12 +2056,34 @@ class TailerManager:
             client_turn_id,
             previews=previews,
             delivery=delivery,
+            visible_text=visible_text,
+            turn_metadata=turn_metadata,
         )
 
-    async def cancel_turn(self, session: ManagedSession) -> bool:
+    async def cancel_turn(
+        self, session: ManagedSession, expected_turn_id: Optional[str] = None
+    ) -> bool:
         """Cancel the active native turn for ``session``, if any."""
         tailer = await self._get_or_create(session)
-        return await tailer.cancel_turn()
+        return await tailer.cancel_turn(expected_turn_id)
+
+    async def answer_pending_question(
+        self, session: ManagedSession, text: str, expected_turn_id: str
+    ) -> bool:
+        tailer = await self._get_or_create(session)
+        return await tailer.answer_pending_question(text, expected_turn_id)
+
+    async def turn_in_flight(self, session: ManagedSession) -> bool:
+        """Return the authoritative native transport turn guard."""
+        tailer = await self._get_or_create(session)
+        transport = tailer._native_transport
+        return bool(transport is not None and transport.turn_in_flight)
+
+    async def accepts_question_followup(
+        self, session: ManagedSession, text: str, expected_turn_id: str
+    ) -> bool:
+        tailer = await self._get_or_create(session)
+        return tailer.accepts_question_followup(text, expected_turn_id)
 
     async def edit_resend(
         self,
