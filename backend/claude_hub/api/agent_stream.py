@@ -44,6 +44,8 @@ from ..models import (
     ChatMode,
     ManagedSession,
     ManagedSessionStatus,
+    ScheduledTask,
+    ScheduledTaskRun,
     SessionKind,
     StreamCapabilities,
     User,
@@ -79,24 +81,33 @@ _tab_tailer_manager: Optional[TailerManager] = None
 
 
 async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
-    """Bridge persisted stream completion to Goal without a module cycle."""
+    """Bridge persisted completion to Goal and scheduled Chat state."""
     if event.type != AgentStreamEventType.TURN_COMPLETED or not event.turn_id:
         return
     from ..services.goal_run import get_goal_manager
 
     payload = event.payload
-    await get_goal_manager().on_turn_completed(
-        event.tab_id,
-        event.turn_id,
-        str(payload.get("status") or "failed"),
-        str(
-            payload.get("_goal_protocol_text")
-            or payload.get("assistant_text")
-            or payload.get("summary")
-            or ""
-        ),
-        payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
-    )
+    try:
+        await get_goal_manager().on_turn_completed(
+            event.tab_id,
+            event.turn_id,
+            str(payload.get("status") or "failed"),
+            str(
+                payload.get("_goal_protocol_text")
+                or payload.get("assistant_text")
+                or payload.get("summary")
+                or ""
+            ),
+            payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
+        )
+    finally:
+        # Goal and scheduled Chat turns share the transcript observer, but one
+        # lifecycle must never prevent the other from releasing its queue.
+        await workspace_manager.on_scheduled_chat_turn_completed(
+            event.tab_id,
+            event.turn_id,
+            str(payload.get("status") or "failed"),
+        )
 
 
 # Terminal-created AI tabs do not have an Agent Workspace record, but their
@@ -206,6 +217,25 @@ def _get_tab_tailer_manager() -> TailerManager:
             post_persist_observers=[_notify_goal_turn_completed],
         )
     return _tab_tailer_manager
+
+
+async def _dispatch_scheduled_chat_turn(run: ScheduledTaskRun, task: ScheduledTask) -> None:
+    """Deliver one durable automation run through the native Chat path."""
+    session = _terminal_tab_session_or_404(run.tab_id)
+    await _send_to_native(
+        session,
+        AgentStreamSendRequest(text=run.message, client_turn_id=run.client_turn_id),
+        _get_tab_tailer_manager(),
+        turn_metadata={
+            "origin": "scheduled_task",
+            "scheduled_task_id": task.id,
+            "scheduled_task_run_id": run.id,
+            "scheduled_task_name": task.name,
+        },
+    )
+
+
+workspace_manager.configure_scheduled_chat_dispatch(_dispatch_scheduled_chat_turn)
 
 
 async def _stop_all_tailer_managers() -> None:

@@ -52,6 +52,41 @@ from claude_hub.services.agent_stream.tailer import SessionTailer, TailerManager
 # ── redaction ────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.asyncio
+async def test_completion_observer_releases_scheduled_queue_when_goal_observer_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The independent Goal lifecycle cannot strand a scheduled Chat run."""
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services import goal_run as goal_run_service
+
+    goal_manager = SimpleNamespace(
+        on_turn_completed=AsyncMock(side_effect=RuntimeError("goal store unavailable"))
+    )
+    scheduled_completion = AsyncMock()
+    monkeypatch.setattr(goal_run_service, "get_goal_manager", lambda: goal_manager)
+    monkeypatch.setattr(
+        agent_stream_api.workspace_manager,
+        "on_scheduled_chat_turn_completed",
+        scheduled_completion,
+    )
+    event = AgentStreamEvent(
+        stream_sequence=1,
+        session_id="terminal-tab-tab-1",
+        tab_id="tab-1",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TURN_COMPLETED,
+        turn_id="scheduled-turn-1",
+        payload={"status": "completed"},
+        created_at=datetime.now(timezone.utc),
+    )
+
+    with pytest.raises(RuntimeError, match="goal store unavailable"):
+        await agent_stream_api._notify_goal_turn_completed(event)
+
+    scheduled_completion.assert_awaited_once_with("tab-1", "scheduled-turn-1", "completed")
+
+
 def test_terminal_tab_stream_session_uses_tab_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

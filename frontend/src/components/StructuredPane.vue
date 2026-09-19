@@ -674,6 +674,7 @@
               :goal-disabled-reason="goalSetupDisabledReason"
               @attachment="triggerFilePicker"
               @goal="isGoalSetupOpen = true"
+              @schedule="appStore.openScheduledTasks(props.tabId)"
             />
             <input
               ref="fileInputEl"
@@ -949,6 +950,7 @@ import {
 } from '@/utils/chatComposerInteraction'
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
@@ -961,6 +963,7 @@ const props = defineProps<{
 }>()
 
 const terminalStore = useTerminalStore()
+const appStore = useAppStore()
 const {
   goal,
   error: goalError,
