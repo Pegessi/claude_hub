@@ -16,15 +16,24 @@ from ._constants import *  # noqa: F401,F403
 
 
 class _StateMixin:
+    scheduled_task_runs: dict[str, ScheduledTaskRun]
+    _scheduled_chat_recovery_pending: bool
+
     def __init__(self) -> None:
         self.workspaces: dict[str, Workspace] = {}
         self.tasks: dict[str, WorkspaceTask] = {}
         self.sessions: dict[str, ManagedSession] = {}
         self.reports: dict[str, AgentReport] = {}
         self.scheduled_tasks: dict[str, ScheduledTask] = {}
+        self.scheduled_task_runs: dict[str, ScheduledTaskRun] = {}
         # Per-task fire locks: serialize the 5s tick and a manual run-now so
         # the same task cannot be stamped / fired twice concurrently.
         self._sched_fire_locks: dict[str, asyncio.Lock] = {}
+        # One native Chat turn may run per tab. These locks serialize the
+        # scheduler monitor, run-now, and completion-observer drain attempts.
+        self._scheduled_chat_tab_locks: dict[str, asyncio.Lock] = {}
+        self._scheduled_chat_recovery_pending = False
+        self._scheduled_chat_dispatch: Any = None
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
         # Per-session pump locks: serialize _pump_session_messages so two

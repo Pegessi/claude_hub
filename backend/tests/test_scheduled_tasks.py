@@ -15,6 +15,7 @@ import json
 from datetime import datetime, timedelta
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
 import click
@@ -38,7 +39,9 @@ from claude_hub.models import (
     ScheduledTask,
     ScheduledTaskCreate,
     ScheduledTaskKind,
+    ScheduledTaskRunStatus,
     ScheduledTaskUpdate,
+    SessionKind,
     Workspace,
     WorkspaceCreate,
     WorkspaceSessionRole,
@@ -58,6 +61,10 @@ _wm = import_module("claude_hub.services.workspace_manager")
 
 
 def _noop(*args: Any, **kwargs: Any) -> None:
+    return None
+
+
+async def _async_noop(*args: Any, **kwargs: Any) -> None:
     return None
 
 
@@ -129,6 +136,48 @@ def _stub_known_tabs(monkeypatch: MonkeyPatch, *tab_ids: str) -> None:
     """
     known = set(tab_ids)
     monkeypatch.setattr(ttyd_manager, "get_tab", lambda tid: object() if tid in known else None)
+
+
+def _chat_tab(
+    tab_id: str = "chat-1",
+    *,
+    agent_type: AgentType = AgentType.CLAUDE,
+    archived: bool = False,
+    workspace_role: WorkspaceSessionRole | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=tab_id,
+        agent_type=agent_type,
+        session_kind=SessionKind.CHAT,
+        workspace_role=workspace_role,
+        archived=archived,
+    )
+
+
+def _stub_chat_target(
+    monkeypatch: MonkeyPatch, tab: SimpleNamespace | None
+) -> dict[str, SimpleNamespace]:
+    tabs = {} if tab is None else {tab.id: tab}
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: tabs.get(tab_id))
+    return tabs
+
+
+def _stub_goal(monkeypatch: MonkeyPatch, goal_ref: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Keep Chat scheduling tests isolated from the process-wide Goal store."""
+    state = goal_ref if goal_ref is not None else {"goal": None}
+    locks: dict[str, asyncio.Lock] = {}
+    goal_module = import_module("claude_hub.services.goal_run")
+    monkeypatch.setattr(
+        goal_module,
+        "get_goal_manager",
+        lambda: SimpleNamespace(current=lambda _tab_id: state.get("goal")),
+    )
+    monkeypatch.setattr(
+        goal_module,
+        "get_goal_admission_lock",
+        lambda tab_id: locks.setdefault(tab_id, asyncio.Lock()),
+    )
+    return state
 
 
 def _weekday_at(hour: int, minute: int, target_weekday: int) -> datetime:
@@ -550,6 +599,404 @@ def test_scheduled_tasks_persist_across_reload(
 
 
 # ---------------------------------------------------------------------------
+# Native Chat automations
+# ---------------------------------------------------------------------------
+
+
+def test_create_chat_turn_validates_and_pins_backend(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab(agent_type=AgentType.TRAEX)
+    _stub_chat_target(monkeypatch, chat)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="continue chat",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            cron="0 9 * * *",
+            tab_id=chat.id,
+            agent_type=AgentType.CLAUDE,
+            message="Summarize overnight changes",
+        )
+    )
+
+    assert task.kind == ScheduledTaskKind.CHAT_TURN
+    assert task.agent_type == AgentType.TRAEX
+    assert task.tab_id == chat.id
+
+    _stub_chat_target(
+        monkeypatch, SimpleNamespace(**{**vars(chat), "session_kind": SessionKind.TERMINAL})
+    )
+    with pytest.raises(ValueError, match="top-level Chat"):
+        manager.create_scheduled_task(
+            ScheduledTaskCreate(
+                name="invalid target",
+                kind=ScheduledTaskKind.CHAT_TURN,
+                interval_seconds=60,
+                tab_id=chat.id,
+                message="hello",
+            )
+        )
+
+
+async def test_chat_turn_dispatches_and_completion_drains_fifo(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    dispatched: list[str] = []
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    first_task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="first",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="first message",
+        )
+    )
+    second_task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="second",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="second message",
+        )
+    )
+
+    first_at = datetime.now()
+    await manager._fire_scheduled_task(first_task, first_at, manual=True)
+    second_at = first_at + timedelta(seconds=2)
+    await manager._fire_scheduled_task(second_task, second_at, manual=True)
+
+    first = manager.scheduled_task_runs[first_task.last_run_id or ""]
+    second = manager.scheduled_task_runs[second_task.last_run_id or ""]
+    assert dispatched == [first.id]
+    assert first.status == ScheduledTaskRunStatus.RUNNING
+    assert second.status == ScheduledTaskRunStatus.QUEUED
+
+    await manager.on_scheduled_chat_turn_completed(chat.id, first.client_turn_id, "completed")
+
+    assert first.status == ScheduledTaskRunStatus.COMPLETED
+    assert second.status == ScheduledTaskRunStatus.RUNNING
+    assert dispatched == [first.id, second.id]
+
+
+async def test_chat_turn_busy_and_goal_wait_then_retry(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    goal_state = _stub_goal(monkeypatch)
+    busy = True
+    dispatched: list[str] = []
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        nonlocal busy
+        if busy:
+            raise RuntimeError(
+                "a turn is already in flight; wait for it to complete before sending another message"
+            )
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="wait safely",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="do this next",
+        )
+    )
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.WAITING
+    assert run.waiting_reason == "waiting for the current Chat response"
+
+    busy = False
+    goal_state["goal"] = SimpleNamespace(
+        status=SimpleNamespace(value="active"),
+        dispatch_state=SimpleNamespace(value="dispatched"),
+    )
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert run.status == ScheduledTaskRunStatus.WAITING
+    assert run.waiting_reason == "waiting for the active Goal"
+
+    goal_state["goal"] = None
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert run.status == ScheduledTaskRunStatus.RUNNING
+    assert dispatched == [run.id]
+
+
+async def test_chat_turn_keeps_each_occurrence_while_busy_and_drains_fifo(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    busy = True
+    dispatched: list[str] = []
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        if busy:
+            raise RuntimeError(
+                "a turn is already in flight; wait for it to complete before sending another message"
+            )
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="keep every occurrence",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="scheduled message",
+        )
+    )
+
+    first_at = task.next_run_at
+    assert first_at is not None
+    await manager._fire_scheduled_task(task, first_at)
+    second_at = task.next_run_at
+    assert second_at is not None
+    await manager._fire_scheduled_task(task, second_at)
+    third_at = task.next_run_at
+    assert third_at is not None
+    await manager._fire_scheduled_task(task, third_at)
+
+    runs = sorted(
+        manager.list_scheduled_task_runs(task.id),
+        key=lambda run: (run.scheduled_for, run.queued_at, run.id),
+    )
+    assert len(runs) == 3
+    assert len({run.id for run in runs}) == 3
+    assert task.run_count == 3
+    assert [run.status for run in runs] == [
+        ScheduledTaskRunStatus.WAITING,
+        ScheduledTaskRunStatus.QUEUED,
+        ScheduledTaskRunStatus.QUEUED,
+    ]
+    assert task.last_run_id == runs[-1].id
+
+    busy = False
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert dispatched == [runs[0].id]
+    await manager.on_scheduled_chat_turn_completed(chat.id, runs[0].client_turn_id, "completed")
+    await manager.on_scheduled_chat_turn_completed(chat.id, runs[1].client_turn_id, "completed")
+
+    assert dispatched == [run.id for run in runs]
+    assert runs[0].status == ScheduledTaskRunStatus.COMPLETED
+    assert runs[1].status == ScheduledTaskRunStatus.COMPLETED
+    assert runs[2].status == ScheduledTaskRunStatus.RUNNING
+    assert task.last_run_id == runs[-1].id
+    assert task.last_status == ScheduledTaskRunStatus.RUNNING.value
+
+
+async def test_chat_turn_backlog_is_bounded_and_overflow_is_auditable(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    monkeypatch.setattr(manager, "_SCHEDULED_CHAT_ACTIVE_RUN_LIMIT", 2)
+
+    async def busy(_run: Any, _task: ScheduledTask) -> None:
+        raise RuntimeError(
+            "a turn is already in flight; wait for it to complete before sending another message"
+        )
+
+    manager.configure_scheduled_chat_dispatch(busy)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="bounded backlog",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="scheduled message",
+        )
+    )
+
+    for _ in range(3):
+        fire_at = task.next_run_at
+        assert fire_at is not None
+        await manager._fire_scheduled_task(task, fire_at)
+
+    runs = sorted(
+        manager.list_scheduled_task_runs(task.id),
+        key=lambda run: (run.scheduled_for, run.queued_at, run.id),
+    )
+    assert task.run_count == 3
+    assert [run.status for run in runs] == [
+        ScheduledTaskRunStatus.WAITING,
+        ScheduledTaskRunStatus.QUEUED,
+        ScheduledTaskRunStatus.SKIPPED,
+    ]
+    assert runs[-1].completed_at is not None
+    assert "backlog limit reached" in (runs[-1].error or "")
+    assert task.last_run_id == runs[-1].id
+    assert task.last_status == ScheduledTaskRunStatus.SKIPPED.value
+    assert "backlog limit reached" in (task.last_error or "")
+
+
+async def test_chat_turn_archived_deleted_and_backend_changed(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab(archived=True)
+    tabs = _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    manager.configure_scheduled_chat_dispatch(_async_noop)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="target lifecycle",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="hello",
+        )
+    )
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.WAITING
+    assert run.waiting_reason == "target Chat is archived"
+
+    tabs[chat.id] = _chat_tab(agent_type=AgentType.CODEX)
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert run.status == ScheduledTaskRunStatus.SKIPPED
+    assert task.enabled is False
+    assert "backend changed" in (run.error or "")
+    reenabled = manager.update_scheduled_task(task.id, ScheduledTaskUpdate(enabled=True))
+    assert reenabled.enabled is True
+    assert reenabled.agent_type == AgentType.CODEX
+
+    second = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="deleted target",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="hello again",
+        )
+    )
+    tabs.clear()
+    manager._disable_deleted_chat_targets(datetime.now())
+    assert second.enabled is False
+    assert second.last_status == ScheduledTaskRunStatus.SKIPPED.value
+
+
+async def test_chat_turn_runs_persist_and_recover_from_stream(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, state_root: Path
+) -> None:
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    manager.configure_scheduled_chat_dispatch(_async_noop)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="durable",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="persist me",
+        )
+    )
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.RUNNING
+
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{chat.id}")
+    now = datetime.now()
+    await store.append(
+        AgentStreamEvent(
+            stream_sequence=-1,
+            session_id=f"terminal-tab-{chat.id}",
+            tab_id=chat.id,
+            agent_type=chat.agent_type,
+            type=AgentStreamEventType.TURN_STARTED,
+            turn_id=run.client_turn_id,
+            created_at=now,
+        )
+    )
+    await store.append(
+        AgentStreamEvent(
+            stream_sequence=-1,
+            session_id=f"terminal-tab-{chat.id}",
+            tab_id=chat.id,
+            agent_type=chat.agent_type,
+            type=AgentStreamEventType.TURN_COMPLETED,
+            turn_id=run.client_turn_id,
+            payload={"status": "completed"},
+            created_at=now,
+        )
+    )
+
+    reloaded = WorkspaceManager()
+    assert reloaded._scheduled_chat_recovery_pending is True
+    await reloaded._recover_scheduled_chat_runs()
+    recovered = reloaded.scheduled_task_runs[run.id]
+    assert recovered.status == ScheduledTaskRunStatus.COMPLETED
+    assert reloaded.list_scheduled_task_runs(task.id)[0].id == run.id
+    assert (state_root / "scheduled_tasks.json").exists()
+
+
+async def test_chat_turn_recovery_queues_unstarted_and_marks_started_uncertain(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    manager.configure_scheduled_chat_dispatch(_async_noop)
+    first_task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="not started",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="one",
+        )
+    )
+    await manager._fire_scheduled_task(first_task, datetime.now(), manual=True)
+    first = manager.scheduled_task_runs[first_task.last_run_id or ""]
+    first.status = ScheduledTaskRunStatus.DISPATCHING
+
+    second_task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="started",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="two",
+        )
+    )
+    second = manager._queue_scheduled_chat_run(
+        second_task, datetime.now() + timedelta(seconds=1), datetime.now()
+    )
+    second.status = ScheduledTaskRunStatus.RUNNING
+
+    async def lifecycle(run: Any) -> tuple[bool, str | None]:
+        return (run.id == second.id, None)
+
+    monkeypatch.setattr(manager, "_scheduled_turn_lifecycle", lifecycle)
+    await manager._recover_scheduled_chat_runs()
+
+    assert first.status == ScheduledTaskRunStatus.QUEUED
+    assert second.status == ScheduledTaskRunStatus.UNCERTAIN
+    assert second.completed_at is not None
+
+
+# ---------------------------------------------------------------------------
 # Firing
 # ---------------------------------------------------------------------------
 
@@ -813,6 +1260,37 @@ async def test_run_scheduled_task_raises_on_fire_failure(
     assert "tmux down" in (task.last_error or "")
     # A one-shot is still disabled even though its fire failed.
     assert task.enabled is False
+    assert task.run_count == 1
+
+
+async def test_run_scheduled_chat_task_raises_on_immediate_dispatch_failure(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+
+    async def fail_dispatch(_run: Any, _task: ScheduledTask) -> None:
+        raise RuntimeError("provider transport failed")
+
+    manager.configure_scheduled_chat_dispatch(fail_dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="fail native send",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="send now",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="provider transport failed"):
+        await manager.run_scheduled_task(task.id)
+
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.FAILED
+    assert run.error == "provider transport failed"
+    assert task.last_status == ScheduledTaskRunStatus.FAILED.value
     assert task.run_count == 1
 
 
@@ -1422,6 +1900,19 @@ def test_cli_schedule_enable_disable_and_run(monkeypatch: MonkeyPatch) -> None:
 
     assert {"enabled": True} in patched
     assert {"enabled": False} in patched
+
+
+def test_cli_schedule_run_exits_nonzero_on_dispatch_failure(monkeypatch: MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/scheduled-tasks/st-1/run"
+        return httpx.Response(500, json={"detail": "provider transport failed"})
+
+    _patch_get_client(monkeypatch, handler)
+    result = CliRunner().invoke(cli, ["schedule", "run", "st-1"])
+
+    assert result.exit_code != 0
+    assert "provider transport failed" in result.output
 
 
 def test_cli_schedule_get_and_delete(monkeypatch: MonkeyPatch) -> None:

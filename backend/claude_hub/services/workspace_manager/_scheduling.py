@@ -1,7 +1,11 @@
 """Scheduled-task orchestration: cron / interval / one-off firing.
 
 A ``ScheduledTask`` is a durable schedule that fires an action when its
-next-run time arrives. Three kinds are supported:
+next-run time arrives. Four kinds are supported:
+
+* ``chat_turn`` — queue a native turn in an existing top-level Chat tab. The
+  turn is delivered through the same provider session and structured event
+  stream as the composer, so its prompt and answer appear in that conversation.
 
 * ``tab_message`` — type a message into an existing terminal tab's pane and
   submit it. This is the agent self-scheduling primitive: an agent calls the
@@ -22,9 +26,8 @@ write) and hydrated at startup after the core workspace state. The tick is
 driven by the 5-second background monitor loop.
 
 Crash idempotency: before firing, the task's ``last_run_at`` / ``run_count``
-/ ``next_run_at`` are stamped and persisted (the same stamp-before-side-effect
-pattern used by resident agents), so a crash between the persist and the
-send side-effect does not re-fire or respawn.
+/ ``next_run_at`` are stamped and persisted. Chat turns additionally create a
+durable run with a deterministic turn id in that same atomic write.
 """
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
@@ -35,12 +38,19 @@ from ._constants import *  # noqa: F401,F403
 class _SchedulingMixin:
     """Scheduled-task persistence, CRUD, scheduling, and firing."""
 
+    scheduled_task_runs: dict[str, ScheduledTaskRun]
+    _scheduled_chat_recovery_pending: bool
+    _scheduled_chat_tab_locks: dict[str, asyncio.Lock]
+    _scheduled_chat_dispatch: Any
+
     # Minimum gap between fires of the same task. A concurrent fire (tick vs
     # run-now, or two run-now calls) that lands within this window joins the
     # in-flight fire instead of re-firing. This is the guard that stops a
     # recurring task from double-firing on concurrent manual run-now calls,
     # where the ``enabled`` / ``next_run_at`` re-checks don't apply.
     _FIRE_COOLDOWN = timedelta(seconds=1)
+    _SCHEDULED_RUN_HISTORY_LIMIT = 100
+    _SCHEDULED_CHAT_ACTIVE_RUN_LIMIT = 100
 
     # Per-field (min, max) for the 5 cron fields: minute, hour, day-of-month,
     # month, day-of-week (0 = Sunday).
@@ -79,18 +89,64 @@ class _SchedulingMixin:
                 self.scheduled_tasks[task.id] = task
             except Exception as exc:
                 logger.warning("Skipping invalid scheduled task entry: %s", exc)
-        logger.info("Loaded %d scheduled task(s)", len(self.scheduled_tasks))
+        runs = raw.get("scheduled_task_runs", [])
+        if isinstance(runs, list):
+            for item in runs:
+                try:
+                    run = ScheduledTaskRun(**item)
+                    self.scheduled_task_runs[run.id] = run
+                except Exception as exc:
+                    logger.warning("Skipping invalid scheduled task run entry: %s", exc)
+        # A dispatch/running marker owned by a prior process must be reconciled
+        # against the durable stream before another turn can be sent.
+        self._scheduled_chat_recovery_pending = any(
+            run.status in {ScheduledTaskRunStatus.DISPATCHING, ScheduledTaskRunStatus.RUNNING}
+            for run in self.scheduled_task_runs.values()
+        )
+        logger.info(
+            "Loaded %d scheduled task(s) and %d scheduled run(s)",
+            len(self.scheduled_tasks),
+            len(self.scheduled_task_runs),
+        )
 
     def _save_scheduled_tasks(self) -> None:
+        self._prune_scheduled_task_runs()
         SCHEDULED_TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "scheduled_tasks": [
                 task.model_dump(mode="json") for task in self.scheduled_tasks.values()
-            ]
+            ],
+            "scheduled_task_runs": [
+                run.model_dump(mode="json") for run in self.scheduled_task_runs.values()
+            ],
         }
         self._atomic_write_text(
             SCHEDULED_TASKS_FILE, json.dumps(payload, ensure_ascii=False, indent=2)
         )
+
+    def _prune_scheduled_task_runs(self) -> None:
+        """Bound completed history while always retaining active runs."""
+        keep: set[str] = set()
+        for task_id in self.scheduled_tasks:
+            runs = sorted(
+                (
+                    run
+                    for run in self.scheduled_task_runs.values()
+                    if run.scheduled_task_id == task_id
+                ),
+                key=lambda run: (run.scheduled_for, run.queued_at),
+                reverse=True,
+            )
+            terminal_kept = 0
+            for run in runs:
+                if self._chat_run_active(run):
+                    keep.add(run.id)
+                elif terminal_kept < self._SCHEDULED_RUN_HISTORY_LIMIT:
+                    keep.add(run.id)
+                    terminal_kept += 1
+        self.scheduled_task_runs = {
+            run_id: run for run_id, run in self.scheduled_task_runs.items() if run_id in keep
+        }
 
     # ------------------------------------------------------------------
     # CRUD
@@ -103,6 +159,11 @@ class _SchedulingMixin:
         if not name:
             raise ValueError("name must not be empty")
         now = _wm._now()
+        agent_type = payload.agent_type
+        if payload.kind == ScheduledTaskKind.CHAT_TURN and payload.tab_id:
+            tab = ttyd_manager.get_tab(payload.tab_id)
+            if tab is not None:
+                agent_type = tab.agent_type
         task = ScheduledTask(
             id=str(uuid.uuid4()),
             name=name,
@@ -113,7 +174,7 @@ class _SchedulingMixin:
             interval_seconds=payload.interval_seconds,
             tab_id=payload.tab_id,
             workspace_id=payload.workspace_id,
-            agent_type=payload.agent_type,
+            agent_type=agent_type,
             message=payload.message,
             task_title=payload.task_title,
             run_count=0,
@@ -134,6 +195,19 @@ class _SchedulingMixin:
 
     def list_scheduled_tasks(self) -> list[ScheduledTask]:
         return list(self.scheduled_tasks.values())
+
+    def list_scheduled_task_runs(self, task_id: str) -> list[ScheduledTaskRun]:
+        if task_id not in self.scheduled_tasks:
+            raise KeyError(task_id)
+        return sorted(
+            (run for run in self.scheduled_task_runs.values() if run.scheduled_task_id == task_id),
+            key=lambda run: (run.scheduled_for, run.queued_at),
+            reverse=True,
+        )
+
+    def configure_scheduled_chat_dispatch(self, callback: Any) -> None:
+        """Inject the native Chat transport without importing the API layer."""
+        self._scheduled_chat_dispatch = callback
 
     def get_scheduled_task(self, task_id: str) -> ScheduledTask:
         task = self.scheduled_tasks.get(task_id)
@@ -164,6 +238,13 @@ class _SchedulingMixin:
 
         fields = merged.model_dump()
         self._validate_scheduled_task_fields(fields, existing=task)
+        if merged.kind == ScheduledTaskKind.CHAT_TURN and merged.tab_id:
+            tab = ttyd_manager.get_tab(merged.tab_id)
+            if tab is not None:
+                # The provider is target-derived, not caller-controlled. An
+                # edit/re-enable explicitly confirms the target's current
+                # backend after a provider switch disabled the automation.
+                merged.agent_type = tab.agent_type
 
         if schedule_changed:
             merged.next_run_at = self._compute_next_run(merged, now)
@@ -177,6 +258,11 @@ class _SchedulingMixin:
         task = self.scheduled_tasks.pop(task_id, None)
         if task is None:
             return False
+        self.scheduled_task_runs = {
+            run_id: run
+            for run_id, run in self.scheduled_task_runs.items()
+            if run.scheduled_task_id != task_id
+        }
         self._save_scheduled_tasks()
         logger.info("Deleted scheduled task id=%s name=%r", task_id, task.name)
         return True
@@ -191,8 +277,20 @@ class _SchedulingMixin:
         task = self.scheduled_tasks.get(task_id)
         if task is None:
             raise KeyError(task_id)
-        await self._fire_scheduled_task(task, _wm._now(), manual=True)
-        if task.last_status == "error":
+        chat_run = await self._fire_scheduled_task(task, _wm._now(), manual=True)
+        if task.kind == ScheduledTaskKind.CHAT_TURN and chat_run is not None:
+            if chat_run.status in {
+                ScheduledTaskRunStatus.FAILED,
+                ScheduledTaskRunStatus.SKIPPED,
+                ScheduledTaskRunStatus.UNCERTAIN,
+                ScheduledTaskRunStatus.CANCELLED,
+            }:
+                raise RuntimeError(
+                    chat_run.error
+                    or chat_run.waiting_reason
+                    or f"scheduled Chat run ended as {chat_run.status.value}"
+                )
+        elif task.last_status == "error":
             raise RuntimeError(task.last_error or "scheduled task failed to fire")
         return task
 
@@ -222,7 +320,20 @@ class _SchedulingMixin:
         if cron is not None:
             self._validate_cron_expression(cron)
 
-        if kind == ScheduledTaskKind.TAB_MESSAGE:
+        if kind == ScheduledTaskKind.CHAT_TURN:
+            if not fields.get("tab_id"):
+                raise ValueError("tab_id is required for chat_turn tasks")
+            if not fields.get("message"):
+                raise ValueError("message is required for chat_turn tasks")
+            if existing is None or fields["tab_id"] != existing.tab_id:
+                tab = ttyd_manager.get_tab(fields["tab_id"])
+                if tab is None:
+                    raise ValueError(f"Chat tab '{fields['tab_id']}' not found")
+                if tab.session_kind != SessionKind.CHAT or tab.workspace_role is not None:
+                    raise ValueError("chat_turn tasks require a top-level Chat tab")
+                if tab.agent_type == AgentType.TERMINAL:
+                    raise ValueError("chat_turn tasks require an AI Chat backend")
+        elif kind == ScheduledTaskKind.TAB_MESSAGE:
             if not fields.get("tab_id"):
                 raise ValueError("tab_id is required for tab_message tasks")
             if not fields.get("message"):
@@ -417,9 +528,11 @@ class _SchedulingMixin:
     # ------------------------------------------------------------------
 
     async def _tick_scheduled_tasks(self) -> None:
-        if not self.scheduled_tasks:
-            return
+        if self._scheduled_chat_recovery_pending:
+            await self._recover_scheduled_chat_runs()
+            self._scheduled_chat_recovery_pending = False
         now = _wm._now()
+        self._disable_deleted_chat_targets(now)
         for task_id in list(self.scheduled_tasks.keys()):
             task = self.scheduled_tasks.get(task_id)
             if task is None or not task.enabled:
@@ -430,10 +543,29 @@ class _SchedulingMixin:
                 await self._fire_scheduled_task(task, now)
             except Exception:
                 logger.exception("Scheduled task tick failed for task_id=%s", task_id)
+        await self._drain_scheduled_chat_runs()
+
+    def _disable_deleted_chat_targets(self, now: datetime) -> None:
+        changed = False
+        for task in self.scheduled_tasks.values():
+            if (
+                task.kind != ScheduledTaskKind.CHAT_TURN
+                or not task.enabled
+                or not task.tab_id
+                or ttyd_manager.get_tab(task.tab_id) is not None
+            ):
+                continue
+            task.enabled = False
+            task.last_status = ScheduledTaskRunStatus.SKIPPED.value
+            task.last_error = "target Chat was deleted"
+            task.updated_at = now
+            changed = True
+        if changed:
+            self._save_scheduled_tasks()
 
     async def _fire_scheduled_task(
         self, task: ScheduledTask, now: datetime, *, manual: bool = False
-    ) -> None:
+    ) -> Optional[ScheduledTaskRun]:
         lock = self._sched_fire_locks.setdefault(task.id, asyncio.Lock())
         async with lock:
             # Re-check eligibility under the lock: a concurrent fire (the 5s
@@ -449,15 +581,20 @@ class _SchedulingMixin:
             if task.last_run_at is not None and (now - task.last_run_at) < self._FIRE_COOLDOWN:
                 # A concurrent fire advanced this task within the cooldown
                 # window while we waited for the lock. Join it: don't re-fire.
-                return
+                return (
+                    self.scheduled_task_runs.get(task.last_run_id)
+                    if task.kind == ScheduledTaskKind.CHAT_TURN and task.last_run_id
+                    else None
+                )
             if not task.enabled:
                 if manual:
                     raise ValueError(f"Scheduled task '{task.id}' is disabled")
-                return
+                return None
             if not manual and (task.next_run_at is None or task.next_run_at > now):
                 # Already advanced by a concurrent manual fire.
-                return
+                return None
 
+            scheduled_for = now if manual else (task.next_run_at or now)
             # Stamp BEFORE the side effect (crash-idempotent, same pattern as
             # resident agents): persist last_run_at / run_count / next_run_at
             # first so a crash does not re-fire or respawn. One-shot tasks are
@@ -470,17 +607,24 @@ class _SchedulingMixin:
                 task.next_run_at = None
             else:
                 task.next_run_at = self._compute_next_run(task, now)
+            chat_run: Optional[ScheduledTaskRun] = None
+            if task.kind == ScheduledTaskKind.CHAT_TURN:
+                chat_run = self._queue_scheduled_chat_run(task, scheduled_for, now)
             self._save_scheduled_tasks()
 
             try:
-                if task.kind == ScheduledTaskKind.TAB_MESSAGE:
+                if task.kind == ScheduledTaskKind.CHAT_TURN:
+                    assert chat_run is not None
+                    await self._drain_scheduled_chat_runs(task.tab_id)
+                elif task.kind == ScheduledTaskKind.TAB_MESSAGE:
                     await self._send_tab_message(task.tab_id, task.message)
                 elif task.kind == ScheduledTaskKind.NEW_SESSION:
                     await self._fire_new_session(task)
                 elif task.kind == ScheduledTaskKind.HUB_TASK:
                     await self._fire_hub_task(task)
-                task.last_status = "ok"
-                task.last_error = None
+                if task.kind != ScheduledTaskKind.CHAT_TURN:
+                    task.last_status = "ok"
+                    task.last_error = None
             except Exception as exc:
                 logger.exception("Scheduled task %s failed to fire", task.id)
                 task.last_status = "error"
@@ -488,6 +632,281 @@ class _SchedulingMixin:
 
             task.updated_at = _wm._now()
             self._save_scheduled_tasks()
+            return chat_run
+
+    @staticmethod
+    def _chat_run_active(run: ScheduledTaskRun) -> bool:
+        return run.status in {
+            ScheduledTaskRunStatus.QUEUED,
+            ScheduledTaskRunStatus.WAITING,
+            ScheduledTaskRunStatus.DISPATCHING,
+            ScheduledTaskRunStatus.RUNNING,
+        }
+
+    def _queue_scheduled_chat_run(
+        self, task: ScheduledTask, scheduled_for: datetime, now: datetime
+    ) -> ScheduledTaskRun:
+        """Create one durable Chat run for one schedule occurrence."""
+        assert task.tab_id is not None
+        assert task.message is not None
+        run_uuid = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"claude-hub:scheduled-chat:{task.id}:{scheduled_for.isoformat()}",
+        )
+        existing = self.scheduled_task_runs.get(str(run_uuid))
+        if existing is not None:
+            # A deterministic id makes replaying the exact same occurrence
+            # idempotent without collapsing distinct future occurrences.
+            task.last_run_id = existing.id
+            task.last_status = existing.status.value
+            task.last_error = existing.error or existing.waiting_reason
+            return existing
+        run = ScheduledTaskRun(
+            id=str(run_uuid),
+            scheduled_task_id=task.id,
+            tab_id=task.tab_id,
+            client_turn_id=f"scheduled-{run_uuid}",
+            message=task.message,
+            scheduled_for=scheduled_for,
+            queued_at=now,
+        )
+        active_for_tab = sum(
+            1
+            for candidate in self.scheduled_task_runs.values()
+            if candidate.tab_id == task.tab_id and self._chat_run_active(candidate)
+        )
+        if active_for_tab >= self._SCHEDULED_CHAT_ACTIVE_RUN_LIMIT:
+            run.status = ScheduledTaskRunStatus.SKIPPED
+            run.completed_at = now
+            run.error = (
+                "target Chat backlog limit reached "
+                f"({self._SCHEDULED_CHAT_ACTIVE_RUN_LIMIT} active runs)"
+            )
+        self.scheduled_task_runs[run.id] = run
+        task.last_run_id = run.id
+        task.last_status = run.status.value
+        task.last_error = run.error
+        return run
+
+    async def _scheduled_turn_lifecycle(self, run: ScheduledTaskRun) -> tuple[bool, Optional[str]]:
+        """Return (turn_started, completion_status) from the durable transcript."""
+        from ..agent_stream.store import AgentStreamStore
+
+        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{run.tab_id}")
+        cursor = -1
+        started = False
+        while True:
+            page = await store.read_since(cursor, limit=5000)
+            for event in page.events:
+                if event.turn_id != run.client_turn_id:
+                    continue
+                if event.type.value == "turn_started":
+                    started = True
+                elif event.type.value == "turn_completed":
+                    return started, str(event.payload.get("status") or "failed")
+                elif event.type.value == "error":
+                    return started, "failed"
+            if not page.has_more:
+                return started, None
+            cursor = page.next_sequence
+
+    async def _recover_scheduled_chat_runs(self) -> None:
+        """Reconcile dispatch markers left by a previous backend process."""
+        changed = False
+        for run in self.scheduled_task_runs.values():
+            if run.status not in {
+                ScheduledTaskRunStatus.DISPATCHING,
+                ScheduledTaskRunStatus.RUNNING,
+            }:
+                continue
+            started, completion = await self._scheduled_turn_lifecycle(run)
+            if completion is not None:
+                self._complete_scheduled_chat_run(run, completion)
+            elif started:
+                run.status = ScheduledTaskRunStatus.UNCERTAIN
+                run.waiting_reason = None
+                run.error = "backend restarted while this Chat turn was in flight"
+                run.completed_at = _wm._now()
+                self._sync_task_from_run(run)
+            else:
+                run.status = ScheduledTaskRunStatus.QUEUED
+                run.waiting_reason = "recovered before provider dispatch"
+                run.error = None
+                self._sync_task_from_run(run)
+            changed = True
+        if changed:
+            self._save_scheduled_tasks()
+
+    def _sync_task_from_run(self, run: ScheduledTaskRun) -> None:
+        task = self.scheduled_tasks.get(run.scheduled_task_id)
+        if task is None:
+            return
+        current = (
+            self.scheduled_task_runs.get(task.last_run_id) if task.last_run_id is not None else None
+        )
+        if current is not None and current.id != run.id:
+            current_key = (current.scheduled_for, current.queued_at, current.id)
+            run_key = (run.scheduled_for, run.queued_at, run.id)
+            if current_key > run_key:
+                # An older FIFO entry can keep transitioning after a newer
+                # occurrence is queued. Keep task-level "last" fields tied
+                # to the newest occurrence; its own run record still captures
+                # every transition.
+                return
+        task.last_run_id = run.id
+        task.last_status = run.status.value
+        task.last_error = run.error or run.waiting_reason
+        task.updated_at = _wm._now()
+
+    def _complete_scheduled_chat_run(self, run: ScheduledTaskRun, status: str) -> None:
+        success = status in {"completed", "success", "ok"}
+        run.status = ScheduledTaskRunStatus.COMPLETED if success else ScheduledTaskRunStatus.FAILED
+        run.completed_at = _wm._now()
+        run.waiting_reason = None
+        run.error = None if success else f"Chat turn completed with status: {status}"
+        self._sync_task_from_run(run)
+
+    async def on_scheduled_chat_turn_completed(
+        self, tab_id: str, turn_id: str, status: str
+    ) -> None:
+        """Advance a scheduled run after its persisted Chat completion edge."""
+        lock = self._scheduled_chat_tab_locks.setdefault(tab_id, asyncio.Lock())
+        async with lock:
+            run = next(
+                (
+                    candidate
+                    for candidate in self.scheduled_task_runs.values()
+                    if candidate.tab_id == tab_id and candidate.client_turn_id == turn_id
+                ),
+                None,
+            )
+            if run is None or not self._chat_run_active(run):
+                return
+            self._complete_scheduled_chat_run(run, status)
+            self._save_scheduled_tasks()
+        await self._drain_scheduled_chat_runs(tab_id)
+
+    async def _drain_scheduled_chat_runs(self, tab_id: Optional[str] = None) -> None:
+        tab_ids = (
+            [tab_id]
+            if tab_id is not None
+            else sorted(
+                {
+                    run.tab_id
+                    for run in self.scheduled_task_runs.values()
+                    if self._chat_run_active(run)
+                }
+            )
+        )
+        for current_tab_id in tab_ids:
+            await self._drain_scheduled_chat_tab(current_tab_id)
+
+    async def _drain_scheduled_chat_tab(self, tab_id: str) -> None:
+        lock = self._scheduled_chat_tab_locks.setdefault(tab_id, asyncio.Lock())
+        async with lock:
+            active = sorted(
+                (
+                    run
+                    for run in self.scheduled_task_runs.values()
+                    if run.tab_id == tab_id and self._chat_run_active(run)
+                ),
+                key=lambda run: (run.scheduled_for, run.queued_at, run.id),
+            )
+            if not active:
+                return
+            if any(
+                run.status in {ScheduledTaskRunStatus.DISPATCHING, ScheduledTaskRunStatus.RUNNING}
+                for run in active
+            ):
+                return
+            run = active[0]
+            task = self.scheduled_tasks.get(run.scheduled_task_id)
+            if task is None:
+                run.status = ScheduledTaskRunStatus.CANCELLED
+                run.error = "scheduled task was deleted"
+                run.completed_at = _wm._now()
+                self._save_scheduled_tasks()
+                return
+            tab = ttyd_manager.get_tab(tab_id)
+            if tab is None:
+                run.status = ScheduledTaskRunStatus.SKIPPED
+                run.error = "target Chat was deleted"
+                run.completed_at = _wm._now()
+                task.enabled = False
+                self._sync_task_from_run(run)
+                self._save_scheduled_tasks()
+                return
+            if tab.session_kind != SessionKind.CHAT or tab.workspace_role is not None:
+                run.status = ScheduledTaskRunStatus.SKIPPED
+                run.error = "target is no longer a top-level Chat session"
+                run.completed_at = _wm._now()
+                task.enabled = False
+                self._sync_task_from_run(run)
+                self._save_scheduled_tasks()
+                return
+            if tab.agent_type != task.agent_type:
+                run.status = ScheduledTaskRunStatus.SKIPPED
+                run.error = "target Chat backend changed; edit the automation to confirm it"
+                run.completed_at = _wm._now()
+                task.enabled = False
+                self._sync_task_from_run(run)
+                self._save_scheduled_tasks()
+                return
+            if tab.archived:
+                run.status = ScheduledTaskRunStatus.WAITING
+                run.waiting_reason = "target Chat is archived"
+                self._sync_task_from_run(run)
+                self._save_scheduled_tasks()
+                return
+
+            from ..goal_run import get_goal_admission_lock, get_goal_manager
+
+            async with get_goal_admission_lock(tab_id):
+                goal = get_goal_manager().current(tab_id)
+                if goal is not None and (
+                    goal.status.value == "active" or goal.dispatch_state.value != "idle"
+                ):
+                    run.status = ScheduledTaskRunStatus.WAITING
+                    run.waiting_reason = "waiting for the active Goal"
+                    self._sync_task_from_run(run)
+                    self._save_scheduled_tasks()
+                    return
+
+                dispatch = self._scheduled_chat_dispatch
+                if dispatch is None:
+                    run.status = ScheduledTaskRunStatus.WAITING
+                    run.waiting_reason = "Chat dispatcher is starting"
+                    self._sync_task_from_run(run)
+                    self._save_scheduled_tasks()
+                    return
+                run.status = ScheduledTaskRunStatus.DISPATCHING
+                run.waiting_reason = None
+                run.error = None
+                self._sync_task_from_run(run)
+                self._save_scheduled_tasks()
+                try:
+                    await dispatch(run, task)
+                except RuntimeError as exc:
+                    if "turn is already in flight" in str(exc):
+                        run.status = ScheduledTaskRunStatus.WAITING
+                        run.waiting_reason = "waiting for the current Chat response"
+                        run.error = None
+                    else:
+                        run.status = ScheduledTaskRunStatus.FAILED
+                        run.error = str(exc)
+                        run.completed_at = _wm._now()
+                except Exception as exc:
+                    run.status = ScheduledTaskRunStatus.FAILED
+                    run.error = str(exc)
+                    run.completed_at = _wm._now()
+                else:
+                    # A very fast provider may complete before the send
+                    # acknowledgement returns. Preserve that terminal evidence.
+                    if run.status == ScheduledTaskRunStatus.DISPATCHING:
+                        run.status = ScheduledTaskRunStatus.RUNNING
+                        run.dispatched_at = _wm._now()
+                self._sync_task_from_run(run)
+                self._save_scheduled_tasks()
 
     async def _send_tab_message(self, tab_id: Optional[str], message: Optional[str]) -> None:
         """Type ``message`` into a terminal tab's pane and submit it (Enter).

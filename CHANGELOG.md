@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat: schedule durable turns in existing Chat conversations
+
+- Add `Create scheduled task` to the Chat composer `+` menu. It opens the
+  scheduler with the current Chat preselected; native Chat delivery is the
+  default, while terminal, new-session, and Hub-task actions remain advanced
+  options.
+- Queue scheduled messages into the original Claude, Codex, Cursor, or TraeX
+  conversation, so both prompt and reply stay in that Chat. Busy conversations,
+  active Goals, and archived Chats wait without interrupting the current turn.
+- Persist per-occurrence run state across backend restarts, recover from the
+  durable Agent Stream, serialize runs per Chat, and disable schedules whose
+  target was deleted or changed to another backend. Preserve every occurrence
+  while bounding each Chat's active backlog at 100; overflow is recorded as a
+  visible skipped run instead of growing memory and state files indefinitely.
+- Expose queued, waiting, running, completed, failed, skipped, and uncertain
+  states through the scheduler API and UI.
+
 ### fix: keep silent provider control notifications out of Chat turns
 
 - Ignore metadata-only provider status events such as TraeX

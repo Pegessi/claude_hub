@@ -1,8 +1,9 @@
 """``schedule`` command group — manage scheduled tasks.
 
-Scheduled tasks fire an action on a cron / interval / one-off basis. Three
+Scheduled tasks fire an action on a cron / interval / one-off basis. Four
 kinds are supported:
 
+* ``chat_turn`` — queue a native turn in an existing Chat conversation.
 * ``tab_message`` — type a message into an existing terminal tab's pane and
   submit it. This is the agent self-scheduling primitive: an agent calls this
   command (which hits the scheduling API) to register a schedule that
@@ -36,7 +37,7 @@ SCHEDULE_COLUMNS = [
     "run_count",
 ]
 
-SCHEDULE_KINDS = ["tab_message", "new_session", "hub_task"]
+SCHEDULE_KINDS = ["chat_turn", "tab_message", "new_session", "hub_task"]
 
 
 def _schedule_body(
@@ -136,7 +137,7 @@ def schedule_get(ctx: click.Context, task_id: str) -> None:
 @click.option("--run-at", default=None, help="One-shot fire time (ISO 8601).")
 @click.option("--cron", default=None, help="5-field cron expression (e.g. '30 9 * * *').")
 @click.option("--interval", type=int, default=None, help="Repeat every N seconds.")
-@click.option("--tab-id", default=None, help="Target terminal tab (tab_message kind).")
+@click.option("--tab-id", default=None, help="Target Chat/terminal tab (chat_turn/tab_message).")
 @click.option("--workspace-id", default=None, help="Workspace (new_session / hub_task kinds).")
 @click.option(
     "--agent-type",
@@ -192,7 +193,7 @@ def schedule_create(
 @click.option("--run-at", default=None, help="One-shot fire time (ISO 8601).")
 @click.option("--cron", default=None, help="5-field cron expression.")
 @click.option("--interval", type=int, default=None, help="Repeat every N seconds.")
-@click.option("--tab-id", default=None, help="Target terminal tab (tab_message kind).")
+@click.option("--tab-id", default=None, help="Target Chat/terminal tab (chat_turn/tab_message).")
 @click.option("--workspace-id", default=None, help="Workspace (new_session / hub_task kinds).")
 @click.option("--agent-type", default=None, help="Agent type.")
 @click.option("--message", default=None, help="Message to send / task prompt.")
