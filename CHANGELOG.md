@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### feat: improve Chat navigation, long-history loading, and provider prompts
+
+- Chat sessions keep the server-defined order, can be dragged or moved with
+  the keyboard, and support browser-local pinning. Directory groups show six
+  ordinary sessions initially with explicit Show more / Show less controls;
+  filtering still searches every session and keeps the active session visible.
+  The complete row is clickable, and the sidebar can be resized from 200–480px
+  with its width remembered locally (double-click the handle to reset).
+- Long conversations open at the latest turn with visible hydration feedback,
+  render a bounded 40-turn window, and load older turns in place without moving
+  the reader's anchor. Switching back to a Chat now returns to its latest
+  content instead of preserving a stale scroll position.
+- Cursor's current top-level AskQuestion protocol and Codex/TraeX free-text
+  requestUserInput payloads now reach the shared question card, including
+  option descriptions and secret inputs. Failed answers remain retryable.
+- TraeX queue, waiting, ready, model fallback, and loop-recovery notifications
+  are normalized into visible timeline status rows instead of being discarded.
+- Plan turns retain their originating mode, consume authoritative plan
+  snapshots, and expose an explicit Implement plan action after successful
+  completion. Progress snapshots no longer replace or masquerade as delivery.
+
 ### fix: hung turns are reaped even while a session is being watched
 
 - **Why now.** A TraeX chat session hung mid-turn (the model API stopped

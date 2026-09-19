@@ -44,6 +44,7 @@ const mod = await import(
 const {
   countProcessSteps,
   foldTurnParts,
+  getCompletedPlanText,
   groupEventsIntoTurns,
   splitTurnProcess,
   turnElapsedMs,
@@ -289,6 +290,26 @@ test('a turn of work plus plan text has no answer to deliver', () => {
   assert.deepEqual(turn.parts.map(p => p.kind), ['tool_group', 'text'])
   assert.equal(splitTurnProcess(turn), null)
   assert.equal(foldTurnParts(turn, false), turn.parts)
+})
+
+test('a completed Plan turn exposes its proposal for explicit implementation', () => {
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'Plan it', mode: 'plan' }),
+    makeEvent(2, 'text_delta', { text: 'Checking files', plan: true, plan_kind: 'progress', snapshot: true }, { message_id: 'plan-progress' }),
+    makeEvent(3, 'text_delta', { text: '1. Update adapter\n2. Verify UI', plan: true, plan_kind: 'proposal', snapshot: true }, { message_id: 'plan-final' }),
+    makeEvent(4, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  assert.equal(getCompletedPlanText(turn), '1. Update adapter\n2. Verify UI')
+})
+
+test('ordinary and failed turns never expose an implementable plan', () => {
+  assert.equal(getCompletedPlanText(completedTurn()), null)
+  const failedPlan = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'Plan it', mode: 'plan' }),
+    makeEvent(2, 'text_delta', { text: 'A plan', plan: true, plan_kind: 'proposal' }),
+    makeEvent(3, 'turn_completed', { status: 'failed' }),
+  ])[0]
+  assert.equal(getCompletedPlanText(failedPlan), null)
 })
 
 test('plan prose and answer prose never merge into one part', () => {

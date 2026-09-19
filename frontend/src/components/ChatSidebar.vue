@@ -1,7 +1,8 @@
 <template>
   <aside
     class="chat-sidebar"
-    :class="{ collapsed: sidebarCollapsed }"
+    :class="{ collapsed: sidebarCollapsed, resizing: isResizing }"
+    :style="sidebarStyle"
     aria-label="Chat sessions"
   >
     <!-- Header: title + collapse toggle -->
@@ -58,15 +59,39 @@
 
       <div class="chat-sidebar__body">
         <div
-          v-for="group in filteredGroups"
-          :key="group.cwd"
-          class="chat-sidebar__group"
+          v-if="draggedTabId && !filteredGroups.some(group => group.pinned)"
+          class="chat-sidebar__pin-drop"
+          @dragover.prevent
+          @drop.prevent="pinDraggedTab"
         >
+          Drop here to pin
+        </div>
+        <div
+          v-for="group in filteredGroups"
+          :key="group.key"
+          class="chat-sidebar__group"
+          :class="{ 'chat-sidebar__group--pinned': group.pinned }"
+        >
+          <div
+            v-if="group.pinned"
+            class="chat-sidebar__group-header chat-sidebar__pinned-header"
+            title="Pins are saved in this browser"
+            @dragover="onGroupDragOver($event, group)"
+            @drop="onGroupDrop($event, group)"
+          >
+            <span aria-hidden="true">⌖</span>
+            <span class="chat-sidebar__group-label">Pinned</span>
+            <span class="chat-sidebar__group-count">{{ group.tabs.length }}</span>
+          </div>
           <button
+            v-else
             type="button"
             class="chat-sidebar__group-header"
-            :aria-expanded="!collapsedGroups.has(group.cwd)"
+            :aria-expanded="!group.collapsed"
+            :aria-controls="`chat-group-${group.key}`"
             @click="toggleGroup(group.cwd)"
+            @dragover="onGroupDragOver($event, group)"
+            @drop="onGroupDrop($event, group)"
           >
             <svg
               viewBox="0 0 16 16"
@@ -86,7 +111,7 @@
             <span class="chat-sidebar__group-count">{{ group.tabs.length }}</span>
             <svg
               class="chat-sidebar__group-chevron"
-              :class="{ collapsed: collapsedGroups.has(group.cwd) }"
+              :class="{ collapsed: group.collapsed }"
               viewBox="0 0 16 16"
               width="12"
               height="12"
@@ -100,20 +125,33 @@
           </button>
 
           <div
-            v-if="!collapsedGroups.has(group.cwd)"
+            :id="`chat-group-${group.key}`"
             class="chat-sidebar__group-items"
           >
             <div
-              v-for="tab in group.tabs"
+              v-for="tab in group.visibleTabs"
               :key="tab.id"
               class="chat-sidebar__item"
-              :class="{ active: tab.id === activeTabId }"
+              :class="{ active: tab.id === activeTabId, dragging: tab.id === draggedTabId }"
+              :data-tab-id="tab.id"
+              :data-drop-position="dropTarget?.id === tab.id ? dropTarget.position : undefined"
+              :draggable="renamingTabId !== tab.id"
+              @dragstart="onDragStart($event, tab)"
+              @dragend="clearDrag"
+              @dragover="onRowDragOver($event, tab, group)"
+              @dragleave="onRowDragLeave($event)"
+              @drop="onRowDrop($event, tab, group)"
+              @click="onRowClick($event, tab)"
             >
               <button
                 v-if="renamingTabId !== tab.id"
                 type="button"
                 class="chat-sidebar__item-main"
-                @click="setActiveTab(tab.id)"
+                :aria-current="tab.id === activeTabId ? 'page' : undefined"
+                :title="`${tab.name || 'Untitled'} — ${tab.cwd || 'No directory'}. Alt+↑/↓ to reorder`"
+                @click.stop="setActiveTab(tab.id)"
+                @keydown.alt.up.prevent="moveInGroup(tab, group, -1)"
+                @keydown.alt.down.prevent="moveInGroup(tab, group, 1)"
               >
                 <span
                   class="chat-sidebar__item-status"
@@ -143,9 +181,21 @@
                 class="chat-sidebar__item-menu"
                 :tab="tab"
                 variant="sidebar"
+                :move-up-disabled="group.tabs[0]?.id === tab.id"
+                :move-down-disabled="group.tabs[group.tabs.length - 1]?.id === tab.id"
                 @rename="startRename"
+                @move="direction => moveInGroup(tab, group, direction)"
               />
             </div>
+            <button
+              v-if="!group.pinned && !group.collapsed && !filterText.trim() && group.tabs.length > CHAT_GROUP_PREVIEW_SIZE"
+              type="button"
+              class="chat-sidebar__show-more"
+              :aria-expanded="group.expanded"
+              @click="toggleExpanded(group.cwd)"
+            >
+              {{ group.expanded ? 'Show less' : `Show more (${group.hiddenCount})` }}
+            </button>
           </div>
         </div>
 
@@ -209,14 +259,31 @@
         >Archived ({{ archivedTabs.length }})</span>
       </button>
     </div>
+
+    <div
+      v-if="!sidebarCollapsed"
+      class="chat-sidebar__resize-handle"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize chat sidebar"
+      :aria-valuemin="SIDEBAR_MIN_WIDTH"
+      :aria-valuemax="SIDEBAR_MAX_WIDTH"
+      :aria-valuenow="sidebarWidth"
+      tabindex="0"
+      title="Drag to resize; double-click to reset"
+      @pointerdown="startResize"
+      @dblclick="resetSidebarWidth"
+      @keydown="resizeWithKeyboard"
+    />
   </aside>
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, computed } from 'vue'
+import { nextTick, ref, computed, watch, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
-import { cwdLabel } from '@/utils/chatGroups'
+import { buildChatSidebarGroups, canDropChatInGroup, CHAT_GROUP_PREVIEW_SIZE, cwdLabel } from '@/utils/chatGroups'
+import type { ChatSidebarGroup } from '@/utils/chatGroups'
 import { relativeTime } from '@/utils/time'
 import { useTabStatus } from '@/composables/useTabStatus'
 import TabActionsMenu from '@/components/TabActionsMenu.vue'
@@ -228,7 +295,8 @@ defineEmits<{
 
 const store = useTerminalStore()
 const {
-  chatTabsByCwd,
+  chatTabs,
+  pinnedChatIds,
   activeTabId,
   sidebarCollapsed,
   archivedTabs,
@@ -241,6 +309,91 @@ const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
 
 const filterText = ref('')
 const collapsedGroups = ref<Set<string>>(new Set())
+const expandedGroups = ref<Set<string>>(new Set())
+const draggedTabId = ref<string | null>(null)
+const dropTarget = ref<{ id: string; position: 'before' | 'after' } | null>(null)
+const SIDEBAR_DEFAULT_WIDTH = 240
+const SIDEBAR_MIN_WIDTH = 200
+const SIDEBAR_MAX_WIDTH = 480
+const SIDEBAR_WIDTH_STORAGE_KEY = 'claude_hub_chat_sidebar_width'
+
+function clampSidebarWidth(width: number): number {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)))
+}
+
+function loadSidebarWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY))
+    return Number.isFinite(saved) && saved > 0
+      ? clampSidebarWidth(saved)
+      : SIDEBAR_DEFAULT_WIDTH
+  } catch {
+    return SIDEBAR_DEFAULT_WIDTH
+  }
+}
+
+const sidebarWidth = ref(loadSidebarWidth())
+const isResizing = ref(false)
+let resizeStartX = 0
+let resizeStartWidth = SIDEBAR_DEFAULT_WIDTH
+const sidebarStyle = computed(() => sidebarCollapsed.value
+  ? undefined
+  : { width: `${sidebarWidth.value}px`, minWidth: `${sidebarWidth.value}px` })
+
+function persistSidebarWidth() {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth.value))
+  } catch {
+    // Width persistence is optional in privacy-restricted browsers.
+  }
+}
+
+function resizeSidebar(event: PointerEvent) {
+  sidebarWidth.value = clampSidebarWidth(
+    resizeStartWidth + event.clientX - resizeStartX,
+  )
+}
+
+function stopResize() {
+  if (!isResizing.value) return
+  isResizing.value = false
+  document.body.classList.remove('chat-sidebar-resizing')
+  window.removeEventListener('pointermove', resizeSidebar)
+  window.removeEventListener('pointerup', stopResize)
+  window.removeEventListener('pointercancel', stopResize)
+  persistSidebarWidth()
+}
+
+function startResize(event: PointerEvent) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  resizeStartX = event.clientX
+  resizeStartWidth = sidebarWidth.value
+  isResizing.value = true
+  document.body.classList.add('chat-sidebar-resizing')
+  window.addEventListener('pointermove', resizeSidebar)
+  window.addEventListener('pointerup', stopResize)
+  window.addEventListener('pointercancel', stopResize)
+}
+
+function resetSidebarWidth() {
+  sidebarWidth.value = SIDEBAR_DEFAULT_WIDTH
+  persistSidebarWidth()
+}
+
+function resizeWithKeyboard(event: KeyboardEvent) {
+  let width = sidebarWidth.value
+  if (event.key === 'ArrowLeft') width -= 16
+  else if (event.key === 'ArrowRight') width += 16
+  else if (event.key === 'Home') width = SIDEBAR_MIN_WIDTH
+  else if (event.key === 'End') width = SIDEBAR_MAX_WIDTH
+  else return
+  event.preventDefault()
+  sidebarWidth.value = clampSidebarWidth(width)
+  persistSidebarWidth()
+}
+
+onUnmounted(stopResize)
 
 // Inline row rename (mirrors the TabBar's double-click rename).
 const renamingTabId = ref<string | null>(null)
@@ -307,24 +460,122 @@ function toggleGroup(cwd: string) {
   collapsedGroups.value = next
 }
 
-const filteredGroups = computed(() => {
-  const query = filterText.value.trim().toLowerCase()
-  if (!query) return chatTabsByCwd.value
-  return chatTabsByCwd.value
-    .map(group => ({
-      cwd: group.cwd,
-      tabs: group.tabs.filter(
-        tab =>
-          (tab.name || '').toLowerCase().includes(query) ||
-          (tab.cwd || '').toLowerCase().includes(query)
-      ),
-    }))
-    .filter(group => group.tabs.length > 0)
+const filteredGroups = computed(() => buildChatSidebarGroups(chatTabs.value, pinnedChatIds.value, {
+  query: filterText.value, activeTabId: activeTabId.value,
+  collapsed: collapsedGroups.value, expanded: expandedGroups.value,
+}))
+
+function toggleExpanded(cwd: string) {
+  const next = new Set(expandedGroups.value)
+  if (next.has(cwd)) next.delete(cwd)
+  else next.add(cwd)
+  expandedGroups.value = next
+}
+
+// Navigation from another surface should never land on an invisible row.
+watch(activeTabId, () => {
+  filterText.value = ''
+  nextTick(() => document.querySelector('.chat-sidebar__item.active')?.scrollIntoView({ block: 'nearest' }))
 })
+
+function clearDrag() {
+  draggedTabId.value = null
+  dropTarget.value = null
+}
+
+function onDragStart(event: DragEvent, tab: TerminalTab) {
+  if (renamingTabId.value === tab.id || (event.target as HTMLElement).closest('input, .tam-trigger')) {
+    event.preventDefault()
+    return
+  }
+  draggedTabId.value = tab.id
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', tab.id)
+  }
+}
+
+function draggedForGroup(group: ChatSidebarGroup) {
+  const source = chatTabs.value.find(tab => tab.id === draggedTabId.value)
+  return source && canDropChatInGroup(source, group) ? source : null
+}
+
+function onRowDragOver(event: DragEvent, tab: TerminalTab, group: ChatSidebarGroup) {
+  if (!draggedForGroup(group) || draggedTabId.value === tab.id) {
+    dropTarget.value = null
+    return
+  }
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  dropTarget.value = { id: tab.id, position: event.clientY < rect.top + rect.height / 2 ? 'before' : 'after' }
+}
+
+function onRowDragLeave(event: DragEvent) {
+  if (!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget)) {
+    dropTarget.value = null
+  }
+}
+
+function onRowDrop(event: DragEvent, tab: TerminalTab, group: ChatSidebarGroup) {
+  const source = draggedForGroup(group)
+  if (!source || source.id === tab.id) return clearDrag()
+  event.preventDefault()
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  const position = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+  store.setChatPinned(source.id, group.pinned)
+  store.reorderTabById(source.id, tab.id, position)
+  clearDrag()
+}
+
+function onRowClick(event: MouseEvent, tab: TerminalTab) {
+  const target = event.target
+  if (!(target instanceof HTMLElement)) return
+  if (target.closest('.chat-sidebar__item-menu, .chat-sidebar__rename-input')) return
+  setActiveTab(tab.id)
+}
+
+function onGroupDragOver(event: DragEvent, group: ChatSidebarGroup) {
+  if (!draggedForGroup(group)) return
+  event.preventDefault()
+  dropTarget.value = null
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+}
+
+function onGroupDrop(event: DragEvent, group: ChatSidebarGroup) {
+  const source = draggedForGroup(group)
+  if (!source) return clearDrag()
+  event.preventDefault()
+  store.setChatPinned(source.id, group.pinned)
+  const first = group.tabs.find(tab => tab.id !== source.id)
+  if (first) store.reorderTabById(source.id, first.id, 'before')
+  clearDrag()
+}
+
+function pinDraggedTab() {
+  if (draggedTabId.value) store.setChatPinned(draggedTabId.value, true)
+  clearDrag()
+}
+
+function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 1) {
+  const index = group.tabs.findIndex(item => item.id === tab.id)
+  const target = group.tabs[index + direction]
+  if (index < 0 || !target) return
+  store.reorderTabById(tab.id, target.id, direction < 0 ? 'before' : 'after')
+  // Keep the moved row reachable when it crosses the preview boundary.
+  if (!group.pinned) expandedGroups.value = new Set([...expandedGroups.value, group.cwd])
+  nextTick(() => {
+    const rows = document.querySelectorAll<HTMLElement>('.chat-sidebar__item')
+    const row = [...rows].find(item => item.dataset.tabId === tab.id)
+    row?.querySelector<HTMLButtonElement>('.chat-sidebar__item-main')?.focus()
+    row?.scrollIntoView({ block: 'nearest' })
+  })
+}
 </script>
 
 <style scoped>
 .chat-sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: 240px;
@@ -338,9 +589,47 @@ const filteredGroups = computed(() => {
   overflow: hidden;
 }
 
+.chat-sidebar.resizing {
+  transition: none;
+}
+
 .chat-sidebar.collapsed {
   width: 48px;
   min-width: 48px;
+}
+
+.chat-sidebar__resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.chat-sidebar__resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background var(--ch-motion-fast);
+}
+
+.chat-sidebar__resize-handle:hover::after,
+.chat-sidebar__resize-handle:focus-visible::after,
+.chat-sidebar.resizing .chat-sidebar__resize-handle::after {
+  background: var(--ch-color-accent);
+}
+
+:global(body.chat-sidebar-resizing) {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* Header */
@@ -447,6 +736,46 @@ const filteredGroups = computed(() => {
   margin-bottom: 2px;
 }
 
+.chat-sidebar__group--pinned {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  max-height: 40vh;
+  overflow-y: auto;
+  background: var(--ch-color-surface);
+  border-bottom: 1px solid var(--ch-color-border-muted);
+  margin-bottom: 6px;
+}
+
+.chat-sidebar__pinned-header {
+  cursor: default;
+}
+
+.chat-sidebar__show-more {
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--ch-radius-md);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  text-align: left;
+  font-size: var(--ch-font-size-xs);
+  cursor: pointer;
+}
+
+.chat-sidebar__show-more:hover {
+  background: var(--ch-color-row-hover);
+  color: var(--ch-color-text);
+}
+
+.chat-sidebar__pin-drop {
+  margin-bottom: 6px;
+  padding: 12px 8px;
+  border: 1px dashed var(--ch-color-accent);
+  border-radius: var(--ch-radius-md);
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-xs);
+}
+
 .chat-sidebar__group-header {
   display: flex;
   align-items: center;
@@ -520,6 +849,28 @@ const filteredGroups = computed(() => {
 .chat-sidebar__item.active {
   background: var(--ch-color-surface-selected);
   color: var(--ch-color-text-strong);
+}
+
+.chat-sidebar__item.dragging {
+  opacity: 0.45;
+}
+
+.chat-sidebar__item[data-drop-position]::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  background: var(--ch-color-accent);
+  pointer-events: none;
+}
+
+.chat-sidebar__item[data-drop-position='before']::before {
+  top: -1px;
+}
+
+.chat-sidebar__item[data-drop-position='after']::before {
+  bottom: -1px;
 }
 
 .chat-sidebar__item-main {

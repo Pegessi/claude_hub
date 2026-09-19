@@ -67,6 +67,7 @@ class _TurnAccumulator:
     # Tool call ids announced by either a streamed content block or an
     # assistant snapshot. Whichever representation arrives second is skipped.
     emitted_tool_call_ids: Set[str] = field(default_factory=set)
+    emitted_approval_call_ids: Set[str] = field(default_factory=set)
     # Per-message tool input assembly keyed by content block index. Claude
     # streams tool arguments as ``input_json_delta`` fragments between
     # ``content_block_start`` and ``content_block_stop``.

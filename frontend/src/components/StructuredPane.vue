@@ -9,17 +9,17 @@
     <!-- Chat sessions fail closed on this surface. A stream failure never
          mounts a hidden raw terminal; users can retry or create a Terminal. -->
     <div
-      v-if="connectionState === 'hydrating' || connectionState === 'failed'"
+      v-if="timelineLoadingMessage || connectionState === 'failed'"
       class="structured-banner"
       :role="connectionState === 'failed' ? 'alert' : 'status'"
       :aria-live="connectionState === 'failed' ? 'assertive' : 'polite'"
     >
-      <template v-if="connectionState === 'hydrating'">
+      <template v-if="timelineLoadingMessage">
         <span
           class="banner-spinner"
           aria-hidden="true"
         />
-        <span>Loading structured view…</span>
+        <span>{{ timelineLoadingMessage }}</span>
       </template>
       <template v-else-if="connectionState === 'failed'">
         <span
@@ -46,12 +46,22 @@
       role="log"
       aria-live="polite"
       aria-label="Chat conversation"
+      :aria-busy="Boolean(timelineLoadingMessage)"
       @scroll.passive="handleTimelineScroll"
     >
       <div
         ref="timelineContentEl"
         class="structured-timeline-content"
       >
+        <button
+          v-if="historyWindowStart > 0"
+          type="button"
+          class="structured-load-earlier"
+          :disabled="isLoadingEarlier"
+          @click="loadEarlierTurns"
+        >
+          {{ isLoadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages' }}
+        </button>
         <div
           v-if="turns.length === 0 && pendingDirectTurns.length === 0 && isHistoryVisible"
           class="structured-empty"
@@ -65,10 +75,11 @@
         </div>
 
         <div
-          v-for="(turn, turnIndex) in turns"
+          v-for="{ turn, ordinal } in visibleTurns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === turnIndex, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false]"
+          v-memo="[turn.renderRevision, ordinal, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false]"
           class="structured-turn"
+          :data-turn-key="turn.key"
         >
           <!-- A right-aligned user bubble and a left-aligned assistant bubble make
                this the same conversation as the terminal, not terminal text
@@ -401,7 +412,8 @@
                         question.allowMultiple,
                       )"
                     >
-                      {{ option.label }}
+                      <span>{{ option.label }}</span>
+                      <small v-if="option.description">{{ option.description }}</small>
                     </button>
                   </div>
                   <!-- The listed options are the agent's guess at the answer,
@@ -410,11 +422,11 @@
                        the completion check, travels in the same payload, and is
                        what the agent reads. -->
                   <input
-                    type="text"
+                    :type="question.isSecret ? 'password' : 'text'"
                     class="approval-custom-answer"
                     :value="customAnswer(part.approval.key, question)"
                     :disabled="isApprovalResolved(part.approval) || isSending"
-                    :placeholder="question.allowMultiple ? '其他（可多选，自己输入）' : '其他（自己输入）'"
+                    :placeholder="question.options.length === 0 ? '输入你的回答' : question.allowMultiple ? '其他（可多选，自己输入）' : '其他（自己输入）'"
                     :aria-label="`${question.prompt} — 其他答案`"
                     @input="setCustomAnswer(
                       part.approval.key,
@@ -482,13 +494,23 @@
                than floating back at the top. -->
           <div class="turn-actions turn-actions--turn">
             <button
+              v-if="completedPlanText(turn)"
+              type="button"
+              class="turn-fork-button turn-implement-button"
+              :disabled="implementingPlanKey !== null || turnInFlight"
+              title="Switch to Agent mode and ask the CLI to implement this plan"
+              @click="implementPlan(turn)"
+            >
+              {{ implementingPlanKey === turn.key ? 'Starting…' : 'Implement plan' }}
+            </button>
+            <button
               type="button"
               class="turn-fork-button"
               :disabled="forkingOrdinal !== null"
               title="Fork a new chat from this turn"
-              @click="forkFromTurn(turnIndex)"
+              @click="forkFromTurn(ordinal)"
             >
-              {{ forkingOrdinal === turnIndex ? 'Forking…' : 'Fork from here' }}
+              {{ forkingOrdinal === ordinal ? 'Forking…' : 'Fork from here' }}
             </button>
             <time
               v-if="turnClockLabel(turn)"
@@ -875,9 +897,10 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { IncrementalTimelineReducer, foldTurnParts, messageClockLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
+import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
@@ -951,19 +974,52 @@ const authoritativeTurns = computed(() => timelineReducer.reduce(events.value))
 // reveal: each committed batch updates the visible text once. On turn
 // completion MarkdownContent caches the final block and exposes the exact
 // final text synchronously.
-const turns = computed(() => authoritativeTurns.value.map(turn => ({
-  ...turn,
-  awaitingAgentActivity: !turn.completed &&
-    turn.parts.length === 0 &&
-    turn.errors.length === 0 &&
-    turn.statuses.length === 0,
+const turns = authoritativeTurns
+// null follows a bounded tail window; detaching freezes its start so incoming
+// turns cannot remove the message being read. Expanding never trims history.
+const visibleHistoryStart = ref<number | null>(null)
+const isLoadingEarlier = ref(false)
+const historyWindowStart = computed(() => timelineWindowStart(turns.value.length, visibleHistoryStart.value))
+const visibleTurns = computed(() => selectTimelineWindow(
+  turns.value,
+  historyWindowStart.value,
+  turn => isEditingTurn(turn) || turn.approvals.some(approval => !isApprovalResolved(approval)),
+).map(({ turn, ordinal }) => ({
+  ordinal,
+  turn: {
+    ...turn,
+    awaitingAgentActivity: !turn.completed &&
+      turn.parts.length === 0 &&
+      turn.errors.length === 0 &&
+      turn.statuses.length === 0,
+  },
 })))
 
 // ── Fork from turn ──────────────────────────────────────────────────────────
-// The turn index in the v-for is the 0-based ordinal: the reducer groups
-// events into turns in the same order the backend's
-// ``_group_event_turn_end_indices`` does, so the indices line up.
+// Preserve the full transcript ordinal when rendering a bounded history window.
 const forkingOrdinal = ref<number | null>(null)
+const implementingPlanKey = ref<string | null>(null)
+
+function completedPlanText(turn: TimelineTurn): string | null {
+  if (turn.key !== turns.value[turns.value.length - 1]?.key) return null
+  return getCompletedPlanText(turn)
+}
+
+async function implementPlan(turn: TimelineTurn) {
+  const plan = completedPlanText(turn)
+  if (!plan || implementingPlanKey.value || turnInFlight.value) return
+  implementingPlanKey.value = turn.key
+  modeChangeError.value = null
+  try {
+    if (currentModeId.value !== 'default') await setMode('default')
+    const sent = await submit('normal', 'Implement the approved plan now.')
+    if (!sent) throw new Error(composerError.value || 'Could not start implementation.')
+  } catch (err) {
+    modeChangeError.value = err instanceof Error ? err.message : 'Failed to start implementation.'
+  } finally {
+    implementingPlanKey.value = null
+  }
+}
 
 async function forkFromTurn(ordinal: number) {
   if (forkingOrdinal.value !== null) return
@@ -1304,6 +1360,9 @@ onMounted(() => {
 // call that used to live in onMounted.
 onActivated(() => {
   timelineDisposed = false
+  timelineVisit++
+  visibleHistoryStart.value = null
+  resetActivation()
   startStream()
   void nextTick(() => {
     if (timelineDisposed) return
@@ -1312,8 +1371,9 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
-  stop()
   timelineDisposed = true
+  timelineVisit++
+  stop()
   timelineResizeObserver?.disconnect()
   timelineResizeObserver = null
   cancelScheduledTimelineScroll()
@@ -1426,6 +1486,7 @@ function confirmTailPinned() {
 }
 
 function detachFromTail() {
+  if (visibleHistoryStart.value === null) visibleHistoryStart.value = historyWindowStart.value
   activation.detachFromTail()
   syncActivation()
 }
@@ -1443,6 +1504,14 @@ function resetActivation() {
 let timelineResizeObserver: ResizeObserver | null = null
 let timelineVerificationFrame: number | null = null
 let timelineDisposed = false
+let timelineVisit = 0
+
+const timelineLoadingMessage = computed(() => {
+  if (connectionState.value === 'failed') return ''
+  if (connectionState.value === 'reconciling') return 'Updating conversation…'
+  if (connectionState.value === 'idle' || connectionState.value === 'hydrating') return 'Loading conversation…'
+  return timelinePhase.value !== 'revealed' ? 'Opening latest messages…' : ''
+})
 
 const canSend = computed(() => connectionState.value === 'live' &&
   !isPreparingAttachments.value &&
@@ -1902,8 +1971,8 @@ async function submitQuestionResponse(approval: TimelineApproval) {
     composerError.value = '请选择所有问题的选项后再提交。'
     return
   }
-  await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))
-  markResolved(approval.key)
+  const sent = await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))
+  if (sent) markResolved(approval.key)
 }
 
 async function cancelActiveTurn() {
@@ -2059,14 +2128,14 @@ async function submitEdit(turn: TimelineTurn) {
 async function submit(
   delivery: 'normal' | 'steer' = 'normal',
   messageOverride?: string,
-) {
-  if (isSending.value) return
+): Promise<boolean> {
+  if (isSending.value) return false
   const message = messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || attachments.value.length > 0
-  if (!hasContent) return
+  if (!hasContent) return false
   if (delivery === 'normal' && turnInFlight.value && !messageOverride) {
     enqueueDraft()
-    return
+    return false
   }
   isSending.value = true
   composerError.value = null
@@ -2125,6 +2194,7 @@ async function submit(
     void terminalStore.fetchAgentStatuses()
     // Success: composer already cleared; nothing more to do.
     void nextTick(() => syncComposerTextareaHeight())
+    return true
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
     if (!messageOverride) {
@@ -2132,6 +2202,7 @@ async function submit(
       attachments.value = draftAtts
     }
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
+    return false
   } finally {
     isSending.value = false
   }
@@ -2163,15 +2234,16 @@ function requestLatestAnchor(force = false) {
   // While hidden or pinning, the activation gate owns the scroll position.
   if (timelinePhase.value !== 'revealed') return
   cancelScheduledTimelineScroll()
+  const visit = timelineVisit
   void nextTick(() => {
-    if (timelineDisposed) return
+    if (timelineDisposed || visit !== timelineVisit) return
     const el = timelineEl.value
     if (!el || !isFollowingLatest.value || timelineDisposed) return
     el.scrollTop = el.scrollHeight
     timelineVerificationFrame = requestAnimationFrame(() => {
       timelineVerificationFrame = null
       const current = timelineEl.value
-      if (!current || !isFollowingLatest.value || timelineDisposed) return
+      if (!current || !isFollowingLatest.value || timelineDisposed || visit !== timelineVisit) return
       if (!isTimelineNearBottom(current)) current.scrollTop = current.scrollHeight
     })
   })
@@ -2181,7 +2253,7 @@ function handleTimelineScroll() {
   const el = timelineEl.value
   if (!el) return
   // Scroll events during hydration are not user-driven and must not detach.
-  if (timelinePhase.value !== 'revealed') return
+  if (timelineDisposed || timelinePhase.value !== 'revealed' || isLoadingEarlier.value) return
   if (isTimelineNearBottom(el)) {
     if (!isFollowingLatest.value) rearmFollow()
   } else {
@@ -2190,8 +2262,37 @@ function handleTimelineScroll() {
 }
 
 function jumpToLatest() {
+  visibleHistoryStart.value = null
   rearmFollow()
   requestLatestAnchor(true)
+}
+
+async function loadEarlierTurns() {
+  const viewport = timelineEl.value
+  if (!viewport || isLoadingEarlier.value || historyWindowStart.value === 0) return
+  detachFromTail()
+  cancelScheduledTimelineScroll()
+  const visit = timelineVisit
+  const top = viewport.getBoundingClientRect().top
+  // Keep a real visible row as anchor: older pending approvals may already be
+  // rendered above the window, so scrollHeight differences alone are unsafe.
+  const anchor = Array.from(viewport.querySelectorAll<HTMLElement>('.structured-turn'))
+    .find(row => row.getBoundingClientRect().bottom > top)
+  const offset = anchor?.getBoundingClientRect().top
+  isLoadingEarlier.value = true
+  try {
+    // Let the disabled loading affordance paint before mounting the next page.
+    await new Promise<void>(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)))
+    if (timelineDisposed || visit !== timelineVisit) return
+    visibleHistoryStart.value = Math.max(0, historyWindowStart.value - TIMELINE_PAGE_SIZE)
+    await nextTick()
+    if (timelineDisposed || visit !== timelineVisit) return
+    if (anchor?.isConnected && offset !== undefined) {
+      viewport.scrollTop += anchor.getBoundingClientRect().top - offset
+    }
+  } finally {
+    isLoadingEarlier.value = false
+  }
 }
 
 function observeTimelineGeometry() {
@@ -2224,17 +2325,19 @@ watch(
 // ``reconciling`` immediately, without waiting for network hydration.
 watch(connectionState, (state) => {
   if (state === 'live' || state === 'reconciling') {
-    // On KeepAlive reactivation the timeline was already revealed and its
-    // scroll + follow state live on the cached instance — don't re-run the
-    // initial-reveal gate, which would force-pin to the tail and rearm
-    // follow, clobbering the user's reading position.
+    // Reconciliation finishing within this visit must not interrupt reading.
+    // Each activation resets the gate before starting reconciliation.
     if (timelinePhase.value === 'revealed') return
     markHistoryReady()
+    const visit = timelineVisit
     void nextTick(() => {
-      if (timelineDisposed) return
+      if (timelineDisposed || visit !== timelineVisit) return
       const el = timelineEl.value
       if (el) el.scrollTop = el.scrollHeight
       confirmTailPinned()
+      // Removing the loading banner changes viewport height. Re-pin after
+      // the reveal DOM commit as well, then verify delayed Markdown layout.
+      requestLatestAnchor()
     })
   } else if (state === 'hydrating') {
     resetActivation()
@@ -2330,13 +2433,26 @@ onUnmounted(() => {
   min-height: 0;
 }
 
-/* Activation gate: while authoritative history is being hydrated, the timeline
-   content is hidden and its scroll container is clipped. The first painted
-   frame after reveal is already pinned to the tail, so the user never sees
-   history paint at the top and then jump down. */
+/* Keep the real scroll geometry while hidden: changing overflow for the gate
+   can clamp scrollTop and detach follow mode on reveal. */
 .structured-timeline.is-timeline-hidden {
   visibility: hidden;
-  overflow: hidden;
+  pointer-events: none;
+}
+
+.structured-load-earlier {
+  align-self: center;
+  padding: 7px 14px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  color: var(--ch-color-text-muted);
+  background: var(--ch-color-surface);
+  cursor: pointer;
+}
+
+.structured-load-earlier:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .structured-jump-latest {
@@ -3067,6 +3183,10 @@ onUnmounted(() => {
 }
 
 .approval-option {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
   padding: 6px 10px;
   font-size: 12px;
   color: var(--ch-color-text);
@@ -3074,6 +3194,11 @@ onUnmounted(() => {
   border: 1px solid var(--ch-color-border);
   border-radius: 999px;
   cursor: pointer;
+}
+
+.approval-option small {
+  color: var(--ch-color-text-muted);
+  text-align: left;
 }
 
 .approval-option--selected {

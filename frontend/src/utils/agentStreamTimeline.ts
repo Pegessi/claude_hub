@@ -14,12 +14,14 @@ export interface TimelineTool {
 export interface TimelineQuestionOption {
   id: string
   label: string
+  description?: string
 }
 
 export interface TimelineQuestion {
   id: string
   prompt: string
   allowMultiple: boolean
+  isSecret?: boolean
   options: TimelineQuestionOption[]
 }
 
@@ -55,20 +57,19 @@ export interface TimelineAttachment {
 
 export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
-  // ``fromPlan`` marks Codex's plan stream: it renders exactly like any other
-  // prose, but it is work rather than the agent's answer, so the fold must not
-  // treat it as a delivery. See the fold helpers below.
+  // Plan proposals are the delivery in Plan mode; progress checklists remain
+  // part of the working process. Provider snapshots replace by message id.
   //
   // ``at`` is when this message began streaming — the timestamp the transcript
   // shows beside the message's actions. Only text parts carry one: they are
   // what the transcript presents per-message, while thinking and tool parts are
   // folded into a process line that reports the turn's elapsed time instead.
-  | { kind: 'text'; key: string; text: string; at: string; fromPlan?: boolean }
+  | { kind: 'text'; key: string; text: string; at: string; fromPlan?: boolean; messageId?: string; planKind?: 'proposal' | 'progress' }
   | { kind: 'tool'; key: string; tool: TimelineTool }
   | { kind: 'tool_group'; key: string; tools: TimelineTool[] }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
   | { kind: 'error'; key: string; message: string }
-  | { kind: 'status'; key: string; text: string }
+  | { kind: 'status'; key: string; text: string; messageId?: string | null }
   // Synthetic part produced by ``foldTurnParts`` — never emitted by the
   // reducer. It is the folded working region's header: the toggle that both
   // reveals and hides the detail beneath it.
@@ -78,6 +79,8 @@ export interface TimelineTurn {
   key: string
   turnId: string | null
   userText: string
+  /** Mode when this turn began, not the composer's current selection. */
+  mode: 'default' | 'plan' | null
   /** Durable attachment descriptors surfaced by ``turn_started``.
    *  Each entry carries the opaque attachment id, mime type, byte size,
    *  and optional pixel dimensions — never raw bytes or local paths. The
@@ -131,6 +134,7 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     key,
     turnId,
     userText: '',
+    mode: null,
     attachments: [],
     parts: [],
     assistantText: '',
@@ -268,6 +272,11 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         mutated = true
       }
       const summary = payloadString(event, 'summary')
+      const mode = event.payload.mode
+      if ((mode === 'plan' || mode === 'default') && turn.mode !== mode) {
+        turn.mode = mode
+        mutated = true
+      }
       if (turn.userText !== summary) {
         turn.userText = summary
         mutated = true
@@ -312,6 +321,28 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     case 'text_delta':
     {
       const text = payloadString(event, 'text')
+      if (event.payload.plan === true && event.message_id) {
+        const existing = turn.parts.find(part =>
+          part.kind === 'text' && part.fromPlan && part.messageId === event.message_id,
+        )
+        if (existing?.kind === 'text') {
+          const nextText = event.payload.snapshot === true ? text : existing.text + text
+          if (nextText === existing.text) break
+          existing.text = nextText
+        } else {
+          if (!text) break
+          turn.parts.push({
+            kind: 'text', key: `plan-${event.stream_sequence}`, text, at: event.created_at,
+            fromPlan: true, messageId: event.message_id,
+            planKind: event.payload.plan_kind === 'progress' ? 'progress' : 'proposal',
+          })
+        }
+        turn.assistantText = turn.parts
+          .filter((part): part is Extract<TimelinePart, { kind: 'text' }> => part.kind === 'text')
+          .map(part => part.text).join('')
+        mutated = true
+        break
+      }
       if (!text) break
       const chunks = state.textChunksByTurn.get(toolMapKey) ?? []
       if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
@@ -458,9 +489,22 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     case 'status': {
       const text = payloadString(event, 'text') || payloadString(event, 'message') ||
         payloadString(event, 'status') || 'status update'
+      if (event.payload.snapshot === true && event.message_id) {
+        const existing = turn.parts.find(part =>
+          part.kind === 'status' && part.messageId === event.message_id,
+        )
+        if (existing?.kind === 'status') {
+          if (existing.text === text) break
+          existing.text = text
+          const stored = turn.statuses.find(status => status.key === existing.key)
+          if (stored) stored.text = text
+          mutated = true
+          break
+        }
+      }
       const statusKey = `status-${event.message_id ?? 'event'}-${event.stream_sequence}`
       turn.statuses.push({ key: statusKey, text })
-      turn.parts.push({ kind: 'status', key: statusKey, text })
+      turn.parts.push({ kind: 'status', key: statusKey, text, messageId: event.message_id })
       mutated = true
       break
     }
@@ -507,10 +551,12 @@ export interface TurnProcessSplit {
  *  Everything the model says before it is working narration ("我先看一下…"),
  *  so the LAST text part is the delivery, not the first. Codex's plan stream is
  *  skipped: it is prose too, but it describes work rather than answering. */
-function deliveryIndex(parts: TimelinePart[]): number {
+function deliveryIndex(parts: TimelinePart[], mode: TimelineTurn['mode'] = null): number {
   for (let i = parts.length - 1; i >= 0; i -= 1) {
     const part = parts[i]
-    if (part.kind === 'text' && !part.fromPlan) return i
+    if (part.kind === 'text' && part.text.trim() && (
+      !part.fromPlan || (mode === 'plan' && part.planKind !== 'progress')
+    )) return i
   }
   return -1
 }
@@ -542,7 +588,7 @@ function isProcessPart(part: TimelinePart): boolean {
  */
 export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   if (!turn.completed) return null
-  const index = deliveryIndex(turn.parts)
+  const index = deliveryIndex(turn.parts, turn.mode)
   if (index <= 0) return null
   if (turn.parts.slice(index + 1).some(isProcessPart)) return null
   const before = turn.parts.slice(0, index)
@@ -582,10 +628,26 @@ function isPinnedPart(part: TimelinePart): boolean {
  *  most common shape there is. This asks a different question, "what was the
  *  last thing it said", and every turn with a message has an answer. */
 export function deliveryAt(turn: TimelineTurn): string | null {
-  const index = deliveryIndex(turn.parts)
+  const index = deliveryIndex(turn.parts, turn.mode)
   if (index < 0) return null
   const part = turn.parts[index]
   return part.kind === 'text' ? part.at : null
+}
+
+/** Return an actionable plan only for a successful, explicitly planned turn.
+ * Older history without mode metadata must not acquire an Implement action
+ * merely because the composer was switched to Plan later. */
+export function getCompletedPlanText(turn: TimelineTurn): string | null {
+  if (turn.mode !== 'plan' || !turn.completed || turn.completionStatus !== 'completed') return null
+  for (let index = turn.parts.length - 1; index >= 0; index -= 1) {
+    const part = turn.parts[index]
+    if (part.kind === 'text' && part.fromPlan && part.planKind !== 'progress' && part.text.trim()) {
+      return part.text
+    }
+  }
+  const index = deliveryIndex(turn.parts, turn.mode)
+  const part = turn.parts[index]
+  return part?.kind === 'text' ? part.text : null
 }
 
 /** Clock label for the message that opened the turn — when it was sent.

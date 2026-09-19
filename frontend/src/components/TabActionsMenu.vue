@@ -41,6 +41,48 @@
       :style="panelStyle"
     >
       <button
+        v-if="tab.session_kind === 'chat' && !tab.workspace_id"
+        type="button"
+        class="tam-item"
+        role="menuitem"
+        title="Saved in this browser"
+        @click="handleTogglePin"
+      >
+        <span
+          class="tam-item-icon"
+          aria-hidden="true"
+        >⌖</span>
+        <span>{{ store.pinnedChatIds.has(tab.id) ? 'Unpin session' : 'Pin session' }}</span>
+      </button>
+      <template v-if="variant === 'sidebar'">
+        <button
+          type="button"
+          class="tam-item"
+          role="menuitem"
+          :disabled="moveUpDisabled"
+          @click="handleMove(-1)"
+        >
+          <span
+            class="tam-item-icon"
+            aria-hidden="true"
+          >↑</span>
+          <span>Move up</span>
+        </button>
+        <button
+          type="button"
+          class="tam-item"
+          role="menuitem"
+          :disabled="moveDownDisabled"
+          @click="handleMove(1)"
+        >
+          <span
+            class="tam-item-icon"
+            aria-hidden="true"
+          >↓</span>
+          <span>Move down</span>
+        </button>
+      </template>
+      <button
         type="button"
         class="tam-item"
         role="menuitem"
@@ -263,14 +305,19 @@ import type { SwitchEnvRequest, TerminalTab } from '@/types'
 interface Props {
   tab: TerminalTab
   variant?: 'tabbar' | 'sidebar'
+  moveUpDisabled?: boolean
+  moveDownDisabled?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   variant: 'tabbar',
+  moveUpDisabled: true,
+  moveDownDisabled: true,
 })
 
 const emit = defineEmits<{
   (e: 'rename', tab: TerminalTab): void
+  (e: 'move', direction: -1 | 1): void
 }>()
 
 const store = useTerminalStore()
@@ -294,7 +341,7 @@ const panelStyle = computed<CSSProperties>(() => {
   const rect = trigger.getBoundingClientRect()
   // Align the panel's right edge with the trigger; place it just below with a gap.
   const panelWidth = 200
-  const panelHeightEst = 200
+  const panelHeightEst = props.variant === 'sidebar' ? 310 : 240
   let top = rect.bottom + 6
   let left = rect.right - panelWidth
   const vw = window.innerWidth
@@ -307,6 +354,8 @@ const panelStyle = computed<CSSProperties>(() => {
     top: `${top}px`,
     left: `${left}px`,
     width: `${panelWidth}px`,
+    maxHeight: `${Math.max(80, vh - 16)}px`,
+    overflowY: 'auto',
   }
 })
 
@@ -383,6 +432,16 @@ onUnmounted(() => {
 })
 
 // ---- Menu actions ----
+function handleTogglePin() {
+  close()
+  store.setChatPinned(props.tab.id, !store.pinnedChatIds.has(props.tab.id))
+}
+
+function handleMove(direction: -1 | 1) {
+  close()
+  emit('move', direction)
+}
+
 function handleRename() {
   close()
   emit('rename', props.tab)
