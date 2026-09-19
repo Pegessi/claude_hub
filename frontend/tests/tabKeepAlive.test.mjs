@@ -17,7 +17,7 @@ const historyCache = readFileSync(
 
 // ---------------------------------------------------------------------------
 // Chat-tab keep-alive. Switching chat tabs must not destroy the StructuredPane
-// (losing scroll, draft, attachments, expand state). The pane is keyed by
+// (losing draft, attachments, expand state). The pane is keyed by
 // tabId inside a bounded <KeepAlive>, so each chat tab owns a cached instance.
 // ---------------------------------------------------------------------------
 
@@ -45,15 +45,48 @@ test('StructuredPane resumes/stops the stream on KeepAlive activate/deactivate',
   )
 })
 
-test('activation gate skips the force-pin on KeepAlive reactivation', () => {
-  // The connectionState watcher must short-circuit when the timeline was
-  // already revealed — otherwise re-entering "reconciling" would force-pin to
-  // the tail and clobber the preserved scroll position.
-  assert.match(
-    structuredPane,
-    /if \(timelinePhase\.value === 'revealed'\) return/,
-    'the activation gate must return early when the timeline was already revealed (reactivation)',
+test('switching back rearms latest before cached history reconciles', () => {
+  const body = structuredPane.match(/onActivated\(\(\) => \{([\s\S]*?)\n\}\)/)?.[1]
+  assert.ok(body)
+  const calls = []
+  const visibleHistoryStart = { value: 120 }
+  const activate = new Function(
+    'resetActivation', 'startStream', 'hydrateGoal', 'nextTick', 'observeTimelineGeometry',
+    'visibleHistoryStart', 'timelineDisposed', 'timelineVisit', body,
   )
+  activate(
+    () => calls.push('reset'),
+    () => calls.push('start'),
+    () => calls.push('hydrate-goal'),
+    () => {},
+    () => {},
+    visibleHistoryStart, true, 0,
+  )
+  assert.deepEqual(calls, ['reset', 'start', 'hydrate-goal'])
+  assert.equal(visibleHistoryStart.value, null, 'a new visit starts with the latest history window')
+})
+
+test('only scrolling an active revealed timeline can detach from latest', () => {
+  const body = structuredPane.match(/function handleTimelineScroll\(\) \{([\s\S]*?)\n\}/)?.[1]
+  assert.ok(body)
+  const scroll = new Function(
+    'timelineEl', 'timelineDisposed', 'timelinePhase', 'isLoadingEarlier',
+    'isTimelineNearBottom', 'isFollowingLatest', 'rearmFollow', 'detachFromTail', body,
+  )
+  for (const [disposed, phase, loading, shouldDetach] of [
+    [true, 'revealed', false, false],
+    [false, 'hidden', false, false],
+    [false, 'pinning', false, false],
+    [false, 'revealed', true, false],
+    [false, 'revealed', false, true],
+  ]) {
+    let detached = false
+    scroll(
+      { value: {} }, disposed, { value: phase }, { value: loading },
+      () => false, { value: true }, () => {}, () => { detached = true },
+    )
+    assert.equal(detached, shouldDetach, `disposed=${disposed}, phase=${phase}, loading=${loading}`)
+  }
 })
 
 test('default history LRU capacity is expanded well beyond the old value of 3', () => {

@@ -206,6 +206,25 @@ test('status events are captured per turn', () => {
   assert.equal(turns[0].statuses[0].text, 'working…')
 })
 
+test('provider status snapshots update in place instead of flooding the timeline', () => {
+  const turns = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }, { turn_id: 'turn-queue' }),
+    makeEvent(2, 'status', { text: 'Queued (position 3)', snapshot: true }, {
+      turn_id: 'turn-queue',
+      message_id: 'traex-status:queue/status',
+    }),
+    makeEvent(3, 'status', { text: 'Queued (position 2)', snapshot: true }, {
+      turn_id: 'turn-queue',
+      message_id: 'traex-status:queue/status',
+    }),
+  ])
+  assert.deepEqual(turns[0].statuses.map(status => status.text), ['Queued (position 2)'])
+  assert.deepEqual(
+    turns[0].parts.filter(part => part.kind === 'status').map(part => part.text),
+    ['Queued (position 2)'],
+  )
+})
+
 test('orphan tool_call_completed (no matching start) renders as standalone tool', () => {
   const events = [
     makeEvent(1, 'turn_started', { summary: 'go' }),
