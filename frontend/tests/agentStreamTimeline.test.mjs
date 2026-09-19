@@ -94,6 +94,19 @@ test('historical multi-chunk final snapshot replays are hidden', () => {
   assert.equal(turns[0].assistantText, '智涌今朝\n千机灯火')
 })
 
+test('compacted historical chunks still identify a following full snapshot replay', () => {
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'poem' }, { turn_id: 'poem-turn' }),
+    makeEvent(2, 'text_delta', {
+      text: '智涌今朝\n千机灯火',
+      _history_chunk_count: 3,
+    }, { turn_id: 'poem-turn' }),
+    makeEvent(5, 'text_delta', { text: '智涌今朝\n千机灯火' }, { turn_id: 'poem-turn' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  assert.equal(turns[0].assistantText, '智涌今朝\n千机灯火')
+})
+
 test('historical replay repair supports multiple assistant messages in one turn', () => {
   const events = [
     makeEvent(1, 'turn_started', { summary: 'two messages' }, { turn_id: 'multi' }),

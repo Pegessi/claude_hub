@@ -15,6 +15,18 @@
 - Migrate older budget-limited Goals to explicitly resumable paused state,
   preserve create retries, and bound recent turn IDs without limiting execution.
 
+### fix: make Chat reordering reliable and compact long-history hydration
+
+- Replace browser-native drag-and-drop in the Chat sidebar with pointer-driven
+  row reordering. The pinned drop hint no longer shifts rows after a drag
+  starts, and the final visible insertion marker is used when the pointer is
+  released. Full-row navigation and Alt+Up/Down remain available alongside
+  pointer dragging.
+- Compact adjacent historical text and thinking deltas only for Chat hydration,
+  while retaining raw durable cursors and unmodified live delivery. This cuts
+  response object counts substantially for delta-heavy long conversations and
+  preserves full-snapshot replay deduplication through chunk-count metadata.
+
 ### feat: improve Chat navigation, long-history loading, and provider prompts
 
 - Chat sessions keep the server-defined order, can be dragged or moved with

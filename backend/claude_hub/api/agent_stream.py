@@ -527,6 +527,7 @@ async def _stream_events_for(
     since_sequence: int,
     limit: int,
     allow_pending_source: bool = False,
+    compact: bool = False,
 ) -> AgentStreamEventPage:
     caps = await _capabilities_for(session, manager)
     if not caps.structured and not allow_pending_source:
@@ -540,6 +541,8 @@ async def _stream_events_for(
     if manager.hard_failed(session.id):
         _raise_structured_unavailable(session.id, manager)
     store = manager.get_store(session.workspace_id, session.id)
+    if compact:
+        return await store.read_since(since_sequence, limit, compact=True)
     return await store.read_since(since_sequence, limit)
 
 
@@ -554,10 +557,13 @@ async def get_stream_events(
     managed_session_id: str,
     since_sequence: int = Query(-1, ge=-1),
     limit: int = Query(200, ge=1, le=_MAX_HISTORY_PAGE_SIZE),
+    compact: bool = Query(False),
     current_user: User = Depends(get_current_user),
 ) -> AgentStreamEventPage:
     session = _session_or_404(managed_session_id)
-    return await _stream_events_for(session, _get_tailer_manager(), since_sequence, limit)
+    return await _stream_events_for(
+        session, _get_tailer_manager(), since_sequence, limit, compact=compact
+    )
 
 
 @router.get(
@@ -568,6 +574,7 @@ async def get_tab_stream_events(
     tab_id: str,
     since_sequence: int = Query(-1, ge=-1),
     limit: int = Query(200, ge=1, le=_MAX_HISTORY_PAGE_SIZE),
+    compact: bool = Query(False),
     current_user: User = Depends(get_current_user),
 ) -> AgentStreamEventPage:
     session = _terminal_tab_session_or_404(tab_id)
@@ -577,6 +584,7 @@ async def get_tab_stream_events(
         since_sequence,
         limit,
         allow_pending_source=True,
+        compact=compact,
     )
 
 

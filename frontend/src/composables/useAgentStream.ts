@@ -178,6 +178,16 @@ export function useAgentStream(): UseAgentStreamApi {
     if (committed.length) enqueueEvents(committed)
   }
 
+  function applyCompactedHistoryPage(page: AgentStreamEventPage, generationId: number) {
+    if (!stateMachine.isCurrent(generationId)) return
+    // Compacted history intentionally has sequence gaps: adjacent durable
+    // deltas are represented by one event.  Commit those presentation events
+    // directly, then advance the correctness cursor to the raw page cursor so
+    // long-poll/SSE resume after every durable row covered by the response.
+    if (page.events.length) enqueueEvents(page.events)
+    sequenceBuffer.reset(page.next_sequence)
+  }
+
   function streamBasePath(sourceId: string, source: StreamSource): string {
     return source === 'terminal-tab'
       ? `${API_BASE}/workspaces/tabs/${sourceId}/stream`
@@ -225,7 +235,7 @@ export function useAgentStream(): UseAgentStreamApi {
     signal: AbortSignal,
   ): Promise<AgentStreamEventPage> {
     const res = await fetchWithTimeout(
-      `${streamPath}/events?since_sequence=${since}&limit=${HYDRATION_PAGE_LIMIT}`,
+      `${streamPath}/events?since_sequence=${since}&limit=${HYDRATION_PAGE_LIMIT}&compact=true`,
       { signal },
       HYDRATION_FETCH_TIMEOUT_MS,
     )
@@ -357,7 +367,7 @@ export function useAgentStream(): UseAgentStreamApi {
         if (stopped || !stateMachine.isCurrent(generationId)) return
         const page = await fetchEvents(streamPath, since, signal)
         if (stopped || !stateMachine.isCurrent(generationId)) return
-        applyPage(page, generationId)
+        applyCompactedHistoryPage(page, generationId)
         since = page.next_sequence
         if (!page.has_more) break
       }
