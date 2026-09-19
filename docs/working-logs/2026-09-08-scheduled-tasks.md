@@ -33,6 +33,10 @@ the native Agent Stream transport used by the Chat composer. On restart, a run
 without durable `turn_started` evidence is queued again; a completed transcript
 edge is reconciled as completed/failed; a started but unfinished turn becomes
 `uncertain` and is not automatically duplicated.
+Every occurrence has its own FIFO run. A target Chat keeps at most 100 active
+runs; later occurrences are persisted as terminal `skipped` records with an
+explicit backlog-limit reason so prolonged busy or archived periods cannot grow
+memory and the state file without bound.
 
 ## Module design
 

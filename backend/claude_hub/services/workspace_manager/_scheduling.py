@@ -50,6 +50,7 @@ class _SchedulingMixin:
     # where the ``enabled`` / ``next_run_at`` re-checks don't apply.
     _FIRE_COOLDOWN = timedelta(seconds=1)
     _SCHEDULED_RUN_HISTORY_LIMIT = 100
+    _SCHEDULED_CHAT_ACTIVE_RUN_LIMIT = 100
 
     # Per-field (min, max) for the 5 cron fields: minute, hour, day-of-month,
     # month, day-of-week (0 = Sunday).
@@ -276,8 +277,20 @@ class _SchedulingMixin:
         task = self.scheduled_tasks.get(task_id)
         if task is None:
             raise KeyError(task_id)
-        await self._fire_scheduled_task(task, _wm._now(), manual=True)
-        if task.last_status == "error":
+        chat_run = await self._fire_scheduled_task(task, _wm._now(), manual=True)
+        if task.kind == ScheduledTaskKind.CHAT_TURN and chat_run is not None:
+            if chat_run.status in {
+                ScheduledTaskRunStatus.FAILED,
+                ScheduledTaskRunStatus.SKIPPED,
+                ScheduledTaskRunStatus.UNCERTAIN,
+                ScheduledTaskRunStatus.CANCELLED,
+            }:
+                raise RuntimeError(
+                    chat_run.error
+                    or chat_run.waiting_reason
+                    or f"scheduled Chat run ended as {chat_run.status.value}"
+                )
+        elif task.last_status == "error":
             raise RuntimeError(task.last_error or "scheduled task failed to fire")
         return task
 
@@ -552,7 +565,7 @@ class _SchedulingMixin:
 
     async def _fire_scheduled_task(
         self, task: ScheduledTask, now: datetime, *, manual: bool = False
-    ) -> None:
+    ) -> Optional[ScheduledTaskRun]:
         lock = self._sched_fire_locks.setdefault(task.id, asyncio.Lock())
         async with lock:
             # Re-check eligibility under the lock: a concurrent fire (the 5s
@@ -568,14 +581,18 @@ class _SchedulingMixin:
             if task.last_run_at is not None and (now - task.last_run_at) < self._FIRE_COOLDOWN:
                 # A concurrent fire advanced this task within the cooldown
                 # window while we waited for the lock. Join it: don't re-fire.
-                return
+                return (
+                    self.scheduled_task_runs.get(task.last_run_id)
+                    if task.kind == ScheduledTaskKind.CHAT_TURN and task.last_run_id
+                    else None
+                )
             if not task.enabled:
                 if manual:
                     raise ValueError(f"Scheduled task '{task.id}' is disabled")
-                return
+                return None
             if not manual and (task.next_run_at is None or task.next_run_at > now):
                 # Already advanced by a concurrent manual fire.
-                return
+                return None
 
             scheduled_for = now if manual else (task.next_run_at or now)
             # Stamp BEFORE the side effect (crash-idempotent, same pattern as
@@ -615,6 +632,7 @@ class _SchedulingMixin:
 
             task.updated_at = _wm._now()
             self._save_scheduled_tasks()
+            return chat_run
 
     @staticmethod
     def _chat_run_active(run: ScheduledTaskRun) -> bool:
@@ -628,27 +646,21 @@ class _SchedulingMixin:
     def _queue_scheduled_chat_run(
         self, task: ScheduledTask, scheduled_for: datetime, now: datetime
     ) -> ScheduledTaskRun:
-        """Create one durable Chat run, coalescing an already-pending repeat."""
+        """Create one durable Chat run for one schedule occurrence."""
         assert task.tab_id is not None
         assert task.message is not None
-        queued = next(
-            (
-                run
-                for run in self.scheduled_task_runs.values()
-                if run.scheduled_task_id == task.id
-                and run.status in {ScheduledTaskRunStatus.QUEUED, ScheduledTaskRunStatus.WAITING}
-            ),
-            None,
-        )
-        if queued is not None:
-            task.last_run_id = queued.id
-            task.last_status = queued.status.value
-            task.last_error = queued.waiting_reason
-            return queued
         run_uuid = uuid.uuid5(
             uuid.NAMESPACE_URL,
             f"claude-hub:scheduled-chat:{task.id}:{scheduled_for.isoformat()}",
         )
+        existing = self.scheduled_task_runs.get(str(run_uuid))
+        if existing is not None:
+            # A deterministic id makes replaying the exact same occurrence
+            # idempotent without collapsing distinct future occurrences.
+            task.last_run_id = existing.id
+            task.last_status = existing.status.value
+            task.last_error = existing.error or existing.waiting_reason
+            return existing
         run = ScheduledTaskRun(
             id=str(run_uuid),
             scheduled_task_id=task.id,
@@ -658,10 +670,22 @@ class _SchedulingMixin:
             scheduled_for=scheduled_for,
             queued_at=now,
         )
+        active_for_tab = sum(
+            1
+            for candidate in self.scheduled_task_runs.values()
+            if candidate.tab_id == task.tab_id and self._chat_run_active(candidate)
+        )
+        if active_for_tab >= self._SCHEDULED_CHAT_ACTIVE_RUN_LIMIT:
+            run.status = ScheduledTaskRunStatus.SKIPPED
+            run.completed_at = now
+            run.error = (
+                "target Chat backlog limit reached "
+                f"({self._SCHEDULED_CHAT_ACTIVE_RUN_LIMIT} active runs)"
+            )
         self.scheduled_task_runs[run.id] = run
         task.last_run_id = run.id
         task.last_status = run.status.value
-        task.last_error = None
+        task.last_error = run.error
         return run
 
     async def _scheduled_turn_lifecycle(self, run: ScheduledTaskRun) -> tuple[bool, Optional[str]]:
@@ -717,6 +741,18 @@ class _SchedulingMixin:
         task = self.scheduled_tasks.get(run.scheduled_task_id)
         if task is None:
             return
+        current = (
+            self.scheduled_task_runs.get(task.last_run_id) if task.last_run_id is not None else None
+        )
+        if current is not None and current.id != run.id:
+            current_key = (current.scheduled_for, current.queued_at, current.id)
+            run_key = (run.scheduled_for, run.queued_at, run.id)
+            if current_key > run_key:
+                # An older FIFO entry can keep transitioning after a newer
+                # occurrence is queued. Keep task-level "last" fields tied
+                # to the newest occurrence; its own run record still captures
+                # every transition.
+                return
         task.last_run_id = run.id
         task.last_status = run.status.value
         task.last_error = run.error or run.waiting_reason
