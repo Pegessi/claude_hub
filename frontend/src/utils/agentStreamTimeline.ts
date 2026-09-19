@@ -188,7 +188,7 @@ function appendTextPart(
 
 function isExactMultiChunkReplay(
   accumulatedText: string,
-  priorChunks: string[],
+  priorChunks: { text: string; count: number }[],
   candidate: string,
 ): boolean {
   if (!candidate || !accumulatedText.endsWith(candidate)) return false
@@ -196,8 +196,8 @@ function isExactMultiChunkReplay(
   let remaining = candidate.length
   let matchedChunks = 0
   for (let index = priorChunks.length - 1; index >= 0; index -= 1) {
-    remaining -= priorChunks[index].length
-    matchedChunks += 1
+    remaining -= priorChunks[index].text.length
+    matchedChunks += priorChunks[index].count
     if (remaining === 0) return matchedChunks >= 2
     if (remaining < 0) return false
   }
@@ -213,7 +213,7 @@ interface ReducerState {
   turns: TimelineTurn[]
   byTurnId: Map<string, TimelineTurn>
   toolsByTurn: Map<string, Map<string, TimelineTool>>
-  textChunksByTurn: Map<string, string[]>
+  textChunksByTurn: Map<string, { text: string; count: number }[]>
   legacyCurrent: TimelineTurn | null
 }
 
@@ -354,7 +354,13 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         event.created_at,
         event.payload.plan === true,
       )
-      chunks.push(text)
+      const historyChunkCount = event.payload._history_chunk_count
+      chunks.push({
+        text,
+        count: typeof historyChunkCount === 'number' && historyChunkCount > 1
+          ? Math.floor(historyChunkCount)
+          : 1,
+      })
       state.textChunksByTurn.set(toolMapKey, chunks)
       mutated = true
       break
