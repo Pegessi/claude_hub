@@ -44,6 +44,8 @@ def test_goal_api_lifecycle_and_idempotency(goal_client: TestClient, monkeypatch
     assert create.status_code == 201, create.text
     goal = create.json()
     assert goal["status"] == "active"
+    assert "token_budget" not in goal
+    assert "max_turns" not in goal
     assert goal["current_turn_id"] == "initial-turn"
 
     # A network retry must replay the successful create even though that
@@ -71,7 +73,9 @@ def test_goal_api_lifecycle_and_idempotency(goal_client: TestClient, monkeypatch
         f"/api/goals/{goal['id']}/budget",
         json={"client_request_id": "budget-1", "token_budget": 500},
     )
-    assert changed.json()["token_budget"] == 500
+    assert changed.status_code == 410
+    assert "removed" in changed.json()["detail"]
+    assert goal_client.get(f"/api/goals/{goal['id']}").json()["status"] == "paused"
 
 
 def test_goal_api_rejects_non_direct_chat(goal_client: TestClient, monkeypatch) -> None:

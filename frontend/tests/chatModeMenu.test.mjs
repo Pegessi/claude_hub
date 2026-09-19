@@ -7,13 +7,13 @@ const structuredPane = readFileSync(
   'utf8',
 )
 
-test('mode picker lives beside the attachment control and opens an upward menu', () => {
+test('mode picker lives beside the add menu and opens an upward menu', () => {
   // The composer-hints element carries a v-if (hidden on mobile), so match up
   // to its class attribute without requiring a bare `<div class="composer-hints">`.
   const composerRow = structuredPane.match(/<div class="composer-row">[\s\S]*?class="composer-hints"/)
   assert.ok(composerRow, 'composer row must contain its toolbar with the mode picker')
   assert.match(composerRow[0], /class="composer-tools"/)
-  assert.match(composerRow[0], /class="composer-attach-btn"[\s\S]*?class="composer-mode-trigger"/)
+  assert.match(composerRow[0], /<ComposerAddMenu[\s\S]*?class="composer-mode-trigger"/)
   assert.match(composerRow[0], /aria-haspopup="menu"/)
   assert.match(composerRow[0], /:aria-expanded="isModeMenuOpen"/)
   assert.match(composerRow[0], /\{\{ currentModeLabel \}\}/)

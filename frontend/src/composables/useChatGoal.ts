@@ -95,22 +95,6 @@ export function useChatGoal(tabId: Ref<string>) {
     })
   }
 
-  async function updateBudget(tokenBudget: number | null): Promise<boolean> {
-    const current = goal.value
-    if (!current) return false
-    return run(async signal => {
-      const response = await fetch(`/api/goals/${current.id}/budget`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        signal,
-        body: JSON.stringify({ token_budget: tokenBudget, client_request_id: requestId() }),
-      })
-      if (!response.ok) throw new Error(await errorDetail(response))
-      return await response.json() as ChatGoal
-    })
-  }
-
   async function run(action: (signal: AbortSignal) => Promise<ChatGoal | null>): Promise<boolean> {
     if (isMutating.value) return false
     epoch++
@@ -171,7 +155,6 @@ export function useChatGoal(tabId: Ref<string>) {
     hasGoal: computed(() => goal.value !== null),
     hydrate,
     create,
-    updateBudget,
     pause: () => mutate('pause'),
     resume: () => mutate('resume'),
     complete: () => mutate('complete'),

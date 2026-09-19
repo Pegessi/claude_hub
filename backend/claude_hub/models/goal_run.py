@@ -10,9 +10,8 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 GOAL_OBJECTIVE_MAX_LENGTH = 4000
-DEFAULT_GOAL_MAX_TURNS = 20
-HARD_GOAL_MAX_TURNS = 100
 GOAL_CHECKPOINT_HISTORY_LIMIT = 10
+GOAL_RECENT_TURN_IDS_LIMIT = 100
 
 
 def utc_now() -> datetime:
@@ -23,7 +22,6 @@ class GoalRunStatus(str, Enum):
     ACTIVE = "active"
     PAUSED = "paused"
     BLOCKED = "blocked"
-    BUDGET_LIMITED = "budget_limited"
     COMPLETE = "complete"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -86,10 +84,8 @@ class GoalRun(BaseModel):
     tab_id: str
     objective: str = Field(min_length=1, max_length=GOAL_OBJECTIVE_MAX_LENGTH)
     status: GoalRunStatus = GoalRunStatus.ACTIVE
-    token_budget: int | None = Field(default=None, ge=1)
     token_usage: int | None = Field(default=None, ge=0)
     usage_quality: GoalUsageQuality = GoalUsageQuality.UNAVAILABLE
-    max_turns: int = Field(default=DEFAULT_GOAL_MAX_TURNS, ge=1, le=HARD_GOAL_MAX_TURNS)
     turns_completed: int = Field(default=0, ge=0)
     dispatch_state: GoalDispatchState = GoalDispatchState.IDLE
     pending_step_id: str | None = None
@@ -116,8 +112,6 @@ class GoalRun(BaseModel):
 
 class GoalRunCreate(BaseModel):
     objective: str = Field(min_length=1, max_length=GOAL_OBJECTIVE_MAX_LENGTH)
-    token_budget: int | None = Field(default=None, ge=1)
-    max_turns: int = Field(default=DEFAULT_GOAL_MAX_TURNS, ge=1, le=HARD_GOAL_MAX_TURNS)
     client_request_id: str = Field(min_length=1, max_length=128)
 
     @field_validator("objective", "client_request_id")
@@ -131,10 +125,6 @@ class GoalRunCreate(BaseModel):
 
 class GoalMutationRequest(BaseModel):
     client_request_id: str = Field(min_length=1, max_length=128)
-
-
-class GoalBudgetUpdate(GoalMutationRequest):
-    token_budget: int | None = Field(default=None, ge=1)
 
 
 class GoalTurnUsage(BaseModel):

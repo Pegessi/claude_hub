@@ -12,13 +12,14 @@
         role="dialog"
         aria-modal="true"
         aria-labelledby="goal-dialog-title"
+        aria-describedby="goal-dialog-tips"
         @submit.prevent="submit"
       >
         <div>
           <h2 id="goal-dialog-title">
-            Start a Goal
+            Set a Goal
           </h2>
-          <p>Set an explicit outcome. Goal runs independently from Agent and Plan modes.</p>
+          <p>What would you like to achieve?</p>
         </div>
         <label>
           Objective
@@ -27,31 +28,18 @@
             v-model="objective"
             maxlength="4000"
             rows="5"
+            :readonly="busy"
             placeholder="Describe the outcome to achieve…"
             required
           />
         </label>
-        <div class="goal-dialog-fields">
-          <label>
-            Token budget <span>(optional)</span>
-            <input
-              v-model="tokenBudget"
-              type="number"
-              min="1"
-              step="1"
-              placeholder="No token limit"
-            >
-          </label>
-          <label>
-            Maximum turns
-            <input
-              v-model="maxTurns"
-              type="number"
-              min="1"
-              max="100"
-              step="1"
-            >
-          </label>
+        <div
+          id="goal-dialog-tips"
+          class="goal-dialog-tips"
+        >
+          <p>Describe the outcome and how to verify it.</p>
+          <p>The agent keeps working until it finishes or needs your input. You can pause anytime.</p>
+          <p>Goal has no token or turn limit. Provider usage and charges still apply.</p>
         </div>
         <p
           v-if="validationError || error"
@@ -87,11 +75,9 @@ import { nextTick, ref, watch } from 'vue'
 const props = defineProps<{ open: boolean; busy?: boolean; error?: string | null }>()
 const emit = defineEmits<{
   close: []
-  submit: [value: { objective: string; token_budget?: number; max_turns?: number }]
+  submit: [value: { objective: string }]
 }>()
 const objective = ref('')
-const tokenBudget = ref('')
-const maxTurns = ref('20')
 const validationError = ref<string | null>(null)
 const objectiveEl = ref<HTMLTextAreaElement | null>(null)
 let returnFocusEl: HTMLElement | null = null
@@ -107,7 +93,10 @@ function trapFocus(event: KeyboardEvent) {
   const first = focusable[0]
   const last = focusable[focusable.length - 1]
   if (!first || !last) return
-  if (event.shiftKey && document.activeElement === first) {
+  if (!focusable.includes(document.activeElement as HTMLElement)) {
+    event.preventDefault()
+    first.focus()
+  } else if (event.shiftKey && document.activeElement === first) {
     event.preventDefault()
     last.focus()
   } else if (!event.shiftKey && document.activeElement === last) {
@@ -129,13 +118,10 @@ watch(() => props.open, open => {
 
 function submit() {
   const trimmed = objective.value.trim()
-  const budget = tokenBudget.value === '' ? undefined : Number(tokenBudget.value)
-  const turns = Number(maxTurns.value)
+  if (props.busy) return
   if (!trimmed) { validationError.value = 'Objective is required.'; return }
-  if (budget !== undefined && (!Number.isInteger(budget) || budget < 1)) { validationError.value = 'Token budget must be a positive whole number.'; return }
-  if (!Number.isInteger(turns) || turns < 1 || turns > 100) { validationError.value = 'Maximum turns must be between 1 and 100.'; return }
   validationError.value = null
-  emit('submit', { objective: trimmed, ...(budget === undefined ? {} : { token_budget: budget }), max_turns: turns })
+  emit('submit', { objective: trimmed })
 }
 </script>
 
@@ -146,14 +132,14 @@ h2, p { margin: 0; }
 h2 { font-size: 18px; }
 p { color: var(--ch-color-text-muted); }
 label { display: grid; gap: 6px; font-weight: 600; }
-label span { color: var(--ch-color-text-subtle); font-weight: 400; }
-textarea, input { box-sizing: border-box; width: 100%; padding: 9px 10px; color: var(--ch-color-text); background: var(--ch-color-app-bg); border: 1px solid var(--ch-color-border-strong); border-radius: var(--ch-radius-sm); font: inherit; }
+textarea { box-sizing: border-box; width: 100%; padding: 9px 10px; color: var(--ch-color-text); background: var(--ch-color-app-bg); border: 1px solid var(--ch-color-border-strong); border-radius: var(--ch-radius-sm); font: inherit; }
 textarea { resize: vertical; }
-.goal-dialog-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.goal-dialog-tips { display: grid; gap: 6px; font-size: 12px; line-height: 1.5; }
 .goal-dialog-error { color: var(--ch-color-danger, #e5484d); }
 .goal-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 button { padding: 7px 12px; color: var(--ch-color-text); background: transparent; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-sm); cursor: pointer; }
 button.primary { color: white; background: var(--ch-color-accent); border-color: var(--ch-color-accent); }
 button:disabled { cursor: default; opacity: .55; }
-@media (max-width: 520px) { .goal-dialog-fields { grid-template-columns: 1fr; } }
+textarea:focus-visible, button:focus-visible { outline: 2px solid var(--ch-color-accent-ring); outline-offset: 2px; }
+@media (max-width: 640px), (pointer: coarse) { button { min-height: 44px; } }
 </style>
