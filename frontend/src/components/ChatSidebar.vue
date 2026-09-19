@@ -61,8 +61,7 @@
         <div
           v-if="draggedTabId && !filteredGroups.some(group => group.pinned)"
           class="chat-sidebar__pin-drop"
-          @dragover.prevent
-          @drop.prevent="pinDraggedTab"
+          data-pointer-drop="pin"
         >
           Drop here to pin
         </div>
@@ -71,13 +70,13 @@
           :key="group.key"
           class="chat-sidebar__group"
           :class="{ 'chat-sidebar__group--pinned': group.pinned }"
+          :data-group-key="group.key"
         >
           <div
             v-if="group.pinned"
             class="chat-sidebar__group-header chat-sidebar__pinned-header"
             title="Pins are saved in this browser"
-            @dragover="onGroupDragOver($event, group)"
-            @drop="onGroupDrop($event, group)"
+            data-pointer-drop="group"
           >
             <span aria-hidden="true">⌖</span>
             <span class="chat-sidebar__group-label">Pinned</span>
@@ -87,11 +86,10 @@
             v-else
             type="button"
             class="chat-sidebar__group-header"
+            data-pointer-drop="group"
             :aria-expanded="!group.collapsed"
             :aria-controls="`chat-group-${group.key}`"
             @click="toggleGroup(group.cwd)"
-            @dragover="onGroupDragOver($event, group)"
-            @drop="onGroupDrop($event, group)"
           >
             <svg
               viewBox="0 0 16 16"
@@ -135,12 +133,7 @@
               :class="{ active: tab.id === activeTabId, dragging: tab.id === draggedTabId }"
               :data-tab-id="tab.id"
               :data-drop-position="dropTarget?.id === tab.id ? dropTarget.position : undefined"
-              :draggable="renamingTabId !== tab.id"
-              @dragstart="onDragStart($event, tab)"
-              @dragend="clearDrag"
-              @dragover="onRowDragOver($event, tab, group)"
-              @dragleave="onRowDragLeave($event)"
-              @drop="onRowDrop($event, tab, group)"
+              @pointerdown="onRowPointerDown($event, tab)"
               @click="onRowClick($event, tab)"
             >
               <button
@@ -149,7 +142,7 @@
                 class="chat-sidebar__item-main"
                 :aria-current="tab.id === activeTabId ? 'page' : undefined"
                 :title="`${tab.name || 'Untitled'} — ${tab.cwd || 'No directory'}. Alt+↑/↓ to reorder`"
-                @click.stop="setActiveTab(tab.id)"
+                @click.stop="onRowClick($event, tab)"
                 @keydown.alt.up.prevent="moveInGroup(tab, group, -1)"
                 @keydown.alt.down.prevent="moveInGroup(tab, group, 1)"
               >
@@ -312,6 +305,9 @@ const collapsedGroups = ref<Set<string>>(new Set())
 const expandedGroups = ref<Set<string>>(new Set())
 const draggedTabId = ref<string | null>(null)
 const dropTarget = ref<{ id: string; position: 'before' | 'after' } | null>(null)
+const dropGroupKey = ref<string | null>(null)
+const dropOnPinZone = ref(false)
+const dropAtGroupStart = ref(false)
 const SIDEBAR_DEFAULT_WIDTH = 240
 const SIDEBAR_MIN_WIDTH = 200
 const SIDEBAR_MAX_WIDTH = 480
@@ -393,7 +389,13 @@ function resizeWithKeyboard(event: KeyboardEvent) {
   persistSidebarWidth()
 }
 
-onUnmounted(stopResize)
+onUnmounted(() => {
+  stopResize()
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', onPointerUp)
+  window.removeEventListener('pointercancel', onPointerCancel)
+  clearDrag()
+})
 
 // Inline row rename (mirrors the TabBar's double-click rename).
 const renamingTabId = ref<string | null>(null)
@@ -481,80 +483,137 @@ watch(activeTabId, () => {
 function clearDrag() {
   draggedTabId.value = null
   dropTarget.value = null
+  dropGroupKey.value = null
+  dropOnPinZone.value = false
+  dropAtGroupStart.value = false
+  document.body.classList.remove('chat-sidebar-dragging')
 }
 
-function onDragStart(event: DragEvent, tab: TerminalTab) {
-  if (renamingTabId.value === tab.id || (event.target as HTMLElement).closest('input, .tam-trigger')) {
-    event.preventDefault()
-    return
-  }
-  draggedTabId.value = tab.id
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData('text/plain', tab.id)
-  }
+interface PointerDragState {
+  pointerId: number
+  sourceId: string
+  startX: number
+  startY: number
+  moved: boolean
 }
+
+const POINTER_DRAG_THRESHOLD_PX = 5
+let pointerDrag: PointerDragState | null = null
+let suppressNextRowClick = false
 
 function draggedForGroup(group: ChatSidebarGroup) {
   const source = chatTabs.value.find(tab => tab.id === draggedTabId.value)
   return source && canDropChatInGroup(source, group) ? source : null
 }
 
-function onRowDragOver(event: DragEvent, tab: TerminalTab, group: ChatSidebarGroup) {
-  if (!draggedForGroup(group) || draggedTabId.value === tab.id) {
-    dropTarget.value = null
+function groupFromElement(element: Element | null): ChatSidebarGroup | null {
+  const key = element?.closest<HTMLElement>('.chat-sidebar__group')?.dataset.groupKey
+  return key ? filteredGroups.value.find(group => group.key === key) ?? null : null
+}
+
+function updatePointerDrop(clientX: number, clientY: number) {
+  const target = document.elementFromPoint(clientX, clientY)
+  dropTarget.value = null
+  dropGroupKey.value = null
+  dropOnPinZone.value = false
+  dropAtGroupStart.value = false
+  if (target?.closest('[data-pointer-drop="pin"]')) {
+    dropOnPinZone.value = true
     return
   }
-  event.preventDefault()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  dropTarget.value = { id: tab.id, position: event.clientY < rect.top + rect.height / 2 ? 'before' : 'after' }
-}
-
-function onRowDragLeave(event: DragEvent) {
-  if (!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget)) {
-    dropTarget.value = null
+  const row = target?.closest<HTMLElement>('.chat-sidebar__item')
+  const group = groupFromElement(row ?? target)
+  const tabId = row?.dataset.tabId
+  if (!group || !draggedForGroup(group)) return
+  dropGroupKey.value = group.key
+  if (!row || !tabId) {
+    dropAtGroupStart.value = true
+    return
   }
+  if (tabId === draggedTabId.value) return
+  const rect = row.getBoundingClientRect()
+  dropTarget.value = { id: tabId, position: clientY < rect.top + rect.height / 2 ? 'before' : 'after' }
 }
 
-function onRowDrop(event: DragEvent, tab: TerminalTab, group: ChatSidebarGroup) {
-  const source = draggedForGroup(group)
-  if (!source || source.id === tab.id) return clearDrag()
+function onPointerMove(event: PointerEvent) {
+  const drag = pointerDrag
+  if (!drag || event.pointerId !== drag.pointerId) return
+  if (!drag.moved) {
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY)
+    if (distance < POINTER_DRAG_THRESHOLD_PX) return
+    drag.moved = true
+    draggedTabId.value = drag.sourceId
+    document.body.classList.add('chat-sidebar-dragging')
+  }
   event.preventDefault()
-  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  const position = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
-  store.setChatPinned(source.id, group.pinned)
-  store.reorderTabById(source.id, tab.id, position)
+  updatePointerDrop(event.clientX, event.clientY)
+}
+
+function finishPointerDrag(event: PointerEvent, cancelled = false) {
+  const drag = pointerDrag
+  if (!drag || event.pointerId !== drag.pointerId) return
+  pointerDrag = null
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', onPointerUp)
+  window.removeEventListener('pointercancel', onPointerCancel)
+  if (!drag.moved) return
+
+  suppressNextRowClick = true
+  window.setTimeout(() => { suppressNextRowClick = false }, 0)
+  if (!cancelled) {
+    // Use the last pointermove candidate that the user actually saw. Some
+    // browsers retarget pointerup to the pressed button, and re-running hit
+    // testing here can silently flip an `after` indicator back to `before`.
+    const source = chatTabs.value.find(tab => tab.id === drag.sourceId)
+    if (source && dropOnPinZone.value) {
+      store.setChatPinned(source.id, true)
+    } else {
+      const group = filteredGroups.value.find(item => item.key === dropGroupKey.value)
+      const targetId = dropTarget.value?.id
+      if (source && group && canDropChatInGroup(source, group)) {
+        store.setChatPinned(source.id, group.pinned)
+        if (targetId && targetId !== source.id) {
+          store.reorderTabById(source.id, targetId, dropTarget.value!.position)
+        } else if (dropAtGroupStart.value) {
+          const first = group.tabs.find(tab => tab.id !== source.id)
+          if (first) store.reorderTabById(source.id, first.id, 'before')
+        }
+      }
+    }
+  }
   clearDrag()
 }
 
+function onPointerUp(event: PointerEvent) {
+  finishPointerDrag(event)
+}
+
+function onPointerCancel(event: PointerEvent) {
+  finishPointerDrag(event, true)
+}
+
+function onRowPointerDown(event: PointerEvent, tab: TerminalTab) {
+  if (event.button !== 0 || !event.isPrimary || renamingTabId.value === tab.id) return
+  const target = event.target
+  if (!(target instanceof HTMLElement) || target.closest('.chat-sidebar__item-menu, .chat-sidebar__rename-input')) return
+  pointerDrag = {
+    pointerId: event.pointerId,
+    sourceId: tab.id,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+  }
+  window.addEventListener('pointermove', onPointerMove, { passive: false })
+  window.addEventListener('pointerup', onPointerUp)
+  window.addEventListener('pointercancel', onPointerCancel)
+}
+
 function onRowClick(event: MouseEvent, tab: TerminalTab) {
+  if (suppressNextRowClick) return
   const target = event.target
   if (!(target instanceof HTMLElement)) return
   if (target.closest('.chat-sidebar__item-menu, .chat-sidebar__rename-input')) return
   setActiveTab(tab.id)
-}
-
-function onGroupDragOver(event: DragEvent, group: ChatSidebarGroup) {
-  if (!draggedForGroup(group)) return
-  event.preventDefault()
-  dropTarget.value = null
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-}
-
-function onGroupDrop(event: DragEvent, group: ChatSidebarGroup) {
-  const source = draggedForGroup(group)
-  if (!source) return clearDrag()
-  event.preventDefault()
-  store.setChatPinned(source.id, group.pinned)
-  const first = group.tabs.find(tab => tab.id !== source.id)
-  if (first) store.reorderTabById(source.id, first.id, 'before')
-  clearDrag()
-}
-
-function pinDraggedTab() {
-  if (draggedTabId.value) store.setChatPinned(draggedTabId.value, true)
-  clearDrag()
 }
 
 function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 1) {
@@ -718,6 +777,7 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
 
 /* Body */
 .chat-sidebar__body {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -768,10 +828,15 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
 }
 
 .chat-sidebar__pin-drop {
-  margin-bottom: 6px;
-  padding: 12px 8px;
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  z-index: 4;
+  padding: 5px 8px;
   border: 1px dashed var(--ch-color-accent);
   border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-size-xs);
 }
@@ -840,6 +905,8 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
   color: var(--ch-color-text);
   font-size: var(--ch-font-size-sm);
   transition: background var(--ch-motion-fast);
+  cursor: grab;
+  touch-action: pan-y;
 }
 
 .chat-sidebar__item:hover {
@@ -853,6 +920,12 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
 
 .chat-sidebar__item.dragging {
   opacity: 0.45;
+  cursor: grabbing;
+}
+
+:global(body.chat-sidebar-dragging) {
+  cursor: grabbing !important;
+  user-select: none;
 }
 
 .chat-sidebar__item[data-drop-position]::before {
