@@ -1,11 +1,12 @@
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from claude_hub.models import (
-    HARD_GOAL_MAX_TURNS,
+    GOAL_RECENT_TURN_IDS_LIMIT,
     GoalDispatchState,
     GoalRunCreate,
     GoalRunStatus,
@@ -77,8 +78,10 @@ def test_contract_validation_and_create_idempotency(tmp_path: Path) -> None:
     assert manager.create("tab-1", request()).id == first.id
     with pytest.raises(ValueError, match="unfinished"):
         manager.create("tab-1", request("create-2"))
-    with pytest.raises(ValidationError):
-        request("too-long", max_turns=HARD_GOAL_MAX_TURNS + 1)
+    assert request().model_dump() == {
+        "objective": "Ship the requested feature",
+        "client_request_id": "create-1",
+    }
     with pytest.raises(ValidationError):
         GoalRunCreate(objective="x" * 4001, client_request_id="large")
 
@@ -124,7 +127,7 @@ async def test_turn_signal_continues_only_after_state_is_persisted(tmp_path: Pat
         return "turn-2"
 
     manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
-    goal = manager.create("tab-1", request(token_budget=1000))
+    goal = manager.create("tab-1", request())
     arm_goal(manager, goal.id, "turn-1")
     result = await manager.on_turn_completed(
         "tab-1",
@@ -218,25 +221,38 @@ async def test_blocked_signal_and_stale_completion_after_pause(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_budget_and_turn_limits_stop_continuation(tmp_path: Path) -> None:
-    called = False
+async def test_goal_continues_past_legacy_limits_with_bounded_recent_ids(tmp_path: Path) -> None:
+    dispatched = []
 
     async def dispatch(goal, prompt):
-        nonlocal called
-        called = True
+        dispatched.append(goal.pending_step_id)
+        return goal.pending_step_id
 
     manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
     goal = manager.create("tab-1", request(token_budget=10, max_turns=1))
-    arm_goal(manager, goal.id, "turn-1")
-    result = await manager.on_turn_completed(
-        "tab-1",
-        "turn-1",
-        "success",
-        '<goal-status state="continue">more</goal-status>',
-        {"total_tokens": 10},
+    result = await manager.dispatch_next(goal.id)
+    first_turn = result.current_turn_id
+    for _ in range(125):
+        result = await manager.on_turn_completed(
+            "tab-1",
+            result.current_turn_id,
+            "success",
+            response_with_checkpoint(),
+            {"total_tokens": 1000},
+        )
+    assert result.status == GoalRunStatus.ACTIVE
+    assert result.turns_completed == 125
+    assert result.token_usage == 125000
+    assert len(dispatched) == 126
+    assert len(result.completed_turn_ids) == GOAL_RECENT_TURN_IDS_LIMIT
+    assert len(result.checkpoint_history) == 10
+    assert first_turn not in result.completed_turn_ids
+    # A callback evicted from recent history is still rejected by turn identity.
+    stale = await manager.on_turn_completed(
+        "tab-1", first_turn, "success", response_with_checkpoint(state="complete")
     )
-    assert result is not None and result.status == GoalRunStatus.BUDGET_LIMITED
-    assert not called
+    assert stale == result
+    assert len(dispatched) == 126
 
 
 def test_recovery_pauses_uncertain_dispatch(tmp_path: Path) -> None:
@@ -378,7 +394,7 @@ async def test_checkpoint_history_is_bounded(tmp_path: Path) -> None:
         return f"next-{goal.turns_completed}"
 
     manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
-    goal = manager.create("tab-1", request(max_turns=20))
+    goal = manager.create("tab-1", request())
     arm_goal(manager, goal.id, "turn-0")
     for index in range(12):
         current = manager.get(goal.id)
@@ -556,14 +572,6 @@ async def test_resume_does_not_dispatch_until_failed_pause_cancel_is_reconciled(
     assert len(dispatched) == 1
 
 
-def test_budget_update_idempotency_includes_payload(tmp_path: Path) -> None:
-    manager = controller(tmp_path)
-    goal = manager.create("tab-1", request(token_budget=10))
-    assert manager.update_budget(goal.id, "budget-1", 20).token_budget == 20
-    with pytest.raises(GoalPolicyError, match="another mutation"):
-        manager.update_budget(goal.id, "budget-1", 30)
-
-
 @pytest.mark.asyncio
 async def test_duplicate_dispatch_and_unrelated_completion_do_not_resend(tmp_path: Path) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
@@ -633,28 +641,67 @@ async def test_clearing_latest_goal_does_not_resurrect_previous_goal(tmp_path: P
     assert manager.current("tab-1") is None
 
 
-def test_create_replay_uses_original_budget_after_budget_edit(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_create_inputs", [True, False])
+async def test_legacy_limited_goal_migrates_without_autostart_and_can_resume(
+    tmp_path: Path, has_create_inputs: bool
+) -> None:
     manager = controller(tmp_path)
-    goal = manager.create("tab-1", request(token_budget=10))
-    manager.update_budget(goal.id, "budget", 20)
-    cold = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"))
-    assert cold.replay_create("tab-1", request(token_budget=10)).id == goal.id
+    goal = manager.create("tab-1", request())
+    path = tmp_path / "goal_runs.json"
+    snapshot = json.loads(path.read_text())
+    snapshot["version"] = 1
+    snapshot["goals"][0].update(
+        status="budget_limited",
+        token_budget=10,
+        max_turns=20,
+        turns_completed=20,
+        token_usage=100,
+        status_message="maximum turn count (20) reached",
+    )
+    if has_create_inputs:
+        snapshot["create_inputs"]["create-1"].update(token_budget=10, max_turns=20)
+    else:
+        snapshot.pop("create_inputs")
+    path.write_text(json.dumps(snapshot))
+    dispatched = []
+
+    def dispatch(goal, prompt):
+        dispatched.append(goal.pending_step_id)
+        return goal.pending_step_id
+
+    cold = GoalRunController(GoalRunStore(path), dispatch)
+    migrated = cold.get(goal.id)
+    assert migrated.status == GoalRunStatus.PAUSED
+    assert "resume" in migrated.status_message
+    assert not dispatched
+    assert cold.replay_create("tab-1", request(token_budget=10, max_turns=20)).id == goal.id
+    assert cold.replay_create("tab-1", request()).id == goal.id
+    with pytest.raises(ValueError, match="another create"):
+        cold.replay_create("tab-2", request())
+    resumed = await cold.resume(goal.id, "resume")
+    assert resumed.status == GoalRunStatus.ACTIVE
+    assert len(dispatched) == 1
+    persisted = json.loads(path.read_text())
+    assert persisted["version"] == 2
+    assert "token_budget" not in persisted["goals"][0]
+    assert "max_turns" not in persisted["goals"][0]
+    assert "token_budget" not in persisted["create_inputs"].get("create-1", {})
 
 
 @pytest.mark.asyncio
-async def test_lower_budget_during_turn_keeps_completion_accounting(tmp_path: Path) -> None:
+async def test_goal_usage_is_accounting_only(tmp_path: Path) -> None:
     manager = controller(tmp_path)
-    goal = manager.create("tab-1", request(token_budget=100))
+    goal = manager.create("tab-1", request())
     arm_goal(manager, goal.id, "running")
     stored = manager.get(goal.id)
     stored.token_usage = 20
     manager.store.put(stored)
-    manager.update_budget(goal.id, "budget", 10)
     result = await manager.on_turn_completed(
         "tab-1", "running", "complete", response_with_checkpoint(), {"total": 5}
     )
     assert result.token_usage == 25
-    assert result.status == GoalRunStatus.BUDGET_LIMITED
+    assert result.status == GoalRunStatus.PAUSED  # No connected dispatcher.
     assert result.current_turn_id is None
 
 
