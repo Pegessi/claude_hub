@@ -13,11 +13,11 @@ Two unrelated changes shipped on this branch:
 
 A `ScheduledTask` (model in `backend/claude_hub/models/schemas.py`) has exactly
 one schedule field — `run_at` (one-off), `cron` (5-field), or
-`interval_seconds` — and one of three **kinds**, which map to the three
-variants the user asked for:
+`interval_seconds` — and one of four **kinds**:
 
 | Kind | User's variant | Behavior on fire |
 | --- | --- | --- |
+| `chat_turn` | Default Chat automation | Queue a native turn in an existing top-level Chat. The prompt and reply remain in that conversation; a busy Chat, active Goal, or archived target waits without interruption. |
 | `tab_message` | **A** — agent self-scheduling | Type a message into an existing terminal tab's pane and submit it. An agent calls the `claude-hub` CLI (which hits the scheduling API) to register a schedule that re-messages its own tab; it learns its tab id from the injected `CLAUDE_HUB_TAB_ID` env var. |
 | `new_session` | **B** — manual creation, "new session to execute" | Create a new session in a workspace and send it a message. One-shot only. |
 | `hub_task` | **C** — Hub-native task scheduling | Publish a system-internal task on a caller-owned ephemeral orchestrator. The task runs the normal reviewed flow; on worker completion it is auto-DONE (skipping human review) and the ephemeral session is auto-deleted — no agent / reviewer resources held. |
@@ -27,11 +27,26 @@ hydrated at startup after the core workspace state. The tick is driven by the
 5-second background monitor loop (`_background_monitor_loop` →
 `_tick_scheduled_tasks`).
 
+Chat automations also persist bounded `ScheduledTaskRun` records in the same
+atomic file. Each occurrence has a deterministic turn id and is delivered via
+the native Agent Stream transport used by the Chat composer. On restart, a run
+without durable `turn_started` evidence is queued again; a completed transcript
+edge is reconciled as completed/failed; a started but unfinished turn becomes
+`uncertain` and is not automatically duplicated.
+Every occurrence has its own FIFO run. A target Chat keeps at most 100 active
+runs; later occurrences are persisted as terminal `skipped` records with an
+explicit backlog-limit reason so prolonged busy or archived periods cannot grow
+memory and the state file without bound.
+
 ## Module design
 
 ### `models/schemas.py`
 
-- `ScheduledTaskKind` — enum: `tab_message`, `new_session`, `hub_task`.
+- `ScheduledTaskKind` — enum: `chat_turn`, `tab_message`, `new_session`,
+  `hub_task`.
+- `ScheduledTaskRun` / `ScheduledTaskRunStatus` — durable occurrences for
+  native Chat delivery (`queued`, `waiting`, `dispatching`, `running`, terminal
+  outcomes, and restart-safe `uncertain`).
 - `ScheduledTask` — durable schedule. Holds the schedule spec, the kind-specific
   payload (`tab_id` / `workspace_id` + `agent_type` / `task_title` +
   `message`), and run bookkeeping: `enabled`, `next_run_at`, `last_run_at`,
@@ -107,7 +122,9 @@ returns 500. This is the primitive an agent uses for self-scheduling (variant A)
   `isMutating`, `error`, `enabledCount`, and the CRUD/run actions.
 - `components/ScheduledTasksPanel.vue` — modal panel with a list view (per-task
   enable toggle, Run, Edit, Delete) and an edit view (kind picker, schedule
-  picker, kind-specific payload). Opened from the toolbar.
+  picker, kind-specific payload). Native Chat is the default kind. The toolbar
+  still opens the list, while the Chat composer `+` menu opens creation with
+  that conversation preselected.
 
 ## Key issues / pitfalls
 

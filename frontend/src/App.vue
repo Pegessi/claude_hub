@@ -73,8 +73,8 @@
             class="schedule-tool-btn"
             title="Scheduled tasks"
             aria-label="Scheduled tasks"
-            :class="{ active: showScheduledTasks }"
-            @click="showScheduledTasks = !showScheduledTasks"
+            :class="{ active: scheduledTasksVisible }"
+            @click="scheduledTasksVisible ? appStore.closeScheduledTasks() : appStore.openScheduledTasks()"
           >
             <svg
               viewBox="0 0 24 24"
@@ -158,8 +158,10 @@
         @open-archive="archivePanelOpen = true; store.mobileDrawerOpen = false"
       />
       <ScheduledTasksPanel
-        :visible="showScheduledTasks"
-        @close="showScheduledTasks = false"
+        :visible="scheduledTasksVisible"
+        :create-target-tab-id="scheduledTaskCreateTargetTabId"
+        :create-request="scheduledTaskCreateRequest"
+        @close="appStore.closeScheduledTasks()"
       />
     </template>
   </div>
@@ -189,8 +191,13 @@ const appStore = useAppStore()
 const store = useTerminalStore()
 const authStore = useAuthStore()
 const { tabs, error, activePane, activePaneIsChat } = storeToRefs(store)
-const { mode, colorScheme } = storeToRefs(appStore)
-const showScheduledTasks = ref(false)
+const {
+  mode,
+  colorScheme,
+  scheduledTasksVisible,
+  scheduledTaskCreateTargetTabId,
+  scheduledTaskCreateRequest,
+} = storeToRefs(appStore)
 const archivePanelOpen = ref(false)
 const { isMobile } = useViewport()
 

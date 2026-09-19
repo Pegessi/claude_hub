@@ -1738,6 +1738,9 @@ class EnvPresetsResponse(BaseModel):
 class ScheduledTaskKind(str, Enum):
     """How a scheduled task is executed when it fires."""
 
+    CHAT_TURN = "chat_turn"
+    """Queue a native turn in an existing top-level Chat conversation."""
+
     TAB_MESSAGE = "tab_message"
     """Send a message to a terminal tab (agent self-scheduling)."""
 
@@ -1748,12 +1751,45 @@ class ScheduledTaskKind(str, Enum):
     """Publish a Hub-native task that runs and auto-cleans (no held resources)."""
 
 
+class ScheduledTaskRunStatus(str, Enum):
+    """Durable lifecycle of one scheduled Chat turn."""
+
+    QUEUED = "queued"
+    WAITING = "waiting"
+    DISPATCHING = "dispatching"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    UNCERTAIN = "uncertain"
+    CANCELLED = "cancelled"
+
+
+class ScheduledTaskRun(BaseModel):
+    """One durable occurrence of a ``chat_turn`` schedule."""
+
+    id: str
+    scheduled_task_id: str
+    tab_id: str
+    client_turn_id: str
+    message: str
+    status: ScheduledTaskRunStatus = ScheduledTaskRunStatus.QUEUED
+    scheduled_for: datetime
+    queued_at: datetime
+    dispatched_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    waiting_reason: Optional[str] = None
+    error: Optional[str] = None
+
+
 class ScheduledTask(BaseModel):
     """A durable schedule that fires an action on a cron / interval / one-off basis.
 
     The schedule spec is exactly one of ``run_at`` (one-shot), ``cron``
     (5-field), or ``interval_seconds``. The action payload depends on ``kind``:
 
+    * ``chat_turn``: ``tab_id`` + ``message`` (queued into that native Chat
+      conversation and rendered in its structured transcript).
     * ``tab_message``: ``tab_id`` + ``message`` (typed into that terminal tab's
       pane and submitted).
     * ``new_session``: ``workspace_id`` + ``agent_type`` + ``message`` (a new
@@ -1786,6 +1822,7 @@ class ScheduledTask(BaseModel):
     next_run_at: Optional[datetime] = None
     last_status: Optional[str] = None
     last_error: Optional[str] = None
+    last_run_id: Optional[str] = None
     run_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -1834,6 +1871,7 @@ class ScheduledTaskRunResult(BaseModel):
     """Result of a manual run-now (fire immediately) request."""
 
     id: str
+    last_run_id: Optional[str] = None
     last_run_at: Optional[datetime] = None
     last_status: Optional[str] = None
     last_error: Optional[str] = None

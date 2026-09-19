@@ -2,7 +2,7 @@
 
 All endpoints are authenticated and return / accept JSON. Scheduled tasks
 fire an action on a cron / interval / one-off basis; see
-``claude_hub.models.ScheduledTask`` for the three kinds and their payloads.
+``claude_hub.models.ScheduledTask`` for the supported kinds and their payloads.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from ..auth.dependencies import get_current_user
 from ..models import (
     ScheduledTask,
     ScheduledTaskCreate,
+    ScheduledTaskRun,
     ScheduledTaskRunResult,
     ScheduledTaskUpdate,
     User,
@@ -50,6 +51,21 @@ async def get_scheduled_task(
     """Return a single scheduled task by id."""
     try:
         return workspace_manager.get_scheduled_task(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scheduled task '{task_id}' not found",
+        ) from None
+
+
+@router.get("/{task_id}/runs", response_model=list[ScheduledTaskRun])
+async def list_scheduled_task_runs(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> list[ScheduledTaskRun]:
+    """List durable runs for a scheduled Chat automation."""
+    try:
+        return workspace_manager.list_scheduled_task_runs(task_id)
     except KeyError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -120,6 +136,7 @@ async def run_scheduled_task(
         ) from None
     return ScheduledTaskRunResult(
         id=task.id,
+        last_run_id=task.last_run_id,
         last_run_at=task.last_run_at,
         last_status=task.last_status,
         last_error=task.last_error,
