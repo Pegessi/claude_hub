@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### fix: keep silent provider control notifications out of Chat turns
+
+- Ignore metadata-only provider status events such as TraeX
+  `thread/goal/cleared` when building the visible Chat timeline. Previously a
+  notification arriving after `turn_completed` created a blank unfinished turn,
+  left the composer showing `Stop`, and made Stop appear ineffective even though
+  the provider runtime was already idle. Existing persisted conversations repair
+  themselves when their history is rebuilt.
+
 ### feat: simplify Chat Goal setup and remove execution limits
 
 - Replace the standalone Goal and attachment buttons with a compact plus menu:
