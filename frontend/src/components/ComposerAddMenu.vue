@@ -9,8 +9,8 @@
       ref="triggerEl"
       type="button"
       class="composer-add-trigger"
-      aria-label="Add attachment or Goal"
-      title="Add attachment or Goal"
+      aria-label="Add to chat"
+      title="Add to chat"
       aria-haspopup="menu"
       :aria-expanded="open"
       @click="toggle"
@@ -60,6 +60,32 @@
         <span>Add attachment</span>
       </button>
       <button
+        type="button"
+        role="menuitem"
+        title="Create a scheduled message in this Chat"
+        @click="select('schedule')"
+      >
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle
+            cx="12"
+            cy="12"
+            r="8"
+          />
+          <path d="M12 8v5l3 2" />
+        </svg>
+        <span>Create scheduled task</span>
+      </button>
+      <button
         v-if="showGoal"
         type="button"
         role="menuitem"
@@ -95,7 +121,12 @@ const props = defineProps<{
   attachmentDisabledReason?: string | null
   goalDisabledReason?: string | null
 }>()
-const emit = defineEmits<{ 'update:open': [value: boolean]; attachment: []; goal: [] }>()
+const emit = defineEmits<{
+  'update:open': [value: boolean]
+  attachment: []
+  goal: []
+  schedule: []
+}>()
 const rootEl = ref<HTMLElement | null>(null)
 const triggerEl = ref<HTMLButtonElement | null>(null)
 const menuEl = ref<HTMLElement | null>(null)
@@ -122,13 +153,15 @@ function toggle() {
   else showMenu()
 }
 
-function select(action: 'attachment' | 'goal') {
-  if (action === 'attachment' ? props.attachmentDisabledReason : props.goalDisabledReason) return
+function select(action: 'attachment' | 'goal' | 'schedule') {
+  if (action === 'attachment' && props.attachmentDisabledReason) return
+  if (action === 'goal' && props.goalDisabledReason) return
   // Restore focus before opening the dialog so its return target survives
   // removal of the menu item from the DOM. Keep file picking synchronous.
   close(true)
   if (action === 'attachment') emit('attachment')
-  else emit('goal')
+  else if (action === 'goal') emit('goal')
+  else emit('schedule')
 }
 
 function handleKeydown(event: KeyboardEvent) {

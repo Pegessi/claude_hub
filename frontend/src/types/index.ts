@@ -471,9 +471,20 @@ export interface ManualTaskControlRequest {
   reason: string
 }
 
-export type ScheduledTaskKind = 'tab_message' | 'new_session' | 'hub_task'
+export type ScheduledTaskKind = 'chat_turn' | 'tab_message' | 'new_session' | 'hub_task'
 
-export type ScheduledTaskStatus = 'ok' | 'error'
+export type ScheduledTaskStatus =
+  | 'ok'
+  | 'error'
+  | 'queued'
+  | 'waiting'
+  | 'dispatching'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+  | 'uncertain'
+  | 'cancelled'
 
 export interface ScheduledTask {
   id: string
@@ -492,6 +503,7 @@ export interface ScheduledTask {
   next_run_at?: string | null
   last_status?: ScheduledTaskStatus | null
   last_error?: string | null
+  last_run_id?: string | null
   run_count: number
   created_at: string
   updated_at: string
@@ -526,6 +538,7 @@ export interface ScheduledTaskUpdate {
 
 export interface ScheduledTaskRunResult {
   id: string
+  last_run_id?: string | null
   last_run_at?: string | null
   last_status?: ScheduledTaskStatus | null
   last_error?: string | null

@@ -45,7 +45,7 @@
           <button
             type="button"
             class="ch-btn ch-btn--sm ch-btn--primary"
-            @click="startCreate"
+            @click="startCreate()"
           >
             + New Task
           </button>
@@ -76,8 +76,7 @@
         >
           <p>No scheduled tasks yet.</p>
           <p class="st-empty-hint">
-            Schedule a message to a session, a new session, or a Hub task that runs and
-            auto-cleans — on a cron, interval, or one-off time.
+            Schedule a message in an existing Chat, or configure an advanced workspace action.
           </p>
         </div>
 
@@ -190,15 +189,20 @@
             class="ch-select"
             :disabled="!!editingId"
           >
-            <option value="hub_task">
-              Hub task — publish a task that runs &amp; auto-cleans
+            <option value="chat_turn">
+              Chat message — continue an existing conversation
             </option>
-            <option value="new_session">
-              New session — create a session and send a message
-            </option>
-            <option value="tab_message">
-              Message — type into a terminal tab
-            </option>
+            <optgroup label="Advanced">
+              <option value="hub_task">
+                Hub task — publish a task that runs &amp; auto-cleans
+              </option>
+              <option value="new_session">
+                New session — create a session and send a message
+              </option>
+              <option value="tab_message">
+                Terminal message — type into a raw terminal
+              </option>
+            </optgroup>
           </select>
           <p class="form-hint">
             {{ kindHint(draft.kind) }}
@@ -266,10 +270,10 @@
 
         <!-- kind-specific payload -->
         <div
-          v-if="draft.kind === 'tab_message'"
+          v-if="draft.kind === 'chat_turn' || draft.kind === 'tab_message'"
           class="form-group"
         >
-          <label for="st-tab">Target terminal tab</label>
+          <label for="st-tab">{{ draft.kind === 'chat_turn' ? 'Target Chat' : 'Target terminal tab' }}</label>
           <select
             id="st-tab"
             v-model="draft.tab_id"
@@ -279,7 +283,7 @@
               value=""
               disabled
             >
-              {{ tabOptions.length === 0 ? 'No plain terminal tabs yet' : 'Select a terminal tab' }}
+              {{ targetTabOptions.length === 0 ? emptyTargetLabel : selectTargetLabel }}
             </option>
             <option
               v-if="staleTab"
@@ -289,7 +293,7 @@
               {{ staleTab.label }}
             </option>
             <option
-              v-for="opt in tabOptions"
+              v-for="opt in targetTabOptions"
               :key="opt.value"
               :value="opt.value"
             >
@@ -299,7 +303,7 @@
             </option>
           </select>
           <p class="form-hint">
-            {{ tabHint }}
+            {{ targetTabHint }}
           </p>
         </div>
 
@@ -417,7 +421,11 @@ import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { AgentType, ScheduledTask, ScheduledTaskCreate, ScheduledTaskKind } from '@/types'
 
-const props = defineProps<{ visible: boolean }>()
+const props = defineProps<{
+  visible: boolean
+  createTargetTabId?: string | null
+  createRequest?: number
+}>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const store = useScheduledTasksStore()
@@ -433,7 +441,7 @@ const formError = ref('')
 
 const draft = reactive({
   name: '',
-  kind: 'hub_task' as ScheduledTaskKind,
+  kind: 'chat_turn' as ScheduledTaskKind,
   scheduleType: 'cron' as ScheduleType,
   run_at: '',
   cron: '',
@@ -463,11 +471,31 @@ const intervalChips = [
 // valid targets for a tab_message task. Managed agent sessions are excluded —
 // they belong to a workspace and have their own messaging path.
 const tabOptions = computed(() =>
-  terminalStore.manualTabs.map(tab => ({
+  terminalStore.manualTabs
+    .filter(tab => tab.session_kind === 'terminal')
+    .map(tab => ({
     value: tab.id,
     label: tab.name?.trim() || tab.id,
     detail: tab.cwd || '',
+    })),
+)
+
+const chatOptions = computed(() =>
+  terminalStore.chatTabs.map(tab => ({
+    value: tab.id,
+    label: tab.name?.trim() || tab.id,
+    detail: [tab.agent_type, tab.cwd].filter(Boolean).join(' · '),
   })),
+)
+
+const targetTabOptions = computed(() =>
+  draft.kind === 'chat_turn' ? chatOptions.value : tabOptions.value,
+)
+const emptyTargetLabel = computed(() =>
+  draft.kind === 'chat_turn' ? 'No Chat sessions yet' : 'No plain terminal tabs yet',
+)
+const selectTargetLabel = computed(() =>
+  draft.kind === 'chat_turn' ? 'Select a Chat session' : 'Select a terminal tab',
 )
 
 // When editing a task whose target tab has since been closed, keep the stale
@@ -476,15 +504,20 @@ const tabOptions = computed(() =>
 const staleTab = computed<{ value: string; label: string } | null>(() => {
   const id = draft.tab_id.trim()
   if (!id) return null
-  if (tabOptions.value.some(opt => opt.value === id)) return null
+  if (targetTabOptions.value.some(opt => opt.value === id)) return null
   return { value: id, label: `${id} (removed)` }
 })
 
-const tabHint = computed(() =>
-  tabOptions.value.length === 0
-    ? 'No plain terminal tabs yet. Open one from the terminal bar (the + button), or use the New-session or Hub-task kinds.'
-    : 'Pick a plain terminal tab — one with a working directory and no workspace. The message is typed into that tab and submitted when the schedule fires.',
-)
+const targetTabHint = computed(() => {
+  if (draft.kind === 'chat_turn') {
+    return chatOptions.value.length === 0
+      ? 'Create a Chat session first, then schedule a message in that conversation.'
+      : 'The message waits if this Chat is busy, then runs and displays its answer in the same conversation.'
+  }
+  return tabOptions.value.length === 0
+    ? 'No plain terminal tabs yet.'
+    : 'The message is typed into this raw terminal when the schedule fires.'
+})
 
 let pollTimer: number | undefined
 
@@ -511,6 +544,14 @@ watch(
   },
 )
 
+watch(
+  [() => props.visible, () => props.createRequest, () => props.createTargetTabId],
+  ([visible, request, targetTabId]) => {
+    if (!visible || !request || !targetTabId) return
+    startCreate(targetTabId)
+  },
+)
+
 onUnmounted(() => {
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
 })
@@ -525,6 +566,8 @@ function handleClose() {
 
 function kindLabel(kind: ScheduledTaskKind): string {
   switch (kind) {
+    case 'chat_turn':
+      return 'Chat'
     case 'tab_message':
       return 'Message'
     case 'new_session':
@@ -536,6 +579,8 @@ function kindLabel(kind: ScheduledTaskKind): string {
 
 function kindHint(kind: ScheduledTaskKind): string {
   switch (kind) {
+    case 'chat_turn':
+      return 'Queue a message in an existing Chat. Its answer stays in that conversation.'
     case 'tab_message':
       return 'Type a message into one of your plain terminal tabs and submit it when the schedule fires — the agent self-scheduling primitive.'
     case 'new_session':
@@ -616,7 +661,7 @@ async function onDelete(task: ScheduledTask) {
 
 function resetDraft() {
   draft.name = ''
-  draft.kind = 'hub_task'
+  draft.kind = 'chat_turn'
   draft.scheduleType = 'cron'
   draft.run_at = ''
   draft.cron = ''
@@ -629,8 +674,9 @@ function resetDraft() {
   formError.value = ''
 }
 
-function startCreate() {
+function startCreate(targetTabId: string = '') {
   resetDraft()
+  if (targetTabId) draft.tab_id = targetTabId
   editingId.value = null
   mode.value = 'edit'
 }
@@ -668,6 +714,8 @@ const messagePlaceholder = computed(() => {
   switch (draft.kind) {
     case 'tab_message':
       return 'Message to type into the terminal tab when the schedule fires'
+    case 'chat_turn':
+      return 'Message to send in this Chat when the schedule fires'
     case 'new_session':
       return 'Message to send to the new session when the schedule fires'
     case 'hub_task':
@@ -685,7 +733,7 @@ const canSave = computed(() => {
     return false
   }
   if (!draft.message.trim()) return false
-  if (draft.kind === 'tab_message' && !draft.tab_id.trim()) return false
+  if ((draft.kind === 'chat_turn' || draft.kind === 'tab_message') && !draft.tab_id.trim()) return false
   if (draft.kind === 'new_session' && !draft.workspace_id) return false
   if (draft.kind === 'hub_task') {
     if (!draft.workspace_id) return false
@@ -704,7 +752,7 @@ function buildPayload(): ScheduledTaskCreate {
   else if (draft.scheduleType === 'cron') payload.cron = draft.cron.trim()
   else payload.interval_seconds = draft.interval_seconds
 
-  if (draft.kind === 'tab_message') {
+  if (draft.kind === 'chat_turn' || draft.kind === 'tab_message') {
     payload.tab_id = draft.tab_id.trim()
   } else {
     payload.workspace_id = draft.workspace_id
@@ -882,6 +930,11 @@ async function save() {
   color: var(--ch-color-accent);
 }
 
+.st-kind--chat_turn {
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+}
+
 .st-kind--new_session {
   background: var(--ch-color-success-bg, rgba(74, 222, 128, 0.14));
   color: var(--ch-color-success, #4ade80);
@@ -917,11 +970,23 @@ async function save() {
   font-size: var(--ch-font-size-xs);
 }
 
-.st-status--ok {
+.st-status--ok,
+.st-status--completed {
   color: var(--ch-color-success, #4ade80);
 }
 
-.st-status--error {
+.st-status--queued,
+.st-status--waiting,
+.st-status--dispatching,
+.st-status--running {
+  color: var(--ch-color-accent);
+}
+
+.st-status--error,
+.st-status--failed,
+.st-status--skipped,
+.st-status--uncertain,
+.st-status--cancelled {
   color: var(--ch-color-warning, #fbbf24);
 }
 
