@@ -90,12 +90,13 @@ test('mode updates are scoped to the active stream and replace capabilities only
   assert.match(composable.slice(modeIndex, assignmentIndex), /currentSessionId !== sourceId/)
 })
 
-test('initial hydration uses bounded large pages instead of 200-event round trips', () => {
+test('initial hydration uses bounded compacted pages instead of replaying every raw delta', () => {
   assert.match(composable, /const HYDRATION_PAGE_LIMIT = 5_000/)
   assert.match(
     composable,
-    /events\?since_sequence=\$\{since\}&limit=\$\{HYDRATION_PAGE_LIMIT\}/,
+    /events\?since_sequence=\$\{since\}&limit=\$\{HYDRATION_PAGE_LIMIT\}&compact=true/,
   )
+  assert.match(composable, /sequenceBuffer\.reset\(page\.next_sequence\)/)
 })
 
 test('a remounted Chat restores cached history and reconciles from its cursor', () => {

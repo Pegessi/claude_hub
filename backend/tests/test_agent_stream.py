@@ -709,6 +709,102 @@ def test_store_read_since_pagination(store: AgentStreamStore):
     asyncio.run(run())
 
 
+def test_store_compacts_adjacent_history_deltas_and_keeps_raw_cursor(
+    store: AgentStreamStore,
+):
+    async def run() -> None:
+        first = _event(text="hello ")
+        second = _event(text="world")
+        completed = _event(text="").model_copy(
+            update={
+                "type": AgentStreamEventType.TURN_COMPLETED,
+                "payload": {"status": "completed"},
+            }
+        )
+        await store.append(first)
+        await store.append(second)
+        await store.append(completed)
+
+        page = await store.read_since(-1, limit=10, compact=True)
+
+        assert len(page.events) == 2
+        assert page.events[0].payload["text"] == "hello world"
+        assert page.events[0].payload["_history_chunk_count"] == 2
+        assert page.events[0].stream_sequence == 0
+        assert page.events[1].type == AgentStreamEventType.TURN_COMPLETED
+        assert page.next_sequence == 2
+        assert page.has_more is False
+
+    asyncio.run(run())
+
+
+def test_store_history_compaction_respects_message_and_snapshot_boundaries(
+    store: AgentStreamStore,
+):
+    async def run() -> None:
+        first = _event(text="a").model_copy(update={"message_id": "one"})
+        second = _event(text="b").model_copy(update={"message_id": "two"})
+        snapshot = _event(text="snapshot").model_copy(
+            update={"message_id": "two", "payload": {"text": "snapshot", "snapshot": True}}
+        )
+        await store.append(first)
+        await store.append(second)
+        await store.append(snapshot)
+
+        page = await store.read_since(-1, limit=10, compact=True)
+
+        assert [event.payload["text"] for event in page.events] == ["a", "b", "snapshot"]
+        assert page.next_sequence == 2
+
+    asyncio.run(run())
+
+
+def test_store_history_compaction_ignores_invalid_internal_chunk_metadata(
+    store: AgentStreamStore,
+):
+    async def run() -> None:
+        first = _event(text="a").model_copy(
+            update={"payload": {"text": "a", "_history_chunk_count": "invalid"}}
+        )
+        second = _event(text="b")
+        await store.append(first)
+        await store.append(second)
+
+        page = await store.read_since(-1, limit=10, compact=True)
+
+        assert page.events[0].payload["text"] == "ab"
+        assert page.events[0].payload["_history_chunk_count"] == 2
+
+    asyncio.run(run())
+
+
+def test_history_api_requests_compacted_store_page(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    session = _snapshot_session()
+    page = AgentStreamEventPage(events=[], next_sequence=17, has_more=False)
+    store = SimpleNamespace(read_since=AsyncMock(return_value=page))
+    manager = MagicMock()
+    manager.ensure_started = AsyncMock()
+    manager.hard_failed.return_value = False
+    manager.get_store.return_value = store
+    monkeypatch.setattr(
+        agent_stream_api,
+        "_capabilities_for",
+        AsyncMock(return_value=StreamCapabilities(structured=True)),
+    )
+
+    async def run() -> None:
+        result = await agent_stream_api._stream_events_for(session, manager, -1, 5000, compact=True)
+
+        assert result is page
+        store.read_since.assert_awaited_once_with(-1, 5000, compact=True)
+
+    asyncio.run(run())
+
+
 def test_store_sequential_pages_resume_from_cached_file_offset(
     store: AgentStreamStore,
     monkeypatch: pytest.MonkeyPatch,

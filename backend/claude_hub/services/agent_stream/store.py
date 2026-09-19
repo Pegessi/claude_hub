@@ -17,9 +17,60 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ...models import AgentStreamEvent, AgentStreamEventPage
+from ...models import AgentStreamEvent, AgentStreamEventPage, AgentStreamEventType
 
 _READ_INDEX_STRIDE = 256
+_COMPACTABLE_HISTORY_TYPES = frozenset(
+    {AgentStreamEventType.TEXT_DELTA, AgentStreamEventType.THINKING_DELTA}
+)
+_HISTORY_CHUNK_COUNT_KEY = "_history_chunk_count"
+
+
+def compact_history_events(events: List[AgentStreamEvent]) -> List[AgentStreamEvent]:
+    """Collapse adjacent historical text deltas without changing semantics.
+
+    Live delivery is already coalesced, but older logs created before that
+    optimization can contain thousands of tiny deltas.  Returning those rows
+    individually makes Chat cold-start pay for thousands of JSON objects and
+    reducer iterations even though adjacent rows render as one text part.
+
+    Keep the first event's identity and concatenate only the same fields used
+    by the live coalescer.  The page cursor remains the raw durable cursor, so
+    callers can resume live delivery without rewriting the append-only log.
+    """
+
+    def payload_text(event: AgentStreamEvent) -> str:
+        value = event.payload.get("text", "")
+        return value if isinstance(value, str) else ""
+
+    def history_chunk_count(event: AgentStreamEvent) -> int:
+        value = event.payload.get(_HISTORY_CHUNK_COUNT_KEY, 1)
+        return value if type(value) is int and value > 0 else 1
+
+    compacted: List[AgentStreamEvent] = []
+    for event in events:
+        previous = compacted[-1] if compacted else None
+        if (
+            previous is not None
+            and event.type in _COMPACTABLE_HISTORY_TYPES
+            and previous.type == event.type
+            and previous.turn_id == event.turn_id
+            and previous.message_id == event.message_id
+            and previous.run_epoch == event.run_epoch
+            and previous.payload.get("plan") == event.payload.get("plan")
+            and previous.payload.get("plan_kind") == event.payload.get("plan_kind")
+            and previous.payload.get("snapshot") is not True
+            and event.payload.get("snapshot") is not True
+        ):
+            payload = dict(previous.payload)
+            payload["text"] = payload_text(previous) + payload_text(event)
+            payload[_HISTORY_CHUNK_COUNT_KEY] = history_chunk_count(previous) + history_chunk_count(
+                event
+            )
+            compacted[-1] = previous.model_copy(update={"payload": payload})
+        else:
+            compacted.append(event)
+    return compacted
 
 
 def _state_root() -> Path:
@@ -169,7 +220,13 @@ class AgentStreamStore:
         if force or sequence % _READ_INDEX_STRIDE == 0:
             self._read_offsets[sequence] = offset
 
-    async def read_since(self, since_sequence: int = -1, limit: int = 500) -> AgentStreamEventPage:
+    async def read_since(
+        self,
+        since_sequence: int = -1,
+        limit: int = 500,
+        *,
+        compact: bool = False,
+    ) -> AgentStreamEventPage:
         """Return events with ``stream_sequence > since_sequence``.
 
         ``since_sequence=-1`` returns from the beginning.
@@ -219,7 +276,7 @@ class AgentStreamStore:
 
             await asyncio.to_thread(_read)
             return AgentStreamEventPage(
-                events=events,
+                events=compact_history_events(events) if compact else events,
                 next_sequence=next_seq,
                 has_more=has_more,
             )
