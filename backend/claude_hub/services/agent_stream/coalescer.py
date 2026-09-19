@@ -89,7 +89,7 @@ class AgentStreamCoalescer:
         The leading-edge flush is awaited so the first token of a turn is
         persisted and fanned out before ``handle`` returns.
         """
-        if event.type not in _COALESCABLE_TYPES:
+        if event.type not in _COALESCABLE_TYPES or event.payload.get("snapshot") is True:
             return False
 
         text = event.payload.get("text", "")
@@ -209,6 +209,10 @@ class AgentStreamCoalescer:
                 and prev.turn_id == event.turn_id
                 and prev.message_id == event.message_id
                 and prev.run_epoch == event.run_epoch
+                and prev.payload.get("plan") == event.payload.get("plan")
+                and prev.payload.get("plan_kind") == event.payload.get("plan_kind")
+                and not prev.payload.get("snapshot")
+                and not event.payload.get("snapshot")
             ):
                 merged_text = prev.payload.get("text", "") + event.payload.get("text", "")
                 merged_payload = dict(prev.payload)

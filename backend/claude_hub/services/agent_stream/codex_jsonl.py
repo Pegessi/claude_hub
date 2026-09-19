@@ -279,18 +279,52 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         elif method == "item/plan/delta":
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
-                # The plan is process, not the agent's answer to the user: it
-                # describes work it intends to do. It still renders as an
-                # assistant message (the UI shows plans as prose), but the flag
-                # keeps the Chat timeline from mistaking a plan for the turn's
-                # delivered answer — and, with folding on, from hiding the real
-                # answer inside the collapsed process.
                 events.append(
-                    ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": delta, "plan": True})
+                    ctx.event(
+                        AgentStreamEventType.TEXT_DELTA,
+                        {"text": delta, "plan": True, "plan_kind": "proposal"},
+                        message_id=self._plan_message_id(params.get("itemId"), ctx),
+                    )
+                )
+        elif method == "turn/plan/updated":
+            # This is the execution checklist, distinct from a proposed plan.
+            steps = params.get("plan")
+            if isinstance(steps, list):
+                lines = []
+                explanation = params.get("explanation")
+                if isinstance(explanation, str) and explanation.strip():
+                    lines.append(explanation.strip())
+                for step in steps:
+                    if not isinstance(step, dict) or not isinstance(step.get("step"), str):
+                        continue
+                    label = step["step"].strip()
+                    if not label:
+                        continue
+                    step_status = step.get("status")
+                    marker = "x" if step_status == "completed" else " "
+                    suffix = " (in progress)" if step_status == "inProgress" else ""
+                    lines.append(f"- [{marker}] {label}{suffix}")
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.TEXT_DELTA,
+                        {
+                            "text": "\n".join(lines),
+                            "plan": True,
+                            "plan_kind": "progress",
+                            "snapshot": True,
+                        },
+                        message_id=f"plan-progress:{ctx.turn_id or params.get('turnId', '')}",
+                    )
                 )
         elif method in _CODEX_QUESTION_METHODS:
             events.extend(self._normalize_question(params, ctx))
         return events
+
+    @staticmethod
+    def _plan_message_id(item_id: Any, ctx: NormalizeContext) -> str:
+        return (
+            f"plan:{item_id if isinstance(item_id, str) and item_id else ctx.turn_id or 'proposal'}"
+        )
 
     def _normalize_tool_item(
         self, item: Any, method: str, ctx: NormalizeContext
@@ -298,6 +332,24 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         if not isinstance(item, dict) or not isinstance(item.get("id"), str):
             return []
         kind = item.get("type")
+        if kind == "plan":
+            # The protocol explicitly says deltas need not match the final
+            # plan. Publish an authoritative replacement, including empty
+            # snapshots, instead of dropping it or appending it twice.
+            if method != "item/completed" or not isinstance(item.get("text"), str):
+                return []
+            return [
+                ctx.event(
+                    AgentStreamEventType.TEXT_DELTA,
+                    {
+                        "text": item["text"],
+                        "plan": True,
+                        "plan_kind": "proposal",
+                        "snapshot": True,
+                    },
+                    message_id=self._plan_message_id(item["id"], ctx),
+                )
+            ]
         name: str
         args: Dict[str, Any]
         result: Any
@@ -503,6 +555,67 @@ class TraexJsonlAdapter(CodexJsonlAdapter):
     # Terminal transcript structured surface is not wired (see docstring); only
     # the native app-server powers the structured Chat view.
     supports_transcript_discovery = False
+
+    def _normalize_notification(
+        self, method: str, params: Any, ctx: NormalizeContext
+    ) -> List[AgentStreamEvent]:
+        if isinstance(params, dict):
+            text = self._traex_status_text(method, params)
+            if text:
+                return [
+                    ctx.event(
+                        AgentStreamEventType.STATUS,
+                        {
+                            "text": text,
+                            "provider_status": method,
+                            "snapshot": True,
+                        },
+                        message_id=f"traex-status:{method}",
+                    )
+                ]
+        return super()._normalize_notification(method, params, ctx)
+
+    @staticmethod
+    def _traex_status_text(method: str, params: Dict[str, Any]) -> Optional[str]:
+        """Translate TraeX-only lifecycle notices into visible timeline text."""
+        provider_message = params.get("message")
+        message = provider_message.strip() if isinstance(provider_message, str) else ""
+        if method == "queue/status":
+            state = params.get("state")
+            if state == "queued":
+                position = params.get("position")
+                fallback = (
+                    f"Queued for model capacity (position {position})."
+                    if isinstance(position, int) and not isinstance(position, bool)
+                    else "Queued for model capacity."
+                )
+                return message or fallback
+            if state == "waiting":
+                return message or "Waiting for model capacity."
+            if state == "ready":
+                return message or "Model is ready; starting the response."
+            return message or "Model queue status updated."
+        if method == "model/loopDetectedRecovering":
+            attempt = params.get("attempt")
+            maximum = params.get("maxAttempts")
+            suffix = (
+                f" (attempt {attempt}/{maximum})"
+                if isinstance(attempt, int) and isinstance(maximum, int)
+                else ""
+            )
+            reason = params.get("reason")
+            detail = reason.strip() if isinstance(reason, str) else ""
+            punctuation = f": {detail}" if detail else "."
+            return message or f"Response loop detected; recovering{suffix}{punctuation}"
+        if method in {"model/rerouted", "model/fallback"}:
+            return message or (
+                "The request was rerouted to another model."
+                if method == "model/rerouted"
+                else "The requested model was unavailable; using a fallback."
+            )
+        if method == "warning":
+            return message or "TraeX reported a warning."
+        return None
 
     def discover_source(self, session: ManagedSession) -> Optional[Path]:
         return None

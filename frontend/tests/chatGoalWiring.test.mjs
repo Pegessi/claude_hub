@@ -44,6 +44,14 @@ test('active Goal guards manual history edits and start waits for an idle turn',
   assert.ok(pane.includes('goalEditReason'))
 })
 
+test('active Goal also blocks implementing a historical Plan turn', () => {
+  assert.ok(pane.includes('implementingPlanKey !== null || turnInFlight || goalComposerLocked'))
+  assert.match(
+    pane,
+    /async function implementPlan[\s\S]*if \(goalComposerLocked\.value\)/,
+  )
+})
+
 test('turn completion uses bounded version-aware Goal reconciliation', () => {
   assert.ok(pane.includes('GOAL_REFRESH_DELAYS_MS'))
   assert.ok(pane.includes('goalSnapshotVersion() !== baselineVersion'))

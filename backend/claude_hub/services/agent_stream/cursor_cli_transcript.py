@@ -239,7 +239,7 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         # file rows use ``role`` (``user``/``assistant``) or ``type:
         # turn_ended``. Dispatch on the native shape first.
         top_type = raw.get("type")
-        if top_type in ("system", "thinking", "assistant", "result"):
+        if top_type in ("system", "thinking", "assistant", "tool_call", "result"):
             return self._normalize_stream_json(raw, ctx)
 
         role = raw.get("role")
@@ -325,16 +325,24 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             args = {"input": args} if args is not None else {}
         call_id = block.get("id")
         call_id_str = call_id if isinstance(call_id, str) else None
-        events.append(
-            ctx.event(
-                AgentStreamEventType.TOOL_CALL_STARTED,
-                {"name": name, "args": args},
-                call_id=call_id_str,
+        state = self._get_turn_state(ctx)
+        if not call_id_str or call_id_str not in state.emitted_tool_call_ids:
+            if call_id_str:
+                state.emitted_tool_call_ids.add(call_id_str)
+            events.append(
+                ctx.event(
+                    AgentStreamEventType.TOOL_CALL_STARTED,
+                    {"name": name, "args": args},
+                    call_id=call_id_str,
+                )
             )
-        )
         if name == "AskQuestion":
-            questions = args.get("questions")
-            if isinstance(questions, list) and questions:
+            questions = self._normalize_questions(args.get("questions"))
+            if questions and (
+                not call_id_str or call_id_str not in state.emitted_approval_call_ids
+            ):
+                if call_id_str:
+                    state.emitted_approval_call_ids.add(call_id_str)
                 events.append(
                     ctx.event(
                         AgentStreamEventType.APPROVAL_REQUIRED,
@@ -348,6 +356,93 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                     )
                 )
         return events
+
+    @staticmethod
+    def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
+        """Convert Cursor protobuf camelCase and legacy tool input to card fields."""
+        if not isinstance(raw, list):
+            return []
+        questions = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            question_id, prompt = item.get("id"), item.get("prompt")
+            if not isinstance(question_id, str) or not question_id:
+                continue
+            if not isinstance(prompt, str) or not prompt:
+                continue
+            raw_options = item.get("options")
+            options = []
+            if isinstance(raw_options, list):
+                for option in raw_options:
+                    if not isinstance(option, dict):
+                        continue
+                    option_id, label = option.get("id"), option.get("label")
+                    if not isinstance(option_id, str) or not option_id:
+                        continue
+                    if not isinstance(label, str) or not label:
+                        continue
+                    normalized = {"id": option_id, "label": label}
+                    description = option.get("description")
+                    if isinstance(description, str) and description:
+                        normalized["description"] = description
+                    options.append(normalized)
+            if raw_options is not None and (
+                not isinstance(raw_options, list) or (raw_options and not options)
+            ):
+                continue
+            questions.append(
+                {
+                    "id": question_id,
+                    "prompt": prompt,
+                    "options": options,
+                    "allow_multiple": item.get("allowMultiple") is True
+                    or item.get("allow_multiple") is True,
+                }
+            )
+        return questions
+
+    def _normalize_stream_tool_call(
+        self, raw: Dict[str, Any], ctx: NormalizeContext
+    ) -> List[AgentStreamEvent]:
+        """Handle the top-level tool records emitted by current Cursor CLI.
+
+        Its protobuf JSON uses ``tool_call.askQuestionToolCall.args``; these
+        calls never appear in assistant ``content[].tool_use``. Completion
+        records may contain arguments missing from the initial announcement.
+        Headless rejection is a placeholder, so it must not resolve the card.
+        """
+        subtype, call_id = raw.get("subtype"), raw.get("call_id")
+        tool_call = raw.get("tool_call")
+        if subtype not in {"started", "completed"} or not isinstance(call_id, str):
+            return []
+        if not isinstance(tool_call, dict):
+            return []
+        for kind, tool in tool_call.items():
+            if not kind.endswith("ToolCall") or not isinstance(tool, dict):
+                continue
+            name = kind[0].upper() + kind[1 : -len("ToolCall")]
+            events = self._tool_use_events(
+                {"id": call_id, "name": name, "input": tool.get("args")}, ctx
+            )
+            if subtype == "completed":
+                result = tool.get("result")
+                failed = isinstance(result, dict) and any(
+                    key in result for key in ("error", "rejected", "failure")
+                )
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.TOOL_CALL_COMPLETED,
+                        {
+                            "name": name,
+                            "status": "failed" if failed else "completed",
+                            "result": result,
+                        },
+                        call_id=call_id,
+                    )
+                )
+            return events
+        return []
 
     def _normalize_assistant_content_blocks(
         self, content: List[Any], ctx: NormalizeContext, *, is_streaming_chunk: bool
@@ -417,6 +512,8 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         if top_type == "system":
             # Handled by the transport's maybe_capture_conversation_id.
             return events
+        if top_type == "tool_call":
+            return self._normalize_stream_tool_call(raw, ctx)
         if top_type == "thinking":
             if raw.get("subtype") == "delta":
                 text = raw.get("text")

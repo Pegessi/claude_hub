@@ -40,7 +40,7 @@ const HYDRATION_PAGE_LIMIT = 5_000
 
 export interface UseAgentStreamApi {
   capabilities: ShallowRef<StreamCapabilities | null>
-  events: Ref<AgentStreamEvent[]>
+  events: ShallowRef<AgentStreamEvent[]>
   connectionState: Ref<StreamConnectionState>
   errorMessage: Ref<string | null>
   /** Start (or restart) a managed-session or direct Chat-tab stream. */
@@ -87,7 +87,9 @@ export interface UseAgentStreamApi {
  */
 export function useAgentStream(): UseAgentStreamApi {
   const capabilities = shallowRef<StreamCapabilities | null>(null)
-  const events = ref<AgentStreamEvent[]>([])
+  // Batches replace the array; event payloads are immutable. Deep proxies
+  // make replaying a long transcript substantially more expensive.
+  const events = shallowRef<AgentStreamEvent[]>([])
   const connectionState = ref<StreamConnectionState>('idle')
   const errorMessage = ref<string | null>(null)
 
@@ -362,6 +364,9 @@ export function useAgentStream(): UseAgentStreamApi {
 
       if (stopped || !stateMachine.isCurrent(generationId)) return
 
+      // The activation gate may reveal immediately on live. Commit the final
+      // delta-only page before that transition, even with rAF suspended.
+      batcher.flushAndCancel()
       if (stateMachine.success(generationId)) {
         connectionState.value = 'live'
       }

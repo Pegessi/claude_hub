@@ -674,6 +674,7 @@ class SessionTailer:
             turn_started_payload: Dict[str, Any] = {
                 "summary": text if visible_text is None else visible_text,
                 "attachments": attachment_metas,
+                "mode": session.chat_mode.value,
             }
             if turn_metadata:
                 turn_started_payload["metadata"] = dict(turn_metadata)
