@@ -96,6 +96,27 @@ test('incremental reducer processes events in batches and accumulates correctly'
   assert.equal(turns[0].completed, true)
 })
 
+test('incremental reducer ignores silent control notifications after completion', () => {
+  const reducer = new IncrementalTimelineReducer()
+  const events = [
+    makeEvent(0, 'turn_started', { summary: 'go' }, { turn_id: 't1', agent_type: 'traex' }),
+    makeEvent(1, 'turn_completed', { status: 'completed' }, { turn_id: 't1', agent_type: 'traex' }),
+  ]
+  reducer.reduce(events)
+
+  const turns = reducer.reduce([
+    ...events,
+    makeEvent(2, 'status', {
+      provider_notification: 'thread/goal/cleared',
+      goal: { threadId: 'provider-thread' },
+    }, { turn_id: null, agent_type: 'traex' }),
+  ])
+
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0].completed, true)
+  assert.deepEqual(turns[0].statuses, [])
+})
+
 test('incremental reducer resets when event list shrinks', () => {
   const reducer = new IncrementalTimelineReducer()
 
