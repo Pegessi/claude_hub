@@ -2009,7 +2009,7 @@ def test_codex_adapter_question_multiselect_and_header_fallback():
 
 
 def test_codex_adapter_question_skips_invalid_entries():
-    """Questions missing an id, prompt, or options are skipped; an empty
+    """Questions missing an id/prompt or with malformed options are skipped; an empty
     question list yields no events."""
     from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
 
@@ -2021,7 +2021,7 @@ def test_codex_adapter_question_skips_invalid_entries():
             "questions": [
                 {"question": "no id", "options": [{"label": "x"}]},
                 {"id": "q2", "options": [{"label": "x"}]},  # no prompt/header
-                {"id": "q3", "question": "no options", "options": []},
+                {"id": "q3", "question": "malformed options", "options": [{}]},
                 {
                     "id": "q4",
                     "question": "valid",

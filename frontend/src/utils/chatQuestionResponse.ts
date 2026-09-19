@@ -1,12 +1,14 @@
 export interface QuestionOption {
   id: string
   label: string
+  description?: string
 }
 
 export interface StructuredQuestion {
   id: string
   prompt: string
   allowMultiple: boolean
+  isSecret?: boolean
   options: QuestionOption[]
 }
 
@@ -32,14 +34,17 @@ export function parseStructuredQuestions(raw: unknown): StructuredQuestion[] {
         const optId = typeof opt.id === 'string' ? opt.id.trim() : ''
         const label = typeof opt.label === 'string' ? opt.label.trim() : ''
         if (!optId || !label) continue
-        options.push({ id: optId, label })
+        const description = typeof opt.description === 'string' ? opt.description.trim() : ''
+        options.push({ id: optId, label, ...(description ? { description } : {}) })
       }
     }
-    if (options.length === 0) continue
+    // Modern providers can ask a free-text question without suggestions.
+    // Its prompt and ID are sufficient to render and route an answer.
     questions.push({
       id,
       prompt,
       allowMultiple: record.allow_multiple === true,
+      ...(record.is_secret === true ? { isSecret: true } : {}),
       options,
     })
   }
@@ -61,8 +66,8 @@ export function isQuestionAnswerComplete(
   questions: readonly StructuredQuestion[],
   answers: QuestionAnswerMap,
 ): boolean {
-  return questions.every((question) => {
+  return questions.length > 0 && questions.every((question) => {
     const selected = answers[question.id] ?? []
-    return selected.length > 0
+    return selected.some(answer => answer.trim().length > 0)
   })
 }

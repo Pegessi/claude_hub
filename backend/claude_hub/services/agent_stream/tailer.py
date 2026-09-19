@@ -545,7 +545,11 @@ class SessionTailer:
             # bytes, width, height) — never raw bytes or local paths.
             turn_started = ctx.event(
                 AgentStreamEventType.TURN_STARTED,
-                {"summary": text, "attachments": attachment_metas},
+                {
+                    "summary": text,
+                    "attachments": attachment_metas,
+                    "mode": session.chat_mode.value,
+                },
             )
             turn_started = redact_event(turn_started)
             try:

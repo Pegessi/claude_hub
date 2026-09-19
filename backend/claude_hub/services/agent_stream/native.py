@@ -270,17 +270,27 @@ def codex_normalize_questions(raw: Any) -> List[Dict[str, Any]]:
                 label = opt.get("label")
                 if not isinstance(label, str) or not label:
                     continue
-                options.append({"id": label, "label": label})
-        if not options:
+                option = {"id": label, "label": label}
+                description = opt.get("description")
+                if isinstance(description, str) and description:
+                    option["description"] = description
+                options.append(option)
+        # Modern app-server schemas explicitly allow null options for a
+        # free-text question. Only reject malformed supplied options; a
+        # missing, null, or empty list still produces an actionable card.
+        if raw_options is not None and (
+            not isinstance(raw_options, list) or (raw_options and not options)
+        ):
             continue
-        questions.append(
-            {
-                "id": question_id,
-                "prompt": prompt,
-                "options": options,
-                "allow_multiple": item.get("multiSelect") is True,
-            }
-        )
+        question: Dict[str, Any] = {
+            "id": question_id,
+            "prompt": prompt,
+            "options": options,
+            "allow_multiple": item.get("multiSelect") is True,
+        }
+        if item.get("isSecret") is True:
+            question["is_secret"] = True
+        questions.append(question)
     return questions
 
 
@@ -2191,13 +2201,12 @@ class CodexNativeSession(ProviderSession):
             params = record.get("params")
             if isinstance(params, dict):
                 # Auto-dismiss a request whose questions are ALL skipped by
-                # the adapter (e.g. every question has empty/invalid options):
+                # the adapter (e.g. every question lacks an id or prompt):
                 # no approval card is emitted, so nothing can answer this
                 # blocking request and the turn would hang until Stop. Reply
                 # with the same empty-answers dismissal payload ``answer_pending_question``
                 # uses, and do NOT stash it (there is no card to resolve).
-                # Codex always sends actionable options in practice, so this
-                # is a robustness guard for degenerate input.
+                # A free-text question with null/empty options is actionable.
                 if not codex_normalize_questions(params.get("questions")):
                     await self._send_jsonrpc_response(req_id, result={"answers": {}})
                     return

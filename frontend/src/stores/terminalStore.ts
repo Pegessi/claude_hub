@@ -11,11 +11,14 @@ import type {
   StoreNotification,
   NotificationType,
 } from '@/types'
-import { groupChatsByCwd } from '@/utils/chatGroups'
+import { groupChatsByCwd, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
 
 const API_BASE = '/api'
 const STORAGE_KEY_LAYOUT = 'claude_hub_layout_type'
 const STORAGE_KEY_SIDEBAR = 'claude_hub_sidebar_collapsed'
+// Browser + origin scoped, like the sidebar/layout preferences. Store IDs only;
+// archived pins stay dormant and reappear if that session is restored.
+const STORAGE_KEY_PINNED_CHATS = 'claude_hub_pinned_chat_ids'
 const STATUS_POLL_INTERVAL_MS = 5000
 
 function generatePaneId(): string {
@@ -104,6 +107,26 @@ export const useTerminalStore = defineStore('terminal', () => {
   const sidebarCollapsed = ref<boolean>(
     localStorage.getItem(STORAGE_KEY_SIDEBAR) === '1'
   )
+  const pinnedChatIds = ref<Set<string>>((() => {
+    try {
+      return parsePinnedChatIds(localStorage.getItem(STORAGE_KEY_PINNED_CHATS))
+    } catch {
+      return new Set<string>()
+    }
+  })())
+
+  function setChatPinned(tabId: string, pinned: boolean) {
+    if (!chatTabs.value.some(tab => tab.id === tabId)) return
+    const next = new Set(pinnedChatIds.value)
+    if (pinned) next.add(tabId)
+    else next.delete(tabId)
+    pinnedChatIds.value = next
+    try {
+      localStorage.setItem(STORAGE_KEY_PINNED_CHATS, JSON.stringify([...next]))
+    } catch {
+      pushNotification({ type: 'warning', message: 'Pin preference could not be saved in this browser.', autoDismissMs: 6000 })
+    }
+  }
   // Mobile slide-out session drawer visibility. Not persisted — it defaults to
   // closed on load. Set directly from components (TabBar opens, App closes).
   const mobileDrawerOpen = ref(false)
@@ -581,10 +604,17 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
-  async function saveTabOrder() {
+  let tabOrderSave: Promise<void> = Promise.resolve()
+
+  function saveTabOrder(): Promise<void> {
+    const tabIds = tabs.value.map(tab => tab.id)
+    // Serialize writes: a slower earlier drag must not overwrite a later one.
+    tabOrderSave = tabOrderSave.then(() => persistTabOrder(tabIds))
+    return tabOrderSave
+  }
+
+  async function persistTabOrder(tabIds: string[]) {
     try {
-      const tabIds = tabs.value.map(t => t.id)
-      console.log('Saving tab order:', tabIds)
       const response = await fetch(`${API_BASE}/tabs/order`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -595,8 +625,6 @@ export const useTerminalStore = defineStore('terminal', () => {
         console.error('Failed to save tab order:', response.status, errText)
         throw new Error(`Failed to save tab order: ${response.status}`)
       }
-      const result = await response.json()
-      console.log('Tab order saved:', result)
     } catch (e) {
       console.error('Error saving tab order:', e)
       // (F5) Re-enabled — use pushNotification so transient tab-order save
@@ -623,12 +651,24 @@ export const useTerminalStore = defineStore('terminal', () => {
     saveTabOrder()
   }
 
+  function reorderTabById(sourceId: string, targetId: string, position: 'before' | 'after') {
+    const source = manualTabs.value.find(tab => tab.id === sourceId)
+    const target = manualTabs.value.find(tab => tab.id === targetId)
+    if (!source || !target) return
+    const next = moveTabById(tabs.value, sourceId, targetId, position)
+    if (next === tabs.value) return
+    tabs.value = next
+    void saveTabOrder()
+  }
+
   return {
     tabs,
     manualTabs,
     managedTabs,
     chatTabs,
     chatTabsByCwd,
+    pinnedChatIds,
+    setChatPinned,
     agentStatuses,
     activeTabId,
     activeTab,
@@ -659,6 +699,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     switchEnv,
     setActiveTab,
     reorderTabs,
+    reorderTabById,
     setLayout,
     setActivePane,
     assignTabToPane,
