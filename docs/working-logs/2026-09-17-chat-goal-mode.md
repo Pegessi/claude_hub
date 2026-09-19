@@ -20,15 +20,15 @@ both schedulers for one Goal; provider names are not used as frontend policy.
 - A Chat thread has at most one unfinished Goal.
 - The objective is explicit user input and cannot be silently narrowed by the
   model. Starting a Goal is never inferred from an ordinary message.
-- A token budget is optional and is only set when the user supplies it. Usage is
-  labelled `exact`, `estimated`, or `unavailable`; an estimate is never shown as
-  exact. A server-side turn cap remains available even when token usage is not.
+- Goal setup asks only for an objective. As of 2026-09-19, Hub applies no token
+  budget or turn-count limit. Provider accounting remains internal with quality
+  `exact`, `estimated`, or `unavailable`; provider quotas and charges still apply.
 - `Stop` continues to mean stop the current response. `Pause Goal` prevents the
   next continuation and safely stops the current Goal turn. `Clear Goal` ends
   the contract without deleting conversation history.
 - A normal turn ending does not complete a Goal. Completion, blocking, and
   pausing require an explicit structured Goal signal or an authoritative
-  provider Goal notification. Budget exhaustion is its own state.
+  provider Goal notification. Protocol/transport errors still fail closed.
 - Goal activity continues without a browser subscriber and survives tab changes
   and backend restart. Recovery never blindly duplicates an uncertain dispatch.
 - Goal mode does not grant new filesystem, network, merge, push, deletion, or
@@ -42,7 +42,6 @@ The public states mirror Codex where the semantics are portable:
 ```text
 active -> paused -> active
        -> blocked -> active
-       -> budget_limited
        -> complete
        -> cancelled
        -> failed
@@ -98,11 +97,14 @@ resolve it before another dispatch is allowed.
 
 ## UI
 
-Goal is a separate composer control beside the Agent/Plan picker. Creation asks
-for an objective and optional token budget. An active Goal renders a compact
-status bar between the timeline and composer with objective, state, elapsed
-time, usage quality, budget, and the currently valid action. Expanded details
-show the complete objective, blocker, turn count, and timestamps.
+See [2026-09-19 composer simplification](2026-09-19-goal-composer-menu.md) for
+the objective-only controls and migration away from execution limits.
+
+The composer plus menu contains Add attachment and Set a Goal beside the
+Agent/Plan picker. Creation asks only for the objective, with tips on verification,
+pausing, and provider usage. An active Goal renders a compact status bar between
+the timeline and composer with objective, state, and the currently valid action.
+Expanded details show the complete objective, checkpoint, blocker, and timestamps.
 
 The active conversation exposes compact Goal state immediately above the
 composer. Status is always conveyed by text as well as color. Cross-tab Goal
@@ -125,7 +127,8 @@ and fixed provider assignments are not.
 
 ## Validation focus
 
-- Pure lifecycle and budget policy tests, including stale completion after pause.
+- Pure lifecycle tests, including stale completion after pause and uninterrupted
+  continuation beyond former limits.
 - Persistence and idempotency tests around dispatch intent and restart recovery.
 - Claude/Cursor one-shot and Codex/TraeX persistent transport fixtures.
 - UI policy, keyboard/focus, 375 px layout, and Goal/provider-mode independence.

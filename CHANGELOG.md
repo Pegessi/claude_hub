@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### feat: simplify Chat Goal setup and remove execution limits
+
+- Replace the standalone Goal and attachment buttons with a compact plus menu:
+  Add attachment / Set a Goal, with keyboard navigation and mobile touch targets.
+- Goal setup now asks only for the outcome and shows short usage tips. Remove
+  token budgets, the default 20-turn limit, and the 100-turn ceiling from both
+  the UI and scheduler; pause, completion, input requests, and error guards remain.
+- Migrate older budget-limited Goals to explicitly resumable paused state,
+  preserve create retries, and bound recent turn IDs without limiting execution.
+
 ### feat: improve Chat navigation, long-history loading, and provider prompts
 
 - Chat sessions keep the server-defined order, can be dragged or moved with

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from ...models.goal_run import (
     GOAL_CHECKPOINT_HISTORY_LIMIT,
+    GOAL_RECENT_TURN_IDS_LIMIT,
     GoalCheckpoint,
     GoalDispatchState,
     GoalRun,
@@ -21,7 +22,7 @@ from ...models.goal_run import (
     GoalUsageQuality,
     utc_now,
 )
-from .policy import GoalPolicyError, can_continue, ensure_unfinished
+from .policy import GoalPolicyError, ensure_unfinished
 from .store import GoalRunStore
 
 DispatchCallback = Callable[[GoalRun, str], Awaitable[str | None] | str | None]
@@ -129,8 +130,6 @@ class GoalRunController:
             GoalRun(
                 tab_id=tab_id,
                 objective=request.objective,
-                token_budget=request.token_budget,
-                max_turns=request.max_turns,
             ),
             request.client_request_id,
         )
@@ -264,11 +263,6 @@ class GoalRunController:
 
         def apply(goal: GoalRun) -> None:
             ensure_unfinished(goal)
-            allowed, reason = can_continue(goal)
-            if not allowed:
-                goal.status = GoalRunStatus.BUDGET_LIMITED
-                goal.status_message = reason
-                raise GoalPolicyError(reason or "goal cannot continue")
             goal.status = GoalRunStatus.ACTIVE
             goal.paused_at = None
             goal.status_message = None
@@ -319,23 +313,6 @@ class GoalRunController:
 
         return self._mutate_once(goal_id, client_request_id, "clear", apply)
 
-    def update_budget(
-        self, goal_id: str, client_request_id: str, token_budget: int | None
-    ) -> GoalRun:
-        def apply(goal: GoalRun) -> None:
-            ensure_unfinished(goal)
-            goal.token_budget = token_budget
-            allowed, reason = can_continue(goal)
-            if not allowed and goal.dispatch_state == GoalDispatchState.IDLE:
-                goal.status = GoalRunStatus.BUDGET_LIMITED
-                goal.status_message = reason
-            elif goal.status == GoalRunStatus.BUDGET_LIMITED:
-                goal.status = GoalRunStatus.PAUSED
-                goal.status_message = None
-
-        fingerprint = f"update_budget:{token_budget!r}"
-        return self._mutate_once(goal_id, client_request_id, fingerprint, apply)
-
     @staticmethod
     def _usage(usage: GoalTurnUsage | dict[str, Any] | None) -> GoalTurnUsage:
         if usage is None:
@@ -385,6 +362,9 @@ class GoalRunController:
             return goal
 
         goal.completed_turn_ids.append(turn_id)
+        # Keep recent IDs for UI reconciliation without growing the snapshot
+        # forever. Older callbacks are still rejected by current_turn_id above.
+        goal.completed_turn_ids = goal.completed_turn_ids[-GOAL_RECENT_TURN_IDS_LIMIT:]
         goal.turns_completed += 1
         goal.current_turn_id = None
         goal.dispatch_state = GoalDispatchState.IDLE
@@ -450,12 +430,6 @@ class GoalRunController:
             goal.status = GoalRunStatus.BLOCKED
             return self.store.put(goal)
 
-        allowed, reason = can_continue(goal)
-        if not allowed:
-            goal.status = GoalRunStatus.BUDGET_LIMITED
-            goal.status_message = reason
-            return self.store.put(goal)
-
         if self.dispatch is None:
             goal.status = GoalRunStatus.PAUSED
             goal.status_message = "automatic continuation is not connected"
@@ -480,11 +454,6 @@ class GoalRunController:
             return goal
         if goal.dispatch_state != GoalDispatchState.IDLE:
             return goal
-        allowed, reason = can_continue(goal)
-        if not allowed:
-            goal.status = GoalRunStatus.BUDGET_LIMITED
-            goal.status_message = reason
-            return self.store.put(goal)
         if self.dispatch is None:
             goal.status = GoalRunStatus.PAUSED
             goal.status_message = "automatic continuation is not connected"

@@ -40,8 +40,18 @@ test('Goal hydration cannot invalidate a mutation busy state', () => {
 })
 
 test('active Goal guards manual history edits and start waits for an idle turn', () => {
-  assert.ok(pane.includes('!isGoalHydrated || Boolean(goalError) || isGoalHydrating || isGoalMutating || turnInFlight'))
+  assert.ok(pane.includes(':goal-disabled-reason="goalSetupDisabledReason"'))
+  assert.ok(pane.includes('!isGoalHydrated.value || isGoalHydrating.value'))
+  assert.ok(pane.includes('if (modeInteractionLocked.value || isUpdatingMode.value'))
   assert.ok(pane.includes('goalEditReason'))
+})
+
+test('Goal setup and status have no budget or turn-limit controls', () => {
+  const dialog = readFileSync(new URL('../src/components/GoalSetupDialog.vue', import.meta.url), 'utf8')
+  assert.doesNotMatch(dialog + statusBar + composable, /token_budget|max_turns|updateBudget|budgetDraft/)
+  assert.ok(dialog.includes("emit('submit', { objective: trimmed })"))
+  assert.match(pane, /<ComposerAddMenu/)
+  assert.doesNotMatch(pane, /composer-goal-btn|composer-attach-btn/)
 })
 
 test('active Goal also blocks implementing a historical Plan turn', () => {

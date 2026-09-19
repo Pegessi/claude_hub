@@ -580,7 +580,6 @@
       @resume="resumeGoal"
       @complete="completeGoal"
       @clear="clearGoal"
-      @budget="updateGoalBudget"
     />
 
     <!-- Composer -->
@@ -668,26 +667,14 @@
             @paste="handlePaste"
           />
           <div class="composer-tools">
-            <button
-              v-if="!goal && capabilities?.supports_goals"
-              type="button"
-              class="composer-goal-btn"
-              :disabled="!isGoalHydrated || Boolean(goalError) || isGoalHydrating || isGoalMutating || turnInFlight"
-              :title="turnInFlight ? 'Wait for the current turn to finish' : 'Start a persistent Chat Goal'"
-              @click="isGoalSetupOpen = true"
-            >
-              {{ isGoalHydrating ? 'Goal…' : 'Goal' }}
-            </button>
-            <button
-              type="button"
-              class="composer-attach-btn"
-              aria-label="Attach image"
-              :title="supportsImages ? 'Attach image' : 'This chat does not support image attachments'"
-              :disabled="!supportsImages || isSending || isPreparingAttachments || goalComposerLocked"
-              @click="triggerFilePicker"
-            >
-              <span aria-hidden="true">📎</span>
-            </button>
+            <ComposerAddMenu
+              v-model:open="isAddMenuOpen"
+              :show-goal="!goal && Boolean(capabilities?.supports_goals)"
+              :attachment-disabled-reason="attachmentDisabledReason"
+              :goal-disabled-reason="goalSetupDisabledReason"
+              @attachment="triggerFilePicker"
+              @goal="isGoalSetupOpen = true"
+            />
             <input
               ref="fileInputEl"
               type="file"
@@ -964,6 +951,7 @@ import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 import { useTerminalStore } from '@/stores/terminalStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
+import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
@@ -985,9 +973,9 @@ const {
   resume: resumeGoal,
   complete: completeGoal,
   clear: clearGoal,
-  updateBudget: updateGoalBudget,
 } = useChatGoal(toRef(props, 'tabId'))
 const isGoalSetupOpen = ref(false)
+const isAddMenuOpen = ref(false)
 const goalPlanReason = computed(() => goalPlanLockReason(goal.value))
 const goalEditReason = computed(() => goal.value && (!isGoalTerminal(goal.value.status) || goalBlocksPlan(goal.value))
   ? 'Finish or clear the Goal before editing history'
@@ -997,7 +985,11 @@ const goalComposerReason = computed(() => goalComposerLocked.value
   ? 'Pause or complete the active Goal before sending messages'
   : null)
 
-async function startGoal(input: { objective: string; token_budget?: number; max_turns?: number }) {
+async function startGoal(input: { objective: string }) {
+  if (goalSetupDisabledReason.value) {
+    goalError.value = goalSetupDisabledReason.value
+    return
+  }
   if (await createGoal(input)) isGoalSetupOpen.value = false
 }
 
@@ -1514,6 +1506,8 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
+  isAddMenuOpen.value = false
+  isGoalSetupOpen.value = false
   goalRefreshEpoch++
   timelineDisposed = true
   timelineVisit++
@@ -1667,6 +1661,30 @@ const canSend = computed(() => connectionState.value === 'live' &&
   (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
+const attachmentDisabledReason = computed(() => {
+  if (!supportsImages.value) return 'This chat does not support image attachments'
+  if (goalComposerLocked.value) return goalComposerReason.value
+  if (isSending.value || isPreparingAttachments.value) return 'Wait for the current upload or send to finish'
+  return null
+})
+const goalSetupDisabledReason = computed(() => {
+  if (goal.value) return 'Clear the current Goal before starting another'
+  if (!capabilities.value?.supports_goals) return 'Goals are unavailable for this chat'
+  if (!isGoalHydrated.value || isGoalHydrating.value) return 'Loading Goal status…'
+  if (goalError.value && !isGoalSetupOpen.value) return 'Reload Goal status before starting a Goal'
+  if (isGoalMutating.value) return 'Updating Goal…'
+  if (connectionState.value !== 'live') return 'Wait for Chat to reconnect'
+  if (modeInteractionLocked.value || isUpdatingMode.value || isUpdatingModel.value || isUpdatingReasoningEffort.value) return 'Wait for the current turn or settings change to finish'
+  if (currentModeId.value === 'plan') return 'Switch to Agent mode before setting a Goal'
+  return null
+})
+
+watch(isAddMenuOpen, open => {
+  if (open) { closeModeMenu(false); closeModelMenu(false) }
+})
+watch([isModeMenuOpen, isModelMenuOpen], ([mode, model]) => {
+  if (mode || model) isAddMenuOpen.value = false
+})
 
 function closeModeMenu(restoreFocus: boolean) {
   if (!isModeMenuOpen.value) return
@@ -1722,7 +1740,7 @@ watch([modeInteractionLocked, isUpdatingModel], ([locked, updating]) => {
 })
 
 function triggerFilePicker() {
-  if (isSending.value) return
+  if (attachmentDisabledReason.value) return
   fileInputEl.value?.click()
 }
 
@@ -3159,34 +3177,6 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-.composer-attach-btn {
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-sm);
-  cursor: pointer;
-  color: var(--ch-color-text-muted);
-  flex-shrink: 0;
-}
-
-.composer-attach-btn:hover {
-  background-color: var(--ch-color-surface-control-hover);
-}
-
-.composer-attach-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.composer-attach-btn:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 1px;
-}
-
 .composer-file-input {
   display: none;
 }
@@ -4108,10 +4098,6 @@ onUnmounted(() => {
   box-shadow: none;
 }
 
-.composer-attach-btn {
-  border-color: transparent;
-}
-
 .composer-send-btn {
   height: 34px;
   border-radius: var(--ch-radius-sm);
@@ -4141,14 +4127,9 @@ onUnmounted(() => {
     gap: 2px;
   }
 
-  .composer-attach-btn,
   .composer-mode-trigger {
     min-height: 44px;
     height: 44px;
-  }
-
-  .composer-attach-btn {
-    width: 44px;
   }
 
   .composer-mode-trigger {

@@ -89,17 +89,18 @@ test('changing tabs isolates a pending mutation and loads the new Goal', async t
   assert.equal(state.goal.value.id, 'goal-2')
 })
 
-test('budget edits preserve explicit no-limit and use the server result', async t => {
+test('Goal creation sends only an objective and idempotency key', async t => {
   const state = useChatGoal(ref('tab-1'))
   t.after(state.dispose)
-  t.mock.method(globalThis, 'fetch', async () => response(snapshot({ status: 'budget_limited' })))
-  await state.hydrate()
-  globalThis.fetch = async (url, options) => {
-    assert.equal(url, '/api/goals/goal-1/budget')
-    assert.equal(options.method, 'PATCH')
-    assert.equal(JSON.parse(options.body).token_budget, null)
-    return response(snapshot({ status: 'paused', dispatch_state: 'idle', token_budget: null }))
-  }
-  assert.equal(await state.updateBudget(null), true)
-  assert.equal(state.goal.value.status, 'paused')
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(url, '/api/tabs/tab-1/goal')
+    assert.equal(options.method, 'POST')
+    const body = JSON.parse(options.body)
+    assert.deepEqual(Object.keys(body).sort(), ['client_request_id', 'objective'])
+    assert.equal(body.objective, 'Ship the feature')
+    assert.ok(body.client_request_id)
+    return response(snapshot())
+  })
+  assert.equal(await state.create({ objective: 'Ship the feature' }), true)
+  assert.equal(state.goal.value.status, 'active')
 })
