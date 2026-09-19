@@ -129,6 +129,11 @@ function payloadRecord(event: AgentStreamEvent, key: string): Record<string, unk
   return value && typeof value === 'object' ? value as Record<string, unknown> : {}
 }
 
+function statusText(event: AgentStreamEvent): string {
+  return payloadString(event, 'text') || payloadString(event, 'message') ||
+    payloadString(event, 'status')
+}
+
 function createTurn(key: string, turnId: string | null): TimelineTurn {
   return {
     key,
@@ -252,6 +257,14 @@ function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn
  *  duplicate tool) leave the revision unchanged so ``v-memo`` can skip
  *  re-rendering the turn. */
 function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
+  // Provider control-plane notifications (for example
+  // ``thread/goal/cleared``) intentionally carry structured metadata without
+  // user-visible text or a turn id. They are persisted for reconciliation,
+  // but are not transcript rows. Resolving them as ordinary status events
+  // would create a new, never-completed legacy turn and permanently lock the
+  // composer after the real turn had already completed.
+  if (event.type === 'status' && !statusText(event)) return
+
   const turn = resolveTurn(state, event)
   const toolMapKey = turn.turnId ?? turn.key
   let toolMap = state.toolsByTurn.get(toolMapKey)
@@ -493,8 +506,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       break
     }
     case 'status': {
-      const text = payloadString(event, 'text') || payloadString(event, 'message') ||
-        payloadString(event, 'status') || 'status update'
+      const text = statusText(event)
       if (event.payload.snapshot === true && event.message_id) {
         const existing = turn.parts.find(part =>
           part.kind === 'status' && part.messageId === event.message_id,

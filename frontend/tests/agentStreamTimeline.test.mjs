@@ -238,6 +238,36 @@ test('provider status snapshots update in place instead of flooding the timeline
   )
 })
 
+test('silent provider control notifications do not create an unfinished turn', () => {
+  const turns = groupEventsIntoTurns([
+    makeEvent(0, 'turn_started', { summary: 'review my workflow' }, {
+      turn_id: 'turn-complete',
+      agent_type: 'traex',
+    }),
+    makeEvent(1, 'text_delta', { text: 'finished answer' }, {
+      turn_id: 'turn-complete',
+      agent_type: 'traex',
+    }),
+    makeEvent(2, 'turn_completed', { status: 'completed' }, {
+      turn_id: 'turn-complete',
+      agent_type: 'traex',
+    }),
+    makeEvent(3, 'status', {
+      provider_notification: 'thread/goal/cleared',
+      goal: { threadId: 'provider-thread' },
+    }, { turn_id: null, agent_type: 'traex' }),
+    makeEvent(4, 'status', {
+      provider_notification: 'thread/goal/cleared',
+      goal: { threadId: 'provider-thread' },
+    }, { turn_id: null, agent_type: 'traex' }),
+  ])
+
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0].turnId, 'turn-complete')
+  assert.equal(turns[0].completed, true)
+  assert.deepEqual(turns[0].statuses, [])
+})
+
 test('orphan tool_call_completed (no matching start) renders as standalone tool', () => {
   const events = [
     makeEvent(1, 'turn_started', { summary: 'go' }),
