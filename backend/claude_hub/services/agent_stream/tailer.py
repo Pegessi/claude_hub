@@ -90,37 +90,54 @@ class EditResendTurnInFlightError(RuntimeError):
 
 POLL_INTERVAL_S = 1.0
 IDLE_TTL_S = 300.0
-# Hard safety cap on a single native turn's wall-clock duration. The idle-reap
-# never cancels a healthy in-flight turn (see ``_run_native``), but a genuinely
-# hung turn must not keep the tailer alive forever. This cap is intentionally
-# generous: it fires on in-flight duration, never on subscriber presence, so it
-# cannot interrupt a healthy turn that was merely backgrounded on mobile.
-MAX_TURN_DURATION_S = 3600.0
-# Stream inactivity timeout. The model API is streaming, so a healthy turn
-# emits events continuously; if no event arrives for this long during an
-# in-flight turn, the stream is dead (e.g. the model backend stopped
-# responding). This is the primary hang check — it fires on inactivity, so
-# it catches a stuck turn far faster than MAX_TURN_DURATION_S (a backstop on
-# total turn duration). Uniform on purpose: no tool-state tracking.
+# Stream inactivity timeout. The model API is streaming while the agent is
+# reasoning or generating text, so a healthy model phase emits events
+# continuously. If no provider record arrives for this long and the turn is
+# neither running a tool nor waiting for an approval answer, the stream is
+# dead (e.g. the model backend stopped responding). There is deliberately no
+# fixed cap on total turn duration: a legitimate review or test run can stream
+# actively for much longer than an hour.
 STREAM_INACTIVITY_TIMEOUT_S = 600.0
+# Grace between a Goal turn's trailing terminal signal and the provider's
+# completion record. One-shot CLIs (Claude/Cursor) can have their stdout held
+# open by a lingering child after the final assistant text, so the result
+# record sometimes never arrives even though the model's output is complete.
+# Once the Goal envelope has fully arrived, wait this long for the provider
+# record before synthesizing a completed turn rather than reaping the turn as
+# silent 10 minutes later.
+GOAL_TERMINAL_GRACE_S = 60.0
 DISCOVERY_GRACE_S = 30.0
 SUBSCRIBER_QUEUE_MAX = 2000
 _STOP_JOIN_TIMEOUT_S = 5.0
 _RUNTIME_INTERRUPTED_MESSAGE = (
     "Turn interrupted because its backend runtime was no longer available."
 )
-# Distinct from the runtime-loss interruption: the runtime is healthy here, the
-# turn itself is stuck past the hard cap. Surfaced so the user knows why a
-# long-running turn was stopped rather than seeing an immortal spinner.
-_HUNG_TURN_MESSAGE = "Turn stopped after exceeding the maximum allowed duration."
-# Distinct from the duration cap: the stream went silent (no events for
-# STREAM_INACTIVITY_TIMEOUT_S), the primary signal that the model backend
-# stopped responding mid-turn.
+# A turn went silent while the model itself was expected to stream. A running
+# tool or an open approval card suppresses this timeout because both are
+# legitimate external waits that can produce no model events for a long time.
 _INACTIVITY_TIMEOUT_MESSAGE = "Turn stopped after the stream went silent."
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
 PostPersistObserver = Callable[[AgentStreamEvent], Awaitable[None]]
+
+# Mirrors the Goal controller's terminal signal: a turn whose raw assistant
+# text ends with a complete ``goal-status`` block has produced the model-side
+# end of turn even if the provider never follows with a completion record.
+# Keep this aligned with the controller's trailing-signal contract: the same
+# raw text is handed to the Goal observer on a normal completion, so synthesis
+# must not accept an envelope the controller would itself reject.
+_GOAL_STATUS_TERMINAL_RE = re.compile(
+    r'<goal-status\s+state=["\'](?:continue|complete|blocked|needs_input)["\']\s*>'
+    r".*?</goal-status>\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# Only scan the bounded tail of accumulated assistant text; the terminal signal
+# is required to be the trailing block of the turn. This must stay equal to the
+# Goal controller's own protocol window
+# (``_MAX_CHECKPOINT_JSON_CHARS + 4096`` in goal_run/controller.py), so the
+# tailer never recognizes an envelope that the controller cannot later see.
+_GOAL_TAIL_SCAN_CHARS = 64 * 1024 + 4096
 
 
 class _GoalProtocolSanitizer:
@@ -362,14 +379,30 @@ class SessionTailer:
         self._subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
         self._last_subscriber_at = time.monotonic()
         # Wall-clock stamp of when the current in-flight turn was first
-        # observed active; ``None`` when no turn is in flight. Drives the
-        # hung-turn safety cap in ``_run_native`` (independent of subscribers).
+        # observed active; ``None`` when no turn is in flight. Used to clear
+        # per-turn watchdog state after a turn finishes.
         self._turn_in_flight_since: Optional[float] = None
-        # Wall-clock stamp of the last accepted event in the current turn.
-        # Initialized on turn start and updated on every accepted record;
-        # ``None`` when no turn is in flight. Drives the stream inactivity
-        # timeout in ``_run_native``.
+        # Wall-clock stamp of the last accepted provider record in the current
+        # turn. Initialized on turn start and updated on every accepted record;
+        # ``None`` when no turn is in flight. Drives the model-stream
+        # inactivity timeout in ``_run_native``.
         self._last_event_at: Optional[float] = None
+        # Tool calls and approval questions are external waits: the model is
+        # not expected to stream while they are outstanding. Track stable
+        # provider call ids so a long shell command or unanswered blocking
+        # question is not mistaken for a dead model stream. Durable approval
+        # cards can outlive their turn (Claude/Cursor follow-up answers), so
+        # ``_blocking_approval_call_ids`` tracks only cards blocking the
+        # current provider turn while ``_pending_approvals`` retains answer
+        # routing for late responses.
+        self._active_tool_call_ids: Set[str] = set()
+        self._blocking_approval_call_ids: Set[str] = set()
+        self._waiting_for_model_capacity = False
+        # When the model's trailing Goal terminal envelope arrived, the stamp
+        # at which it first became complete. While set, the silence watchdog is
+        # suppressed; after ``GOAL_TERMINAL_GRACE_S`` without a provider
+        # completion record the tailer synthesizes a completed turn instead.
+        self._goal_terminal_at: Optional[float] = None
         self._hard_failed = False
         self._discovery_deadline: Optional[float] = None
         self._stopped = False
@@ -436,6 +469,15 @@ class SessionTailer:
         """Latest persisted native turn outcome, if the turn terminalized."""
 
         return self._native_terminal_status
+
+    def _reset_turn_watchdog_state(self) -> None:
+        """Clear per-turn output buffers and external-wait tracking."""
+        self._assistant_text = ""
+        self._visible_assistant_text = ""
+        self._active_tool_call_ids.clear()
+        self._blocking_approval_call_ids.clear()
+        self._waiting_for_model_capacity = False
+        self._goal_terminal_at = None
 
     def _terminalize_native_runtime(self, status: Any) -> None:
         if status == "completed":
@@ -653,8 +695,7 @@ class SessionTailer:
             #    the provider does anything. This guarantees the turn exists in
             #    the store and is fanned out to subscribers.
             self._active_turn_id = client_turn_id
-            self._assistant_text = ""
-            self._visible_assistant_text = ""
+            self._reset_turn_watchdog_state()
             self._goal_protocol_sanitizer = (
                 _GoalProtocolSanitizer()
                 if turn_metadata and turn_metadata.get("protocol") == "goal-continuation-v1"
@@ -814,25 +855,153 @@ class SessionTailer:
         self._terminalize_native_runtime(status)
         return completed
 
-    def _turn_exceeds_hard_cap(self) -> bool:
-        """True if the active turn has run longer than ``MAX_TURN_DURATION_S``.
+    def _waiting_for_external_activity(self) -> bool:
+        """True while the model is legitimately blocked on a tool or question.
 
-        Independent of subscriber presence, so it can never fire on a healthy
-        turn that was merely backgrounded — only on a genuinely hung turn.
+        Those waits are not model-stream gaps: a test suite, shell command,
+        subagent, or approval answer can take far longer than the streaming
+        timeout without producing model deltas.
         """
-        since = self._turn_in_flight_since
-        return since is not None and (time.monotonic() - since > MAX_TURN_DURATION_S)
+        return bool(
+            self._active_tool_call_ids
+            or self._blocking_approval_call_ids
+            or self._waiting_for_model_capacity
+        )
 
     def _stream_inactive(self) -> bool:
-        """True if no event has arrived for ``STREAM_INACTIVITY_TIMEOUT_S``.
+        """True if model output has been silent past the inactivity timeout.
 
-        The model API is streaming, so a healthy turn emits events
-        continuously; a gap longer than this means the stream is dead. This
-        is the primary hang check — it fires on inactivity, so it catches a
-        stuck turn far faster than the total-duration backstop.
+        Every accepted provider record refreshes the activity stamp, while
+        outstanding tool calls and blocking questions suppress the watchdog
+        entirely. A Goal turn whose terminal envelope already arrived is owned
+        by the shorter Goal-terminal grace instead. Total wall-clock duration
+        is intentionally not capped: an active agent can legitimately work for
+        more than an hour.
         """
+        if self._waiting_for_external_activity() or self._goal_terminal_at is not None:
+            return False
         last = self._last_event_at
         return last is not None and (time.monotonic() - last > STREAM_INACTIVITY_TIMEOUT_S)
+
+    def _note_assistant_text(self, transport: ProviderSession) -> None:
+        """Track a complete trailing Goal terminal signal in the raw text.
+
+        The signal lives in the raw (sanitizer-hidden) assistant text. Only
+        one-shot providers can finish their model output but never send a
+        result record because a lingering child holds stdout open; persistent
+        app-servers (Codex/TraeX) emit their own terminal completion, so they
+        must never synthesize one.
+
+        Re-evaluated on every delta: if the model emits an envelope and then
+        keeps writing (a protocol violation), the latch clears until the
+        signal is trailing again.
+        """
+        if self._goal_protocol_sanitizer is None or transport.eof_is_fatal:
+            return
+        tail = self._assistant_text[-_GOAL_TAIL_SCAN_CHARS:]
+        if "goal-status" not in tail:
+            return
+        if _GOAL_STATUS_TERMINAL_RE.search(tail):
+            if self._goal_terminal_at is None:
+                self._goal_terminal_at = time.monotonic()
+        else:
+            self._goal_terminal_at = None
+
+    def _goal_terminal_grace_expired(self) -> bool:
+        # Do not declare the turn finished while a tool or blocking question is
+        # still outstanding: a model may legitimately emit its envelope-shaped
+        # text and then keep acting, and the external wait is authoritative.
+        at = self._goal_terminal_at
+        if at is None or self._waiting_for_external_activity():
+            return False
+        return (time.monotonic() - at) > GOAL_TERMINAL_GRACE_S
+
+    async def _synthesize_goal_completion_locked(self, transport: ProviderSession) -> None:
+        """Complete a one-shot Goal turn whose provider result never arrived.
+
+        After the model's trailing ``goal-status`` envelope plus a grace period,
+        a one-shot CLI (Claude/Cursor) can still be alive only because a
+        lingering child holds stdout open. Treat the model output as the
+        authoritative completion: publish a completed turn so the Goal
+        controller parses the checkpoint and routes the Goal (continue / pause /
+        block / complete), then terminate the stale provider process. The
+        tailer loop stays alive; the next turn spawns a fresh one-shot.
+
+        Persistent transports (Codex/TraeX) never reach this: their app-server
+        emits its own terminal completion and is not safe to retire early.
+        """
+        turn_id = self._active_turn_id
+        if turn_id is None or self._goal_terminal_at is None or transport.eof_is_fatal:
+            return
+        session = self._session_getter()
+        if session is None:
+            raise RuntimeError("session no longer exists")
+        ctx = NormalizeContext(
+            session_id=self.session_id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            run_epoch=self._run_epoch,
+            turn_id=turn_id,
+        )
+        payload: Dict[str, Any] = {"status": "completed"}
+        if self._visible_assistant_text:
+            payload["assistant_text"] = self._visible_assistant_text
+        event = ctx.event(AgentStreamEventType.TURN_COMPLETED, payload)
+        observer_event = event.model_copy(
+            deep=True,
+            update={
+                "payload": {
+                    **event.payload,
+                    "_goal_protocol_text": self._assistant_text,
+                }
+            },
+        )
+        await self._publish(redact_event(event))
+        self._turn_completed_seen = True
+        self._terminalize_native_runtime("completed")
+        self._active_turn_id = None
+        self._active_tool_call_ids.clear()
+        self._blocking_approval_call_ids.clear()
+        self._waiting_for_model_capacity = False
+        self._goal_terminal_at = None
+        # Retire the one-shot reader generation and terminate the lingering
+        # process so stale records/EOF cannot be attributed to the next turn and
+        # spawned children do not hold ports indefinitely. The next
+        # send_message spawns a fresh process.
+        await transport.stop()
+        self._notify_post_persist(observer_event)
+        self._assistant_text = ""
+        self._visible_assistant_text = ""
+        self._goal_protocol_sanitizer = None
+
+    def _record_watchdog_activity(self, event: AgentStreamEvent) -> None:
+        """Track conditions that legitimately pause model streaming."""
+        if event.type in {AgentStreamEventType.TEXT_DELTA, AgentStreamEventType.THINKING_DELTA}:
+            self._waiting_for_model_capacity = False
+        call_id = event.call_id or (
+            event.payload.get("tool_call_id") if isinstance(event.payload, dict) else None
+        )
+        if not isinstance(call_id, str) or not call_id:
+            return
+        if event.type == AgentStreamEventType.TOOL_CALL_STARTED:
+            self._active_tool_call_ids.add(call_id)
+        elif event.type == AgentStreamEventType.TOOL_CALL_COMPLETED:
+            self._active_tool_call_ids.discard(call_id)
+
+    def _note_raw_provider_wait(self, record: Any) -> None:
+        """Track provider-level capacity queueing from a raw JSON-RPC record.
+
+        TraeX/Codex app-servers emit ``queue/status`` notifications while the
+        turn waits for model capacity; no model deltas arrive during that wait,
+        so it must not count as a dead stream. ``ready`` (and any later model
+        delta) clears the wait. This reads the raw record rather than adding an
+        internal field to the persisted, user-visible STATUS payload.
+        """
+        if not isinstance(record, dict) or record.get("method") != "queue/status":
+            return
+        params = record.get("params")
+        state = params.get("state") if isinstance(params, dict) else None
+        self._waiting_for_model_capacity = state in {"queued", "waiting"}
 
     async def _cancel_active_turn_locked(
         self,
@@ -861,9 +1030,14 @@ class SessionTailer:
         self._active_turn_id = None
         if turn_id is not None and publish_error is None:
             self._notify_post_persist(completed)
-        # A cancelled turn can no longer answer a pending card; drop stale
-        # tracking so it cannot be resolved against a later turn.
+        # A cancelled turn can no longer answer a pending card or own an
+        # outstanding tool wait; drop stale tracking so it cannot be resolved
+        # against a later turn.
         self._pending_approvals.clear()
+        self._active_tool_call_ids.clear()
+        self._blocking_approval_call_ids.clear()
+        self._waiting_for_model_capacity = False
+        self._goal_terminal_at = None
         if publish_error is not None:
             raise RuntimeError("turn stopped but its cancelled state could not be persisted") from (
                 publish_error
@@ -1073,45 +1247,38 @@ class SessionTailer:
             self._hard_failed = False
             _HARD_FAILED_SESSION_IDS.discard(self.session_id)
             self._last_error = None
-            # Track the current turn's wall-clock duration and last-activity
-            # time for the hung-turn safety caps below. ``turn_in_flight`` is
-            # the authoritative guard (released at TURN_COMPLETED), so this
-            # stamps the first tick on which a turn is observed active and
-            # clears on completion.
+            # Track the current turn's last-activity time for the stream
+            # inactivity watchdog. ``turn_in_flight`` is the authoritative
+            # guard (released at TURN_COMPLETED), so this stamps the first tick
+            # on which a turn is observed active and clears on completion.
             if transport.turn_in_flight:
                 if self._turn_in_flight_since is None:
-                    # Fresh turn: start both the duration and inactivity clocks.
                     self._turn_in_flight_since = time.monotonic()
                     self._last_event_at = time.monotonic()
             elif self._turn_in_flight_since is not None:
                 self._turn_in_flight_since = None
                 self._last_event_at = None
-            # Hung-turn safety cap: a turn stuck past MAX_TURN_DURATION_S is
-            # genuinely hung. This runs independent of subscriber presence on
-            # purpose — a session the user is actively watching must also be
-            # protected, not left to hang forever. Terminalize the turn and
-            # reap the subprocess so the tailer does not live indefinitely.
-            if transport.turn_in_flight and self._turn_exceeds_hard_cap():
+            # Goal terminal without a provider result record: the model already
+            # emitted its trailing goal-status envelope, but a one-shot CLI never
+            # followed with a completion record. After the grace period, finish
+            # the turn from the model output so the Goal controller can route it
+            # instead of cancelling it as silent ten minutes later.
+            if transport.turn_in_flight and self._goal_terminal_grace_expired():
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._turn_exceeds_hard_cap():
-                            await self._cancel_active_turn_locked(
-                                transport,
-                                error_message=_HUNG_TURN_MESSAGE,
-                            )
-                            await transport.stop()
+                        if transport.turn_in_flight and self._goal_terminal_grace_expired():
+                            await self._synthesize_goal_completion_locked(transport)
                 except Exception:
                     logger.exception(
-                        "native hung-turn reap failed for session %s",
+                        "native Goal completion synthesis failed for session %s",
                         self.session_id,
                     )
-                break
-            # Stream inactivity timeout: the model API is streaming, so a
-            # healthy turn emits events continuously. If no event arrives for
-            # STREAM_INACTIVITY_TIMEOUT_S, the stream is dead — terminalize
-            # the turn and reap the subprocess. This is the primary hang
-            # check: it fires on inactivity, so it catches a stuck turn far
-            # faster than the duration cap above.
+                continue
+            # Stream inactivity timeout: terminate only when the model itself
+            # was expected to produce output and the provider went silent.
+            # Outstanding tool calls and blocking approval questions are
+            # legitimate external waits, and active long-running turns have no
+            # absolute duration cap.
             if transport.turn_in_flight and self._stream_inactive():
                 try:
                     async with self._send_lock:
@@ -1193,6 +1360,24 @@ class SessionTailer:
                 # produce two terminal events for the same turn.
                 exit_error = transport.exit_error
                 failed: Optional[AgentStreamEvent] = None
+                if not self._turn_completed_seen and self._goal_terminal_at is not None:
+                    # One-shot exited before the Goal-terminal grace elapsed but
+                    # after the model emitted a complete, controller-valid
+                    # goal-status envelope, and it exited cleanly. This is the
+                    # same missing-result disease as a held-open stdout, just a
+                    # faster death: finish the turn as completed so the Goal
+                    # controller routes it instead of marking it failed. A
+                    # nonzero exit still falls through to the failure path.
+                    if exit_error is None:
+                        try:
+                            async with self._send_lock:
+                                await self._synthesize_goal_completion_locked(transport)
+                        except Exception:
+                            logger.exception(
+                                "native Goal completion synthesis on EOF failed for session %s",
+                                self.session_id,
+                            )
+                        continue
                 if not self._turn_completed_seen:
                     # A cancelled reader cannot reach this branch: the
                     # transport retires its generation before publishing the
@@ -1234,6 +1419,10 @@ class SessionTailer:
                 # release the guard here so the next send can proceed. If a
                 # completion WAS emitted, these are no-ops.
                 self._active_turn_id = None
+                self._active_tool_call_ids.clear()
+                self._blocking_approval_call_ids.clear()
+                self._waiting_for_model_capacity = False
+                self._goal_terminal_at = None
                 transport.acknowledge_turn_complete()
                 if failed is not None:
                     self._notify_post_persist(failed)
@@ -1245,6 +1434,7 @@ class SessionTailer:
             # Accepted record: the turn is making progress, so reset the
             # stream inactivity clock.
             self._last_event_at = time.monotonic()
+            self._note_raw_provider_wait(record)
             transport.maybe_capture_conversation_id(record)
             ctx = NormalizeContext(
                 session_id=self.session_id,
@@ -1281,7 +1471,7 @@ class SessionTailer:
                         uuid.uuid5(uuid.NAMESPACE_URL, f"claude-hub:{self.session_id}:{stable_key}")
                     )
                     self._run_epoch += 1
-                    self._assistant_text = ""
+                    self._reset_turn_watchdog_state()
                     self._turn_completed_seen = False
                     transport.acknowledge_provider_turn_started()
                     event.turn_id = self._active_turn_id
@@ -1291,10 +1481,12 @@ class SessionTailer:
                 if event.run_epoch is None:
                     event.run_epoch = self._run_epoch
                 self._record_approval_card(event)
+                self._record_watchdog_activity(event)
                 if event.type == AgentStreamEventType.TEXT_DELTA and not event.payload.get("plan"):
                     text = event.payload.get("text")
                     if isinstance(text, str):
                         self._assistant_text += text
+                        self._note_assistant_text(transport)
                         if self._goal_protocol_sanitizer is not None:
                             visible = self._goal_protocol_sanitizer.feed(text)
                             if not visible:
@@ -1386,6 +1578,10 @@ class SessionTailer:
                     # a new turn_started that sequences ahead of this turn's
                     # completion.
                     self._active_turn_id = None
+                    self._active_tool_call_ids.clear()
+                    self._blocking_approval_call_ids.clear()
+                    self._waiting_for_model_capacity = False
+                    self._goal_terminal_at = None
                     transport.acknowledge_turn_complete()
                     self._notify_post_persist(observer_event)
                     self._assistant_text = ""
@@ -1755,8 +1951,15 @@ class SessionTailer:
                     if isinstance(question, dict) and isinstance(question.get("id"), str)
                 ),
             )
+            self._blocking_approval_call_ids.add(event.call_id)
         elif event.type == AgentStreamEventType.APPROVAL_RESOLVED and event.call_id:
             self._pending_approvals.pop(event.call_id, None)
+            self._blocking_approval_call_ids.discard(event.call_id)
+            # Codex/TraeX blocking questions are announced as a synthetic
+            # TOOL_CALL_STARTED that never gets a matching completed event.
+            # Drop it on resolve so the answer does not leave the watchdog
+            # suppressed for the rest of the turn.
+            self._active_tool_call_ids.discard(event.call_id)
 
     async def _emit_approval_resolved(self, answers: Optional[List[Dict[str, Any]]] = None) -> None:
         """Persist + fan out ``approval_resolved`` for the answered cards.
@@ -1783,6 +1986,8 @@ class SessionTailer:
         }
         for key in pending:
             self._pending_approvals.pop(key)
+            self._blocking_approval_call_ids.discard(key)
+            self._active_tool_call_ids.discard(key)
         session = self._session_getter()
         if session is None:
             return
