@@ -5,6 +5,11 @@
 
 ## Unreleased
 
+### fix: show newly created sessions first
+
+- Put newly created, duplicated, and forked sessions at the top of Chat and
+  agent status lists while preserving the manual order of existing sessions.
+
 ### fix: submit workspace agent bootstrap reliably
 
 - Send tmux's semantic `Enter` key for pasted workspace-agent prompts, including
