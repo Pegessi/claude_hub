@@ -33,6 +33,17 @@
       role="region"
       aria-label="Chat Goal details"
     >
+      <div class="goal-status-details-header">
+        <strong>Goal details</strong>
+        <button
+          type="button"
+          class="goal-status-details-close"
+          aria-label="Collapse Goal details"
+          @click="expanded = false"
+        >
+          ×
+        </button>
+      </div>
       <p>{{ goal.objective }}</p>
       <div class="goal-status-meta">
         <span>Started {{ formatTime(goal.created_at) }}</span>
@@ -146,7 +157,7 @@ function formatTime(value: string): string { return new Date(value).toLocaleStri
 </script>
 
 <style scoped>
-.goal-status { display: flex; align-items: center; gap: 8px; padding: 7px 28px; border-top: 1px solid var(--ch-color-border-muted); border-bottom: 1px solid var(--ch-color-border-muted); background: var(--ch-color-surface); font-size: 12px; }
+.goal-status { position: relative; display: flex; align-items: center; gap: 8px; padding: 7px 28px; border-top: 1px solid var(--ch-color-border-muted); border-bottom: 1px solid var(--ch-color-border-muted); background: var(--ch-color-surface); font-size: 12px; }
 .goal-status-summary { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; padding: 2px 0; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
 .goal-status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--ch-color-accent); }
 [data-status='paused'] .goal-status-dot, [data-status='blocked'] .goal-status-dot { background: var(--ch-color-warning, #e0a800); }
@@ -156,7 +167,10 @@ function formatTime(value: string): string { return new Date(value).toLocaleStri
 .goal-status-actions { display: flex; gap: 5px; }
 .goal-status-actions button { padding: 3px 8px; color: var(--ch-color-text); background: transparent; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-sm); cursor: pointer; }
 .goal-status-actions button:disabled { cursor: default; opacity: .55; }
-.goal-status-details { position: absolute; right: 28px; bottom: 72px; left: 28px; z-index: 4; max-height: min(60dvh, 480px); padding: 12px; overflow-y: auto; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-elevated, var(--ch-color-surface)); box-shadow: var(--ch-shadow-md); }
+.goal-status-details { position: absolute; right: 0; bottom: calc(100% + 8px); left: 0; z-index: 4; max-height: min(60dvh, 480px); padding: 12px; overflow-y: auto; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-elevated, var(--ch-color-surface)); box-shadow: var(--ch-shadow-md); }
+.goal-status-details-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.goal-status-details-close { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; color: var(--ch-color-text-muted); font-size: 18px; line-height: 1; background: transparent; border: 0; border-radius: var(--ch-radius-sm); cursor: pointer; }
+.goal-status-details-close:hover { color: var(--ch-color-text); background: var(--ch-color-surface-control-hover); }
 .goal-status-details p { margin: 0 0 8px; white-space: pre-wrap; }
 .goal-status-meta { display: flex; flex-wrap: wrap; gap: 12px; color: var(--ch-color-text-subtle); }
 .goal-status-message, .goal-status-error { color: var(--ch-color-warning, #e0a800); }
@@ -166,6 +180,6 @@ function formatTime(value: string): string { return new Date(value).toLocaleStri
 .goal-checkpoint p { margin: 5px 0 0; color: var(--ch-color-text-muted); }
 .goal-checkpoint-warning { color: var(--ch-color-warning, #e0a800); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-@media (pointer: coarse) { .goal-status-summary, .goal-status-actions button { min-height: 44px; } .goal-status-actions button { min-width: 44px; } }
-@media (max-width: 640px) { .goal-status { flex-wrap: wrap; padding: 7px 12px; } .goal-status-actions { width: 100%; justify-content: flex-end; } .goal-status-details { right: 12px; left: 12px; } }
+@media (pointer: coarse) { .goal-status-summary, .goal-status-actions button, .goal-status-details-close { min-height: 44px; } .goal-status-actions button, .goal-status-details-close { min-width: 44px; } }
+@media (max-width: 640px) { .goal-status { flex-wrap: wrap; padding: 7px 12px; } .goal-status-actions { width: 100%; justify-content: flex-end; } }
 </style>
