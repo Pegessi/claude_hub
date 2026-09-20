@@ -70,6 +70,82 @@ def test_ttyd_manager_tests_use_isolated_runtime_paths() -> None:
     assert _LIVE_RUNTIME_HOME.resolve() not in ttyd_manager_module.STATE_FILE.resolve().parents
 
 
+def test_ensure_tab_in_order_prepends_new_tab_and_preserves_existing_order(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._tab_order = ["manual-b", "manual-a"]
+    saved_orders: list[list[str]] = []
+    monkeypatch.setattr(
+        manager, "_save_order", lambda: saved_orders.append(manager._tab_order.copy())
+    )
+
+    manager._ensure_tab_in_order("new")
+    manager._ensure_tab_in_order("manual-b")
+
+    assert manager._tab_order == ["new", "manual-b", "manual-a"]
+    assert saved_orders == [["new", "manual-b", "manual-a"]]
+
+
+def test_set_tab_order_preserves_position_of_tab_omitted_by_stale_payload(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {
+        "new": object(),
+        "manual-b": object(),
+        "manual-a": object(),
+    }
+    manager._tab_order = ["new", "manual-b", "manual-a"]
+    saved_orders: list[list[str]] = []
+    monkeypatch.setattr(
+        manager, "_save_order", lambda: saved_orders.append(manager._tab_order.copy())
+    )
+
+    manager.set_tab_order(["manual-a", "manual-b"])
+
+    assert manager._tab_order == ["new", "manual-a", "manual-b"]
+    assert saved_orders == [["new", "manual-a", "manual-b"]]
+
+
+@pytest.mark.parametrize(
+    ("current_order", "submitted_order", "process_ids", "expected_order"),
+    [
+        (
+            ["manual-a", "manual-b", "manual-c"],
+            ["manual-c", "manual-a", "manual-b"],
+            ["manual-a", "manual-b", "manual-c"],
+            ["manual-c", "manual-a", "manual-b"],
+        ),
+        (
+            ["new", "manual-b"],
+            ["manual-a", "invalid", "manual-a", "manual-b"],
+            ["untracked", "new", "manual-b", "manual-a"],
+            ["new", "manual-a", "manual-b", "untracked"],
+        ),
+    ],
+)
+def test_set_tab_order_keeps_full_payload_and_filters_partial_payload(
+    monkeypatch: MonkeyPatch,
+    current_order: list[str],
+    submitted_order: list[str],
+    process_ids: list[str],
+    expected_order: list[str],
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {tab_id: object() for tab_id in process_ids}
+    manager._tab_order = current_order
+    saved_orders: list[list[str]] = []
+    monkeypatch.setattr(
+        manager, "_save_order", lambda: saved_orders.append(manager._tab_order.copy())
+    )
+
+    manager.set_tab_order(submitted_order)
+
+    assert manager._tab_order == expected_order
+    assert saved_orders == [expected_order]
+
+
 def _run_coro_in_isolated_thread(coro) -> None:
     """Run an async assertion outside pytest-asyncio's shared-loop state."""
     errors = []

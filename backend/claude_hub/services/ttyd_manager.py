@@ -3241,20 +3241,38 @@ class TTYDManager:
         """Set the order of tabs."""
         logger.info(f"set_tab_order called with: {tab_ids}")
         logger.info(f"Current processes keys: {list(self.processes.keys())}")
-        # Validate that all tab IDs exist
-        valid_ids = [tid for tid in tab_ids if tid in self.processes]
-        # Add any missing tabs at the end
+        valid_ids = list(dict.fromkeys(tid for tid in tab_ids if tid in self.processes))
+        submitted_ids = set(valid_ids)
+        submitted_iter = iter(valid_ids)
+        merged_ids: List[str] = []
+        current_ids = set()
+
+        # Preserve the slots of tabs omitted by a stale payload while reordering
+        # the submitted tabs around them.
+        for tid in self._tab_order:
+            if tid not in self.processes or tid in current_ids:
+                continue
+            current_ids.add(tid)
+            if tid in submitted_ids:
+                merged_ids.append(next(submitted_iter))
+            else:
+                merged_ids.append(tid)
+
+        merged_ids.extend(submitted_iter)
+        ordered_ids = set(merged_ids)
+        # Add processes unknown to both the persisted and submitted orders.
         for tid in self.processes:
-            if tid not in valid_ids:
-                valid_ids.append(tid)
-        self._tab_order = valid_ids
+            if tid not in ordered_ids:
+                merged_ids.append(tid)
+                ordered_ids.add(tid)
+        self._tab_order = merged_ids
         logger.info(f"Final tab order set to: {self._tab_order}")
         self._save_order()
 
     def _ensure_tab_in_order(self, tab_id: str) -> None:
-        """Ensure a tab is in the order list."""
+        """Ensure a newly created tab appears before existing tabs."""
         if tab_id not in self._tab_order:
-            self._tab_order.append(tab_id)
+            self._tab_order.insert(0, tab_id)
             self._save_order()
 
     def set_tab_workspace_metadata(

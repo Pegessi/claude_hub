@@ -333,7 +333,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to create tab')
       const newTab = await response.json()
-      tabs.value.push(newTab)
+      tabs.value.unshift(newTab)
       activeTabId.value = newTab.id
       // Auto-assign new tab to active pane
       if (activePaneId.value) {
@@ -355,7 +355,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to duplicate tab')
       const newTab = await response.json()
-      tabs.value.push(newTab)
+      tabs.value.unshift(newTab)
       activeTabId.value = newTab.id
       if (activePaneId.value) {
         assignTabToPane(newTab.id, activePaneId.value)
@@ -390,7 +390,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to fork tab')
       const newTab = await response.json()
-      tabs.value.push(newTab)
+      tabs.value.unshift(newTab)
       // Is the user still looking at the source tab? The active pane's tab is
       // the ground truth for what is on screen right now. If yes → auto-switch
       // to the fork (legacy behavior). If they switched away → leave them
