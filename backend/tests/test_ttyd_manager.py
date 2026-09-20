@@ -70,6 +70,23 @@ def test_ttyd_manager_tests_use_isolated_runtime_paths() -> None:
     assert _LIVE_RUNTIME_HOME.resolve() not in ttyd_manager_module.STATE_FILE.resolve().parents
 
 
+def test_ensure_tab_in_order_prepends_new_tab_and_preserves_existing_order(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._tab_order = ["manual-b", "manual-a"]
+    saved_orders: list[list[str]] = []
+    monkeypatch.setattr(
+        manager, "_save_order", lambda: saved_orders.append(manager._tab_order.copy())
+    )
+
+    manager._ensure_tab_in_order("new")
+    manager._ensure_tab_in_order("manual-b")
+
+    assert manager._tab_order == ["new", "manual-b", "manual-a"]
+    assert saved_orders == [["new", "manual-b", "manual-a"]]
+
+
 def _run_coro_in_isolated_thread(coro) -> None:
     """Run an async assertion outside pytest-asyncio's shared-loop state."""
     errors = []
