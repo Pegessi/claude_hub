@@ -5,6 +5,11 @@
 
 ## Unreleased
 
+### fix: keep expanded Chat Goal details dismissible
+
+- Anchor expanded Goal details above the status bar and add a visible close
+  control, so the popover cannot cover the summary used to collapse it.
+
 ### fix: show newly created sessions first
 
 - Put newly created, duplicated, and forked sessions at the top of Chat and
