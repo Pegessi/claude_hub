@@ -80,6 +80,8 @@ async def create_tab(
         )
     except TabLimitExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.put("/order")

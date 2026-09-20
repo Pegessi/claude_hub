@@ -5,6 +5,7 @@ from __future__ import annotations
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ...models import TaskCleanupResult
+from ..remote_profiles import reject_stdin_shell_interactive
 from ..task_graph import TaskHasDescendantsError, task_has_descendants
 from ._constants import *  # noqa: F401,F403
 
@@ -175,6 +176,7 @@ class _SessionsMixin:
         try:
             bootstrap_prompt = self._build_session_bootstrap_prompt(workspace, session)
             if bootstrap_prompt:
+                await self._wait_for_agent_prompt(session)
                 await self.send_session_message(session.id, bootstrap_prompt)
         except Exception as exc:
             # Creating the terminal and persisting the session precedes the
@@ -259,8 +261,10 @@ class _SessionsMixin:
             remote_profile_id = payload.remote_profile_id or workspace.remote_profile_id
             if not remote_profile_id:
                 raise ValueError("Remote agent requires remote_profile_id")
-            if not remote_profile_manager.get_profile(remote_profile_id):
+            profile = remote_profile_manager.get_profile(remote_profile_id)
+            if not profile:
                 raise ValueError(f"Remote profile not found: {remote_profile_id}")
+            reject_stdin_shell_interactive(profile)
             remote_cwd = self._resolve_remote_cwd(
                 profile_id=remote_profile_id,
                 requested_cwd=payload.remote_cwd,
@@ -425,7 +429,7 @@ class _SessionsMixin:
             for session in self.sessions.values()
             if session.remote_forward_port is not None
         }
-        port = REMOTE_FORWARD_PORT_BASE
+        port = settings.port + REMOTE_FORWARD_PORT_OFFSET
         while port in used_ports:
             port += 1
         return port
