@@ -5,6 +5,13 @@
 
 ## Unreleased
 
+### feat: rename a Chat from the sidebar by double-clicking
+
+- Double-clicking a Chat row in the left sidebar now starts inline rename,
+  matching the tab bar. The row's tooltip notes the shortcut, and drag-to-
+  reorder is unaffected because a stationary double-click never crosses the
+  drag threshold.
+
 ### fix: keep expanded Chat Goal details dismissible
 
 - Anchor expanded Goal details above the status bar and add a visible close
