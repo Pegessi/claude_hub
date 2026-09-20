@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### fix: stop cancelling active long-running Chat turns
+
+- Remove the one-hour absolute cap on a native Chat turn. That wall-clock
+  limit could terminate a healthy review or test run that was still emitting
+  model and tool events; duration alone is not evidence of a hang.
+- Keep the 10-minute silence watchdog, but suppress it while the provider is
+  legitimately blocked on an outstanding tool call, a blocking approval
+  question, or model-capacity queueing (read from the raw `queue/status`
+  record, so the visible STATUS payload is unchanged). Normal streaming
+  activity re-engages the watchdog.
+- Goal turns whose model already emitted a complete trailing `goal-status`
+  envelope but whose one-shot CLI (Cursor) never sent its result record are no
+  longer reaped as silent. After a short grace the tailer synthesizes a
+  completed turn with the raw protocol text, letting the Goal controller parse
+  the checkpoint and continue/pause/complete instead of force-pausing.
+- Add regressions covering an actively streaming two-hour turn, a long-running
+  tool whose completion arrives after the streaming timeout, raw queue/status
+  suppression, and a Goal turn completed without a provider result record.
+
 ### fix: keep expanded Chat Goal details dismissible
 
 - Anchor expanded Goal details above the status bar and add a visible close
