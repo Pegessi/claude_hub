@@ -5,6 +5,33 @@
 
 ## Unreleased
 
+### fix: close remote Chat/agent/reviewer placement holes
+
+- Reject Chat + Remote at the create-tab API, ttyd manager, and new-session
+  UI. Structured Chat owns a local native provider; the SSH launcher is
+  Terminal-only. Selecting both previously persisted `target=remote` while
+  still running the model on the Hub host.
+- Parse `#` as an SSH-config comment on `Host` lines so inline notes such as
+  `# 自定义，必须为 ASCII 字符` no longer become fake remote profiles.
+- Auto-spawned reviewers follow the worker's execution target/profile/cwd
+  instead of `workspace.target`, and idle-reviewer reuse must match that
+  placement. Add-Agent defaults Run On to the workspace target.
+- Wait for the agent TUI prompt before pasting workspace bootstrap. A Codex
+  "Update available" dialog is skipped (Down + Enter) instead of treating
+  bootstrap Enter as `npm install -g`. If the dialog is still up when the
+  wait expires, create fails closed and rolls back.
+- Remote directory listing now uses non-interactive SSH (`-T`, BatchMode)
+  and parses the last JSON object in stdout so MOTD/banners do not 502 the
+  picker. Merlin/ssh-candy stdin-shell aliases send a single-line
+  base64-wrapped listing command on stdin instead of the OpenSSH command
+  channel. Reject Terminal/agent create on those aliases (`ssh -tt` hangs
+  on the Trial TTY); the profile API marks them `stdin_shell` so the UI
+  labels them listing-only. Remote Claude launchers omit Hub-local
+  `--settings` paths.
+- Remote reverse-forward listen ports start at `settings.port + 10000`
+  (live Hub 8173 → 18173; isolated 18273 → 28273) so preview backends do
+  not collide with live Hub on the same SSH host.
+
 ### fix: show newly created sessions first
 
 - Put newly created, duplicated, and forked sessions at the top of Chat and

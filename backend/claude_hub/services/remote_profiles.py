@@ -5,12 +5,46 @@ from pathlib import Path
 from typing import Optional
 
 from ..models import RemoteProfile
+from ..models.schemas import STDIN_SHELL_REMOTE_UNSUPPORTED
 
 logger = logging.getLogger(__name__)
 
 REMOTE_PROFILES_FILE = Path.home() / ".claude_hub" / "remote_profiles.json"
 SSH_CONFIG_FILE = Path.home() / ".ssh" / "config"
 _PROFILE_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_STDIN_SHELL_PROFILE_IDS = frozenset({"merlin_dev", "merlin_dev_2", "merlin_dev_evo"})
+
+
+def profile_uses_stdin_shell(profile: RemoteProfile) -> bool:
+    """True when ``ssh host 'cmd'`` is swallowed and there is no usable TTY.
+
+    Merlin workspace / ssh-candy seedjob aliases accept the TCP session but
+    ignore the OpenSSH command channel (rc 0, empty stdout). They execute a
+    line read from stdin instead. ``ssh -tt`` hangs on a Trial TTY, so these
+    profiles are listing-only: Terminal tabs and remote agents must use a
+    PTY host.
+    """
+    alias = profile.id.strip().lower()
+    host = profile.ssh_host.strip().lower()
+    user = (profile.user or "").strip().lower()
+    if alias in _STDIN_SHELL_PROFILE_IDS:
+        return True
+    if "merlin-ssh-proxy" in host:
+        return True
+    if "workspace.byted.org" in host and ".seedjob." in user:
+        return True
+    if ".worker_" in user and ".seedjob." in user:
+        return True
+    return False
+
+
+def reject_stdin_shell_interactive(profile: RemoteProfile | None) -> None:
+    if profile is not None and profile_uses_stdin_shell(profile):
+        raise ValueError(STDIN_SHELL_REMOTE_UNSUPPORTED)
+
+
+def _with_transport_flags(profile: RemoteProfile) -> RemoteProfile:
+    return profile.model_copy(update={"stdin_shell": profile_uses_stdin_shell(profile)})
 
 
 class RemoteProfileManager:
@@ -26,7 +60,7 @@ class RemoteProfileManager:
             if profile.id not in seen_ids:
                 profiles.append(profile)
                 seen_ids.add(profile.id)
-        return profiles
+        return [_with_transport_flags(profile) for profile in profiles]
 
     def _load_configured_profiles(self) -> list[RemoteProfile]:
         if not self.path.exists():
@@ -61,6 +95,12 @@ class RemoteProfileManager:
         for line in lines:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
+                continue
+            # OpenSSH treats `#` as the start of a comment even mid-line.
+            # Without this, `Host foo  # ASCII only` is parsed as hosts
+            # `foo` and `ASCII`.
+            stripped = stripped.split("#", 1)[0].strip()
+            if not stripped:
                 continue
 
             parts = stripped.split()

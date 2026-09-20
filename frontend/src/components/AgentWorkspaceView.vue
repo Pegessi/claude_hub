@@ -1555,9 +1555,15 @@
                   :key="profile.id"
                   :value="profile.id"
                 >
-                  {{ profile.name }}
+                  {{ profile.name }}{{ profile.stdin_shell ? ' · listing only' : '' }}
                 </option>
               </select>
+              <p
+                v-if="selectedRemoteProfile?.stdin_shell"
+                class="modal-hint"
+              >
+                Listing-only alias: new remote agents need a PTY host such as mac_mini.
+              </p>
             </div>
             <div class="modal-field">
               <label>Remote start dir</label>
@@ -1847,11 +1853,17 @@
                 :key="profile.id"
                 :value="profile.id"
               >
-                {{ profile.name }}
+                {{ profile.name }}{{ profile.stdin_shell ? ' · listing only' : '' }}
               </option>
             </select>
             <p
-              v-if="remoteProfiles.length === 0"
+              v-if="remoteProfiles.find(profile => profile.id === workspaceForm.resident_agent_remote_profile_id)?.stdin_shell"
+              class="modal-hint"
+            >
+              This alias has no remote TTY. Resident agents need a PTY host such as mac_mini.
+            </p>
+            <p
+              v-else-if="remoteProfiles.length === 0"
               class="modal-hint"
             >
               Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
@@ -2609,6 +2621,18 @@
                 Remote
               </button>
             </div>
+            <p
+              v-if="activeWorkspace?.target === 'remote' && agentOptionsForm.target === 'local'"
+              class="modal-hint"
+            >
+              This workspace is remote. New agents stay local unless you switch Run On to Remote.
+            </p>
+            <p
+              v-else-if="activeWorkspace?.target === 'local' && agentOptionsForm.target === 'remote'"
+              class="modal-hint"
+            >
+              This agent will SSH to the selected server. Auto-review follows this agent, not the workspace default.
+            </p>
           </div>
 
           <div
@@ -2628,11 +2652,17 @@
                 :key="profile.id"
                 :value="profile.id"
               >
-                {{ profile.name }}
+                {{ profile.name }}{{ profile.stdin_shell ? ' · listing only' : '' }}
               </option>
             </select>
             <p
-              v-if="remoteProfiles.length === 0"
+              v-if="selectedAgentRemoteProfile?.stdin_shell"
+              class="modal-hint"
+            >
+              This alias has no remote TTY. Browse directories here; remote agents need a PTY host such as mac_mini.
+            </p>
+            <p
+              v-else-if="remoteProfiles.length === 0"
               class="modal-hint"
             >
               Add profiles in ~/.claude_hub/remote_profiles.json or ~/.ssh/config
@@ -3811,7 +3841,8 @@ const isAgentOptionsCreateDisabled = computed(
   () =>
     isLoading.value ||
     isPending('agent:create') ||
-    (agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id)
+    (agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id) ||
+    (agentOptionsForm.target === 'remote' && Boolean(selectedAgentRemoteProfile.value?.stdin_shell))
 )
 
 function taskActionKey(action: string, taskId: string | null | undefined) {
@@ -5048,7 +5079,7 @@ function resetAgentOptionsForm() {
   agentOptionsForm.title = ''
   agentOptionsForm.role = 'orchestrator'
   agentOptionsForm.agent_type = 'codex'
-  agentOptionsForm.target = 'local'
+  agentOptionsForm.target = workspace?.target ?? 'local'
   agentOptionsForm.solo_mode = true
   agentOptionsForm.remote_reconnect = workspace?.remote_reconnect ?? true
   agentOptionsForm.remote_profile_id =
