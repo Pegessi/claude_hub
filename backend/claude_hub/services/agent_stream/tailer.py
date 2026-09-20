@@ -133,8 +133,11 @@ _GOAL_STATUS_TERMINAL_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 # Only scan the bounded tail of accumulated assistant text; the terminal signal
-# is required to be the trailing block of the turn.
-_GOAL_TAIL_SCAN_CHARS = 70 * 1024
+# is required to be the trailing block of the turn. This must stay equal to the
+# Goal controller's own protocol window
+# (``_MAX_CHECKPOINT_JSON_CHARS + 4096`` in goal_run/controller.py), so the
+# tailer never recognizes an envelope that the controller cannot later see.
+_GOAL_TAIL_SCAN_CHARS = 64 * 1024 + 4096
 
 
 class _GoalProtocolSanitizer:
@@ -880,34 +883,55 @@ class SessionTailer:
         last = self._last_event_at
         return last is not None and (time.monotonic() - last > STREAM_INACTIVITY_TIMEOUT_S)
 
-    def _note_assistant_text(self) -> None:
-        """Stamp arrival of a complete trailing Goal terminal signal.
+    def _note_assistant_text(self, transport: ProviderSession) -> None:
+        """Track a complete trailing Goal terminal signal in the raw text.
 
-        The signal lives in the raw (sanitizer-hidden) assistant text. Once it
-        is present the model-side turn is finished even if a one-shot provider
-        never emits its result record.
+        The signal lives in the raw (sanitizer-hidden) assistant text. Only
+        one-shot providers can finish their model output but never send a
+        result record because a lingering child holds stdout open; persistent
+        app-servers (Codex/TraeX) emit their own terminal completion, so they
+        must never synthesize one.
+
+        Re-evaluated on every delta: if the model emits an envelope and then
+        keeps writing (a protocol violation), the latch clears until the
+        signal is trailing again.
         """
-        if self._goal_protocol_sanitizer is None or self._goal_terminal_at is not None:
+        if self._goal_protocol_sanitizer is None or transport.eof_is_fatal:
             return
-        if _GOAL_STATUS_TERMINAL_RE.search(self._assistant_text[-_GOAL_TAIL_SCAN_CHARS:]):
-            self._goal_terminal_at = time.monotonic()
+        tail = self._assistant_text[-_GOAL_TAIL_SCAN_CHARS:]
+        if "goal-status" not in tail:
+            return
+        if _GOAL_STATUS_TERMINAL_RE.search(tail):
+            if self._goal_terminal_at is None:
+                self._goal_terminal_at = time.monotonic()
+        else:
+            self._goal_terminal_at = None
 
     def _goal_terminal_grace_expired(self) -> bool:
+        # Do not declare the turn finished while a tool or blocking question is
+        # still outstanding: a model may legitimately emit its envelope-shaped
+        # text and then keep acting, and the external wait is authoritative.
         at = self._goal_terminal_at
-        return at is not None and (time.monotonic() - at) > GOAL_TERMINAL_GRACE_S
+        if at is None or self._waiting_for_external_activity():
+            return False
+        return (time.monotonic() - at) > GOAL_TERMINAL_GRACE_S
 
     async def _synthesize_goal_completion_locked(self, transport: ProviderSession) -> None:
-        """Complete a Goal turn whose provider result record never arrived.
+        """Complete a one-shot Goal turn whose provider result never arrived.
 
         After the model's trailing ``goal-status`` envelope plus a grace period,
-        one-shot CLIs (Claude/Cursor) can still be alive only because a
+        a one-shot CLI (Claude/Cursor) can still be alive only because a
         lingering child holds stdout open. Treat the model output as the
         authoritative completion: publish a completed turn so the Goal
         controller parses the checkpoint and routes the Goal (continue / pause /
-        block / complete), then retire the stale provider stream.
+        block / complete), then terminate the stale provider process. The
+        tailer loop stays alive; the next turn spawns a fresh one-shot.
+
+        Persistent transports (Codex/TraeX) never reach this: their app-server
+        emits its own terminal completion and is not safe to retire early.
         """
         turn_id = self._active_turn_id
-        if turn_id is None or self._goal_terminal_at is None:
+        if turn_id is None or self._goal_terminal_at is None or transport.eof_is_fatal:
             return
         session = self._session_getter()
         if session is None:
@@ -940,7 +964,11 @@ class SessionTailer:
         self._blocking_approval_call_ids.clear()
         self._waiting_for_model_capacity = False
         self._goal_terminal_at = None
-        transport.acknowledge_turn_complete()
+        # Retire the one-shot reader generation and terminate the lingering
+        # process so stale records/EOF cannot be attributed to the next turn and
+        # spawned children do not hold ports indefinitely. The next
+        # send_message spawns a fresh process.
+        await transport.stop()
         self._notify_post_persist(observer_event)
         self._assistant_text = ""
         self._visible_assistant_text = ""
@@ -1332,6 +1360,24 @@ class SessionTailer:
                 # produce two terminal events for the same turn.
                 exit_error = transport.exit_error
                 failed: Optional[AgentStreamEvent] = None
+                if not self._turn_completed_seen and self._goal_terminal_at is not None:
+                    # One-shot exited before the Goal-terminal grace elapsed but
+                    # after the model emitted a complete, controller-valid
+                    # goal-status envelope, and it exited cleanly. This is the
+                    # same missing-result disease as a held-open stdout, just a
+                    # faster death: finish the turn as completed so the Goal
+                    # controller routes it instead of marking it failed. A
+                    # nonzero exit still falls through to the failure path.
+                    if exit_error is None:
+                        try:
+                            async with self._send_lock:
+                                await self._synthesize_goal_completion_locked(transport)
+                        except Exception:
+                            logger.exception(
+                                "native Goal completion synthesis on EOF failed for session %s",
+                                self.session_id,
+                            )
+                        continue
                 if not self._turn_completed_seen:
                     # A cancelled reader cannot reach this branch: the
                     # transport retires its generation before publishing the
@@ -1373,6 +1419,10 @@ class SessionTailer:
                 # release the guard here so the next send can proceed. If a
                 # completion WAS emitted, these are no-ops.
                 self._active_turn_id = None
+                self._active_tool_call_ids.clear()
+                self._blocking_approval_call_ids.clear()
+                self._waiting_for_model_capacity = False
+                self._goal_terminal_at = None
                 transport.acknowledge_turn_complete()
                 if failed is not None:
                     self._notify_post_persist(failed)
@@ -1436,7 +1486,7 @@ class SessionTailer:
                     text = event.payload.get("text")
                     if isinstance(text, str):
                         self._assistant_text += text
-                        self._note_assistant_text()
+                        self._note_assistant_text(transport)
                         if self._goal_protocol_sanitizer is not None:
                             visible = self._goal_protocol_sanitizer.feed(text)
                             if not visible:
@@ -1905,6 +1955,11 @@ class SessionTailer:
         elif event.type == AgentStreamEventType.APPROVAL_RESOLVED and event.call_id:
             self._pending_approvals.pop(event.call_id, None)
             self._blocking_approval_call_ids.discard(event.call_id)
+            # Codex/TraeX blocking questions are announced as a synthetic
+            # TOOL_CALL_STARTED that never gets a matching completed event.
+            # Drop it on resolve so the answer does not leave the watchdog
+            # suppressed for the rest of the turn.
+            self._active_tool_call_ids.discard(event.call_id)
 
     async def _emit_approval_resolved(self, answers: Optional[List[Dict[str, Any]]] = None) -> None:
         """Persist + fan out ``approval_resolved`` for the answered cards.
@@ -1932,6 +1987,7 @@ class SessionTailer:
         for key in pending:
             self._pending_approvals.pop(key)
             self._blocking_approval_call_ids.discard(key)
+            self._active_tool_call_ids.discard(key)
         session = self._session_getter()
         if session is None:
             return

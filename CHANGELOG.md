@@ -16,13 +16,21 @@
   record, so the visible STATUS payload is unchanged). Normal streaming
   activity re-engages the watchdog.
 - Goal turns whose model already emitted a complete trailing `goal-status`
-  envelope but whose one-shot CLI (Cursor) never sent its result record are no
-  longer reaped as silent. After a short grace the tailer synthesizes a
-  completed turn with the raw protocol text, letting the Goal controller parse
-  the checkpoint and continue/pause/complete instead of force-pausing.
+  envelope but whose one-shot CLI (Cursor/Claude) never sent its result record
+  are no longer reaped as silent. After a short grace — or a clean early EOF —
+  the tailer synthesizes a completed turn with the raw protocol text and
+  terminates the lingering one-shot process, letting the Goal controller parse
+  the checkpoint and continue/pause/complete instead of force-pausing. This
+  never applies to the persistent Codex/TraeX app-server, whose own
+  `turn/completed` stays authoritative.
+- Answering a Codex/TraeX blocking question re-arms the silence watchdog (the
+  synthetic question tool no longer leaves it suppressed for the rest of the
+  turn), and the Goal envelope detection window matches the controller's.
 - Add regressions covering an actively streaming two-hour turn, a long-running
   tool whose completion arrives after the streaming timeout, raw queue/status
-  suppression, and a Goal turn completed without a provider result record.
+  suppression, blocking-question resolution, persistent-transport exclusion,
+  early-EOF and no-envelope Goal fallback, and a Goal turn completed without a
+  provider result record.
 
 ### fix: keep expanded Chat Goal details dismissible
 

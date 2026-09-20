@@ -59,26 +59,52 @@ failure.
 
 ### Goal-terminal synthesis
 
-For a one-shot CLI whose stdout is held open by a lingering child, the
-provider may never emit a result record even after the model output is
-complete. When the turn is a Goal continuation and the raw assistant text ends
-with a complete `goal-status` block (same trailing contract the Goal
-controller requires), the tailer:
+For a **one-shot CLI** (Claude/Cursor, `eof_is_fatal=False`) whose stdout is
+held open by a lingering child, the provider may never emit a result record
+even after the model output is complete. When the turn is a Goal continuation
+and the raw assistant text ends with a complete `goal-status` block (same
+trailing contract the Goal controller requires), the tailer:
 
 1. Suppresses the silence watchdog (`_goal_terminal_at`).
-2. After `GOAL_TERMINAL_GRACE_S` (60 s) with no provider completion,
-   publishes a synthesized `turn_completed(status=completed)` carrying the
-   sanitized visible text and, on the observer copy only, the raw
-   `_goal_protocol_text`.
-3. Releases the turn guard via `acknowledge_turn_complete()` (which retires
-   the stale one-shot stream), resets per-turn state, and lets the Goal
-   observer parse the checkpoint and route the Goal (continue/blocked/
-   needs_input/complete).
+2. After `GOAL_TERMINAL_GRACE_S` (60 s) with no provider completion, or on a
+   clean one-shot EOF before the grace elapses, publishes a synthesized
+   `turn_completed(status=completed)` carrying the sanitized visible text and,
+   on the observer copy only, the raw `_goal_protocol_text`.
+3. Calls `transport.stop()` to retire the stale one-shot stream **and terminate
+   the lingering process/children** (the next send spawns a fresh process),
+   resets per-turn state, and lets the Goal observer parse the checkpoint and
+   route the Goal (continue/blocked/needs_input/complete).
 
 Synthesis intentionally requires a controller-valid trailing envelope. If the
 model never produced one, the controller would mark the Goal failed regardless
 of completion path; in that case the existing silence reap (Goal → paused,
 resumable) remains the correct fallback rather than pretending success.
+
+### Reviewer corrections (post-implementation)
+
+An independent review found and these were fixed:
+
+- **Persistent transports excluded.** Codex/TraeX are persistent app-servers
+  (`eof_is_fatal=True`) that emit their own terminal `turn/completed`. Early
+  synthesis there released the guard while the turn still ran, causing
+  cross-turn contamination, a duplicate terminal event, and an overlapping turn
+  start on auto-continue. Synthesis is gated to one-shot transports only.
+- **Grace does not arm during external waits and re-validates the tail.** The
+  envelope latch is recomputed on every text delta (a model that keeps writing
+  after the block un-latches), and the grace is not considered expired while a
+  tool or blocking question is still outstanding.
+- **EOF before grace.** A clean process exit with an envelope but no result now
+  synthesizes completion instead of marking the Goal failed; a nonzero exit
+  still fails.
+- **Scan-window parity.** `_GOAL_TAIL_SCAN_CHARS` is pinned to exactly the
+  controller's protocol window (`64 KiB + 4096`) so the tailer can never accept
+  an envelope the controller cannot parse.
+- **Synthetic question tool wait.** Codex/TraeX blocking questions are a
+  `TOOL_CALL_STARTED` with no matching completed event; resolving the approval
+  now also drops that id from the active-tool set, so the silence watchdog
+  re-arms after the answer.
+- EOF/failure terminal path clears the per-turn wait sets like the other
+  terminal paths.
 
 ## Pitfalls
 
@@ -89,12 +115,14 @@ resumable) remains the correct fallback rather than pretending success.
   suppressed for the full outstanding tool lifetime.
 - Durable approval cards can outlive Claude/Cursor turns for late answer
   routing, so blocking-card state is separate from `_pending_approvals`.
+- Never synthesize a Goal completion on a persistent app-server; its own
+  `turn/completed` is authoritative.
 
 ## Validation
 
 - `uv run pytest tests/test_agent_stream.py tests/test_goal_run.py \
   tests/test_goal_protocol.py tests/test_provider_question_protocol.py`
-- Full suite (browser-only e2e excluded): 1641 passed, 7 skipped.
+- Full suite (browser-only e2e excluded): 1646 passed, 7 skipped.
 - `uv run black --check claude_hub/services/agent_stream/tailer.py \
   claude_hub/services/agent_stream/codex_jsonl.py tests/test_agent_stream.py`
 - `uv run isort --check-only ...`

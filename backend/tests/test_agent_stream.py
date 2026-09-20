@@ -2383,6 +2383,10 @@ class _FakeNativeTransport:
         self.stop_called = False
         self.sent_messages: List[Tuple[str, List[bytes]]] = []
         self._turn_in_flight = False
+        # Mirrors the real one-shot transport's stdout generation. Records may
+        # be enqueued as ``(generation, payload)``; stale-generation records are
+        # discarded, plain payloads are always current-generation.
+        self._stdout_generation = 0
         # Per-turn exit error surfaced to the tailer on EOF. ``None`` means
         # the last turn exited cleanly.
         self.exit_error: Optional[str] = None
@@ -2391,14 +2395,29 @@ class _FakeNativeTransport:
     async def start(self) -> None:
         self._started = True
 
+    def _invalidate_stdout_stream(self) -> None:
+        self._stdout_generation += 1
+
     async def stop(self) -> None:
+        # Mirror the real ProviderSession.stop: retire the one-shot stream and
+        # release the turn guard (see native.py _terminate_process + _end_turn).
         self.stop_called = True
+        self._invalidate_stdout_stream()
+        self._turn_in_flight = False
 
     async def cancel_active_turn(self) -> None:
+        self._invalidate_stdout_stream()
         self._turn_in_flight = False
 
     async def read_line(self):
-        return await self._records.get()
+        while True:
+            item = await self._records.get()
+            if isinstance(item, tuple):
+                generation, record = item
+                if generation != self._stdout_generation:
+                    continue
+                return record
+            return item
 
     async def send_message(self, text: str, images: List[bytes]) -> None:
         self._turn_in_flight = True
@@ -2417,7 +2436,13 @@ class _FakeNativeTransport:
         return self._turn_in_flight
 
     def acknowledge_turn_complete(self) -> None:
-        """Release the turn guard after the tailer consumes the turn-end signal."""
+        """Release the turn guard after the tailer consumes the turn-end signal.
+
+        Mirrors the one-shot ProviderSession: retire the stdout generation so a
+        lingering child's later records/EOF are dropped, then end the turn.
+        """
+        if not self.eof_is_fatal:
+            self._invalidate_stdout_stream()
         self._turn_in_flight = False
 
     def _end_turn(self) -> None:
@@ -3476,6 +3501,294 @@ async def test_goal_turn_synthesizes_completion_when_provider_result_never_arriv
     assert "<goal-status" in observed[-1].payload["_goal_protocol_text"]
     assert 'state="continue"' in observed[-1].payload["_goal_protocol_text"]
     await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_provider_result_within_grace_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real provider result arriving before/without grace is the single end.
+
+    The synthesizer must not race a normal completion: when the one-shot CLI
+    emits its ``result`` record, there is exactly one TURN_COMPLETED and the
+    transport is not force-stopped (the normal path retires the generation via
+    acknowledge, not stop).
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(tailer_module, "GOAL_TERMINAL_GRACE_S", 3600.0)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-goal-result-wins",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "Continue the active Goal.",
+        [],
+        client_turn_id="goal-turn-result-wins",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    for delta in (
+        'Visible.\n<goal-checkpoint>{"remaining":[]}</goal-checkpoint>\n<goal-status ',
+        'state="complete">done</goal-status>',
+    ):
+        transport._records.put_nowait(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": delta},
+                },
+            }
+        )
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+
+    await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    await asyncio.sleep(0.1)
+    page = await tailer._store.read_since(-1, limit=100)
+    completions = [e for e in page.events if e.type == AgentStreamEventType.TURN_COMPLETED]
+    assert len(completions) == 1
+    assert completions[0].payload["status"] == "completed"
+    assert transport.turn_in_flight is False
+    assert transport.stop_called is False
+    assert tailer._goal_terminal_at is None
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_persistent_transport_is_not_synthesized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex/TraeX app-servers keep their own terminal; never synthesize early.
+
+    Even with a complete goal-status envelope and a zero grace, a persistent
+    (``eof_is_fatal``) transport must keep the turn in flight and must not
+    publish a completion, since the app-server's own turn/completed is the
+    authority and releasing early would contaminate the next turn.
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(tailer_module, "GOAL_TERMINAL_GRACE_S", 0.0)
+    transport = _FakeNativeTransport(eof_is_fatal=True)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-goal-persistent",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "Continue the active Goal.",
+        [],
+        client_turn_id="goal-turn-persistent",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": '<goal-checkpoint>{"remaining":[]}</goal-checkpoint>'
+                    '<goal-status state="complete">done</goal-status>',
+                },
+            },
+        }
+    )
+
+    await asyncio.sleep(0.25)
+    page = await tailer._store.read_since(-1, limit=100)
+    assert not any(e.type == AgentStreamEventType.TURN_COMPLETED for e in page.events)
+    assert transport.turn_in_flight is True
+    assert tailer._goal_terminal_at is None
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_eof_before_grace_synthesizes_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clean process exit with an envelope but no result still completes the Goal.
+
+    Same missing-result disease as held-open stdout, but the one-shot dies
+    before the grace elapses. A clean EOF (no exit_error) must synthesize a
+    completed Goal turn rather than falling through to a failed completion.
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(tailer_module, "GOAL_TERMINAL_GRACE_S", 3600.0)
+    transport = _FakeNativeTransport()
+    transport.exit_error = None
+    session = _native_session()
+    observed: List[AgentStreamEvent] = []
+
+    async def observer(event: AgentStreamEvent) -> None:
+        observed.append(event)
+
+    tailer = SessionTailer(
+        workspace_id="ws-goal-eof-early",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+        post_persist_observers=[observer],
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "Continue the active Goal.",
+        [],
+        client_turn_id="goal-turn-eof-early",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": '<goal-checkpoint>{"remaining":[]}</goal-checkpoint>'
+                    '<goal-status state="complete">done</goal-status>',
+                },
+            },
+        }
+    )
+    transport._records.put_nowait(None)  # clean EOF, no result record
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    page = await tailer._store.read_since(-1, limit=100)
+    assert completed.payload["status"] == "completed"
+    assert not any(event.type == AgentStreamEventType.ERROR for event in page.events)
+    assert observed and observed[-1].type == AgentStreamEventType.TURN_COMPLETED
+    assert "<goal-status" in observed[-1].payload["_goal_protocol_text"]
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_without_envelope_is_still_reaped_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Goal turn that never emits an envelope falls back to the silence reap.
+
+    The Goal metadata alone must not suppress the watchdog; without a complete
+    trailing goal-status the turn is cancelled as silent (Goal → paused,
+    resumable) rather than synthesized into a false success.
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(tailer_module, "STREAM_INACTIVITY_TIMEOUT_S", 0.0)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-goal-no-envelope",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "Continue the active Goal.",
+        [],
+        client_turn_id="goal-turn-no-envelope",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Still working, no envelope yet."},
+            },
+        }
+    )
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    assert completed.payload["status"] == "cancelled"
+    page = await tailer._store.read_since(-1, limit=100)
+    assert any(
+        e.type == AgentStreamEventType.ERROR
+        and e.payload.get("message") == "Turn stopped after the stream went silent."
+        for e in page.events
+    )
+    assert transport.turn_in_flight is False
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_approval_resolve_clears_synthetic_tool_wait() -> None:
+    """Answering a Codex/TraeX question re-arms the silence watchdog.
+
+    The adapter announces a blocking question as a TOOL_CALL_STARTED with no
+    matching completion; resolving the approval must also drop that id from the
+    active-tool set, otherwise the watchdog stays suppressed for the turn.
+    """
+    from claude_hub.services.agent_stream.base import NormalizeContext
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_FakeNativeTransport(),
+    )
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=1,
+        turn_id="turn-q",
+    )
+    started = ctx.event(
+        AgentStreamEventType.TOOL_CALL_STARTED,
+        {"tool_call_id": "q1", "name": "request_user_input"},
+        call_id="q1",
+    )
+    required = ctx.event(
+        AgentStreamEventType.APPROVAL_REQUIRED,
+        {"tool_call_id": "q1", "kind": "ask_question", "questions": [{"id": "a", "label": "x"}]},
+        call_id="q1",
+    )
+    resolved = ctx.event(
+        AgentStreamEventType.APPROVAL_RESOLVED, {"tool_call_id": "q1"}, call_id="q1"
+    )
+    tailer._record_watchdog_activity(started)
+    tailer._record_approval_card(required)
+    assert tailer._waiting_for_external_activity() is True
+    tailer._record_approval_card(resolved)
+    assert tailer._active_tool_call_ids == set()
+    assert tailer._blocking_approval_call_ids == set()
+    assert tailer._waiting_for_external_activity() is False
 
 
 @pytest.mark.asyncio
