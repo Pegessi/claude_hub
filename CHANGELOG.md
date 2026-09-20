@@ -5,6 +5,13 @@
 
 ## Unreleased
 
+### feat: rename a Chat from the sidebar by double-clicking
+
+- Double-clicking a Chat row in the left sidebar now starts inline rename,
+  matching the tab bar. The row's tooltip notes the shortcut, and drag-to-
+  reorder is unaffected because a stationary double-click never crosses the
+  drag threshold.
+
 ### feat: group Terminal Status list by working directory
 
 - Order the manual Terminal Status panel the same way as the Chat sidebar:
