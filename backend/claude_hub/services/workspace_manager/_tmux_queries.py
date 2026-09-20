@@ -68,7 +68,10 @@ class _TmuxQueriesMixin:
 
     async def _submit_tmux_message(self, tmux_session: str, message: str) -> None:
         for attempt in range(1, TMUX_SUBMIT_ATTEMPTS + 1):
-            await self._run_tmux("send-keys", "-t", tmux_session, "C-m")
+            # Use tmux's semantic Enter key. With extended-keys/csi-u enabled,
+            # C-m is encoded as Ctrl-M and Claude Code leaves multi-line pasted
+            # input pending instead of treating it as a submit action.
+            await self._run_tmux("send-keys", "-t", tmux_session, "Enter")
             await asyncio.sleep(TMUX_SUBMIT_SETTLE_SECONDS)
             try:
                 output = await self._capture_tmux_output(tmux_session)
@@ -237,7 +240,7 @@ class _TmuxQueriesMixin:
            * checks the session user option ``@receipt_<hash>`` (the
              receipt);
            * if the receipt is **absent**, clears the input line (``C-u``),
-             pastes the named buffer, submits it (first ``C-m``), and sets
+             pastes the named buffer, submits it (first ``Enter``), and sets
              the receipt option — all in one tmux command list;
            * if the receipt is **present**, does nothing.
 
@@ -250,7 +253,7 @@ class _TmuxQueriesMixin:
         3. **Submit verification (no re-paste).** After the transaction,
            we run the same ``_submit_tmux_message`` verification loop as
            the legacy path: capture the pane and, if the message is still
-           sitting in the input box, send additional ``C-m`` retries.
+           sitting in the input box, send additional ``Enter`` retries.
            This never re-pastes — the receipt guarantees the paste
            happened at most once — it only ensures the already-pasted
            input is accepted by the TUI.
@@ -307,18 +310,18 @@ class _TmuxQueriesMixin:
             # if-shell -F <format> <then-cmd> <else-cmd>
             #   format = #{@receipt_<hash>}  -> non-empty if receipt set
             #   then-cmd  = "" (do nothing)
-            #   else-cmd  = send-keys C-u; paste-buffer ...; send-keys C-m;
+            #   else-cmd  = send-keys C-u; paste-buffer ...; send-keys Enter;
             #               set-option @receipt_<hash> 1
             #
             # The else branch is a tmux command list separated by ';'.
             # Because it is passed as a single argument, the ';' reaches
             # tmux and is parsed as a command separator inside the else
-            # branch. The first C-m is part of the atomic transaction so
+            # branch. The first Enter is part of the atomic transaction so
             # the receipt is set only after the paste+submit attempt.
             else_commands = (
                 f"send-keys -t {tmux_session} C-u"
                 f"; paste-buffer -b {buffer_name} -p -r -t {tmux_session}"
-                f"; send-keys -t {tmux_session} C-m"
+                f"; send-keys -t {tmux_session} Enter"
                 f"; set-option -t {tmux_session} {receipt_key} 1"
             )
             await self._run_tmux(
@@ -362,7 +365,7 @@ class _TmuxQueriesMixin:
         already accepted it), we return without sending anything — this
         avoids submitting an unrelated/blank line that happens to be on
         the prompt. Only while the message is verifiably pending do we
-        send ``C-m`` and re-check, up to ``TMUX_SUBMIT_ATTEMPTS`` times.
+        send ``Enter`` and re-check, up to ``TMUX_SUBMIT_ATTEMPTS`` times.
 
         Used both after the atomic paste transaction (the receipt
         guarantees at-most-once paste; this only nudges Enter) and on
@@ -371,11 +374,11 @@ class _TmuxQueriesMixin:
         if not message:
             # Fail closed: without the original message body we cannot
             # verify whether the input is still pending, and sending a
-            # blind C-m could submit an unrelated line. Surface this to
+            # blind Enter could submit an unrelated line. Surface this to
             # the caller so it can quarantine the call_id.
             raise RuntimeError(
                 f"cannot verify submit for tmux_session={tmux_session}: "
-                "message body is empty; refusing to send blind C-m"
+                "message body is empty; refusing to send blind Enter"
             )
 
         for attempt in range(1, TMUX_SUBMIT_ATTEMPTS + 1):
@@ -392,18 +395,19 @@ class _TmuxQueriesMixin:
             if not self._message_still_in_input(output, message):
                 if attempt > 1:
                     logger.info(
-                        "Already-pasted message accepted after %s C-m nudge(s) " "tmux_session=%s",
+                        "Already-pasted message accepted after %s Enter nudge(s) "
+                        "tmux_session=%s",
                         attempt - 1,
                         tmux_session,
                     )
                 return
-            # Message is still pending: send one C-m and re-check.
-            await self._run_tmux("send-keys", "-t", tmux_session, "C-m")
+            # Message is still pending: send one semantic Enter and re-check.
+            await self._run_tmux("send-keys", "-t", tmux_session, "Enter")
             await asyncio.sleep(TMUX_SUBMIT_SETTLE_SECONDS)
 
         raise RuntimeError(
             f"Already-pasted message still pending after {TMUX_SUBMIT_ATTEMPTS} "
-            f"C-m nudges on tmux_session={tmux_session}"
+            f"Enter nudges on tmux_session={tmux_session}"
         )
 
     async def _interrupt_session(self, session: ManagedSession) -> None:

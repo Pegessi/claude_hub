@@ -15,6 +15,7 @@ session directly in the in-memory manager (mirroring the helper used in
 touches a real terminal.
 """
 
+import logging
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
@@ -185,6 +186,66 @@ async def test_managed_session_creation_never_inherits_chat_tab_surface(
 
     assert session.session_kind == SessionKind.TERMINAL
     assert session.chat_mode == ChatMode.DEFAULT
+
+
+def test_agent_create_rolls_back_session_when_bootstrap_submit_fails(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed bootstrap must not leave a registered idle session/tab."""
+    repo = tmp_path / "repo-bootstrap-failure"
+    repo.mkdir()
+    client = TestClient(app, raise_server_exceptions=False)
+    workspace = _make_workspace(client, repo, name="Bootstrap Failure Repo")
+    deleted_tabs: list[str] = []
+
+    async def fake_create_tab(**kwargs: object) -> TerminalTab:
+        return TerminalTab(
+            id="bootstrap-failure-tab",
+            name=str(kwargs["name"]),
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.CLAUDE,
+            target=ExecutionTarget.LOCAL,
+            port=12346,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace["id"],
+            workspace_name="Bootstrap Failure Repo",
+            workspace_role=WorkspaceSessionRole.DISPATCHER,
+        )
+
+    async def fail_bootstrap(_session_id: str, _message: str) -> None:
+        raise RuntimeError("Failed to submit workspace agent message")
+
+    async def fake_delete_tab(tab_id: str) -> bool:
+        deleted_tabs.append(tab_id)
+        return True
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", fake_delete_tab)
+    monkeypatch.setattr(workspace_manager, "send_session_message", fail_bootstrap)
+
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            f"/api/workspaces/{workspace['id']}/agent",
+            json={
+                "agent_type": "claude",
+                "role": "dispatcher",
+                "reuse_existing": False,
+                "ephemeral": True,
+            },
+        )
+
+    assert response.status_code == 502
+    assert "failed to initialize" in response.json()["detail"].lower()
+    assert workspace_manager.sessions == {}
+    assert workspace_manager.workspaces[workspace["id"]].dispatcher_session_id is None
+    assert deleted_tabs == ["bootstrap-failure-tab"]
+    assert any(
+        "Failed to initialize workspace agent" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_list_workspaces_empty_when_none_exist(tmp_path: Path) -> None:

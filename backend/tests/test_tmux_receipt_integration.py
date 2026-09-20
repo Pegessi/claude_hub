@@ -277,7 +277,7 @@ async def test_post_send_failure_receipt_present_no_repaste_on_recovery(
     assert call_id not in recovered.pending_call_ids
     assert call_id not in recovered.uncertain_call_ids
     # No repaste: the receipt made the atomic check-and-paste a no-op, and
-    # the submit-nudge only sends C-m (not the message body).
+    # the submit-nudge only sends Enter (not the message body).
     assert _count_pastes(effect_file, call_id) == 1
 
     # resume_existing_call for a processing call_id is a no-op (already

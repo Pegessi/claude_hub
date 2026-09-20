@@ -331,7 +331,7 @@ class _MonitorMixin:
             task.id,
             session.role,
         )
-        await self._run_tmux("send-keys", "-t", session.tmux_session, "C-m")
+        await self._run_tmux("send-keys", "-t", session.tmux_session, "Enter")
         self.sessions[session.id] = session.model_copy(
             update={
                 "status": ManagedSessionStatus.WORKING,

@@ -276,10 +276,15 @@ class DeliveryUncertain(RuntimeError):
     """
 
 
+class WorkspaceAgentInitializationError(RuntimeError):
+    """Raised after a newly created workspace agent is rolled back."""
+
+
 # Re-export everything (including single-underscore helpers like _now/_slug)
 # so ``from ._constants import *`` carries them into the mixins and package.
 __all__ = [
     "DeliveryUncertain",
+    "WorkspaceAgentInitializationError",
     "ARTIFACT_PREVIEW_MAX_BYTES",
     "ATTACHMENT_MAX_BYTES",
     "AUTO_CONTINUE_IDLE_GRACE_SECONDS",
