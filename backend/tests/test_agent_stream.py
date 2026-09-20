@@ -2986,22 +2986,21 @@ async def test_idle_reap_does_not_cancel_healthy_inflight_turn(
 
 
 @pytest.mark.asyncio
-async def test_idle_reap_cancels_hung_turn_past_hard_cap(
+async def test_active_long_running_turn_has_no_duration_cap(
     store: AgentStreamStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn stuck past the hard duration cap is reaped, not left forever.
+    """An actively streaming turn must survive beyond the old one-hour cap.
 
-    Reviewer safety-cap note: after AC1 a hung turn with zero subscribers would
-    otherwise keep the tailer alive indefinitely. The cap fires on in-flight
-    duration (not subscriber presence), so it can never interrupt a healthy
-    turn that was merely backgrounded — only a genuinely stuck one.
+    A real code review or test run can remain productive for more than an hour.
+    Wall-clock duration alone is not evidence of a hang; only model silence
+    while the model is expected to stream is.
     """
     from claude_hub.services.agent_stream import tailer as tailer_module
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 
     monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
-    monkeypatch.setattr(tailer_module, "MAX_TURN_DURATION_S", 0.0)
+    monkeypatch.setattr(tailer_module, "STREAM_INACTIVITY_TIMEOUT_S", 600.0)
 
     session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
     transport = _FakeNativeTransport(eof_is_fatal=False)
@@ -3015,52 +3014,40 @@ async def test_idle_reap_cancels_hung_turn_past_hard_cap(
         native_transport=transport,
     )
     queue = await tailer.subscribe()
-    await tailer.send_message("hello", [], client_turn_id="turn-hung")
+    await tailer.send_message("run a long review", [], client_turn_id="turn-long-active")
     assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
         AgentStreamEventType.TURN_STARTED
     )
 
-    tailer.unsubscribe(queue)
-    tailer._last_subscriber_at = time.monotonic() - tailer_module.IDLE_TTL_S - 1
-    # Force the observed in-flight duration past the (zeroed) cap.
-    tailer._turn_in_flight_since = time.monotonic() - 1.0
+    # Two hours of total elapsed time, but provider activity was received
+    # recently. The turn and its provider process must both remain alive.
+    tailer._turn_in_flight_since = time.monotonic() - 7200.0
+    tailer._last_event_at = time.monotonic()
+    await asyncio.sleep(0.2)
 
-    await asyncio.sleep(0.3)
-    # The hung turn is terminalized (cancelled) and the subprocess reaped.
-    assert transport.turn_in_flight is False
-    assert transport.stop_called is True
-    assert tailer.is_running() is False
+    assert transport.turn_in_flight is True
+    assert transport.stop_called is False
+    assert tailer.is_running() is True
     page = await store.read_since(-1, limit=50)
-    assert page.events[-1].type == AgentStreamEventType.TURN_COMPLETED
-    assert page.events[-1].payload["status"] == "cancelled"
-    hung = [
-        event
-        for event in page.events
-        if event.type == AgentStreamEventType.ERROR
-        and event.payload.get("message")
-        == "Turn stopped after exceeding the maximum allowed duration."
-    ]
-    assert len(hung) == 1
+    assert not any(event.type == AgentStreamEventType.ERROR for event in page.events)
 
 
 @pytest.mark.asyncio
-async def test_hung_turn_reap_fires_with_subscribers_present(
+async def test_outstanding_tool_call_suppresses_stream_inactivity_reap(
     store: AgentStreamStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn stuck past the hard cap is reaped even while viewers watch.
+    """A long-running tool is an external wait, not a dead model stream.
 
-    Regression for the watched-session hang: the hung-turn cap used to be
-    nested inside the zero-subscriber idle-reap gate, so a session the user
-    was actively viewing was never protected — the tailer blocked on
-    ``read_line`` forever. The cap now runs independent of subscriber
-    presence.
+    Shell commands, test suites, builds, and subagents can remain outstanding
+    beyond the streaming timeout without model deltas. The watchdog re-engages
+    once the provider reports that the tool call is no longer outstanding.
     """
     from claude_hub.services.agent_stream import tailer as tailer_module
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 
     monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
-    monkeypatch.setattr(tailer_module, "MAX_TURN_DURATION_S", 0.0)
+    monkeypatch.setattr(tailer_module, "STREAM_INACTIVITY_TIMEOUT_S", 0.0)
 
     session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
     transport = _FakeNativeTransport(eof_is_fatal=False)
@@ -3074,32 +3061,69 @@ async def test_hung_turn_reap_fires_with_subscribers_present(
         native_transport=transport,
     )
     queue = await tailer.subscribe()
-    await tailer.send_message("hello", [], client_turn_id="turn-hung-watched")
+    await tailer.send_message("run the tests", [], client_turn_id="turn-long-tool")
     assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
         AgentStreamEventType.TURN_STARTED
     )
 
-    # Keep the subscriber attached (the user is watching). Force the observed
-    # in-flight duration past the (zeroed) cap.
-    tailer._turn_in_flight_since = time.monotonic() - 1.0
+    tailer._last_event_at = time.monotonic() - 1.0
+    tailer._active_tool_call_ids.add("long-test-run")
+    await asyncio.sleep(0.2)
+    assert transport.turn_in_flight is True
+    assert transport.stop_called is False
+    assert tailer.is_running() is True
 
+    tailer._active_tool_call_ids.discard("long-test-run")
     await asyncio.sleep(0.3)
-    # The hung turn is terminalized (cancelled) and the subprocess reaped,
-    # even though a subscriber is still present.
     assert transport.turn_in_flight is False
     assert transport.stop_called is True
     assert tailer.is_running() is False
     page = await store.read_since(-1, limit=50)
     assert page.events[-1].type == AgentStreamEventType.TURN_COMPLETED
     assert page.events[-1].payload["status"] == "cancelled"
-    hung = [
+    silent = [
         event
         for event in page.events
         if event.type == AgentStreamEventType.ERROR
-        and event.payload.get("message")
-        == "Turn stopped after exceeding the maximum allowed duration."
+        and event.payload.get("message") == "Turn stopped after the stream went silent."
     ]
-    assert len(hung) == 1
+    assert len(silent) == 1
+
+
+@pytest.mark.asyncio
+async def test_raw_queue_status_suppresses_inactivity_without_visible_payload(
+    store: AgentStreamStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity queueing is read from the raw record, not the STATUS payload.
+
+    The persisted STATUS event must keep its exact user-visible shape, while a
+    raw ``queue/status`` queued/waiting notification suppresses the silence
+    watchdog until a model delta or a ``ready`` state clears it.
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    monkeypatch.setattr(tailer_module, "STREAM_INACTIVITY_TIMEOUT_S", 0.0)
+    session = _native_session().model_copy(update={"session_kind": SessionKind.CHAT})
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=_FakeNativeTransport(eof_is_fatal=False),
+    )
+    tailer._last_event_at = time.monotonic() - 1.0
+    assert tailer._stream_inactive() is True
+
+    tailer._note_raw_provider_wait({"method": "queue/status", "params": {"state": "queued"}})
+    assert tailer._waiting_for_model_capacity is True
+    assert tailer._stream_inactive() is False
+
+    tailer._note_raw_provider_wait({"method": "queue/status", "params": {"state": "ready"}})
+    assert tailer._waiting_for_model_capacity is False
+    assert tailer._stream_inactive() is True
 
 
 @pytest.mark.asyncio
@@ -3376,6 +3400,81 @@ async def test_goal_turn_hides_internal_prompt_and_protocol_from_visible_transcr
     assert completed.payload["assistant_text"] == visible
     assert "_goal_protocol_text" not in completed.payload
     assert observed and "<goal-checkpoint>" in observed[-1].payload["_goal_protocol_text"]
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_turn_synthesizes_completion_when_provider_result_never_arrives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A complete Goal envelope finishes the turn without a provider result.
+
+    Regression for Goal turns reaped as "stream went silent": the model
+    emitted its trailing goal-status block but the one-shot CLI (Cursor here)
+    never followed with a result record because a lingering child held stdout
+    open. After the terminal grace the tailer must synthesize a *completed*
+    turn (with the raw protocol text for the Goal observer) instead of
+    cancelling it ten minutes later and pausing the Goal.
+    """
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(tailer_module, "GOAL_TERMINAL_GRACE_S", 0.0)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    observed: List[AgentStreamEvent] = []
+
+    async def observer(event: AgentStreamEvent) -> None:
+        observed.append(event)
+
+    tailer = SessionTailer(
+        workspace_id="ws-goal-stuck-result",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+        post_persist_observers=[observer],
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "Continue the active Goal.",
+        [],
+        client_turn_id="goal-turn-no-result",
+        visible_text="Continue active Goal",
+        turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+    )
+
+    for delta in (
+        "Visible progress.\n<goal-check",
+        'point>{"remaining":["review"]}</goal-checkpoint>\n<goal-status ',
+        'state="continue">next: review the rest</goal-status>',
+    ):
+        transport._records.put_nowait(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": delta},
+                },
+            }
+        )
+    # Deliberately never enqueue the provider's {"type": "result"} record.
+
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    await asyncio.sleep(0.1)
+    page = await tailer._store.read_since(-1, limit=100)
+
+    assert completed.turn_id == "goal-turn-no-result"
+    assert completed.payload["status"] == "completed"
+    assert not any(event.type == AgentStreamEventType.ERROR for event in page.events)
+    assert transport.turn_in_flight is False
+    assert tailer._goal_terminal_at is None
+    assert observed and observed[-1].type == AgentStreamEventType.TURN_COMPLETED
+    assert "<goal-status" in observed[-1].payload["_goal_protocol_text"]
+    assert 'state="continue"' in observed[-1].payload["_goal_protocol_text"]
     await tailer.stop()
 
 
