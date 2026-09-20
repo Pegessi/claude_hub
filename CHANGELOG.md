@@ -5,6 +5,14 @@
 
 ## Unreleased
 
+### feat: group Terminal Status list by working directory
+
+- Order the manual Terminal Status panel the same way as the Chat sidebar:
+  group sessions by working directory, showing the directory name (full path
+  on hover) and reusing the persisted within- and cross-directory order. All
+  manual sessions, including raw terminal tabs, remain listed; only directory
+  headers were added and no row styling changed.
+
 ### fix: keep expanded Chat Goal details dismissible
 
 - Anchor expanded Goal details above the status bar and add a visible close

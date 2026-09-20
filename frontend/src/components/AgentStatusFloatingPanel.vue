@@ -89,7 +89,7 @@
             v-if="group.title"
             class="agent-group-header"
           >
-            <span>{{ group.title }}</span>
+            <span :title="group.tooltip">{{ group.title }}</span>
             <strong>{{ group.rows.length }}</strong>
           </div>
           <button
@@ -149,6 +149,7 @@ import AgentAvatar from '@/components/AgentAvatar.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { cwdLabel, groupChatsByCwd } from '@/utils/chatGroups'
 import type { AgentRuntimeStatus, TerminalAgentStatus, TerminalTab } from '@/types'
 
 const STATUS_PRIORITY: AgentRuntimeStatus[] = ['attention', 'working', 'idle', 'offline']
@@ -202,6 +203,8 @@ interface AgentRow {
 interface AgentRowGroup {
   key: string
   title: string
+  /** Optional native tooltip — holds the full cwd path for manual directory groups. */
+  tooltip?: string
   rows: AgentRow[]
 }
 
@@ -246,7 +249,21 @@ const availableRows = computed<AgentRow[]>(() =>
 
 const rowGroups = computed<AgentRowGroup[]>(() => {
   if (!isManagedSource.value) {
-    return [{ key: 'manual', title: '', rows: rows.value }]
+    // Same display order as the Chat sidebar: group manual sessions by working
+    // directory, preserving the server's persisted order both within a
+    // directory and for the first appearance of each directory. We reuse the
+    // Chat list's grouping primitive (utils/chatGroups) so the two surfaces
+    // share one ordering scheme. The status panel keeps every manual session
+    // (including raw terminal tabs); it only adds directory headers.
+    const rowByTabId = new Map(rows.value.map(row => [row.tab.id, row]))
+    return groupChatsByCwd(rows.value.map(row => row.tab)).map(group => ({
+      key: `cwd:${group.cwd}`,
+      title: cwdLabel(group.cwd),
+      tooltip: group.cwd === 'No directory' ? undefined : group.cwd,
+      rows: group.tabs
+        .map(tab => rowByTabId.get(tab.id))
+        .filter((row): row is AgentRow => Boolean(row)),
+    }))
   }
 
   const groups = new Map<string, AgentRowGroup>()
