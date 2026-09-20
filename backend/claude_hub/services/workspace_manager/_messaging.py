@@ -730,14 +730,14 @@ class _MessagingMixin:
             if receipt_set:
                 # Paste happened. The message may still be sitting in the
                 # input box if the Hub died between the atomic paste+first
-                # C-m and the submit verification loop. Nudge Enter (no
+                # Enter and the submit verification loop. Nudge Enter (no
                 # re-paste) so the TUI accepts it, then keep the call_id
                 # in processing to await the worker's ACK.
                 message = session.pending_messages.get(call_id)
                 if not message:
                     # Fail closed: without the original message body we
                     # cannot verify whether the input is still pending,
-                    # and a blind C-m could submit an unrelated line.
+                    # and a blind Enter could submit an unrelated line.
                     # Move to uncertain so an operator can decide.
                     to_uncertain.append(call_id)
                     continue
@@ -1086,13 +1086,13 @@ class _MessagingMixin:
                 raise
 
             # The paste ran but the Hub may have died before the submit
-            # verification loop could nudge additional C-m. Ensure the
+            # verification loop could nudge additional Enter keys. Ensure the
             # already-pasted input is accepted by the TUI (no re-paste).
             message = session.pending_messages.get(call_id)
             if not message:
                 # Fail closed: without the original message body we cannot
                 # verify whether the input is still pending, and a blind
-                # C-m could submit an unrelated line. Move back to
+                # Enter could submit an unrelated line. Move back to
                 # uncertain and surface to the operator.
                 comp_session = updated_session.model_copy(
                     update={

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import uuid
 from typing import Any, List
 
@@ -50,10 +51,14 @@ from ..services.workspace_identity import (
     DuplicateWorkspaceError,
     WorkspaceIdentityError,
 )
-from ..services.workspace_manager._constants import DeliveryUncertain
+from ..services.workspace_manager._constants import (
+    DeliveryUncertain,
+    WorkspaceAgentInitializationError,
+)
 from ..services.workspace_manager._reports import ReportCallIdConflict
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
+logger = logging.getLogger(__name__)
 
 # Per-session timestamps that tick on every status refresh without reflecting any
 # content the board UI renders. Excluding them from the ETag lets idle 2.5s polls
@@ -537,6 +542,12 @@ async def ensure_workspace_agent(
         raise HTTPException(status_code=404, detail="Workspace not found") from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except WorkspaceAgentInitializationError as e:
+        logger.exception(
+            "Failed to initialize workspace agent workspace_id=%s",
+            workspace_id,
+        )
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 @router.patch("/tasks/{task_id}", response_model=WorkspaceTask)

@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### fix: submit workspace agent bootstrap reliably
+
+- Send tmux's semantic `Enter` key for pasted workspace-agent prompts, including
+  receipt recovery and stuck-prompt retries. This keeps submission working when
+  tmux extended keys encode `C-m` as Ctrl-M instead of the TUI's Enter action.
+- Roll back the new managed session and terminal tab when its bootstrap cannot
+  be delivered, log the underlying failure, and return a diagnostic 502 instead
+  of leaving an unusable idle session after a generic 500.
+
 ### feat: schedule durable turns in existing Chat conversations
 
 - Add `Create scheduled task` to the Chat composer `+` menu. It opens the

@@ -172,9 +172,52 @@ class _SessionsMixin:
         # would turn advisory reuse into hard concurrent de-duplication.
         async with self.workspace_mutation_lock(workspace_id):
             session = await self._create_managed_session(workspace, payload)
-        bootstrap_prompt = self._build_session_bootstrap_prompt(workspace, session)
-        if bootstrap_prompt:
-            await self.send_session_message(session.id, bootstrap_prompt)
+        try:
+            bootstrap_prompt = self._build_session_bootstrap_prompt(workspace, session)
+            if bootstrap_prompt:
+                await self.send_session_message(session.id, bootstrap_prompt)
+        except Exception as exc:
+            # Creating the terminal and persisting the session precedes the
+            # bootstrap. Compensate that partial create so any initialization
+            # failure cannot leave an unusable session in the sidebar.
+            try:
+                async with self.workspace_mutation_lock(workspace_id):
+                    self.sessions.pop(session.id, None)
+                    current_workspace = self.workspaces.get(workspace_id)
+                    if current_workspace:
+                        workspace_update: dict[str, Any] = {}
+                        if current_workspace.dispatcher_session_id == session.id:
+                            workspace_update["dispatcher_session_id"] = None
+                        if current_workspace.resident_agent_session_id == session.id:
+                            workspace_update["resident_agent_session_id"] = None
+                            workspace_update["resident_agent_last_run_at"] = None
+                        if workspace_update:
+                            workspace_update["updated_at"] = _wm._now()
+                            self.workspaces[workspace_id] = current_workspace.model_copy(
+                                update=workspace_update
+                            )
+                    self._save_state()
+            except Exception:
+                logger.exception(
+                    "Failed to persist workspace agent rollback "
+                    "workspace_id=%s session_id=%s tab_id=%s",
+                    workspace_id,
+                    session.id,
+                    session.tab_id,
+                )
+            try:
+                await ttyd_manager.delete_tab(session.tab_id)
+            except Exception:
+                logger.exception(
+                    "Failed to delete terminal tab during workspace agent rollback "
+                    "workspace_id=%s session_id=%s tab_id=%s",
+                    workspace_id,
+                    session.id,
+                    session.tab_id,
+                )
+            raise WorkspaceAgentInitializationError(
+                "Failed to initialize workspace agent; the new session was rolled back"
+            ) from exc
         return session
 
     async def _create_managed_session(

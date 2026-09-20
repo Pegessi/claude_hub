@@ -6217,6 +6217,102 @@ def test_send_tmux_message_pastes_with_bracketed_paste_flags(
     assert load_index < paste_index
 
 
+def test_submit_tmux_message_uses_semantic_enter_with_extended_keys(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Submit with tmux's ``Enter`` key, not the control-key alias ``C-m``.
+
+    With ``extended-keys on`` and ``extended-keys-format csi-u`` (the live Hub
+    tmux configuration), Claude Code distinguishes the physical Enter key from
+    Ctrl-M.  ``C-m`` leaves a bracketed multi-line paste in the composer while
+    ``Enter`` submits it.
+    """
+    tmux_calls: list[tuple[str, ...]] = []
+    captures = iter(["❯ Bootstrap accepted\n\n⏺ Working\n"])
+
+    async def fake_run_tmux(*args: str) -> None:
+        tmux_calls.append(args)
+
+    async def fake_capture(_tmux_session: str) -> str:
+        return next(captures)
+
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
+
+    asyncio.run(
+        workspace_manager._submit_tmux_message(
+            "claude-hub-deadbeef",
+            "Bootstrap accepted\nSecond line",
+        )
+    )
+
+    assert tmux_calls == [("send-keys", "-t", "claude-hub-deadbeef", "Enter")]
+
+
+def test_receipt_send_uses_semantic_enter_in_atomic_submit(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """The receipt-gated delivery path must use the same physical Enter key."""
+    tmux_calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str) -> None:
+        tmux_calls.append(args)
+
+    async def fake_verify(_tmux_session: str, _message: str) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_ensure_submitted_without_repaste",
+        fake_verify,
+    )
+
+    asyncio.run(
+        workspace_manager._send_tmux_message_with_receipt(
+            "claude-hub-deadbeef",
+            "Bootstrap accepted\nSecond line",
+            "bootstrap-call",
+        )
+    )
+
+    atomic_call = next(call for call in tmux_calls if call[0] == "if-shell")
+    else_commands = atomic_call[-1]
+    assert "send-keys -t claude-hub-deadbeef Enter" in else_commands
+    assert "send-keys -t claude-hub-deadbeef C-m" not in else_commands
+
+
+def test_receipt_recovery_uses_semantic_enter_without_repasting(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A pending receipt recovery nudges Enter without sending the body again."""
+    tmux_calls: list[tuple[str, ...]] = []
+    captures = iter(
+        [
+            "❯ [Pasted text #1 +17 lines]\n",
+            "❯ Bootstrap accepted\n\n⏺ Working\n",
+        ]
+    )
+
+    async def fake_run_tmux(*args: str) -> None:
+        tmux_calls.append(args)
+
+    async def fake_capture(_tmux_session: str) -> str:
+        return next(captures)
+
+    monkeypatch.setattr(workspace_manager, "_run_tmux", fake_run_tmux)
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
+
+    asyncio.run(
+        workspace_manager._ensure_submitted_without_repaste(
+            "claude-hub-deadbeef",
+            "Bootstrap accepted\nSecond line",
+        )
+    )
+
+    assert tmux_calls == [("send-keys", "-t", "claude-hub-deadbeef", "Enter")]
+
+
 def test_tmux_pending_input_detection_matches_cursor_paste_prompt() -> None:
     message = "New workspace task assigned.\n\nTask description"
 
@@ -6260,7 +6356,7 @@ def test_tmux_pending_input_detection_matches_claude_pasted_text_placeholder() -
 
     The Codex-era placeholder check only matched `[Pasted Content`, so a
     Claude paste that was still sitting in the input would be reported as
-    submitted and the C-m retry loop would not fire. Lock in coverage that
+    submitted and the Enter retry loop would not fire. Lock in coverage that
     the broadened `[Pasted text` check now catches Claude's format too.
     """
     message = "New workspace task assigned.\n\nTask description"
@@ -7295,7 +7391,7 @@ def test_monitor_surfaces_worker_prompt_stuck_in_input(
     assert updated_task.status == WorkspaceTaskStatus.WORKING
     assert updated_session.runtime_status == AgentRuntimeStatus.WORKING
     assert updated_session.prompt_retry_task_id == started["id"]
-    assert submitted_keys == [("send-keys", "-t", session.tmux_session, "C-m")]
+    assert submitted_keys == [("send-keys", "-t", session.tmux_session, "Enter")]
     assert sent_messages == []
 
     retry_at = datetime.now() - timedelta(seconds=30)
@@ -7419,7 +7515,7 @@ def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
     assert updated_task.status == WorkspaceTaskStatus.REVIEW
     assert updated_reviewer.runtime_status == AgentRuntimeStatus.WORKING
     assert updated_reviewer.prompt_retry_task_id == started["id"]
-    assert submitted_keys == [("send-keys", "-t", reviewer.tmux_session, "C-m")]
+    assert submitted_keys == [("send-keys", "-t", reviewer.tmux_session, "Enter")]
     assert sent_messages == []
 
     retry_at = datetime.now() - timedelta(seconds=30)
