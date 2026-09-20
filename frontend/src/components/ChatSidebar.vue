@@ -141,8 +141,9 @@
                 type="button"
                 class="chat-sidebar__item-main"
                 :aria-current="tab.id === activeTabId ? 'page' : undefined"
-                :title="`${tab.name || 'Untitled'} — ${tab.cwd || 'No directory'}. Alt+↑/↓ to reorder`"
+                :title="`${tab.name || 'Untitled'} — ${tab.cwd || 'No directory'}. Double-click to rename; Alt+↑/↓ to reorder`"
                 @click.stop="onRowClick($event, tab)"
+                @dblclick.stop="startRename(tab)"
                 @keydown.alt.up.prevent="moveInGroup(tab, group, -1)"
                 @keydown.alt.down.prevent="moveInGroup(tab, group, 1)"
               >
