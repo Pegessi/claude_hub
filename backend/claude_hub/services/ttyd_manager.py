@@ -3252,9 +3252,9 @@ class TTYDManager:
         self._save_order()
 
     def _ensure_tab_in_order(self, tab_id: str) -> None:
-        """Ensure a tab is in the order list."""
+        """Ensure a newly created tab appears before existing tabs."""
         if tab_id not in self._tab_order:
-            self._tab_order.append(tab_id)
+            self._tab_order.insert(0, tab_id)
             self._save_order()
 
     def set_tab_workspace_metadata(

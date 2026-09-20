@@ -62,6 +62,27 @@ test('pin and unpin preferences survive new store instances and ignore other ses
   assert.deepEqual(JSON.parse(storage.get('claude_hub_pinned_chat_ids')), [])
 })
 
+test('newly created and duplicated sessions are prepended without reordering existing sessions', async t => {
+  const { store } = setup(t)
+  const responses = [
+    { id: 'new', cwd: '/repo', session_kind: 'chat' },
+    { id: 'duplicate', cwd: '/repo', session_kind: 'chat' },
+  ]
+  globalThis.fetch.mock.mockImplementation(async () => ({
+    ok: true,
+    json: async () => responses.shift(),
+  }))
+
+  await store.createTab({ name: 'New session' })
+  assert.deepEqual(store.tabs.map(tab => tab.id), ['new', 'a', 'terminal', 'b', 'managed'])
+
+  await store.duplicateTab('a')
+  assert.deepEqual(
+    store.tabs.map(tab => tab.id),
+    ['duplicate', 'new', 'a', 'terminal', 'b', 'managed'],
+  )
+})
+
 test('ID-based reorder keeps managed and terminal rows and saves the complete order', async t => {
   const { store } = setup(t)
   store.activeTabId = 'b'

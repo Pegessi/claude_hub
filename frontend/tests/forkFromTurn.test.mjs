@@ -131,6 +131,11 @@ test('fork resolving after a tab switch does not override the switch', async () 
 
   assert.equal(result.id, 'fork-1')
   assert.ok(store.tabs.some(t => t.id === 'fork-1'), 'fork tab is added regardless')
+  assert.deepEqual(
+    store.tabs.map(tab => tab.id),
+    ['fork-1', 'tab-a', 'tab-b'],
+    'fork is prepended without reordering existing sessions',
+  )
   assert.equal(
     store.activeTabId,
     tabB.id,
@@ -159,6 +164,7 @@ test('fork resolving while still on the source tab auto-switches to the fork', a
   forkDeferred.resolve()
   await forkPromise
 
+  assert.deepEqual(store.tabs.map(tab => tab.id), ['fork-1', 'tab-a'])
   assert.equal(store.activeTabId, 'fork-1', 'auto-switched to the fork')
   const pane = store.panes.find(p => p.id === store.activePaneId)
   assert.equal(pane.tabId, 'fork-1', 'fork assigned to the active pane')
