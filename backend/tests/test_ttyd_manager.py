@@ -5059,9 +5059,7 @@ async def test_archive_tab_returns_none_for_missing(
 
 
 @pytest.mark.asyncio
-async def test_unarchive_tab_clears_flag(
-    monkeypatch: MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_unarchive_tab_clears_flag(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     manager, process = _make_archive_test_manager(monkeypatch, tmp_path, archived=True)
     process.archived_at = datetime.now()
 
@@ -5090,9 +5088,7 @@ async def test_unarchive_tab_returns_none_for_missing(
     assert result is None
 
 
-def test_list_tabs_excludes_archived(
-    monkeypatch: MonkeyPatch, tmp_path: Path
-) -> None:
+def test_list_tabs_excludes_archived(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     manager, _ = _make_archive_test_manager(monkeypatch, tmp_path)
     archived = TTYDProcess(
         tab_id="archived-tab",
@@ -5110,9 +5106,7 @@ def test_list_tabs_excludes_archived(
     assert [t.id for t in manager.list_archived_tabs()] == ["archived-tab"]
 
 
-def test_list_archived_tabs_sorted_newest_first(
-    monkeypatch: MonkeyPatch, tmp_path: Path
-) -> None:
+def test_list_archived_tabs_sorted_newest_first(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 14100
     manager.processes = {}

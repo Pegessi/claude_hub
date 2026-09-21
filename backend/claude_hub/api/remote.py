@@ -67,10 +67,7 @@ def remote_listing_command(remote_path: str, *, stdin_shell: bool) -> str:
     """
     if stdin_shell:
         encoded = base64.b64encode(REMOTE_LIST_SCRIPT.encode("utf-8")).decode("ascii")
-        runner = (
-            "import base64,sys; "
-            f"exec(base64.b64decode({encoded!r}).decode());"
-        )
+        runner = "import base64,sys; " f"exec(base64.b64decode({encoded!r}).decode());"
         return f"python3 -c {shlex.quote(runner)} {shlex.quote(remote_path)}"
     return f"python3 -c {shlex.quote(REMOTE_LIST_SCRIPT)} {shlex.quote(remote_path)}"
 

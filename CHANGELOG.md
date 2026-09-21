@@ -32,6 +32,53 @@
   (live Hub 8173 → 18173; isolated 18273 → 28273) so preview backends do
   not collide with live Hub on the same SSH host.
 
+### fix: stop cancelling active long-running Chat turns
+
+- Remove the one-hour absolute cap on a native Chat turn. That wall-clock
+  limit could terminate a healthy review or test run that was still emitting
+  model and tool events; duration alone is not evidence of a hang.
+- Keep the 10-minute silence watchdog, but suppress it while the provider is
+  legitimately blocked on an outstanding tool call, a blocking approval
+  question, or model-capacity queueing (read from the raw `queue/status`
+  record, so the visible STATUS payload is unchanged). Normal streaming
+  activity re-engages the watchdog.
+- Goal turns whose model already emitted a complete trailing `goal-status`
+  envelope but whose one-shot CLI (Cursor/Claude) never sent its result record
+  are no longer reaped as silent. After a short grace — or a clean early EOF —
+  the tailer synthesizes a completed turn with the raw protocol text and
+  terminates the lingering one-shot process, letting the Goal controller parse
+  the checkpoint and continue/pause/complete instead of force-pausing. This
+  never applies to the persistent Codex/TraeX app-server, whose own
+  `turn/completed` stays authoritative.
+- Answering a Codex/TraeX blocking question re-arms the silence watchdog (the
+  synthetic question tool no longer leaves it suppressed for the rest of the
+  turn), and the Goal envelope detection window matches the controller's.
+- Add regressions covering an actively streaming two-hour turn, a long-running
+  tool whose completion arrives after the streaming timeout, raw queue/status
+  suppression, blocking-question resolution, persistent-transport exclusion,
+  early-EOF and no-envelope Goal fallback, and a Goal turn completed without a
+  provider result record.
+
+### feat: rename a Chat from the sidebar by double-clicking
+
+- Double-clicking a Chat row in the left sidebar now starts inline rename,
+  matching the tab bar. The row's tooltip notes the shortcut, and drag-to-
+  reorder is unaffected because a stationary double-click never crosses the
+  drag threshold.
+
+### feat: group Terminal Status list by working directory
+
+- Order the manual Terminal Status panel the same way as the Chat sidebar:
+  group sessions by working directory, showing the directory name (full path
+  on hover) and reusing the persisted within- and cross-directory order. All
+  manual sessions, including raw terminal tabs, remain listed; only directory
+  headers were added and no row styling changed.
+
+### fix: keep expanded Chat Goal details dismissible
+
+- Anchor expanded Goal details above the status bar and add a visible close
+  control, so the popover cannot cover the summary used to collapse it.
+
 ### fix: show newly created sessions first
 
 - Put newly created, duplicated, and forked sessions at the top of Chat and

@@ -4388,7 +4388,9 @@ class TTYDManager:
             next_profile_id = (
                 remote_profile_id if remote_profile_id is not None else process.remote_profile_id
             )
-            reject_stdin_shell_interactive(remote_profile_manager.get_profile(next_profile_id or ""))
+            reject_stdin_shell_interactive(
+                remote_profile_manager.get_profile(next_profile_id or "")
+            )
         if target is not None:
             process.target = target
             needs_restart = True
