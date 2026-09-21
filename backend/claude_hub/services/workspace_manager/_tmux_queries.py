@@ -1253,12 +1253,25 @@ class _TmuxQueriesMixin:
                 logger.exception("Failed to reap stuck review task_id=%s", task.id)
         return reaped
 
-    def _first_available_reviewer(self, workspace_id: str) -> Optional[ManagedSession]:
+    def _first_available_reviewer(
+        self,
+        workspace_id: str,
+        *,
+        target: ExecutionTarget,
+        remote_profile_id: str | None = None,
+        remote_cwd: str | None = None,
+    ) -> Optional[ManagedSession]:
         """Internal review dispatch only — not CLI agent-create reuse.
 
-        Hub review routing may pick any idle reviewer; CLI ``agent create`` with
-        ``reuse_existing`` must use ``_find_compatible_workspace_agent`` instead.
+        Hub review routing may pick any idle reviewer on the same execution
+        target; CLI ``agent create`` with ``reuse_existing`` must use
+        ``_find_compatible_workspace_agent`` instead.
         """
+        from ..workspace_identity import normalize_remote_cwd
+
+        wanted_remote_cwd = (
+            normalize_remote_cwd(remote_cwd) if target == ExecutionTarget.REMOTE else None
+        )
         reviewers = [
             session
             for session in self._sessions_for_workspace_raw(workspace_id)
@@ -1268,6 +1281,14 @@ class _TmuxQueriesMixin:
             and not session.task_id
             and not session.current_task_id
             and not self._reviewer_has_active_task_binding(session)
+            and session.target == target
+            and (
+                target != ExecutionTarget.REMOTE
+                or (
+                    (session.remote_profile_id or remote_profile_id) == remote_profile_id
+                    and normalize_remote_cwd(session.remote_cwd) == wanted_remote_cwd
+                )
+            )
         ]
         if not reviewers:
             return None

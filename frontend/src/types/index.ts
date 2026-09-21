@@ -125,6 +125,7 @@ export interface RemoteProfile {
   user?: string | null
   port: number
   default_cwd?: string | null
+  stdin_shell?: boolean
 }
 
 export interface NetworkAddress {

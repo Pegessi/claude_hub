@@ -101,6 +101,8 @@ recreation require the operator to verify the worker state before
 retrying.
 """
 
+import time
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ..session_seat import SessionSeatMismatch, validate_session_seat
@@ -1380,7 +1382,14 @@ class _MessagingMixin:
             raise RuntimeError(error or f"tmux capture-pane failed with code {proc.returncode}")
         return stdout.decode("utf-8", errors="ignore")
 
+    def _agent_update_dialog(self, output: str) -> bool:
+        """True when Codex is asking to self-update instead of showing a prompt."""
+        lower = output.lower()
+        return "update available" in lower and "skip" in lower
+
     def _agent_input_ready(self, output: str) -> bool:
+        if self._agent_update_dialog(output):
+            return False
         lower = output.lower()
         return any(
             marker in lower
@@ -1394,6 +1403,52 @@ class _MessagingMixin:
                 "cursor agent",
                 "/auto-run",
             )
+        )
+
+    async def _dismiss_codex_update_dialog(self, session: ManagedSession) -> None:
+        """Move off 'Update now' (npm install -g) onto Skip, then confirm.
+
+        The dialog highlights option 1. A bootstrap Enter would install.
+        """
+        await self._run_tmux("send-keys", "-t", session.tmux_session, "Down")
+        await self._prompt_wait_sleep(AGENT_UPDATE_DIALOG_SETTLE_SECONDS)
+        await self._run_tmux("send-keys", "-t", session.tmux_session, "Enter")
+
+    async def _prompt_wait_sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    async def _wait_for_agent_prompt(self, session: ManagedSession) -> None:
+        """Wait until the agent TUI can accept a pasted bootstrap prompt.
+
+        Dismiss a Codex update dialog if it appears. If that dialog is still
+        showing when the wait expires, fail closed so bootstrap Enter cannot
+        confirm ``npm install -g``.
+        """
+        deadline = time.monotonic() + AGENT_PROMPT_WAIT_SECONDS
+        saw_update_dialog = False
+        last_output = ""
+        while time.monotonic() < deadline:
+            try:
+                last_output = await self._capture_tmux_output(session.tmux_session)
+            except RuntimeError:
+                await self._prompt_wait_sleep(AGENT_PROMPT_POLL_SECONDS)
+                continue
+            if self._agent_update_dialog(last_output):
+                saw_update_dialog = True
+                await self._dismiss_codex_update_dialog(session)
+                await self._prompt_wait_sleep(AGENT_UPDATE_DIALOG_SETTLE_SECONDS)
+                continue
+            if self._agent_input_ready(last_output):
+                return
+            await self._prompt_wait_sleep(AGENT_PROMPT_POLL_SECONDS)
+        if saw_update_dialog and self._agent_update_dialog(last_output):
+            raise WorkspaceAgentInitializationError(
+                "Codex update dialog is still blocking the prompt; "
+                "bootstrap was not sent to avoid confirming npm install -g"
+            )
+        logger.warning(
+            "agent prompt not confirmed before bootstrap session_id=%s",
+            session.id,
         )
 
     def _compute_payload_fingerprint(

@@ -71,6 +71,7 @@ class _ReviewMixin:
                 and reviewer.role == WorkspaceSessionRole.REVIEWER
                 and reviewer.status != ManagedSessionStatus.STOPPED
                 and not self._reviewer_is_busy_with_other_task(reviewer, task.id)
+                and self._reviewer_matches_placement(reviewer, workspace, task)
             ):
                 return reviewer
             if reviewer and reviewer.status != ManagedSessionStatus.STOPPED:
@@ -80,7 +81,13 @@ class _ReviewMixin:
                     reviewer.id,
                     task.id,
                 )
-        reviewer = self._first_available_reviewer(workspace.id)
+        placement = self._reviewer_placement(workspace, task)
+        reviewer = self._first_available_reviewer(
+            workspace.id,
+            target=placement["target"],
+            remote_profile_id=placement["remote_profile_id"],
+            remote_cwd=placement["remote_cwd"],
+        )
         if reviewer:
             return reviewer
         return await self.ensure_workspace_agent(
@@ -90,14 +97,72 @@ class _ReviewMixin:
                 title=f"{workspace.name} Temporary Reviewer",
                 role=WorkspaceSessionRole.REVIEWER,
                 reuse_existing=False,
-                cwd=workspace.path,
-                target=workspace.target,
-                remote_profile_id=workspace.remote_profile_id,
-                remote_cwd=workspace.remote_cwd,
-                remote_reconnect=workspace.remote_reconnect,
+                cwd=placement["cwd"],
+                target=placement["target"],
+                remote_profile_id=placement["remote_profile_id"],
+                remote_cwd=placement["remote_cwd"],
+                remote_reconnect=placement["remote_reconnect"],
                 ephemeral=True,
                 caller_owned_ephemeral=False,
             ),
+        )
+
+    def _reviewer_placement(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+    ) -> dict[str, Any]:
+        """Place a new reviewer on the worker's execution target when known.
+
+        Workspace.target is only the workspace default. A local workspace can
+        still host a remote worker; auto-review must follow that worker, not
+        silently spawn a local reviewer (or vice versa).
+        """
+        worker = self.sessions.get(task.session_id) if task.session_id else None
+        if worker is not None:
+            target = worker.target
+            if target == ExecutionTarget.REMOTE:
+                return {
+                    "target": ExecutionTarget.REMOTE,
+                    "cwd": workspace.path,
+                    "remote_profile_id": worker.remote_profile_id or workspace.remote_profile_id,
+                    "remote_cwd": worker.remote_cwd or workspace.remote_cwd,
+                    "remote_reconnect": worker.remote_reconnect,
+                }
+            return {
+                "target": ExecutionTarget.LOCAL,
+                "cwd": worker.workspace_path or workspace.path,
+                "remote_profile_id": None,
+                "remote_cwd": None,
+                "remote_reconnect": workspace.remote_reconnect,
+            }
+        return {
+            "target": workspace.target,
+            "cwd": workspace.path,
+            "remote_profile_id": workspace.remote_profile_id,
+            "remote_cwd": workspace.remote_cwd,
+            "remote_reconnect": workspace.remote_reconnect,
+        }
+
+    def _reviewer_matches_placement(
+        self,
+        reviewer: ManagedSession,
+        workspace: Workspace,
+        task: WorkspaceTask,
+    ) -> bool:
+        placement = self._reviewer_placement(workspace, task)
+        if reviewer.target != placement["target"]:
+            return False
+        if placement["target"] != ExecutionTarget.REMOTE:
+            return True
+        from ..workspace_identity import normalize_remote_cwd
+
+        reviewer_profile = reviewer.remote_profile_id or workspace.remote_profile_id
+        wanted_profile = placement["remote_profile_id"]
+        if reviewer_profile != wanted_profile:
+            return False
+        return normalize_remote_cwd(reviewer.remote_cwd) == normalize_remote_cwd(
+            placement["remote_cwd"]
         )
 
     async def _handle_review_report(

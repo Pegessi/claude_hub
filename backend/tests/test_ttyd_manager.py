@@ -1339,6 +1339,34 @@ def test_remote_codex_solo_mode_uses_reconnect_launcher(monkeypatch: MonkeyPatch
     assert "codex --ask-for-approval never --sandbox danger-full-access" in launcher
 
 
+def test_chat_remote_ttyd_command_does_not_ssh(monkeypatch: MonkeyPatch) -> None:
+    """Chat launch is native/local; remote SSH is a later elif and must not run."""
+    monkeypatch.setattr(
+        ttyd_manager_module.remote_profile_manager,
+        "get_profile",
+        lambda profile_id: RemoteProfile(
+            id=profile_id,
+            name="DevBox",
+            ssh_host="devbox",
+        ),
+    )
+    process = TTYDProcess(
+        tab_id="tab-chat-remote",
+        port=12360,
+        name="Chat Remote",
+        solo_mode=True,
+        agent_type=AgentType.CODEX,
+        session_kind=SessionKind.CHAT,
+        target=ExecutionTarget.REMOTE,
+        remote_profile_id="devbox",
+        remote_cwd="~/repo",
+    )
+    cmd = process._build_ttyd_command(session_exists=False)
+    joined = " ".join(cmd)
+    assert "ssh" not in joined
+    assert process.shell in joined or os.environ.get("SHELL", "/bin/bash") in joined
+
+
 def test_remote_launcher_starts_agent_after_missing_cwd_fallback(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -1371,6 +1399,7 @@ def test_remote_launcher_starts_agent_after_missing_cwd_fallback(
         "tmux new-session -d -s claude-hub-tab-remo"
     )
     assert "IS_SANDBOX=1 claude --dangerously-skip-permissions" in launcher
+    assert "--settings" not in launcher
 
 
 def test_remote_terminal_can_disable_reconnect(monkeypatch: MonkeyPatch) -> None:
@@ -5030,9 +5059,7 @@ async def test_archive_tab_returns_none_for_missing(
 
 
 @pytest.mark.asyncio
-async def test_unarchive_tab_clears_flag(
-    monkeypatch: MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_unarchive_tab_clears_flag(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     manager, process = _make_archive_test_manager(monkeypatch, tmp_path, archived=True)
     process.archived_at = datetime.now()
 
@@ -5061,9 +5088,7 @@ async def test_unarchive_tab_returns_none_for_missing(
     assert result is None
 
 
-def test_list_tabs_excludes_archived(
-    monkeypatch: MonkeyPatch, tmp_path: Path
-) -> None:
+def test_list_tabs_excludes_archived(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     manager, _ = _make_archive_test_manager(monkeypatch, tmp_path)
     archived = TTYDProcess(
         tab_id="archived-tab",
@@ -5081,9 +5106,7 @@ def test_list_tabs_excludes_archived(
     assert [t.id for t in manager.list_archived_tabs()] == ["archived-tab"]
 
 
-def test_list_archived_tabs_sorted_newest_first(
-    monkeypatch: MonkeyPatch, tmp_path: Path
-) -> None:
+def test_list_archived_tabs_sorted_newest_first(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 14100
     manager.processes = {}

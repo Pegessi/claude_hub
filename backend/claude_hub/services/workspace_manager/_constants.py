@@ -86,7 +86,15 @@ STATE_ROOT = resolve_state_root()
 INDEX_FILE = STATE_ROOT / "index.json"
 SCHEDULED_TASKS_FILE = STATE_ROOT / "scheduled_tasks.json"
 LEGACY_STATE_FILE = Path.home() / ".claude_hub" / "workspaces.json"
-REMOTE_FORWARD_PORT_BASE = 18173
+REMOTE_FORWARD_PORT_OFFSET = 10000
+# Default Hub 8173 + offset == 18173. Isolated previews use settings.port + offset
+# so two Hubs SSHing to the same host do not collide on the remote listen port.
+REMOTE_FORWARD_PORT_BASE = 8173 + REMOTE_FORWARD_PORT_OFFSET
+# Wait for the agent TUI prompt (and dismiss Codex "Update available") before
+# pasting workspace bootstrap. Enter on that dialog runs `npm install -g`.
+AGENT_PROMPT_WAIT_SECONDS = 25.0
+AGENT_PROMPT_POLL_SECONDS = 0.4
+AGENT_UPDATE_DIALOG_SETTLE_SECONDS = 0.35
 TMUX_SUBMIT_ATTEMPTS = 3
 TMUX_PASTE_SETTLE_SECONDS = 0.35
 TMUX_SUBMIT_SETTLE_SECONDS = 0.7
@@ -302,7 +310,10 @@ __all__ = [
     "AgentReportState",
     "AgentRuntimeStatus",
     "AgentType",
+    "AGENT_PROMPT_POLL_SECONDS",
+    "AGENT_PROMPT_WAIT_SECONDS",
     "AGENT_TAG_MAX_LENGTH",
+    "AGENT_UPDATE_DIALOG_SETTLE_SECONDS",
     "normalize_agent_tag",
     "Any",
     "AutonomousIteration",
@@ -346,6 +357,7 @@ __all__ = [
     "PROMPT_STUCK_RISK_LEVEL",
     "Path",
     "REMOTE_FORWARD_PORT_BASE",
+    "REMOTE_FORWARD_PORT_OFFSET",
     "RESIDENT_ACTIVITY_DEBOUNCE_SECONDS",
     "REVIEW_REAPER_DISPATCH_GRACE_SECONDS",
     "REVIEW_RUNTIME_REOPEN_GRACE_SECONDS",
