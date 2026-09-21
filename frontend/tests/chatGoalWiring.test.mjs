@@ -77,6 +77,15 @@ test('active Goal locks composer actions and queued draft flushing', () => {
   assert.ok(pane.includes('Pause or complete the active Goal before sending messages'))
 })
 
+test('expanded Goal details have a visible collapse control and stay above the status bar', () => {
+  assert.match(
+    statusBar,
+    /class="goal-status-details-close"[\s\S]*aria-label="Collapse Goal details"[\s\S]*@click="expanded = false"/,
+  )
+  assert.match(statusBar, /\.goal-status \{ position: relative/)
+  assert.match(statusBar, /\.goal-status-details \{[\s\S]*bottom: calc\(100% \+ 8px\)/)
+})
+
 test('Goal status disclosure exposes accessible state and controls', () => {
   assert.ok(statusBar.includes('aria-live="polite"'))
   assert.ok(statusBar.includes(':aria-controls="detailsId"'))

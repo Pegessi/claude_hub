@@ -199,6 +199,7 @@ task.
 | Add a new agent type / TraeX (Codex fork) terminal+Chat wiring | `docs/working-logs/2026-09-16-traex-agent.md` |
 | Structured Chat Goal mode | `docs/working-logs/2026-09-17-chat-goal-mode.md` |
 | Remote tabs / remote workspace agents and reviewers | `docs/working-logs/2026-09-20-remote-agent-pipeline.md` |
+| Long Chat turns / stream watchdog timeouts | `docs/working-logs/2026-09-20-chat-long-turn-watchdog.md` |
 
 ## Common Edit Areas
 
