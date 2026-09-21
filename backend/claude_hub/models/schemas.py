@@ -45,6 +45,13 @@ class SessionKind(str, Enum):
     TERMINAL = "terminal"
 
 
+CHAT_REMOTE_UNSUPPORTED = "Chat sessions run on the Hub host; use a Terminal session for remote SSH"
+STDIN_SHELL_REMOTE_UNSUPPORTED = (
+    "This SSH alias has no usable remote TTY; directory listing works, "
+    "but Terminal and remote agents need a PTY host"
+)
+
+
 class ChatMode(str, Enum):
     """Provider execution mode selected for subsequent Chat turns."""
 
@@ -522,6 +529,15 @@ class TerminalTabCreate(TerminalTabBase):
         ),
     )
 
+    @model_validator(mode="after")
+    def _reject_chat_remote(self) -> "TerminalTabCreate":
+        # Native Chat owns a local ProviderSession. The remote SSH launcher is
+        # Terminal-only; combining the two would persist target=remote while
+        # still running the model on the Hub host.
+        if self.session_kind == SessionKind.CHAT and self.target == ExecutionTarget.REMOTE:
+            raise ValueError(CHAT_REMOTE_UNSUPPORTED)
+        return self
+
 
 class SwitchEnvRequest(BaseModel):
     """Payload for switching the environment / model of a live Claude or Codex tab."""
@@ -640,6 +656,7 @@ class RemoteProfile(BaseModel):
     user: Optional[str] = None
     port: int = 22
     default_cwd: Optional[str] = None
+    stdin_shell: bool = False
 
 
 class ResidentPeriodicTask(BaseModel):

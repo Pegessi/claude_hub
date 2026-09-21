@@ -224,9 +224,7 @@ async def test_unarchive_tab_route_returns_404_for_missing_tab(
 
 
 @pytest.mark.asyncio
-async def test_archived_route_not_shadowed(
-    client: AsyncClient, monkeypatch: MonkeyPatch
-) -> None:
+async def test_archived_route_not_shadowed(client: AsyncClient, monkeypatch: MonkeyPatch) -> None:
     """GET /api/tabs/archived must list archived tabs, not treat "archived" as a tab id."""
     monkeypatch.setattr(
         "claude_hub.api.tabs.ttyd_manager.list_archived_tabs",

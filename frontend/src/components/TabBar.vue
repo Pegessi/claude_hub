@@ -177,8 +177,8 @@
             </div>
             <p class="form-hint">
               {{ form.session_kind === 'chat'
-                ? 'Structured conversation with messages, images, and parsed model output.'
-                : 'Native terminal UI with full keyboard and shell interaction.' }}
+                ? 'Structured conversation with messages, images, and parsed model output. Chat always runs on this Hub host.'
+                : 'Native terminal UI with full keyboard and shell interaction. Remote SSH is available here.' }}
             </p>
           </div>
           <div class="form-group">
@@ -204,11 +204,18 @@
               <button
                 type="button"
                 :class="['segment-button', { active: form.target === 'remote' }]"
+                :disabled="form.session_kind === 'chat'"
                 @click="form.target = 'remote'"
               >
                 Remote
               </button>
             </div>
+            <p
+              v-if="form.session_kind === 'chat'"
+              class="form-hint"
+            >
+              Remote SSH is Terminal-only. Chat uses the local native provider.
+            </p>
           </div>
           <div
             v-if="form.target === 'remote'"
@@ -232,7 +239,7 @@
                 :key="profile.id"
                 :value="profile.id"
               >
-                {{ profile.name }}
+                {{ profile.name }}{{ profile.stdin_shell ? ' · listing only' : '' }}
               </option>
             </select>
             <p
@@ -240,6 +247,12 @@
               class="form-error"
             >
               {{ remoteProfilesError }}
+            </p>
+            <p
+              v-else-if="selectedRemoteProfile?.stdin_shell"
+              class="form-hint"
+            >
+              This alias has no remote TTY. Browse directories here; use a PTY host such as mac_mini for Terminal.
             </p>
             <p
               v-else-if="remoteProfiles.length === 0"
@@ -624,7 +637,8 @@ const isCreateDisabled = computed(
   () =>
     isLoading.value ||
     isPending('tab:create') ||
-    (form.target === 'remote' && !form.remote_profile_id)
+    (form.target === 'remote' && !form.remote_profile_id) ||
+    (form.target === 'remote' && Boolean(selectedRemoteProfile.value?.stdin_shell))
 )
 
 function tabActionKey(action: string, tabId: string | null | undefined) {
@@ -638,9 +652,12 @@ function resetEnvForAgentType(agentType: AgentType) {
 
 function setSessionKind(kind: SessionKind) {
   form.session_kind = kind
-  if (kind === 'chat' && form.agent_type === 'terminal') {
-    form.agent_type = 'claude'
-    resetEnvForAgentType(form.agent_type)
+  if (kind === 'chat') {
+    form.target = 'local'
+    if (form.agent_type === 'terminal') {
+      form.agent_type = 'claude'
+      resetEnvForAgentType(form.agent_type)
+    }
   }
 }
 
@@ -1037,6 +1054,15 @@ async function handleCreateTab() {
   const agent_session_id =
     form.agent_type === 'codex' && target === 'local' ? form.agent_session_id : undefined
 
+  if (form.session_kind === 'chat' && target === 'remote') {
+    remoteProfilesError.value = 'Chat sessions run locally. Switch to Terminal for remote SSH.'
+    return
+  }
+  if (target === 'remote' && selectedProfile?.stdin_shell) {
+    remoteProfilesError.value =
+      'This SSH alias has no remote TTY. Browse directories, then pick a PTY host for Terminal.'
+    return
+  }
   if (target === 'remote' && !selectedProfile) {
     remoteProfilesError.value = 'Select a remote server first'
     return

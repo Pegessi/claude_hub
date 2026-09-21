@@ -32,9 +32,10 @@ from ..models import (
     TerminalTab,
     WorkspaceSessionRole,
 )
+from ..models.schemas import CHAT_REMOTE_UNSUPPORTED
 from ._cursor_verify import _cursor_id_exists
 from .agent_status_markers import codex_output_is_working
-from .remote_profiles import remote_profile_manager
+from .remote_profiles import reject_stdin_shell_interactive, remote_profile_manager
 from .runtime_isolation import resolve_runtime_home, tmux_command, tmux_socket_args
 
 logger = logging.getLogger(__name__)
@@ -3432,6 +3433,12 @@ class TTYDManager:
             session_kind != SessionKind.TERMINAL or chat_mode != ChatMode.DEFAULT
         ):
             raise ValueError("managed workspace tabs must use Terminal")
+        if session_kind == SessionKind.CHAT and target == ExecutionTarget.REMOTE:
+            raise ValueError(CHAT_REMOTE_UNSUPPORTED)
+        if target == ExecutionTarget.REMOTE:
+            reject_stdin_shell_interactive(
+                remote_profile_manager.get_profile(remote_profile_id or "")
+            )
         # session_kind is authoritative: only an explicit SessionKind.CHAT
         # from the caller (direct user Chat tab) gets the native/inert
         # structured surface. Managed task runners (dispatcher, reviewer,
@@ -4177,6 +4184,7 @@ class TTYDManager:
         # Deferred import to avoid a circular import (agent_stream is a
         # sibling service; the fork code at the top of this file does the same).
         from .agent_stream.store import AgentStreamStore
+
         store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
         completed_at_str = await store.latest_turn_completed_at()
         if completed_at_str is None:
@@ -4373,6 +4381,16 @@ class TTYDManager:
                 logger.info(f"reset agent_session_id for tab {tab_id} due to agent_type change")
             process.agent_type = agent_type
             needs_restart = True
+        next_target = target if target is not None else process.target
+        if process.session_kind == SessionKind.CHAT and next_target == ExecutionTarget.REMOTE:
+            raise ValueError(CHAT_REMOTE_UNSUPPORTED)
+        if next_target == ExecutionTarget.REMOTE:
+            next_profile_id = (
+                remote_profile_id if remote_profile_id is not None else process.remote_profile_id
+            )
+            reject_stdin_shell_interactive(
+                remote_profile_manager.get_profile(next_profile_id or "")
+            )
         if target is not None:
             process.target = target
             needs_restart = True
