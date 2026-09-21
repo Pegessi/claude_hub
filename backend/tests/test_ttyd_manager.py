@@ -1616,6 +1616,59 @@ async def test_chat_status_uses_native_turn_in_flight_not_inert_tmux(
     assert status.detail == "native provider turn is in flight"
 
 
+@pytest.mark.asyncio
+async def test_list_statuses_excludes_archived_tabs_by_default(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """The default status snapshot mirrors ``GET /api/tabs``: archived tabs
+    are hidden. Otherwise the sidebar's 5-second status poll sees them as
+    "unknown new tabs" and triggers a full tab-list refresh forever.
+    Callers that pass an explicit ``tab_ids`` (e.g. the workspace monitor)
+    keep full control of what gets sampled.
+    """
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._status_snapshots = {}
+    manager._status_cache = {}
+    active = TTYDProcess(
+        tab_id="chat-active",
+        port=12361,
+        name="Active Chat",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    archived = TTYDProcess(
+        tab_id="chat-archived",
+        port=12362,
+        name="Archived Chat",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    archived.archived = True
+    manager.processes = {active.tab_id: active, archived.tab_id: archived}
+    manager._tab_order = [active.tab_id, archived.tab_id]
+
+    async def fake_list_sessions() -> set[str]:
+        return set()
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_list_sessions", fake_list_sessions)
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "get_tab_native_runtime_snapshot",
+        lambda _tab_id: SimpleNamespace(
+            status=AgentRuntimeStatus.IDLE,
+            detail="native provider is ready",
+        ),
+        raising=False,
+    )
+
+    statuses = await manager.list_tab_agent_statuses()
+    assert [status.tab_id for status in statuses] == [active.tab_id]
+
+    explicit = await manager.list_tab_agent_statuses(tab_ids=[active.tab_id, archived.tab_id])
+    assert {status.tab_id for status in explicit} == {active.tab_id, archived.tab_id}
+
+
 def test_claude_spinner_status_classifies_as_working(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists", lambda _session: True)
     manager = TTYDManager.__new__(TTYDManager)

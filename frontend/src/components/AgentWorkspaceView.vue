@@ -5151,7 +5151,7 @@ async function handleCreateAdvancedAgent() {
     showAgentFileBrowser.value = false
     agentOptionsForm.title = ''
     resetAgentEnvForType(agentOptionsForm.agent_type)
-    await terminalStore.fetchTabs()
+    await terminalStore.fetchTabs({ force: true })
   })
 }
 
@@ -5490,7 +5490,7 @@ async function startTask(task: WorkspaceTask) {
       related_task_id: options.related_task_id || null,
       clear_context: options.clear_context ? true : null,
     })
-    await terminalStore.fetchTabs()
+    await terminalStore.fetchTabs({ force: true })
   })
 }
 
@@ -5574,7 +5574,7 @@ async function deleteAgent(agent: ManagedSession) {
   if (!confirmed) return
   await runPending(agentActionKey('delete', agent.id), async () => {
     await workspaceStore.deleteSession(agent.id)
-    await terminalStore.fetchTabs()
+    await terminalStore.fetchTabs({ force: true })
   })
 }
 
