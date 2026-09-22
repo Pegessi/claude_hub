@@ -49,7 +49,11 @@ from .base import (
     discover_source_cached,
     resolve_cwd,
 )
-from .native import strip_image_attachment_guidance, strip_question_protocol_guidance
+from .native import (
+    strip_hub_runtime_guidance,
+    strip_image_attachment_guidance,
+    strip_question_protocol_guidance,
+)
 
 #: Schema identifier for the same-pane Cursor transcript format this adapter
 #: understands. Bump when the row shape changes incompatibly.
@@ -255,6 +259,10 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             # flag; the model reads the staged files via its Read tool) so
             # the temp paths never reach the persisted timeline or the UI.
             text = strip_image_attachment_guidance(text)
+            # Strip the sentinel-wrapped Hub Chat runtime/self-scheduling
+            # guidance the transport injects on the first turn so it never
+            # reaches the persisted timeline or the UI. No-op on later turns.
+            text = strip_hub_runtime_guidance(text)
             if text:
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": text}))
         elif role == "assistant":

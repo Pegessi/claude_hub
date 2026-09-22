@@ -45,7 +45,11 @@ from .base import (
     resolve_cwd,
     resolve_process_hint,
 )
-from .native import _CODEX_QUESTION_METHODS, codex_normalize_questions
+from .native import (
+    _CODEX_QUESTION_METHODS,
+    codex_normalize_questions,
+    strip_hub_runtime_guidance,
+)
 
 _FLAT_OBJ_RE = re.compile(r"\{[^{}]*\}")
 _CMD_RE = re.compile(r'"cmd"\s*:\s*"((?:[^"\\]|\\.)*)"')
@@ -449,6 +453,11 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         events: List[AgentStreamEvent] = []
         if payload_type == "user_message":
             text = payload.get("message")
+            if isinstance(text, str):
+                # Strip the sentinel-wrapped Hub Chat runtime guidance the
+                # transport prepends on the first turn so it never reaches the
+                # persisted timeline or the UI (no-op on later turns).
+                text = strip_hub_runtime_guidance(text)
             if isinstance(text, str) and text.strip():
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": text}))
         elif payload_type == "agent_reasoning":

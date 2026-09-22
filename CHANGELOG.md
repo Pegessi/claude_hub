@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### feat: inject concise Hub self-scheduling guidance into Chat agents
+
+- Native Chat agents (Claude / Cursor / Codex / TraeX) already run with
+  `CLAUDE_HUB_TAB_ID` in env and the `claude-hub` CLI on PATH, and
+  `schedule create --kind chat_turn` can enqueue a turn for the current
+  conversation — but nothing told the agent any of this, so it either never
+  self-scheduled or wrongly used the Terminal-only `--kind tab_message` (which
+  types into a terminal pane).
+- The transport now prepends a concise sentinel-wrapped "Hub runtime" block to
+  the **first** user turn of each native Chat session (once per session, not
+  every turn), pointing the agent at the literal `$CLAUDE_HUB_TAB_ID` env var
+  and the Chat-native `chat_turn` schedule command, and telling it not to
+  schedule without an explicit user request. The backend never substitutes the
+  concrete tab id.
+- The block is stripped by every provider transcript normalizer (Claude /
+  Cursor / Codex) before persistence and echo, and by the edit-resend
+  transcript fork before content matching, so it reaches neither the
+  persisted timeline, the Chat UI, nor the fork match. Terminal (non-Chat)
+  sessions never construct a native transport and are unaffected.
+- Design and pitfalls: `docs/working-logs/2026-09-22-chat-agent-self-guidance.md`.
+
 ### fix: scheduled Chat runs no longer wedge after a dead turn; backlog stays bounded
 
 - A scheduled `chat_turn` whose provider runtime was lost ("Turn interrupted
