@@ -289,8 +289,48 @@ async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> Optional[s
     return "dead"
 
 
+async def _ensure_scheduled_chat_runtime(tab_id: str) -> bool:
+    """Ensure a direct Chat tab's native runtime is spawned and ready.
+
+    The scheduler's cold-runtime gate. Idempotent: a warm Chat returns
+    immediately; a cold or idle-reaped Chat is lazily created and its consumer
+    started. Returns ``True`` only once a turn can actually be delivered, so the
+    scheduler parks and retries while a first-time provider spawn (or a Codex
+    app-server handshake) is still in flight instead of delivering into a
+    runtime that does not exist yet.
+    """
+    session = _terminal_tab_stream_session(tab_id)
+    if session is None:
+        return False
+    manager = _get_tab_tailer_manager()
+    try:
+        tailer = await manager.ensure_started(session)
+    except (ValueError, StructuredSourceUnavailable):
+        logger.info(
+            "scheduled Chat cold runtime unavailable for tab=%s; will retry",
+            tab_id,
+        )
+        return False
+    transport = tailer.native_transport
+    if transport is None or tailer.native_error is not None or manager.hard_failed(session.id):
+        return False
+    # Let the freshly started consumer's first tick run provider ``start()``
+    # (one-shot providers flip ``_started`` synchronously there; a persistent
+    # Codex app-server stays False until its handshake finishes).
+    if not getattr(transport, "_started", False):
+        await asyncio.sleep(0)
+    if not getattr(transport, "_started", False):
+        return False
+    # Persistent app-servers are not ready until the JSON-RPC handshake plus
+    # thread create/resume has completed. One-shot providers do not handshake.
+    if transport.eof_is_fatal and not getattr(transport, "_handshake_complete", False):
+        return False
+    return True
+
+
 workspace_manager.configure_scheduled_chat_dispatch(_dispatch_scheduled_chat_turn)
 workspace_manager.configure_scheduled_chat_liveness(_scheduled_chat_turn_liveness)
+workspace_manager.configure_scheduled_chat_readiness(_ensure_scheduled_chat_runtime)
 
 
 async def _stop_all_tailer_managers() -> None:

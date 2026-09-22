@@ -1140,6 +1140,13 @@ class SessionTailer:
             if self._native_transport is not None and not self._native_transport.turn_in_flight:
                 await self._recover_orphaned_turn_locked()
             self._stopped = False
+            # (Re)starting the consumer is explicit liveness evidence from
+            # either a UI subscriber or a headless background dispatch (a
+            # scheduled ``chat_turn`` has no viewer). An idle-reaped tailer
+            # stays registered with a stale clock, so without this reset the
+            # fresh consumer is born already past IDLE_TTL_S and its first tick
+            # reaps the cold turn it was just restarted to deliver.
+            self._last_subscriber_at = time.monotonic()
             self._task = asyncio.create_task(
                 self._run(), name=f"agent-stream-tail-{self.session_id[:8]}"
             )
@@ -1307,21 +1314,35 @@ class SessionTailer:
             # long-poll self-expires) — it completes on its own and the next
             # idle check reaps it.
             if not self._subscribers and (time.monotonic() - self._last_subscriber_at > IDLE_TTL_S):
-                if not transport.turn_in_flight:
-                    # Stop the native transport so the provider subprocess
-                    # (e.g. the Codex app-server) is reaped, not left orphaned.
-                    try:
-                        async with self._send_lock:
+                # A headless background turn (a scheduled chat_turn with no
+                # viewer attached) must survive exactly like a watched one.
+                # Re-check liveness UNDER the send lock: a concurrent send may
+                # publish turn_started (setting ``_active_turn_id``) and raise
+                # the provider guard between the outside check and acting on it.
+                # Acting on the stale read used to stop the one-shot process a
+                # cold scheduled turn had just spawned, orphaning it. This
+                # mirrors the double-checked locking of the inactivity reap
+                # above.
+                async with self._send_lock:
+                    turn_active = transport.turn_in_flight or self._active_turn_id is not None
+                    if not turn_active:
+                        # Stop the native transport so the provider subprocess
+                        # (e.g. the Codex app-server) is reaped, not left orphaned.
+                        try:
                             await transport.stop()
-                    except Exception:
-                        logger.exception(
-                            "native transport stop failed during idle reap for session %s",
-                            self.session_id,
-                        )
+                        except Exception:
+                            logger.exception(
+                                "native transport stop failed during idle reap for session %s",
+                                self.session_id,
+                            )
+                        idle_stop = True
+                    else:
+                        idle_stop = False
+                if idle_stop:
                     break
-                # Healthy in-flight turn: fall through and keep consuming.
-                # Records are still persisted even with zero subscribers, so
-                # nothing is lost while no viewer is attached.
+                # Active (possibly viewer-less) turn: fall through and keep
+                # consuming. Records are still persisted even with zero
+                # subscribers, so nothing is lost while no viewer is attached.
             try:
                 record = await asyncio.wait_for(transport.read_line(), timeout=POLL_INTERVAL_S)
             except asyncio.TimeoutError:
