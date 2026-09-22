@@ -6,18 +6,31 @@ Scope: backend only — native Chat transports; no frontend change.
 
 ## Why
 
-A native Chat agent (structured Chat, `ProviderSession`) already runs with
-`CLAUDE_HUB_TAB_ID` in its process env and the `claude-hub` CLI on `PATH`, and
+A native Chat agent has the `claude-hub` CLI on `PATH`, and
 `claude-hub schedule create --kind chat_turn` can enqueue a turn for the
-**current** Chat conversation. Nothing tells the agent any of this. Without a
-hint the agent either never self-schedules or mistakes a Chat for a Terminal
-and uses `--kind tab_message`, which types into a terminal pane rather than
-driving a native Chat turn.
+**current** Chat conversation. Nothing tells the agent either fact, and it
+does not reliably know its own tab id. Without a hint the agent either never
+self-schedules or mistakes a Chat for a Terminal and uses
+`--kind tab_message`, which types into a terminal pane rather than driving a
+native Chat turn.
 
-The fix injects a short, one-time "Hub runtime" block so the agent knows where
-it is and how to self-schedule correctly, reusing the existing
+The fix (1) injects a short, one-time "Hub runtime" block so the agent knows
+where it is and how to self-schedule correctly, reusing the existing
 sentinel wrap/strip mechanism (same pattern as the question-protocol and
-image-attachment guidance).
+image-attachment guidance), and (2) makes the tab id the block references
+actually present in every native Chat provider subprocess.
+
+> **Reviewer MUST-FIX (cycle 1 → fixed cycle 2).** The original task premise
+> said the agent "already runs with `CLAUDE_HUB_TAB_ID` in env". That was only
+> true for the tmux-shell path (`TTYDProcess._child_env`) and, incidentally,
+> for Claude (its per-tab `--settings launch_env/<tab>.settings.json` carries
+> the id). A native Chat transport spawns the provider **directly** through
+> `ProviderSession._build_env()` = `os.environ + session.env`; the live
+> backend process has no tab id and `session.env = dict(tab.env)` deliberately
+> excludes it. So Cursor / Codex / TraeX started **without** the var and the
+> guidance's `"$CLAUDE_HUB_TAB_ID"` expanded empty →
+> `schedule create --tab-id ""` → 400. Cycle 2 adds the overlay in
+> `_build_env()` (see below) and per-provider tests.
 
 ## Injection design
 
@@ -45,6 +58,30 @@ image-attachment guidance).
   attached to an attachment-only delivery.
 - The guidance is explicit that scheduling requires an explicit user request.
 
+## Tab-id env overlay (cycle-2 MUST-FIX fix)
+
+`ProviderSession._build_env()` now overlays the tab id for every native Chat
+subprocess:
+
+```python
+tab_id = getattr(self.session, "tab_id", None)
+if tab_id:
+    env.setdefault("CLAUDE_HUB_TAB_ID", tab_id)
+```
+
+- Sits on the **base** `ProviderSession`, so Claude / Cursor / Codex / TraeX
+  all inherit it (and Terminal, which never builds a `ProviderSession`, is
+  unaffected).
+- `setdefault`, after merging `session.env`, so an explicit value (parent
+  process env or `session.env`) stays authoritative and the overlay never
+  clobbers it.
+- Process env only; it is not written back to `self.env` / `tabs.json`,
+  preserving the existing "keep it out of persisted user config" invariant
+  that `TTYDProcess._child_env` already follows for the tmux path.
+- Claude still also receives it via its `--settings` file; the two agree
+  (same tab id) and `setdefault` makes the explicit settings-derived value
+  win if ever present in `session.env`.
+
 ## Strip / non-leak design
 
 The injected block must reach neither the persisted transcript nor the Chat
@@ -64,6 +101,16 @@ UI. Three independent planes are covered:
 
 ## Pitfalls
 
+- **The tab id was not actually in the native Chat provider's env (cycle-1
+  blocker).** Guidance text asserting `$CLAUDE_HUB_TAB_ID` exists is not
+  enough — the var has to be in the spawned provider's environment. The tmux
+  shell overlays it (`_child_env`), but a native Chat transport spawns the
+  provider directly via `_build_env()` (`os.environ + session.env`), bypassing
+  that overlay; the backend process has no tab id and `tab.env` omits it.
+  Claude was covered only by its per-tab `--settings` file; Cursor / Codex /
+  TraeX had no carrier at all. Tests that assert only the literal `$VAR` in
+  the guidance text miss this — assert the var really lands in
+  `_build_env()` per provider.
 - **First-turn wrap breaks edit-resend unless stripped for the fork.**
   `fork_transcript` matches the edited turn to a provider user message by
   *exact* normalized text (with ordinal disambiguation). The pre-existing
@@ -90,7 +137,8 @@ UI. Three independent planes are covered:
 ## Files
 
 - `backend/claude_hub/services/agent_stream/native.py` — guidance text,
-  wrap/strip, once-flag, base `send_message` injection.
+  wrap/strip, once-flag, base `send_message` injection, and the
+  `_build_env()` tab-id overlay.
 - `backend/claude_hub/services/agent_stream/claude_jsonl.py`,
   `codex_jsonl.py`, `cursor_cli_transcript.py` — transcript strip.
 - `backend/claude_hub/services/agent_stream/transcript_fork.py` — fork-match strip.

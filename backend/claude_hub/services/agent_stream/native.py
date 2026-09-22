@@ -224,8 +224,9 @@ def strip_image_attachment_guidance(text: str) -> str:
 
 # Hub Chat runtime / self-scheduling guidance.
 #
-# A native Chat agent already runs with ``CLAUDE_HUB_TAB_ID`` in its env and
-# the ``claude-hub`` CLI on PATH, and ``schedule create --kind chat_turn`` can
+# A native Chat agent runs with ``CLAUDE_HUB_TAB_ID`` in its provider
+# subprocess env (overlaid in :meth:`ProviderSession._build_env`) and the
+# ``claude-hub`` CLI on PATH, and ``schedule create --kind chat_turn`` can
 # enqueue a turn for the current conversation, but nothing tells the agent any
 # of this. Without guidance it either never self-schedules or mistakes Chat
 # for a Terminal and uses ``--kind tab_message`` (which types into a terminal
@@ -1457,6 +1458,17 @@ class ProviderSession(ABC):
 
         PATH is always preserved from the parent environment so the provider
         binary and its toolchain remain discoverable.
+
+        ``CLAUDE_HUB_TAB_ID`` is overlaid here for every native Chat provider
+        subprocess. The tab id otherwise reaches only the tmux-shell path
+        (``TTYDProcess._child_env``); a native Chat transport spawns the
+        provider directly with this env, so without this overlay Cursor /
+        Codex / TraeX (which, unlike Claude, have no ``--settings`` carrier)
+        would start without the id the Hub-runtime guidance points at, and
+        ``$CLAUDE_HUB_TAB_ID`` would expand empty in a self-scheduled command.
+        ``setdefault`` keeps an explicit value (from the parent env or
+        ``session.env``) authoritative. This is process env only — it is never
+        written back to the persisted tab env.
         """
         env = dict(os.environ)
         for key, value in self.session.env.items():
@@ -1464,6 +1476,9 @@ class ProviderSession(ABC):
                 env.pop(key, None)
             else:
                 env[key] = value
+        tab_id = getattr(self.session, "tab_id", None)
+        if tab_id:
+            env.setdefault("CLAUDE_HUB_TAB_ID", tab_id)
         # Never let the session override PATH away; keep the inherited PATH.
         if "PATH" not in env:
             env["PATH"] = os.environ.get("PATH", "")
