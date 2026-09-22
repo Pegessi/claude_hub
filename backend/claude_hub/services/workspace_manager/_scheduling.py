@@ -42,6 +42,8 @@ class _SchedulingMixin:
     _scheduled_chat_recovery_pending: bool
     _scheduled_chat_tab_locks: dict[str, asyncio.Lock]
     _scheduled_chat_dispatch: Any
+    _scheduled_chat_readiness: Any
+    _sched_chat_redrain_tasks: dict[str, "asyncio.Task[None]"]
     _scheduled_chat_liveness: Any
     _sched_reap_checked_at: dict[str, datetime]
 
@@ -53,6 +55,14 @@ class _SchedulingMixin:
     _FIRE_COOLDOWN = timedelta(seconds=1)
     _SCHEDULED_RUN_HISTORY_LIMIT = 100
     _SCHEDULED_CHAT_ACTIVE_RUN_LIMIT = 100
+    # Cold runtime backoff: when the target Chat's native provider is cold the
+    # readiness step spawns it but the process may still be starting on the next
+    # tick. Park the run WAITING and re-drain after this delay, bounded by
+    # ``_SCHEDULED_CHAT_COLD_MAX_ATTEMPTS`` so a runtime that never comes up
+    # fails the run rather than retrying forever. The window (attempts × delay)
+    # comfortably covers a slow first-time provider spawn while staying finite.
+    _SCHEDULED_CHAT_COLD_REDRAIN_DELAY = timedelta(seconds=5)
+    _SCHEDULED_CHAT_COLD_MAX_ATTEMPTS = 12
     # A run stuck in DISPATCHING/RUNNING past this age is reconciled against
     # the durable transcript and the live provider turn guard. A legitimately
     # long turn keeps the provider guard raised, so this only reaps dead turns.
@@ -245,6 +255,58 @@ class _SchedulingMixin:
     def configure_scheduled_chat_dispatch(self, callback: Any) -> None:
         """Inject the native Chat transport without importing the API layer."""
         self._scheduled_chat_dispatch = callback
+
+    def configure_scheduled_chat_readiness(self, callback: Any) -> None:
+        """Inject the native Chat runtime readiness probe without importing API.
+
+        The callback is ``async (tab_id) -> bool``: it ensures the target Chat's
+        native tailer/provider exists (spawning a cold one and waiting until it
+        is ready) and returns ``True`` when a turn can be delivered, ``False``
+        when it is still starting.
+        """
+        self._scheduled_chat_readiness = callback
+
+    def _schedule_chat_redrain(self, tab_id: str) -> None:
+        """Re-run one tab's FIFO drain after the cold-start backoff.
+
+        Self-scheduling and de-duplicated per tab: only one delayed redrain is
+        ever pending for a given tab, so a backlog of cold runs cannot enqueue
+        an unbounded number of wakeups.
+        """
+        existing = self._sched_chat_redrain_tasks.get(tab_id)
+        if existing is not None and not existing.done():
+            return
+
+        async def _redrain() -> None:
+            try:
+                await asyncio.sleep(self._SCHEDULED_CHAT_COLD_REDRAIN_DELAY.total_seconds())
+                await self._drain_scheduled_chat_runs(tab_id)
+            except asyncio.CancelledError:  # pragma: no cover - shutdown cancellation
+                raise
+            except Exception:
+                logger.exception("Scheduled Chat cold-start redrain failed for tab=%s", tab_id)
+            finally:
+                self._sched_chat_redrain_tasks.pop(tab_id, None)
+
+        self._sched_chat_redrain_tasks[tab_id] = asyncio.create_task(
+            _redrain(), name=f"sched-chat-cold-redrain-{tab_id[:8]}"
+        )
+
+    async def _ensure_scheduled_chat_runtime_ready(self, tab_id: str) -> bool:
+        """Ensure the target Chat's native runtime is up before delivery.
+
+        Returns ``True`` when a turn can be delivered now. When no readiness
+        callback is wired we cannot verify, so we optimistically allow delivery
+        (preserves the pre-callback behavior used by tests).
+        """
+        readiness = self._scheduled_chat_readiness
+        if readiness is None:
+            return True
+        try:
+            return bool(await readiness(tab_id))
+        except Exception:
+            logger.exception("Scheduled Chat runtime readiness probe failed for tab=%s", tab_id)
+            return False
 
     def get_scheduled_task(self, task_id: str) -> ScheduledTask:
         task = self.scheduled_tasks.get(task_id)
@@ -1197,6 +1259,34 @@ class _SchedulingMixin:
                     run.waiting_reason = "Chat dispatcher is starting"
                     self._sync_task_from_run(run)
                     self._save_scheduled_tasks()
+                    return
+                # Cold-runtime gate. A Chat whose native provider has never been
+                # spawned (or was idle-reaped) has no ready runtime; delivering
+                # into that state attaches the turn to a subprocess that cannot
+                # produce it and the tailer later terminalizes it as
+                # "backend runtime was no longer available". Ensure the runtime
+                # is up first; if it is still starting, park the run WAITING with
+                # a bounded redrain instead of cancelling it.
+                ready = await self._ensure_scheduled_chat_runtime_ready(tab_id)
+                if not ready:
+                    if run.dispatch_attempts >= self._SCHEDULED_CHAT_COLD_MAX_ATTEMPTS:
+                        run.status = ScheduledTaskRunStatus.FAILED
+                        run.waiting_reason = None
+                        run.error = (
+                            "Chat runtime did not become ready "
+                            f"after {self._SCHEDULED_CHAT_COLD_MAX_ATTEMPTS} cold-start attempts"
+                        )
+                        run.completed_at = _wm._now()
+                        self._sync_task_from_run(run)
+                        self._save_scheduled_tasks()
+                        return
+                    run.dispatch_attempts += 1
+                    run.status = ScheduledTaskRunStatus.WAITING
+                    run.waiting_reason = "waiting for the Chat runtime to start"
+                    run.error = None
+                    self._sync_task_from_run(run)
+                    self._save_scheduled_tasks()
+                    self._schedule_chat_redrain(tab_id)
                     return
                 run.status = ScheduledTaskRunStatus.DISPATCHING
                 run.waiting_reason = None
