@@ -34,6 +34,15 @@ class _StateMixin:
         self._scheduled_chat_tab_locks: dict[str, asyncio.Lock] = {}
         self._scheduled_chat_recovery_pending = False
         self._scheduled_chat_dispatch: Any = None
+        # Injected live liveness probe for a dispatched Chat turn. Returns
+        # "active" (provider still owns the turn), "terminalized" (a dead
+        # orphan was just terminalized and its completion observer will fire),
+        # "dead" (no start edge and the provider is idle), or "unknown".
+        self._scheduled_chat_liveness: Any = None
+        # Throttle transcript reaps for runs stuck in DISPATCHING/RUNNING:
+        # run id -> last reconciliation attempt. Process-local; cold-restart
+        # reconciliation runs once unthrottled at startup.
+        self._sched_reap_checked_at: dict[str, datetime] = {}
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
         # Per-session pump locks: serialize _pump_session_messages so two

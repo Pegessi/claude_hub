@@ -508,6 +508,27 @@ export interface ScheduledTask {
   run_count: number
   created_at: string
   updated_at: string
+  // Live derived counts for chat_turn tasks (not persisted).
+  active_run_count?: number
+  queued_run_count?: number
+  in_flight_run_count?: number
+  in_flight_run_id?: string | null
+  in_flight_since?: string | null
+}
+
+export interface ScheduledTaskRun {
+  id: string
+  scheduled_task_id: string
+  tab_id: string
+  client_turn_id: string
+  message: string
+  status: ScheduledTaskStatus
+  scheduled_for: string
+  queued_at: string
+  dispatched_at?: string | null
+  completed_at?: string | null
+  waiting_reason?: string | null
+  error?: string | null
 }
 
 export interface ScheduledTaskCreate {

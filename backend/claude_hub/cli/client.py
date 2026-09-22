@@ -546,3 +546,15 @@ class HubClient:
     def run_scheduled_task(self, task_id: str) -> Any:
         """POST /api/scheduled-tasks/{task_id}/run."""
         return self._request("POST", f"/api/scheduled-tasks/{task_id}/run")
+
+    def list_scheduled_task_runs(self, task_id: str) -> Any:
+        """GET /api/scheduled-tasks/{task_id}/runs."""
+        return self._request("GET", f"/api/scheduled-tasks/{task_id}/runs")
+
+    def cancel_scheduled_task_run(self, run_id: str) -> Any:
+        """POST /api/scheduled-tasks/runs/{run_id}/cancel."""
+        return self._request("POST", f"/api/scheduled-tasks/runs/{run_id}/cancel")
+
+    def clear_scheduled_task_backlog(self, task_id: str) -> Any:
+        """POST /api/scheduled-tasks/{task_id}/runs/clear."""
+        return self._request("POST", f"/api/scheduled-tasks/{task_id}/runs/clear")
