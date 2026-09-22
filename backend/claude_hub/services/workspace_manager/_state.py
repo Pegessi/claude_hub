@@ -34,6 +34,16 @@ class _StateMixin:
         self._scheduled_chat_tab_locks: dict[str, asyncio.Lock] = {}
         self._scheduled_chat_recovery_pending = False
         self._scheduled_chat_dispatch: Any = None
+        # Injected readiness probe: ensures the target Chat's native runtime
+        # (tailer + provider) is spawned and reports whether it is ready to
+        # accept a turn. A cold/idle Chat is lazily spawned here and the run is
+        # parked WAITING with a bounded redrain instead of delivered into a
+        # runtime that does not exist yet.
+        self._scheduled_chat_readiness: Any = None
+        # Per-tab self-cleaning task that re-runs the FIFO drain after a short
+        # delay when the head run is waiting on a cold runtime to come up. At
+        # most one is pending per tab, so cold-start polling cannot pile up.
+        self._sched_chat_redrain_tasks: dict[str, asyncio.Task[None]] = {}
         # Injected live liveness probe for a dispatched Chat turn. Returns
         # "active" (provider still owns the turn), "terminalized" (a dead
         # orphan was just terminalized and its completion observer will fire),

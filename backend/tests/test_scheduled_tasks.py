@@ -736,6 +736,231 @@ async def test_chat_turn_busy_and_goal_wait_then_retry(
     assert dispatched == [run.id]
 
 
+async def test_chat_turn_ready_runtime_dispatches_immediately(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    """A warm Chat (readiness True) dispatches on the first drain, no parking."""
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    readiness_calls: list[str] = []
+    dispatched: list[str] = []
+
+    async def ready(tab_id: str) -> bool:
+        readiness_calls.append(tab_id)
+        return True
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_readiness(ready)
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="warm",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="warm message",
+        )
+    )
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.RUNNING
+    assert run.dispatch_attempts == 0
+    assert readiness_calls == [chat.id]
+    assert dispatched == [run.id]
+
+
+async def test_chat_turn_cold_runtime_parks_then_dispatches_when_ready(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    """A cold Chat is parked WAITING (not cancelled/delivered) until ready."""
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    # Keep the self-scheduled redrain inert; the test drives drains explicitly.
+    manager._SCHEDULED_CHAT_COLD_REDRAIN_DELAY = timedelta(hours=1)
+    is_ready = False
+    readiness_calls = 0
+    dispatched: list[str] = []
+
+    async def ready(_tab_id: str) -> bool:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return is_ready
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_readiness(ready)
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="cold",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="cold message",
+        )
+    )
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    # Cold: parked with a bounded retry, the turn is never delivered to a
+    # runtime that does not exist, and it is not cancelled.
+    assert run.status == ScheduledTaskRunStatus.WAITING
+    assert run.waiting_reason == "waiting for the Chat runtime to start"
+    assert run.dispatch_attempts == 1
+    assert dispatched == []
+    assert run.dispatched_at is None
+
+    # Still cold on the next drain: the attempt count grows but the run keeps
+    # waiting rather than failing or double-delivering.
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert run.status == ScheduledTaskRunStatus.WAITING
+    assert run.dispatch_attempts == 2
+    assert dispatched == []
+
+    # The runtime finishes starting: the very next drain delivers the turn.
+    is_ready = True
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert run.status == ScheduledTaskRunStatus.RUNNING
+    assert run.dispatch_attempts == 2
+    assert dispatched == [run.id]
+
+    await manager.on_scheduled_chat_turn_completed(chat.id, run.client_turn_id, "completed")
+    assert run.status == ScheduledTaskRunStatus.COMPLETED
+
+
+async def test_chat_turn_cold_runtime_bounded_fail_after_max_attempts(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    """A runtime that never comes up fails after a bounded number of attempts."""
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    manager._SCHEDULED_CHAT_COLD_REDRAIN_DELAY = timedelta(hours=1)
+    manager._SCHEDULED_CHAT_COLD_MAX_ATTEMPTS = 3
+    dispatched: list[str] = []
+
+    async def never_ready(_tab_id: str) -> bool:
+        return False
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_readiness(never_ready)
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="never warms",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="doomed",
+        )
+    )
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    # attempts: parked(1), parked(2), parked(3), then the 4th drain fails.
+    for expected in (1, 2, 3):
+        assert run.status == ScheduledTaskRunStatus.WAITING
+        assert run.dispatch_attempts == expected
+        await manager._drain_scheduled_chat_runs(chat.id)
+    assert run.status == ScheduledTaskRunStatus.FAILED
+    assert "did not become ready" in (run.error or "")
+    assert run.completed_at is not None
+    assert dispatched == []
+
+
+async def test_chat_turn_cold_runtime_redrives_via_self_scheduled_drain(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    """The WAITING run is redelivered automatically by the bounded redrain."""
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    manager._SCHEDULED_CHAT_COLD_REDRAIN_DELAY = timedelta(milliseconds=20)
+    is_ready = False
+    dispatched: list[str] = []
+
+    async def ready(_tab_id: str) -> bool:
+        return is_ready
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_readiness(ready)
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="self redrive",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="self redrive",
+        )
+    )
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.WAITING
+
+    is_ready = True
+    # The parked run scheduled one redrain; after the short delay it must drain
+    # itself and deliver without anyone calling the drain manually.
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while asyncio.get_event_loop().time() < deadline and not dispatched:
+        await asyncio.sleep(0.02)
+    assert dispatched == [run.id]
+    assert run.status == ScheduledTaskRunStatus.RUNNING
+    # Exactly one redrain task exists per tab, never a pile-up.
+    assert len(manager._sched_chat_redrain_tasks) <= 1
+
+
+async def test_chat_turn_cold_runtime_gate_skipped_while_goal_active(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    """An active Goal parks the run BEFORE the cold-runtime gate is consulted."""
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    goal_state = _stub_goal(monkeypatch)
+    goal_state["goal"] = SimpleNamespace(
+        status=SimpleNamespace(value="active"),
+        dispatch_state=SimpleNamespace(value="dispatched"),
+    )
+    readiness_calls = 0
+
+    async def ready(_tab_id: str) -> bool:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return True
+
+    async def dispatch(_run: Any, _task: ScheduledTask) -> None:
+        raise AssertionError("must not deliver while a Goal is active")
+
+    manager.configure_scheduled_chat_readiness(ready)
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="goal guarded",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="wait for goal",
+        )
+    )
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.WAITING
+    assert run.waiting_reason == "waiting for the active Goal"
+    assert readiness_calls == 0
+
+
 async def test_chat_turn_supersedes_blocked_occurrences_and_delivers_latest(
     manager: WorkspaceManager, monkeypatch: MonkeyPatch
 ) -> None:

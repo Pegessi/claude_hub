@@ -4403,6 +4403,80 @@ async def test_native_after_idle_stop_resubscribe_restarts_transport() -> None:
     monkeypatch.undo()
 
 
+@pytest.mark.asyncio
+async def test_headless_restart_after_idle_does_not_reap_cold_scheduled_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for scheduled chat_turn cold-wake (P1).
+
+    A scheduled ``chat_turn`` has no viewer: its tailer is restarted headlessly
+    by the scheduler's ensure-started path (``start()``, no subscribe) after an
+    idle reap. Two bugs used to kill the cold turn it then spawned:
+
+    1. (Re)start did not reset ``_last_subscriber_at``, so the fresh consumer
+       was born already past ``IDLE_TTL_S``.
+    2. The idle reaper read ``turn_in_flight`` outside the send lock and acted
+       on the stale read under the lock, so a cold one-shot spawn that raises
+       the guard a tick later was stopped before it ever produced output and
+       later terminalized as "backend runtime was no longer available".
+
+    After the fix the headless cold turn must survive: the consumer keeps
+    running, the provider guard stays raised, and ``stop()`` is never called.
+    """
+    import time as _time
+
+    import claude_hub.services.agent_stream.tailer as tailer_mod
+
+    monkeypatch.setattr(tailer_mod, "POLL_INTERVAL_S", 0.005)
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    class _ColdOneShotTransport(_FakeNativeTransport):
+        """One-shot whose cold spawn yields BEFORE raising the turn guard."""
+
+        def __init__(self) -> None:
+            super().__init__(eof_is_fatal=False)
+            self.send_started = False
+
+        async def send_message(self, text, images) -> None:  # type: ignore[override]
+            self.send_started = True
+            # Mimic cold-spawn latency: the subprocess is launching while the
+            # consumer can already take an idle-reap tick (guard still down).
+            await asyncio.sleep(0.05)
+            self._turn_in_flight = True
+            self.sent_messages.append((text, images))
+
+    transport = _ColdOneShotTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+
+    # Simulate the post-idle-reap state: still registered, consumer stopped,
+    # idle clock stale (no subscriber has touched it for well over IDLE_TTL_S).
+    tailer._stopped = True
+    tailer._task = None
+    tailer._last_subscriber_at = _time.monotonic() - (tailer_mod.IDLE_TTL_S + 60)
+
+    # Headless restart, exactly as the scheduler's ensure-started does (no
+    # subscribe), followed immediately by the background turn delivery.
+    await tailer.start()
+    await tailer.send_message("scheduled cold prompt", [], "turn-cold")
+
+    # Let many consumer ticks run across the cold-spawn latency.
+    await asyncio.sleep(0.3)
+
+    assert tailer.is_running()
+    assert transport.send_started is True
+    assert transport.stop_called is False
+    assert transport.turn_in_flight is True
+    await tailer.stop()
+
+
 # ── EOF / nonzero-exit / missing-completion handling ────────────────────────
 
 
