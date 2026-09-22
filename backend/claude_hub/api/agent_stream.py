@@ -235,7 +235,62 @@ async def _dispatch_scheduled_chat_turn(run: ScheduledTaskRun, task: ScheduledTa
     )
 
 
+async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> Optional[str]:
+    """Live liveness probe for the scheduler's stale-run reaper.
+
+    Returns ``"active"`` when the provider is busy (this turn OR a newer
+    unrelated turn, e.g. a manual composer message — a raised guard is never
+    "dead", regardless of which turn owns it), ``"terminalized"`` when a dead
+    durable orphan for this turn was just closed (its completion observer is in
+    flight), ``"dead"`` when the provider is idle and no unfinished turn
+    remains, and ``"unknown"`` when no tailer exists or a *different* orphan is
+    still open (the run must not be redelivered into someone else's turn).
+    """
+    session = _terminal_tab_stream_session(tab_id)
+    if session is None:
+        # The target tab is gone; the drain's deleted-target rule owns this.
+        return "dead"
+    tailer = _get_tab_tailer_manager().get_tailer(session.id)
+    if tailer is None:
+        return "unknown"
+    transport = tailer._native_transport
+    if transport is not None and transport.turn_in_flight:
+        # The human composer bypasses the scheduler and can own the guard with
+        # a newer turn while a scheduled run is stale. That is not evidence the
+        # scheduled run is dead: stay conservative and re-probe after the
+        # guard clears (next reaper pass terminalizes the real orphan then).
+        return "active"
+    # Provider idle while the run is still marked in flight: the durable
+    # transcript holds an orphan. Terminalize our own (Stop-equivalent) so the
+    # persisted completion edge releases the FIFO via its observers.
+    try:
+        repaired = await tailer.cancel_turn(expected_turn_id=turn_id)
+    except Exception:
+        logger.exception(
+            "Scheduled run liveness: orphan terminalization failed for tab=%s turn=%s",
+            tab_id,
+            turn_id,
+        )
+        return "unknown"
+    if repaired:
+        return "terminalized"
+    # No terminalization happened. If a *different* unfinished turn is open,
+    # redelivering this run would collide with it (and busy-park forever);
+    # leave the run alone for the next pass rather than call it dead.
+    try:
+        other_orphan = await tailer.store.latest_unfinished_turn()
+    except Exception:
+        logger.exception(
+            "Scheduled run liveness: orphan lookup failed for tab=%s turn=%s", tab_id, turn_id
+        )
+        return "unknown"
+    if other_orphan is not None and other_orphan.turn_id != turn_id:
+        return "unknown"
+    return "dead"
+
+
 workspace_manager.configure_scheduled_chat_dispatch(_dispatch_scheduled_chat_turn)
+workspace_manager.configure_scheduled_chat_liveness(_scheduled_chat_turn_liveness)
 
 
 async def _stop_all_tailer_managers() -> None:

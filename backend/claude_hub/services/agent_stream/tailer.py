@@ -808,12 +808,19 @@ class SessionTailer:
             return False
         if expected_turn_id is not None and orphan.turn_id != expected_turn_id:
             return False
-        await self._publish_turn_completion(
+        # The terminal edges are persisted by ``_publish_turn_completion``, but
+        # persistence alone does not wake completion owners: Goal admission and
+        # scheduled Chat runs only advance through the post-persist observers.
+        # Every other terminalization path notifies after publishing; the orphan
+        # path must do the same, or a scheduled turn whose runtime died stays
+        # RUNNING forever and blocks its FIFO backlog.
+        completed = await self._publish_turn_completion(
             turn_id=orphan.turn_id,
             run_epoch=orphan.run_epoch,
             status="cancelled",
             error_message=_RUNTIME_INTERRUPTED_MESSAGE,
         )
+        self._notify_post_persist(completed)
         return True
 
     async def _publish_turn_completion(

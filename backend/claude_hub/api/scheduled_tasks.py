@@ -11,11 +11,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth.dependencies import get_current_user
 from ..models import (
-    ScheduledTask,
     ScheduledTaskCreate,
     ScheduledTaskRun,
     ScheduledTaskRunResult,
     ScheduledTaskUpdate,
+    ScheduledTaskView,
     User,
 )
 from ..services.workspace_manager import workspace_manager
@@ -23,39 +23,44 @@ from ..services.workspace_manager import workspace_manager
 router = APIRouter(prefix="/api/scheduled-tasks", tags=["scheduled-tasks"])
 
 
-@router.get("", response_model=list[ScheduledTask])
+@router.get("", response_model=list[ScheduledTaskView])
 async def list_scheduled_tasks(
     current_user: User = Depends(get_current_user),
-) -> list[ScheduledTask]:
-    """Return all scheduled tasks."""
-    return workspace_manager.list_scheduled_tasks()
+) -> list[ScheduledTaskView]:
+    """Return all scheduled tasks with live run/backlog counts."""
+    return [
+        workspace_manager.scheduled_task_view(task)
+        for task in workspace_manager.list_scheduled_tasks()
+    ]
 
 
-@router.post("", response_model=ScheduledTask, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ScheduledTaskView, status_code=status.HTTP_201_CREATED)
 async def create_scheduled_task(
     body: ScheduledTaskCreate,
     current_user: User = Depends(get_current_user),
-) -> ScheduledTask:
+) -> ScheduledTaskView:
     """Create a new scheduled task."""
     try:
-        return workspace_manager.create_scheduled_task(body)
+        task = workspace_manager.create_scheduled_task(body)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    return workspace_manager.scheduled_task_view(task)
 
 
-@router.get("/{task_id}", response_model=ScheduledTask)
+@router.get("/{task_id}", response_model=ScheduledTaskView)
 async def get_scheduled_task(
     task_id: str,
     current_user: User = Depends(get_current_user),
-) -> ScheduledTask:
+) -> ScheduledTaskView:
     """Return a single scheduled task by id."""
     try:
-        return workspace_manager.get_scheduled_task(task_id)
+        task = workspace_manager.get_scheduled_task(task_id)
     except KeyError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Scheduled task '{task_id}' not found",
         ) from None
+    return workspace_manager.scheduled_task_view(task)
 
 
 @router.get("/{task_id}/runs", response_model=list[ScheduledTaskRun])
@@ -73,12 +78,53 @@ async def list_scheduled_task_runs(
         ) from None
 
 
-@router.patch("/{task_id}", response_model=ScheduledTask)
+@router.post("/runs/{run_id}/cancel", response_model=ScheduledTaskRun)
+async def cancel_scheduled_task_run(
+    run_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ScheduledTaskRun:
+    """Cancel one wedged or queued scheduled Chat run.
+
+    Use this to release a run stuck in queued/waiting/dispatching/running
+    without a backend restart. The provider-side turn is not interrupted
+    (use Chat Stop for that); the run is marked cancelled and the tab's queue
+    drains to the next occurrence.
+    """
+    try:
+        return await workspace_manager.cancel_scheduled_task_run(run_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scheduled task run '{run_id}' not found",
+        ) from None
+
+
+@router.post("/{task_id}/runs/clear")
+async def clear_scheduled_task_backlog(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, int]:
+    """Cancel every queued/waiting occurrence of a task.
+
+    A currently dispatching/running occurrence is left to finish. Returns the
+    number of runs cancelled.
+    """
+    try:
+        count = await workspace_manager.cancel_pending_scheduled_task_runs(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scheduled task '{task_id}' not found",
+        ) from None
+    return {"cancelled": count}
+
+
+@router.patch("/{task_id}", response_model=ScheduledTaskView)
 async def update_scheduled_task(
     task_id: str,
     body: ScheduledTaskUpdate,
     current_user: User = Depends(get_current_user),
-) -> ScheduledTask:
+) -> ScheduledTaskView:
     """Update fields of an existing scheduled task.
 
     ``kind`` is immutable; delete and recreate to change it. When any schedule
@@ -86,7 +132,7 @@ async def update_scheduled_task(
     next-run time is recomputed.
     """
     try:
-        return workspace_manager.update_scheduled_task(task_id, body)
+        task = workspace_manager.update_scheduled_task(task_id, body)
     except KeyError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -94,6 +140,7 @@ async def update_scheduled_task(
         ) from None
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    return workspace_manager.scheduled_task_view(task)
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -736,7 +736,7 @@ async def test_chat_turn_busy_and_goal_wait_then_retry(
     assert dispatched == [run.id]
 
 
-async def test_chat_turn_keeps_each_occurrence_while_busy_and_drains_fifo(
+async def test_chat_turn_supersedes_blocked_occurrences_and_delivers_latest(
     manager: WorkspaceManager, monkeypatch: MonkeyPatch
 ) -> None:
     chat = _chat_tab()
@@ -755,7 +755,7 @@ async def test_chat_turn_keeps_each_occurrence_while_busy_and_drains_fifo(
     manager.configure_scheduled_chat_dispatch(dispatch)
     task = manager.create_scheduled_task(
         ScheduledTaskCreate(
-            name="keep every occurrence",
+            name="supersede stale occurrences",
             kind=ScheduledTaskKind.CHAT_TURN,
             interval_seconds=60,
             tab_id=chat.id,
@@ -775,33 +775,36 @@ async def test_chat_turn_keeps_each_occurrence_while_busy_and_drains_fifo(
 
     runs = sorted(
         manager.list_scheduled_task_runs(task.id),
-        key=lambda run: (run.scheduled_for, run.queued_at, run.id),
+        key=lambda run: (run.scheduled_for, run.queued_at),
     )
     assert len(runs) == 3
     assert len({run.id for run in runs}) == 3
     assert task.run_count == 3
+    # While the Chat is busy, only the newest occurrence survives as the
+    # pending head; earlier undelivered occurrences are auditable SKIPPED
+    # records instead of a burst waiting in the FIFO (latest-wins).
     assert [run.status for run in runs] == [
+        ScheduledTaskRunStatus.SKIPPED,
+        ScheduledTaskRunStatus.SKIPPED,
         ScheduledTaskRunStatus.WAITING,
-        ScheduledTaskRunStatus.QUEUED,
-        ScheduledTaskRunStatus.QUEUED,
     ]
+    assert all("superseded" in (run.error or "") for run in runs[:2])
     assert task.last_run_id == runs[-1].id
 
     busy = False
     await manager._drain_scheduled_chat_runs(chat.id)
-    assert dispatched == [runs[0].id]
-    await manager.on_scheduled_chat_turn_completed(chat.id, runs[0].client_turn_id, "completed")
-    await manager.on_scheduled_chat_turn_completed(chat.id, runs[1].client_turn_id, "completed")
 
-    assert dispatched == [run.id for run in runs]
-    assert runs[0].status == ScheduledTaskRunStatus.COMPLETED
-    assert runs[1].status == ScheduledTaskRunStatus.COMPLETED
+    # Only the newest occurrence is delivered; superseded occurrences never
+    # replay as a burst.
+    assert dispatched == [runs[2].id]
+    assert runs[0].status == ScheduledTaskRunStatus.SKIPPED
+    assert runs[1].status == ScheduledTaskRunStatus.SKIPPED
     assert runs[2].status == ScheduledTaskRunStatus.RUNNING
     assert task.last_run_id == runs[-1].id
     assert task.last_status == ScheduledTaskRunStatus.RUNNING.value
 
 
-async def test_chat_turn_backlog_is_bounded_and_overflow_is_auditable(
+async def test_chat_turn_blocked_backlog_is_auditable_and_bounded(
     manager: WorkspaceManager, monkeypatch: MonkeyPatch
 ) -> None:
     chat = _chat_tab()
@@ -835,16 +838,20 @@ async def test_chat_turn_backlog_is_bounded_and_overflow_is_auditable(
         key=lambda run: (run.scheduled_for, run.queued_at, run.id),
     )
     assert task.run_count == 3
+    # One pending head (waiting) per blocked task: intermediate occurrences
+    # are superseded, each with an explicit, auditable reason.
     assert [run.status for run in runs] == [
-        ScheduledTaskRunStatus.WAITING,
-        ScheduledTaskRunStatus.QUEUED,
         ScheduledTaskRunStatus.SKIPPED,
+        ScheduledTaskRunStatus.SKIPPED,
+        ScheduledTaskRunStatus.WAITING,
     ]
-    assert runs[-1].completed_at is not None
-    assert "backlog limit reached" in (runs[-1].error or "")
+    for run in runs[:-1]:
+        assert run.completed_at is not None
+        assert "superseded" in (run.error or "")
+    active = [run for run in runs if manager._chat_run_active(run)]
+    assert len(active) <= 2
     assert task.last_run_id == runs[-1].id
-    assert task.last_status == ScheduledTaskRunStatus.SKIPPED.value
-    assert "backlog limit reached" in (task.last_error or "")
+    assert task.last_status == ScheduledTaskRunStatus.WAITING.value
 
 
 async def test_chat_turn_archived_deleted_and_backend_changed(
@@ -994,6 +1001,289 @@ async def test_chat_turn_recovery_queues_unstarted_and_marks_started_uncertain(
     assert first.status == ScheduledTaskRunStatus.QUEUED
     assert second.status == ScheduledTaskRunStatus.UNCERTAIN
     assert second.completed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Live stale-run reaper, cancel status, and queue controls
+# ---------------------------------------------------------------------------
+
+
+def _stale_run(
+    manager: WorkspaceManager,
+    task: ScheduledTask,
+    scheduled_for: datetime,
+    *,
+    status: ScheduledTaskRunStatus = ScheduledTaskRunStatus.RUNNING,
+    age: timedelta = timedelta(minutes=11),
+) -> Any:
+    now = _wm._now()
+    run = manager._queue_scheduled_chat_run(task, scheduled_for, now)
+    run.status = status
+    run.dispatched_at = now - age
+    return run
+
+
+async def test_reaper_completes_stale_run_from_durable_completion_edge(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="reaper transcript",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="x",
+        )
+    )
+    now = _wm._now()
+    run = _stale_run(manager, task, now - timedelta(minutes=12))
+
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{chat.id}")
+    await store.append(
+        AgentStreamEvent(
+            stream_sequence=-1,
+            session_id=f"terminal-tab-{chat.id}",
+            tab_id=chat.id,
+            agent_type=chat.agent_type,
+            type=AgentStreamEventType.TURN_STARTED,
+            turn_id=run.client_turn_id,
+            created_at=now,
+        )
+    )
+    await store.append(
+        AgentStreamEvent(
+            stream_sequence=-1,
+            session_id=f"terminal-tab-{chat.id}",
+            tab_id=chat.id,
+            agent_type=chat.agent_type,
+            type=AgentStreamEventType.TURN_COMPLETED,
+            turn_id=run.client_turn_id,
+            payload={"status": "cancelled"},
+            created_at=now,
+        )
+    )
+
+    probed: list[str] = []
+
+    async def liveness(tab_id: str, turn_id: str) -> str:
+        probed.append(turn_id)
+        return "active"  # must not matter: transcript evidence wins
+
+    manager.configure_scheduled_chat_liveness(liveness)
+    await manager._reap_stale_scheduled_chat_runs(now)
+
+    assert run.status == ScheduledTaskRunStatus.CANCELLED
+    assert probed == []  # transcript terminal edge is authoritative
+
+
+async def test_reaper_marks_dead_started_turn_uncertain_and_drains_queue(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    dispatched: list[str] = []
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+
+    async def lifecycle(run: Any) -> tuple[bool, str | None]:
+        return (run.id == wedged.id, None)
+
+    monkeypatch.setattr(manager, "_scheduled_turn_lifecycle", lifecycle)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="reaper dead",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="x",
+        )
+    )
+    now = _wm._now()
+    wedged = _stale_run(manager, task, now - timedelta(minutes=12))
+    # A newer occurrence waiting behind the wedged head.
+    queued = manager._queue_scheduled_chat_run(task, now - timedelta(minutes=5), now)
+
+    async def liveness(tab_id: str, turn_id: str) -> str:
+        return "dead" if turn_id == wedged.client_turn_id else "unknown"
+
+    manager.configure_scheduled_chat_liveness(liveness)
+    await manager._reap_stale_scheduled_chat_runs(now)
+
+    assert wedged.status == ScheduledTaskRunStatus.UNCERTAIN
+    # Drain released the FIFO and dispatched the queued occurrence.
+    assert queued.id in dispatched
+
+
+async def test_reaper_leaves_active_turn_and_fresh_run_alone(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    now = _wm._now()
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="reaper active",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="x",
+        )
+    )
+    active = _stale_run(manager, task, now - timedelta(minutes=12))
+    fresh = manager._queue_scheduled_chat_run(task, now - timedelta(minutes=1), now)
+    fresh.status = ScheduledTaskRunStatus.RUNNING
+    fresh.dispatched_at = now - timedelta(minutes=1)
+
+    async def lifecycle(run: Any) -> tuple[bool, str | None]:
+        return (True, None)
+
+    async def liveness(tab_id: str, turn_id: str) -> str:
+        return "active"
+
+    monkeypatch.setattr(manager, "_scheduled_turn_lifecycle", lifecycle)
+    manager.configure_scheduled_chat_liveness(liveness)
+    await manager._reap_stale_scheduled_chat_runs(now)
+
+    assert active.status == ScheduledTaskRunStatus.RUNNING
+    assert fresh.status == ScheduledTaskRunStatus.RUNNING
+
+
+async def test_cancelled_completion_edge_maps_to_cancelled_run(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    manager.configure_scheduled_chat_dispatch(_async_noop)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="cancel edge",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="x",
+        )
+    )
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.RUNNING
+    await manager.on_scheduled_chat_turn_completed(chat.id, run.client_turn_id, "cancelled")
+    assert run.status == ScheduledTaskRunStatus.CANCELLED
+    assert task.last_status == ScheduledTaskRunStatus.CANCELLED.value
+
+
+async def test_disabling_task_cancels_its_queued_occurrences(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    manager.configure_scheduled_chat_dispatch(_async_noop)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="disable clears backlog",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="x",
+        )
+    )
+    now = _wm._now()
+    waiting = manager._queue_scheduled_chat_run(task, now, now)
+    queued = manager._queue_scheduled_chat_run(task, now + timedelta(seconds=60), now)
+    running = manager._queue_scheduled_chat_run(task, now + timedelta(seconds=120), now)
+    waiting.status = ScheduledTaskRunStatus.WAITING
+    waiting.waiting_reason = "target Chat is archived"
+    queued.status = ScheduledTaskRunStatus.QUEUED
+    running.status = ScheduledTaskRunStatus.RUNNING
+    running.dispatched_at = now
+
+    manager.update_scheduled_task(task.id, ScheduledTaskUpdate(enabled=False))
+
+    assert waiting.status == ScheduledTaskRunStatus.CANCELLED
+    assert "disabled" in (waiting.error or "")
+    assert queued.status == ScheduledTaskRunStatus.CANCELLED
+    # The run already executing is left to finish.
+    assert running.status == ScheduledTaskRunStatus.RUNNING
+
+
+async def test_manual_cancel_run_and_clear_backlog(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    dispatched: list[str] = []
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        dispatched.append(run.id)
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="manual controls",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="x",
+        )
+    )
+    now = _wm._now()
+    wedged = manager._queue_scheduled_chat_run(task, now, now)
+    wedged.status = ScheduledTaskRunStatus.RUNNING
+    wedged.dispatched_at = now - timedelta(minutes=30)
+    queued = manager._queue_scheduled_chat_run(task, now + timedelta(seconds=60), now)
+
+    # Cancelling the wedged head releases the queue: queued dispatches.
+    result = await manager.cancel_scheduled_task_run(wedged.id)
+    assert result.status == ScheduledTaskRunStatus.CANCELLED
+    assert queued.id in dispatched
+
+    # clear-backlog on a fresh pile cancels queued/waiting but not a live run.
+    extra1 = manager._queue_scheduled_chat_run(task, now + timedelta(seconds=120), now)
+    extra2 = manager._queue_scheduled_chat_run(task, now + timedelta(seconds=180), now)
+    count = await manager.cancel_pending_scheduled_task_runs(task.id)
+    assert count == 1  # only extra2 remains queued (extra1 was superseded when extra2 queued)
+    assert extra1.status == ScheduledTaskRunStatus.SKIPPED
+    assert extra2.status == ScheduledTaskRunStatus.CANCELLED
+
+
+async def test_scheduled_task_view_exposes_backlog_counts(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="view counts",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="x",
+        )
+    )
+    now = _wm._now()
+    running = manager._queue_scheduled_chat_run(task, now, now)
+    running.status = ScheduledTaskRunStatus.RUNNING
+    running.dispatched_at = now
+    manager._queue_scheduled_chat_run(task, now + timedelta(seconds=60), now)
+
+    view = manager.scheduled_task_view(task)
+    assert view.in_flight_run_count == 1
+    assert view.in_flight_run_id == running.id
+    assert view.queued_run_count == 1
+    assert view.active_run_count == 2
+
+    with pytest.raises(KeyError):
+        await manager.cancel_scheduled_task_run("missing-run-id")
 
 
 # ---------------------------------------------------------------------------
