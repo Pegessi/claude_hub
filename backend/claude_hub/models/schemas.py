@@ -1797,6 +1797,10 @@ class ScheduledTaskRun(BaseModel):
     completed_at: Optional[datetime] = None
     waiting_reason: Optional[str] = None
     error: Optional[str] = None
+    # Number of times the run was parked WAITING because the target Chat's
+    # native runtime was cold/not yet ready. Bounds cold-start requeue so a
+    # runtime that never comes up fails the run instead of retrying forever.
+    dispatch_attempts: int = 0
 
 
 class ScheduledTask(BaseModel):

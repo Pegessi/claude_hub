@@ -5,6 +5,35 @@
 
 ## Unreleased
 
+### fix: scheduled chat_turn reliably wakes a cold/native-idle Chat
+
+- A `chat_turn` automation firing against a Chat that had been idle past the
+  provider/subprocess lifetime produced no reply and ended red with "Turn
+  interrupted because its backend runtime was no longer available" (run
+  `cancelled`). The tailer for a headless scheduled turn is restarted without
+  a UI subscriber after an idle reap; its stale idle clock made the fresh
+  consumer reap itself, and an idle-reaper time-of-check/time-of-use race
+  (the turn guard was read outside the send lock and acted on under it)
+  stopped the one-shot provider the cold turn had just spawned, before it
+  emitted anything. `SessionTailer.start()` now resets the idle clock, and
+  the idle reaper re-checks `turn_in_flight`/active-turn under the send lock
+  (mirroring the stream-inactivity reaper), so a viewer-less scheduled turn
+  is never killed by idle reaping.
+- Scheduled delivery now ensures the target Chat's native runtime is up
+  before sending. A new readiness probe (`ensure_started` + started/handshake
+  check) spawns a cold provider and parks the run `waiting` ("waiting for the
+  Chat runtime to start") with a bounded, de-duplicated per-tab redrain
+  (5 s × 12) instead of delivering into a runtime that does not exist; a
+  runtime that never becomes ready fails the run rather than retrying
+  forever. Busy-Chat / active-Goal / archived guards, per-tab FIFO locking,
+  cooldown double-fire protection, and the 100-run backlog cap are unchanged.
+- Tests: cold spawn-then-deliver completes and lands in the transcript; a
+  not-yet-ready runtime parks with bounded retries (never `cancelled`);
+  readiness failure after the cap fails the run; the self-scheduled redrain
+  delivers without a manual tick; an active Goal is never interrupted; and a
+  headless tailer restart after idle no longer reaps the cold turn. See
+  `docs/working-logs/2026-09-22-scheduled-chat-cold-wake.md`.
+
 ### fix: scheduled Chat runs no longer wedge after a dead turn; backlog stays bounded
 
 - A scheduled `chat_turn` whose provider runtime was lost ("Turn interrupted
