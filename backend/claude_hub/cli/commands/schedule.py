@@ -295,3 +295,63 @@ def schedule_run(ctx: click.Context, task_id: str) -> None:
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))
+
+
+RUN_COLUMNS = ["scheduled_for", "status", "id", "error"]
+
+
+@schedule.command("runs")
+@click.argument("task_id")
+@click.pass_context
+def schedule_runs(ctx: click.Context, task_id: str) -> None:
+    """List the durable Chat runs of a task (newest first)."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.list_scheduled_task_runs(task_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if cli_main.as_json(ctx):
+        emit(data, True)
+        return
+    rows = [
+        {
+            "scheduled_for": item.get("scheduled_for", ""),
+            "status": item.get("status", ""),
+            "id": item.get("id", ""),
+            "error": truncate(item.get("error") or item.get("waiting_reason") or "", 60),
+        }
+        for item in data or []
+    ]
+    print_rows(rows, RUN_COLUMNS)
+
+
+@schedule.command("cancel-run")
+@click.argument("run_id")
+@click.pass_context
+def schedule_cancel_run(ctx: click.Context, run_id: str) -> None:
+    """Cancel one wedged or queued scheduled Chat run.
+
+    Releases a run stuck in queued/waiting/dispatching/running without a
+    backend restart; the tab's queue then drains to the next occurrence.
+    """
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.cancel_scheduled_task_run(run_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@schedule.command("clear-runs")
+@click.argument("task_id")
+@click.pass_context
+def schedule_clear_runs(ctx: click.Context, task_id: str) -> None:
+    """Cancel every queued/waiting occurrence of a task (a live run is kept)."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.clear_scheduled_task_backlog(task_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+    if not cli_main.as_json(ctx):
+        click.echo(f"cancelled {data.get('cancelled', 0)} queued run(s)")

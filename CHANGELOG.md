@@ -5,6 +5,41 @@
 
 ## Unreleased
 
+### fix: scheduled Chat runs no longer wedge after a dead turn; backlog stays bounded
+
+- A scheduled `chat_turn` whose provider runtime was lost ("Turn interrupted
+  because its backend runtime was no longer available") stayed `running`
+  forever: the orphan-turn terminalization persisted the terminal
+  `error`/`turn_completed` edges but never invoked the post-persist observers,
+  so the scheduled-run FIFO never drained and every later occurrence piled up
+  as `queued`. The orphan recovery path now notifies observers like every
+  other terminalization path.
+- Add a live-process stale-run reaper: a run stuck dispatching/running past 10
+  minutes is reconciled against the durable transcript (completed / failed /
+  cancelled) and, with no terminal edge, against the live provider turn guard
+  via a new liveness probe (active long turns — tools, approvals — are never
+  touched; dead idle turns become `uncertain`/requeued and the queue drains).
+  Cold-restart reconciliation already existed; this covers runtime loss while
+  the backend stays up.
+- Blocked occurrences are now superseded (auditable `skipped`,
+  "superseded by a newer occurrence") instead of accumulating one FIFO record
+  per interval that would replay as a burst of identical stale prompts when
+  the Chat frees up. Disabling an automation, or the drain discovering a
+  disabled/deleted/changed target, cancels its queued occurrences instead of
+  firing them later.
+- A cancelled/interrupted turn maps the run to `cancelled` (not `failed`).
+- New recovery controls: `POST /api/scheduled-tasks/runs/{id}/cancel` (cancel
+  one wedged/queued run) and `POST /api/scheduled-tasks/{id}/runs/clear`
+  (clear the queued backlog); CLI `schedule runs`, `schedule cancel-run`,
+  `schedule clear-runs`. Task list responses carry live `in_flight_run_*` /
+  `queued_run_count` fields; the panel shows an in-flight indicator (with
+  elapsed duration — long runs are normal, not an alert) and queued count,
+  with inline cancel/clear.
+- Liveness probe is strictly conservative: a raised provider guard is "busy"
+  even when a newer unrelated turn (e.g. a manual composer message) owns it,
+  so a stale run is never reaped while any turn is live; a different open
+  durable orphan yields "unknown" instead of redelivering into it.
+
 ### fix: close remote Chat/agent/reviewer placement holes
 
 - Reject Chat + Remote at the create-tab API, ttyd manager, and new-session

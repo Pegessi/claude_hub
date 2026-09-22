@@ -2525,6 +2525,11 @@ async def test_cancel_turn_closes_orphaned_durable_turn_after_restart(
     await store.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": "unfinished"}))
     await store.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": "partial"}))
 
+    observed: List[AgentStreamEvent] = []
+
+    async def observer(event: AgentStreamEvent) -> None:
+        observed.append(event)
+
     transport = _FakeNativeTransport()
     tailer = SessionTailer(
         workspace_id=session.workspace_id,
@@ -2533,10 +2538,21 @@ async def test_cancel_turn_closes_orphaned_durable_turn_after_restart(
         session_getter=lambda: session,
         store=store,
         native_transport=transport,
+        post_persist_observers=[observer],
     )
 
     assert transport.turn_in_flight is False
     assert await tailer.cancel_turn() is True
+
+    # The terminalization must also fire post-persist observers: that is the
+    # only signal a scheduled Chat run (or Goal) gets that its dead turn ended,
+    # so its FIFO queue can drain. Regression: the orphan path persisted the
+    # terminal edges but never notified, stranding scheduled runs as RUNNING.
+    await asyncio.sleep(0)
+    assert any(
+        event.type == AgentStreamEventType.TURN_COMPLETED and event.turn_id == "turn-orphaned"
+        for event in observed
+    )
 
     page = await store.read_since(-1, limit=10)
     assert [event.type for event in page.events] == [
@@ -2558,6 +2574,141 @@ async def test_cancel_turn_closes_orphaned_durable_turn_after_restart(
     assert completed.payload["status"] == "cancelled"
     assert await tailer.cancel_turn() is False
     assert len((await store.read_since(-1, limit=10)).events) == 4
+
+
+class _FakeProbeTailer:
+    """Stand-in for SessionTailer in the scheduled-run liveness probe."""
+
+    def __init__(
+        self,
+        *,
+        turn_in_flight: bool,
+        active_turn_id: Optional[str] = None,
+        cancel_result: bool = False,
+        cancel_raises: bool = False,
+        orphan: Any = None,
+    ) -> None:
+        self._native_transport = (
+            SimpleNamespace(turn_in_flight=turn_in_flight) if turn_in_flight else None
+        )
+        self._active_turn_id = active_turn_id
+        self._cancel_result = cancel_result
+        self._cancel_raises = cancel_raises
+        self.cancel_calls: List[Optional[str]] = []
+        self.store = SimpleNamespace(
+            latest_unfinished_turn=AsyncMock(return_value=orphan),
+        )
+
+    async def cancel_turn(self, expected_turn_id: Optional[str] = None) -> bool:
+        self.cancel_calls.append(expected_turn_id)
+        if self._cancel_raises:
+            raise RuntimeError("terminalization failed")
+        return self._cancel_result
+
+
+def _patch_probe_tab(monkeypatch: pytest.MonkeyPatch, tailer: Optional[_FakeProbeTailer]) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    monkeypatch.setattr(
+        agent_stream_api,
+        "_terminal_tab_stream_session",
+        lambda tab_id: SimpleNamespace(id=f"terminal-tab-{tab_id}"),
+    )
+    monkeypatch.setattr(
+        agent_stream_api,
+        "_get_tab_tailer_manager",
+        lambda: SimpleNamespace(get_tailer=lambda session_id: tailer),
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_liveness_guard_owned_by_other_turn_is_not_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raised provider guard — even for a NEWER unrelated turn — means busy.
+
+    A human composer message can own the guard while a stale scheduled run is
+    unreconciled; the reaper must not call that run dead and redispatch into
+    the live turn.
+    """
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    tailer = _FakeProbeTailer(turn_in_flight=True, active_turn_id="turn-B")
+    _patch_probe_tab(monkeypatch, tailer)
+    assert await agent_stream_api._scheduled_chat_turn_liveness("tab", "turn-A") == "active"
+    assert tailer.cancel_calls == []  # never attempted a terminalization
+
+
+@pytest.mark.asyncio
+async def test_scheduled_liveness_terminalizes_idle_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    tailer = _FakeProbeTailer(turn_in_flight=False, cancel_result=True)
+    _patch_probe_tab(monkeypatch, tailer)
+    assert await agent_stream_api._scheduled_chat_turn_liveness("tab", "turn-A") == ("terminalized")
+    assert tailer.cancel_calls == ["turn-A"]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_liveness_different_open_orphan_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle provider but a DIFFERENT unfinished turn exists: do not redeliver."""
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    tailer = _FakeProbeTailer(
+        turn_in_flight=False,
+        cancel_result=False,
+        orphan=SimpleNamespace(turn_id="turn-OTHER"),
+    )
+    _patch_probe_tab(monkeypatch, tailer)
+    assert await agent_stream_api._scheduled_chat_turn_liveness("tab", "turn-A") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_liveness_idle_with_no_orphan_is_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    tailer = _FakeProbeTailer(turn_in_flight=False, cancel_result=False, orphan=None)
+    _patch_probe_tab(monkeypatch, tailer)
+    assert await agent_stream_api._scheduled_chat_turn_liveness("tab", "turn-A") == "dead"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_liveness_terminalization_error_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    tailer = _FakeProbeTailer(turn_in_flight=False, cancel_raises=True)
+    _patch_probe_tab(monkeypatch, tailer)
+    assert await agent_stream_api._scheduled_chat_turn_liveness("tab", "turn-A") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_liveness_missing_tab_and_tailer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    monkeypatch.setattr(agent_stream_api, "_terminal_tab_stream_session", lambda tab_id: None)
+    assert await agent_stream_api._scheduled_chat_turn_liveness("gone", "turn-A") == "dead"
+
+    monkeypatch.setattr(
+        agent_stream_api,
+        "_terminal_tab_stream_session",
+        lambda tab_id: SimpleNamespace(id="terminal-tab-tab"),
+    )
+    monkeypatch.setattr(
+        agent_stream_api,
+        "_get_tab_tailer_manager",
+        lambda: SimpleNamespace(get_tailer=lambda session_id: None),
+    )
+    assert await agent_stream_api._scheduled_chat_turn_liveness("tab", "turn-A") == "unknown"
 
 
 @pytest.mark.asyncio

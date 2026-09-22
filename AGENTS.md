@@ -200,6 +200,7 @@ task.
 | Structured Chat Goal mode | `docs/working-logs/2026-09-17-chat-goal-mode.md` |
 | Remote tabs / remote workspace agents and reviewers | `docs/working-logs/2026-09-20-remote-agent-pipeline.md` |
 | Long Chat turns / stream watchdog timeouts | `docs/working-logs/2026-09-20-chat-long-turn-watchdog.md` |
+| Scheduled Chat run wedge / stale reaper / backlog supersede | `docs/working-logs/2026-09-22-scheduled-chat-stale-run.md` |
 
 ## Common Edit Areas
 

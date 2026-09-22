@@ -140,6 +140,29 @@ export const useScheduledTasksStore = defineStore('scheduled-tasks', () => {
     return updateTask(taskId, { enabled })
   }
 
+  async function cancelRun(runId: string): Promise<void> {
+    isMutating.value = true
+    try {
+      const response = await fetch(`${API_BASE}/runs/${runId}/cancel`, { method: 'POST' })
+      if (!response.ok) throw new Error(await readError(response))
+    } finally {
+      isMutating.value = false
+    }
+    await fetchTasks({ silent: true })
+  }
+
+  async function clearBacklog(taskId: string): Promise<number> {
+    isMutating.value = true
+    try {
+      const response = await fetch(`${API_BASE}/${taskId}/runs/clear`, { method: 'POST' })
+      if (!response.ok) throw new Error(await readError(response))
+      const data = (await response.json()) as { cancelled: number }
+      return data.cancelled
+    } finally {
+      isMutating.value = false
+    }
+  }
+
   return {
     tasks,
     isLoading,
@@ -152,5 +175,7 @@ export const useScheduledTasksStore = defineStore('scheduled-tasks', () => {
     deleteTask,
     runTask,
     setEnabled,
+    cancelRun,
+    clearBacklog,
   }
 })

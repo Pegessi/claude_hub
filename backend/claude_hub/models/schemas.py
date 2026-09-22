@@ -1892,3 +1892,22 @@ class ScheduledTaskRunResult(BaseModel):
     last_run_at: Optional[datetime] = None
     last_status: Optional[str] = None
     last_error: Optional[str] = None
+
+
+class ScheduledTaskView(ScheduledTask):
+    """A scheduled task with live derived run/backlog counts (not persisted)."""
+
+    # Occurrences that have not reached a terminal state (queued/waiting/
+    # dispatching/running).
+    active_run_count: int = 0
+    # Occurrences piled up behind the one turn a target Chat can accept
+    # (queued/waiting), i.e. the backlog that would replay when it frees up.
+    queued_run_count: int = 0
+    # The single occurrence currently dispatched to / running on the provider.
+    in_flight_run_count: int = 0
+    # Id of the in-flight (oldest dispatching/running) run, if any — lets the
+    # UI cancel a wedged run directly.
+    in_flight_run_id: Optional[str] = None
+    # When that in-flight run was dispatched (or queued if dispatch stamp is
+    # absent); used by the UI to flag wedged runs.
+    in_flight_since: Optional[datetime] = None

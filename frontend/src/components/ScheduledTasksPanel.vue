@@ -120,6 +120,42 @@
                 </span>
                 <span class="st-runs">{{ task.run_count }} run{{ task.run_count === 1 ? '' : 's' }}</span>
               </div>
+              <div
+                v-if="task.kind === 'chat_turn' && (task.in_flight_run_count || task.queued_run_count)"
+                class="st-backlog"
+              >
+                <span
+                  v-if="task.in_flight_run_count"
+                  class="st-backlog-pill"
+                  :title="`A scheduled turn has been running in the target Chat for ${flightDuration(task)}. Long runs are normal (reviews, test runs); the backend only reconciles a turn once the provider is idle. Cancel to release the queue without stopping the Chat turn.`"
+                >
+                  ● run in flight · {{ flightDuration(task) }}
+                  <button
+                    v-if="task.in_flight_run_id"
+                    type="button"
+                    class="st-link-btn"
+                    :disabled="store.isMutating"
+                    @click="onCancelRun(task)"
+                  >
+                    cancel
+                  </button>
+                </span>
+                <span
+                  v-if="task.queued_run_count"
+                  class="st-backlog-pill st-backlog-pill--queued"
+                  :title="`${task.queued_run_count} occurrence(s) waiting behind the current turn; older occurrences are superseded while the Chat is busy`"
+                >
+                  {{ task.queued_run_count }} queued
+                  <button
+                    type="button"
+                    class="st-link-btn"
+                    :disabled="store.isMutating"
+                    @click="onClearBacklog(task)"
+                  >
+                    clear
+                  </button>
+                </span>
+              </div>
             </div>
             <div class="st-item-actions">
               <label
@@ -655,6 +691,57 @@ async function onDelete(task: ScheduledTask) {
   }
 }
 
+// Show how long the current turn has been dispatched; a long duration alone is
+// not an error (legit reviews/test runs), so this is informational, not an
+// alert — the backend only reconciles once the provider guard is actually down.
+function flightDuration(task: ScheduledTask): string {
+  if (!task.in_flight_since) return ''
+  const since = Date.parse(task.in_flight_since)
+  if (!Number.isFinite(since)) return ''
+  const minutes = Math.max(0, Math.round((Date.now() - since) / 60000))
+  if (minutes < 1) return '<1m'
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest ? `${hours}h${rest}m` : `${hours}h`
+}
+
+async function onCancelRun(task: ScheduledTask) {
+  if (!task.in_flight_run_id) return
+  if (
+    !window.confirm(
+      'Cancel this scheduled run and release the queue?\n\n'
+        + 'The Chat turn itself is not interrupted (use Stop in the Chat for that). '
+        + 'The next queued occurrence will dispatch once the Chat is free.',
+    )
+  ) {
+    return
+  }
+  try {
+    await store.cancelRun(task.in_flight_run_id)
+  } catch (e) {
+    formError.value = e instanceof Error ? e.message : 'Failed to cancel run'
+  }
+}
+
+async function onClearBacklog(task: ScheduledTask) {
+  if (!task.queued_run_count) return
+  if (
+    !window.confirm(
+      `Cancel ${task.queued_run_count} queued occurrence(s) of "${task.name}"?\n\n`
+        + 'A run currently in flight (if any) keeps going.',
+    )
+  ) {
+    return
+  }
+  try {
+    await store.clearBacklog(task.id)
+    await store.fetchTasks({ silent: true })
+  } catch (e) {
+    formError.value = e instanceof Error ? e.message : 'Failed to clear queued runs'
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Create / edit
 // ---------------------------------------------------------------------------
@@ -992,6 +1079,44 @@ async function save() {
 
 .st-error-text {
   cursor: help;
+}
+
+.st-backlog {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.st-backlog-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: var(--ch-font-size-xs);
+  color: var(--ch-color-accent);
+  background: color-mix(in srgb, var(--ch-color-accent) 12%, transparent);
+}
+
+.st-backlog-pill--queued {
+  color: var(--ch-color-text-secondary, var(--ch-color-text));
+  background: var(--ch-color-bg-elevated, rgba(255, 255, 255, 0.08));
+}
+
+.st-link-btn {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.st-link-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .st-item-actions {
