@@ -38,6 +38,7 @@ from claude_hub.services.agent_stream.native import (
     ClaudeNativeSession,
     CodexNativeSession,
     CursorNativeSession,
+    TraexNativeSession,
     create_native_session,
     parse_ask_question_response,
     strip_hub_runtime_guidance,
@@ -440,6 +441,58 @@ def test_terminal_session_never_gets_native_guidance_injection() -> None:
         create_native_session(_session(AgentType.TERMINAL))
     # The strip path is inert for ordinary terminal text regardless.
     assert strip_hub_runtime_guidance("ls -la") == "ls -la"
+
+
+# ── Provider subprocess env: CLAUDE_HUB_TAB_ID for every native Chat ─────────
+
+_NATIVE_SESSION_CASES = [
+    (ClaudeNativeSession, AgentType.CLAUDE),
+    (CursorNativeSession, AgentType.CURSOR),
+    (CodexNativeSession, AgentType.CODEX),
+    (TraexNativeSession, AgentType.TRAEX),
+]
+
+
+@pytest.mark.parametrize("session_cls,agent_type", _NATIVE_SESSION_CASES)
+def test_build_env_injects_tab_id_for_native_chat_provider(
+    monkeypatch: MonkeyPatch, session_cls: Any, agent_type: AgentType
+) -> None:
+    """Every native Chat provider subprocess must carry CLAUDE_HUB_TAB_ID so
+    the first-turn guidance's ``$CLAUDE_HUB_TAB_ID`` reference actually
+    resolves. Without the ``_build_env`` overlay only Claude (via its
+    --settings file) had it; Cursor/Codex/TraeX started without it and a
+    self-scheduled command expanded --tab-id to empty."""
+    monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
+    native = session_cls(_session(agent_type))  # tab_id == "tab-1"
+    assert native._build_env()["CLAUDE_HUB_TAB_ID"] == "tab-1"
+
+
+@pytest.mark.parametrize("session_cls,agent_type", _NATIVE_SESSION_CASES)
+def test_build_env_does_not_override_explicit_tab_id(
+    monkeypatch: MonkeyPatch, session_cls: Any, agent_type: AgentType
+) -> None:
+    """setdefault keeps an explicit tab id (from session.env or the parent
+    process env) authoritative; the overlay never clobbers it."""
+    # Explicit session.env value wins over the session's own tab_id.
+    monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
+    sess = _session(agent_type)
+    sess.env = {"CLAUDE_HUB_TAB_ID": "explicit-tab"}
+    assert session_cls(sess)._build_env()["CLAUDE_HUB_TAB_ID"] == "explicit-tab"
+
+    # An inherited parent-process value is likewise preserved (not replaced).
+    monkeypatch.setenv("CLAUDE_HUB_TAB_ID", "parent-tab")
+    sess2 = _session(agent_type)
+    sess2.env = {}
+    assert session_cls(sess2)._build_env()["CLAUDE_HUB_TAB_ID"] == "parent-tab"
+
+
+def test_build_env_without_tab_id_omits_overlay(monkeypatch: MonkeyPatch) -> None:
+    """A native session with no tab id must not inject an empty/placeholder
+    CLAUDE_HUB_TAB_ID."""
+    monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
+    sess = _session(AgentType.CODEX)
+    sess.tab_id = ""
+    assert "CLAUDE_HUB_TAB_ID" not in CodexNativeSession(sess)._build_env()
 
 
 def test_claude_transcript_strips_hub_runtime_guidance_string_content() -> None:

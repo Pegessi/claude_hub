@@ -7,10 +7,9 @@
 
 ### feat: inject concise Hub self-scheduling guidance into Chat agents
 
-- Native Chat agents (Claude / Cursor / Codex / TraeX) already run with
-  `CLAUDE_HUB_TAB_ID` in env and the `claude-hub` CLI on PATH, and
+- Native Chat agents have the `claude-hub` CLI on PATH and
   `schedule create --kind chat_turn` can enqueue a turn for the current
-  conversation — but nothing told the agent any of this, so it either never
+  conversation, but nothing told the agent any of this, so it either never
   self-scheduled or wrongly used the Terminal-only `--kind tab_message` (which
   types into a terminal pane).
 - The transport now prepends a concise sentinel-wrapped "Hub runtime" block to
@@ -19,6 +18,16 @@
   and the Chat-native `chat_turn` schedule command, and telling it not to
   schedule without an explicit user request. The backend never substitutes the
   concrete tab id.
+- Fix: `CLAUDE_HUB_TAB_ID` is now overlaid in `ProviderSession._build_env()`
+  for every native Chat subprocess (Claude / Cursor / Codex / TraeX). It
+  previously reached only the tmux-shell path (`TTYDProcess._child_env`); a
+  native Chat transport spawns the provider directly from
+  `os.environ + session.env`, neither of which carried the tab id, so the
+  guidance's `$CLAUDE_HUB_TAB_ID` expanded empty for Cursor / Codex / TraeX
+  (only Claude happened to receive it via its per-tab `--settings` file) and a
+  self-scheduled command failed with a `--tab-id` validation error. The
+  overlay uses `setdefault` (an explicit env value stays authoritative) and is
+  process-env only — never written back to the persisted tab env.
 - The block is stripped by every provider transcript normalizer (Claude /
   Cursor / Codex) before persistence and echo, and by the edit-resend
   transcript fork before content matching, so it reaches neither the
