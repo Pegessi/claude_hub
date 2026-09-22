@@ -79,6 +79,32 @@ test('concurrent background refreshes share a single in-flight request', async t
   await Promise.all([first, second])
 })
 
+test('a forced refresh bypasses coalescing so mutation callers get fresh data', async t => {
+  const store = setup(t)
+  const tabsCalls = () =>
+    globalThis.fetch.mock.calls.filter(call => call.arguments[0] === '/api/tabs').length
+  let resolveBackground
+  globalThis.fetch.mock.mockImplementation((...args) => {
+    if (args[0] === '/api/tabs') {
+      if (tabsCalls() === 0) {
+        // A poll-started refresh is still hanging when the mutation lands.
+        return new Promise(resolve => {
+          resolveBackground = () => resolve({ ok: true, json: async () => [{ id: 'stale' }] })
+        })
+      }
+      return Promise.resolve({ ok: true, json: async () => [{ id: 'fresh' }] })
+    }
+    return Promise.resolve({ ok: true, json: async () => [] })
+  })
+
+  const background = store.fetchTabs()
+  await store.fetchTabs({ force: true })
+  assert.equal(tabsCalls(), 2, 'force bypasses the in-flight coalesced request')
+  assert.deepEqual(store.tabs.map(tab => tab.id), ['fresh'])
+  resolveBackground()
+  await background
+})
+
 test('createTab drives isLoading so the launcher shows its pending state', async t => {
   const store = setup(t)
   let resolveCreate

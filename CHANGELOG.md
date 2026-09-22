@@ -10,7 +10,8 @@
 - `GET /api/tabs/status` now excludes archived tabs, matching `GET /api/tabs`.
   Previously every archived session showed up in the 5-second status poll as
   an "unknown new tab", forcing a full `GET /api/tabs` refresh every cycle and
-  needlessly re-sampling dozens of runtimes on the backend.
+  needlessly re-sampling dozens of runtimes on the backend. The Feishu
+  `tab_status` card likewise lists live sessions only.
 - `terminalStore.fetchTabs()` no longer drives the global `isLoading` flag —
   that flag is reserved for real mutations (create/close/archive). Poll- and
   mount-driven background refreshes made the sidebar's `+` launcher briefly
