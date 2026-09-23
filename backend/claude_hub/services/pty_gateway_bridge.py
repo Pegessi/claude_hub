@@ -13,10 +13,11 @@ The bridge is a byte-for-byte proxy with a one-shot injection at connect time:
    bound to a fresh local proxy PTY.
 2. Hold off forwarding keystrokes until the genuine ``user@host:…$`` prompt has
    appeared *twice* (the connect ``init $`` splash is never typed into).
-3. Type ``echo <bootstrap-b64> | base64 -d | bash`` so the remote login shell
-   starts the detached tmux session and ``exec tmux attach``es; then drop into
-   fully transparent passthrough — Up/Tab/Ctrl-C/alt-screen/scrollback all flow
-   untouched because every intervening local PTY is in raw mode.
+3. Type a one-line ``echo <bootstrap-b64> | base64 -d > /tmp/x; bash /tmp/x; rm``
+   so the remote login shell starts the detached tmux session and
+   ``exec tmux attach``es (the script runs with the login PTY as stdin); then
+   drop into fully transparent passthrough — Up/Tab/Ctrl-C/alt-screen/scrollback
+   all flow untouched because every intervening local PTY is in raw mode.
 
 On SSH exit the bridge re-runs the whole connection + handshake (the remote
 detached tmux survives, so it re-attaches the same processes).
@@ -33,6 +34,7 @@ import base64
 import fcntl
 import os
 import pty
+import secrets
 import signal
 import struct
 import termios
@@ -90,11 +92,19 @@ class BootstrapHandshake:
         return b""
 
 
-def build_bootstrap_line(bootstrap_script: str) -> str:
-    """Single typed line that decodes and runs the (possibly multiline) script."""
+def build_bootstrap_line(bootstrap_script: str, *, token: Optional[str] = None) -> str:
+    """Type the (possibly multiline) script as one physical line.
 
+    It is decoded into a temp file and executed as a *separate* list command so
+    its stdin is the login shell's PTY, not the decode pipeline. Piping straight
+    into ``bash`` would make the final ``exec tmux attach`` inherit the (closed)
+    pipe and die with "open terminal failed: not a terminal".
+    """
+
+    token = token or secrets.token_hex(6)
     encoded = base64.b64encode(bootstrap_script.encode("utf-8")).decode("ascii")
-    return f"echo {encoded} | base64 -d | bash"
+    tmp = f"/tmp/.chp-bootstrap-{token}.sh"
+    return f"echo {encoded} | base64 -d > {tmp}; " f"bash {tmp}; " f"rm -f {tmp}"
 
 
 def _set_raw(fd: int) -> Optional[list]:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import sys
 
 import pytest
@@ -170,9 +171,14 @@ def test_handshake_gates_keys_until_two_prompts() -> None:
     # Second prompt after the synchronising Enter releases the bootstrap.
     injected = hs.feed(b"\r\ntiger@host:~$ ")
     assert injected.endswith(b"\r") and injected.startswith(b"echo ")
-    assert b"| base64 -d | bash" in injected
+    # The typed line decodes into a temp file and runs it attached to the tty
+    # (piping straight into bash would deny tmux attach a terminal).
+    assert b"| base64 -d > /tmp/.chp-bootstrap-" in injected
+    assert b"; bash /tmp/.chp-bootstrap-" in injected and b"; rm -f /tmp/" in injected
     assert hs.ready
-    decoded = base64.b64decode(injected.split(b"echo ", 1)[1].split(b" | base64", 1)[0]).decode()
+    match = re.search(rb"echo ([A-Za-z0-9+/=]+) \| base64 -d", injected)
+    assert match is not None
+    decoded = base64.b64decode(match.group(1)).decode()
     assert "exec tmux attach" in decoded
     # Once ready, feed emits nothing (the bridge owns transparent passthrough).
     assert hs.feed(b"anything") == b""
