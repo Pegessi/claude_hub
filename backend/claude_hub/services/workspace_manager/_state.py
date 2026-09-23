@@ -29,6 +29,10 @@ class _StateMixin:
         # Per-task fire locks: serialize the 5s tick and a manual run-now so
         # the same task cannot be stamped / fired twice concurrently.
         self._sched_fire_locks: dict[str, asyncio.Lock] = {}
+        # Per-internal-task locks serializing orphan convergence for a WORKING
+        # scheduled hub_task whose worker session died. Keyed by the internal
+        # WorkspaceTask id (distinct from the ScheduledTask fire lock above).
+        self._hubtask_orphan_locks: dict[str, asyncio.Lock] = {}
         # One native Chat turn may run per tab. These locks serialize the
         # scheduler monitor, run-now, and completion-observer drain attempts.
         self._scheduled_chat_tab_locks: dict[str, asyncio.Lock] = {}
