@@ -25,6 +25,19 @@
   violated) or marks the task `FAILED` and cleans up the dead ephemeral session.
   Healthy long tasks, ordinary reviewed tasks, native `chat_turn` cold-wake, and
   the subagent reaper are unaffected.
+### feat: hover-copy an entire Chat turn as plain text
+
+- Structured Chat turns now show a copy icon in the per-turn action row
+  beside "Fork from here" when the turn is hovered (and always on touch
+  devices). Clicking copies the whole conversation segment — the user
+  question plus every assistant text block in arrival order, assembled by the
+  new pure helper `frontend/src/utils/chatTurnCopy.ts` — to the clipboard via
+  the existing `writeClipboard` helper.
+- The copied text keeps markdown as authored; thinking, tool call
+  input/result JSON, approvals, status lines and internal events are
+  excluded. A transient "Copied" / "Copy failed" label (aria-live,
+  danger-colored on error) gives visible feedback when the clipboard API is
+  unavailable.
 
 ## Unreleased
 
