@@ -170,6 +170,11 @@ class _Bridge:
         self._handshake = BootstrapHandshake(build_bootstrap_line(bootstrap_script))
         self._got_prompt_at: Optional[float] = None
         self._ssh_eof = asyncio.Event()
+        # Pending bytes for the ssh PTY, drained by an edge-triggered writer so
+        # a full PTY input queue (a long typed bootstrap / TUI paste) is never
+        # partially dropped.
+        self._master_out = bytearray()
+        self._master_writer_registered = False
 
     # ---- fd helpers ---------------------------------------------------------
 
@@ -179,12 +184,44 @@ class _Bridge:
             try:
                 written = os.write(fd, view)
             except BlockingIOError:
-                # Drop output rather than deadlock the pump; PTY backpressure on a
-                # terminal-sized buffer is transient.
+                # Drop remote→screen output rather than deadlock the pump; PTY
+                # backpressure on a terminal-sized read is transient and xterm
+                # repaints. Input to ssh is handled separately by _queue_master.
                 return
             except OSError:
                 return
             view = view[written:]
+
+    def _queue_master(self, data: bytes) -> None:
+        self._master_out.extend(data)
+        self._pump_master()
+
+    def _pump_master(self) -> None:
+        """Flush queued bytes to the ssh PTY; park on add_writer if it fills."""
+
+        if self._master_fd is None:
+            return
+        loop = asyncio.get_running_loop()
+        while self._master_out:
+            try:
+                written = os.write(self._master_fd, self._master_out)
+            except BlockingIOError:
+                break
+            except OSError:
+                self._master_out.clear()
+                return
+            if written <= 0:
+                break
+            del self._master_out[:written]
+        if self._master_out and not self._master_writer_registered:
+            loop.add_writer(self._master_fd, self._on_master_writable)
+            self._master_writer_registered = True
+        elif not self._master_out and self._master_writer_registered:
+            loop.remove_writer(self._master_fd)
+            self._master_writer_registered = False
+
+    def _on_master_writable(self) -> None:
+        self._pump_master()
 
     def _read(self, fd: int) -> Optional[bytes]:
         try:
@@ -232,6 +269,8 @@ class _Bridge:
         self._handshake = BootstrapHandshake(build_bootstrap_line(self.bootstrap_script))
         self._got_prompt_at = None
         self._ssh_eof.clear()
+        self._master_out = bytearray()
+        self._master_writer_registered = False
         _set_nonblocking(self.stdin_fd)
         _set_nonblocking(master_fd)
 
@@ -244,6 +283,9 @@ class _Bridge:
         finally:
             loop.remove_reader(self.stdin_fd)
             loop.remove_reader(master_fd)
+            if self._master_writer_registered:
+                loop.remove_writer(master_fd)
+                self._master_writer_registered = False
             try:
                 os.close(master_fd)
             except OSError:
@@ -263,16 +305,11 @@ class _Bridge:
             if not self._handshake.ready:
                 injected = self._handshake.feed(chunk)
                 if injected:
-                    self._write(self._master_fd, injected)
-                if self._handshake.ready:
-                    # Handshake just completed; nothing from the user was passed
-                    # before this point, so no stale input is replayed into tmux.
-                    pass
+                    self._queue_master(injected)
             # Remote output is always forwarded (pre-hook flash included).
             self._write(self.stdout_fd, chunk)
 
     def _on_stdin_readable(self) -> None:
-        assert self._master_fd is not None
         while True:
             chunk = self._read(self.stdin_fd)
             if chunk is None:
@@ -282,7 +319,7 @@ class _Bridge:
             # Gate user keys until the bootstrap has been typed so pre-prompt
             # keystrokes cannot be swallowed by the connect splash.
             if self._handshake.ready:
-                self._write(self._master_fd, chunk)
+                self._queue_master(chunk)
 
     async def _wait_handshake_or_eof(self) -> None:
         loop = asyncio.get_running_loop()
