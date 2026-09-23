@@ -4308,10 +4308,25 @@ class TTYDManager:
         self,
         tab_ids: Optional[Iterable[str]] = None,
     ) -> list[TerminalAgentStatus]:
-        """List best-effort terminal agent statuses in tab order."""
+        """List best-effort terminal agent statuses in tab order.
+
+        With no explicit ``tab_ids`` the snapshot matches ``list_tabs``:
+        archived tabs are skipped. They have no runtime and exposing them here
+        makes the sidebar's status poll see "unknown new tabs" every cycle,
+        forcing a full tab-list refresh. Callers that pass ``tab_ids``
+        explicitly (e.g. the workspace monitor) control their own sampling.
+        """
         if tab_ids is None:
-            ordered_ids = [tab_id for tab_id in self._tab_order if tab_id in self.processes]
-            ordered_ids.extend(tab_id for tab_id in self.processes if tab_id not in ordered_ids)
+            ordered_ids = [
+                tab_id
+                for tab_id in self._tab_order
+                if tab_id in self.processes and not self.processes[tab_id].archived
+            ]
+            ordered_ids.extend(
+                tab_id
+                for tab_id, process in self.processes.items()
+                if tab_id not in ordered_ids and not process.archived
+            )
         else:
             seen: set[str] = set()
             ordered_ids = []

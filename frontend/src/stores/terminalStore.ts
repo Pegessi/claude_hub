@@ -255,31 +255,50 @@ export const useTerminalStore = defineStore('terminal', () => {
     return tab.session_kind === 'chat' && !tab.workspace_role
   })
 
-  async function fetchTabs() {
-    isLoading.value = true
-    try {
-      const response = await fetch(`${API_BASE}/tabs`)
-      if (!response.ok) throw new Error('Failed to fetch tabs')
-      tabs.value = await response.json()
-      if (manualTabs.value.length && !activeTabId.value) {
-        activeTabId.value = manualTabs.value[0].id
-      }
-      // Initialize panes after fetching tabs
-      if (panes.value.length === 0) {
-        initializePanes()
-      }
-      // Auto-assign first tab to first pane if available
-      if (manualTabs.value.length > 0 && panes.value.length > 0) {
-        const firstPane = panes.value[0]
-        if (!firstPane.tabId) {
-          firstPane.tabId = manualTabs.value[0].id
+  // Background refresh of the tab list. This must NOT drive ``isLoading``:
+  // it runs every status-poll cycle (and on every mounted status panel), and
+  // sharing that flag with the launcher makes the sidebar + button blink
+  // into a disabled "..." every few seconds. ``isLoading`` is reserved for
+  // explicit mutations (create / close / archive / ...). Overlapping calls
+  // (the two floating panels mount at once, poll-driven refreshes overlap)
+  // coalesce onto one in-flight request and share its result.
+  let tabsFetchPromise: Promise<void> | null = null
+  function fetchTabs(options: { force?: boolean } = {}): Promise<void> {
+    // Mutation callers (restore, switch-env, create agent, ...) rely on the
+    // awaited refresh reflecting the change they just made, so they bypass
+    // coalescing — a poll-started fetch could have raced the server.
+    if (tabsFetchPromise && !options.force) return tabsFetchPromise
+    const run = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/tabs`)
+        if (!response.ok) throw new Error('Failed to fetch tabs')
+        tabs.value = await response.json()
+        if (manualTabs.value.length && !activeTabId.value) {
+          activeTabId.value = manualTabs.value[0].id
         }
+        // Initialize panes after fetching tabs
+        if (panes.value.length === 0) {
+          initializePanes()
+        }
+        // Auto-assign first tab to first pane if available
+        if (manualTabs.value.length > 0 && panes.value.length > 0) {
+          const firstPane = panes.value[0]
+          if (!firstPane.tabId) {
+            firstPane.tabId = manualTabs.value[0].id
+          }
+        }
+      } catch (e) {
+        notifyError(e instanceof Error ? e.message : 'Unknown error')
       }
-    } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      isLoading.value = false
     }
+    const promise = run()
+    if (!options.force) {
+      tabsFetchPromise = promise.finally(() => {
+        tabsFetchPromise = null
+      })
+      return tabsFetchPromise
+    }
+    return promise
   }
 
   async function fetchAgentStatuses() {
@@ -536,7 +555,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         method: 'POST',
       })
       if (!response.ok) throw new Error('Failed to unarchive tab')
-      await fetchTabs()
+      await fetchTabs({ force: true })
       setActiveTab(tabId)
       void fetchArchivedTabs()
       return true
@@ -573,7 +592,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         tabs.value[index] = updatedTab
       }
       // Also re-fetch to make sure env/solo_mode are in sync with the backend.
-      await fetchTabs()
+      await fetchTabs({ force: true })
       return updatedTab
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Unknown error')
