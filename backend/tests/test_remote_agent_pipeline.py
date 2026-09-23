@@ -18,6 +18,7 @@ from claude_hub.models import (
     RemoteProfile,
     SessionKind,
     TerminalTabCreate,
+    Workspace,
     WorkspaceCreate,
     WorkspaceSessionRole,
     WorkspaceTask,
@@ -103,6 +104,7 @@ def _session(
     remote_profile_id: str | None = None,
     remote_cwd: str | None = None,
     runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE,
+    env_preset: str | None = None,
 ) -> ManagedSession:
     now = datetime.now()
     return ManagedSession(
@@ -120,6 +122,7 @@ def _session(
         target=target,
         remote_profile_id=remote_profile_id,
         remote_cwd=remote_cwd,
+        env_preset=env_preset,
         created_at=now,
         updated_at=now,
     )
@@ -232,6 +235,130 @@ async def test_auto_reviewer_reuses_matching_remote_idle_reviewer(
 
     reviewer = await manager._select_or_create_reviewer(workspace, task)
     assert reviewer.id == idle_remote_reviewer.id
+
+
+def _local_workspace_with_worker_env_preset(
+    tmp_path: Path, monkeypatch: MonkeyPatch, *, env_preset: str | None
+) -> tuple[WorkspaceManager, Workspace, WorkspaceTask, ManagedSession]:
+    """A local reviewed task whose orchestrator/worker carries ``env_preset``.
+
+    No reviewer sessions are registered, so ``_select_or_create_reviewer``
+    must take the auto-create branch (``ensure_workspace_agent`` is stubbed by
+    each test).
+    """
+    manager = WorkspaceManager()
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    repo = tmp_path / f"repo-preset-{env_preset or 'none'}"
+    repo.mkdir()
+    workspace = manager.create_workspace(
+        WorkspaceCreate(name="Local Env WS", path=str(repo), session_prefix="envws")
+    )
+    worker = _session(
+        session_id="envws-agent-1",
+        workspace_id=workspace.id,
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        env_preset=env_preset,
+    )
+    manager.sessions[worker.id] = worker
+    now = datetime.now()
+    task = WorkspaceTask(
+        id="task-env-preset",
+        workspace_id=workspace.id,
+        title="Review me",
+        prompt="do the thing",
+        agent_type=AgentType.CODEX,
+        task_mode=WorkspaceTaskMode.REVIEWED,
+        status=WorkspaceTaskStatus.WORKING,
+        session_id=worker.id,
+        created_at=now,
+        updated_at=now,
+    )
+    manager.tasks[task.id] = task
+    return manager, workspace, task, worker
+
+
+def _install_capturing_ensure(
+    monkeypatch: MonkeyPatch, manager: WorkspaceManager
+) -> list[EnsureWorkspaceAgentRequest]:
+    captured: list[EnsureWorkspaceAgentRequest] = []
+
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
+        captured.append(payload)
+        session = _session(
+            session_id="envws-reviewer-1",
+            workspace_id=workspace_id,
+            role=WorkspaceSessionRole.REVIEWER,
+            target=payload.target or ExecutionTarget.LOCAL,
+            env_preset=payload.env_preset,
+        )
+        manager.sessions[session.id] = session
+        return session
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_auto_reviewer_inherits_worker_env_preset(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    manager, workspace, task, _worker = _local_workspace_with_worker_env_preset(
+        tmp_path, monkeypatch, env_preset="day1"
+    )
+    captured = _install_capturing_ensure(monkeypatch, manager)
+
+    reviewer = await manager._select_or_create_reviewer(workspace, task)
+
+    assert len(captured) == 1
+    # The auto-created reviewer must launch with the worker's working preset,
+    # not the default (401) env.
+    assert captured[0].env_preset == "day1"
+    assert reviewer.role == WorkspaceSessionRole.REVIEWER
+    assert reviewer.env_preset == "day1"
+
+
+@pytest.mark.asyncio
+async def test_auto_reviewer_passes_none_env_preset_when_worker_has_none(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    manager, workspace, task, _worker = _local_workspace_with_worker_env_preset(
+        tmp_path, monkeypatch, env_preset=None
+    )
+    captured = _install_capturing_ensure(monkeypatch, manager)
+
+    await manager._select_or_create_reviewer(workspace, task)
+
+    assert len(captured) == 1
+    # A worker on the default env must not force a preset onto the reviewer.
+    assert captured[0].env_preset is None
+
+
+@pytest.mark.asyncio
+async def test_auto_reviewer_reuse_path_unaffected_by_worker_env_preset(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    manager, workspace, task, _worker = _local_workspace_with_worker_env_preset(
+        tmp_path, monkeypatch, env_preset="day1"
+    )
+    idle_reviewer = _session(
+        session_id="envws-reviewer-existing",
+        workspace_id=workspace.id,
+        role=WorkspaceSessionRole.REVIEWER,
+        target=ExecutionTarget.LOCAL,
+        # Existing reviewer happens to run a different/no preset; reuse still wins.
+        env_preset=None,
+    )
+    manager.sessions[idle_reviewer.id] = idle_reviewer
+
+    async def fail_ensure(*_args: object, **_kwargs: object) -> ManagedSession:
+        raise AssertionError("an idle reviewer on placement must be reused, not recreated")
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fail_ensure)
+
+    reviewer = await manager._select_or_create_reviewer(workspace, task)
+    assert reviewer.id == idle_reviewer.id
 
 
 @pytest.mark.asyncio
