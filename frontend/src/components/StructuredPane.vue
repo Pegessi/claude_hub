@@ -358,6 +358,69 @@
               </details>
             </div>
 
+            <!-- Dedicated Codex-style card for a confirmed sub-agent spawn.
+                 The timeline splits these out of ordinary tool groups; the
+                 whole internal prompt/result stays behind the fold so normal
+                 folding/copy never ships its JSON as a tool row. -->
+            <div
+              v-else-if="part.kind === 'subagent'"
+              class="conversation-row conversation-row--assistant conversation-row--subagent"
+            >
+              <span
+                class="conversation-avatar conversation-avatar--subagent"
+                aria-hidden="true"
+              >❯</span>
+              <details class="subagent-card">
+                <summary
+                  class="subagent-header"
+                  :class="{ 'subagent-header--running': part.tool.status === 'running' }"
+                >
+                  <span class="subagent-idline">
+                    <span class="subagent-badge">{{ subagentChip(part.tool) }}</span>
+                    <span class="subagent-name">{{ subagentName(part.tool) }}</span>
+                    <span
+                      v-if="part.tool.subagent?.background"
+                      class="subagent-bg-tag"
+                    >后台</span>
+                  </span>
+                  <span class="subagent-headline">{{ subagentHeadline(part.tool) }}</span>
+                  <span
+                    class="tool-status"
+                    :class="part.tool.status"
+                  >{{ subagentStatusLabel(part.tool.status) }}</span>
+                </summary>
+                <div class="subagent-body">
+                  <div
+                    v-if="subagentPrompt(part.tool)"
+                    class="tool-block"
+                  >
+                    <span>Prompt</span>
+                    <pre>{{ subagentPrompt(part.tool) }}</pre>
+                  </div>
+                  <div
+                    v-if="part.tool.resultText"
+                    class="tool-block"
+                  >
+                    <span>Result</span>
+                    <pre>{{ part.tool.resultText }}</pre>
+                  </div>
+                  <div
+                    v-else-if="part.tool.status === 'running'"
+                    class="subagent-running-note"
+                  >
+                    子代理运行中…
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  class="details-collapse"
+                  @click="collapseDetails"
+                >
+                  收起
+                </button>
+              </details>
+            </div>
+
             <div
               v-else-if="part.kind === 'approval'"
               class="conversation-row conversation-row--assistant"
@@ -938,6 +1001,7 @@ import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreview
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { subagentProviderLabel, subagentStatusLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
@@ -2143,6 +2207,47 @@ function toolGroupStatus(
   if (tools.some(t => t.status === 'failed')) return 'failed'
   if (tools.length > 0 && tools.every(t => t.status === 'cancelled')) return 'cancelled'
   return 'completed'
+}
+
+// --- Sub-agent card projection ---------------------------------------------
+// The timeline already classified the call as a sub-agent; these keep the
+// template null-safe (``tool.subagent`` is optional on TimelineTool) and hold
+// all fallback copy in one place.
+
+function subagentChip(tool: TimelineTool): string {
+  return tool.subagent ? subagentProviderLabel(tool.subagent.provider) : '子代理'
+}
+
+/** Sub-agent identity: its type when present, else a provider-local target
+ *  (TraeX addresses children by thread id), else a neutral label. */
+function subagentName(tool: TimelineTool): string {
+  const view = tool.subagent
+  if (!view) return '子代理'
+  if (view.agentType) return view.agentType
+  if (view.provider === 'traex') {
+    const thread = view.threadIds[0]
+    return thread ? `线程 ${thread.slice(0, 8)}` : 'TraeX 子代理'
+  }
+  return '子代理'
+}
+
+/** One-line description of what the child is doing. Providers without a
+ *  ``description`` field (TraeX) fall back to the prompt's first line. */
+function subagentHeadline(tool: TimelineTool): string {
+  const view = tool.subagent
+  if (!view) return ''
+  const description = view.description.trim()
+  if (description) return description
+  const firstLine = view.prompt
+    .split('\n')
+    .map(line => line.trim())
+    .find(line => line.length > 0)
+  if (firstLine) return firstLine.length > 140 ? `${firstLine.slice(0, 140)}…` : firstLine
+  return '已派发子代理任务'
+}
+
+function subagentPrompt(tool: TimelineTool): string {
+  return tool.subagent?.prompt ?? ''
 }
 
 async function submitQuestionResponse(approval: TimelineApproval) {
@@ -4054,6 +4159,123 @@ onUnmounted(() => {
   padding: 0;
 }
 
+/* --- Sub-agent card (Codex-style spawned child) ---------------------------
+   Reuses the tool-card surface and status tokens, but reads as its own agent:
+   an accent left edge, an identity line, and an indented body for a nested
+   feel rather than another collapsed Bash/Read row. */
+.conversation-row--subagent {
+  padding-left: 14px;
+}
+
+.conversation-avatar--subagent {
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+}
+
+.subagent-card {
+  width: min(85%, 680px);
+  border: 1px solid var(--ch-color-border-muted);
+  border-left: 2px solid var(--ch-color-accent);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  overflow: clip;
+}
+
+.subagent-card summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.subagent-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.subagent-card summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--ch-color-surface);
+}
+
+.subagent-card summary:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: -2px;
+}
+
+.subagent-idline {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.subagent-badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.subagent-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ch-color-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-bg-tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-muted, rgba(139, 148, 158, 0.14));
+  color: var(--ch-color-text-subtle);
+  font-size: 10px;
+}
+
+.subagent-headline {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-header--running .subagent-headline {
+  color: var(--ch-color-warning, #e0a800);
+}
+
+.subagent-body {
+  padding: 2px 10px 8px 16px;
+  border-top: 1px solid var(--ch-color-border-muted);
+}
+
+.subagent-body .tool-block {
+  padding: 8px 0 0;
+}
+
+.subagent-running-note {
+  padding: 8px 0 2px;
+  color: var(--ch-color-text-subtle);
+  font-size: 11px;
+  font-style: italic;
+}
+
 .event-error {
   align-self: flex-start;
   width: min(85%, 680px);
@@ -4176,6 +4398,7 @@ onUnmounted(() => {
   .conversation-bubble,
   .thinking-card,
   .tool-card,
+  .subagent-card,
   .event-error {
     width: min(92%, 680px);
     max-width: 92%;

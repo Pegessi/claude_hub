@@ -1,6 +1,8 @@
 import type { AgentStreamEvent } from '@/types'
 import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
 import { formatClockTime, formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
+import type { SubagentView } from '@/utils/subagentTool'
+import { parseSubagent } from '@/utils/subagentTool'
 
 export interface TimelineTool {
   key: string
@@ -9,6 +11,10 @@ export interface TimelineTool {
   status: 'running' | 'completed' | 'failed' | 'cancelled'
   argsText: string
   resultText: string
+  /** Present only for confirmed sub-agent-spawn tools (Claude ``Agent``,
+   *  Cursor ``Task``, TraeX ``spawnAgent``); the renderer gives these their own
+   *  card instead of the generic grouped tool block. */
+  subagent?: SubagentView
 }
 
 export interface TimelineQuestionOption {
@@ -67,6 +73,10 @@ export type TimelinePart =
   | { kind: 'text'; key: string; text: string; at: string; fromPlan?: boolean; messageId?: string; planKind?: 'proposal' | 'progress' }
   | { kind: 'tool'; key: string; tool: TimelineTool }
   | { kind: 'tool_group'; key: string; tools: TimelineTool[] }
+  // A confirmed sub-agent-spawn call, split out of the ordinary tool groups so
+  // the pane can render a dedicated Codex-style sub-agent card. Carries the
+  // same TimelineTool (status/result mutate in place) plus the parsed view.
+  | { kind: 'subagent'; key: string; tool: TimelineTool }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
   | { kind: 'error'; key: string; message: string }
   | { kind: 'status'; key: string; text: string; messageId?: string | null }
@@ -388,12 +398,17 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     case 'tool_call_started': {
       const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
       const toolName = payloadString(event, 'name') || 'unknown'
+      const argsRecord = payloadRecord(event, 'args')
       let argsText = ''
       try {
-        argsText = JSON.stringify(payloadRecord(event, 'args'), null, 2)
+        argsText = JSON.stringify(argsRecord, null, 2)
       } catch {
         argsText = String(event.payload.args ?? '')
       }
+      // Sub-agent-spawn tools are identified from the structured args at the
+      // only event that carries them (the start event) and rendered on their
+      // own card. A null view means this is an ordinary tool and keeps grouping.
+      const subagent = parseSubagent(toolName, event.payload.args)
       const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
       if (!toolMap.has(identity)) {
         const tool: TimelineTool = {
@@ -403,21 +418,29 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           status: 'running',
           argsText,
           resultText: '',
+          ...(subagent ? { subagent } : {}),
         }
         toolMap.set(identity, tool)
         turn.tools.push(tool)
         if (toolName !== 'AskQuestion' && toolName !== 'AskUserQuestion' && toolName !== 'request_user_input') {
-          // Group consecutive tool calls into a single tool_group part so the
-          // UI can render a compact summary (e.g. "3 tools: Read, Edit, Bash")
-          // with expandable per-tool details, matching how Codex/Paseo display
-          // parallel tool calls. AskQuestion (Cursor), AskUserQuestion
-          // (Claude), and request_user_input (Codex) are excluded: they render
-          // as interactive approval cards instead of a raw tool row.
-          const lastPart = turn.parts[turn.parts.length - 1]
-          if (lastPart && lastPart.kind === 'tool_group') {
-            lastPart.tools.push(tool)
+          if (subagent) {
+            // Each sub-agent is an independent Codex-style card. It is never
+            // merged into a neighbouring tool group and never breaks one: the
+            // normal tools before and after it simply form separate groups.
+            turn.parts.push({ kind: 'subagent', key: `subagent-${identity}`, tool })
           } else {
-            turn.parts.push({ kind: 'tool_group', key: `tool-group-${event.stream_sequence}`, tools: [tool] })
+            // Group consecutive tool calls into a single tool_group part so the
+            // UI can render a compact summary (e.g. "3 tools: Read, Edit, Bash")
+            // with expandable per-tool details, matching how Codex/Paseo display
+            // parallel tool calls. AskQuestion (Cursor), AskUserQuestion
+            // (Claude), and request_user_input (Codex) are excluded: they render
+            // as interactive approval cards instead of a raw tool row.
+            const lastPart = turn.parts[turn.parts.length - 1]
+            if (lastPart && lastPart.kind === 'tool_group') {
+              lastPart.tools.push(tool)
+            } else {
+              turn.parts.push({ kind: 'tool_group', key: `tool-group-${event.stream_sequence}`, tools: [tool] })
+            }
           }
         }
         mutated = true
@@ -585,6 +608,7 @@ function isProcessPart(part: TimelinePart): boolean {
     part.kind === 'thinking' ||
     part.kind === 'tool' ||
     part.kind === 'tool_group' ||
+    part.kind === 'subagent' ||
     (part.kind === 'text' && part.fromPlan === true)
   )
 }
@@ -692,7 +716,7 @@ export function countProcessSteps(process: TimelinePart[]): number {
   let steps = 0
   for (const part of process) {
     if (part.kind === 'tool_group') steps += part.tools.length
-    else if (part.kind === 'tool') steps += 1
+    else if (part.kind === 'tool' || part.kind === 'subagent') steps += 1
   }
   return steps
 }
