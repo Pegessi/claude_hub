@@ -170,18 +170,65 @@ def test_handshake_gates_keys_until_two_prompts() -> None:
     assert not hs.ready
     # Second prompt after the synchronising Enter releases the bootstrap.
     injected = hs.feed(b"\r\ntiger@host:~$ ")
-    assert injected.endswith(b"\r") and injected.startswith(b"echo ")
-    # The typed line decodes into a temp file and runs it attached to the tty
-    # (piping straight into bash would deny tmux attach a terminal).
+    assert injected.endswith(b"\r")
+    # The typed line decodes into a 0600 temp file and runs it attached to the
+    # tty (piping straight into bash would deny tmux attach a terminal).
+    assert b"(umask 077;" in injected
     assert b"| base64 -d > /tmp/.chp-bootstrap-" in injected
-    assert b"; bash /tmp/.chp-bootstrap-" in injected and b"; rm -f /tmp/" in injected
+    assert b"chmod 600 -- /tmp/.chp-bootstrap-" in injected
+    assert b"; bash /tmp/.chp-bootstrap-" in injected and b"; rm -f -- /tmp/" in injected
     assert hs.ready
-    match = re.search(rb"echo ([A-Za-z0-9+/=]+) \| base64 -d", injected)
+    match = re.search(rb"printf '%s' ([A-Za-z0-9+/=]+) \| base64 -d", injected)
     assert match is not None
     decoded = base64.b64decode(match.group(1)).decode()
     assert "exec tmux attach" in decoded
     # Once ready, feed emits nothing (the bridge owns transparent passthrough).
     assert hs.feed(b"anything") == b""
+
+
+def test_bootstrap_line_is_owner_only_and_passes_path_as_arg1() -> None:
+    line = build_bootstrap_line("exec tmux attach -t s", token="abcdef0123")
+    assert "\n" not in line  # single physical typed line
+    path = "/tmp/.chp-bootstrap-abcdef0123.sh"
+    assert "(umask 077;" in line
+    assert "chmod 600 -- " in line
+    assert f"bash {path} {path}" in line  # script receives its own path as $1
+    assert f"rm -f -- {path}" in line  # backstop if bash never starts
+    assert "| bash" not in line  # never pipe the secret-bearing script into bash
+
+
+def test_bootstrap_temp_path_rejects_non_hex_tokens() -> None:
+    from claude_hub.services.pty_gateway_bridge import bootstrap_temp_path
+
+    assert bootstrap_temp_path("deadbeef") == "/tmp/.chp-bootstrap-deadbeef.sh"
+    for evil in ("../x", "a;rm", "a b", "$(id)", "a|b", ""):
+        with pytest.raises(ValueError):
+            bootstrap_temp_path(evil)
+
+
+def test_remote_attach_script_deletes_secret_file_before_attach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tmod.remote_profile_manager,
+        "get_profile",
+        lambda pid: _NORMAL,
+    )
+    proc = _process("mac_mini")
+    script = proc._build_remote_attach_script(bootstrap_file="/tmp/.chp-bootstrap-x.sh")
+    # Traps armed at the very start (covers SIGHUP mid-bootstrap).
+    assert '__chp_bootstrap_file="${1:-}"' in script
+    assert "trap __chp_cleanup EXIT HUP INT TERM" in script
+    # The file is removed explicitly after new-session and before exec attach.
+    new_idx = script.index("tmux new-session -d")
+    clean_idx = script.index("__chp_cleanup", new_idx)
+    attach_idx = script.index("exec tmux attach-session")
+    assert new_idx < clean_idx < attach_idx
+    # The no-tmux fallback also removes the file before dropping to a shell.
+    direct_idx = script.index("Remote tmux not found in PATH")
+    clean_direct = script.index("__chp_cleanup", direct_idx)
+    exec_shell = script.index("exec ${SHELL:-/bin/bash} -l", direct_idx)
+    assert clean_direct < exec_shell
 
 
 # --------------------------------------------------------------------------- #

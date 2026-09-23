@@ -27,7 +27,12 @@
 - Directory listing, tmux history and cursor one-shots on a gateway route
   through PTY-exec; normal hosts keep the existing argv ssh path. Frontend
   (TabBar, AgentWorkspaceView) gates on the interactive capability instead of
-  the old binary `stdin_shell` flag. Hermetic unit tests (no network) for
+  the old binary `stdin_shell` flag. The typed bootstrap temp file (which
+  carries exported agent secrets) is created owner-only (`umask 077` +
+  `chmod 600`), named from a hex-only token, and self-deletes after the
+  detached tmux pane is created and before `exec tmux attach` (EXIT/HUP trap as
+  backstop) so it is never world-readable or left on the shared container.
+  Hermetic unit tests (no network) for
   resolver tri-state, prompt/sentinel parsing, bootstrap FSM, launcher/-R
   params, routing, and normal-host regression. Real-machine PoC against
   merlin_dev (terminal + top + kill/re-attach, agent report over `-R`,

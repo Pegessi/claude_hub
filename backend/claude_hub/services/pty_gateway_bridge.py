@@ -34,7 +34,9 @@ import base64
 import fcntl
 import os
 import pty
+import re
 import secrets
+import shlex
 import signal
 import struct
 import termios
@@ -92,19 +94,42 @@ class BootstrapHandshake:
         return b""
 
 
+# Bootstrap temp files are named solely from this hex token, so the path can
+# never carry shell metacharacters or be parameter-polluted.
+_BOOTSTRAP_TOKEN_RE = re.compile(r"^[0-9a-f]+$")
+
+
+def bootstrap_temp_path(token: str) -> str:
+    """Absolute temp-script path for a token; rejects any non-hex token."""
+
+    if not _BOOTSTRAP_TOKEN_RE.fullmatch(token):
+        raise ValueError(f"invalid bootstrap token: {token!r}")
+    return f"/tmp/.chp-bootstrap-{token}.sh"
+
+
 def build_bootstrap_line(bootstrap_script: str, *, token: Optional[str] = None) -> str:
     """Type the (possibly multiline) script as one physical line.
 
-    It is decoded into a temp file and executed as a *separate* list command so
-    its stdin is the login shell's PTY, not the decode pipeline. Piping straight
-    into ``bash`` would make the final ``exec tmux attach`` inherit the (closed)
-    pipe and die with "open terminal failed: not a terminal".
+    The decoded script carries exported secrets (e.g. ``ANTHROPIC_AUTH_TOKEN``)
+    and lands on a *shared* Trial container, so the temp file is created
+    owner-only (``umask 077`` + ``chmod 600``). The script receives its own
+    path as ``$1`` and deletes itself as soon as the detached tmux pane exists,
+    before ``exec tmux attach``; the trailing ``rm`` is only a backstop for when
+    bash never starts. Cleanup chained *after* ``bash <file>`` is not enough on
+    its own because the script's last act is ``exec tmux attach`` for the whole
+    session (so it never returns) and SIGHUP skips it entirely. Decoding to a
+    file rather than piping into bash keeps the login PTY as stdin for attach.
     """
 
     token = token or secrets.token_hex(6)
-    encoded = base64.b64encode(bootstrap_script.encode("utf-8")).decode("ascii")
-    tmp = f"/tmp/.chp-bootstrap-{token}.sh"
-    return f"echo {encoded} | base64 -d > {tmp}; " f"bash {tmp}; " f"rm -f {tmp}"
+    path = shlex.quote(bootstrap_temp_path(token))
+    encoded = shlex.quote(base64.b64encode(bootstrap_script.encode("utf-8")).decode("ascii"))
+    return (
+        f"(umask 077; printf '%s' {encoded} | base64 -d > {path}); "
+        f"chmod 600 -- {path}; "
+        f"bash {path} {path}; "
+        f"rm -f -- {path}"
+    )
 
 
 def _set_raw(fd: int) -> Optional[list]:
