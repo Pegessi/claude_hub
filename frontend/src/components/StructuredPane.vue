@@ -77,7 +77,7 @@
         <div
           v-for="{ turn, ordinal } in visibleTurns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, ordinal, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false]"
+          v-memo="[turn.renderRevision, ordinal, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
           class="structured-turn"
           :data-turn-key="turn.key"
         >
@@ -493,6 +493,29 @@
                open it, so a long turn's controls sit with its result rather
                than floating back at the top. -->
           <div class="turn-actions turn-actions--turn">
+            <button
+              v-if="turnCopyText(turn)"
+              type="button"
+              class="turn-fork-button turn-copy-button"
+              :class="{ 'turn-copy-button--feedback': copyFeedbackLabel(turn.key) }"
+              :aria-label="copyTurnButtonLabel(turn.key)"
+              :title="copyTurnButtonLabel(turn.key)"
+              @click="copyTurn(turn)"
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 16 16"
+              >
+                <path d="M5 1.75h7.25a2 2 0 0 1 2 2V11h-1.5V3.75a.5.5 0 0 0-.5-.5H5v-1.5Z" />
+                <path d="M3.75 4h6.5a2 2 0 0 1 2 2v6.25a2 2 0 0 1-2 2h-6.5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 1.5a.5.5 0 0 0-.5.5v6.25c0 .276.224.5.5.5h6.5a.5.5 0 0 0 .5-.5V6a.5.5 0 0 0-.5-.5h-6.5Z" />
+              </svg>
+              <span
+                v-if="copyFeedbackLabel(turn.key)"
+                class="turn-copy-result"
+                :class="`turn-copy-result--${copyFeedbackState(turn.key)}`"
+                aria-live="polite"
+              >{{ copyFeedbackLabel(turn.key) }}</span>
+            </button>
             <button
               v-if="completedPlanText(turn)"
               type="button"
@@ -949,6 +972,8 @@ import {
   resolveComposerEnterAction,
 } from '@/utils/chatComposerInteraction'
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
+import { writeClipboard } from '@/utils/clipboard'
+import { buildTurnCopyText } from '@/utils/chatTurnCopy'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
@@ -1110,6 +1135,50 @@ async function forkFromTurn(ordinal: number) {
   } finally {
     forkingOrdinal.value = null
   }
+}
+
+// ── Copy whole turn ─────────────────────────────────────────────────────────
+// One control per turn, sharing the turn-actions row with "Fork from here".
+// Feedback (Copied / Copy failed) is keyed per turn and auto-dismissed.
+const copyFeedback = ref<{ turnKey: string; state: 'copied' | 'error' } | null>(null)
+let copyFeedbackTimer: ReturnType<typeof window.setTimeout> | null = null
+
+function turnCopyText(turn: TimelineTurn): string {
+  return buildTurnCopyText(turn)
+}
+
+function clearCopyFeedback() {
+  if (copyFeedbackTimer !== null) {
+    window.clearTimeout(copyFeedbackTimer)
+    copyFeedbackTimer = null
+  }
+  copyFeedback.value = null
+}
+
+function copyFeedbackState(turnKey: string): 'copied' | 'error' | null {
+  return copyFeedback.value?.turnKey === turnKey ? copyFeedback.value.state : null
+}
+
+function copyFeedbackLabel(turnKey: string): string | null {
+  const state = copyFeedbackState(turnKey)
+  if (state === 'copied') return 'Copied'
+  if (state === 'error') return 'Copy failed'
+  return null
+}
+
+function copyTurnButtonLabel(turnKey: string): string {
+  return copyFeedbackLabel(turnKey) ?? 'Copy conversation'
+}
+
+async function copyTurn(turn: TimelineTurn) {
+  clearCopyFeedback()
+  try {
+    await writeClipboard(buildTurnCopyText(turn))
+    copyFeedback.value = { turnKey: turn.key, state: 'copied' }
+  } catch {
+    copyFeedback.value = { turnKey: turn.key, state: 'error' }
+  }
+  copyFeedbackTimer = window.setTimeout(clearCopyFeedback, 1800)
 }
 
 type PendingTurn = {
@@ -1518,6 +1587,7 @@ onDeactivated(() => {
   timelineResizeObserver?.disconnect()
   timelineResizeObserver = null
   cancelScheduledTimelineScroll()
+  clearCopyFeedback()
 })
 
 onUnmounted(() => {
@@ -1530,6 +1600,7 @@ onUnmounted(() => {
   document.removeEventListener('pointerdown', handleModelOutsidePointer)
   window.removeEventListener('resize', handleViewportResize)
   dismissImageLightbox(false)
+  clearCopyFeedback()
   stop()
 })
 
@@ -2741,6 +2812,47 @@ onUnmounted(() => {
 .turn-fork-button:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+.turn-copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* Match the fork pill's height: 11px text + 3px*2 padding. */
+  padding: 3px 7px;
+}
+
+.turn-copy-button svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+  flex: 0 0 auto;
+}
+
+.turn-copy-result {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.turn-copy-result--copied {
+  color: var(--ch-color-accent);
+}
+
+.turn-copy-result--error {
+  color: var(--ch-color-danger, var(--ch-color-accent));
+}
+
+.turn-copy-button--feedback {
+  border-color: currentColor;
+}
+
+/* Hover is unavailable on touch: keep the action row (copy + fork) visible. */
+@media (hover: none), (pointer: coarse) {
+  .structured-turn .turn-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .structured-turn--pending {
