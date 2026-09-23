@@ -355,15 +355,17 @@ def test_hub_runtime_guidance_content_uses_literal_env_and_chat_kind() -> None:
     assert "tab-1" not in HUB_RUNTIME_GUIDANCE
 
 
-def test_first_turn_hub_guidance_helper_injects_once() -> None:
+@pytest.mark.asyncio
+async def test_first_turn_hub_guidance_helper_injects_once() -> None:
     """The per-session helper wraps the first turn only."""
     native = ClaudeNativeSession(_session(AgentType.CLAUDE))
-    first = native._with_first_turn_hub_guidance("first")
-    second = native._with_first_turn_hub_guidance("second")
+    first, first_seed = await native._with_first_turn_prefixes("first")
+    second, second_seed = await native._with_first_turn_prefixes("second")
     assert first.startswith("<<<HUB_RUNTIME_V1>>>")
     assert first.endswith("first")
     assert second == "second"
     assert "HUB_RUNTIME" not in second
+    assert first_seed is False and second_seed is False
 
 
 @pytest.mark.asyncio

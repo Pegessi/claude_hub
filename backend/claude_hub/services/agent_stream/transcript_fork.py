@@ -37,6 +37,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ...models import AgentType, ManagedSession
 from .base import discover_source_cached
+from .fork_seed import strip_fork_seed_history
 from .native import (
     strip_hub_runtime_guidance,
     strip_image_attachment_guidance,
@@ -139,6 +140,7 @@ def _extract_user_text(obj: Dict[str, Any], agent_type: AgentType) -> str:
     text = strip_question_protocol_guidance(text)
     text = strip_image_attachment_guidance(text)
     text = strip_hub_runtime_guidance(text)
+    text = strip_fork_seed_history(text)
     return text
 
 

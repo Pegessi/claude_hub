@@ -7,6 +7,33 @@
 
 ## Unreleased
 
+### fix: forked Chat tab seeds its truncated history into the new provider session
+
+- "Fork from here" copied the structured UI history up to the chosen turn but
+  started a brand-new, **zero-history** native provider conversation. The pane
+  showed the forked Q/A while the model's context was empty, so it could not
+  resolve references to earlier messages. Fork ordinal truncation was already
+  correct; the missing piece was seeding that prefix into the provider.
+- `fork_tab` now renders the copied prefix's user text (`turn_started`
+  summaries) and assistant markdown (`text_delta`) and writes it to a pending
+  `.fork-seed.json` sidecar next to the forked tab's event store. When the
+  forked tab's tailer builds its native transport it loads the sidecar and
+  prepends the transcript to the provider's **first** user turn once, wrapped
+  in a new `FORK_SEED_HISTORY_V1` sentinel block. The block is committed only
+  after the provider accepts the turn (a failed first turn retries with the
+  seed) and the sidecar is then deleted (at-most-once, survives restart).
+- Works for every native Chat transport (Claude/Codex/TraeX/Cursor) since each
+  accepts ordinary prompt text; provider-native resume cannot truncate to a
+  turn and is therefore unsuitable. All transcript normalizers
+  (Claude/Codex/Cursor) and the edit-resend matcher strip the sentinel, so the
+  seeded history never enters the persisted timeline or the UI.
+- Text-only seed: tool calls/results and images are not seeded (best-effort).
+  A text-less prefix (image/tool-only) writes no seed and behaves as before.
+  When a forked tab's own first turn is image-only (empty text + attachment),
+  the seed is committed only once a turn actually carries text, so an image
+  opener no longer silently drops the forked context. Fork ordinal/cap/
+  launch-copy semantics and Terminal (non-Chat) fork are unchanged.
+
 ### fix: keep sidebar launcher enabled during background tab refresh
 
 - `GET /api/tabs/status` now excludes archived tabs, matching `GET /api/tabs`.
