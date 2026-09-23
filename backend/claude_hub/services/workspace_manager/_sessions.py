@@ -5,7 +5,7 @@ from __future__ import annotations
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ...models import TaskCleanupResult
-from ..remote_profiles import reject_stdin_shell_interactive
+from ..remote_profiles import reject_unsupported_interactive
 from ..task_graph import TaskHasDescendantsError, task_has_descendants
 from ._constants import *  # noqa: F401,F403
 
@@ -264,7 +264,7 @@ class _SessionsMixin:
             profile = remote_profile_manager.get_profile(remote_profile_id)
             if not profile:
                 raise ValueError(f"Remote profile not found: {remote_profile_id}")
-            reject_stdin_shell_interactive(profile)
+            reject_unsupported_interactive(profile)
             remote_cwd = self._resolve_remote_cwd(
                 profile_id=remote_profile_id,
                 requested_cwd=payload.remote_cwd,

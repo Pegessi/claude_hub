@@ -50,6 +50,28 @@ STDIN_SHELL_REMOTE_UNSUPPORTED = (
     "This SSH alias has no usable remote TTY; directory listing works, "
     "but Terminal and remote agents need a PTY host"
 )
+NONINTERACTIVE_REMOTE_UNSUPPORTED = (
+    "This SSH alias is browse-only: it neither accepts an ssh argv command nor "
+    "exposes an interactive PTY the Hub can drive. Directory listing may work, "
+    "but Terminal tabs and remote agents cannot run on it."
+)
+
+
+class RemoteTransport(str, Enum):
+    """How commands and interactive bytes reach a remote SSH host.
+
+    - ``normal``: a conventional sshd. ``ssh host 'cmd'`` runs the argv command
+      and a persistent ``ssh -tt host '<bootstrap>'`` carries the interactive
+      tmux session.
+    - ``pty_gateway``: a jump/gateway sshd (e.g. the merlin_dev Trial proxy)
+      that swallows the OpenSSH command channel and any non-tty stdin, but drops
+      an argv-less ``ssh -tt`` connection into a *real* interactive PTY after a
+      brief connect flash. One-shot commands must be typed into that PTY and the
+      interactive session must be bootstrapped by typing after the real prompt.
+    """
+
+    NORMAL = "normal"
+    PTY_GATEWAY = "pty_gateway"
 
 
 class ChatMode(str, Enum):
@@ -656,7 +678,17 @@ class RemoteProfile(BaseModel):
     user: Optional[str] = None
     port: int = 22
     default_cwd: Optional[str] = None
+    # Deprecated derived flag: True when ``ssh host 'cmd'`` is swallowed. Kept
+    # so older API consumers keep working; new code should read ``transport``
+    # and ``interactive_supported`` instead.
     stdin_shell: bool = False
+    # Explicit transport override. When None the transport is inferred from the
+    # host/alias signatures in services.remote_profiles.
+    transport: Optional[RemoteTransport] = None
+    # Explicit interactive capability override. None/True means Terminal tabs and
+    # remote agents are allowed (normal host or PTY gateway). Set False for a
+    # truly browse-only target with no drivable PTY.
+    interactive: Optional[bool] = None
 
 
 class ResidentPeriodicTask(BaseModel):

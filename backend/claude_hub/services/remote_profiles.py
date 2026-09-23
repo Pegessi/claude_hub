@@ -1,50 +1,176 @@
+"""Capability resolution for remote SSH profiles.
+
+There are three effective capability states for a remote alias:
+
+* ``normal`` — a conventional sshd. ``ssh host 'cmd'`` runs the argv command and
+  a persistent ``ssh -tt host '<bootstrap>'`` carries the interactive tmux
+  session. One-shot capture uses the argv channel.
+* ``pty_gateway`` — a jump/gateway sshd such as the merlin_dev Trial proxy. The
+  OpenSSH command channel is swallowed (``ssh host 'cmd'`` → rc 0, empty) and a
+  non-tty stdin is ignored, *but* an argv-less ``ssh -tt`` connection lands in a
+  real interactive PTY after a short connect flash. Interactive tabs are
+  supported (bootstrap is typed after the real prompt) and one-shot commands go
+  through the PTY-exec primitive rather than argv.
+* browse-only — a profile that additionally has no drivable interactive PTY
+  (``interactive=False``). Terminal tabs and remote agents are rejected; only
+  directory listing is offered.
+
+The transport is normally inferred from host/alias signatures, but it can be
+pinned explicitly per profile (``"transport": "pty_gateway"``) or via the
+``CLAUDE_HUB_PTY_GATEWAY_HOSTS`` env var (comma-separated host substrings).
+Detection is deliberately signature-based rather than a single hard-coded alias
+so every merlin/seedjob gateway is classified consistently.
+"""
+
 import json
 import logging
+import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from ..models import RemoteProfile
-from ..models.schemas import STDIN_SHELL_REMOTE_UNSUPPORTED
+from ..models.schemas import NONINTERACTIVE_REMOTE_UNSUPPORTED, RemoteTransport
 
 logger = logging.getLogger(__name__)
 
 REMOTE_PROFILES_FILE = Path.home() / ".claude_hub" / "remote_profiles.json"
 SSH_CONFIG_FILE = Path.home() / ".ssh" / "config"
 _PROFILE_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
-_STDIN_SHELL_PROFILE_IDS = frozenset({"merlin_dev", "merlin_dev_2", "merlin_dev_evo"})
+
+# Aliases known to be merlin-style PTY gateways. Host/user signatures below are
+# the primary classifier; this set is a convenience for short ssh-config aliases.
+_PTY_GATEWAY_ALIAS_IDS = frozenset({"merlin_dev", "merlin_dev_2", "merlin_dev_evo"})
+# Substrings in ssh_host that identify a gateway sshd.
+_PTY_GATEWAY_HOST_SIGNATURES = ("merlin-ssh-proxy",)
+# (host substring, user substring) composite signatures, e.g. ssh-candy.
+_PTY_GATEWAY_HOST_USER_SIGNATURES = (("workspace.byted.org", ".seedjob."),)
+# Comma-separated extra host substrings treated as gateways (operational override).
+_GATEWAY_HOSTS_ENV = "CLAUDE_HUB_PTY_GATEWAY_HOSTS"
 
 
-def profile_uses_stdin_shell(profile: RemoteProfile) -> bool:
-    """True when ``ssh host 'cmd'`` is swallowed and there is no usable TTY.
+@dataclass(frozen=True)
+class RemoteCapabilities:
+    """Resolved transport capabilities for a profile."""
 
-    Merlin workspace / ssh-candy seedjob aliases accept the TCP session but
-    ignore the OpenSSH command channel (rc 0, empty stdout). They execute a
-    line read from stdin instead. ``ssh -tt`` hangs on a Trial TTY, so these
-    profiles are listing-only: Terminal tabs and remote agents must use a
-    PTY host.
+    transport: RemoteTransport
+    interactive_supported: bool
+
+    @property
+    def is_pty_gateway(self) -> bool:
+        return self.transport == RemoteTransport.PTY_GATEWAY
+
+    # One-shot argv commands are swallowed on a gateway; they must be typed into
+    # a real PTY via services.pty_exec.
+    @property
+    def requires_pty_exec(self) -> bool:
+        return self.is_pty_gateway
+
+    @property
+    def argv_command_works(self) -> bool:
+        return self.transport == RemoteTransport.NORMAL
+
+
+def _env_gateway_signatures() -> tuple[str, ...]:
+    raw = os.environ.get(_GATEWAY_HOSTS_ENV, "")
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def _coerce_transport(value: object) -> Optional[RemoteTransport]:
+    if value is None:
+        return None
+    if isinstance(value, RemoteTransport):
+        return value
+    try:
+        return RemoteTransport(str(value))
+    except ValueError:
+        logger.warning("Ignoring invalid remote transport override: %r", value)
+        return None
+
+
+def resolve_transport(profile: RemoteProfile) -> RemoteTransport:
+    """Resolve the effective transport for a profile.
+
+    Explicit ``profile.transport`` wins; otherwise host/alias/env signatures are
+    used. Defaults to a conventional ``normal`` host.
     """
+
+    explicit = _coerce_transport(profile.transport)
+    if explicit is not None:
+        return explicit
+
     alias = profile.id.strip().lower()
     host = profile.ssh_host.strip().lower()
     user = (profile.user or "").strip().lower()
-    if alias in _STDIN_SHELL_PROFILE_IDS:
-        return True
-    if "merlin-ssh-proxy" in host:
-        return True
-    if "workspace.byted.org" in host and ".seedjob." in user:
-        return True
+
+    if alias in _PTY_GATEWAY_ALIAS_IDS:
+        return RemoteTransport.PTY_GATEWAY
+    for signature in (*_PTY_GATEWAY_HOST_SIGNATURES, *_env_gateway_signatures()):
+        if signature in host or signature in alias:
+            return RemoteTransport.PTY_GATEWAY
+    for host_sig, user_sig in _PTY_GATEWAY_HOST_USER_SIGNATURES:
+        if host_sig in host and user_sig in user:
+            return RemoteTransport.PTY_GATEWAY
+    # Generic seedjob worker identity (ssh-candy / Trial proxies).
     if ".worker_" in user and ".seedjob." in user:
-        return True
-    return False
+        return RemoteTransport.PTY_GATEWAY
+    return RemoteTransport.NORMAL
 
 
+def profile_is_pty_gateway(profile: RemoteProfile) -> bool:
+    return resolve_transport(profile) == RemoteTransport.PTY_GATEWAY
+
+
+def profile_interactive_supported(profile: RemoteProfile) -> bool:
+    """Whether Terminal tabs / remote agents may run on this profile.
+
+    Both normal hosts and PTY gateways are interactive. Only an explicit
+    ``interactive=False`` marks a target as browse-only.
+    """
+
+    return profile.interactive is not False
+
+
+def profile_capabilities(profile: RemoteProfile) -> RemoteCapabilities:
+    return RemoteCapabilities(
+        transport=resolve_transport(profile),
+        interactive_supported=profile_interactive_supported(profile),
+    )
+
+
+def profile_uses_stdin_shell(profile: RemoteProfile) -> bool:
+    """Back-compat: True when ``ssh host 'cmd'`` is swallowed (a PTY gateway).
+
+    Historically this also meant "no interactive TTY". That is no longer true for
+    merlin-style gateways — those are fully interactive through a real PTY — so
+    new code must use :func:`profile_capabilities` instead.
+    """
+
+    return profile_is_pty_gateway(profile)
+
+
+def reject_unsupported_interactive(profile: RemoteProfile | None) -> None:
+    """Raise if interactive Terminal/agent use is impossible on this profile."""
+
+    if profile is not None and not profile_interactive_supported(profile):
+        raise ValueError(NONINTERACTIVE_REMOTE_UNSUPPORTED)
+
+
+# Deprecated name: gateways are interactive now, so this is identical to the
+# explicit non-interactive gate. Retained for older importers.
 def reject_stdin_shell_interactive(profile: RemoteProfile | None) -> None:
-    if profile is not None and profile_uses_stdin_shell(profile):
-        raise ValueError(STDIN_SHELL_REMOTE_UNSUPPORTED)
+    reject_unsupported_interactive(profile)
 
 
 def _with_transport_flags(profile: RemoteProfile) -> RemoteProfile:
-    return profile.model_copy(update={"stdin_shell": profile_uses_stdin_shell(profile)})
+    capabilities = profile_capabilities(profile)
+    return profile.model_copy(
+        update={
+            "stdin_shell": capabilities.is_pty_gateway,
+            "transport": capabilities.transport,
+        }
+    )
 
 
 class RemoteProfileManager:

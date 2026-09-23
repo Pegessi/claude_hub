@@ -24,7 +24,7 @@ from claude_hub.models import (
     WorkspaceTaskMode,
     WorkspaceTaskStatus,
 )
-from claude_hub.models.schemas import CHAT_REMOTE_UNSUPPORTED, STDIN_SHELL_REMOTE_UNSUPPORTED
+from claude_hub.models.schemas import CHAT_REMOTE_UNSUPPORTED, NONINTERACTIVE_REMOTE_UNSUPPORTED
 from claude_hub.services import remote_profiles as remote_profiles_module
 from claude_hub.services.remote_profiles import RemoteProfileManager
 from claude_hub.services.ttyd_manager import TTYDManager
@@ -371,54 +371,60 @@ def test_next_remote_forward_port_uses_hub_port_plus_offset(
 
 
 @pytest.mark.asyncio
-async def test_tabs_api_rejects_stdin_shell_remote(
+async def test_tabs_api_rejects_browse_only_remote(
     client: AsyncClient, monkeypatch: MonkeyPatch
 ) -> None:
-    merlin = RemoteProfile(id="merlin_dev", name="merlin_dev", ssh_host="merlin_dev")
+    # A PTY gateway (merlin_dev) is interactive now; only an explicit
+    # interactive=False (no drivable PTY at all) is rejected for Terminal.
+    browse_only = RemoteProfile(
+        id="browseonly", name="browseonly", ssh_host="merlin_dev", interactive=False
+    )
     monkeypatch.setattr(
         remote_profiles_module.remote_profile_manager,
         "get_profile",
-        lambda profile_id: merlin if profile_id == "merlin_dev" else None,
+        lambda profile_id: browse_only if profile_id == "browseonly" else None,
     )
     resp = await client.post(
         "/api/tabs",
         json={
-            "name": "merlin-term",
+            "name": "browse-term",
             "session_kind": "terminal",
             "agent_type": "terminal",
             "target": "remote",
-            "remote_profile_id": "merlin_dev",
+            "remote_profile_id": "browseonly",
             "remote_cwd": "~",
         },
     )
     assert resp.status_code == 400
-    assert STDIN_SHELL_REMOTE_UNSUPPORTED in resp.text
+    assert NONINTERACTIVE_REMOTE_UNSUPPORTED in resp.text
 
 
 @pytest.mark.asyncio
-async def test_ensure_workspace_agent_rejects_stdin_shell(
+async def test_ensure_workspace_agent_rejects_browse_only(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    merlin = RemoteProfile(id="merlin_dev", name="merlin_dev", ssh_host="merlin_dev")
+    browse_only = RemoteProfile(
+        id="browseonly", name="browseonly", ssh_host="merlin_dev", interactive=False
+    )
     monkeypatch.setattr(
         remote_profiles_module.remote_profile_manager,
         "get_profile",
-        lambda profile_id: merlin if profile_id == "merlin_dev" else None,
+        lambda profile_id: browse_only if profile_id == "browseonly" else None,
     )
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     workspace = manager.create_workspace(
-        WorkspaceCreate(name="Merlin WS", path=str(repo), session_prefix="merlinws")
+        WorkspaceCreate(name="Browse WS", path=str(repo), session_prefix="browsews")
     )
-    with pytest.raises(ValueError, match="no usable remote TTY"):
+    with pytest.raises(ValueError, match="browse-only"):
         await manager.ensure_workspace_agent(
             workspace.id,
             EnsureWorkspaceAgentRequest(
                 agent_type=AgentType.TERMINAL,
                 target=ExecutionTarget.REMOTE,
-                remote_profile_id="merlin_dev",
+                remote_profile_id="browseonly",
                 remote_cwd="~",
             ),
         )

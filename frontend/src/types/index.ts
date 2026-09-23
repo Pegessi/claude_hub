@@ -118,6 +118,8 @@ export interface SwitchEnvRequest {
   solo_mode?: boolean
 }
 
+export type RemoteTransport = 'normal' | 'pty_gateway'
+
 export interface RemoteProfile {
   id: string
   name: string
@@ -125,7 +127,11 @@ export interface RemoteProfile {
   user?: string | null
   port: number
   default_cwd?: string | null
+  /** @deprecated use transport + remoteInteractive instead */
   stdin_shell?: boolean
+  transport?: RemoteTransport
+  /** false/null-absent semantics: only explicit false means browse-only */
+  interactive?: boolean | null
 }
 
 export interface NetworkAddress {
