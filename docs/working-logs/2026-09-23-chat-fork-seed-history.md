@@ -121,6 +121,15 @@ Wiring:
 - Sidecar uses the same `workspace_id`/`session_id` the tailer passes to the
   `AgentStreamStore` (`"terminal-tabs"`, `terminal-tab-<id>`), resolved through
   the call-time `STATE_ROOT` indirection so tests can monkeypatch it.
+- **Image-only first turn (review MUST-FIX).** The send API allows an empty
+  `text` with attachments. The composer defers the seed (it has no prompt text
+  to prepend to), so the commit must be gated on whether *this* turn actually
+  included the seed — `_with_first_turn_prefixes` returns
+  `(prompt, seed_included)` and `send_message` calls `_mark_seed_delivered()`
+  only when `seed_included`. An unconditional commit marked the seed delivered
+  after the image-only turn, deleted the sidecar, and the next *text* turn
+  silently lacked the forked context forever. Regression:
+  `test_image_only_first_turn_defers_seed_to_next_text_turn`.
 
 ## Verification
 

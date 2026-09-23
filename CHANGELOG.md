@@ -29,8 +29,10 @@
   seeded history never enters the persisted timeline or the UI.
 - Text-only seed: tool calls/results and images are not seeded (best-effort).
   A text-less prefix (image/tool-only) writes no seed and behaves as before.
-  Fork ordinal/cap/launch-copy semantics and Terminal (non-Chat) fork are
-  unchanged.
+  When a forked tab's own first turn is image-only (empty text + attachment),
+  the seed is committed only once a turn actually carries text, so an image
+  opener no longer silently drops the forked context. Fork ordinal/cap/
+  launch-copy semantics and Terminal (non-Chat) fork are unchanged.
 
 ### fix: keep sidebar launcher enabled during background tab refresh
 
