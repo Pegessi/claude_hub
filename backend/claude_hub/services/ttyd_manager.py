@@ -2603,11 +2603,19 @@ asyncio.run(_main())
         cmd.extend([host, remote_command])
         return cmd
 
-    def _build_remote_attach_script(self) -> str:
+    def _build_remote_attach_script(self, *, bootstrap_file: Optional[str] = None) -> str:
         """The remote shell script that ensures/attaches the detached tmux.
 
         Shared by the normal argv bootstrap and the PTY-gateway typed bootstrap
         so both transports produce identical remote session semantics.
+
+        On a PTY gateway the launcher passes the secret-bearing temp script's
+        own path as ``$1`` (``bootstrap_file``). The script arms an EXIT/HUP trap
+        that removes that file and explicitly deletes it as soon as the detached
+        tmux pane exists — before ``exec tmux attach`` — so the token-bearing
+        file is never on disk for the (potentially whole-session) attach and is
+        cleaned up even if the connection is SIGHUP'd mid-bootstrap. For a normal
+        argv launch ``$1`` is unset and these are no-ops.
         """
 
         remote_session = self.tmux_session
@@ -2619,18 +2627,35 @@ asyncio.run(_main())
         bootstrap_path = self._remote_path_bootstrap()
         checks: list[str] = []
 
+        # Arm temp-file self-cleanup first so a SIGHUP at any point during
+        # bootstrap still removes the secret-bearing file. Guarded on $1 being
+        # set (gateway typed launch only); the normal argv path leaves it empty.
+        cleanup_preamble = (
+            '__chp_bootstrap_file="${1:-}"; '
+            "__chp_cleanup() { "
+            '[ -n "${__chp_bootstrap_file:-}" ] && '
+            'rm -f -- "$__chp_bootstrap_file" 2>/dev/null || true; '
+            "}; "
+            "trap __chp_cleanup EXIT HUP INT TERM"
+        )
+        # Detached pane now exists and inherited its env at new-session time;
+        # the on-disk secret is no longer needed. Runs before exec attach.
+        cleanup_before_attach = "__chp_cleanup"
+
         direct_start_script = "; ".join(
             [
                 "printf 'Remote tmux not found in PATH; starting without remote tmux persistence.\\n'",
                 start_command,
                 "status=$?",
                 "printf '\\nRemote agent exited with code %s. Dropping to shell.\\n' \"$status\"",
+                cleanup_before_attach,
                 f"exec {shell} -l",
             ]
         )
 
         return "; ".join(
             [
+                cleanup_preamble,
                 bootstrap_path,
                 *self._env_export_commands(),
                 *checks,
@@ -2643,6 +2668,7 @@ asyncio.run(_main())
                 f"tmux set-option -t {quoted_session} focus-events on >/dev/null 2>&1 || true; "
                 f"tmux set-option -t {quoted_session} history-limit 100000 >/dev/null 2>&1 || true; "
                 f"tmux set-window-option -t {quoted_session} mode-keys vi >/dev/null 2>&1 || true; "
+                f"{cleanup_before_attach}; "
                 f"exec tmux attach-session -t {quoted_session}; "
                 "fi",
                 direct_start_script,

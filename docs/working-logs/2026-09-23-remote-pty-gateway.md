@@ -166,6 +166,17 @@ Live 8173 confirmed healthy and untouched.
 6. **Persistence vs process.** Restarting uvicorn does **not** restart the
    independent local tmux pane/bridge; kill the local session to exercise
    re-attach, and kill locals before remote sessions during teardown.
+7. **Secret-bearing temp file (review MUST-FIX).** The typed bootstrap exports
+   `ANTHROPIC_AUTH_TOKEN`, so its temp file on the shared Trial container must be
+   owner-only and short-lived. A bare `> file` is 0644 and `rm` chained after
+   `bash file` never runs (the script `exec`s tmux for the whole session) and is
+   skipped on SIGHUP. Fix: `(umask 077; … > file); chmod 600 -- file; bash file
+   file; rm -f -- file` (trailing rm only a backstop); the remote script arms
+   `trap … EXIT HUP INT TERM` and self-deletes (`$1` = its own path) right after
+   `new-session -d` and **before** `exec tmux attach` (and in the no-tmux
+   fallback). Live-verified: `stat` = `MODE=600`, and while an attached tab's
+   remote session was present `/tmp/.chp-bootstrap-*` was empty. The file name
+   is hex-token only (`bootstrap_temp_path` rejects non-hex), so no injection.
 
 ## Residual risks / not covered
 
