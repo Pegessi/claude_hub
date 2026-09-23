@@ -222,6 +222,80 @@ def strip_image_attachment_guidance(text: str) -> str:
     return text[:start] + text[end:].lstrip("\n")
 
 
+# Hub Chat runtime / self-scheduling guidance.
+#
+# A native Chat agent runs with ``CLAUDE_HUB_TAB_ID`` in its provider
+# subprocess env (overlaid in :meth:`ProviderSession._build_env`) and the
+# ``claude-hub`` CLI on PATH, and ``schedule create --kind chat_turn`` can
+# enqueue a turn for the current conversation, but nothing tells the agent any
+# of this. Without guidance it either never self-schedules or mistakes Chat
+# for a Terminal and uses ``--kind tab_message`` (which types into a terminal
+# pane). This block points it at the correct, Chat-native command.
+#
+# Injected once, on the first user turn of a transport session (see
+# :meth:`ProviderSession.send_message`), as a sentinel-wrapped prompt prefix.
+# The ``$CLAUDE_HUB_TAB_ID`` reference is deliberately literal: the model
+# expands it from its own process env; the backend never substitutes the id.
+# Every transcript normalizer strips the block (see
+# :func:`strip_hub_runtime_guidance`) so it reaches neither the persisted
+# timeline nor the Chat UI; the authoritative Hub echo persists the clean
+# user text before the transport ever wraps it.
+HUB_RUNTIME_GUIDANCE = (
+    "HUB RUNTIME (Claude Hub Chat): you are running inside a Claude Hub Chat, "
+    "and the `claude-hub` CLI is on PATH. This conversation's tab id is exposed "
+    "by the env var `$CLAUDE_HUB_TAB_ID` — read it from the environment; never "
+    "hardcode the value.\n"
+    "Only when the user explicitly asks you to schedule a recurring self-check "
+    "or follow-up, create one with the Chat-native kind:\n"
+    '  claude-hub schedule create --name "<short name>" --kind chat_turn '
+    '--tab-id "$CLAUDE_HUB_TAB_ID" --interval <seconds> --message '
+    '"<what to do when it fires>"\n'
+    "Inspect and remove schedules with `claude-hub schedule list` and "
+    "`claude-hub schedule delete <id>`. A due turn auto-queues while you are "
+    "busy or running a Goal and never interrupts the active turn.\n"
+    "A plain Terminal (non-Chat) session schedules with `--kind tab_message`; "
+    "do NOT use `tab_message` in this Chat.\n"
+    "Do not create any schedule unless the user asked for one."
+)
+
+_HUB_RUNTIME_START = "<<<HUB_RUNTIME_V1>>>"
+_HUB_RUNTIME_END = "<<<END_HUB_RUNTIME_V1>>>"
+
+
+def wrap_hub_runtime_guidance(text: str) -> str:
+    """Prepend the sentinel-wrapped Hub runtime guidance to a Chat prompt.
+
+    Applied once to the first user turn of every native Chat transport so the
+    agent knows it runs in Hub Chat and how to self-schedule a ``chat_turn``.
+    The adapter strips the block on transcript read (see
+    :func:`strip_hub_runtime_guidance`) so it never reaches the persisted
+    timeline or the UI.
+    """
+    return f"{_HUB_RUNTIME_START}\n{HUB_RUNTIME_GUIDANCE}\n{_HUB_RUNTIME_END}\n\n{text}"
+
+
+def strip_hub_runtime_guidance(text: str) -> str:
+    """Remove the sentinel-wrapped Hub runtime guidance from a user message.
+
+    Applied when normalizing provider user messages (transcript/snapshot read)
+    and when matching an edited turn to a provider user message, so the
+    injected guidance never reaches the persisted timeline, the UI, or the
+    edit-resend content match. No-op when the block is absent or malformed (an
+    open block without a close marker is left untouched rather than risk
+    truncating a legitimate message).
+    """
+    if not text:
+        return text
+    start = text.find(_HUB_RUNTIME_START)
+    if start == -1:
+        return text
+    end = text.find(_HUB_RUNTIME_END, start + len(_HUB_RUNTIME_START))
+    if end == -1:
+        return text  # malformed (open block); leave untouched
+    end += len(_HUB_RUNTIME_END)
+    return text[:start] + text[end:].lstrip("\n")
+
+
 def parse_ask_question_response(text: str) -> Optional[List[Dict[str, Any]]]:
     """Parse a structured ``ask_question_response`` composer payload.
 
@@ -895,6 +969,10 @@ class ProviderSession(ABC):
         self._turn_completion: Optional[asyncio.Future[None]] = None
         # Serialize sends so a second prompt never cancels an active turn.
         self._send_lock = asyncio.Lock()
+        # Hub Chat runtime guidance is injected once, on the first user turn,
+        # to avoid re-paying its tokens on every turn. Only native Chat
+        # transports reach this class; Terminal sessions never construct one.
+        self._hub_runtime_guidance_injected: bool = False
         self._current_mode = ChatMode(getattr(session, "chat_mode", ChatMode.DEFAULT)).value
         # Available models, populated by ``prepare_capabilities`` from the
         # runtime-discovered (cursor) or curated static (claude/codex) list.
@@ -1134,11 +1212,27 @@ class ProviderSession(ABC):
             try:
                 if images:
                     self._stage_images(images)
-                await self._send_text(text)
+                await self._send_text(self._with_first_turn_hub_guidance(text))
             except Exception:
                 self._clear_staged_images()
                 self._end_turn()
                 raise
+
+    def _with_first_turn_hub_guidance(self, text: str) -> str:
+        """Prepend the Hub runtime guidance once, on this session's first turn.
+
+        Runs inside the send lock, so a racing second turn cannot also inject
+        it. The flag is set even if the spawn later fails: the guidance is a
+        per-session hint, not something to retry, and re-injecting it would
+        leak the block into a later (possibly non-first) provider user message.
+        Provider-specific prompt wrapping (Cursor's question/image blocks)
+        happens later in ``_send_text``, around this text. An image-only turn
+        (empty text) defers injection to the first turn that carries text.
+        """
+        if self._hub_runtime_guidance_injected or not text:
+            return text
+        self._hub_runtime_guidance_injected = True
+        return wrap_hub_runtime_guidance(text)
 
     async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
         """Answer a provider-native blocking question, if one is pending.
@@ -1364,6 +1458,17 @@ class ProviderSession(ABC):
 
         PATH is always preserved from the parent environment so the provider
         binary and its toolchain remain discoverable.
+
+        ``CLAUDE_HUB_TAB_ID`` is overlaid here for every native Chat provider
+        subprocess. The tab id otherwise reaches only the tmux-shell path
+        (``TTYDProcess._child_env``); a native Chat transport spawns the
+        provider directly with this env, so without this overlay Cursor /
+        Codex / TraeX (which, unlike Claude, have no ``--settings`` carrier)
+        would start without the id the Hub-runtime guidance points at, and
+        ``$CLAUDE_HUB_TAB_ID`` would expand empty in a self-scheduled command.
+        ``setdefault`` keeps an explicit value (from the parent env or
+        ``session.env``) authoritative. This is process env only — it is never
+        written back to the persisted tab env.
         """
         env = dict(os.environ)
         for key, value in self.session.env.items():
@@ -1371,6 +1476,9 @@ class ProviderSession(ABC):
                 env.pop(key, None)
             else:
                 env[key] = value
+        tab_id = getattr(self.session, "tab_id", None)
+        if tab_id:
+            env.setdefault("CLAUDE_HUB_TAB_ID", tab_id)
         # Never let the session override PATH away; keep the inherited PATH.
         if "PATH" not in env:
             env["PATH"] = os.environ.get("PATH", "")

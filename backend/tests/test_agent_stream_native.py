@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from pytest import MonkeyPatch
@@ -28,15 +28,23 @@ from claude_hub.models import (
 )
 from claude_hub.services.agent_stream.base import NormalizeContext
 from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+from claude_hub.services.agent_stream.cursor_cli_transcript import (
+    CursorCliTranscriptAdapter,
+)
 from claude_hub.services.agent_stream.native import (
+    HUB_RUNTIME_GUIDANCE,
     QUESTION_PROTOCOL_GUIDANCE,
     ClaudeNativeSession,
     CodexNativeSession,
     CursorNativeSession,
+    TraexNativeSession,
     create_native_session,
     parse_ask_question_response,
+    strip_hub_runtime_guidance,
     strip_image_attachment_guidance,
     strip_question_protocol_guidance,
+    wrap_hub_runtime_guidance,
     wrap_image_attachment_guidance,
     wrap_question_protocol_guidance,
 )
@@ -309,6 +317,291 @@ async def test_cursor_send_text_prepends_question_protocol_guidance() -> None:
     assert prompt.startswith("<<<HUB_QUESTION_PROTOCOL_V1>>>")
     assert QUESTION_PROTOCOL_GUIDANCE in prompt
     assert prompt.endswith("hello")
+
+
+# ── Hub Chat runtime / self-scheduling guidance (first turn, native only) ────
+
+
+def test_hub_runtime_guidance_wrap_and_strip_round_trip() -> None:
+    """wrap() prepends a sentinel block; strip() removes it exactly, leaving
+    the original user text."""
+    clean = "帮我每 5 分钟自查一次进度"
+    wrapped = wrap_hub_runtime_guidance(clean)
+    assert wrapped.startswith("<<<HUB_RUNTIME_V1>>>")
+    assert HUB_RUNTIME_GUIDANCE in wrapped
+    assert wrapped.endswith(clean)
+    assert strip_hub_runtime_guidance(wrapped) == clean
+
+
+def test_strip_hub_runtime_guidance_is_noop_without_block() -> None:
+    """Ordinary user messages (no sentinel block) pass through untouched."""
+    assert strip_hub_runtime_guidance("just a user message") == "just a user message"
+    assert strip_hub_runtime_guidance("") == ""
+
+
+def test_strip_hub_runtime_guidance_leaves_malformed_block_untouched() -> None:
+    """An open sentinel without its close marker is left as-is (fail-safe)."""
+    malformed = "<<<HUB_RUNTIME_V1>>> some user text"
+    assert strip_hub_runtime_guidance(malformed) == malformed
+
+
+def test_hub_runtime_guidance_content_uses_literal_env_and_chat_kind() -> None:
+    """The model must expand the tab id from its own env (no backend
+    substitution) and be steered to the Chat-native schedule kind."""
+    assert "$CLAUDE_HUB_TAB_ID" in HUB_RUNTIME_GUIDANCE
+    assert "--kind chat_turn" in HUB_RUNTIME_GUIDANCE
+    assert "tab_message" in HUB_RUNTIME_GUIDANCE
+    # The literal marker is the only tab reference; no concrete id is baked in.
+    assert "tab-1" not in HUB_RUNTIME_GUIDANCE
+
+
+def test_first_turn_hub_guidance_helper_injects_once() -> None:
+    """The per-session helper wraps the first turn only."""
+    native = ClaudeNativeSession(_session(AgentType.CLAUDE))
+    first = native._with_first_turn_hub_guidance("first")
+    second = native._with_first_turn_hub_guidance("second")
+    assert first.startswith("<<<HUB_RUNTIME_V1>>>")
+    assert first.endswith("first")
+    assert second == "second"
+    assert "HUB_RUNTIME" not in second
+
+
+@pytest.mark.asyncio
+async def test_claude_send_message_injects_hub_guidance_once() -> None:
+    """Claude Chat: the first turn's stdin envelope carries the guidance; the
+    second turn's envelope is the bare user text."""
+    native = ClaudeNativeSession(_session(AgentType.CLAUDE))
+    mock_spawn = AsyncMock()
+    with patch.object(native, "_spawn_oneshot", mock_spawn):
+        await native.send_message("first", [])
+        native.acknowledge_turn_complete()
+        await native.send_message("second", [])
+
+    def envelope_text(stdin_json: str):
+        content = json.loads(stdin_json)["message"]["content"]
+        return next(b["text"] for b in content if b.get("type") == "text")
+
+    first = envelope_text(mock_spawn.await_args_list[0].args[1])
+    second = envelope_text(mock_spawn.await_args_list[1].args[1])
+    assert first.startswith("<<<HUB_RUNTIME_V1>>>")
+    assert HUB_RUNTIME_GUIDANCE in first
+    assert first.endswith("first")
+    assert second == "second"
+    assert "HUB_RUNTIME" not in second
+
+
+@pytest.mark.asyncio
+async def test_cursor_send_message_injects_hub_guidance_once() -> None:
+    """Cursor Chat: the first prompt carries BOTH the question-protocol block
+    (every turn) and the Hub runtime block (first turn only); the second turn
+    carries only the question block."""
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    mock_spawn = AsyncMock()
+    with patch.object(native, "_spawn_oneshot", mock_spawn):
+        await native.send_message("first", [])
+        native.acknowledge_turn_complete()
+        await native.send_message("second", [])
+
+    first = mock_spawn.await_args_list[0].args[1]
+    second = mock_spawn.await_args_list[1].args[1]
+    assert "<<<HUB_RUNTIME_V1>>>" in first
+    assert "<<<HUB_QUESTION_PROTOCOL_V1>>>" in first
+    assert first.endswith("first")
+    assert "<<<HUB_RUNTIME_V1>>>" not in second
+    assert "<<<HUB_QUESTION_PROTOCOL_V1>>>" in second
+    assert second.endswith("second")
+
+
+@pytest.mark.asyncio
+async def test_codex_send_message_injects_hub_guidance_once() -> None:
+    """Codex Chat: only the first turn/start input carries the guidance."""
+    native = CodexNativeSession(_session(AgentType.CODEX))
+    # Skip the persistent app-server handshake; drives turn/start directly.
+    native._started = True
+    native._process = MagicMock()
+    mock_request = AsyncMock(return_value={})
+    with patch.object(native, "_send_request", mock_request):
+        await native.send_message("first", [])
+        native.acknowledge_turn_complete()
+        await native.send_message("second", [])
+
+    first = mock_request.await_args_list[0].args[1]["input"][0]["text"]
+    second = mock_request.await_args_list[1].args[1]["input"][0]["text"]
+    assert first.startswith("<<<HUB_RUNTIME_V1>>>")
+    assert HUB_RUNTIME_GUIDANCE in first
+    assert first.endswith("first")
+    assert second == "second"
+    assert "HUB_RUNTIME" not in second
+
+
+def test_terminal_session_never_gets_native_guidance_injection() -> None:
+    """Terminal (non-Chat) sessions never construct a ProviderSession, so the
+    first-turn wrap that lives on its send path cannot run for them."""
+    with pytest.raises(ValueError):
+        create_native_session(_session(AgentType.TERMINAL))
+    # The strip path is inert for ordinary terminal text regardless.
+    assert strip_hub_runtime_guidance("ls -la") == "ls -la"
+
+
+# ── Provider subprocess env: CLAUDE_HUB_TAB_ID for every native Chat ─────────
+
+_NATIVE_SESSION_CASES = [
+    (ClaudeNativeSession, AgentType.CLAUDE),
+    (CursorNativeSession, AgentType.CURSOR),
+    (CodexNativeSession, AgentType.CODEX),
+    (TraexNativeSession, AgentType.TRAEX),
+]
+
+
+@pytest.mark.parametrize("session_cls,agent_type", _NATIVE_SESSION_CASES)
+def test_build_env_injects_tab_id_for_native_chat_provider(
+    monkeypatch: MonkeyPatch, session_cls: Any, agent_type: AgentType
+) -> None:
+    """Every native Chat provider subprocess must carry CLAUDE_HUB_TAB_ID so
+    the first-turn guidance's ``$CLAUDE_HUB_TAB_ID`` reference actually
+    resolves. Without the ``_build_env`` overlay only Claude (via its
+    --settings file) had it; Cursor/Codex/TraeX started without it and a
+    self-scheduled command expanded --tab-id to empty."""
+    monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
+    native = session_cls(_session(agent_type))  # tab_id == "tab-1"
+    assert native._build_env()["CLAUDE_HUB_TAB_ID"] == "tab-1"
+
+
+@pytest.mark.parametrize("session_cls,agent_type", _NATIVE_SESSION_CASES)
+def test_build_env_does_not_override_explicit_tab_id(
+    monkeypatch: MonkeyPatch, session_cls: Any, agent_type: AgentType
+) -> None:
+    """setdefault keeps an explicit tab id (from session.env or the parent
+    process env) authoritative; the overlay never clobbers it."""
+    # Explicit session.env value wins over the session's own tab_id.
+    monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
+    sess = _session(agent_type)
+    sess.env = {"CLAUDE_HUB_TAB_ID": "explicit-tab"}
+    assert session_cls(sess)._build_env()["CLAUDE_HUB_TAB_ID"] == "explicit-tab"
+
+    # An inherited parent-process value is likewise preserved (not replaced).
+    monkeypatch.setenv("CLAUDE_HUB_TAB_ID", "parent-tab")
+    sess2 = _session(agent_type)
+    sess2.env = {}
+    assert session_cls(sess2)._build_env()["CLAUDE_HUB_TAB_ID"] == "parent-tab"
+
+
+def test_build_env_without_tab_id_omits_overlay(monkeypatch: MonkeyPatch) -> None:
+    """A native session with no tab id must not inject an empty/placeholder
+    CLAUDE_HUB_TAB_ID."""
+    monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
+    sess = _session(AgentType.CODEX)
+    sess.tab_id = ""
+    assert "CLAUDE_HUB_TAB_ID" not in CodexNativeSession(sess)._build_env()
+
+
+def test_claude_transcript_strips_hub_runtime_guidance_string_content() -> None:
+    """A string-content Claude user message carrying the first-turn block
+    normalizes back to the clean text (never reaches the timeline/UI)."""
+    adapter = ClaudeJsonlAdapter()
+    clean = "请帮我清理这个目录"
+    raw = {
+        "type": "user",
+        "message": {"role": "user", "content": wrap_hub_runtime_guidance(clean)},
+    }
+    events = adapter.normalize_line(raw, _ctx())
+    assert len(events) == 1
+    assert events[0].type == AgentStreamEventType.TURN_STARTED
+    assert events[0].payload["summary"] == clean
+    assert HUB_RUNTIME_GUIDANCE not in events[0].payload["summary"]
+    assert "HUB_RUNTIME" not in events[0].payload["summary"]
+
+
+def test_claude_transcript_list_text_block_never_surfaces_hub_guidance() -> None:
+    """The SDK envelope (list content) the first turn actually uses emits no
+    user-text turn_started, so the block cannot surface in the UI."""
+    adapter = ClaudeJsonlAdapter()
+    raw = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": wrap_hub_runtime_guidance("hi")}],
+        },
+    }
+    events = adapter.normalize_line(raw, _ctx())
+    assert all("HUB_RUNTIME" not in str(e.payload) for e in events)
+
+
+def test_codex_transcript_strips_hub_runtime_guidance() -> None:
+    """A Codex ``user_message`` carrying the first-turn block normalizes to the
+    clean text (never reaches the timeline/UI)."""
+    adapter = CodexJsonlAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-1",
+        tab_id="tab-1",
+        agent_type=AgentType.CODEX,
+        run_epoch=1,
+    )
+    clean = "check back in a few minutes"
+    raw = {
+        "type": "event_msg",
+        "payload": {"type": "user_message", "message": wrap_hub_runtime_guidance(clean)},
+    }
+    events = adapter.normalize_line(raw, ctx)
+    assert len(events) == 1
+    assert events[0].type == AgentStreamEventType.TURN_STARTED
+    assert events[0].payload["summary"] == clean
+    assert "HUB_RUNTIME" not in events[0].payload["summary"]
+
+
+def test_cursor_transcript_strips_hub_runtime_guidance() -> None:
+    """A Cursor user row carrying the first-turn block normalizes to the clean
+    text (never reaches the timeline/UI)."""
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-1",
+        tab_id="tab-1",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+    )
+    clean = "列一下文件"
+    raw = {
+        "role": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": wrap_hub_runtime_guidance(clean)}],
+        },
+    }
+    events = adapter.normalize_line(raw, ctx)
+    assert len(events) == 1
+    assert events[0].type == AgentStreamEventType.TURN_STARTED
+    assert events[0].payload["summary"] == clean
+    assert "HUB_RUNTIME" not in events[0].payload["summary"]
+
+
+def test_first_turn_blocks_strip_in_normalizer_order(tmp_path: Path) -> None:
+    """A Cursor first turn can carry image + question + Hub runtime blocks
+    together; stripping in the normalizer's order (question, image, hub)
+    recovers exactly the original text."""
+    img = tmp_path / "a.png"
+    img.write_bytes(_VALID_PNG)
+    clean = "请描述这张图并稍后自查"
+    wrapped = wrap_image_attachment_guidance(
+        wrap_question_protocol_guidance(wrap_hub_runtime_guidance(clean)), [img]
+    )
+    recovered = strip_hub_runtime_guidance(
+        strip_image_attachment_guidance(strip_question_protocol_guidance(wrapped))
+    )
+    assert recovered == clean
+
+
+def test_fork_extract_user_text_strips_hub_runtime_guidance() -> None:
+    """edit-resend matches an edited turn to a provider user message by exact
+    clean text; the first-turn wrapped block must be stripped or the first
+    turn would be unmappable."""
+    from claude_hub.services.agent_stream.transcript_fork import _extract_user_text
+
+    clean = "edit this first turn"
+    obj = {
+        "type": "user",
+        "message": {"role": "user", "content": wrap_hub_runtime_guidance(clean)},
+    }
+    assert _extract_user_text(obj, AgentType.CLAUDE) == clean
 
 
 # ── Claude stream_event normalization ───────────────────────────────────────
@@ -623,6 +916,9 @@ async def test_codex_turn_start_uses_input_array_not_prompt() -> None:
         ]
     )
     sess = _codex_session()
+    # This test asserts the turn/start input-array shape, not the first-turn
+    # Hub guidance injection (covered separately); mark guidance as injected.
+    sess._hub_runtime_guidance_injected = True
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         await sess.start()
         await sess.send_message("hello", [])
