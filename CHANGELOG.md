@@ -5,6 +5,27 @@
 
 ## Unreleased
 
+### fix: scheduled hub_tasks bind a worker session and converge when the worker dies
+
+- A scheduled `hub_task` (the Hub-native "execute on a schedule" action) had
+  never actually completed since the feature shipped. Its fire path claimed the
+  worker **session** for the task but never persisted the reverse
+  `task.session_id` binding, unlike the normal `start_task` entrypoint. The
+  worker's first report was therefore rejected by report intake
+  ("Task has no assigned worker session"), so the task could never reach
+  COMPLETED — the promised auto-DONE and ephemeral-session cleanup were
+  unreachable, and abort/release could not find the worker. Dispatch now writes
+  `task.session_id` in the same crash-idempotent pre-send transaction that sets
+  `session.task_id` (a no-op for the normal queued path, which already sets it).
+- Added orphan convergence for a reviewed/system scheduled task whose bound
+  worker stops, goes offline, or vanishes before reporting. Past a grace window
+  the scheduler either binds a fresh caller-owned ephemeral worker and
+  redispatches (bounded to 3 worker sessions; a brand-new `dispatch:` call_id so
+  the fail-closed uncertain-delivery contract on the dead session is never
+  violated) or marks the task `FAILED` and cleans up the dead ephemeral session.
+  Healthy long tasks, ordinary reviewed tasks, native `chat_turn` cold-wake, and
+  the subagent reaper are unaffected.
+
 ## Unreleased
 
 ### fix: keep sidebar launcher enabled during background tab refresh
