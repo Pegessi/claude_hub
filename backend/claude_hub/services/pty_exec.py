@@ -238,12 +238,40 @@ class SshPty:
             self._wake.set()
 
     def write(self, data: bytes) -> None:
+        """Best-effort write for *small* frames (CR / exit). For anything that
+        may exceed the PTY input buffer use :meth:`awrite`."""
+
         if self._closed:
             raise PtyExecError("PTY channel closed before write")
         try:
             os.write(self.master_fd, data)
         except OSError as exc:
             raise PtyExecError(f"failed to write to PTY: {exc}") from exc
+
+    async def awrite(self, data: bytes, *, chunk_size: int = 256, delay: float = 0.004) -> None:
+        """Write the whole buffer, pacing to survive a full PTY input queue.
+
+        A single ``os.write`` to a PTY master can short-write (observed: 1022 of
+        1697 bytes) or raise EAGAIN while ssh has not drained the canonical
+        input line. Chunking and yielding lets the remote consume each piece so
+        a long typed command/line is delivered intact before its terminating CR.
+        """
+
+        view: memoryview = memoryview(data)
+        while view:
+            try:
+                written = os.write(self.master_fd, view[:chunk_size])
+            except BlockingIOError:
+                await asyncio.sleep(delay)
+                continue
+            except OSError as exc:
+                raise PtyExecError(f"failed to write to PTY: {exc}") from exc
+            if written <= 0:
+                await asyncio.sleep(delay)
+                continue
+            view = view[written:]
+            if view:
+                await asyncio.sleep(delay)
 
     @property
     def buffer(self) -> bytes:
@@ -352,7 +380,7 @@ class SshPty:
         token = token or new_token()
         line = build_guarded_line(command, token)
         offset = len(self.buffer)
-        self.write(line.encode("utf-8") + b"\r")
+        await self.awrite(line.encode("utf-8") + b"\r")
 
         def _done(chunk: bytes) -> bool:
             return extract_guarded_result(chunk, token) is not None
