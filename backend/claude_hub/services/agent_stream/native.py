@@ -55,7 +55,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
 
 from ...models import (
     AgentType,
@@ -66,6 +66,7 @@ from ...models import (
     StreamModeOption,
     StreamReasoningEffortOption,
 )
+from .fork_seed import wrap_fork_seed_history
 
 logger = logging.getLogger(__name__)
 
@@ -921,6 +922,8 @@ class ProviderSession(ABC):
         self,
         session: ManagedSession,
         conversation_id_persist: Optional[Callable[[str], None]] = None,
+        seed_history: Optional[str] = None,
+        on_seed_consumed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self.session = session
         # Optional callback to persist the provider conversation id so a cold
@@ -973,6 +976,16 @@ class ProviderSession(ABC):
         # to avoid re-paying its tokens on every turn. Only native Chat
         # transports reach this class; Terminal sessions never construct one.
         self._hub_runtime_guidance_injected: bool = False
+        # Forked-tab history seed: a sentinel-wrapped transcript body prepended
+        # once to the first user turn of a fresh provider session so the model
+        # actually carries the forked context (a forked tab starts a
+        # zero-history provider conversation; provider-native resume cannot
+        # truncate to a turn). Populated by ``create_native_session`` from the
+        # fork sidecar; ``on_seed_consumed`` deletes that sidecar once injected
+        # so a restart cannot seed a second time. See ``agent_stream/fork_seed.py``.
+        self._seed_history: Optional[str] = seed_history or None
+        self._on_seed_consumed: Optional[Callable[[], Awaitable[None]]] = on_seed_consumed
+        self._seed_history_injected: bool = False
         self._current_mode = ChatMode(getattr(session, "chat_mode", ChatMode.DEFAULT)).value
         # Available models, populated by ``prepare_capabilities`` from the
         # runtime-discovered (cursor) or curated static (claude/codex) list.
@@ -1212,27 +1225,78 @@ class ProviderSession(ABC):
             try:
                 if images:
                     self._stage_images(images)
-                await self._send_text(self._with_first_turn_hub_guidance(text))
+                prompt, seed_included = await self._with_first_turn_prefixes(text)
+                await self._send_text(prompt)
+                # The provider accepted the turn; commit the one-shot fork
+                # seed ONLY when this turn actually carried it. An image-only
+                # first turn carries no prompt text and therefore no seed; it
+                # must defer both seed and sidecar deletion to the first text
+                # turn rather than silently dropping the forked context.
+                if seed_included:
+                    await self._mark_seed_delivered()
             except Exception:
                 self._clear_staged_images()
                 self._end_turn()
                 raise
 
-    def _with_first_turn_hub_guidance(self, text: str) -> str:
-        """Prepend the Hub runtime guidance once, on this session's first turn.
+    async def _with_first_turn_prefixes(self, text: str) -> Tuple[str, bool]:
+        """Compose the first turn's prompt with its one-shot prefix blocks.
+
+        Returns ``(prompt, seed_included)`` where ``seed_included`` is True only
+        when the forked-history seed block was actually prepended on this turn.
+        The caller commits the seed (and deletes its sidecar) solely when this
+        is True, so an image-only first turn (empty text) defers the seed to
+        the first text turn instead of marking it delivered without ever
+        sending it.
+
+        Two blocks are prepended, each at most once:
+
+        - The forked-tab history seed (when this session was created from a
+          fork): the copied Q/A transcript the model would otherwise lack.
+        - The Hub runtime/self-scheduling guidance.
 
         Runs inside the send lock, so a racing second turn cannot also inject
-        it. The flag is set even if the spawn later fails: the guidance is a
-        per-session hint, not something to retry, and re-injecting it would
-        leak the block into a later (possibly non-first) provider user message.
+        them. This method only *composes* the prompt: the seed is not marked
+        delivered (and its sidecar not discarded) until the provider accepts
+        a turn that actually contained it, so a failed spawn retries with the
+        seed on the next attempt instead of losing the forked context.
         Provider-specific prompt wrapping (Cursor's question/image blocks)
         happens later in ``_send_text``, around this text. An image-only turn
         (empty text) defers injection to the first turn that carries text.
         """
-        if self._hub_runtime_guidance_injected or not text:
-            return text
-        self._hub_runtime_guidance_injected = True
-        return wrap_hub_runtime_guidance(text)
+        if not text:
+            return text, False
+        prefix = ""
+        seed_included = False
+        if self._seed_history and not self._seed_history_injected:
+            prefix = wrap_fork_seed_history(self._seed_history)
+            seed_included = True
+        if not self._hub_runtime_guidance_injected:
+            self._hub_runtime_guidance_injected = True
+            text = wrap_hub_runtime_guidance(text)
+        return prefix + text, seed_included
+
+    async def _mark_seed_delivered(self) -> None:
+        """Record a successful first-turn seed delivery and drop its sidecar.
+
+        Called only after the provider accepted the seeded turn. Clears the
+        in-memory seed so later turns are bare and invokes the at-most-once
+        callback that deletes the durable fork sidecar. A callback failure is
+        logged but not retried here: the in-memory flag already guarantees the
+        seed is sent once per session; the sidecar is only a cross-restart
+        handoff.
+        """
+        if self._seed_history_injected or not self._seed_history:
+            return
+        self._seed_history_injected = True
+        callback = self._on_seed_consumed
+        self._seed_history = None
+        self._on_seed_consumed = None
+        if callback is not None:
+            try:
+                await callback()
+            except Exception:
+                logger.warning("fork-seed consumed callback failed", exc_info=True)
 
     async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
         """Answer a provider-native blocking question, if one is pending.
@@ -1599,8 +1663,15 @@ class ClaudeNativeSession(ProviderSession):
         self,
         session: ManagedSession,
         conversation_id_persist: Optional[Callable[[str], None]] = None,
+        seed_history: Optional[str] = None,
+        on_seed_consumed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
-        super().__init__(session, conversation_id_persist=conversation_id_persist)
+        super().__init__(
+            session,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
         # Staged image bytes for the next turn's user message content blocks.
         self._staged_images: List[bytes] = []
 
@@ -1772,8 +1843,15 @@ class CodexNativeSession(ProviderSession):
         self,
         session: ManagedSession,
         conversation_id_persist: Optional[Callable[[str], None]] = None,
+        seed_history: Optional[str] = None,
+        on_seed_consumed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
-        super().__init__(session, conversation_id_persist=conversation_id_persist)
+        super().__init__(
+            session,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
         self._jsonrpc_id = 0
         self._thread_id: Optional[str] = None
         self._provider_turn_id: Optional[str] = None
@@ -2592,8 +2670,15 @@ class TraexNativeSession(CodexNativeSession):
         self,
         session: ManagedSession,
         conversation_id_persist: Optional[Callable[[str], None]] = None,
+        seed_history: Optional[str] = None,
+        on_seed_consumed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
-        super().__init__(session, conversation_id_persist=conversation_id_persist)
+        super().__init__(
+            session,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
         self._discard_turn_id: Optional[str] = None
         self._interrupted = asyncio.Event()
         self._pending_permissions: Dict[Any, Dict[str, str]] = {}
@@ -2811,8 +2896,15 @@ class CursorNativeSession(ProviderSession):
         self,
         session: ManagedSession,
         conversation_id_persist: Optional[Callable[[str], None]] = None,
+        seed_history: Optional[str] = None,
+        on_seed_consumed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
-        super().__init__(session, conversation_id_persist=conversation_id_persist)
+        super().__init__(
+            session,
+            conversation_id_persist=conversation_id_persist,
+            seed_history=seed_history,
+            on_seed_consumed=on_seed_consumed,
+        )
         # Staged image temp files for the next turn's prompt.
         self._staged_images: List[Path] = []
         # Image temp files owned by each in-flight one-shot process, keyed by
@@ -3016,17 +3108,31 @@ class CursorNativeSession(ProviderSession):
 def create_native_session(
     session: ManagedSession,
     conversation_id_persist: Optional[Callable[[str], None]] = None,
+    seed_history: Optional[str] = None,
+    on_seed_consumed: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> ProviderSession:
     """Return the native transport for ``session``'s agent type.
 
+    ``seed_history`` / ``on_seed_consumed`` carry a forked tab's truncated
+    transcript. Every supported transport (Claude / Codex / TraeX / Cursor)
+    accepts ordinary prompt text, so the seed is delivered as a sentinel
+    text block on the first turn for all of them — no provider needs a
+    special prefill field and there is no silent "UI has history, model does
+    not" gap.
+
     Raises ``ValueError`` for unsupported agent types (fail-closed).
     """
+    kwargs: Dict[str, Any] = {
+        "conversation_id_persist": conversation_id_persist,
+        "seed_history": seed_history,
+        "on_seed_consumed": on_seed_consumed,
+    }
     if session.agent_type == AgentType.CLAUDE:
-        return ClaudeNativeSession(session, conversation_id_persist=conversation_id_persist)
+        return ClaudeNativeSession(session, **kwargs)
     if session.agent_type == AgentType.CODEX:
-        return CodexNativeSession(session, conversation_id_persist=conversation_id_persist)
+        return CodexNativeSession(session, **kwargs)
     if session.agent_type == AgentType.TRAEX:
-        return TraexNativeSession(session, conversation_id_persist=conversation_id_persist)
+        return TraexNativeSession(session, **kwargs)
     if session.agent_type == AgentType.CURSOR:
-        return CursorNativeSession(session, conversation_id_persist=conversation_id_persist)
+        return CursorNativeSession(session, **kwargs)
     raise ValueError(f"no native transport for agent_type={session.agent_type}")

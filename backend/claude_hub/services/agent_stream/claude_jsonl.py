@@ -26,6 +26,7 @@ from ..ttyd_manager import (
     _pick_backfill_session,
 )
 from .base import AgentStreamAdapter, NormalizeContext, resolve_cwd, resolve_process_hint
+from .fork_seed import strip_fork_seed_history
 from .native import strip_hub_runtime_guidance
 
 
@@ -506,6 +507,9 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             # transport prepends on the first turn so it never reaches the
             # persisted timeline or the UI (no-op on later turns).
             content = strip_hub_runtime_guidance(content)
+            # Strip the one-shot fork-seed history block the transport
+            # prepends to a forked tab's first turn for the same reason.
+            content = strip_fork_seed_history(content)
             if content.strip():
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": content}))
             return events
