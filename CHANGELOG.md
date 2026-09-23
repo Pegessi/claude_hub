@@ -5,6 +5,35 @@
 
 ## Unreleased
 
+### feat: pty_gateway transport for merlin_dev-style PTY-gateway hosts
+
+- New explicit remote transport model (`normal` | `pty_gateway`) plus an
+  `interactive` capability on `RemoteProfile`. Jump/gateway sshds (merlin_dev,
+  merlin-ssh-proxy, seedjob/ssh-candy) that swallow the ssh argv and non-tty
+  stdin but expose a real interactive PTY are now **interactive**: they can host
+  remote Terminal tabs and remote workspace agents/reviewers instead of being
+  hard-rejected as "listing only". Only an explicit `interactive: false` stays
+  browse-only. Detection is signature/config/env based (`CLAUDE_HUB_PTY_GATEWAY_HOSTS`).
+- New `services/pty_exec.py` PTY-exec primitive: drives an argv-less
+  `ssh -tt` over a held local PTY, waits for the genuine `user@host:…$` prompt
+  past the connect `init $` flash (two-prompt round-trip), and runs sentinel/
+  base64-framed one-shot commands with guarded JSON stdout. Writes are paced to
+  survive a full PTY input queue.
+- New `services/pty_gateway_bridge.py` transparent reconnecting proxy used as
+  the tab launcher: types the remote tmux bootstrap (decoded to a temp file so
+  `tmux attach` keeps the tty) after the prompt handshake, keeps the `-R`
+  report reverse-forward, then passes raw bytes (TUI/alt-screen/scrollback)
+  untouched and re-handshakes on every reconnect.
+- Directory listing, tmux history and cursor one-shots on a gateway route
+  through PTY-exec; normal hosts keep the existing argv ssh path. Frontend
+  (TabBar, AgentWorkspaceView) gates on the interactive capability instead of
+  the old binary `stdin_shell` flag. Hermetic unit tests (no network) for
+  resolver tri-state, prompt/sentinel parsing, bootstrap FSM, launcher/-R
+  params, routing, and normal-host regression. Real-machine PoC against
+  merlin_dev (terminal + top + kill/re-attach, agent report over `-R`,
+  reviewer placement, directory browse) documented in
+  `docs/working-logs/2026-09-23-remote-pty-gateway.md`.
+
 ### fix: scheduled hub_tasks bind a worker session and converge when the worker dies
 
 - A scheduled `hub_task` (the Hub-native "execute on a schedule" action) had
