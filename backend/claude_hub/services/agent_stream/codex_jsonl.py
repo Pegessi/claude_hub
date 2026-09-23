@@ -45,6 +45,7 @@ from .base import (
     resolve_cwd,
     resolve_process_hint,
 )
+from .fork_seed import strip_fork_seed_history
 from .native import (
     _CODEX_QUESTION_METHODS,
     codex_normalize_questions,
@@ -458,6 +459,8 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                 # transport prepends on the first turn so it never reaches the
                 # persisted timeline or the UI (no-op on later turns).
                 text = strip_hub_runtime_guidance(text)
+                # Strip the one-shot fork-seed history block likewise.
+                text = strip_fork_seed_history(text)
             if isinstance(text, str) and text.strip():
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": text}))
         elif payload_type == "agent_reasoning":

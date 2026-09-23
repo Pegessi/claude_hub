@@ -3707,6 +3707,24 @@ class TTYDManager:
             ]
             await forked_store.replace_all(rewritten)
 
+            # Seed the new provider conversation with the copied Q/A text. The
+            # forked tab starts a fresh, zero-history native provider session;
+            # without this the model cannot resolve references to the visible
+            # copied history. The body is handed to the first provider turn via
+            # a sidecar the tailer loads when it builds the transport (see
+            # agent_stream/fork_seed.py). Text-only; a prefix with no text (e.g.
+            # image-only turns) seeds nothing and behaves like a UI-only fork.
+            from .agent_stream.fork_seed import build_seed_body, write_seed_sidecar
+
+            seed_body = build_seed_body(rewritten)
+            if seed_body is not None:
+                await asyncio.to_thread(
+                    write_seed_sidecar,
+                    "terminal-tabs",
+                    f"terminal-tab-{forked.id}",
+                    seed_body,
+                )
+
             # Record fork provenance on the forked tab.
             process = self.processes[forked.id]
             process.forked_from_tab_id = tab_id
