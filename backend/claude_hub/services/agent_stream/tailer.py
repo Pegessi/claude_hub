@@ -57,6 +57,7 @@ from .base import (
     invalidate_source,
 )
 from .coalescer import AgentStreamCoalescer
+from .fork_seed import discard_seed_sidecar, read_seed_sidecar
 from .native import (
     ProviderSession,
     _detect_image_mime,
@@ -2217,12 +2218,28 @@ class TailerManager:
                 )
 
                 if is_chat and not cursor_transcript_fallback:
+                    # A freshly forked Chat tab carries a pending one-shot
+                    # history seed in a sidecar next to its event store. Load
+                    # it so the new provider's first turn actually contains the
+                    # forked Q/A context (the fork copies UI history but starts
+                    # a zero-history provider conversation). The sidecar is
+                    # deleted once the seed is prepended to an accepted turn.
+                    seed_body = read_seed_sidecar(session.workspace_id, session.id)
+
+                    async def _drop_seed_sidecar(
+                        workspace_id: str = session.workspace_id,
+                        stream_session_id: str = session.id,
+                    ) -> None:
+                        discard_seed_sidecar(workspace_id, stream_session_id)
+
                     try:
                         native_transport = create_native_session(
                             session,
                             conversation_id_persist=lambda cid: self._persist_session_id(
                                 session.id, cid
                             ),
+                            seed_history=seed_body,
+                            on_seed_consumed=_drop_seed_sidecar,
                         )
                     except ValueError as exc:
                         native_error = (
@@ -2709,6 +2726,9 @@ async def discard_session_stream(workspace_id: str, session_id: str) -> None:
     for manager in list(_TAILER_MANAGERS):
         await manager.forget_session(session_id)
     await AgentStreamStore(workspace_id, session_id).clear()
+    # Drop any unconsumed fork-seed sidecar so a reused session id never seeds
+    # a fresh conversation with a deleted fork's history.
+    await asyncio.to_thread(discard_seed_sidecar, workspace_id, session_id)
     # Also clear the session's bounded preview cache so a reused session id
     # cannot surface another conversation's images.
     await AgentStreamAttachmentStore(workspace_id, session_id).clear()

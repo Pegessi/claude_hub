@@ -49,6 +49,7 @@ from .base import (
     discover_source_cached,
     resolve_cwd,
 )
+from .fork_seed import strip_fork_seed_history
 from .native import (
     strip_hub_runtime_guidance,
     strip_image_attachment_guidance,
@@ -263,6 +264,9 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             # guidance the transport injects on the first turn so it never
             # reaches the persisted timeline or the UI. No-op on later turns.
             text = strip_hub_runtime_guidance(text)
+            # Strip the one-shot fork-seed history block the transport
+            # prepends to a forked tab's first turn.
+            text = strip_fork_seed_history(text)
             if text:
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": text}))
         elif role == "assistant":
