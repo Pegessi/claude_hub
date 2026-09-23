@@ -239,7 +239,7 @@
                 :key="profile.id"
                 :value="profile.id"
               >
-                {{ profile.name }}{{ profile.stdin_shell ? ' · listing only' : '' }}
+                {{ profile.name }}{{ remoteProfileBadge(profile) }}
               </option>
             </select>
             <p
@@ -249,10 +249,10 @@
               {{ remoteProfilesError }}
             </p>
             <p
-              v-else-if="selectedRemoteProfile?.stdin_shell"
+              v-else-if="!remoteInteractive(selectedRemoteProfile)"
               class="form-hint"
             >
-              This alias has no remote TTY. Browse directories here; use a PTY host such as mac_mini for Terminal.
+              This alias has no drivable remote PTY. Browse directories here; use an interactive host (normal or PTY gateway such as merlin_dev) for Terminal.
             </p>
             <p
               v-else-if="remoteProfiles.length === 0"
@@ -545,6 +545,7 @@ import AgentConfigFields from '@/components/AgentConfigFields.vue'
 import CodexSessionSelector from '@/components/CodexSessionSelector.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useTabStatus } from '@/composables/useTabStatus'
+import { remoteInteractive, remoteProfileBadge } from '@/utils/remoteProfiles'
 import { useCwdHistory } from '@/composables/useCwdHistory'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -638,7 +639,7 @@ const isCreateDisabled = computed(
     isLoading.value ||
     isPending('tab:create') ||
     (form.target === 'remote' && !form.remote_profile_id) ||
-    (form.target === 'remote' && Boolean(selectedRemoteProfile.value?.stdin_shell))
+    (form.target === 'remote' && !remoteInteractive(selectedRemoteProfile.value))
 )
 
 function tabActionKey(action: string, tabId: string | null | undefined) {
@@ -1058,9 +1059,9 @@ async function handleCreateTab() {
     remoteProfilesError.value = 'Chat sessions run locally. Switch to Terminal for remote SSH.'
     return
   }
-  if (target === 'remote' && selectedProfile?.stdin_shell) {
+  if (target === 'remote' && !remoteInteractive(selectedProfile)) {
     remoteProfilesError.value =
-      'This SSH alias has no remote TTY. Browse directories, then pick a PTY host for Terminal.'
+      'This SSH alias is browse-only. Pick an interactive host (normal or PTY gateway) for Terminal.'
     return
   }
   if (target === 'remote' && !selectedProfile) {

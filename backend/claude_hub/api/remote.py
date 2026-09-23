@@ -10,7 +10,8 @@ from ..api.filesystem import DirectoryListing
 from ..auth.dependencies import get_current_user
 from ..models import RemoteProfile, User
 from ..services import remote_profile_manager
-from ..services.remote_profiles import profile_uses_stdin_shell
+from ..services.pty_exec import PtyExecError, pty_exec
+from ..services.remote_profiles import profile_capabilities
 
 router = APIRouter(prefix="/api/remote", tags=["remote"])
 
@@ -115,7 +116,32 @@ async def list_remote_directory(
         raise HTTPException(status_code=404, detail="Remote profile not found")
 
     remote_path = path or profile.default_cwd or "~"
-    stdin_shell = profile_uses_stdin_shell(profile)
+    capabilities = profile_capabilities(profile)
+
+    if capabilities.is_pty_gateway:
+        # The gateway swallows ssh argv and non-tty stdin; drive a real PTY.
+        remote_command = remote_listing_command(remote_path, stdin_shell=False)
+        try:
+            raw = await pty_exec(profile, remote_command)
+        except PtyExecError as e:
+            raise HTTPException(status_code=504, detail=f"Remote PTY listing failed: {e}") from e
+        try:
+            payload = parse_remote_listing_stdout(raw)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=502, detail="Remote returned invalid directory data"
+            ) from e
+        if "error" in payload:
+            raise HTTPException(
+                status_code=int(payload.get("status", 500)),
+                detail=str(payload["error"]),
+            )
+        return DirectoryListing(**payload)
+
+    # Conventional host: argv channel (or the legacy single-line stdin fallback
+    # for hosts that only execute a line read from stdin but are not flagged as
+    # PTY gateways).
+    stdin_shell = False
     remote_command = remote_listing_command(remote_path, stdin_shell=stdin_shell)
     cmd = [
         "ssh",
@@ -134,22 +160,17 @@ async def list_remote_directory(
     if profile.port != 22:
         cmd.extend(["-p", str(profile.port)])
     cmd.append(_ssh_target(profile))
-    stdin_bytes: bytes | None = None
-    if stdin_shell:
-        stdin_bytes = (remote_command + "\n").encode()
-    else:
-        cmd.append(remote_command)
+    cmd.append(remote_command)
 
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=stdin_bytes),
-            timeout=20 if stdin_shell else 8,
+            proc.communicate(),
+            timeout=8,
         )
     except asyncio.TimeoutError as e:
         raise HTTPException(status_code=504, detail="Remote directory listing timed out") from e
