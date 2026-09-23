@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### fix: auto-created reviewer inherits the worker's env preset
+
+- For reviewed/autonomous tasks, the auto-created temporary reviewer was
+  launched without the worker's `env_preset`, so a worker started on a preset
+  that supplies the provider credentials (e.g. a custom
+  `ANTHROPIC_BASE_URL`/API key) got a reviewer on the default env. That
+  reviewer failed at 401 ("API key format is incorrect / Please run /login")
+  and could never file a review, stranding the task.
+- `ManagedSession` now records the non-secret `env_preset` name/id it was
+  launched with (the merged KEY=VALUE pairs still live in redacted `env`).
+  `_select_or_create_reviewer` passes the bound worker session's
+  `env_preset` into `EnsureWorkspaceAgentRequest` on the auto-create path.
+- None-safe: a worker with no preset keeps the reviewer on `None` (default
+  env); reusing an existing idle reviewer and remote placement
+  (target/profile/cwd) are unchanged.
+
 ## Unreleased
 
 ### fix: keep sidebar launcher enabled during background tab refresh

@@ -982,6 +982,14 @@ class ManagedSession(BaseModel):
     ephemeral: bool = False
     caller_owned_ephemeral: bool = False
     env: Dict[str, str] = Field(default_factory=dict)
+    # Non-secret identity of the env preset the session was launched with (the
+    # raw name/id passed to EnsureWorkspaceAgentRequest.env_preset). The merged
+    # KEY=VALUE pairs live in ``env`` (redacted on public surfaces); this only
+    # records *which preset* was used so that follow-on sessions — notably
+    # auto-created reviewers — can inherit the same preset instead of launching
+    # on a default/broken env. None means no preset was requested. Not
+    # backfilled for sessions created before this field existed (loads as None).
+    env_preset: Optional[str] = None
     remote_forward_port: Optional[int] = None
     auto_continue_task_id: Optional[str] = None
     auto_continue_attempts: int = 0
