@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import click
 import httpx
@@ -30,6 +30,7 @@ from claude_hub.cli.commands.schedule import _schedule_body
 from claude_hub.cli.main import cli
 from claude_hub.models import (
     AgentReport,
+    AgentReportCreate,
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
@@ -2242,6 +2243,354 @@ async def test_internal_report_scheduled_task_keeps_non_ephemeral_session(
     assert manager.tasks[task.id].status == WorkspaceTaskStatus.DONE
     assert deleted == []  # non-ephemeral session is left alone
     assert session.id in manager.sessions
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: real fire -> real dispatch binding -> REAL report intake ->
+# DONE -> ephemeral cleanup, plus dead-worker orphan convergence. These tests
+# deliberately do NOT stub _fire_hub_task, _dispatch_task_to_session,
+# create_report, delete_session, or ensure_workspace_agent — only the tmux /
+# ttyd terminal side effects are faked, exactly as production would see them.
+# ---------------------------------------------------------------------------
+
+
+def _install_live_terminal_fakes(monkeypatch: MonkeyPatch, tmp_path: Path) -> Dict[str, List[str]]:
+    """Fake the terminal control plane but keep session/dispatch/report real.
+
+    Returns a dict recording ``deleted_tabs`` and ``sent`` tmux writes so tests
+    can assert on lifecycle side effects.
+    """
+    import claude_hub.services.agent_stream as agent_stream
+
+    recorded: Dict[str, List[str]] = {"deleted_tabs": [], "sent": []}
+    tab_seq = {"n": 0}
+
+    async def fake_create_tab(**kwargs: Any) -> SimpleNamespace:
+        tab_seq["n"] += 1
+        tab_id = f"tab-e2e-{tab_seq['n']}"
+        return SimpleNamespace(
+            id=tab_id,
+            name=kwargs.get("name"),
+            agent_type=kwargs.get("agent_type", AgentType.CLAUDE),
+            agent_session_id=None,
+            cursor_transport="terminal",
+            cursor_data_dir=None,
+            cursor_cli_version=None,
+            cursor_transcript_path=None,
+            cursor_transcript_schema=None,
+        )
+
+    async def fake_update_tab(tab_id: str, name: Optional[str] = None, **_: Any) -> Any:
+        return SimpleNamespace(id=tab_id, name=name)
+
+    async def fake_delete_tab(tab_id: str) -> None:
+        recorded["deleted_tabs"].append(tab_id)
+
+    async def fake_send_with_receipt(
+        _self: Any, tmux_session: str, message: str, call_id: str
+    ) -> None:
+        recorded["sent"].append(call_id)
+
+    async def fake_send_plain(_self: Any, tmux_session: str, message: str) -> None:
+        # Fire-and-forget path (e.g. the no-call_id bootstrap prompt).
+        recorded["sent"].append("bootstrap")
+
+    async def fake_query_receipt(_self: Any, tmux_session: str, call_id: str) -> bool:
+        # Receipt present: the paste is durably recorded, so the monitor never
+        # re-pastes (mirrors a healthy tmux server).
+        return True
+
+    async def fake_discard_stream(workspace_id: str, session_id: str) -> None:
+        return None
+
+    async def fake_ready(_self: Any, _session: Any) -> None:
+        return None
+
+    async def fake_wait_prompt(_self: Any, _session: Any) -> None:
+        return None
+
+    monkeypatch.setattr(ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(ttyd_manager, "update_tab", fake_update_tab)
+    monkeypatch.setattr(ttyd_manager, "delete_tab", fake_delete_tab)
+    monkeypatch.setattr(
+        _wm.WorkspaceManager, "_send_tmux_message_with_receipt", fake_send_with_receipt
+    )
+    monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message", fake_send_plain)
+    monkeypatch.setattr(_wm.WorkspaceManager, "_query_tmux_receipt", fake_query_receipt)
+    monkeypatch.setattr(_wm.WorkspaceManager, "_ensure_session_ready_for_send", fake_ready)
+    monkeypatch.setattr(_wm.WorkspaceManager, "_wait_for_agent_prompt", fake_wait_prompt)
+    monkeypatch.setattr(_wm.WorkspaceManager, "_capture_tmux_output", AsyncNoop.return_empty)
+    monkeypatch.setattr(agent_stream, "discard_session_stream", fake_discard_stream)
+    return recorded
+
+
+class AsyncNoop:
+    @staticmethod
+    async def return_empty(*_args: Any, **_kwargs: Any) -> str:
+        return ""
+
+    @staticmethod
+    async def dispatch_noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+def _create_hub_schedule(manager: WorkspaceManager, workspace: Workspace) -> ScheduledTask:
+    return manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="nightly sweep",
+            kind=ScheduledTaskKind.HUB_TASK,
+            cron="0 3 * * *",
+            workspace_id=workspace.id,
+            task_title="Nightly lint",
+            message="Run the lint sweep",
+        )
+    )
+
+
+def _only_internal_task(manager: WorkspaceManager):
+    internal = [t for t in manager.tasks.values() if t.internal_kind == "scheduled"]
+    assert len(internal) == 1, f"expected one internal task, got {len(internal)}"
+    return internal[0]
+
+
+async def test_e2e_hub_task_fire_binds_session_and_real_report_completes_and_cleans(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    recorded = _install_live_terminal_fakes(monkeypatch, tmp_path)
+
+    async def fake_dispatch_workspace(workspace_id: str, **_: Any) -> None:
+        return None
+
+    # The post-completion rebalance tick is orthogonal to the intake chain under
+    # test; stub it so the e2e stays deterministic without a status refresh.
+    monkeypatch.setattr(manager, "dispatch_workspace", fake_dispatch_workspace)
+
+    schedule = _create_hub_schedule(manager, workspace)
+
+    # REAL fire: creates the internal task, spawns a real ephemeral session, and
+    # runs the real _dispatch_task_to_session (no stub of dispatch or spawn).
+    await manager._fire_scheduled_task(schedule, datetime.now(), manual=True)
+
+    task = _only_internal_task(manager)
+    assert task.status == WorkspaceTaskStatus.WORKING
+    # E1 regression guard: the canonical task -> session binding now exists.
+    assert task.session_id is not None
+    worker = manager.sessions[task.session_id]
+    assert worker.caller_owned_ephemeral is True
+    assert worker.task_id == task.id
+    assert worker.current_task_id == task.id
+
+    # Worker submits through the REAL report intake endpoint (not the internal
+    # handler directly). E1 used to 400 here with "Task has no assigned worker".
+    report = await manager.create_report(
+        worker.id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.COMPLETED,
+            message="lint sweep done",
+            call_id=f"{task.id}-completed-cycle-1-attempt-1",
+            changed_files=[],
+        ),
+    )
+    assert report.task_id == task.id
+
+    done = manager.tasks[task.id]
+    assert done.status == WorkspaceTaskStatus.DONE
+    assert done.completed_at is not None
+    # Ephemeral auto-cleanup: the throwaway worker tab/session is gone.
+    assert worker.id not in manager.sessions
+    assert worker.tab_id in recorded["deleted_tabs"]
+
+
+async def test_e2e_hub_task_worker_dies_early_redispatches_then_completes(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    recorded = _install_live_terminal_fakes(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "dispatch_workspace", AsyncNoop.dispatch_noop)
+
+    schedule = _create_hub_schedule(manager, workspace)
+    await manager._fire_scheduled_task(schedule, datetime.now(), manual=True)
+
+    task = _only_internal_task(manager)
+    first_worker_id = task.session_id
+    first_attempt = task.dispatch_attempt
+    assert first_attempt == 1
+    # Snapshot the original fire's sends (it legitimately sent dispatch:1 once).
+    sent_at_fire = list(recorded["sent"])
+    dead_call = f"dispatch:{task.id}:{first_attempt}"
+    assert dead_call in sent_at_fire
+
+    # The first worker's tmux dies minutes before it ever ACKs/reports: the
+    # session is observed STOPPED and the dispatch call is fail-closed uncertain.
+    first = manager.sessions[first_worker_id]
+    manager.sessions[first_worker_id] = first.model_copy(
+        update={
+            "status": ManagedSessionStatus.STOPPED,
+            "runtime_status": AgentRuntimeStatus.OFFLINE,
+            "processing_call_ids": [],
+            "uncertain_call_ids": [dead_call],
+        }
+    )
+    # Age past the orphan grace.
+    backdated = manager.tasks[task.id].model_copy(
+        update={"updated_at": datetime.now() - timedelta(seconds=120)}
+    )
+    manager.tasks[task.id] = backdated
+
+    # Convergence sweep: bounded redispatch to a FRESH healthy ephemeral.
+    await manager._converge_orphaned_hub_tasks(datetime.now())
+
+    redispatched = manager.tasks[task.id]
+    assert redispatched.status == WorkspaceTaskStatus.WORKING
+    assert redispatched.session_id is not None
+    assert redispatched.session_id != first_worker_id
+    assert redispatched.dispatch_attempt == first_attempt + 1
+    second_worker = manager.sessions[redispatched.session_id]
+    assert second_worker.status == ManagedSessionStatus.WORKING
+    # The dead first session was torn down; no stopped session is left behind.
+    assert first_worker_id not in manager.sessions
+    assert first.tab_id in recorded["deleted_tabs"]
+    # The fresh dispatch used a brand-new call_id; the uncertain call on the
+    # dead session was never auto-resent (its send count did not increase),
+    # preserving the fail-closed contract.
+    fresh_call = f"dispatch:{task.id}:{redispatched.dispatch_attempt}"
+    sent_after = recorded["sent"]
+    assert fresh_call in sent_after
+    assert sent_after.count(dead_call) == sent_at_fire.count(dead_call)
+
+    # No double-fire: another sweep while the replacement is healthy is a no-op
+    # (same binding, same attempt, no extra session spawned).
+    sessions_at = set(manager.sessions)
+    await manager._converge_orphaned_hub_tasks(datetime.now())
+    assert set(manager.sessions) == sessions_at
+    again = manager.tasks[task.id]
+    assert again.session_id == second_worker.id
+    assert again.dispatch_attempt == redispatched.dispatch_attempt
+
+    # The replacement worker completes through real report intake.
+    await manager.create_report(
+        second_worker.id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.COMPLETED,
+            message="done on retry",
+            call_id=f"{task.id}-completed-cycle-1-attempt-2",
+        ),
+    )
+    assert manager.tasks[task.id].status == WorkspaceTaskStatus.DONE
+    assert second_worker.id not in manager.sessions
+
+
+async def test_e2e_hub_task_dead_worker_exhausts_retries_fails_and_cleans_session(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    recorded = _install_live_terminal_fakes(monkeypatch, tmp_path)
+
+    task = _scheduled_internal_task(manager, workspace)
+    dead = _make_session(workspace, session_id="dead-eph", caller_owned_ephemeral=True)
+    manager.sessions[dead.id] = dead
+    now = datetime.now()
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "session_id": dead.id,
+            "dispatch_attempt": _wm._scheduling.HUBTASK_ORPHAN_MAX_ATTEMPTS,
+            "started_at": now - timedelta(seconds=300),
+            "updated_at": now - timedelta(seconds=120),
+        }
+    )
+    manager.sessions[dead.id] = dead.model_copy(
+        update={
+            "task_id": task.id,
+            "current_task_id": task.id,
+            "status": ManagedSessionStatus.STOPPED,
+            "runtime_status": AgentRuntimeStatus.OFFLINE,
+        }
+    )
+
+    await manager._converge_orphaned_hub_tasks(now)
+
+    failed = manager.tasks[task.id]
+    assert failed.status == WorkspaceTaskStatus.FAILED
+    assert failed.failure_reason is not None
+    assert failed.failed_at is not None
+    assert dead.id not in manager.sessions
+    assert dead.tab_id in recorded["deleted_tabs"]
+
+    # A second sweep is a no-op on the now-terminal task (no respawn storm).
+    sessions_before = set(manager.sessions)
+    await manager._converge_orphaned_hub_tasks(now)
+    assert set(manager.sessions) == sessions_before
+    assert manager.tasks[task.id].status == WorkspaceTaskStatus.FAILED
+
+
+async def test_hub_task_orphan_convergence_leaves_healthy_and_non_scheduled_tasks_alone(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    _install_live_terminal_fakes(monkeypatch, tmp_path)
+
+    # 1) A healthy scheduled hub_task, even very old, is never reaped.
+    healthy_task = _scheduled_internal_task(manager, workspace)
+    healthy = _make_session(workspace, session_id="healthy-eph", caller_owned_ephemeral=True)
+    manager.sessions[healthy.id] = healthy
+    old = datetime.now() - timedelta(hours=6)
+    manager.tasks[healthy_task.id] = healthy_task.model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "session_id": healthy.id,
+            "started_at": old,
+            "updated_at": old,
+        }
+    )
+    manager.sessions[healthy.id] = healthy.model_copy(
+        update={
+            "task_id": healthy_task.id,
+            "current_task_id": healthy_task.id,
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+        }
+    )
+
+    # 2) A normal (human, non-system) reviewed task with a dead worker keeps the
+    # pre-existing reviewed-task recovery contract — the hub_task sweep must not
+    # touch it (independent reviewer / long-task guarantees).
+    human_task = manager._create_task(
+        workspace.id,
+        WorkspaceTaskCreate(
+            title="Human task", prompt="do it", task_mode=WorkspaceTaskMode.REVIEWED
+        ),
+    )
+    human_session = _make_session(workspace, session_id="human-eph")
+    manager.sessions[human_session.id] = human_session
+    manager.tasks[human_task.id] = human_task.model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "session_id": human_session.id,
+            "started_at": old,
+            "updated_at": old,
+        }
+    )
+    manager.sessions[human_session.id] = human_session.model_copy(
+        update={
+            "task_id": human_task.id,
+            "current_task_id": human_task.id,
+            "status": ManagedSessionStatus.STOPPED,
+            "runtime_status": AgentRuntimeStatus.OFFLINE,
+        }
+    )
+
+    sessions_before = set(manager.sessions)
+    await manager._converge_orphaned_hub_tasks(datetime.now())
+
+    assert set(manager.sessions) == sessions_before
+    assert manager.tasks[healthy_task.id].status == WorkspaceTaskStatus.WORKING
+    assert manager.tasks[healthy_task.id].session_id == healthy.id
+    assert manager.tasks[human_task.id].status == WorkspaceTaskStatus.WORKING
+    assert manager.tasks[human_task.id].session_id == human_session.id
 
 
 # ---------------------------------------------------------------------------
