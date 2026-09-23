@@ -25,6 +25,10 @@ const durationSource = await readFile(
   new URL('../src/utils/duration.ts', import.meta.url),
   'utf8',
 )
+const subagentSource = await readFile(
+  new URL('../src/utils/subagentTool.ts', import.meta.url),
+  'utf8',
+)
 const transpileOptions = {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
@@ -33,11 +37,12 @@ const transpileOptions = {
 }
 const questionJs = ts.transpileModule(questionSource, transpileOptions).outputText
 const durationJs = ts.transpileModule(durationSource, transpileOptions).outputText
+const subagentJs = ts.transpileModule(subagentSource, transpileOptions).outputText
 const timelineJs = ts.transpileModule(
   source.replace(/^import .* from '@\/utils\/.*$/gm, ''),
   transpileOptions,
 ).outputText
-const bundled = `${durationJs}\n${questionJs}\n${timelineJs}`
+const bundled = `${durationJs}\n${questionJs}\n${subagentJs}\n${timelineJs}`
 const mod = await import(
   `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
 )
@@ -539,9 +544,13 @@ test('an open process header stays reachable from any scroll depth', () => {
   )
 })
 
-test('a long thinking or tool card can be collapsed from its own footer', () => {
+test('a long thinking, tool, or sub-agent card can be collapsed from its own footer', () => {
   const collapses = structuredPane.match(/class="details-collapse"/g) ?? []
-  assert.equal(collapses.length, 2, 'thinking and tool cards each need the footer')
+  assert.equal(
+    collapses.length,
+    3,
+    'thinking, tool, and sub-agent cards each need the footer',
+  )
   assert.match(structuredPane, /@click="collapseDetails"/)
   const fnMatch = structuredPane.match(
     /function collapseDetails\(event: MouseEvent\): void \{[\s\S]*?\n\}/,

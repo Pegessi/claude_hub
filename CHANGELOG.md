@@ -67,6 +67,27 @@
   the seed is committed only once a turn actually carries text, so an image
   opener no longer silently drops the forked context. Fork ordinal/cap/
   launch-copy semantics and Terminal (non-Chat) fork are unchanged.
+### feat: Codex-style sub-agent cards in structured Chat (frontend MVP)
+
+- Tool calls that spawn a sub-agent now render as their own card instead of a
+  generic collapsed Bash/Read tool block. Identification is centralized in
+  `frontend/src/utils/subagentTool.ts` (`isSubagentTool`/`parseSubagent`),
+  built only from real persisted stream-event signatures: Claude Code `Agent`
+  (args `description`/`prompt`/`subagent_type`), Cursor `Task`
+  (`subagentType`/`agentId`), TraeX `spawnAgent` (`receiverThreadIds`). Codex
+  has no sub-agent tool in captured history.
+- Matching requires the exact tool name **plus** that provider's argument
+  signature; a name alone never matches, so unknown/future shapes fail closed
+  back to the normal tool card and ordinary tools are never mislabelled.
+- The card shows provider identity, sub-agent type (or TraeX thread target),
+  the task description, a running/completed/failed/cancelled status badge, and
+  an expandable prompt + result body with nested indentation. Multiple
+  sub-agents in one turn each get an independent card and split surrounding
+  ordinary tool groups. Pure frontend; the backend stream protocol is
+  unchanged and internal sub-agent activity is not streamed (future work).
+
+## Unreleased
+
 
 ### fix: keep sidebar launcher enabled during background tab refresh
 

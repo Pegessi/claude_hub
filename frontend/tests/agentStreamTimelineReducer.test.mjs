@@ -18,6 +18,10 @@ const durationSource = await readFile(
   new URL('../src/utils/duration.ts', import.meta.url),
   'utf8',
 )
+const subagentSource = await readFile(
+  new URL('../src/utils/subagentTool.ts', import.meta.url),
+  'utf8',
+)
 const transpileOptions = {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
@@ -26,6 +30,7 @@ const transpileOptions = {
 }
 const questionJs = ts.transpileModule(questionSource, transpileOptions).outputText
 const durationJs = ts.transpileModule(durationSource, transpileOptions).outputText
+const subagentJs = ts.transpileModule(subagentSource, transpileOptions).outputText
 // The timeline's `@/utils/*` imports are stripped and their transpiled sources
 // concatenated ahead of it: a data-URL module has no resolver, so its sibling
 // utils have to travel with it.
@@ -33,7 +38,7 @@ const { outputText } = ts.transpileModule(
   source.replace(/^import .* from '@\/utils\/.*$/gm, ''),
   transpileOptions,
 )
-const bundled = `${durationJs}\n${questionJs}\n${outputText}`
+const bundled = `${durationJs}\n${questionJs}\n${subagentJs}\n${outputText}`
 const mod = await import(
   `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
 )
@@ -641,4 +646,122 @@ test('turn_started with attachments populates durable attachment descriptors on 
     width: 256,
     height: 256,
   })
+})
+
+// --- Sub-agent card classification -----------------------------------------
+// Confirmed sub-agent spawns are split out of ordinary tool groups so the
+// pane renders a dedicated card; rules come from real provider payloads.
+
+test('sub-agent spawn becomes its own part and splits surrounding tool groups', () => {
+  const events = [
+    makeEvent(0, 'turn_started', { summary: 'delegate' }, { turn_id: 't1' }),
+    makeEvent(1, 'text_delta', { text: 'I will delegate this.' }, { turn_id: 't1' }),
+    makeEvent(2, 'tool_call_started', {
+      tool_call_id: 'b1', name: 'Bash', args: { command: 'pwd' },
+    }, { turn_id: 't1' }),
+    makeEvent(3, 'tool_call_completed', {
+      tool_call_id: 'b1', status: 'completed', result: '/repo',
+    }, { turn_id: 't1' }),
+    makeEvent(4, 'tool_call_started', {
+      tool_call_id: 'a1',
+      name: 'Agent',
+      args: {
+        description: 'Explore backend patterns',
+        prompt: 'Read the backend and report.',
+        subagent_type: 'Explore',
+      },
+    }, { turn_id: 't1' }),
+    makeEvent(5, 'tool_call_started', {
+      tool_call_id: 'r1', name: 'Read', args: { file_path: '/x' },
+    }, { turn_id: 't1' }),
+    makeEvent(6, 'tool_call_completed', {
+      tool_call_id: 'a1', status: 'completed', result: 'report text',
+    }, { turn_id: 't1' }),
+    makeEvent(7, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+  ]
+
+  const turn = groupEventsIntoTurns(events)[0]
+  const kinds = turn.parts.map(part => part.kind)
+  // The sub-agent sits between two independent ordinary tool groups.
+  assert.deepEqual(kinds, ['text', 'tool_group', 'subagent', 'tool_group'])
+
+  const groupBefore = turn.parts[1]
+  const sub = turn.parts[2]
+  const groupAfter = turn.parts[3]
+  assert.deepEqual(groupBefore.tools.map(t => t.name), ['Bash'])
+  assert.deepEqual(groupAfter.tools.map(t => t.name), ['Read'])
+
+  assert.equal(sub.kind, 'subagent')
+  assert.equal(sub.tool.name, 'Agent')
+  assert.equal(sub.tool.subagent.provider, 'claude')
+  assert.equal(sub.tool.subagent.agentType, 'Explore')
+  assert.equal(sub.tool.subagent.description, 'Explore backend patterns')
+  // The matching completed event mutates the same tool the card references.
+  assert.equal(sub.tool.status, 'completed')
+  assert.equal(sub.tool.resultText, 'report text')
+
+  // The sub-agent is still counted in the flat tool aggregate.
+  assert.equal(turn.tools.length, 3)
+})
+
+test('Cursor Task and TraeX spawnAgent render as sub-agents; failed status flows through', () => {
+  const reducer = new IncrementalTimelineReducer()
+  const turns = reducer.reduce([
+    makeEvent(0, 'turn_started', { summary: 'multi' }, { turn_id: 't1' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'k1',
+      name: 'Task',
+      args: { description: 'd', prompt: 'p', subagentType: 'composer', agentId: 'ag' },
+    }, { turn_id: 't1' }),
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'k1', status: 'failed', result: 'boom',
+    }, { turn_id: 't1' }),
+    makeEvent(3, 'tool_call_started', {
+      tool_call_id: 'k2',
+      name: 'spawnAgent',
+      args: { prompt: 'review', receiverThreadIds: ['thread-1'] },
+    }, { turn_id: 't1', agent_type: 'traex' }),
+    makeEvent(4, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+  ])
+
+  const parts = turns[0].parts.filter(part => part.kind === 'subagent')
+  assert.equal(parts.length, 2)
+  assert.equal(parts[0].tool.subagent.provider, 'cursor')
+  assert.equal(parts[0].tool.status, 'failed')
+  assert.equal(parts[1].tool.subagent.provider, 'traex')
+  assert.deepEqual(parts[1].tool.subagent.threadIds, ['thread-1'])
+  // A sub-agent without its own completed event is finalized when the turn
+  // completes, matching ordinary-tool behavior.
+  assert.equal(parts[1].tool.status, 'completed')
+})
+
+test('a sub-agent mid-turn (before completion) reads as running', () => {
+  const reducer = new IncrementalTimelineReducer()
+  const turns = reducer.reduce([
+    makeEvent(0, 'turn_started', { summary: 'live' }, { turn_id: 't1' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'k1',
+      name: 'Agent',
+      args: { description: 'd', prompt: 'p', subagent_type: 'Explore' },
+    }, { turn_id: 't1' }),
+  ])
+  const sub = turns[0].parts.find(part => part.kind === 'subagent')
+  assert.ok(sub)
+  assert.equal(sub.tool.status, 'running')
+})
+
+test('ordinary tools stay grouped even when an Agent-named call lacks the signature', () => {
+  const turn = groupEventsIntoTurns([
+    makeEvent(0, 'turn_started', { summary: 'x' }, { turn_id: 't1' }),
+    // Same name as the Claude tool but no usable prompt/identity → normal block.
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'x1', name: 'Agent', args: { note: 'unrelated' },
+    }, { turn_id: 't1' }),
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'x1', status: 'completed', result: 'ok',
+    }, { turn_id: 't1' }),
+    makeEvent(3, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
+  ])[0]
+  assert.deepEqual(turn.parts.map(p => p.kind), ['tool_group'])
+  assert.equal(turn.parts[0].tools[0].subagent, undefined)
 })
