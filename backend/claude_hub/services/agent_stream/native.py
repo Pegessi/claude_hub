@@ -1225,17 +1225,29 @@ class ProviderSession(ABC):
             try:
                 if images:
                     self._stage_images(images)
-                await self._send_text(await self._with_first_turn_prefixes(text))
+                prompt, seed_included = await self._with_first_turn_prefixes(text)
+                await self._send_text(prompt)
                 # The provider accepted the turn; commit the one-shot fork
-                # seed (clear in-memory state and delete the durable sidecar).
-                await self._mark_seed_delivered()
+                # seed ONLY when this turn actually carried it. An image-only
+                # first turn carries no prompt text and therefore no seed; it
+                # must defer both seed and sidecar deletion to the first text
+                # turn rather than silently dropping the forked context.
+                if seed_included:
+                    await self._mark_seed_delivered()
             except Exception:
                 self._clear_staged_images()
                 self._end_turn()
                 raise
 
-    async def _with_first_turn_prefixes(self, text: str) -> str:
+    async def _with_first_turn_prefixes(self, text: str) -> Tuple[str, bool]:
         """Compose the first turn's prompt with its one-shot prefix blocks.
+
+        Returns ``(prompt, seed_included)`` where ``seed_included`` is True only
+        when the forked-history seed block was actually prepended on this turn.
+        The caller commits the seed (and deletes its sidecar) solely when this
+        is True, so an image-only first turn (empty text) defers the seed to
+        the first text turn instead of marking it delivered without ever
+        sending it.
 
         Two blocks are prepended, each at most once:
 
@@ -1246,21 +1258,23 @@ class ProviderSession(ABC):
         Runs inside the send lock, so a racing second turn cannot also inject
         them. This method only *composes* the prompt: the seed is not marked
         delivered (and its sidecar not discarded) until the provider accepts
-        the turn in :meth:`send_message`, so a failed spawn retries with the
+        a turn that actually contained it, so a failed spawn retries with the
         seed on the next attempt instead of losing the forked context.
         Provider-specific prompt wrapping (Cursor's question/image blocks)
         happens later in ``_send_text``, around this text. An image-only turn
         (empty text) defers injection to the first turn that carries text.
         """
         if not text:
-            return text
+            return text, False
         prefix = ""
+        seed_included = False
         if self._seed_history and not self._seed_history_injected:
             prefix = wrap_fork_seed_history(self._seed_history)
+            seed_included = True
         if not self._hub_runtime_guidance_injected:
             self._hub_runtime_guidance_injected = True
             text = wrap_hub_runtime_guidance(text)
-        return prefix + text
+        return prefix + text, seed_included
 
     async def _mark_seed_delivered(self) -> None:
         """Record a successful first-turn seed delivery and drop its sidecar.

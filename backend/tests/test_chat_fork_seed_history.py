@@ -301,6 +301,50 @@ async def _append(consumed: List[int]) -> None:
     consumed.append(1)
 
 
+# Minimal PNG magic+header bytes (only the magic prefix is validated when
+# staging; the file is never actually decoded in these transport tests).
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 16
+
+
+@pytest.mark.asyncio
+async def test_image_only_first_turn_defers_seed_to_next_text_turn() -> None:
+    """Review MUST-FIX regression: a forked tab whose FIRST turn carries only
+    an image (empty text, allowed by the send API) must NOT commit/discard the
+    seed. The seed is absent from that image-only turn (no prompt text) but
+    must still be prepended to the following text turn."""
+    transport = ClaudeNativeSession(
+        _session(AgentType.CLAUDE), seed_history="User: prior q\n\nAssistant: prior a"
+    )
+    consumed: List[int] = []
+    transport._on_seed_consumed = lambda: _append(consumed)
+    mock_spawn = AsyncMock()
+    with patch.object(transport, "_spawn_oneshot", mock_spawn):
+        # First turn: image only, no text.
+        await transport.send_message("", [_PNG_BYTES])
+        first_envelope = json.loads(mock_spawn.await_args_list[0].args[1])["message"]["content"]
+        first_text = next(
+            (b.get("text", "") for b in first_envelope if b.get("type") == "text"), ""
+        )
+        # Image went out, but no seed was sent or committed; it stays pending.
+        assert any(b.get("type") == "image" for b in first_envelope)
+        assert "FORK_SEED" not in first_text
+        assert transport._seed_history is not None
+        assert transport._seed_history_injected is False
+        assert consumed == []
+
+        transport.acknowledge_turn_complete()
+        # Second turn: real text — must still carry the deferred seed.
+        await transport.send_message("what did I say before?", [])
+        second_text = _claude_envelope_text(mock_spawn.await_args_list[1].args[1])
+
+    # Following text turn carries the full seed (context not lost).
+    assert "FORK_SEED_HISTORY_V1" in second_text
+    assert "prior q" in second_text
+    assert second_text.endswith("what did I say before?")
+    assert transport._seed_history_injected is True
+    assert consumed == [1]
+
+
 # ── END-TO-END: fork_tab -> sidecar -> real provider first-turn input ────────
 
 
