@@ -853,6 +853,7 @@ class _DispatchMixin:
             self.tasks[task.id] = task.model_copy(
                 update={
                     "status": WorkspaceTaskStatus.WORKING,
+                    "session_id": task.session_id or session.id,
                     "started_at": task.started_at or now,
                     "updated_at": now,
                 }
@@ -956,8 +957,29 @@ class _DispatchMixin:
                 "updated_at": now,
             }
         )
+        # Establish the canonical task -> session binding in the SAME pre-send
+        # claim transaction as session.task_id. The normal start_task path
+        # already persists task.session_id before the dispatch pass, but direct
+        # callers (the scheduled hub_task fire path) reach this method without
+        # it. Without it a worker's first report is rejected by report intake
+        # ("Task has no assigned worker session") and abort/release/auto-DONE
+        # cleanup — all keyed on task.session_id — cannot find the session.
+        # Persisting before the send makes the binding crash-idempotent. For
+        # queued-continuation callers task.session_id already equals session.id,
+        # so this write is a no-op there (idempotent, never a re-bind).
+        if task.session_id != session.id:
+            logger.info(
+                "Binding workspace task id=%s to session_id=%s before dispatch",
+                task.id,
+                session.id,
+            )
+        self.tasks[task.id] = task.model_copy(update={"session_id": session.id, "updated_at": now})
         self._save_state()
         session = self.sessions[session.id]
+        # Re-read so the post-send model_copy below starts from the persisted
+        # binding rather than the stale parameter object (whose session_id may
+        # still be None), which would otherwise clobber the binding.
+        task = self.tasks[task.id]
 
         lesson_context = self._lesson_context_payload(
             workspace,
@@ -978,6 +1000,7 @@ class _DispatchMixin:
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
+                "session_id": session.id,
                 "started_at": now,
                 "updated_at": now,
             }

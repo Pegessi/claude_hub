@@ -129,6 +129,17 @@ PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
 # review prompt and the reviewer actually emitting first tokens — without
 # this grace, a slow-to-start reviewer is repeatedly re-dispatched.
 REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
+# Orphan convergence for scheduled hub_tasks. A system-internal scheduled task
+# whose bound worker session is stopped/offline/missing cannot report and would
+# otherwise hang in WORKING forever (dispatch/recovery/migration require QUEUED,
+# the failure reaper is subagent-only, and an uncertain dispatch is fail-closed
+# against auto-resend to the SAME session). After this grace the scheduler may
+# bind a fresh throwaway worker and redispatch, up to HUBTASK_ORPHAN_MAX_ATTEMPTS
+# total worker sessions; beyond that the task is FAILED and its ephemeral
+# session is cleaned up. The gate is keyed on a DEAD session, so a healthy long
+# task — regardless of age — is never touched.
+HUBTASK_ORPHAN_GRACE_SECONDS = 60
+HUBTASK_ORPHAN_MAX_ATTEMPTS = 3
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 # Agent-facing examples call the Hub over localhost (or a loopback SSH
@@ -338,6 +349,8 @@ __all__ = [
     "GoalPacketStatus",
     "HARD_RECOVERY_REVIEWER_MESSAGE",
     "HARD_RECOVERY_WORKER_MESSAGE",
+    "HUBTASK_ORPHAN_GRACE_SECONDS",
+    "HUBTASK_ORPHAN_MAX_ATTEMPTS",
     "IMAGE_ATTACHMENT_TYPES",
     "IMAGE_ATTACHMENT_SIGNATURES",
     "INDEX_FILE",
