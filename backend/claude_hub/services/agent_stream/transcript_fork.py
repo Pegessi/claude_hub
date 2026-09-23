@@ -37,6 +37,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ...models import AgentType, ManagedSession
 from .base import discover_source_cached
+from .native import (
+    strip_hub_runtime_guidance,
+    strip_image_attachment_guidance,
+    strip_question_protocol_guidance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +126,23 @@ def _user_message_predicate(agent_type: AgentType) -> Callable[[Dict[str, Any]],
 
 
 def _extract_user_text(obj: Dict[str, Any], agent_type: AgentType) -> str:
+    """Extract the human-typed text from a genuine user message.
+
+    Thin wrapper over :func:`_extract_user_text_raw` that also strips the
+    sentinel-wrapped guidance blocks the transport injects (question protocol,
+    image references, and the once-per-session Hub Chat runtime block). Edit
+    matching compares the provider transcript text against the clean
+    ``turn_text`` from the Hub store, so injected prefixes must be removed or
+    the content match fails.
+    """
+    text = _extract_user_text_raw(obj, agent_type)
+    text = strip_question_protocol_guidance(text)
+    text = strip_image_attachment_guidance(text)
+    text = strip_hub_runtime_guidance(text)
+    return text
+
+
+def _extract_user_text_raw(obj: Dict[str, Any], agent_type: AgentType) -> str:
     """Extract the typed text from a genuine user message for content matching.
 
     Each provider stores the text differently; this must agree with the
