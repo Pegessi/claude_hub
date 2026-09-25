@@ -13,12 +13,100 @@
          a header would just duplicate it and cost a row of space. -->
     <!-- Minimal session name in the top-right corner so a pane can still be
          identified at a glance (multi-pane layouts, or when reviewing history)
-         without the cost of a full header row. -->
-    <span
+         without the cost of a full header row. Terminal panes get a tiny
+         manual reconnect button beside it: re-attaches the same ttyd/tmux
+         stream (Chat panes have their own surface and never show it). -->
+    <div
       v-if="pane.tabId"
-      class="pane-session-name"
-      :title="tabName"
-    >{{ tabName }}</span>
+      class="pane-chrome"
+    >
+      <button
+        v-if="!isChatSession"
+        type="button"
+        class="pane-reconnect-button"
+        :class="reconnectStateClass"
+        :title="reconnectTitle"
+        :aria-label="reconnectTitle"
+        :disabled="isReconnecting"
+        @click.stop="handleReconnect"
+      >
+        <span
+          class="pane-reconnect-icon"
+          aria-hidden="true"
+        >
+          <!-- connecting: spinner; success: check; error: alert; idle: ↻ -->
+          <svg
+            v-if="reconnectStatus?.state === 'connecting'"
+            class="pane-reconnect-spinner"
+            viewBox="0 0 16 16"
+            fill="none"
+          >
+            <circle
+              cx="8"
+              cy="8"
+              r="6"
+              stroke="currentColor"
+              stroke-opacity="0.25"
+              stroke-width="2"
+            />
+            <path
+              d="M14 8a6 6 0 0 0-6-6"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+          </svg>
+          <svg
+            v-else-if="reconnectStatus?.state === 'success'"
+            viewBox="0 0 16 16"
+            fill="none"
+          >
+            <path
+              d="M3.5 8.5l3 3 6-6.5"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <svg
+            v-else-if="reconnectStatus?.state === 'error'"
+            viewBox="0 0 16 16"
+            fill="none"
+          >
+            <path
+              d="M8 4.5v4"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+            />
+            <circle
+              cx="8"
+              cy="11.4"
+              r="0.9"
+              fill="currentColor"
+            />
+          </svg>
+          <svg
+            v-else
+            viewBox="0 0 16 16"
+            fill="none"
+          >
+            <path
+              d="M13.2 8A5.2 5.2 0 1 1 8 2.8c1.7 0 3.2.8 4.1 2.1M12.6 2.2v3h-3"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </span>
+      </button>
+      <span
+        class="pane-session-name"
+        :title="tabName"
+      >{{ tabName }}</span>
+    </div>
 
     <!-- 空状态 -->
     <div
@@ -96,6 +184,39 @@ const isManagedTab = computed(() => Boolean(paneTab.value?.workspace_role))
 const isChatSession = computed(() =>
   paneTab.value?.session_kind === 'chat' && !isManagedTab.value
 )
+
+// ── Manual reconnect button (Terminal panes only) ──────────────────────────
+// Status is per-tab in the store; TerminalView performs the actual re-attach
+// when the request nonce bumps. While connecting the button shows a spinner
+// and is disabled (the store itself also coalesces in-flight requests).
+const reconnectStatus = computed(() =>
+  props.pane.tabId ? store.paneReconnectStatus(props.pane.tabId) : null
+)
+const isReconnecting = computed(() => reconnectStatus.value?.state === 'connecting')
+const reconnectStateClass = computed(() => {
+  const state = reconnectStatus.value?.state
+  return state && state !== 'idle' ? `is-${state}` : ''
+})
+const reconnectTitle = computed(() => {
+  switch (reconnectStatus.value?.state) {
+    case 'connecting':
+      return 'Reconnecting…'
+    case 'success':
+      return 'Reconnected'
+    case 'error':
+      return 'Reconnect failed — click to retry'
+    default:
+      return 'Reconnect terminal'
+  }
+})
+
+function handleReconnect() {
+  const tabId = props.pane.tabId
+  if (!tabId || isReconnecting.value) return
+  // Re-dispatch after a previous failure/clear is allowed; an in-flight
+  // reconnect is deduped in the store and disabled in the UI.
+  store.requestPaneReconnect(tabId)
+}
 
 // Upper bound on cached StructuredPane instances per pane. Each entry holds a
 // full conversation DOM + composer state, so this stays modest; the global
@@ -178,12 +299,110 @@ onUnmounted(() => {
   background-color: var(--ch-color-success-bg);
 }
 
-.pane-session-name {
+/* Floating top-right chrome cluster: manual reconnect icon + session name.
+   Sits in the same spot the session-name pill used to occupy; the cluster
+   never takes a full row and never blocks the terminal surface below. */
+.pane-chrome {
   position: absolute;
   top: 6px;
   right: 8px;
   z-index: 5;
-  max-width: 45%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 55%;
+}
+
+/* Tiny icon-only reconnect control, styled to match the floating name pill:
+   same raised surface, hairline border, and muted color. It stays quiet until
+   hover/focus, and only the transient reconnect states (spinner/success/
+   error) bring in color. */
+.pane-reconnect-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--ch-color-surface-raised);
+  border: 1px solid var(--ch-color-border-muted);
+  box-shadow: 0 1px 4px var(--ch-shadow-color-soft);
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  transition:
+    color var(--ch-motion-fast),
+    border-color var(--ch-motion-fast),
+    background-color var(--ch-motion-fast);
+}
+
+.pane-reconnect-button:hover:not(:disabled) {
+  color: var(--ch-color-text-strong);
+  border-color: var(--ch-color-border-strong);
+}
+
+.pane-reconnect-button:focus-visible {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: 1px;
+}
+
+.pane-reconnect-button:disabled {
+  cursor: default;
+}
+
+.pane-reconnect-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+}
+
+.pane-reconnect-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.pane-reconnect-button.is-connecting {
+  color: var(--ch-color-accent);
+}
+
+.pane-reconnect-spinner {
+  animation: pane-reconnect-spin 700ms linear infinite;
+}
+
+@keyframes pane-reconnect-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-reconnect-spinner {
+    animation-duration: 1400ms;
+  }
+}
+
+.pane-reconnect-button.is-success {
+  color: var(--ch-color-success-strong);
+  border-color: var(--ch-color-success-strong);
+}
+
+.pane-reconnect-button.is-error {
+  color: var(--ch-color-danger-strong);
+  border-color: var(--ch-color-danger-border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-reconnect-button,
+  .pane-reconnect-button:hover:not(:disabled) {
+    transition: none;
+  }
+}
+
+.pane-session-name {
+  min-width: 0;
   padding: 2px 9px;
   border-radius: 999px;
   background: var(--ch-color-surface-raised);
