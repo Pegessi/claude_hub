@@ -14,14 +14,15 @@ const read = name => readFile(new URL(`../src/utils/${name}`, import.meta.url), 
 const transpileOptions = {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 }
-const [timelineSrc, lifeSrc, durationSrc, questionSrc, subagentSrc] = await Promise.all([
+const [timelineSrc, lifeSrc, durationSrc, questionSrc, subagentSrc, agentImageSrc] = await Promise.all([
   read('agentStreamTimeline.ts'),
   read('chatTurnLifecycle.ts'),
   read('duration.ts'),
   read('chatQuestionResponse.ts'),
   read('subagentTool.ts'),
+  read('agentImage.ts'),
 ])
-const bundle = [durationSrc, questionSrc, subagentSrc, timelineSrc]
+const bundle = [durationSrc, questionSrc, subagentSrc, agentImageSrc, timelineSrc]
   .map(src => ts.transpileModule(
     src.replace(/^import .* from '@\/utils\/.*$/gm, ''),
     transpileOptions,
