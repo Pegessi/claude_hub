@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### feat: manual reconnect button on Terminal panes
+
+- Added a tiny icon-only reconnect control next to the floating session name
+  in each Terminal pane's top-right corner (Terminal surface only; Chat panes
+  are unchanged). It re-attaches the pane's existing ttyd/tmux stream via the
+  existing iframe reload / connecting-retry path — ttyd runs
+  `tmux new-session -A` locally (and `attach-session` over pty_gateway
+  remotely), so it reconnects the SAME session: no new terminal, no scrollback
+  loss, and a running foreground process keeps running.
+- The terminal store now owns per-tab reconnect state (`idle`/`connecting`/
+  `success`/`error`) with monotonic request nonces and in-flight coalescing, so
+  repeated clicks can't trigger concurrent reconnects and multi-pane layouts
+  are isolated per tab. The button shows a spinner while connecting, a brief
+  green check on success, a red warning + toast on failure, and is disabled
+  while a reconnect is in flight.
+
 ### feat: pty_gateway transport for merlin_dev-style PTY-gateway hosts
 
 - New explicit remote transport model (`normal` | `pty_gateway`) plus an

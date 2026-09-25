@@ -12,6 +12,10 @@ import type {
   NotificationType,
 } from '@/types'
 import { groupChatsByCwd, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
+import {
+  createPaneReconnectRegistry,
+  type PaneReconnectStatus,
+} from '@/utils/terminalReconnect'
 
 const API_BASE = '/api'
 const STORAGE_KEY_LAYOUT = 'claude_hub_layout_type'
@@ -254,6 +258,38 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (!tab) return false
     return tab.session_kind === 'chat' && !tab.workspace_role
   })
+
+  // Manual per-pane reconnect bookkeeping (Terminal surface only). The store
+  // owns the state + dedup; TerminalView watches the request nonce and runs
+  // the existing iframe re-attach path (ttyd re-attaches the same tmux
+  // session), then settles the status. Keyed by tabId so concurrent panes and
+  // repeated clicks never race.
+  const paneReconnect = createPaneReconnectRegistry()
+
+  function paneReconnectStatus(tabId: string): PaneReconnectStatus {
+    return paneReconnect.get(tabId)
+  }
+
+  // Request a manual reconnect for one pane's terminal. No-ops for unknown
+  // tabs and coalesces while that tab already has a reconnect in flight.
+  // TerminalView reacts to the bumped nonce; returns false when nothing new
+  // was dispatched so callers can skip feedback.
+  function requestPaneReconnect(tabId: string): boolean {
+    if (!tabId || !tabs.value.some(tab => tab.id === tabId)) return false
+    return !paneReconnect.request(tabId).deduped
+  }
+
+  function settlePaneReconnect(
+    tabId: string,
+    state: 'success' | 'error',
+    nonce?: number,
+  ): boolean {
+    return paneReconnect.settle(tabId, state, nonce)
+  }
+
+  function clearPaneReconnect(tabId: string, nonce?: number): void {
+    paneReconnect.clear(tabId, nonce)
+  }
 
   // Background refresh of the tab list. This must NOT drive ``isLoading``:
   // it runs every status-poll cycle (and on every mounted status panel), and
@@ -724,6 +760,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     assignTabToPane,
     getPaneCountForTab,
     initializePanes,
+    paneReconnectStatus,
+    requestPaneReconnect,
+    settlePaneReconnect,
+    clearPaneReconnect,
     saveTabOrder,
     toggleSidebar,
     fetchArchivedTabs,
