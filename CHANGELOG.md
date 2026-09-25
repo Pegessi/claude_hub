@@ -5,6 +5,38 @@
 
 ## Unreleased
 
+### fix(chat): render agent-produced local images (view_image) instead of a raw path
+
+- Structured Chat previously showed an agent-generated screenshot (a Codex/
+  TraeX `view_image` tool call) as a generic tool card containing only the
+  file path. The transcript normalizer already emits `view_image` with
+  `args.path` (`services/agent_stream/codex_jsonl.py` imageView mapping); the
+  frontend simply had no image branch.
+- New **restricted** read endpoint
+  `GET /api/workspaces/tabs/{tab_id}/stream/agent-image?path=…`
+  (`api/agent_stream.py`). It is scoped like the existing stream-attachment
+  routes (tab/session ownership) and is deliberately not an arbitrary file
+  read: the resolved real path must stay inside the tab's own working
+  directory (absolute escapes, `..` traversal and symlink escapes are denied
+  after full `Path.resolve(strict=True)`), only regular files whose magic
+  bytes sniff as a whitelisted image (PNG/JPEG/GIF/WebP) are served, reads
+  are size-capped (10 MiB), remote sessions expose no local root, and every
+  denial returns the same opaque 404 with `X-Content-Type-Options: nosniff`.
+- Frontend: a provider-independent matcher (`utils/agentImage.ts`) recognizes
+  Codex/TraeX `view_image` (`args.path`) and a Claude `Read` of an image
+  (`args.file_path` with an image suffix; other Reads stay on the generic tool
+  card). The timeline reducer splits such calls into a dedicated
+  `agent_image` part that StructuredPane renders as a thumbnail which opens
+  the existing image lightbox, with a small file-name subtitle. It folds with
+  other working steps, is excluded from copy (no binary, no path spam) and
+  fork seeding, and a deleted/moved/non-image file degrades to a stable
+  "image unavailable" placeholder. References live in the persisted
+  transcript, so history/refresh keeps working as long as the file is on disk.
+- Tests: 16 backend cases (traversal/absolute/symlink escape, non-image,
+  cross-tab scope, remote denial, valid cwd image 200 + correct content-type,
+  missing/empty/unknown-tab 404) and 13 frontend cases (provider mapping,
+  image-part + encoded src, ordinary-tool fallback, fold step count).
+
 ### feat: pty_gateway transport for merlin_dev-style PTY-gateway hosts
 
 - New explicit remote transport model (`normal` | `pty_gateway`) plus an
