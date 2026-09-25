@@ -5,6 +5,42 @@
 
 ## Unreleased
 
+### fix: TraeX/native chat turn wedge — Stop now recovers, orphan replays no longer lock the composer
+
+- A TraeX session could wedge permanently after a turn that ended abnormally:
+  no new messages were accepted and Stop did nothing. Root cause was NOT the
+  backend turn guard (it was released normally): after the turn's
+  `turn/completed`, TraeX later re-emitted a duplicate nested code-mode
+  `item/completed` (hours later, during background/goal execution) carrying
+  **no turn id**, followed by `thread/goal/updated` (`turnId: null`). The
+  frontend timeline reducer opened a fresh null-id legacy turn for that
+  orphan record which never terminalized, so `isChatModeLocked()` stayed
+  true forever (Send disabled / Stop-queue state). Stop found no in-flight
+  provider turn and no durable orphan, so it returned `cancelled:false` and
+  cleared nothing.
+- Frontend: `agentStreamTimeline` now drops a null-turn tool/approval record
+  whose call identity was already attributed to a real turn (provider
+  replay), so it cannot mint an immortal legacy turn. `thread/goal/updated`
+  with `turnId=null` remains an ignored control-plane status as before.
+  Verifiable against the real production jsonl.
+- Backend defense in depth: the native push consumer drops unreferenceable
+  turn-interior records from persistent app-servers (Codex/TraeX) when no
+  Hub turn is active and a turn has already completed; one-shot providers
+  (Claude/Cursor) are unaffected.
+- Recoverable Stop: when a Codex `turn/cancel` / TraeX `turn/interrupt`
+  cannot be confirmed (frozen/dead app-server), the app-server is killed and
+  relaunched and the same conversation is resumed (`thread/resume`) instead
+  of failing the session closed on EOF ("Retry" with a dead tab). The
+  expected-EOF is marked (`_client_requested_stop`) so the push consumer
+  keeps the tab live; the next message sends normally.
+- New outer liveness bound `ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S` (default
+  7200s, env-tunable): an active turn emitting NOTHING for that long — even
+  with an outstanding tool — is terminalized and restarted/resumed. It is
+  refreshed by every provider record (so long but live work is untouched)
+  and suppressed by an open approval card (human wait). The existing 600s
+  streaming-inactivity reap (model-silence while not tool/approval-bound)
+  now also resumes in place instead of tearing the consumer down.
+
 ### feat: pty_gateway transport for merlin_dev-style PTY-gateway hosts
 
 - New explicit remote transport model (`normal` | `pty_gateway`) plus an

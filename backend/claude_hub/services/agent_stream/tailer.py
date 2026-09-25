@@ -99,6 +99,21 @@ IDLE_TTL_S = 300.0
 # fixed cap on total turn duration: a legitimate review or test run can stream
 # actively for much longer than an hour.
 STREAM_INACTIVITY_TIMEOUT_S = 600.0
+# Outer liveness bound for an active turn that has produced NO provider record
+# of any kind. Unlike ``STREAM_INACTIVITY_TIMEOUT_S`` this is not suppressed by
+# an outstanding tool call: a wedged persistent app-server (TraeX/Codex) or a
+# subprocess killed outside Hub can leave a tool call open *forever*, which the
+# streaming watchdog alone would never converge. It is deliberately far longer
+# than the streaming timeout and is refreshed by EVERY accepted record — tool
+# lifecycle, capacity-queue notifications, and control-plane notifications
+# included — so genuinely long work that keeps emitting something is never
+# reaped. Only total provider silence (typically a frozen process past any real
+# tool's horizon) trips it. An open blocking approval card suppresses it, since
+# that silence is a human wait, not a dead provider. Tunable for environments
+# with longer legitimate silent commands.
+ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S = float(
+    os.environ.get("CLAUDE_HUB_ACTIVE_TURN_LIVENESS_TIMEOUT_S", "7200")
+)
 # Grace between a Goal turn's trailing terminal signal and the provider's
 # completion record. One-shot CLIs (Claude/Cursor) can have their stdout held
 # open by a lingering child after the final assistant text, so the result
@@ -117,6 +132,30 @@ _RUNTIME_INTERRUPTED_MESSAGE = (
 # tool or an open approval card suppresses this timeout because both are
 # legitimate external waits that can produce no model events for a long time.
 _INACTIVITY_TIMEOUT_MESSAGE = "Turn stopped after the stream went silent."
+# A turn produced NO provider record at all past the outer liveness bound,
+# including while a tool was nominally outstanding: the provider process is
+# wedged or gone without an EOF.
+_HARD_LIVENESS_TIMEOUT_MESSAGE = "Turn stopped after the provider stopped producing any output."
+# Turn-interior event types that only have meaning attributed to a live Hub
+# turn. A record of one of these arriving with no owning turn (``turn_id`` is
+# null AND no turn is active) is an unreferenceable replay/background record —
+# e.g. TraeX re-emitting a nested code-mode ``item/completed`` long after the
+# turn it belonged to terminalized. Persisting it would mint an orphan
+# never-completed turn and pin the composer lock forever. Explicit boundaries
+# (``turn_started``), control-plane notifications (``status``, such as
+# ``thread/goal/updated`` with ``turnId=null``), and session-level ``error``
+# records are intentionally allowed without a turn.
+_UNATTRIBUTED_DROP_TYPES = frozenset(
+    {
+        AgentStreamEventType.TEXT_DELTA,
+        AgentStreamEventType.THINKING_DELTA,
+        AgentStreamEventType.TOOL_CALL_STARTED,
+        AgentStreamEventType.TOOL_CALL_COMPLETED,
+        AgentStreamEventType.APPROVAL_REQUIRED,
+        AgentStreamEventType.APPROVAL_RESOLVED,
+        AgentStreamEventType.TURN_COMPLETED,
+    }
+)
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
@@ -891,6 +930,23 @@ class SessionTailer:
         last = self._last_event_at
         return last is not None and (time.monotonic() - last > STREAM_INACTIVITY_TIMEOUT_S)
 
+    def _turn_hard_liveness_expired(self) -> bool:
+        """True when an active turn has emitted NOTHING past the outer bound.
+
+        This is the fail-safe behind :meth:`_stream_inactive`: it is not
+        suppressed by an outstanding tool call, because a persistent
+        app-server frozen mid-tool (or a process that vanished without an EOF)
+        keeps that tool open indefinitely. It is refreshed by every accepted
+        provider record of any kind, so a legitimately long turn — including a
+        long-running command that streams output or completes within the
+        window — never trips it. A blocking approval card (a human wait) does
+        suppress it.
+        """
+        if self._blocking_approval_call_ids:
+            return False
+        last = self._last_event_at
+        return last is not None and (time.monotonic() - last > ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S)
+
     def _note_assistant_text(self, transport: ProviderSession) -> None:
         """Track a complete trailing Goal terminal signal in the raw text.
 
@@ -1050,6 +1106,23 @@ class SessionTailer:
             raise RuntimeError("turn stopped but its cancelled state could not be persisted") from (
                 publish_error
             )
+
+    async def _reap_active_turn_locked(
+        self, transport: ProviderSession, error_message: str
+    ) -> bool:
+        """Terminalize a wedged active turn while the send lock is held.
+
+        Returns ``True`` when the provider was restarted in place (a TraeX/Codex
+        interrupt could not be confirmed, so ``cancel_active_turn`` replaced the
+        app-server and resumed the thread) and the push consumer should keep
+        running; ``False`` when the process was stopped and the consumer should
+        exit (the next send/subscribe restarts it).
+        """
+        await self._cancel_active_turn_locked(transport, error_message=error_message)
+        if getattr(transport, "_client_requested_stop", False):
+            return True
+        await transport.stop()
+        return False
 
     async def _fail_active_turn(
         self, message: str, transport: ProviderSession
@@ -1262,6 +1335,12 @@ class SessionTailer:
             self._hard_failed = False
             _HARD_FAILED_SESSION_IDS.discard(self.session_id)
             self._last_error = None
+            # A client-Stop recovery restart is complete once the transport is
+            # started and healthy here; the expected EOF of the killed process
+            # has been consumed by this same consumer before it loops back. A
+            # LATER EOF (new server) must again fail closed.
+            if getattr(transport, "_client_requested_stop", False) and transport._started:
+                transport._client_requested_stop = False
             # Track the current turn's last-activity time for the stream
             # inactivity watchdog. ``turn_in_flight`` is the authoritative
             # guard (released at TURN_COMPLETED), so this stamps the first tick
@@ -1295,20 +1374,47 @@ class SessionTailer:
             # legitimate external waits, and active long-running turns have no
             # absolute duration cap.
             if transport.turn_in_flight and self._stream_inactive():
+                restarted_in_place = False
                 try:
                     async with self._send_lock:
                         if transport.turn_in_flight and self._stream_inactive():
-                            await self._cancel_active_turn_locked(
+                            restarted_in_place = await self._reap_active_turn_locked(
                                 transport,
-                                error_message=_INACTIVITY_TIMEOUT_MESSAGE,
+                                _INACTIVITY_TIMEOUT_MESSAGE,
                             )
-                            await transport.stop()
                 except Exception:
                     logger.exception(
                         "native stream inactivity reap failed for session %s",
                         self.session_id,
                     )
-                break
+                if not restarted_in_place:
+                    break
+                continue
+            # Outer liveness bound: even with an outstanding tool, total
+            # provider silence past the hard timeout means the runtime is wedged
+            # or gone without an EOF. Terminalize the turn; when the provider
+            # could not be interrupted in place it is restarted and the thread
+            # resumed here, so the tab stays live. Otherwise the process is
+            # reaped and the next send restarts it. Legitimately long work
+            # keeps emitting SOME record and refreshes the stamp; an open
+            # approval card exempts the turn because it is waiting on a human.
+            if transport.turn_in_flight and self._turn_hard_liveness_expired():
+                restarted_in_place = False
+                try:
+                    async with self._send_lock:
+                        if transport.turn_in_flight and self._turn_hard_liveness_expired():
+                            restarted_in_place = await self._reap_active_turn_locked(
+                                transport,
+                                _HARD_LIVENESS_TIMEOUT_MESSAGE,
+                            )
+                except Exception:
+                    logger.exception(
+                        "native hard liveness reap failed for session %s",
+                        self.session_id,
+                    )
+                if not restarted_in_place:
+                    break
+                continue
             # Idle reaping: with no subscribers for IDLE_TTL_S, reap an idle
             # tailer. A healthy in-flight turn is NEVER cancelled just because
             # viewers vanished (e.g. mobile backgrounding kills SSE and the
@@ -1364,6 +1470,15 @@ class SessionTailer:
                 # turn; keep waiting for the next turn. For Codex the
                 # persistent app-server died — fail closed.
                 if transport.eof_is_fatal:
+                    # A client Stop (or the hard-liveness reaper) deliberately
+                    # killed this persistent app-server because its turn could
+                    # not be interrupted in place. That EOF is expected: the
+                    # transport has already restarted and thread/resumed (or the
+                    # loop-top start below does so), so keep the consumer alive
+                    # instead of failing the session closed and stranding the
+                    # tab on "Retry".
+                    if getattr(transport, "_client_requested_stop", False):
+                        continue
                     # The persistent provider died; the in-flight turn (if
                     # any) is abandoned. Emit an error and a failed
                     # turn_completed for the active turn so the frontend
@@ -1506,6 +1621,37 @@ class SessionTailer:
                     event.turn_id = self._active_turn_id
                     event.message_id = f"{self._active_turn_id}:user"
                     event.run_epoch = self._run_epoch
+                # Defensive boundary for persistent app-servers (TraeX/Codex):
+                # a turn-interior record arriving with NO owning Hub turn is an
+                # unreferenceable replay or background/goal execution, not the
+                # beginning of a new turn. Persisting it minted a null-turn
+                # legacy row on the frontend that never completed and pinned the
+                # composer lock forever — a duplicate ``item/completed`` for a
+                # nested code-mode tool, re-emitted hours after its turn had
+                # ended, was the observed wedge. Drop it before watchdog and
+                # persistence bookkeeping. ``turn_started`` is handled above and
+                # can legitimately open a provider-initiated turn; ``status``
+                # and ``error`` carry control-plane information with no turn.
+                if (
+                    self._active_turn_id is None
+                    and event.turn_id is None
+                    and event.type in _UNATTRIBUTED_DROP_TYPES
+                    # Only persistent app-servers guarantee every interior
+                    # record belongs to a Hub-opened turn. One-shot providers
+                    # (Claude/Cursor) legitimately stream records with no Hub
+                    # turn id (provider-initiated / transcript paths), and at a
+                    # cold start a resumed thread may replay the still-active
+                    # turn before its turn/started notification — so only drop
+                    # after a turn has already completed in this consumer.
+                    and transport.eof_is_fatal
+                    and self._turn_completed_seen
+                ):
+                    logger.warning(
+                        "dropping unattributed %s record with no active turn for session %s",
+                        event.type.value,
+                        self.session_id,
+                    )
+                    continue
                 is_turn_completed = event.type == AgentStreamEventType.TURN_COMPLETED
                 if event.run_epoch is None:
                     event.run_epoch = self._run_epoch

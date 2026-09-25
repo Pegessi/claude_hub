@@ -571,7 +571,7 @@ async def test_traex_interrupt_uses_provider_ids_and_retires_old_output(
     assert (await transport.read_line())["params"]["delta"] == "new"
 
 
-async def test_traex_interrupt_failure_terminates_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_traex_interrupt_failure_restarts_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = TraexNativeSession(_managed_session())
     proc = _FakeProcess([])
     transport._process = proc
@@ -581,9 +581,13 @@ async def test_traex_interrupt_failure_terminates_provider(monkeypatch: pytest.M
     monkeypatch.setattr(
         transport, "_send_request", AsyncMock(side_effect=RuntimeError("broken RPC"))
     )
+    restart = AsyncMock()
+    monkeypatch.setattr(transport, "restart_for_recovery", restart)
     await transport.cancel_active_turn()
-    assert proc._terminated
-    assert not transport._started
+    # An unconfirmed interrupt kills + relaunches the app-server (resuming the
+    # thread) instead of failing the session closed. The kill/respawn mechanics
+    # are covered end-to-end in test_traex_turn_wedge.py.
+    restart.assert_awaited_once()
     assert not transport.turn_in_flight
 
 

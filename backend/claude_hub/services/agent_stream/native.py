@@ -970,6 +970,11 @@ class ProviderSession(ABC):
         # the moment ``_spawn_oneshot`` returned).
         self._turn_in_flight: bool = False
         self._turn_completion: Optional[asyncio.Future[None]] = None
+        # Set while a client Stop deliberately kills/restarts the persistent
+        # provider because its native interrupt could not be confirmed. The EOF
+        # of that dying process is expected: the tailer restarts (resuming the
+        # thread) instead of failing the session closed. Cleared by ``start``.
+        self._client_requested_stop: bool = False
         # Serialize sends so a second prompt never cancels an active turn.
         self._send_lock = asyncio.Lock()
         # Hub Chat runtime guidance is injected once, on the first user turn,
@@ -1012,6 +1017,22 @@ class ProviderSession(ABC):
         # Resolve any pending turn completion so a caller awaiting the turn
         # does not hang after the transport is stopped.
         self._end_turn()
+
+    async def restart_for_recovery(self) -> None:
+        """Kill and relaunch the provider after a turn could not be cancelled.
+
+        Persistent app-servers (Codex/TraeX) resume the same conversation in
+        :meth:`start` (``thread/resume``), so the tab stays usable after a
+        wedged turn instead of failing closed. The dying process's stdout EOF
+        is marked expected via ``_client_requested_stop`` so the tailer treats
+        that EOF as a restart handoff rather than a crashed server. The flag is
+        deliberately left set: the push loop clears it only once the
+        replacement transport is confirmed running, which also covers the case
+        where the old queue's EOF sentinel is consumed slightly later.
+        """
+        self._client_requested_stop = True
+        await self.stop()
+        await self.start()
 
     def _invalidate_stdout_stream(self) -> None:
         """Retire the current stdout stream.
@@ -2254,10 +2275,16 @@ class CodexNativeSession(ProviderSession):
     async def cancel_active_turn(self) -> None:
         if not self._turn_in_flight:
             return
+        restart_required = False
         try:
             await self._send_request("turn/cancel", {})
         except Exception:
-            logger.exception("codex turn/cancel failed")
+            # The app-server is gone or not answering the cancel RPC, so
+            # turn/cancel cannot actually kill the blocked turn. Releasing the
+            # guard alone would wedge the tab again on the next send; tear the
+            # dead server down and resume the thread in a fresh process.
+            logger.exception("codex turn/cancel failed; restarting app-server")
+            restart_required = True
         # turn/cancel kills the blocked turn, so any pending question request is
         # dead — drop it so the next turn's answer is not also sent to a stale
         # request id the app-server is no longer waiting on.
@@ -2266,6 +2293,14 @@ class CodexNativeSession(ProviderSession):
         inflight = self._inflight_images
         self._inflight_images = []
         self._cleanup_images(inflight)
+        if restart_required:
+            try:
+                await self.restart_for_recovery()
+            except Exception:
+                # The dead server is already stopped; release the guard so the
+                # tab is not wedged on a 409. The next send (or the push loop's
+                # start retry) relaunches and resumes the thread.
+                logger.exception("codex app-server recovery restart failed")
         self._end_turn()
 
     async def _send_text(self, text: str) -> None:
@@ -2757,10 +2792,19 @@ class TraexNativeSession(CodexNativeSession):
                 )
                 await asyncio.wait_for(self._interrupted.wait(), timeout=_STARTUP_GRACE_S)
         except Exception:
-            # An unconfirmed interrupt must actually stop execution. EOF then
-            # makes the tailer fail closed and exposes Retry in Chat.
-            logger.exception("TraeX interrupt failed; stopping app-server")
-            await self.stop()
+            # An unconfirmed interrupt must actually stop execution, but simply
+            # killing the app-server used to fail the session closed (the EOF
+            # surfaced "Retry" and the tab could neither send nor resume). Kill
+            # and relaunch instead: the fresh app-server thread/resumes the same
+            # conversation, so the next message works.
+            logger.exception("TraeX interrupt failed; restarting app-server to resume the thread")
+            try:
+                await self.restart_for_recovery()
+            except Exception:
+                logger.exception(
+                    "TraeX app-server restart after failed interrupt failed for thread %s",
+                    self._thread_id,
+                )
         finally:
             self._pending_questions.clear()
             self._pending_permissions.clear()
@@ -2768,6 +2812,17 @@ class TraexNativeSession(CodexNativeSession):
             self._cleanup_images(self._inflight_images)
             self._inflight_images = []
             self._end_turn()
+
+    async def restart_for_recovery(self) -> None:
+        """Restart the app-server and forget the interrupted turn's filters.
+
+        ``_discard_turn_id`` belongs to the dead process's turn; in the resumed
+        process it would otherwise suppress unrelated notifications whose
+        turn-id happens to compare equal.
+        """
+        await super().restart_for_recovery()
+        self._discard_turn_id = None
+        self._interrupted.clear()
 
     async def stop(self) -> None:
         self._pending_permissions.clear()
