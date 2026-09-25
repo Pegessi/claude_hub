@@ -37,10 +37,26 @@ const { outputText: chatGroupsJs } = ts.transpileModule(chatGroupsSource, {
   },
 })
 const chatGroupsUrl = `data:text/javascript;base64,${Buffer.from(chatGroupsJs).toString('base64')}`
+// terminalReconnect is a value import too; it pulls `reactive` from vue, so
+// rewrite that specifier to the resolved runtime before embedding.
+const reconnectSource = await readFile(
+  new URL('../src/utils/terminalReconnect.ts', import.meta.url),
+  'utf8',
+)
+const { outputText: reconnectJs } = ts.transpileModule(reconnectSource, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2020,
+  },
+})
+const reconnectUrl = `data:text/javascript;base64,${Buffer.from(
+  reconnectJs.replace(/from\s+['"]vue['"]/g, `from ${JSON.stringify(vueUrl)}`),
+).toString('base64')}`
 const rewritten = outputText
   .replace(/from\s+['"]pinia['"]/g, `from ${JSON.stringify(piniaUrl)}`)
   .replace(/from\s+['"]vue['"]/g, `from ${JSON.stringify(vueUrl)}`)
   .replace(/from\s+['"]@\/utils\/chatGroups['"]/g, `from ${JSON.stringify(chatGroupsUrl)}`)
+  .replace(/from\s+['"]@\/utils\/terminalReconnect['"]/g, `from ${JSON.stringify(reconnectUrl)}`)
 const storeModule = await import(
   `data:text/javascript;base64,${Buffer.from(rewritten).toString('base64')}`
 )

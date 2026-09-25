@@ -563,6 +563,55 @@ const currentAgentStatus = computed<AgentRuntimeStatus | null>(
 const activeTabState = computed<'connecting' | 'timeout' | 'error' | 'loaded'>(() =>
   getConnectingState(props.tabId, loadedTabIds.value, timeoutTabIds.value, errorTabIds.value),
 )
+
+// ── Manual reconnect (TerminalPane refresh button) ─────────────────────────
+// The store owns the per-tab request/settle state and in-flight dedup. This
+// view watches the request nonce and performs the actual re-attach via the
+// SAME path as the overlay "Retry" button: reset connecting state, reassign
+// the iframe src (ttyd re-attaches the existing tmux session — same PTY, same
+// history, foreground process untouched), re-arm the connecting timer. The
+// iframe load/error handlers settle the request; success/error feedback is
+// the pane button color (+ error toast), then the status auto-clears.
+const reconnectStatus = computed(() => terminalStore.paneReconnectStatus(props.tabId))
+// Per-tab auto-clear timers: the user can reconnect tab A, switch to tab B
+// (A's iframe stays cached and loading), and reconnect B too — each settles
+// and clears independently.
+const reconnectClearTimers = new Map<string, number>()
+// Tabs this view has ever dispatched a manual reconnect for, so onUnmounted
+// can reset registry entries that would otherwise outlive the view.
+const reconnectTouchedTabs = new Set<string>()
+
+function scheduleReconnectClear(tabId: string, delayMs: number) {
+  const existing = reconnectClearTimers.get(tabId)
+  if (existing !== undefined) window.clearTimeout(existing)
+  const handle = window.setTimeout(() => {
+    reconnectClearTimers.delete(tabId)
+    terminalStore.clearPaneReconnect(tabId)
+  }, delayMs)
+  reconnectClearTimers.set(tabId, handle)
+}
+
+function clearReconnectFeedbackTimers() {
+  reconnectClearTimers.forEach(handle => window.clearTimeout(handle))
+  reconnectClearTimers.clear()
+}
+
+watch(
+  () => ({ tabId: props.tabId, nonce: reconnectStatus.value.nonce }),
+  (next, prev) => {
+    // Ignore the initial value, tab switches (each tab has its own nonce
+    // sequence), and stale/non-incrementing values.
+    if (!prev || prev.tabId !== next.tabId || next.nonce <= prev.nonce) return
+    reconnectTouchedTabs.add(next.tabId)
+    const previous = reconnectClearTimers.get(next.tabId)
+    if (previous !== undefined) {
+      window.clearTimeout(previous)
+      reconnectClearTimers.delete(next.tabId)
+    }
+    retryTab(next.tabId)
+  },
+)
+
 let terminalResizeObserver: ResizeObserver | null = null
 let keyboardResizeSettleTimer: number | null = null
 let keyboardResizeSettlesAt = 0
@@ -630,6 +679,15 @@ function cacheTabId(tabId: string) {
   evicted.forEach((id) => {
     resetTabConnectingState(id)
     delete iframeDocumentGeneration[id]
+    // A reconnect in flight for an evicted iframe can never settle (its load
+    // events belong to the destroyed document); cancel its button state and
+    // pending auto-clear so a later re-add doesn't inherit a stuck spinner.
+    const pendingTimer = reconnectClearTimers.get(id)
+    if (pendingTimer !== undefined) {
+      window.clearTimeout(pendingTimer)
+      reconnectClearTimers.delete(id)
+    }
+    terminalStore.clearPaneReconnect(id)
   })
   cachedTabIds.value = nextCached
   tabRecency.value = nextRecency
@@ -1238,6 +1296,16 @@ function onIframeLoad(event: Event, tabId: string) {
   // prior error state so the overlay is hidden.
   markLoaded(tabId)
 
+  // Settle a manual reconnect, if one was in flight for this tab. The
+  // re-attach completed (ttyd re-attached the same tmux session); flash
+  // success on the pane button briefly. No-op on ordinary initial loads.
+  // Not guarded by props.tabId: the user can switch panes mid-reconnect, and
+  // this tab's iframe stays cached in THIS view and still settles its own
+  // request when it loads.
+  if (terminalStore.settlePaneReconnect(tabId, 'success')) {
+    scheduleReconnectClear(tabId, 2000)
+  }
+
   try {
     // Fast input path: allocate a SAB + Atomics ring buffer shared between
     // the parent frame and this iframe. The parent writes keystroke records
@@ -1752,6 +1820,16 @@ ${buildIframeSabScript(tabId)}
  *  tab as errored and show the "Terminal failed to connect" state. */
 function onIframeError(_event: Event, tabId: string) {
   markError(tabId)
+  // Settle an in-flight manual reconnect as failed: the pane button turns red
+  // and an error toast is queued through the existing notification channel.
+  if (terminalStore.settlePaneReconnect(tabId, 'error')) {
+    terminalStore.pushNotification({
+      type: 'error',
+      message: 'Terminal reconnect failed — please try again',
+      autoDismissMs: 8000,
+    })
+    scheduleReconnectClear(tabId, 6000)
+  }
 }
 
 watch(colorScheme, () => {
@@ -1923,6 +2001,11 @@ onUnmounted(() => {
   // Cancel all pending connecting timeouts so they can't fire after unmount
   // and mutate state that's no longer rendered.
   clearAllTimers()
+  // Manual reconnect: drop any feedback timers and reset per-tab state so a
+  // future view mounting the same tab never inherits a stale spinner.
+  clearReconnectFeedbackTimers()
+  reconnectTouchedTabs.forEach(tabId => terminalStore.clearPaneReconnect(tabId))
+  reconnectTouchedTabs.clear()
 })
 </script>
 
