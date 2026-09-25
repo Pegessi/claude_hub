@@ -258,40 +258,37 @@ def test_profile_uses_stdin_shell_for_merlin_and_seedjob() -> None:
 
 
 @pytest.mark.asyncio
-async def test_merlin_listing_sends_command_on_stdin(
+async def test_gateway_listing_routes_through_pty_exec(
     client: AsyncClient, monkeypatch: MonkeyPatch
 ) -> None:
+    # A PTY gateway (merlin_dev) swallows argv/non-tty stdin; the listing route
+    # must drive it through the PTY-exec primitive instead of spawning argv ssh.
+    gateway = RemoteProfile(id="merlin_dev", name="merlin_dev", ssh_host="merlin_dev")
+    _patch_profile(monkeypatch, gateway)
+
     payload = {
         "current_path": "/root",
         "parent_path": "/",
         "items": [{"name": "opt", "path": "/root/opt", "is_dir": True, "is_symlink": False}],
     }
-    captured: list[list[str]] = []
-    proc = FakeProcess(stdout=json.dumps(payload).encode())
+    captured_command: list[str] = []
 
-    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
-        captured.append([str(a) for a in args])
-        assert kwargs.get("stdin") is not None
-        return proc
+    async def fake_pty_exec(profile, command):
+        captured_command.append(command)
+        return json.dumps(payload)
 
-    _patch_profile(
-        monkeypatch,
-        RemoteProfile(id="merlin_dev", name="merlin_dev", ssh_host="merlin_dev"),
-    )
-    monkeypatch.setattr(remote_api.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    async def boom(*args, **kwargs):
+        raise AssertionError("gateway listing must not use an argv ssh subprocess")
+
+    monkeypatch.setattr(remote_api, "pty_exec", fake_pty_exec)
+    monkeypatch.setattr(remote_api.asyncio, "create_subprocess_exec", boom)
 
     resp = await client.get("/api/remote/filesystem/list", params={"profile_id": "merlin_dev"})
 
     assert resp.status_code == 200
     assert resp.json()["current_path"] == "/root"
-    ssh_cmd = captured[0]
-    assert ssh_cmd[-1] == "merlin_dev"
-    assert "python3" not in " ".join(ssh_cmd)
-    assert proc.received_input is not None
-    assert proc.received_input.startswith(b"python3 -c")
-    assert proc.received_input.endswith(b"\n")
-    assert proc.received_input.count(b"\n") == 1
-    assert b"base64" in proc.received_input
+    # The command typed over the PTY is the ordinary multiline python listing.
+    assert "import json" in captured_command[0]
 
 
 def test_stdin_shell_listing_command_is_one_line() -> None:

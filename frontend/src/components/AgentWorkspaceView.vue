@@ -1555,14 +1555,14 @@
                   :key="profile.id"
                   :value="profile.id"
                 >
-                  {{ profile.name }}{{ profile.stdin_shell ? ' · listing only' : '' }}
+                  {{ profile.name }}{{ remoteProfileBadge(profile) }}
                 </option>
               </select>
               <p
-                v-if="selectedRemoteProfile?.stdin_shell"
+                v-if="!remoteInteractive(selectedRemoteProfile)"
                 class="modal-hint"
               >
-                Listing-only alias: new remote agents need a PTY host such as mac_mini.
+                Browse-only alias: new remote agents need an interactive host (normal or PTY gateway).
               </p>
             </div>
             <div class="modal-field">
@@ -1853,14 +1853,14 @@
                 :key="profile.id"
                 :value="profile.id"
               >
-                {{ profile.name }}{{ profile.stdin_shell ? ' · listing only' : '' }}
+                {{ profile.name }}{{ remoteProfileBadge(profile) }}
               </option>
             </select>
             <p
-              v-if="remoteProfiles.find(profile => profile.id === workspaceForm.resident_agent_remote_profile_id)?.stdin_shell"
+              v-if="!remoteInteractive(remoteProfiles.find(profile => profile.id === workspaceForm.resident_agent_remote_profile_id))"
               class="modal-hint"
             >
-              This alias has no remote TTY. Resident agents need a PTY host such as mac_mini.
+              Browse-only alias: resident agents need an interactive host (normal or PTY gateway).
             </p>
             <p
               v-else-if="remoteProfiles.length === 0"
@@ -2652,14 +2652,14 @@
                 :key="profile.id"
                 :value="profile.id"
               >
-                {{ profile.name }}{{ profile.stdin_shell ? ' · listing only' : '' }}
+                {{ profile.name }}{{ remoteProfileBadge(profile) }}
               </option>
             </select>
             <p
-              v-if="selectedAgentRemoteProfile?.stdin_shell"
+              v-if="!remoteInteractive(selectedAgentRemoteProfile)"
               class="modal-hint"
             >
-              This alias has no remote TTY. Browse directories here; remote agents need a PTY host such as mac_mini.
+              Browse-only alias. Pick an interactive host (normal or PTY gateway such as merlin_dev) for remote agents.
             </p>
             <p
               v-else-if="remoteProfiles.length === 0"
@@ -3004,6 +3004,7 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
+import { remoteInteractive, remoteProfileBadge } from '@/utils/remoteProfiles'
 import { DEFAULT_ABORT_REASON, resolveAbortReason } from '@/utils/taskAbort'
 import {
   awaitingHumanAcceptance as taskAcceptanceAwaiting,
@@ -3842,7 +3843,7 @@ const isAgentOptionsCreateDisabled = computed(
     isLoading.value ||
     isPending('agent:create') ||
     (agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id) ||
-    (agentOptionsForm.target === 'remote' && Boolean(selectedAgentRemoteProfile.value?.stdin_shell))
+    (agentOptionsForm.target === 'remote' && !remoteInteractive(selectedAgentRemoteProfile.value))
 )
 
 function taskActionKey(action: string, taskId: string | null | undefined) {
