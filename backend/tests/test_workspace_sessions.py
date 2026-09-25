@@ -188,6 +188,59 @@ async def test_managed_session_creation_never_inherits_chat_tab_surface(
     assert session.chat_mode == ChatMode.DEFAULT
 
 
+@pytest.mark.asyncio
+async def test_managed_session_records_requested_env_preset(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """The requested preset identity is persisted on the session so later
+    sessions (auto-created reviewers) can inherit it. The merged KEY=VALUE
+    pairs are forwarded to the launch tab; the preset name itself is non-secret
+    and survives a state reload."""
+    repo = tmp_path / "repo-env-preset"
+    repo.mkdir()
+    client = TestClient(app)
+    workspace_payload = _make_workspace(client, repo)
+    workspace = workspace_manager.workspaces[workspace_payload["id"]]
+    launched: dict[str, object] = {}
+
+    async def fake_create_tab(**kwargs: object) -> TerminalTab:
+        launched.update(kwargs)
+        return TerminalTab(  # type: ignore[call-arg]
+            id="mock-preset-tab",
+            name=str(kwargs["name"]),
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.CLAUDE,
+            target=ExecutionTarget.LOCAL,
+            port=12347,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=workspace.id,
+            workspace_name=workspace.name,
+            workspace_role=WorkspaceSessionRole.WORKER,
+            env=kwargs["env"],  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+
+    session = await workspace_manager._create_managed_session(
+        workspace,
+        EnsureWorkspaceAgentRequest(
+            agent_type=AgentType.CLAUDE,
+            role=WorkspaceSessionRole.WORKER,
+            env={"FOO": "bar"},
+            env_preset="day1",
+        ),
+    )
+
+    assert session.env_preset == "day1"
+    assert launched["env"] == {"FOO": "bar"}
+
+    # Round-trips through persistence (optional field; older sessions load None).
+    reloaded = ManagedSession.model_validate(session.model_dump(mode="json"))
+    assert reloaded.env_preset == "day1"
+
+
 def test_agent_create_rolls_back_session_when_bootstrap_submit_fails(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

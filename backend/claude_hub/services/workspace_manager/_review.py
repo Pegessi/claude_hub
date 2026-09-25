@@ -90,6 +90,15 @@ class _ReviewMixin:
         )
         if reviewer:
             return reviewer
+        # Inherit the worker's env preset so an auto-created reviewer launches
+        # with the same (working) provider env as the session that produced the
+        # task. Without this the reviewer starts on the default env, which for
+        # preset-only credentials (e.g. a custom ANTHROPIC_BASE_URL/API key)
+        # fails at 401 and can never file a review. A worker with no preset
+        # yields None, which correctly keeps the reviewer on the default env;
+        # reused reviewers (_first_available_reviewer above) are untouched.
+        worker = self.sessions.get(task.session_id) if task.session_id else None
+        worker_env_preset = worker.env_preset if worker is not None else None
         return await self.ensure_workspace_agent(
             workspace.id,
             EnsureWorkspaceAgentRequest(
@@ -104,6 +113,7 @@ class _ReviewMixin:
                 remote_reconnect=placement["remote_reconnect"],
                 ephemeral=True,
                 caller_owned_ephemeral=False,
+                env_preset=worker_env_preset,
             ),
         )
 
