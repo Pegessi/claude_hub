@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import errno
 import glob
 import hashlib
@@ -27,15 +28,21 @@ from ..models import (
     AgentType,
     ChatMode,
     ExecutionTarget,
+    RemoteProfile,
     SessionKind,
     TerminalAgentStatus,
     TerminalTab,
     WorkspaceSessionRole,
 )
 from ..models.schemas import CHAT_REMOTE_UNSUPPORTED
+from . import pty_exec
 from ._cursor_verify import _cursor_id_exists
 from .agent_status_markers import codex_output_is_working
-from .remote_profiles import reject_stdin_shell_interactive, remote_profile_manager
+from .remote_profiles import (
+    profile_capabilities,
+    reject_unsupported_interactive,
+    remote_profile_manager,
+)
 from .runtime_isolation import resolve_runtime_home, tmux_command, tmux_socket_args
 
 logger = logging.getLogger(__name__)
@@ -2547,13 +2554,20 @@ asyncio.run(_main())
             raise RuntimeError(error or f"tmux respawn-pane failed with code {proc.returncode}")
 
     def _remote_ssh_target(self) -> tuple[str, int]:
+        profile = self._remote_profile()
+        host = f"{profile.user}@{profile.ssh_host}" if profile.user else profile.ssh_host
+        return host, profile.port
+
+    def _remote_profile(self) -> RemoteProfile:
         if not self.remote_profile_id:
             raise ValueError("Remote tab requires remote_profile_id")
         profile = remote_profile_manager.get_profile(self.remote_profile_id)
         if not profile:
             raise ValueError(f"Remote profile not found: {self.remote_profile_id}")
-        host = f"{profile.user}@{profile.ssh_host}" if profile.user else profile.ssh_host
-        return host, profile.port
+        return profile
+
+    def _remote_is_pty_gateway(self) -> bool:
+        return profile_capabilities(self._remote_profile()).is_pty_gateway
 
     @staticmethod
     def _remote_path_bootstrap() -> str:
@@ -2589,7 +2603,21 @@ asyncio.run(_main())
         cmd.extend([host, remote_command])
         return cmd
 
-    def _build_remote_attach_command(self) -> str:
+    def _build_remote_attach_script(self, *, bootstrap_file: Optional[str] = None) -> str:
+        """The remote shell script that ensures/attaches the detached tmux.
+
+        Shared by the normal argv bootstrap and the PTY-gateway typed bootstrap
+        so both transports produce identical remote session semantics.
+
+        On a PTY gateway the launcher passes the secret-bearing temp script's
+        own path as ``$1`` (``bootstrap_file``). The script arms an EXIT/HUP trap
+        that removes that file and explicitly deletes it as soon as the detached
+        tmux pane exists — before ``exec tmux attach`` — so the token-bearing
+        file is never on disk for the (potentially whole-session) attach and is
+        cleaned up even if the connection is SIGHUP'd mid-bootstrap. For a normal
+        argv launch ``$1`` is unset and these are no-ops.
+        """
+
         remote_session = self.tmux_session
         cwd = self.remote_cwd or self.cwd or "~"
         start_command = self._with_env(self._agent_start_command())
@@ -2599,18 +2627,35 @@ asyncio.run(_main())
         bootstrap_path = self._remote_path_bootstrap()
         checks: list[str] = []
 
+        # Arm temp-file self-cleanup first so a SIGHUP at any point during
+        # bootstrap still removes the secret-bearing file. Guarded on $1 being
+        # set (gateway typed launch only); the normal argv path leaves it empty.
+        cleanup_preamble = (
+            '__chp_bootstrap_file="${1:-}"; '
+            "__chp_cleanup() { "
+            '[ -n "${__chp_bootstrap_file:-}" ] && '
+            'rm -f -- "$__chp_bootstrap_file" 2>/dev/null || true; '
+            "}; "
+            "trap __chp_cleanup EXIT HUP INT TERM"
+        )
+        # Detached pane now exists and inherited its env at new-session time;
+        # the on-disk secret is no longer needed. Runs before exec attach.
+        cleanup_before_attach = "__chp_cleanup"
+
         direct_start_script = "; ".join(
             [
                 "printf 'Remote tmux not found in PATH; starting without remote tmux persistence.\\n'",
                 start_command,
                 "status=$?",
                 "printf '\\nRemote agent exited with code %s. Dropping to shell.\\n' \"$status\"",
+                cleanup_before_attach,
                 f"exec {shell} -l",
             ]
         )
 
-        script = "; ".join(
+        return "; ".join(
             [
+                cleanup_preamble,
                 bootstrap_path,
                 *self._env_export_commands(),
                 *checks,
@@ -2623,12 +2668,15 @@ asyncio.run(_main())
                 f"tmux set-option -t {quoted_session} focus-events on >/dev/null 2>&1 || true; "
                 f"tmux set-option -t {quoted_session} history-limit 100000 >/dev/null 2>&1 || true; "
                 f"tmux set-window-option -t {quoted_session} mode-keys vi >/dev/null 2>&1 || true; "
+                f"{cleanup_before_attach}; "
                 f"exec tmux attach-session -t {quoted_session}; "
                 "fi",
                 direct_start_script,
             ]
         )
-        return self._remote_shell_command(script)
+
+    def _build_remote_attach_command(self) -> str:
+        return self._remote_shell_command(self._build_remote_attach_script())
 
     @classmethod
     def _remote_cwd_command(cls, cwd: str, shell: str) -> str:
@@ -2652,7 +2700,44 @@ asyncio.run(_main())
             return "~/" + shlex.quote(cwd[2:])
         return shlex.quote(cwd)
 
+    def _build_pty_gateway_launcher(self) -> list[str]:
+        """Launcher for a PTY-gateway host (argv is swallowed).
+
+        Runs the transparent bridge under the local pane PTY. The bridge holds
+        an argv-less ``ssh -tt`` (plus the ``-R`` report forward), waits for the
+        real remote prompt, types the base64 bootstrap, then proxies raw bytes —
+        and re-runs the whole handshake on every SSH reconnect.
+        """
+
+        host, port = self._remote_ssh_target()
+        bootstrap_b64 = base64.b64encode(self._build_remote_attach_script().encode("utf-8")).decode(
+            "ascii"
+        )
+        bridge = [
+            sys.executable,
+            "-m",
+            "claude_hub.services.pty_gateway_bridge",
+            "--target",
+            host,
+            "--port",
+            str(port),
+            "--bootstrap-b64",
+            bootstrap_b64,
+            "--reconnect" if self.remote_reconnect else "--no-reconnect",
+        ]
+        if self.remote_forward_port:
+            bridge.extend(
+                [
+                    "--remote-forward",
+                    f"{self.remote_forward_port}:{settings.port}",
+                ]
+            )
+        user_shell = os.environ.get("SHELL", "/bin/bash")
+        return [user_shell, "-lc", shlex.join(bridge)]
+
     def _build_remote_launcher(self) -> list[str]:
+        if self._remote_is_pty_gateway():
+            return self._build_pty_gateway_launcher()
         host, port = self._remote_ssh_target()
         user_shell = os.environ.get("SHELL", "/bin/bash")
         ssh_parts = ["ssh", "-tt"]
@@ -2751,6 +2836,13 @@ asyncio.run(_main())
             logger.warning(f"Failed to configure tmux for tab {self.tab_id}: {e}")
 
     async def _run_remote_capture_command(self, remote_command: str) -> str:
+        if self._remote_is_pty_gateway():
+            # A gateway ignores the argv channel; type the one-shot into a driven
+            # PTY and read the guarded stdout back.
+            try:
+                return await pty_exec.pty_exec(self._remote_profile(), remote_command)
+            except pty_exec.PtyExecError as exc:
+                raise RuntimeError(f"remote PTY exec failed: {exc}") from exc
         proc = await asyncio.create_subprocess_exec(
             *self._build_remote_ssh_command(remote_command),
             stdout=asyncio.subprocess.PIPE,
@@ -3436,7 +3528,7 @@ class TTYDManager:
         if session_kind == SessionKind.CHAT and target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
         if target == ExecutionTarget.REMOTE:
-            reject_stdin_shell_interactive(
+            reject_unsupported_interactive(
                 remote_profile_manager.get_profile(remote_profile_id or "")
             )
         # session_kind is authoritative: only an explicit SessionKind.CHAT
@@ -4421,7 +4513,7 @@ class TTYDManager:
             next_profile_id = (
                 remote_profile_id if remote_profile_id is not None else process.remote_profile_id
             )
-            reject_stdin_shell_interactive(
+            reject_unsupported_interactive(
                 remote_profile_manager.get_profile(next_profile_id or "")
             )
         if target is not None:
