@@ -77,7 +77,7 @@
         <div
           v-for="{ turn, ordinal } in visibleTurns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, ordinal, erroredAttachments.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
+          v-memo="[turn.renderRevision, ordinal, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
           class="structured-turn"
           :data-turn-key="turn.key"
         >
@@ -419,6 +419,51 @@
                   收起
                 </button>
               </details>
+            </div>
+
+            <!-- Agent-produced local image (Codex/TraeX view_image, Claude
+                 image Read). Render the picture itself; click opens the shared
+                 lightbox. The scoped endpoint serves only whitelisted images
+                 inside the tab cwd. A deleted/moved/non-image file degrades to
+                 a path-only placeholder via the @error handler. -->
+            <div
+              v-else-if="part.kind === 'agent_image'"
+              class="conversation-row conversation-row--assistant conversation-row--agent-image"
+            >
+              <span
+                class="conversation-avatar conversation-avatar--tool"
+                aria-hidden="true"
+              >⌘</span>
+              <div class="agent-image-card">
+                <button
+                  v-if="!erroredAgentImages.has(part.key)"
+                  type="button"
+                  class="turn-attachment-button agent-image-button"
+                  :aria-label="`Open image ${agentImageBasename(part.path)}`"
+                  @click="openImageLightbox(agentImageUrl(part.path), agentImageBasename(part.path), $event)"
+                >
+                  <img
+                    :src="agentImageUrl(part.path)"
+                    class="turn-attachment-img"
+                    :alt="agentImageBasename(part.path)"
+                    loading="lazy"
+                    decoding="async"
+                    @error="onAgentImageError($event, part.key)"
+                  >
+                </button>
+                <div
+                  v-else
+                  class="turn-attachment-placeholder agent-image-missing"
+                >
+                  图片不可用
+                </div>
+                <div
+                  class="agent-image-path"
+                  :title="part.path"
+                >
+                  {{ agentImageBasename(part.path) }}
+                </div>
+              </div>
             </div>
 
             <div
@@ -1690,6 +1735,10 @@ const modeMenuEl = ref<HTMLElement | null>(null)
 /** Attachment ids whose preview fetch returned 404/410 (evicted or never
  *  cached). Rendered as a visible "Preview expired" placeholder. */
 const erroredAttachments = ref<Set<string>>(new Set())
+/** Agent-image part keys whose scoped image fetch failed (the agent deleted
+ *  or moved the file, or it is no longer an allowed image). Those blocks
+ *  degrade to a stable path-only placeholder instead of a broken icon. */
+const erroredAgentImages = ref<Set<string>>(new Set())
 const imageLightboxUrl = ref<string | null>(null)
 const imageLightboxAlt = ref('')
 const lightboxCloseEl = ref<HTMLButtonElement | null>(null)
@@ -2074,6 +2123,26 @@ function removeAttachment(att: DraftAttachment) {
 function attachmentUrl(attachmentId: string): string {
   const encId = encodeURIComponent(attachmentId)
   return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/attachments/${encId}`
+}
+
+/**
+ * Build the scoped URL for an agent-produced local image (view_image / image
+ * Read). The backend resolves ``path`` only inside the tab's working dir and
+ * validates magic bytes before serving, so this is not an arbitrary file read.
+ */
+function agentImageUrl(path: string): string {
+  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/agent-image?path=${encodeURIComponent(path)}`
+}
+
+/** Short file name for the image block's subtitle (full path stays on hover). */
+function agentImageBasename(path: string): string {
+  const clean = path.split(/[?#]/, 1)[0].replace(/\\/g, '/')
+  const parts = clean.split('/')
+  return parts[parts.length - 1] || clean
+}
+
+function onAgentImageError(_event: Event, partKey: string): void {
+  erroredAgentImages.value = new Set(erroredAgentImages.value).add(partKey)
 }
 
 /**
@@ -3741,6 +3810,30 @@ onUnmounted(() => {
 
 .turn-attachment-button:hover .turn-attachment-img {
   transform: scale(1.025);
+}
+
+/* Agent-produced image block (view_image). Reuses the attachment thumbnail
+   chrome so user uploads and agent screenshots read as the same object. */
+.agent-image-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.agent-image-path {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ch-font-mono);
+  font-size: var(--ch-font-size-xs);
+  color: var(--ch-color-text-muted);
+}
+
+.agent-image-missing {
+  width: clamp(72px, 8vw, 88px);
+  cursor: default;
 }
 
 .turn-attachment-placeholder {

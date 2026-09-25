@@ -1,4 +1,5 @@
 import type { AgentStreamEvent } from '@/types'
+import { agentImagePathFromTool } from '@/utils/agentImage'
 import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
 import { formatClockTime, formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
 import type { SubagentView } from '@/utils/subagentTool'
@@ -11,6 +12,12 @@ export interface TimelineTool {
   status: 'running' | 'completed' | 'failed' | 'cancelled'
   argsText: string
   resultText: string
+  /** Local path when this call is an agent image view (Codex/TraeX
+   *  ``view_image`` or a Claude ``Read`` of an image). When set, the reducer
+   *  emits a dedicated ``agent_image`` part instead of grouping the call in a
+   *  generic tool card. The endpoint serves the bytes after validating that
+   *  the path stays inside the session cwd and really is an image. */
+  imagePath?: string
   /** Present only for confirmed sub-agent-spawn tools (Claude ``Agent``,
    *  Cursor ``Task``, TraeX ``spawnAgent``); the renderer gives these their own
    *  card instead of the generic grouped tool block. */
@@ -77,6 +84,11 @@ export type TimelinePart =
   // the pane can render a dedicated Codex-style sub-agent card. Carries the
   // same TimelineTool (status/result mutate in place) plus the parsed view.
   | { kind: 'subagent'; key: string; tool: TimelineTool }
+  // An agent-produced local image (view_image / image Read), split out of the
+  // tool groups so the pane renders the actual picture (click → lightbox)
+  // instead of a raw path string. ``tool`` carries the live status; ``path``
+  // is the filesystem path the scoped agent-image endpoint serves.
+  | { kind: 'agent_image'; key: string; tool: TimelineTool; path: string }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
   | { kind: 'error'; key: string; message: string }
   | { kind: 'status'; key: string; text: string; messageId?: string | null }
@@ -409,6 +421,9 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       // only event that carries them (the start event) and rendered on their
       // own card. A null view means this is an ordinary tool and keeps grouping.
       const subagent = parseSubagent(toolName, event.payload.args)
+      // Agent image views (view_image / image Read) likewise split out of the
+      // generic tool groups so the pane renders the picture, not a path string.
+      const imagePath = agentImagePathFromTool(toolName, argsRecord)
       const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
       if (!toolMap.has(identity)) {
         const tool: TimelineTool = {
@@ -418,12 +433,23 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           status: 'running',
           argsText,
           resultText: '',
+          ...(imagePath !== null ? { imagePath } : {}),
           ...(subagent ? { subagent } : {}),
         }
         toolMap.set(identity, tool)
         turn.tools.push(tool)
         if (toolName !== 'AskQuestion' && toolName !== 'AskUserQuestion' && toolName !== 'request_user_input') {
-          if (subagent) {
+          if (imagePath !== null) {
+            // An agent-produced image gets its own block (thumbnail + lightbox).
+            // It never merges into a neighbouring tool group; tools on either
+            // side form their own groups.
+            turn.parts.push({
+              kind: 'agent_image',
+              key: `agent-image-${identity}`,
+              tool,
+              path: imagePath,
+            })
+          } else if (subagent) {
             // Each sub-agent is an independent Codex-style card. It is never
             // merged into a neighbouring tool group and never breaks one: the
             // normal tools before and after it simply form separate groups.
@@ -609,6 +635,7 @@ function isProcessPart(part: TimelinePart): boolean {
     part.kind === 'tool' ||
     part.kind === 'tool_group' ||
     part.kind === 'subagent' ||
+    part.kind === 'agent_image' ||
     (part.kind === 'text' && part.fromPlan === true)
   )
 }
@@ -716,7 +743,9 @@ export function countProcessSteps(process: TimelinePart[]): number {
   let steps = 0
   for (const part of process) {
     if (part.kind === 'tool_group') steps += part.tools.length
-    else if (part.kind === 'tool' || part.kind === 'subagent') steps += 1
+    else if (part.kind === 'tool' || part.kind === 'subagent' || part.kind === 'agent_image') {
+      steps += 1
+    }
   }
   return steps
 }

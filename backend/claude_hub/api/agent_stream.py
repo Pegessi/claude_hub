@@ -27,6 +27,7 @@ import json
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, NoReturn, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -42,6 +43,7 @@ from ..models import (
     AgentStreamEventType,
     AgentType,
     ChatMode,
+    ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
     ScheduledTask,
@@ -58,6 +60,7 @@ from ..services.agent_stream import (
     get_adapter_for_session,
 )
 from ..services.agent_stream.attachments import AgentStreamAttachmentStore
+from ..services.agent_stream.attachments import _magic_mime as sniff_image_mime
 from ..services.agent_stream.base import discover_source_cached
 
 logger = logging.getLogger(__name__)
@@ -1616,6 +1619,160 @@ async def get_tab_attachment(
         headers={
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": _ATTACHMENT_CACHE_CONTROL,
+        },
+    )
+
+
+# ── Agent-produced local images (view_image) ────────────────────────────────
+#
+# Unlike user-uploaded attachments, images an agent produces (a Codex/TraeX
+# ``view_image`` tool call or a Claude ``Read`` of an image) already live on
+# disk at an absolute path inside the session's working area. The browser needs
+# a scoped URL to render them. This endpoint is deliberately a *restricted*
+# reader, not an arbitrary file-read primitive:
+#
+#   1. tab/session ownership — the route is keyed by tab id and resolves the
+#      live tab session exactly like the attachment endpoints;
+#   2. directory allowlist — the resolved real path must sit under the
+#      session's own working directory (``session.workspace_path`` / tab
+#      launch cwd). Absolute escapes, ``..`` traversal, and symlink escapes
+#      are rejected after full symlink resolution;
+#   3. content allowlist — the file is opened and its magic bytes must sniff as
+#      a whitelisted image (PNG/JPEG/GIF/WebP). A text file under cwd is
+#      refused regardless of its extension;
+#   4. size bound — agent screenshots are small; a hard read cap prevents this
+#      being used to pull large files;
+#   5. no information leak — every rejection (bad path, traversal, missing,
+#      non-image, too large) returns the same opaque 404 with ``nosniff`` and
+#      ``no-store``.
+_AGENT_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB
+_AGENT_IMAGE_CACHE_CONTROL = "private, max-age=300"
+
+
+def _agent_image_not_available() -> HTTPException:
+    """Uniform opaque 404 for every denied agent-image request."""
+    return HTTPException(
+        status_code=404,
+        detail="image not available",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": _ATTACHMENT_NO_STORE,
+        },
+    )
+
+
+def _agent_image_allowed_roots(session: ManagedSession) -> List[Path]:
+    """Resolved directories an agent image is permitted to live under.
+
+    Scope is the session/tab's own working area — never the whole disk. For a
+    terminal tab this is the launch ``cwd``; for a managed agent launched from
+    an isolated feature worktree (``--cwd .``) it is that worktree. Remote
+    sessions expose no local root and therefore cannot read through this path.
+    """
+    if getattr(session, "target", ExecutionTarget.LOCAL) != ExecutionTarget.LOCAL:
+        return []
+    root_raw = session.workspace_path
+    if not root_raw:
+        return []
+    try:
+        root = Path(root_raw).expanduser().resolve()
+    except (OSError, ValueError):
+        return []
+    return [root]
+
+
+def _resolve_agent_image(session: ManagedSession, raw_path: str) -> Tuple[bytes, str]:
+    """Validate *raw_path* as an agent image and return ``(bytes, mime)``.
+
+    Raises the opaque 404 from :func:`_agent_image_not_available` for an empty
+    path, traversal/absolute/symlink escape, a missing file, a non-regular
+    file, an oversized file, or non-image bytes. All containment checks happen
+    after ``Path.resolve(strict=True)`` so symlinks are fully expanded before
+    the allowlist comparison.
+    """
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise _agent_image_not_available()
+    # Reject control characters / NULs before touching the filesystem.
+    if any(ord(ch) < 0x20 for ch in raw_path):
+        raise _agent_image_not_available()
+
+    roots = _agent_image_allowed_roots(session)
+    if not roots:
+        raise _agent_image_not_available()
+
+    try:
+        candidate = Path(raw_path).expanduser()
+    except (OSError, ValueError):
+        raise _agent_image_not_available() from None
+
+    try:
+        is_absolute = candidate.is_absolute()
+    except OSError:
+        is_absolute = False
+
+    # Relative paths are anchored at the session root only. An absolute path is
+    # accepted solely if it is already inside that root (the normal case —
+    # view_image emits an absolute path under cwd); otherwise it can never be
+    # relative_to() a root and is denied below.
+    anchors = [candidate] if is_absolute else [root / candidate for root in roots]
+
+    resolved: Optional[Path] = None
+    for anchor in anchors:
+        try:
+            real = anchor.resolve(strict=True)
+        except OSError:
+            continue
+        # Only regular files (resolve() follows symlinks, so a link that points
+        # outside the root fails the relative_to check that follows).
+        if not real.is_file():
+            continue
+        for root in roots:
+            try:
+                real.relative_to(root)
+            except ValueError:
+                continue
+            resolved = real
+            break
+        if resolved is not None:
+            break
+
+    if resolved is None:
+        raise _agent_image_not_available()
+
+    try:
+        with open(resolved, "rb") as handle:
+            data = handle.read(_AGENT_IMAGE_MAX_BYTES + 1)
+    except OSError:
+        raise _agent_image_not_available() from None
+
+    if len(data) > _AGENT_IMAGE_MAX_BYTES:
+        raise _agent_image_not_available()
+
+    mime = sniff_image_mime(data)
+    if mime is None:
+        raise _agent_image_not_available()
+    return data, mime
+
+
+@router.get("/tabs/{tab_id}/stream/agent-image")
+async def get_tab_agent_image(
+    tab_id: str,
+    path: str = Query(..., max_length=4096, description="Absolute or cwd-relative image path"),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Serve an agent-produced image that lives inside the tab's working dir.
+
+    Restricted reader for ``view_image``-style tool output — see
+    :func:`_resolve_agent_image` for the containment and content allowlist.
+    """
+    session = _terminal_tab_session_or_404(tab_id)
+    data, mime = _resolve_agent_image(session, path)
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": _AGENT_IMAGE_CACHE_CONTROL,
         },
     )
 
