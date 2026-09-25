@@ -242,6 +242,9 @@ interface ReducerState {
   toolsByTurn: Map<string, Map<string, TimelineTool>>
   textChunksByTurn: Map<string, { text: string; count: number }[]>
   legacyCurrent: TimelineTurn | null
+  /** Tool/approval call ids already attributed to a turn with a real turn id.
+   *  A later null-turn event carrying one of these ids is a provider replay. */
+  attributedToolIds: Set<string>
 }
 
 function createReducerState(): ReducerState {
@@ -251,6 +254,7 @@ function createReducerState(): ReducerState {
     toolsByTurn: new Map(),
     textChunksByTurn: new Map(),
     legacyCurrent: null,
+    attributedToolIds: new Set(),
   }
 }
 
@@ -278,6 +282,22 @@ function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn
  *  mutates the turn. No-op events (empty text, exact multi-chunk replay,
  *  duplicate tool) leave the revision unchanged so ``v-memo`` can skip
  *  re-rendering the turn. */
+// Record types that carry a tool/approval call identity usable for replay
+// detection. Mirrors the backend's persistent-transport orphan filter.
+const REPLAY_IDENTITY_TYPES = new Set([
+  'tool_call_started',
+  'tool_call_completed',
+  'approval_required',
+  'approval_resolved',
+])
+
+function replayToolIdentity(event: AgentStreamEvent): string | null {
+  if (!REPLAY_IDENTITY_TYPES.has(event.type)) return null
+  const fromPayload = event.payload.tool_call_id
+  if (typeof fromPayload === 'string' && fromPayload) return fromPayload
+  return typeof event.call_id === 'string' && event.call_id ? event.call_id : null
+}
+
 function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
   // Provider control-plane notifications (for example
   // ``thread/goal/cleared``) intentionally carry structured metadata without
@@ -287,7 +307,23 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
   // composer after the real turn had already completed.
   if (event.type === 'status' && !statusText(event)) return
 
+  // Provider replay guard: a persistent app-server (TraeX/Codex) can re-emit
+  // an item record long after the turn it belonged to terminalized — the
+  // observed wedge was a duplicate nested code-mode item/completed arriving
+  // hours later during background/goal execution, stamped with no turn id. If
+  // the record's tool/approval identity was already attributed to a turn with
+  // a real id, this is a replay: drop it so it cannot mint a fresh
+  // never-completed legacy turn and pin the composer (Stop/queue lock).
+  if (!event.turn_id) {
+    const identity = replayToolIdentity(event)
+    if (identity !== null && state.attributedToolIds.has(identity)) return
+  }
+
   const turn = resolveTurn(state, event)
+  if (event.turn_id) {
+    const identity = replayToolIdentity(event)
+    if (identity !== null) state.attributedToolIds.add(identity)
+  }
   const toolMapKey = turn.turnId ?? turn.key
   let toolMap = state.toolsByTurn.get(toolMapKey)
   if (!toolMap) {
