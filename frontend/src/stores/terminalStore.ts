@@ -132,8 +132,28 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
   // Mobile slide-out session drawer visibility. Not persisted — it defaults to
-  // closed on load. Set directly from components (TabBar opens, App closes).
+  // closed on load. Use the open/close/toggle/select actions from components;
+  // selecting a session always dismisses the drawer.
   const mobileDrawerOpen = ref(false)
+
+  function openMobileDrawer() {
+    mobileDrawerOpen.value = true
+  }
+
+  function closeMobileDrawer() {
+    mobileDrawerOpen.value = false
+  }
+
+  function toggleMobileDrawer() {
+    mobileDrawerOpen.value = !mobileDrawerOpen.value
+  }
+
+  // Row tap inside the mobile drawer (pinned or regular group): switch the
+  // active session and auto-close so the chosen session is immediately visible.
+  function selectMobileTab(tabId: string) {
+    setActiveTab(tabId)
+    mobileDrawerOpen.value = false
+  }
   // Soft-deleted tabs. Kept separately from `tabs` (which only holds active
   // tabs) so the archive browser can list them without polluting the grid.
   const archivedTabs = ref<TerminalTab[]>([])
@@ -740,6 +760,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     activePaneIsChat,
     sidebarCollapsed,
     mobileDrawerOpen,
+    openMobileDrawer,
+    closeMobileDrawer,
+    toggleMobileDrawer,
+    selectMobileTab,
     archivedTabs,
     isLoadingArchived,
     fetchTabs,
