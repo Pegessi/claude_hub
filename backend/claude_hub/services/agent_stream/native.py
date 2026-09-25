@@ -1812,6 +1812,28 @@ class ClaudeNativeSession(ProviderSession):
 
 # ── Codex ────────────────────────────────────────────────────────────────────
 
+# Opt-in flag that lifts the Codex/TraeX workspace-write sandbox's network ban.
+#
+# The macOS codex app-server (verified 0.156.1) runs a seatbelt profile that
+# denies ALL outbound TCP by default — including loopback — so a Hub Chat agent
+# cannot reach the local Hub (``claude-hub schedule`` / reading sessions) and
+# fails with ``OSError: [Errno 1] Operation not permitted``. The app-server's
+# per-turn ``sandboxPolicy.networkAccess`` is a STRICT BOOLEAN: true grants
+# FULL outbound access; there is NO loopback-only tier (the string variants
+# ``enabled``/``restricted``/``loopback``/``local`` are all rejected with
+# "expected a boolean"). We therefore never open network by default: it is
+# enabled only when this env key is set to a truthy value, so the user opts in
+# knowing the engine grants full egress rather than silently opening every Chat
+# to the network. Solo (``dangerFullAccess``) already grants full access with
+# no flag at all; plan (``readOnly``) never executes shell commands.
+HUB_CHAT_NETWORK_ENV = "HUB_CHAT_ALLOW_NETWORK"
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on", "y"})
+
+
+def _env_flag(env: Dict[str, str], key: str) -> bool:
+    value = env.get(key)
+    return isinstance(value, str) and value.strip().lower() in _TRUTHY_ENV_VALUES
+
 
 class CodexNativeSession(ProviderSession):
     """Codex native transport via the app-server JSON-RPC stdio protocol.
@@ -2035,11 +2057,57 @@ class CodexNativeSession(ProviderSession):
         # ownership and accidentally enable two continuation schedulers.
         return caps.model_copy(update={"goal_execution_owner": "hub_managed"})
 
+    def _sandbox_plan_solo(self) -> Tuple[bool, bool]:
+        """Return ``(plan, solo)`` honouring the existing Chat mode semantics.
+
+        Plan forces read-only regardless of the solo toggle (mirrors Claude's
+        ``--permission-mode plan`` and TraeX); solo therefore only applies in
+        the default mode.
+        """
+        plan = self._current_mode == ChatMode.PLAN.value
+        solo = bool(self.session.solo_mode) and not plan
+        return plan, solo
+
+    @staticmethod
+    def _sandbox_type(plan: bool, solo: bool) -> str:
+        if plan:
+            return "readOnly"
+        if solo:
+            return "dangerFullAccess"
+        return "workspaceWrite"
+
+    def _network_access_enabled(self, plan: bool, solo: bool) -> bool:
+        """Whether to attach ``networkAccess: true`` to the sandbox policy.
+
+        - plan/readOnly: never — the model issues no shell commands at all.
+        - solo/dangerFullAccess: not needed — that tier already permits full
+          egress (verified against codex 0.156.1 seatbelt).
+        - default/workspaceWrite: only on an explicit
+          ``HUB_CHAT_ALLOW_NETWORK`` opt-in, since the engine's only lift is
+          full outbound (no loopback-only tier).
+        """
+        if plan or solo:
+            return False
+        return _env_flag(self.session.env, HUB_CHAT_NETWORK_ENV)
+
+    def _sandbox_policy(self, plan: bool, solo: bool) -> Dict[str, Any]:
+        policy: Dict[str, Any] = {"type": self._sandbox_type(plan, solo)}
+        if self._network_access_enabled(plan, solo):
+            policy["networkAccess"] = True
+        return policy
+
+    def _permission_config(self) -> Dict[str, Any]:
+        plan, solo = self._sandbox_plan_solo()
+        return {
+            "approvalPolicy": "never" if solo else "on-request",
+            "sandboxPolicy": self._sandbox_policy(plan, solo),
+        }
+
     def _thread_config(self) -> Dict[str, Any]:
-        return {}
+        return {"cwd": self._cwd, **self._permission_config()}
 
     def _turn_config(self) -> Dict[str, Any]:
-        return {}
+        return self._permission_config()
 
     def _capture_thread_model(self, response: Dict[str, Any]) -> None:
         model = response.get("model")
@@ -2690,24 +2758,26 @@ class TraexNativeSession(CodexNativeSession):
             config["model"] = model
         return config
 
+    # TraeX's thread/start takes the kebab-case sandbox string; turn/start takes
+    # the camelCase sandboxPolicy object (see :meth:`_turn_config`).
+    _THREAD_SANDBOX = {
+        "readOnly": "read-only",
+        "workspaceWrite": "workspace-write",
+        "dangerFullAccess": "danger-full-access",
+    }
+
     def _permission_config(self) -> Dict[str, Any]:
-        plan = self._current_mode == ChatMode.PLAN.value
-        solo = self.session.solo_mode and not plan
+        plan, solo = self._sandbox_plan_solo()
         return {
             "approvalPolicy": "never" if solo else "on-request",
-            "sandbox": (
-                "read-only" if plan else ("danger-full-access" if solo else "workspace-write")
-            ),
+            "sandbox": self._THREAD_SANDBOX[self._sandbox_type(plan, solo)],
         }
 
     def _turn_config(self) -> Dict[str, Any]:
         config = self._permission_config()
-        sandbox = {
-            "read-only": "readOnly",
-            "workspace-write": "workspaceWrite",
-            "danger-full-access": "dangerFullAccess",
-        }[config.pop("sandbox")]
-        return {**config, "sandboxPolicy": {"type": sandbox}}
+        plan, solo = self._sandbox_plan_solo()
+        config.pop("sandbox")  # kebab thread field; turn/start uses sandboxPolicy
+        return {**config, "sandboxPolicy": self._sandbox_policy(plan, solo)}
 
     @staticmethod
     def _notification_turn_id(record: Dict[str, Any]) -> Optional[str]:
