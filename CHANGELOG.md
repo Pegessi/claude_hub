@@ -86,6 +86,24 @@
   and suppressed by an open approval card (human wait). The existing 600s
   streaming-inactivity reap (model-silence while not tool/approval-bound)
   now also resumes in place instead of tearing the consumer down.
+### fix: Codex/TraeX Chat sandbox blocks loopback (Errno 1)
+
+- Stock Codex Chat sent no `sandboxPolicy`/`approvalPolicy`, so its macOS
+  seatbelt sandbox denied **all** outbound TCP — including loopback — and the
+  agent could not reach the local Hub (`claude-hub schedule`, session reads,
+  `127.0.0.1` calls) with `OSError: [Errno 1] Operation not permitted`, solo
+  included. Codex Chat now emits the same plan/solo/default policy TraeX does:
+  `readOnly` / `dangerFullAccess` / `workspaceWrite` with matching
+  `approvalPolicy` on both thread/start and turn/start. Solo Chat (the managed
+  default) therefore gets full access via `dangerFullAccess`, matching solo's
+  existing trust on Claude/TraeX.
+- Verified against codex app-server 0.156.1: `sandboxPolicy.networkAccess` is
+  a strict **boolean with no loopback-only tier** (`enabled`/`restricted`/
+  `loopback`/`local` are rejected; `true` grants full outbound). Non-solo
+  Chat therefore stays network-off by default; full egress is an explicit
+  opt-in via `HUB_CHAT_ALLOW_NETWORK=1` (session/env-preset), attached only to
+  `workspaceWrite`. Plan (`readOnly`) never executes shell commands and never
+  carries network. TraeX turn policy shares the same helper.
 
 ### feat: pty_gateway transport for merlin_dev-style PTY-gateway hosts
 
