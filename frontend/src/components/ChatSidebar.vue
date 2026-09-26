@@ -1,17 +1,50 @@
 <template>
   <aside
+    ref="panelRef"
     class="chat-sidebar"
-    :class="{ collapsed: sidebarCollapsed, resizing: isResizing }"
-    :style="sidebarStyle"
+    :class="{
+      collapsed: sidebarCollapsed,
+      resizing: isResizing,
+      'mobile-drawer': isMobile,
+      'mobile-drawer--open': isMobile && mobileDrawerOpen,
+      'mobile-drawer--dragging': isMobile && edgeDragging,
+    }"
+    :style="isMobile ? mobilePanelStyle : sidebarStyle"
     aria-label="Chat sessions"
   >
-    <!-- Header: title + collapse toggle -->
-    <div class="chat-sidebar__header">
+    <!-- Header: title + collapse toggle (desktop) / close (mobile drawer) -->
+    <div
+      ref="headerRef"
+      class="chat-sidebar__header"
+    >
       <span
-        v-if="!sidebarCollapsed"
+        v-if="!sidebarCollapsed || isMobile"
         class="chat-sidebar__title"
       >Chats</span>
       <button
+        v-if="isMobile"
+        type="button"
+        class="chat-sidebar__icon-btn chat-sidebar__drawer-close"
+        aria-label="Close sessions"
+        @click="closeMobileDrawer"
+      >
+        <svg
+          viewBox="0 0 16 16"
+          width="16"
+          height="16"
+          aria-hidden="true"
+        >
+          <path
+            fill="currentColor"
+            d="M4.5 4.5l7 7M11.5 4.5l-7 7"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>
+      </button>
+      <button
+        v-else
         type="button"
         class="chat-sidebar__icon-btn"
         :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
@@ -34,8 +67,8 @@
       </button>
     </div>
 
-    <!-- Expanded body -->
-    <template v-if="!sidebarCollapsed">
+    <!-- Expanded body (always rendered inside the mobile drawer) -->
+    <template v-if="!sidebarCollapsed || isMobile">
       <div class="chat-sidebar__search">
         <svg
           viewBox="0 0 16 16"
@@ -234,7 +267,7 @@
         type="button"
         class="chat-sidebar__archived-btn"
         :title="sidebarCollapsed ? 'View archived sessions' : ''"
-        @click="$emit('open-archive')"
+        @click="openArchive"
       >
         <svg
           viewBox="0 0 16 16"
@@ -248,14 +281,14 @@
           />
         </svg>
         <span
-          v-if="!sidebarCollapsed"
+          v-if="!sidebarCollapsed || isMobile"
           class="chat-sidebar__archived-label"
         >Archived ({{ archivedTabs.length }})</span>
       </button>
     </div>
 
     <div
-      v-if="!sidebarCollapsed"
+      v-if="!sidebarCollapsed && !isMobile"
       class="chat-sidebar__resize-handle"
       role="separator"
       aria-orientation="vertical"
@@ -269,6 +302,28 @@
       @dblclick="resetSidebarWidth"
       @keydown="resizeWithKeyboard"
     />
+
+    <!-- Mobile-only: invisible left-edge gesture zone (above the ttyd iframe,
+         whose touches never reach this document) and the dimmed backdrop.
+         Teleported so the fixed positioning escapes any pane transform. -->
+    <Teleport to="body">
+      <div
+        v-if="isMobile && isTerminalMode"
+        ref="bandRef"
+        class="chat-drawer-edge-band"
+        aria-hidden="true"
+      />
+      <Transition name="chat-drawer-fade">
+        <div
+          v-if="isMobile && isTerminalMode && (mobileDrawerOpen || edgeDragging)"
+          ref="backdropRef"
+          class="chat-drawer-backdrop"
+          :class="{ 'chat-drawer-backdrop--dragging': edgeDragging }"
+          :style="edgeDragging ? { opacity: edgeBackdropOpacity } : undefined"
+          @click.self="closeMobileDrawer"
+        />
+      </Transition>
+    </Teleport>
   </aside>
 </template>
 
@@ -276,18 +331,25 @@
 import { nextTick, ref, computed, watch, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { useAppStore } from '@/stores/appStore'
 import { buildChatSidebarGroups, canDropChatInGroup, CHAT_GROUP_PREVIEW_SIZE, cwdLabel } from '@/utils/chatGroups'
 import type { ChatSidebarGroup } from '@/utils/chatGroups'
 import { relativeTime } from '@/utils/time'
 import { useTabStatus } from '@/composables/useTabStatus'
+import { useViewport } from '@/composables/useViewport'
+import { useEdgeSwipeDrawer } from '@/composables/useEdgeSwipeDrawer'
 import TabActionsMenu from '@/components/TabActionsMenu.vue'
 import type { TerminalTab } from '@/types'
 
-defineEmits<{
+const emit = defineEmits<{
   (e: 'open-archive'): void
 }>()
 
 const store = useTerminalStore()
+const appStore = useAppStore()
+const { isMobile } = useViewport()
+const { mode } = storeToRefs(appStore)
+const isTerminalMode = computed(() => mode.value === 'terminal')
 const {
   chatTabs,
   pinnedChatIds,
@@ -295,8 +357,45 @@ const {
   sidebarCollapsed,
   archivedTabs,
   agentStatuses,
+  mobileDrawerOpen,
 } = storeToRefs(store)
-const { toggleSidebar, setActiveTab } = store
+const {
+  toggleSidebar,
+  setActiveTab,
+  openMobileDrawer,
+  closeMobileDrawer,
+  selectMobileTab,
+} = store
+
+// Mobile drawer: the same sidebar becomes a fixed overlay panel. These refs
+// are the gesture zones consumed by useEdgeSwipeDrawer.
+const panelRef = ref<HTMLElement | null>(null)
+const bandRef = ref<HTMLElement | null>(null)
+const backdropRef = ref<HTMLElement | null>(null)
+const headerRef = ref<HTMLElement | null>(null)
+const {
+  dragging: edgeDragging,
+  translatePx: edgeTranslatePx,
+  backdropOpacity: edgeBackdropOpacity,
+} = useEdgeSwipeDrawer({
+  bandRef,
+  panelRef,
+  backdropRef,
+  closeDragRef: headerRef,
+  enabled: computed(() => isMobile.value && isTerminalMode.value),
+  open: openMobileDrawer,
+  close: closeMobileDrawer,
+  isOpen: () => mobileDrawerOpen.value,
+})
+
+// While dragging, the panel follows the finger 1:1 (CSS transition disabled);
+// at rest the open/closed classes own the transform.
+const mobilePanelStyle = computed(() => {
+  if (!isMobile.value) return undefined
+  return edgeDragging.value
+    ? { transform: `translateX(${edgeTranslatePx.value}px)` }
+    : undefined
+})
 
 // Tab-status logic is shared with the TabBar via useTabStatus.
 const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
@@ -395,6 +494,7 @@ onUnmounted(() => {
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
   window.removeEventListener('pointercancel', onPointerCancel)
+  window.removeEventListener('keydown', handleDrawerKeydown)
   clearDrag()
 })
 
@@ -478,6 +578,8 @@ function toggleExpanded(cwd: string) {
 // Navigation from another surface should never land on an invisible row.
 watch(activeTabId, () => {
   filterText.value = ''
+  // Off-screen drawer rows must not yank page scroll while the drawer is shut.
+  if (isMobile.value && !mobileDrawerOpen.value) return
   nextTick(() => document.querySelector('.chat-sidebar__item.active')?.scrollIntoView({ block: 'nearest' }))
 })
 
@@ -614,8 +716,35 @@ function onRowClick(event: MouseEvent, tab: TerminalTab) {
   const target = event.target
   if (!(target instanceof HTMLElement)) return
   if (target.closest('.chat-sidebar__item-menu, .chat-sidebar__rename-input')) return
-  setActiveTab(tab.id)
+  // On mobile the row lives inside the drawer: switch + auto-dismiss it so the
+  // selected session is visible immediately; desktop leaves the sidebar open.
+  if (isMobile.value) {
+    selectMobileTab(tab.id)
+  } else {
+    setActiveTab(tab.id)
+  }
 }
+
+// The archived-sessions browser opens above the drawer; dismiss the drawer.
+function openArchive() {
+  if (isMobile.value) closeMobileDrawer()
+  emit('open-archive')
+}
+
+// Escape closes the mobile drawer (mirrors the previous MobileSessionDrawer).
+function handleDrawerKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeMobileDrawer()
+}
+
+watch(mobileDrawerOpen, isOpen => {
+  if (!isMobile.value) return
+  if (isOpen) {
+    filterText.value = ''
+    window.addEventListener('keydown', handleDrawerKeydown)
+  } else {
+    window.removeEventListener('keydown', handleDrawerKeydown)
+  }
+})
 
 function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 1) {
   const index = group.tabs.findIndex(item => item.id === tab.id)
@@ -1132,10 +1261,98 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
   text-align: left;
 }
 
-/* Mobile: sidebar is hidden to save the limited width */
+/* Mobile: the sidebar becomes a left-edge overlay drawer instead of being
+   removed from the layout. The same groups/pinned/search/archive markup is
+   reused — only its positioning changes. */
 @media (max-width: 768px) {
-  .chat-sidebar {
-    display: none;
+  .chat-sidebar.mobile-drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(82vw, 320px);
+    min-width: 0;
+    height: 100%;
+    height: 100dvh;
+    z-index: 850;
+    border-right: none;
+    box-shadow: var(--ch-shadow-dialog);
+    transform: translateX(-100%);
+    /* Delay `hidden` until the slide-out finishes; show instantly on open. */
+    transition:
+      transform 160ms cubic-bezier(0.2, 0, 0, 1),
+      visibility 0s linear 160ms;
+    /* iPhone notch / home indicator */
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    will-change: transform;
+    visibility: hidden;
+  }
+
+  .chat-sidebar.mobile-drawer.mobile-drawer--open {
+    transform: translateX(0);
+    visibility: visible;
+    transition:
+      transform 160ms cubic-bezier(0.2, 0, 0, 1),
+      visibility 0s;
+  }
+
+  /* Follow the finger 1:1 while an edge swipe is in flight. */
+  .chat-sidebar.mobile-drawer.mobile-drawer--dragging {
+    transition: none;
+    visibility: visible;
+  }
+
+  /* The collapsed (icon-only) desktop state never applies on mobile. */
+  .chat-sidebar.mobile-drawer.collapsed {
+    width: min(82vw, 320px);
+    min-width: 0;
+  }
+
+  /* 44px touch rows: the existing desktop paddings are slightly tighter. */
+  .chat-sidebar.mobile-drawer .chat-sidebar__item {
+    min-height: 44px;
+  }
+
+  /* Horizontal drags on the header must reach JS (close gesture); vertical
+     movement stays native. */
+  .chat-sidebar.mobile-drawer .chat-sidebar__header {
+    touch-action: pan-y;
+  }
+
+  .chat-drawer-edge-band {
+    position: fixed;
+    left: 0;
+    /* Stay below the mobile TabBar so tab-strip taps keep working. */
+    top: 48px;
+    bottom: 0;
+    width: 20px;
+    z-index: 840;
+    /* pan-y: vertical scrolls/selection stay native, horizontal edge drags
+       are delivered to JS. Visually invisible; it only captures edge
+       touch-start. A non-captured tap is re-dispatched to the surface beneath
+       (see useEdgeSwipeDrawer). */
+    background: transparent;
+    touch-action: pan-y;
+  }
+
+  .chat-drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 849;
+    background: var(--ch-color-overlay);
+    opacity: 1;
+    transition: opacity var(--ch-motion-standard);
+    touch-action: pan-y;
+  }
+
+  .chat-drawer-backdrop.chat-drawer-backdrop--dragging {
+    transition: none;
+  }
+
+  .chat-drawer-fade-enter-from,
+  .chat-drawer-fade-leave-to {
+    opacity: 0;
   }
 }
 </style>

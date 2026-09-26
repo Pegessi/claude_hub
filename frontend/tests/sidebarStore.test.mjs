@@ -135,3 +135,52 @@ test('missing or managed drag IDs do not write order or remove sessions', async 
   assert.equal(store.tabs, previous)
   assert.equal(globalThis.fetch.mock.calls.length, 0)
 })
+
+test('mobile drawer open/close/toggle actions update visibility', t => {
+  const { store } = setup(t)
+  assert.equal(store.mobileDrawerOpen, false)
+  store.openMobileDrawer()
+  assert.equal(store.mobileDrawerOpen, true)
+  // open is idempotent
+  store.openMobileDrawer()
+  assert.equal(store.mobileDrawerOpen, true)
+  store.closeMobileDrawer()
+  assert.equal(store.mobileDrawerOpen, false)
+  store.toggleMobileDrawer()
+  assert.equal(store.mobileDrawerOpen, true)
+  store.toggleMobileDrawer()
+  assert.equal(store.mobileDrawerOpen, false)
+})
+
+test('selecting a session from the mobile drawer switches tab AND dismisses it', t => {
+  const { store } = setup(t)
+  store.openMobileDrawer()
+  store.activeTabId = 'a'
+  store.selectMobileTab('b')
+  assert.equal(store.activeTabId, 'b')
+  assert.equal(store.mobileDrawerOpen, false)
+  // An unknown id neither switches nor opens anything.
+  store.selectMobileTab('does-not-exist')
+  assert.equal(store.activeTabId, 'b')
+})
+
+test('pinned group is still built for mobile-shaped chat data (presentation-agnostic)', async t => {
+  const { store } = setup(t)
+  store.setChatPinned('a', true)
+  // Mobile reuses the exact same buildChatSidebarGroups source as desktop;
+  // import it through the same transpile harness used for the store above.
+  const { buildChatSidebarGroups } = await import(groupsUrl)
+  const groups = buildChatSidebarGroups(store.chatTabs, store.pinnedChatIds, {
+    query: '',
+    activeTabId: 'b',
+    collapsed: new Set(),
+    expanded: new Set(),
+  })
+  const pinned = groups.find(group => group.pinned)
+  assert.ok(pinned, 'a pinned group is rendered')
+  assert.deepEqual(pinned.visibleTabs.map(tab => tab.id), ['a'])
+  // The pinned row is absent from every cwd group.
+  assert.ok(
+    groups.filter(group => !group.pinned).every(group => !group.tabs.some(tab => tab.id === 'a')),
+  )
+})

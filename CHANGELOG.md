@@ -5,6 +5,32 @@
 
 ## Unreleased
 
+### feat(mobile): left-edge swipe session drawer with pinned sessions
+
+- On phones (≤768px) the chat session list is no longer `display:none`. The
+  existing **ChatSidebar becomes a left-edge overlay drawer**
+  (`min(82vw, 320px)`, slide + fade transitions, iPhone notch/home-indicator
+  safe-area padding, `--ch-*` dark/light tokens) — reusing the same groups,
+  **Pinned section**, search, per-row actions menu (incl. Pin/Unpin), and
+  Archived entry as desktop. The previous duplicate `MobileSessionDrawer`
+  list was removed.
+- **Edge gesture**: a horizontal drag starting in a 20px invisible left-edge
+  band follows the finger and snaps open past 1/3 width or on a fast fling,
+  otherwise springs back; when open, a leftward drag on the header/backdrop
+  or a backdrop tap closes; selecting a session auto-closes. Geometry
+  (edge-band, horizontal-vs-vertical slop, translate, fling velocity,
+  commit/revert) is pure/testable in `utils/edgeSwipe.ts`, DOM wiring in
+  `composables/useEdgeSwipeDrawer.ts`. The band sits above the ttyd
+  **iframe** (whose touches never reach the parent document), hands vertical
+  scrolls back untouched, and re-dispatches plain taps to the surface below;
+  the same gesture works over the structured Chat surface.
+- The TabBar's ⋯ → Chats item remains an explicit non-gesture entry; the
+  terminal store gains `open/close/toggleMobileDrawer` and `selectMobileTab`
+  (switch + dismiss). Node:test covers gesture branches, drawer state,
+  mobile pinned grouping, and SFC wiring; Playwright verified edge open,
+  vertical/non-edge passthrough, backdrop/header close, menu entry, pinned
+  render + Pin/Unpin toggle, and desktop layout on a 390px iPhone viewport.
+
 ### feat: manual reconnect button on Terminal panes
 
 - Added a tiny icon-only reconnect control next to the floating session name
