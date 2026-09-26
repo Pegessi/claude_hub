@@ -925,7 +925,7 @@ function closeMobileAppMenu() {
 }
 
 function openMobileDrawer() {
-  store.mobileDrawerOpen = true
+  store.openMobileDrawer()
   closeMobileAppMenu()
 }
 
