@@ -20,6 +20,16 @@
           aria-hidden="true"
         />
         <span>{{ timelineLoadingMessage }}</span>
+        <button
+          v-if="stopArmed"
+          type="button"
+          class="banner-stop"
+          :disabled="isCancelling"
+          title="Stop the current turn even while the conversation is reconnecting"
+          @click="cancelActiveTurn"
+        >
+          {{ isCancelling ? 'Stopping…' : 'Stop turn' }}
+        </button>
       </template>
       <template v-else-if="connectionState === 'failed'">
         <span
@@ -27,6 +37,16 @@
           aria-hidden="true"
         >⚠</span>
         <span>{{ errorMessage || 'Structured view unavailable.' }}</span>
+        <button
+          v-if="stopArmed"
+          type="button"
+          class="banner-stop"
+          :disabled="isCancelling"
+          title="Stop the wedged turn and unlock the composer without waiting for reconnect"
+          @click="cancelActiveTurn"
+        >
+          {{ isCancelling ? 'Stopping…' : 'Stop turn' }}
+        </button>
         <button
           type="button"
           class="banner-retry"
@@ -597,6 +617,21 @@
             </button>
           </template>
 
+          <!-- A user Stop (or a watchdog reap) terminalized the turn: mark the
+               cancelled round instead of leaving its thinking/working
+               placeholder spinning. -->
+          <div
+            v-if="turn.completed && turn.completionStatus === 'cancelled'"
+            class="turn-cancelled-marker"
+            role="status"
+          >
+            <span
+              class="turn-cancelled-dot"
+              aria-hidden="true"
+            >■</span>
+            Stopped
+          </div>
+
           <!-- Turn-level actions close the turn the way the message actions
                open it, so a long turn's controls sit with its result rather
                than floating back at the top. -->
@@ -991,11 +1026,11 @@
             </div>
           </div>
           <button
-            v-if="turnInFlight"
+            v-if="stopArmed"
             type="button"
             class="composer-stop-btn"
             :disabled="isSending || isCancelling"
-            title="Stop the current turn (works even while reconnecting or queued)"
+            title="Stop the current turn (works even while reconnecting, queued, or after an error)"
             @click="cancelActiveTurn"
           >
             {{ isCancelling ? 'Stopping…' : 'Stop' }}
@@ -1090,7 +1125,7 @@ import MarkdownContent from '@/components/MarkdownContent.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
-import type { StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
+import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
   /** A top-level Chat tab owns its transcript directly. */
@@ -1140,6 +1175,7 @@ const {
   retry: retryStream,
   setMode,
   stop,
+  nudge,
   reset: resetStream,
 } = useAgentStream()
 
@@ -1179,7 +1215,36 @@ function startStream() {
 // each batch costs O(new events) regardless of history length.
 
 const timelineReducer = new IncrementalTimelineReducer()
-const authoritativeTurns = computed(() => timelineReducer.reduce(events.value))
+// After a successful manual Stop we optimistically append one terminal
+// ``cancelled`` edge for the stopped turn, so the composer unlocks and the
+// round renders as Stopped WITHOUT waiting for the possibly-wedged long-poll
+// to deliver the backend's persisted edge. The synthetic stream_sequence (-1)
+// never exists server-side; the reducer's turn_completed is idempotent, and
+// the optimism is dropped as soon as the real edge lands in ``events``.
+const optimisticCancelledTurnId = ref<string | null>(null)
+const timelineEvents = computed<AgentStreamEvent[]>(() => {
+  const base = events.value
+  const turnId = optimisticCancelledTurnId.value
+  if (!turnId) return base
+  return [
+    ...base,
+    {
+      stream_sequence: -1,
+      session_id: '',
+      tab_id: props.tabId,
+      agent_type: (base[base.length - 1]?.agent_type ?? 'traex') as AgentStreamEvent['agent_type'],
+      type: 'turn_completed',
+      run_epoch: null,
+      turn_id: turnId,
+      message_id: turnId,
+      call_id: null,
+      payload: { status: 'cancelled' },
+      created_at: new Date().toISOString(),
+      redacted: false,
+    },
+  ]
+})
+const authoritativeTurns = computed(() => timelineReducer.reduce(timelineEvents.value))
 
 // Assistant text streams directly from the batched event stream (backend
 // 60ms coalescer + frontend rAF/48ms batcher). No second-stage character
@@ -1578,6 +1643,26 @@ const turnInFlight = computed(() => isChatModeLocked(
   authoritativeTurns.value,
 ))
 const modeInteractionLocked = computed(() => isSending.value || turnInFlight.value)
+
+// ── Manual Stop: unconditional recovery ─────────────────────────────────────
+// A user Stop is explicit intent and must work for ANY wedged active turn,
+// including one the conservative auto-watchdogs deliberately leave alone (a
+// long turn that keeps emitting thinking/tool records but never closes).
+// ``stopArmed`` is therefore slightly wider than ``turnInFlight``: a genuine
+// error already released the composer lock, but the turn is still unfinished in
+// the timeline — Stop stays mounted so the user can terminalize it. Stop in
+// the reconnecting/FAILED banners shares this same gate.
+const stopArmed = computed(() => {
+  if (pendingDirectTurns.value.length > 0) return true
+  const latest = authoritativeTurns.value[authoritativeTurns.value.length - 1]
+  return Boolean(latest && !latest.completed)
+})
+const stopTargetTurnId = computed(() => {
+  const latest = authoritativeTurns.value[authoritativeTurns.value.length - 1]
+  if (latest && !latest.completed && latest.turnId) return latest.turnId
+  const pending = pendingDirectTurns.value[pendingDirectTurns.value.length - 1]
+  return pending?.turnId ?? null
+})
 
 // Reconcile optimistic (pending) turns against authoritative turns as they
 // arrive. No text-reveal state is kept: assistant text is rendered directly
@@ -2401,13 +2486,23 @@ async function submitQuestionResponse(approval: TimelineApproval) {
 }
 
 async function cancelActiveTurn() {
-  if (isCancelling.value || isSending.value || !turnInFlight.value) return
+  // Idempotent: a second click while Stop is in flight is a no-op. Stop stays
+  // armed slightly wider than the composer lock (an unfinished turn after a
+  // terminal error), but is never allowed to race a send still in flight.
+  if (isCancelling.value || isSending.value || !stopArmed.value) return
+  const cancelledTurnId = stopTargetTurnId.value
   isCancelling.value = true
   composerError.value = null
   try {
     const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/cancel`, {
       method: 'POST',
       credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      // Hint the backend to terminalize THIS turn; it ignores the hint when it
+      // no longer matches (Stop racing a natural completion stays a single
+      // terminal edge). Omitted for a turn whose authoritative id has not
+      // hydrated yet — the backend then terminalizes its active/orphan turn.
+      body: cancelledTurnId ? JSON.stringify({ expected_turn_id: cancelledTurnId }) : undefined,
     })
     if (!res.ok) {
       let detail = `HTTP ${res.status}`
@@ -2419,6 +2514,16 @@ async function cancelActiveTurn() {
       }
       throw new Error(detail)
     }
+    const data = await res.json().catch(() => ({}))
+    // The backend persists the cancelled edge and releases its guard BEFORE
+    // provider teardown, but the edge is only delivered over the long-poll/SSE
+    // surface — which may itself be reconnecting or FAILED. Apply the terminal
+    // edge locally NOW (unlocks composer, marks the round Stopped) and nudge
+    // the wait loop so the real edge reconciles in the next RTT.
+    if (data?.cancelled !== false && cancelledTurnId) {
+      optimisticCancelledTurnId.value = cancelledTurnId
+      nudge()
+    }
     void terminalStore.fetchAgentStatuses()
   } catch (err) {
     composerError.value = err instanceof Error ? err.message : 'Failed to stop the current turn.'
@@ -2426,6 +2531,18 @@ async function cancelActiveTurn() {
     isCancelling.value = false
   }
 }
+
+// Drop the local Stop optimism as soon as the backend's own terminal edge for
+// that turn arrives (any status: the natural completion winning the race is
+// just as terminal). The reducer's turn_completed is idempotent, so until this
+// fires the synthetic edge and the real one never double-render.
+watch(events, (latest) => {
+  const optimisticId = optimisticCancelledTurnId.value
+  if (!optimisticId) return
+  if (latest.some(event => event.type === 'turn_completed' && event.turn_id === optimisticId)) {
+    optimisticCancelledTurnId.value = null
+  }
+})
 
 /**
  * Deliver composer input to the native provider transport via ``/stream/send``.
@@ -2572,6 +2689,8 @@ async function submit(
   }
   isSending.value = true
   composerError.value = null
+  // A new turn supersedes any local Stop optimism for the previous one.
+  optimisticCancelledTurnId.value = null
   // Snapshot the full draft attachments (including id, preview_url,
   // preview_data_url, size_bytes) so we can restore the composer exactly on
   // send failure — no reconstructed ids, no zeroed sizes.
@@ -2858,6 +2977,45 @@ onUnmounted(() => {
 
 .banner-retry:hover {
   background-color: var(--ch-color-surface-control-hover);
+}
+
+/* Stop stays reachable from the reconnecting/FAILED banner: a wedged turn must
+   be cancellable even when the surface itself is not live. */
+.banner-stop {
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: var(--ch-weight-medium, 500);
+  color: var(--ch-color-danger, #d04848);
+  background: transparent;
+  border: 1px solid var(--ch-color-danger, #d04848);
+  border-radius: var(--ch-radius-sm);
+  cursor: pointer;
+}
+
+.banner-stop:hover:not(:disabled) {
+  background-color: var(--ch-color-danger, #d04848);
+  color: #fff;
+}
+
+.banner-stop:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* The terminal marker of a user-stopped round: replaces the spinning working
+   placeholder so the cancelled turn reads as deliberately stopped. */
+.turn-cancelled-marker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+  font-size: var(--ch-font-xs, 11px);
+  color: var(--ch-color-text-muted);
+}
+
+.turn-cancelled-dot {
+  font-size: 9px;
+  color: var(--ch-color-text-subtle);
 }
 
 .structured-timeline {

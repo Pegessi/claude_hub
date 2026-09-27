@@ -193,13 +193,19 @@ async def test_stop_during_endless_queue_releases_guard_and_resends(
         assert tailer._waiting_for_model_capacity is True
 
         # Stop even though the provider interrupt will be unconfirmed (timeout
-        # mode): kill+relaunch+resume runs, but the guard must be released and
-        # the cancelled edge persisted so the composer unlocks.
+        # mode): kill+relaunch+resume runs, but the Hub guard is released and
+        # the cancelled edge persisted IMMEDIATELY — before the bounded
+        # background provider teardown finishes — so the composer unlocks.
         assert await tailer.cancel_turn() is True
-        assert transport.turn_in_flight is False
+        assert tailer._active_turn_id is None
         completions = await _completion_events(store)
         assert completions and completions[-1].payload["status"] == "cancelled"
         assert completions[-1].turn_id == "turn-q1"
+
+        # Provider-side teardown (kill + relaunch + resume) completes shortly
+        # after, in the background: the cancel call did not wait for it.
+        await tailer._await_turn_teardown()
+        assert transport.turn_in_flight is False
         assert len(harness.servers) == 2
         assert "thread/resume" in harness.current.request_methods()
 
@@ -216,7 +222,13 @@ async def test_stop_during_endless_queue_releases_guard_and_resends(
 async def test_terminal_edge_and_guard_release_precede_provider_teardown(
     store: AgentStreamStore,
 ) -> None:
-    """The Hub guard is released BEFORE awaiting a slow provider teardown."""
+    """The Hub guard is released BEFORE awaiting a slow provider teardown.
+
+    A manual Stop (the default ``await_teardown=False``) backgrounds the
+    teardown: the cancelled edge is durable and the Hub guard is released
+    before ``cancel_active_turn`` is even entered, and the HTTP path never
+    waits for it.
+    """
 
     class _SlowCancelTransport:
         def __init__(self) -> None:
@@ -233,17 +245,20 @@ async def test_terminal_edge_and_guard_release_precede_provider_teardown(
     tailer._active_turn_id = "turn-slow"
     tailer._run_epoch = 1
 
-    task = asyncio.create_task(tailer._cancel_active_turn_locked(transport))
+    # Manual Stop: returns as soon as the terminal edge is durable; teardown
+    # keeps running in the background.
+    await tailer._cancel_active_turn_locked(transport)
     await asyncio.wait_for(transport.entered.wait(), timeout=2.0)
 
     # While the provider teardown is still blocked, the Hub turn is terminal.
     assert tailer._active_turn_id is None
     completions = await _completion_events(store)
     assert completions and completions[-1].payload["status"] == "cancelled"
-    assert not task.done()  # still awaiting provider teardown
+    assert tailer._turn_teardown_pending is True
 
     transport.release.set()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(tailer._await_turn_teardown(), timeout=2.0)
+    assert tailer._turn_teardown_pending is False
 
 
 @pytest.mark.asyncio
@@ -257,11 +272,13 @@ async def test_double_cancel_during_queue_is_idempotent(
     try:
         await asyncio.sleep(0.1)
         results = await asyncio.gather(tailer.cancel_turn(), tailer.cancel_turn())
+        # Both Stops report success and are idempotent: the second is folded
+        # into the first one's already-running teardown.
         assert results[0] is True
-        # Second cancel finds no in-flight / orphan turn: a clean no-op.
-        assert results[1] is False
+        assert results[1] is True
         completions = await _completion_events(store)
         assert [c.payload["status"] for c in completions].count("cancelled") == 1
+        await tailer._await_turn_teardown()
         # Still usable.
         await tailer.send_message("again", [], client_turn_id="turn-q3")
         assert harness.current.request_params("turn/start")
