@@ -5,6 +5,41 @@
 
 ## Unreleased
 
+### fix(chat): provider capacity-queue no longer locks the turn or hides Stop
+
+- When a model provider throttled a Chat turn it pushed a `queue/status`
+  snapshot ("Too many current requests. Your queue position is N.") roughly
+  every second while generation had not started. Hub treated those heartbeats
+  as proof the turn was still streaming: they refreshed the hard-liveness
+  clock (`tailer.py`) and the waiting flag suppressed the inactivity timeout,
+  so a turn queued for **hours** never tripped any watchdog and the composer
+  stayed locked ("a turn is already in flight").
+- The provider's own recoverable **"Reconnecting… 1/5"** notice arrived on the
+  `error` channel and the frontend treats any `error` as turn-terminal
+  (`chatTurnLifecycle.isChatModeLocked`): `turnInFlight` flipped false, the
+  **Stop button unmounted**, `cancelActiveTurn` early-returned, and a single
+  dropped long-poll failed the observation plane (`useAgentStream`) — so the UI
+  could neither Stop nor send, while a manual `POST /stream/cancel` worked.
+- **Stop is now one-shot**: the cancelled terminal edge is persisted and the
+  Hub active-turn guard is released *before* awaiting the bounded provider
+  interrupt/kill+relaunch, so it never holds the lock during teardown. The
+  Stop button stays armed even while the observation plane is reconnecting.
+- **Queue semantics**: a queue heartbeat is no longer liveness. Two new,
+  env-configurable bounds — `CLAUDE_HUB_QUEUED_TURN_MAX_WAIT_S` (default
+  1800s: a *live* queue that never gets capacity is **cancelled**, never
+  restarted — resending re-queues; 0 disables) and
+  `CLAUDE_HUB_QUEUE_HEARTBEAT_STALL_S` (default 90s: a declared queue whose
+  heartbeats go silent is a dead runtime → kill + relaunch + resume). Real
+  thinking/text/tool output clears the wait, so a genuinely long turn or a
+  transient single `queue/status` is never cancelled, and queue → ready →
+  generation completes normally.
+- Identical per-second queue snapshots are suppressed server-side (they share
+  one stable message id and the UI replaces them in place; only position
+  changes persist), and recoverable provider reconnect/retry notices are
+  mapped to one coalesced **status**, not a terminal **error**. The
+  authoritative long-poll tolerates transient blips with capped backoff while
+  staying live instead of failing on one dropped poll.
+
 ### feat(mobile): left-edge swipe session drawer with pinned sessions
 
 - On phones (≤768px) the chat session list is no longer `display:none`. The
