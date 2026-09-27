@@ -1431,17 +1431,31 @@ async def send_tab_stream_input(
     return {"ok": True}
 
 
+class StreamCancelRequest(BaseModel):
+    """Optional body for ``/stream/cancel``.
+
+    ``expected_turn_id`` is a hint: when the active turn no longer matches
+    (Stop raced a natural completion or a newer turn already started) the
+    request is a no-op rather than cancelling the wrong turn. Omitted, Stop
+    terminalizes whatever turn is active (or the latest durable orphan).
+    """
+
+    expected_turn_id: Optional[str] = None
+
+
 async def _cancel_native_turn(
     session: ManagedSession,
     manager: TailerManager,
+    payload: Optional[StreamCancelRequest] = None,
 ) -> Dict[str, Any]:
     if not _is_chat_native(session):
         raise HTTPException(
             status_code=400,
             detail="native turn cancel is only available for CHAT sessions",
         )
+    expected_turn_id = payload.expected_turn_id if payload is not None else None
     try:
-        cancelled = await manager.cancel_turn(session)
+        cancelled = await manager.cancel_turn(session, expected_turn_id=expected_turn_id)
     except StructuredSourceUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -1452,19 +1466,21 @@ async def _cancel_native_turn(
 @router.post("/sessions/{managed_session_id}/stream/cancel")
 async def cancel_stream_turn(
     managed_session_id: str,
+    payload: Optional[StreamCancelRequest] = None,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     session = _session_or_404(managed_session_id)
-    return await _cancel_native_turn(session, _get_tailer_manager())
+    return await _cancel_native_turn(session, _get_tailer_manager(), payload)
 
 
 @router.post("/tabs/{tab_id}/stream/cancel")
 async def cancel_tab_stream_turn(
     tab_id: str,
+    payload: Optional[StreamCancelRequest] = None,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     session = _terminal_tab_session_or_404(tab_id)
-    return await _cancel_native_turn(session, _get_tab_tailer_manager())
+    return await _cancel_native_turn(session, _get_tab_tailer_manager(), payload)
 
 
 class AgentStreamEditResendRequest(BaseModel):

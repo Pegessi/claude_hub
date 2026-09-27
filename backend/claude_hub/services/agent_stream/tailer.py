@@ -508,6 +508,15 @@ class SessionTailer:
         # publish, and the transport send so a busy second send never mutates
         # state that the in-flight first turn still depends on.
         self._send_lock = asyncio.Lock()
+        # A user Stop persists the ``cancelled`` edge and releases the Hub
+        # active-turn guard immediately, then lets the provider teardown
+        # (interrupt grace / kill+relaunch+resume) run in this background task.
+        # While it is pending the provider guard is still held and the watchdog
+        # must not double-reap; composer sends await this barrier before
+        # acquiring ``_send_lock`` so a fast resend is ordered AFTER the
+        # kill/relaunch and reaches the fresh server.
+        self._turn_teardown_task: Optional["asyncio.Task[None]"] = None
+        self._turn_teardown_pending = False
 
         # Semantic coalescer for text_delta / thinking_delta bursts. Merges
         # consecutive same-stream deltas within a ~60ms window so the fanout
@@ -702,6 +711,12 @@ class SessionTailer:
             raise RuntimeError("no native transport for this session; use the terminal send path")
         if self._native_error is not None:
             raise RuntimeError(self._native_error)
+        # A prior manual Stop may still be killing/relaunching the provider.
+        # Wait for that bounded teardown BEFORE taking the send lock so the new
+        # turn/start reaches the fresh app-server rather than the process being
+        # killed. The composer-side lock was already released by the cancelled
+        # edge, so this only bounds a resend sent within the teardown window.
+        await self._await_turn_teardown()
         if not transport._started:
             await transport.start()
 
@@ -733,7 +748,12 @@ class SessionTailer:
             #    _run_epoch are never overwritten — unless the caller steers.
             if transport.turn_in_flight:
                 if delivery == "steer":
-                    await self._cancel_active_turn_locked(transport)
+                    # Steer immediately re-sends on the same transport, so its
+                    # cancel must finish tearing down the old provider turn
+                    # (kill one-shot / interrupt persistent) before we deliver.
+                    await self._cancel_active_turn_locked(
+                        transport, await_teardown=True
+                    )
                 else:
                     raise RuntimeError(
                         "a turn is already in flight; wait for it to complete before "
@@ -896,7 +916,18 @@ class SessionTailer:
         so the durable UI state and the actual idle runtime converge again.
         """
         transport = self._native_transport
+        # A second Stop while the first one's provider teardown is still
+        # running is idempotent: the cancelled edge is already durable and the
+        # guard is released, so report success without awaiting the teardown.
+        if self._turn_teardown_pending:
+            return True
         async with self._send_lock:
+            # The first Stop's background teardown can win the race with a
+            # second caller that was already queued on the lock. Do NOT cancel
+            # again (that would persist a second terminal edge); report the
+            # in-flight Stop as the idempotent success it is.
+            if self._turn_teardown_pending:
+                return True
             if transport is not None and transport.turn_in_flight:
                 if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
                     return False
@@ -1206,16 +1237,25 @@ class SessionTailer:
         transport: ProviderSession,
         *,
         error_message: Optional[str] = None,
+        await_teardown: bool = False,
     ) -> None:
         """Cancel the in-flight turn while ``_send_lock`` is held.
 
         The durable terminal edge is persisted and the Hub active-turn guard is
-        released BEFORE awaiting the provider's interrupt/teardown. A persistent
+        released BEFORE the provider's interrupt/teardown. A persistent
         app-server can take its bounded time to confirm an interrupt or to
-        kill+relaunch+resume; releasing first means a capacity-queued turn the
-        user (or the queue watchdog) cancelled is never left holding the guard
-        while that teardown runs, and the persisted/fanned ``cancelled`` edge
-        unlocks the composer immediately.
+        kill+relaunch+resume; releasing first means a capacity-queued or wedged
+        turn the user (or the watchdog) cancelled is never left holding the
+        guard while that teardown runs, and the persisted/fanned ``cancelled``
+        edge unlocks the composer immediately.
+
+        ``await_teardown=False`` (manual user Stop): provider teardown runs in
+        a background task — the cancel HTTP returns as soon as the terminal
+        edge is durable, never waiting for the provider process to actually
+        exit. Sends and the watchdog are serialized behind the teardown via the
+        ``_turn_teardown_task`` barrier. ``await_teardown=True`` (steer,
+        watchdog reap, shutdown) keeps the previous inline behavior because the
+        caller immediately needs the torn-down transport.
         """
         turn_id = self._active_turn_id
         publish_error: Optional[Exception] = None
@@ -1249,20 +1289,87 @@ class SessionTailer:
         self._goal_terminal_at = None
         if turn_id is not None and publish_error is None and completed is not None:
             self._notify_post_persist(completed)
-        # Best-effort provider teardown. It is bounded (a native interrupt waits
-        # on a short grace and otherwise kill+relaunches) and never re-raises
-        # into a wedged guard: the turn is already terminal Hub-side.
-        try:
-            await transport.cancel_active_turn()
-        except Exception:
-            logger.exception(
-                "native provider cancel after terminalizing turn failed for session %s",
-                self.session_id,
-            )
+        # Provider teardown. It is bounded (a native interrupt waits on a short
+        # grace and otherwise kill+relaunches) and never re-raises into a wedged
+        # guard: the turn is already terminal Hub-side. Manual Stop backgrounds
+        # it so the user keeps a responsive composer while the persistent
+        # app-server is being killed/resumed; inline callers await it here.
+        if await_teardown:
+            try:
+                await transport.cancel_active_turn()
+            except Exception:
+                logger.exception(
+                    "native provider cancel after terminalizing turn failed for session %s",
+                    self.session_id,
+                )
+            self._turn_teardown_pending = False
+        else:
+            self._spawn_turn_teardown(transport)
         if publish_error is not None:
             raise RuntimeError("turn stopped but its cancelled state could not be persisted") from (
                 publish_error
             )
+
+    def _spawn_turn_teardown(self, transport: ProviderSession) -> None:
+        """Run ``transport.cancel_active_turn`` after the send lock is freed.
+
+        The cancelled edge is already durable and the Hub guard is released;
+        only the provider-side interrupt / kill+relaunch+resume remains, and it
+        must not block the cancel response or hold the composer lock. The task
+        re-acquires ``_send_lock`` (FIFO behind anyone already waiting) so the
+        teardown completes before the watchdog can act and — together with the
+        barrier awaited in ``send_message`` — before a new turn reaches the
+        provider being replaced.
+        """
+        if self._turn_teardown_task is not None or self._turn_teardown_pending:
+            return
+        self._turn_teardown_pending = True
+        task = asyncio.create_task(
+            self._run_turn_teardown(transport),
+            name=f"agent-stream-cancel-teardown-{self.session_id[:8]}",
+        )
+        self._turn_teardown_task = task
+        task.add_done_callback(self._turn_teardown_done)
+
+    async def _run_turn_teardown(self, transport: ProviderSession) -> None:
+        try:
+            async with self._send_lock:
+                try:
+                    await transport.cancel_active_turn()
+                except Exception:
+                    logger.exception(
+                        "native provider cancel teardown failed for session %s",
+                        self.session_id,
+                    )
+                self._turn_teardown_pending = False
+        except asyncio.CancelledError:
+            self._turn_teardown_pending = False
+            raise
+
+    def _turn_teardown_done(self, task: "asyncio.Task[None]") -> None:
+        if self._turn_teardown_task is task:
+            self._turn_teardown_task = None
+        self._turn_teardown_pending = False
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.exception(
+                "agent_stream cancel teardown task failed for session %s",
+                self.session_id,
+                exc_info=exc,
+            )
+
+    async def _await_turn_teardown(self) -> None:
+        """Block until any backgrounded Stop teardown has finished."""
+        task = self._turn_teardown_task
+        if task is not None:
+            try:
+                await task
+            except Exception:
+                logger.exception(
+                    "waiting on cancel teardown failed for session %s", self.session_id
+                )
 
     async def _reap_active_turn_locked(
         self, transport: ProviderSession, error_message: str
@@ -1275,7 +1382,11 @@ class SessionTailer:
         running; ``False`` when the process was stopped and the consumer should
         exit (the next send/subscribe restarts it).
         """
-        await self._cancel_active_turn_locked(transport, error_message=error_message)
+        await self._cancel_active_turn_locked(
+            transport,
+            error_message=error_message,
+            await_teardown=True,
+        )
         if getattr(transport, "_client_requested_stop", False):
             return True
         await transport.stop()
@@ -1406,6 +1517,10 @@ class SessionTailer:
             # the backend reloads while a turn is active, persist its terminal
             # edge first so the next process does not replay an immortal
             # Stop/Queue turn from history.
+            # Finish (or inherit) a manual Stop's backgrounded provider
+            # teardown before shutting the transport down so it is not killed
+            # mid kill+relaunch and a fresh resume does not outlive the tailer.
+            await self._await_turn_teardown()
             if self._native_transport.turn_in_flight:
                 try:
                     async with self._send_lock:
@@ -1413,6 +1528,7 @@ class SessionTailer:
                             await self._cancel_active_turn_locked(
                                 self._native_transport,
                                 error_message=_RUNTIME_INTERRUPTED_MESSAGE,
+                                await_teardown=True,
                             )
                 except Exception:
                     logger.exception(
@@ -1509,15 +1625,24 @@ class SessionTailer:
             elif self._turn_in_flight_since is not None:
                 self._turn_in_flight_since = None
                 self._last_event_at = None
+            # Every watchdog branch is skipped while a manual Stop's provider
+            # teardown is running: the Hub turn is already terminal and the
+            # background task owns the provider guard, so the watchdogs must
+            # neither double-cancel nor race the kill/relaunch.
+            watchdogs_armed = transport.turn_in_flight and not self._turn_teardown_pending
             # Goal terminal without a provider result record: the model already
             # emitted its trailing goal-status envelope, but a one-shot CLI never
             # followed with a completion record. After the grace period, finish
             # the turn from the model output so the Goal controller can route it
             # instead of cancelling it as silent ten minutes later.
-            if transport.turn_in_flight and self._goal_terminal_grace_expired():
+            if watchdogs_armed and self._goal_terminal_grace_expired():
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._goal_terminal_grace_expired():
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._goal_terminal_grace_expired()
+                        ):
                             await self._synthesize_goal_completion_locked(transport)
                 except Exception:
                     logger.exception(
@@ -1530,11 +1655,15 @@ class SessionTailer:
             # (distinct from a slow-but-live queue, which keeps heartbeating and
             # is handled below). Reap it like any dead turn: kill, relaunch,
             # resume the thread so the tab stays live.
-            if transport.turn_in_flight and self._queued_heartbeat_stalled():
+            if watchdogs_armed and self._queued_heartbeat_stalled():
                 restarted_in_place = False
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._queued_heartbeat_stalled():
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._queued_heartbeat_stalled()
+                        ):
                             restarted_in_place = await self._reap_active_turn_locked(
                                 transport,
                                 _QUEUE_STALL_MESSAGE,
@@ -1552,13 +1681,18 @@ class SessionTailer:
             # Cancel (do NOT stop/restart — resending simply re-queues) so the
             # user is never locked out for hours. Stop remains available at any
             # time regardless of this bound.
-            if transport.turn_in_flight and self._queued_wait_cap_expired():
+            if watchdogs_armed and self._queued_wait_cap_expired():
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._queued_wait_cap_expired():
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._queued_wait_cap_expired()
+                        ):
                             await self._cancel_active_turn_locked(
                                 transport,
                                 error_message=_QUEUE_CAP_TIMEOUT_MESSAGE,
+                                await_teardown=True,
                             )
                 except Exception:
                     logger.exception(
@@ -1571,11 +1705,15 @@ class SessionTailer:
             # Outstanding tool calls and blocking approval questions are
             # legitimate external waits, and active long-running turns have no
             # absolute duration cap.
-            if transport.turn_in_flight and self._stream_inactive():
+            if watchdogs_armed and self._stream_inactive():
                 restarted_in_place = False
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._stream_inactive():
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._stream_inactive()
+                        ):
                             restarted_in_place = await self._reap_active_turn_locked(
                                 transport,
                                 _INACTIVITY_TIMEOUT_MESSAGE,
@@ -1596,11 +1734,15 @@ class SessionTailer:
             # reaped and the next send restarts it. Legitimately long work
             # keeps emitting SOME record and refreshes the stamp; an open
             # approval card exempts the turn because it is waiting on a human.
-            if transport.turn_in_flight and self._turn_hard_liveness_expired():
+            if watchdogs_armed and self._turn_hard_liveness_expired():
                 restarted_in_place = False
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._turn_hard_liveness_expired():
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._turn_hard_liveness_expired()
+                        ):
                             restarted_in_place = await self._reap_active_turn_locked(
                                 transport,
                                 _HARD_LIVENESS_TIMEOUT_MESSAGE,
@@ -1680,12 +1822,19 @@ class SessionTailer:
                     # The persistent provider died; the in-flight turn (if
                     # any) is abandoned. Emit an error and a failed
                     # turn_completed for the active turn so the frontend
-                    # never leaves it pending, then fail the session.
-                    fatal_failure = await self._fail_active_turn(
-                        "native transport process exited", transport
-                    )
-                    self._active_turn_id = None
-                    transport.acknowledge_turn_complete()
+                    # never leaves it pending, then fail the session. The
+                    # identity recheck under the send lock prevents a race
+                    # with a manual Stop that already terminalized this turn:
+                    # only one of the two edges is ever persisted.
+                    async with self._send_lock:
+                        if self._active_turn_id is not None:
+                            fatal_failure = await self._fail_active_turn(
+                                "native transport process exited", transport
+                            )
+                        else:
+                            fatal_failure = None
+                        self._active_turn_id = None
+                        transport.acknowledge_turn_complete()
                     if fatal_failure is not None:
                         self._notify_post_persist(fatal_failure)
                     self._hard_failed = True
@@ -1925,6 +2074,23 @@ class SessionTailer:
                     else event
                 )
                 event = redact_event(event)
+                if is_turn_completed:
+                    # The provider's own terminal record is persisted and the
+                    # guard released under ``_send_lock`` so it cannot interleave
+                    # with a manual Stop's ``cancelled`` edge for the same turn.
+                    try:
+                        consumed = await self._consume_turn_completion_record(
+                            event, observer_event, transport
+                        )
+                    except Exception:
+                        logger.exception(
+                            "agent_stream turn_completed finalize failed for session %s",
+                            self.session_id,
+                        )
+                        continue
+                    if not consumed:
+                        continue
+                    continue
                 try:
                     await self._publish(event)
                 except Exception:
@@ -1933,53 +2099,78 @@ class SessionTailer:
                         self.session_id,
                     )
                     continue
-                if is_turn_completed:
-                    # Pending cards are deliberately NOT dropped here. A card
-                    # routinely outlives its turn: Claude and Cursor have no
-                    # blocking-question channel, so the tool returns a
-                    # placeholder, the agent ends the turn, and the user answers
-                    # the card afterwards. Clearing on completion meant that
-                    # answer found an empty set and no ``approval_resolved`` was
-                    # ever persisted — leaving an answered card looking
-                    # unanswered after a reload. Each entry carries the card's
-                    # own ``turn_id``/``run_epoch``, so a late answer is stamped
-                    # with the turn that owns the card, not whatever is running
-                    # now.
-                    # Mark that the provider emitted a terminal completion for
-                    # the active turn. At EOF we use this to decide whether a
-                    # failed turn_completed must be synthesized.
-                    self._turn_completed_seen = True
-                    self._terminalize_native_runtime(event.payload.get("status"))
-                    # ``TURN_COMPLETED`` is the provider's explicit turn-end
-                    # signal for every adapter we ship:
-                    #   - Claude: top-level ``result`` record (after the final
-                    #     ``assistant`` snapshot; never on ``message_stop``).
-                    #   - Cursor: ``turn_ended`` record.
-                    #   - Codex: ``turn/completed`` notification.
-                    # There are no trailing records after it, so it is safe to
-                    # release the active turn id and the turn guard immediately
-                    # — both for persistent transports (Codex app-server, which
-                    # has no per-turn EOF) and for one-shot transports (Claude /
-                    # Cursor, whose subprocess may linger after the turn because
-                    # a long-running tool call e.g. ``pnpm dev`` keeps the
-                    # process alive). Releasing here prevents the turn guard
-                    # from staying stuck ``True`` until the subprocess finally
-                    # exits.
-                    #
-                    # The completion event has already been persisted and fanned
-                    # out above, so a concurrent ``send_message`` cannot publish
-                    # a new turn_started that sequences ahead of this turn's
-                    # completion.
-                    self._active_turn_id = None
-                    self._active_tool_call_ids.clear()
-                    self._blocking_approval_call_ids.clear()
-                    self._waiting_for_model_capacity = False
-                    self._goal_terminal_at = None
+
+    async def _consume_turn_completion_record(
+        self,
+        event: AgentStreamEvent,
+        observer_event: AgentStreamEvent,
+        transport: ProviderSession,
+    ) -> bool:
+        """Persist the provider's terminal ``turn_completed`` and release the
+        guard, atomically against a concurrent manual Stop.
+
+        The provider's own terminal record can race a user Stop that has
+        already persisted a ``cancelled`` edge for the same Hub turn. Both run
+        under the tailer's ``_send_lock`` and re-check turn identity:
+
+        * a completion for the currently active Hub turn → persist + release;
+        * a null-id completion with no active turn → provider/process terminal
+          edge (cold-start replay, one-shot result); persist + release;
+        * anything else (Stop already terminalized, or a newer turn active) →
+          dropped, so a turn never gets two terminal edges and a late
+          completion can never clear a newer turn's guard.
+
+        Returns ``False`` when the record was dropped.
+        """
+        completion_turn_id = event.turn_id
+        async with self._send_lock:
+            active = self._active_turn_id
+            if completion_turn_id is not None and active != completion_turn_id:
+                logger.warning(
+                    "dropping stale turn_completed for turn %s while active=%s session %s",
+                    completion_turn_id,
+                    active,
+                    self.session_id,
+                )
+                # Stop already retired this turn; cancel_active_turn's teardown
+                # owns provider-guard release. Only release an orphaned provider
+                # guard when no newer Hub turn is running on the transport.
+                if active is None and transport.turn_in_flight:
                     transport.acknowledge_turn_complete()
-                    self._notify_post_persist(observer_event)
-                    self._assistant_text = ""
-                    self._visible_assistant_text = ""
-                    self._goal_protocol_sanitizer = None
+                return False
+            try:
+                await self._publish(event)
+            except Exception:
+                logger.exception(
+                    "agent_stream store append failed for turn_completed session %s",
+                    self.session_id,
+                )
+                # Persistence failed, but the provider turn is over: release
+                # anyway rather than wedging the composer.
+            # Pending cards are deliberately NOT dropped on completion: a card
+            # routinely outlives its turn (Claude/Cursor have no blocking
+            # question channel, so the user answers the card after the agent
+            # ends the turn). Each card carries its own turn id/epoch, so a late
+            # answer is stamped with the owning turn, not the current one.
+            self._turn_completed_seen = True
+            self._terminalize_native_runtime(event.payload.get("status"))
+            # ``TURN_COMPLETED`` is every shipped adapter's final record for the
+            # turn (Claude ``result``, Cursor ``turn_ended``, Codex/TraeX
+            # ``turn/completed``), so releasing immediately is safe for both
+            # persistent app-servers and one-shot CLIs whose subprocess lingers
+            # (e.g. a long-running tool child). Done under the send lock so a
+            # concurrent send cannot start a turn before the release.
+            self._active_turn_id = None
+            self._active_tool_call_ids.clear()
+            self._blocking_approval_call_ids.clear()
+            self._waiting_for_model_capacity = False
+            self._goal_terminal_at = None
+            transport.acknowledge_turn_complete()
+            self._notify_post_persist(observer_event)
+            self._assistant_text = ""
+            self._visible_assistant_text = ""
+            self._goal_protocol_sanitizer = None
+        return True
 
     def _notify_post_persist(self, event: AgentStreamEvent) -> None:
         """Schedule observers after completion persistence and guard release."""
