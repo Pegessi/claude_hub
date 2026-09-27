@@ -751,9 +751,7 @@ class SessionTailer:
                     # Steer immediately re-sends on the same transport, so its
                     # cancel must finish tearing down the old provider turn
                     # (kill one-shot / interrupt persistent) before we deliver.
-                    await self._cancel_active_turn_locked(
-                        transport, await_teardown=True
-                    )
+                    await self._cancel_active_turn_locked(transport, await_teardown=True)
                 else:
                     raise RuntimeError(
                         "a turn is already in flight; wait for it to complete before "
