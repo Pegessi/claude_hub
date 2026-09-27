@@ -29,6 +29,7 @@ import asyncio
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -233,7 +234,7 @@ async def test_late_turn_completed_after_stop_is_dropped_not_double_terminal(
     terminal edge survives for the turn.
     """
     session = _native_session()
-    transport = _FakeNativeTransport()
+    transport: Any = _FakeNativeTransport()
     tailer = _claude_tailer(session, transport, claude_store)
     await tailer.send_message("wedged", [], client_turn_id="turn-x")
     assert tailer._active_turn_id == "turn-x"
@@ -270,7 +271,7 @@ async def test_late_completion_for_old_turn_clears_newer_guard_never(
 ) -> None:
     """A stale completion must not terminalize the turn currently active."""
     session = _native_session()
-    transport = _FakeNativeTransport()
+    transport: Any = _FakeNativeTransport()
     tailer = _claude_tailer(session, transport, claude_store)
     await tailer.send_message("new turn", [], client_turn_id="turn-new")
 
@@ -295,7 +296,7 @@ async def test_late_completion_for_old_turn_clears_newer_guard_never(
 @pytest.mark.asyncio
 async def test_rapid_double_stop_on_active_turn_is_one_edge(claude_store) -> None:
     session = _native_session()
-    transport = _FakeNativeTransport()
+    transport: Any = _FakeNativeTransport()
     tailer = _claude_tailer(session, transport, claude_store)
     await tailer.send_message("double tap", [], client_turn_id="turn-z")
     results = await asyncio.gather(tailer.cancel_turn(), tailer.cancel_turn())

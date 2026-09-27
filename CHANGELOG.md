@@ -5,6 +5,40 @@
 
 ## Unreleased
 
+### fix(chat): manual Stop resets any wedged/reconnecting turn (idempotent cancel + late-completion lock)
+
+- Even after the capacity-queue fix, two wedges remained: a repeat Stop after
+  the backend had **already** persisted `cancelled` returned
+  `{cancelled:false}`, and the frontend gated its local reset on that boolean —
+  so while the browser was stuck on the provider's "Reconnecting…" banner the
+  composer never unlocked and the durable edge was trapped behind a wedged
+  long-poll. Separately, a turn that kept emitting activity but never closed
+  (exempt from every auto-watchdog, as a real long task should be) had no
+  reliable manual escape hatch.
+- **Manual Stop is now unconditional recovery.** The Hub cancelled edge is
+  persisted and the active-turn guard released *first*; the bounded provider
+  interrupt / kill+relaunch+resume runs in a background task serialized through
+  `_send_lock`. All five auto-watchdogs disarm while that teardown is pending
+  (re-checked in-lock), so a turn is never double-reaped; a fast resend waits on
+  a teardown barrier and always reaches the fresh app-server.
+- **Idempotent cancel / no-active-turn reset:** a second Stop during teardown
+  folds into the first (one terminal edge); with no live turn a durable orphan
+  is terminalized once and its completion observers notified (drains scheduled /
+  Goal FIFOs), and a repeat is a clean no-op. `expected_turn_id` fences a stale
+  stop from cancelling a newer turn.
+- **One terminal edge per turn:** a provider `turn_completed` arriving *late*
+  (after Stop) or for an older turn is dropped under the send lock; the
+  process-exited failure path takes the same lock with an identity re-check.
+- **Frontend resets on any successful (200) Stop**, regardless of the
+  `cancelled` boolean: it applies an optimistic `cancelled` edge immediately
+  (unlocks composer, marks the round "Stopped") and `nudge()`s the in-flight
+  `/wait` to reconcile the real edge in one RTT (abort not counted as a
+  transport failure). Stop is mounted on one gate in the composer, the
+  reconnecting banner, and the failed banner (Retry still offered). Pure helpers
+  live in `agentStreamStopReset.ts`.
+- Tests: 7 new backend event-replay tests (`test_stop_resets_wedged_turn.py`)
+  and 9 new frontend assertions (`agentStreamStopReset.test.mjs`).
+
 ### fix(chat): provider capacity-queue no longer locks the turn or hides Stop
 
 - When a model provider throttled a Chat turn it pushed a `queue/status`
