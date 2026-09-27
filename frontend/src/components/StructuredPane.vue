@@ -1119,6 +1119,10 @@ import {
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 import { writeClipboard } from '@/utils/clipboard'
 import { buildTurnCopyText } from '@/utils/chatTurnCopy'
+import {
+  hasAuthoritativeTerminalFor,
+  withOptimisticCancelled,
+} from '@/utils/agentStreamStopReset'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
@@ -1226,23 +1230,10 @@ const timelineEvents = computed<AgentStreamEvent[]>(() => {
   const base = events.value
   const turnId = optimisticCancelledTurnId.value
   if (!turnId) return base
-  return [
-    ...base,
-    {
-      stream_sequence: -1,
-      session_id: '',
-      tab_id: props.tabId,
-      agent_type: (base[base.length - 1]?.agent_type ?? 'traex') as AgentStreamEvent['agent_type'],
-      type: 'turn_completed',
-      run_epoch: null,
-      turn_id: turnId,
-      message_id: turnId,
-      call_id: null,
-      payload: { status: 'cancelled' },
-      created_at: new Date().toISOString(),
-      redacted: false,
-    },
-  ]
+  return withOptimisticCancelled(base, turnId, {
+    tabId: props.tabId,
+    now: new Date().toISOString(),
+  })
 })
 const authoritativeTurns = computed(() => timelineReducer.reduce(timelineEvents.value))
 
@@ -2514,16 +2505,23 @@ async function cancelActiveTurn() {
       }
       throw new Error(detail)
     }
-    const data = await res.json().catch(() => ({}))
-    // The backend persists the cancelled edge and releases its guard BEFORE
-    // provider teardown, but the edge is only delivered over the long-poll/SSE
-    // surface — which may itself be reconnecting or FAILED. Apply the terminal
-    // edge locally NOW (unlocks composer, marks the round Stopped) and nudge
-    // the wait loop so the real edge reconciles in the next RTT.
-    if (data?.cancelled !== false && cancelledTurnId) {
+    // Consume the body (``{ ok, cancelled }``) but do NOT gate on
+    // ``cancelled``. A 200 means Stop intent was honored, and that includes the
+    // idempotent re-Stop that is the reported wedge (tab 896983b0): a prior Stop
+    // already persisted ``cancelled`` and released the Hub guard, so the backend
+    // answers ``cancelled:false`` ("nothing new to terminalize") while the
+    // browser is still stuck on Reconnecting and this very edge is stuck behind
+    // a wedged long-poll. Keying the reset on that boolean left the composer
+    // locked — the bug. So on ANY successful Stop: optimistically terminalize
+    // the turn we asked about (unlocks + marks Stopped) and nudge /wait so the
+    // real edge reconciles in one RTT. The backend already refuses to cancel a
+    // genuinely different LIVE turn via the expected_turn_id hint, so the only
+    // false-but-200 cases are already-terminal / idempotent — safe to resolve.
+    await res.json().catch(() => ({}))
+    if (cancelledTurnId) {
       optimisticCancelledTurnId.value = cancelledTurnId
-      nudge()
     }
+    nudge()
     void terminalStore.fetchAgentStatuses()
   } catch (err) {
     composerError.value = err instanceof Error ? err.message : 'Failed to stop the current turn.'
@@ -2539,7 +2537,7 @@ async function cancelActiveTurn() {
 watch(events, (latest) => {
   const optimisticId = optimisticCancelledTurnId.value
   if (!optimisticId) return
-  if (latest.some(event => event.type === 'turn_completed' && event.turn_id === optimisticId)) {
+  if (hasAuthoritativeTerminalFor(latest, optimisticId)) {
     optimisticCancelledTurnId.value = null
   }
 })
