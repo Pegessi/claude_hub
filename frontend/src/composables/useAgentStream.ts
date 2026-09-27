@@ -37,6 +37,17 @@ export type StreamSource = 'managed-session' | 'terminal-tab'
 const HYDRATION_FETCH_TIMEOUT_MS = 15_000
 /** Large enough to avoid hundreds of serial round trips for delta-heavy history. */
 const HYDRATION_PAGE_LIMIT = 5_000
+/**
+ * The authoritative ``/wait`` long-poll tolerates transient transport blips
+ * (a proxy 502, a brief backend reload during a long queue) instead of failing
+ * closed on the first error: it retries with capped exponential backoff while
+ * staying ``live`` (so Stop/Send stay armed and no reconnect banner flashes).
+ * Only after the budget is exhausted does it surface ``failed``. A genuine
+ * session loss therefore still fails, but a single dropped poll never does.
+ */
+const LONG_POLL_MAX_RETRIES = 6
+const LONG_POLL_RETRY_BASE_MS = 1_000
+const LONG_POLL_RETRY_MAX_MS = 5_000
 
 export interface UseAgentStreamApi {
   capabilities: ShallowRef<StreamCapabilities | null>
@@ -256,13 +267,39 @@ export function useAgentStream(): UseAgentStreamApi {
 
   /** Authoritative live reconciliation loop; SSE is only an accelerator. */
   async function longPollLoop(sourceId: string, streamPath: string, generationId: number) {
+    let consecutiveFailures = 0
     while (!stopped && currentSessionId === sourceId && stateMachine.isCurrent(generationId)) {
       try {
         const page = await waitEvents(streamPath, sequenceBuffer.cursor)
         applyPage(page, generationId)
+        consecutiveFailures = 0
       } catch (err) {
         if (stopped || currentSessionId !== sourceId || !stateMachine.isCurrent(generationId)) return
-        // Surface the failure and stop; the Chat surface stays fail-closed.
+        const abort = longPollAbort
+        if (abort?.signal.aborted) return
+        // Transient blip: stay live and retry with capped backoff rather than
+        // failing on one dropped poll (which used to disable Stop and flash a
+        // reconnect banner during a long provider queue).
+        if (consecutiveFailures < LONG_POLL_MAX_RETRIES) {
+          consecutiveFailures += 1
+          const delay = Math.min(
+            LONG_POLL_RETRY_BASE_MS * 2 ** (consecutiveFailures - 1),
+            LONG_POLL_RETRY_MAX_MS,
+          )
+          await new Promise<void>(resolve => {
+            const timer = setTimeout(resolve, delay)
+            abort?.signal.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer)
+                resolve()
+              },
+              { once: true },
+            )
+          })
+          continue
+        }
+        // Budget exhausted — surface the failure and stop; fail closed.
         const message = err instanceof Error ? err.message : 'stream wait failed'
         if (stateMachine.fail(generationId, message)) {
           errorMessage.value = message

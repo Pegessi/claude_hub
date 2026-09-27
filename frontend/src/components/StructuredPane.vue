@@ -994,7 +994,8 @@
             v-if="turnInFlight"
             type="button"
             class="composer-stop-btn"
-            :disabled="isSending || isCancelling || connectionState !== 'live'"
+            :disabled="isSending || isCancelling"
+            title="Stop the current turn (works even while reconnecting or queued)"
             @click="cancelActiveTurn"
           >
             {{ isCancelling ? 'Stopping…' : 'Stop' }}
