@@ -22,6 +22,18 @@
   `item/completed` — with a stable `message_id` + `snapshot` so the frontend
   replaces the indicator in place. No reasoning content is fabricated or
   exposed.
+- Review follow-up (two defects fixed):
+  - **Subthread routing**: the reasoning branch previously returned before
+    `_resolve_sub_thread`, so a child's `STATUS` got no `subagent_thread`
+    and appeared on the main stream. It now routes to the owning child
+    thread, and the frontend `applySubthreadEvent` handles child `STATUS`
+    with stable in-place snapshot replacement.
+  - **Stale status finalization**: a cancelled/interrupted turn (or any
+    terminal without `item/completed` for an in-flight reasoning item) left
+    a stale "Thinking…" indicator. The `turn/completed` handler now
+    finalizes each in-flight reasoning status in place ("Thinking
+    interrupted" for cancelled/failed, "Done thinking" otherwise), so
+    completed turns never show an in-flight status.
 
 ### fix(chat): render agent-quoted bare-token images (Lark `img_v3_`, extensible) instead of "image unavailable"
 

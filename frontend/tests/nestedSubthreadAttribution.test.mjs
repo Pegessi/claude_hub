@@ -329,3 +329,67 @@ test('incremental reducer groups subthread events identically on append', () => 
   assert.deepEqual(groups.map((g) => g.threadId), [F6, FEC])
   assert.equal(full[0].assistantText, '我先派内建 worker 去做。Kernel 已完成，单 launch。')
 })
+
+test('child status with stable snapshot replaces in place, not appended', () => {
+  // Regression for review defect (1) frontend: a child's STATUS with
+  // snapshot=true + a stable message_id must replace in place.
+  const rsId = 'rs_child_status_001'
+  const statusEvent = (text) => ev('status', {
+    text, snapshot: true, subagent_thread: F6,
+  }, { message_id: `reasoning:${rsId}` })
+
+  const events = [
+    ev('turn_started', { summary: 'use a child' }, { message_id: `${TURN}:user` }),
+    ev('tool_call_started', {
+      tool_call_id: 'call_spawn', name: 'spawnAgent',
+      args: { prompt: 'go', receiverThreadIds: [F6] },
+    }, { call_id: 'call_spawn' }),
+    ev('tool_call_completed', {
+      tool_call_id: 'call_spawn', status: 'completed', result: '{}',
+    }, { call_id: 'call_spawn' }),
+    // Child reasoning starts → "Thinking…" status.
+    statusEvent('Thinking…'),
+    // Child reasoning completes → "Done thinking" replaces in place.
+    statusEvent('Done thinking'),
+    ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
+  ]
+  const [turn] = groupEventsIntoTurns(events)
+  const group = turn.parts.find((p) => p.kind === 'subthread')
+  assert.ok(group, 'F6 subthread group should exist')
+  // Only ONE status part (replaced in place), with the final text.
+  const statuses = group.parts.filter((p) => p.kind === 'status')
+  assert.equal(statuses.length, 1)
+  assert.equal(statuses[0].text, 'Done thinking')
+  assert.equal(statuses[0].messageId, `reasoning:${rsId}`)
+})
+
+test('cancelled turn finalizes in-flight child status (snapshot replay)', () => {
+  // Regression for review defect (2): a cancelled turn must not leave a
+  // stale "Thinking…" status. The final status replaces the in-flight one.
+  const rsId = 'rs_child_cancel_001'
+  const events = [
+    ev('turn_started', { summary: 'use a child' }, { message_id: `${TURN}:user` }),
+    ev('tool_call_started', {
+      tool_call_id: 'call_spawn', name: 'spawnAgent',
+      args: { prompt: 'go', receiverThreadIds: [F6] },
+    }, { call_id: 'call_spawn' }),
+    ev('tool_call_completed', {
+      tool_call_id: 'call_spawn', status: 'completed', result: '{}',
+    }, { call_id: 'call_spawn' }),
+    // Child reasoning starts → "Thinking…" (in-flight).
+    ev('status', { text: 'Thinking…', snapshot: true, subagent_thread: F6 },
+      { message_id: `reasoning:${rsId}` }),
+    // Turn cancelled WITHOUT item/completed → final status replaces in place.
+    ev('status', { text: 'Thinking interrupted', snapshot: true, subagent_thread: F6 },
+      { message_id: `reasoning:${rsId}` }),
+    ev('turn_completed', { status: 'cancelled' }, { message_id: TURN }),
+  ]
+  const [turn] = groupEventsIntoTurns(events)
+  const group = turn.parts.find((p) => p.kind === 'subthread')
+  assert.ok(group, 'F6 subthread group should exist')
+  const statuses = group.parts.filter((p) => p.kind === 'status')
+  assert.equal(statuses.length, 1)
+  assert.equal(statuses[0].text, 'Thinking interrupted')
+  // The in-flight "Thinking…" is gone — no stale indicator.
+  assert.ok(!statuses.some((s) => s.text === 'Thinking…'))
+})

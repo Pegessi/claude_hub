@@ -55,9 +55,29 @@ so the frontend replaces the indicator in place (see `status` case in
 
 ## Files
 
-- `backend/claude_hub/services/agent_stream/codex_jsonl.py` — reasoning branch
-- `backend/tests/test_codex_subthread_attribution.py` — regression test
+- `backend/claude_hub/services/agent_stream/codex_jsonl.py` — reasoning branch + turn/completed finalization
+- `backend/tests/test_codex_subthread_attribution.py` — backend regression tests
+- `frontend/src/utils/agentStreamTimeline.ts` — subthread `status` part + `applySubthreadEvent` case
+- `frontend/src/components/StructuredPane.vue` — subthread status rendering
+- `frontend/tests/nestedSubthreadAttribution.test.mjs` — frontend regression tests
 - `CHANGELOG.md` — entry
+
+## Review follow-up (cycle 2)
+
+The independent reviewer rejected the first fix on two concrete defects, both
+now fixed with backend + frontend regression tests:
+
+1. **Subthread routing**: the reasoning branch returned before
+   `_resolve_sub_thread`, so a child's `STATUS` got no `subagent_thread` and
+   appeared on the main stream. The branch now resolves the sub-thread and
+   passes `sub_thread_id`; the frontend `applySubthreadEvent` has a new
+   `status` case that replaces a child status in place by `messageId`.
+2. **Stale status finalization**: a cancelled/interrupted turn (or any
+   terminal without `item/completed` for an in-flight reasoning item) left a
+   stale "Thinking…" indicator. The adapter now tracks in-flight reasoning
+   items per turn (`_inflight_reasoning`) and the `turn/completed` handler
+   finalizes each in-flight status in place — "Thinking interrupted" for
+   cancelled/failed, "Done thinking" otherwise.
 
 ## Remaining live-validation boundary
 
