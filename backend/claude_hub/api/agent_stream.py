@@ -26,13 +26,12 @@ import asyncio
 import json
 import logging
 import os
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, NoReturn, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from ..auth.dependencies import get_current_user
@@ -59,6 +58,7 @@ from ..services.agent_stream import (
     StructuredSourceUnavailable,
     TailerManager,
     get_adapter_for_session,
+    quoted_images,
 )
 from ..services.agent_stream.attachments import AgentStreamAttachmentStore
 from ..services.agent_stream.attachments import _magic_mime as sniff_image_mime
@@ -1794,50 +1794,31 @@ async def get_tab_agent_image(
     )
 
 
-# ── Lark (Feishu) IM images referenced by a bare ``img_v3_`` key ────────────
+# ── Agent-quoted bare-token images (Lark ``img_v3_`` and future providers) ──
 #
-# lark-cli downloads inbound IM images to
-# ``~/.claude/oncall/.tmp_img/<sender>/lark-im-resources/img_v3_<key>.<ext>``
-# (one sender subdirectory per peer). Agents quote such an image in markdown
-# with only the bare filename stem ``img_v3_<key>`` — no scheme, directory, or
-# extension — which the browser resolves as a relative URL and gets a 404.
+# Agents quote images in markdown with provider-specific bare tokens — Lark's
+# ``img_v3_<key>`` today, potentially Slack/DingTalk/CDN/skill-local tokens
+# later. The token is not a URL the browser can load. The
+# :mod:`services.agent_stream.quoted_images` resolver layer maps such a token
+# to real bytes (or, in future, a redirect/inline result) via a provider
+# registry; Lark is simply the first registered resolver.
 #
-# This endpoint maps the bare key back to the already-downloaded file. It uses
-# the same restricted-reader posture as the agent-image endpoint:
+# This route is provider-neutral. Shared security posture, enforced inside the
+# resolvers:
 #
-#   1. tab/session ownership — keyed by tab id, resolved through the same
-#      live-tab lookup as the attachment/agent-image endpoints;
-#   2. no caller-controlled path — the client supplies only the key, which must
-#      match a strict charset (``img_v3_`` prefix + ``[A-Za-z0-9_-]``). The
-#      filesystem location is constructed solely by globbing the fixed root,
-#      so traversal/absolute-path payloads can never select a file;
-#   3. containment — the glob anchor is fixed two levels below the resource
-#      root (``*/lark-im-resources``) and the resolved real file (symlinks
-#      fully expanded) must still live inside that root;
+#   1. tab/session ownership — same live-tab lookup as the
+#      attachment/agent-image endpoints;
+#   2. per-provider key allowlist — anchored charset, length bound, no control
+#      chars; the caller never supplies a filesystem path;
+#   3. root confinement — resolved real paths stay inside a provider's roots
+#      (symlinks fully expanded);
 #   4. content allowlist — magic bytes must sniff as PNG/JPEG/GIF/WebP;
-#   5. no information leak — every failure (bad key, missing, non-image,
-#      traversal, unknown tab) is the same opaque 404 with ``nosniff``.
-_LARK_IMAGE_KEY_RE = re.compile(r"img_v3_[A-Za-z0-9_-]+")
-_LARK_IMAGE_KEY_MAX_LEN = 256
-_LARK_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
-_LARK_IMAGE_RESOURCES_DIR = "lark-im-resources"
+#   5. no information leak — every failure is the same opaque 404 with
+#      ``nosniff``.
 
 
-def _lark_image_resource_root() -> Optional[Path]:
-    """Root that contains ``<sender>/lark-im-resources/`` image directories.
-
-    Returns the resolved root, or ``None`` when it cannot be resolved. Kept as
-    a function (rather than an import-time constant) so tests can monkeypatch a
-    tmp resource tree instead of touching the real ``~/.claude/oncall``.
-    """
-    try:
-        return Path.home() / ".claude" / "oncall" / ".tmp_img"
-    except RuntimeError:
-        return None
-
-
-def _lark_image_not_available() -> HTTPException:
-    """Uniform opaque 404 for every denied lark-image request."""
+def _quoted_image_not_available() -> HTTPException:
+    """Uniform opaque 404 for every denied quoted-image request."""
     return HTTPException(
         status_code=404,
         detail="image not available",
@@ -1848,102 +1829,55 @@ def _lark_image_not_available() -> HTTPException:
     )
 
 
-def _resolve_lark_image(key: str) -> Tuple[bytes, str]:
-    """Map a validated ``img_v3_<key>`` token to downloaded image bytes.
-
-    The file is located by globbing ``<root>/*/lark-im-resources/<key>.<ext>``
-    for the whitelisted extensions — the caller never supplies a path. Raises
-    the opaque 404 from :func:`_lark_image_not_available` for a malformed key,
-    a missing/non-regular file, a symlink escape outside the resource root, an
-    oversized file, or non-image bytes.
-    """
-    if (
-        not isinstance(key, str)
-        or not key
-        or len(key) > _LARK_IMAGE_KEY_MAX_LEN
-        or any(ord(ch) < 0x20 for ch in key)
-        or not _LARK_IMAGE_KEY_RE.fullmatch(key)
-    ):
-        raise _lark_image_not_available()
-
-    root = _lark_image_resource_root()
-    if root is None:
-        raise _lark_image_not_available()
-    try:
-        real_root = root.expanduser().resolve(strict=True)
-    except OSError:
-        raise _lark_image_not_available() from None
-
-    resolved: Optional[Path] = None
-    for suffix in _LARK_IMAGE_SUFFIXES:
-        # Fixed-shape glob: exactly one sender-level directory, then the
-        # well-known resources directory, then the caller's key. ``key`` has
-        # been charset-validated, so it cannot carry glob metacharacters or
-        # path separators.
-        pattern = os.path.join("*", _LARK_IMAGE_RESOURCES_DIR, key + suffix)
-        for candidate in real_root.glob(pattern):
-            try:
-                real = candidate.resolve(strict=True)
-            except OSError:
-                continue
-            if not real.is_file():
-                continue
-            # Symlink escape: the fully resolved file must stay under the root
-            # and keep the ``<sender>/lark-im-resources/<file>`` shape.
-            try:
-                relative = real.relative_to(real_root)
-            except ValueError:
-                continue
-            if len(relative.parts) != 3 or relative.parts[1] != _LARK_IMAGE_RESOURCES_DIR:
-                continue
-            resolved = real
-            break
-        if resolved is not None:
-            break
-
-    if resolved is None:
-        raise _lark_image_not_available()
-
-    try:
-        with open(resolved, "rb") as handle:
-            data = handle.read(_AGENT_IMAGE_MAX_BYTES + 1)
-    except OSError:
-        raise _lark_image_not_available() from None
-
-    if len(data) > _AGENT_IMAGE_MAX_BYTES:
-        raise _lark_image_not_available()
-
-    mime = sniff_image_mime(data)
-    if mime is None:
-        raise _lark_image_not_available()
-    return data, mime
-
-
-@router.get("/tabs/{tab_id}/stream/lark-image")
-async def get_tab_lark_image(
+@router.get("/tabs/{tab_id}/stream/quoted-image")
+async def get_tab_quoted_image(
     tab_id: str,
     key: str = Query(
         ...,
-        max_length=_LARK_IMAGE_KEY_MAX_LEN,
-        description="Bare lark image key, e.g. img_v3_0215v_…",
+        max_length=quoted_images.QUOTED_IMAGE_KEY_MAX_LEN,
+        description="Bare provider image token, e.g. img_v3_0215v_…",
     ),
     current_user: User = Depends(get_current_user),
 ) -> Response:
-    """Serve a downloaded Lark IM image referenced by its bare ``img_v3_`` key.
+    """Resolve and serve an agent-quoted bare-token image.
 
-    Restricted reader — see :func:`_resolve_lark_image` for the key charset,
-    fixed-root glob, containment, and content allowlist.
+    Provider-neutral entry point; dispatch, containment and content checks
+    live in :mod:`services.agent_stream.quoted_images`.
     """
     _terminal_tab_session_or_404(tab_id)
-    data, mime = _resolve_lark_image(key)
-    return Response(
-        content=data,
-        media_type=mime,
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": _AGENT_IMAGE_CACHE_CONTROL,
-        },
-    )
+    try:
+        result = quoted_images.resolve_quoted_image(key)
+    except quoted_images.QuotedImageUnavailable:
+        raise _quoted_image_not_available() from None
+
+    if isinstance(result, quoted_images.LocalImage):
+        return Response(
+            content=result.data,
+            media_type=result.media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": _AGENT_IMAGE_CACHE_CONTROL,
+            },
+        )
+    if isinstance(result, quoted_images.DataImage):
+        return Response(
+            content=result.data,
+            media_type=result.media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": _ATTACHMENT_NO_STORE,
+            },
+        )
+    if isinstance(result, quoted_images.RedirectImage):
+        # Reserved for a future remote/CDN provider: hand the browser the
+        # provider URL instead of proxying bytes. nosniff stays on the
+        # redirect response itself.
+        return RedirectResponse(
+            url=result.location,
+            status_code=307,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+    raise _quoted_image_not_available()
 
 
 __all__ = ["router", "_reset_tailer_manager"]
