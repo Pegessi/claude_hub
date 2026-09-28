@@ -70,6 +70,7 @@ def _transient_provider_notice(message: Any) -> bool:
     """True when an ``error``-channel message is a recoverable reconnect."""
     return isinstance(message, str) and bool(_TRANSIENT_NOTICE_RE.match(message))
 
+
 # Prefix TraeX's code-mode host gives the nested sub-agent's item ids, e.g.
 # ``code-mode-nested:29:call_…:exec-…``. The ``29`` token is a nesting depth /
 # cell namespace, NOT the receiver thread id, so it cannot by itself split two
