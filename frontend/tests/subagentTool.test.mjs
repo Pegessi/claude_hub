@@ -87,6 +87,7 @@ test('parseSubagent projects the Claude Agent view', () => {
     prompt: CLAUDE_ARGS.prompt,
     threadIds: [],
     background: true,
+    directive: false,
   })
 })
 
@@ -104,7 +105,19 @@ test('parseSubagent projects the TraeX spawnAgent view (thread target, no type)'
   assert.equal(view.provider, 'traex')
   assert.equal(view.agentType, null)
   assert.equal(view.description, '')
+  assert.equal(view.directive, false)
   assert.deepEqual(view.threadIds, ['01a0bce6-af31-7ab1-b111-5d0b50967ae7'])
+})
+
+test('parseSubagent treats sendInput as a directive to an existing thread', () => {
+  const args = { prompt: 'status?', receiverThreadIds: ['01a0e2f6-ef37-7031-b97e-fecf618eef5a'] }
+  const view = parseSubagent('sendInput', args)
+  assert.equal(view.provider, 'traex')
+  assert.equal(view.directive, true)
+  assert.deepEqual(view.threadIds, ['01a0e2f6-ef37-7031-b97e-fecf618eef5a'])
+  // A sendInput with no receiver thread or no prompt fails closed.
+  assert.equal(parseSubagent('sendInput', { prompt: 'x' }), null)
+  assert.equal(parseSubagent('sendInput', { receiverThreadIds: args.receiverThreadIds }), null)
 })
 
 test('status and provider labels cover every lifecycle/provider and pass through unknowns', () => {

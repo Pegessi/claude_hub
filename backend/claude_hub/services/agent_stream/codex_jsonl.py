@@ -24,7 +24,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from ...models import (
     AgentStreamEvent,
@@ -69,6 +69,24 @@ _TRANSIENT_NOTICE_MESSAGE_ID = "provider-status:reconnect"
 def _transient_provider_notice(message: Any) -> bool:
     """True when an ``error``-channel message is a recoverable reconnect."""
     return isinstance(message, str) and bool(_TRANSIENT_NOTICE_RE.match(message))
+
+
+# Prefix TraeX's code-mode host gives the nested sub-agent's item ids, e.g.
+# ``code-mode-nested:29:call_…:exec-…``. The ``29`` token is a nesting depth /
+# cell namespace, NOT the receiver thread id, so it cannot by itself split two
+# concurrent sub-agents — it only marks "this item ran inside the nested
+# code-mode worker". See ``_code_mode_thread`` for the attribution fallback.
+_CODE_MODE_NESTED_PREFIX = "code-mode-nested:"
+
+# Tool names on the Codex/TraeX collab protocol that address a child thread.
+# ``spawnAgent`` launches (and owns) the local worker; ``sendInput`` posts a
+# follow-up to one or more already-running threads.
+_COLLAB_SPAWN_TOOLS = {"spawnAgent"}
+_COLLAB_MESSAGE_TOOLS = {"sendInput"}
+
+
+def _clean_thread_id(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _codex_tool_args(raw_input: Any) -> Dict[str, Any]:
@@ -143,6 +161,21 @@ class CodexJsonlAdapter(AgentStreamAdapter):
     def __init__(self) -> None:
         super().__init__()
         self._latest_usage: Dict[str, Dict[str, Any]] = {}
+        # Per-session collab thread registry, learned from the main agent's
+        # ``spawnAgent`` / ``sendInput`` calls. Used only as a fallback to
+        # attribute ``code-mode-nested`` items when the provider omits a
+        # distinguishing ``threadId`` (see ``_code_mode_thread``). Keyed by
+        # NormalizeContext.session_id so concurrent tabs never cross wires.
+        self._spawned_threads: Dict[str, Set[str]] = {}
+        self._messaged_threads: Dict[str, Set[str]] = {}
+        # Multi-spawn attribution: maps a ``code-mode-nested:<depth>:<parent>``
+        # item's parent call token to the concrete child thread that owns the
+        # code-mode host. Learned the first time an item with that token
+        # carries an explicit owner thread (``params.threadId`` / the item's
+        # own thread fields); later started/completed/delta records for the
+        # same host — which may omit the thread id — then still attribute to
+        # the right child instead of a shared synthetic bucket. Per session.
+        self._nested_owner_by_parent: Dict[str, Dict[str, str]] = {}
 
     def capabilities(self, session: ManagedSession) -> StreamCapabilities:
         """Advertise structured Codex chat only after its rollout exists."""
@@ -257,6 +290,137 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             )
         return ctx.event(AgentStreamEventType.ERROR, {"message": message})
 
+    # ── sub-agent thread attribution ─────────────────────────────────────────
+
+    def _remember_collab_threads(
+        self, tool_name: str, args: Dict[str, Any], ctx: NormalizeContext
+    ) -> None:
+        """Record which child threads a main-agent collab call addressed.
+
+        ``spawnAgent`` owns the local worker thread; ``sendInput`` may also
+        address pre-existing remote peer threads. The registry lets us place
+        ``code-mode-nested`` work on the spawned worker when the provider does
+        not repeat an explicit ``threadId`` on every nested item."""
+        raw = args.get("receiverThreadIds") if isinstance(args, dict) else None
+        if not isinstance(raw, list):
+            return
+        ids = {t for t in raw if isinstance(t, str) and t.strip()}
+        if not ids:
+            return
+        if tool_name in _COLLAB_SPAWN_TOOLS:
+            target = self._spawned_threads
+        elif tool_name in _COLLAB_MESSAGE_TOOLS:
+            target = self._messaged_threads
+        else:
+            return
+        target.setdefault(ctx.session_id, set()).update(ids)
+
+    @staticmethod
+    def _nested_parent_token(item_id: str) -> Optional[str]:
+        """Extract the host call token from a ``code-mode-nested`` item id.
+
+        Real id: ``code-mode-nested:29:<host_call_id>:exec-<uuid>``. All exec
+        items of one nested code-mode host share ``<host_call_id>``; each
+        parallel spawned worker gets a distinct host, so in a multi-spawn turn
+        this token — not the constant depth ``29`` — disambiguates the owner.
+        Returns ``None`` for malformed/non-nested ids."""
+        parts = item_id.split(":")
+        if len(parts) >= 3 and parts[0] == "code-mode-nested" and parts[2]:
+            return parts[2]
+        return None
+
+    def _remember_nested_owner(self, ctx: NormalizeContext, item_id: str, thread_id: str) -> None:
+        parent = self._nested_parent_token(item_id)
+        if parent is None:
+            return
+        owners = self._nested_owner_by_parent.setdefault(ctx.session_id, {})
+        known = owners.get(parent)
+        # First authoritative sighting wins; a contradiction is left untouched
+        # (real protocol keeps one host per worker, so this never flips).
+        if known is None:
+            owners[parent] = thread_id
+
+    def _code_mode_thread(self, ctx: NormalizeContext, item_id: str) -> str:
+        """Resolve the owning thread for a ``code-mode-nested`` item.
+
+        Order:
+        1. The host call token learned from a prior explicit-owner record of
+           this same nested host (multi-spawn attribution).
+        2. The unique thread the main agent spawned (single local worker).
+        3. The unique addressed (spawned-or-messaged) thread.
+        4. A stable synthetic group derived from the nesting token, so
+           ambiguous work still nests off the main stream instead of being
+           flattened into the main agent's bubble."""
+        parent = self._nested_parent_token(item_id)
+        if parent is not None:
+            owner = self._nested_owner_by_parent.get(ctx.session_id, {}).get(parent)
+            if owner is not None:
+                return owner
+        spawned = self._spawned_threads.get(ctx.session_id, set())
+        if len(spawned) == 1:
+            return next(iter(spawned))
+        union = spawned | self._messaged_threads.get(ctx.session_id, set())
+        if len(union) == 1:
+            return next(iter(union))
+        depth = "nested"
+        parts = item_id.split(":")
+        if len(parts) >= 2 and parts[0] == "code-mode-nested" and parts[1]:
+            depth = parts[1]
+        return f"code-mode-{depth}"
+
+    @staticmethod
+    def _item_owner_thread(item: Any) -> Optional[str]:
+        """Owner thread id carried inside an ``item`` payload, if any.
+
+        Observed/candidate fields across app-server protocol versions:
+        top-level ``threadId`` / ``thread_id`` and collab's
+        ``senderThreadId`` / ``agentThreadId``. Non-string/blank → None."""
+        if not isinstance(item, dict):
+            return None
+        for key in ("threadId", "thread_id", "senderThreadId", "agentThreadId"):
+            value = _clean_thread_id(item.get(key))
+            if value is not None:
+                return value
+        return None
+
+    def _resolve_sub_thread(
+        self,
+        params: Any,
+        ctx: NormalizeContext,
+        item_id: Optional[str] = None,
+        item: Any = None,
+    ) -> Optional[str]:
+        """Return the sub-agent thread id a record belongs to, or ``None`` for
+        a main-thread (or unattributable) record.
+
+        1. An explicit ``params.threadId`` (or an owner id inside ``item``)
+           differing from the user's main thread is authoritative — the collab
+           protocol's own routing field. For a ``code-mode-nested`` item it
+           also teaches the host-token → child-thread mapping used to place
+           the item's later thread-less records (multi-spawn attribution).
+        2. Otherwise a ``code-mode-nested`` item id marks nested worker work;
+           place it via the learned host owner, then the spawn/addressed-thread
+           registry fallback.
+
+        Never returns the main thread id itself. With no ``main_thread_id`` in
+        context (one-shot/transcript paths) the explicit check is skipped and
+        only the nested-id fallback can attribute — both degrade safely."""
+        explicit: Optional[str] = None
+        if isinstance(params, dict):
+            explicit = _clean_thread_id(params.get("threadId"))
+        if explicit is None:
+            explicit = self._item_owner_thread(item)
+        main_id = _clean_thread_id(ctx.main_thread_id)
+        nested_id = _clean_thread_id(item_id)
+        is_nested = nested_id is not None and nested_id.startswith(_CODE_MODE_NESTED_PREFIX)
+        if explicit is not None and main_id is not None and explicit != main_id:
+            if is_nested and nested_id is not None:
+                self._remember_nested_owner(ctx, nested_id, explicit)
+            return explicit
+        if is_nested and nested_id is not None:
+            return self._code_mode_thread(ctx, nested_id)
+        return None
+
     def _normalize_notification(
         self, method: str, params: Any, ctx: NormalizeContext
     ) -> List[AgentStreamEvent]:
@@ -264,6 +428,7 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         events: List[AgentStreamEvent] = []
         if not isinstance(params, dict):
             return events
+        sub_thread = self._resolve_sub_thread(params, ctx, params.get("itemId"))
         if method == "turn/started":
             turn = params.get("turn")
             provider_turn_id = turn.get("id") if isinstance(turn, dict) else params.get("turnId")
@@ -308,15 +473,29 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             if isinstance(error, dict) and error.get("message"):
                 events.append(self._error_or_status_event(ctx, error["message"]))
         elif method in {"item/started", "item/completed"}:
-            events.extend(self._normalize_tool_item(params.get("item"), method, ctx))
+            events.extend(
+                self._normalize_tool_item(params.get("item"), method, ctx, params.get("threadId"))
+            )
         elif method == "item/agentMessage/delta":
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
-                events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": delta}))
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.TEXT_DELTA,
+                        {"text": delta},
+                        sub_thread_id=sub_thread,
+                    )
+                )
         elif method == "item/reasoning/textDelta":
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
-                events.append(ctx.event(AgentStreamEventType.THINKING_DELTA, {"text": delta}))
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.THINKING_DELTA,
+                        {"text": delta},
+                        sub_thread_id=sub_thread,
+                    )
+                )
         elif method == "item/plan/delta":
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
@@ -368,7 +547,11 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         )
 
     def _normalize_tool_item(
-        self, item: Any, method: str, ctx: NormalizeContext
+        self,
+        item: Any,
+        method: str,
+        ctx: NormalizeContext,
+        params_thread_id: Any = None,
     ) -> List[AgentStreamEvent]:
         if not isinstance(item, dict) or not isinstance(item.get("id"), str):
             return []
@@ -421,6 +604,21 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             # Text/reasoning/plan items already arrive as deltas.
             return []
         call_id = item["id"]
+        # Collab calls (spawnAgent/sendInput) are issued BY the main agent and
+        # stay on the main stream as instruction cards; they also teach us the
+        # receiver threads. Every other item that carries a sub-thread id (or a
+        # ``code-mode-nested`` item id) is the child's own work and is nested.
+        is_collab = kind == "collabAgentToolCall"
+        if is_collab and method == "item/started":
+            self._remember_collab_threads(name, args, ctx)
+        sub_thread: Optional[str] = None
+        if not is_collab:
+            sub_thread = self._resolve_sub_thread(
+                {"threadId": params_thread_id} if isinstance(params_thread_id, str) else {},
+                ctx,
+                call_id,
+                item,
+            )
         if method == "item/started":
             return [
                 ctx.event(
@@ -431,6 +629,7 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                         "args": args,
                     },
                     call_id=call_id,
+                    sub_thread_id=sub_thread,
                 )
             ]
         failed = item.get("status") in {"failed", "declined"} or item.get("success") is False
@@ -445,6 +644,7 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                     "result": _codex_extract_text(result),
                 },
                 call_id=call_id,
+                sub_thread_id=sub_thread,
             )
         ]
 

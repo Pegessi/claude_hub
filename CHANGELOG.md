@@ -5,6 +5,26 @@
 
 ## Unreleased
 
+### fix(chat): silence watchdog no longer reaps a just-started turn before its first record drains
+
+- A stop-restart/relaunch turn intermittently produced no usable lifecycle
+  after the nested sub-agent-thread merge: the inactivity (and hard-liveness)
+  watchdog evaluates at the **top** of each poll tick, *before* that tick's
+  next provider record is read. On a freshly started turn the first
+  `item/started` / `item/completed` records can already be buffered in the
+  transport's stdout queue while the watchdog still sees an activity stamp of
+  age ≈ 0 and an empty active-tool set. With the zero/near-zero timeouts used
+  in fast tests (and any sub-tick configuration), that microsecond-old turn was
+  reaped before the suppressing `item/started` registered, discarding the
+  buffered completion and wedging the stop-restart-relaunch first turn.
+- Added a small minimum-silence debounce (`_MIN_TURN_SILENCE_S`, 0.25s) to both
+  `_stream_inactive` and `_turn_hard_liveness_expired` — long enough to drain
+  the start handoff, far below the real 600s/7200s timeouts — and stopped the
+  first-observation tick from clobbering an already-set (or deliberately
+  back-dated) `_last_event_at`. Sends remain serialized through `_send_lock`,
+  so production never observes the restart's stop→resume gap; the affected
+  wedge test now waits on the resumed thread like the explicit-Stop test.
+
 ### fix(chat): manual Stop resets any wedged/reconnecting turn (idempotent cancel + late-completion lock)
 
 - Even after the capacity-queue fix, two wedges remained: a repeat Stop after
@@ -73,6 +93,31 @@
   mapped to one coalesced **status**, not a terminal **error**. The
   authoritative long-poll tolerates transient blips with capped backoff while
   staying live instead of failing on one dropped poll.
+
+### fix(chat): nested sub-agent content grouped by thread (multi-spawn)
+
+- TraeX/Codex collab turns (`spawnAgent` / `sendInput`) no longer flatten a
+  child worker's thinking, prose, and tools into the main assistant bubble.
+  The backend adapter stamps every child record with `payload.subagent_thread`
+  (thread-scoped `message_id`); the structured Chat mounts one expandable
+  **sub-thread card per receiver thread**. `spawnAgent` keeps its standalone
+  sub-agent launch card; only follow-up `sendInput` directives are filed as
+  in-card instructions, so the delegated prompt renders exactly once.
+- **Multi-spawn attribution**: a turn that spawns several parallel code-mode
+  workers (real tab 4ed6b70c: one F6 + three `01a0e38b…` spawns) previously
+  dumped every `code-mode-nested:29:…` tool into one synthetic `code-mode-29`
+  bucket, because the registry only attributed when exactly one thread had
+  been spawned. The adapter now learns the `host call token → child thread`
+  mapping from any record of that host carrying an explicit owner id
+  (`params.threadId` / item-level `threadId`/`senderThreadId`/`agentThreadId`)
+  and places the host's later thread-less started/completed records on the
+  same child; genuinely unattributable hosts still nest off-main in a stable
+  synthetic group rather than polluting the main stream.
+- Fixed a Vue `:key` bug in the sub-thread block: the per-part loop keyed on
+  `sub.kind`, which repeats across dozens of text/thinking/tool rows and made
+  Vue reuse wrong vnodes (dropped rows). It now keys on the reducer's unique
+  `sub.key`.
+
 
 ### feat(mobile): left-edge swipe session drawer with pinned sessions
 
