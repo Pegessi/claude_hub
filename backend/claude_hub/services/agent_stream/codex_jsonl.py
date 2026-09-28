@@ -574,6 +574,29 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                     message_id=self._plan_message_id(item["id"], ctx),
                 )
             ]
+        if kind == "reasoning":
+            # The current app-server emits ``item/started`` + ``item/completed``
+            # for reasoning items but NO ``item/reasoning/textDelta`` — the
+            # reasoning content/summary are empty and the actual reasoning is
+            # encrypted server-side (only token counts are exposed via
+            # ``thread/tokenUsage/updated``). Emit a truthful in-flight status
+            # so the user sees process activity without fabricating reasoning
+            # content. The stable message_id + snapshot lets the completion
+            # update replace the start indicator in place.
+            if method not in ("item/started", "item/completed"):
+                return []
+            text = "Thinking…" if method == "item/started" else "Done thinking"
+            return [
+                ctx.event(
+                    AgentStreamEventType.STATUS,
+                    {
+                        "text": text,
+                        "provider_status": "reasoning",
+                        "snapshot": True,
+                    },
+                    message_id=f"reasoning:{item['id']}",
+                )
+            ]
         name: str
         args: Dict[str, Any]
         result: Any
