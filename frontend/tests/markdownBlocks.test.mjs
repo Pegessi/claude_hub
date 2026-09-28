@@ -41,6 +41,21 @@ globalThis.__codeHighlight = await import(
   `data:text/javascript;base64,${Buffer.from(hlMocked).toString('base64')}`
 )
 
+// ── Load larkImage.ts (zero-dependency util) for the import below ───────
+const larkSource = await readFile(
+  new URL('../src/utils/larkImage.ts', import.meta.url),
+  'utf8',
+)
+const { outputText: larkOutputText } = ts.transpileModule(larkSource, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2020,
+  },
+})
+globalThis.__larkImage = await import(
+  `data:text/javascript;base64,${Buffer.from(larkOutputText).toString('base64')}`
+)
+
 // ── Load markdownBlocks.ts with mocked dompurify ────────────────────────
 const source = await readFile(
   new URL('../src/utils/markdownBlocks.ts', import.meta.url),
@@ -68,6 +83,10 @@ const mocked = outputText
   .replace(
     /import \{ highlightVersion, renderCodeBlockHtml \} from ['"]@\/utils\/codeHighlight['"];?/,
     'const { highlightVersion, renderCodeBlockHtml } = globalThis.__codeHighlight;',
+  )
+  .replace(
+    /import \{ rewriteLarkImageSrcs \} from ['"]@\/utils\/larkImage['"];?/,
+    'const { rewriteLarkImageSrcs } = globalThis.__larkImage;',
   )
 
 globalThis.__marked = marked
@@ -760,4 +779,63 @@ test('long streamed list: per-delta render time is informational (not asserted)'
   console.log(
     `[informational] max per-delta list render for ${ITEM_COUNT} items: ${maxRenderMs.toFixed(2)}ms`,
   )
+})
+
+// ── Bare img_v3_ lark-image rewriting through the block cache ────────────
+
+const LARK_KEY = 'img_v3_0215v_f958a4be-ef9b-4a06-b887-0a048973208g'
+
+test('bare img_v3 src is rewritten only when larkTabId is given', () => {
+  const src = `![Image](${LARK_KEY})`
+
+  const without = new MarkdownBlockCache()
+  // No tab id: the bare key stays as marked emitted it.
+  const plain = renderString(without, src, { complete: true, larkTabId: '' })
+  assert.match(plain, new RegExp(`<img src="${LARK_KEY}"`))
+
+  const withTab = new MarkdownBlockCache()
+  const rewritten = renderString(withTab, src, {
+    complete: true,
+    larkTabId: 'tab-a',
+  })
+  assert.match(
+    rewritten,
+    /<img src="\/api\/workspaces\/tabs\/tab-a\/stream\/lark-image\?key=/,
+  )
+  assert.match(rewritten, new RegExp(`data-lark-img="${LARK_KEY}"`))
+})
+
+test('ordinary image urls are unaffected with larkTabId set', () => {
+  const cache = new MarkdownBlockCache()
+  const html = renderString(
+    cache,
+    '![u](https://example.com/a.png)\n\n![d](data:image/png;base64,AAAA)',
+    { complete: true, larkTabId: 'tab-a' },
+  )
+  assert.match(html, /<img src="https:\/\/example\.com\/a\.png"/)
+  assert.match(html, /<img src="data:image\/png;base64,AAAA"/)
+  assert.doesNotMatch(html, /data-lark-img/)
+})
+
+test('lark rewrite applies inside list items', () => {
+  const cache = new MarkdownBlockCache()
+  const blocks = cache.render(`- ![Image](${LARK_KEY})`, {
+    complete: true,
+    larkTabId: 'tab-a',
+  })
+  assert.equal(blocks.length, 1)
+  assert.ok('list' in blocks[0])
+  assert.match(
+    blocks[0].list.items[0].html,
+    /stream\/lark-image\?key=/,
+  )
+})
+
+test('switching larkTabId invalidates cached rewritten html', () => {
+  const cache = new MarkdownBlockCache()
+  const src = `![Image](${LARK_KEY})`
+  const a = renderString(cache, src, { complete: true, larkTabId: 'tab-a' })
+  const b = renderString(cache, src, { complete: true, larkTabId: 'tab-b' })
+  assert.match(a, /tabs\/tab-a\/stream\/lark-image/)
+  assert.match(b, /tabs\/tab-b\/stream\/lark-image/)
 })

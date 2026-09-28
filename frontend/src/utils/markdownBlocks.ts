@@ -1,6 +1,7 @@
 import { marked, type Token, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
 import { highlightVersion, renderCodeBlockHtml } from '@/utils/codeHighlight'
+import { rewriteLarkImageSrcs } from '@/utils/larkImage'
 
 /**
  * Marked render options.
@@ -192,12 +193,20 @@ export class MarkdownBlockCache {
   /** The linkMarkdownPaths mode the cache was populated for. If the mode
    *  changes, the cache is invalidated. */
   private linkMode: boolean | null = null
+  /** The tab id bare ``img_v3_`` srcs were rewritten for. The endpoint URL
+   *  embeds the tab id, so a different tab id invalidates the cache. */
+  private larkTabId: string | null = null
   /** The highlight.js version the cache was populated for.  Bumped once
    *  when the lazy-loaded highlighter finishes loading; the cache is
    *  invalidated so code blocks are re-rendered with real highlighting. */
   private hlVersion: number | null = null
 
-  private cacheKey(raw: string, linkMarkdownPaths: boolean, listLoose?: boolean): string {
+  private cacheKey(
+    raw: string,
+    linkMarkdownPaths: boolean,
+    larkTabId: string,
+    listLoose?: boolean,
+  ): string {
     const link = linkMarkdownPaths ? 'l' : 'n'
     // List items are rendered in the context of their parent list's ``loose``
     // flag, which controls whether the item content is wrapped in ``<p>``.
@@ -206,7 +215,7 @@ export class MarkdownBlockCache {
     // loose). Including it in the key ensures cached items are invalidated
     // when the list's loose state changes.
     const loose = listLoose === undefined ? '' : `:loose=${listLoose}`
-    return `${link}${loose}:${raw}`
+    return `${link}:${larkTabId}${loose}:${raw}`
   }
 
   /**
@@ -217,18 +226,32 @@ export class MarkdownBlockCache {
    *   (stream has ended). Defaults to false for live streaming.
    * @param options.linkMarkdownPaths - when true, markdown path mentions
    *   are wrapped in anchor tags. Defaults to false.
+   * @param options.larkTabId - when set, bare ``img_v3_`` image srcs are
+   *   proxied through that tab's lark-image endpoint. Defaults to '' (no
+   *   rewriting).
    */
   render(
     source: string,
-    options: { complete?: boolean; linkMarkdownPaths?: boolean } = {},
+    options: {
+      complete?: boolean
+      linkMarkdownPaths?: boolean
+      larkTabId?: string
+    } = {},
   ): RenderedBlock[] {
-    const { complete = false, linkMarkdownPaths = false } = options
+    const { complete = false, linkMarkdownPaths = false, larkTabId = '' } = options
 
     // Invalidate the cache if the link mode changed since the last render.
     if (this.linkMode !== null && this.linkMode !== linkMarkdownPaths) {
       this.cache.clear()
     }
     this.linkMode = linkMarkdownPaths
+
+    // Invalidate the cache if the owning tab changed — rewritten lark image
+    // URLs embed the tab id.
+    if (this.larkTabId !== null && this.larkTabId !== larkTabId) {
+      this.cache.clear()
+    }
+    this.larkTabId = larkTabId
 
     // Invalidate the cache if the highlighter version changed (the
     // lazy-loaded highlight.js chunk finished loading since last render).
@@ -251,59 +274,87 @@ export class MarkdownBlockCache {
           isLast,
           complete,
           linkMarkdownPaths,
+          larkTabId,
         }))
       } else {
         blocks.push(this.renderHtmlBlock(token, `block:${i}`, {
           isLast,
           complete,
           linkMarkdownPaths,
+          larkTabId,
         }))
       }
     }
     return blocks
   }
 
+  /** Apply the optional HTML post-process passes shared by blocks/items. */
+  private postProcess(
+    html: string,
+    linkMarkdownPaths: boolean,
+    larkTabId: string,
+  ): string {
+    let result = html
+    if (linkMarkdownPaths) {
+      result = linkPathMentions(result)
+    }
+    if (larkTabId) {
+      result = rewriteLarkImageSrcs(result, larkTabId)
+    }
+    return result
+  }
+
   private renderHtmlBlock(
     token: Token,
     key: string,
-    opts: { isLast: boolean; complete: boolean; linkMarkdownPaths: boolean },
+    opts: {
+      isLast: boolean
+      complete: boolean
+      linkMarkdownPaths: boolean
+      larkTabId: string
+    },
   ): RenderedHtmlBlock {
-    const { isLast, complete, linkMarkdownPaths } = opts
-    const rawKey = this.cacheKey(token.raw, linkMarkdownPaths)
+    const { isLast, complete, linkMarkdownPaths, larkTabId } = opts
+    const rawKey = this.cacheKey(token.raw, linkMarkdownPaths, larkTabId)
 
     if (!isLast || complete) {
       let blockHtml = this.cache.get(rawKey)
       if (blockHtml === undefined) {
-        blockHtml = renderBlockToken(token)
-        if (linkMarkdownPaths) {
-          blockHtml = linkPathMentions(blockHtml)
-        }
+        blockHtml = this.postProcess(
+          renderBlockToken(token),
+          linkMarkdownPaths,
+          larkTabId,
+        )
         this.cache.set(rawKey, blockHtml)
       }
       return { key, html: blockHtml }
     }
 
     // Live tail: render but do not cache.
-    let blockHtml = renderBlockToken(token)
-    if (linkMarkdownPaths) {
-      blockHtml = linkPathMentions(blockHtml)
+    return {
+      key,
+      html: this.postProcess(renderBlockToken(token), linkMarkdownPaths, larkTabId),
     }
-    return { key, html: blockHtml }
   }
 
   private renderListBlock(
     token: Tokens.List,
     key: string,
-    opts: { isLast: boolean; complete: boolean; linkMarkdownPaths: boolean },
+    opts: {
+      isLast: boolean
+      complete: boolean
+      linkMarkdownPaths: boolean
+      larkTabId: string
+    },
   ): RenderedListBlock {
-    const { isLast, complete, linkMarkdownPaths } = opts
+    const { isLast, complete, linkMarkdownPaths, larkTabId } = opts
     const items = token.items
     const lastItemIdx = items.length - 1
 
     const renderedItems = items.map((item, idx) => {
       const itemIsLast = idx === lastItemIdx
       const itemKey = `${key}:item:${idx}`
-      const rawKey = this.cacheKey(item.raw, linkMarkdownPaths, token.loose)
+      const rawKey = this.cacheKey(item.raw, linkMarkdownPaths, larkTabId, token.loose)
 
       // An item is completed (and therefore cached) when:
       //  - it is not the final item of the list, OR
@@ -317,21 +368,25 @@ export class MarkdownBlockCache {
       if (itemCompleted) {
         let itemHtml = this.cache.get(rawKey)
         if (itemHtml === undefined) {
-          itemHtml = renderListItemInnerHtml(item, token)
-          if (linkMarkdownPaths) {
-            itemHtml = linkPathMentions(itemHtml)
-          }
+          itemHtml = this.postProcess(
+            renderListItemInnerHtml(item, token),
+            linkMarkdownPaths,
+            larkTabId,
+          )
           this.cache.set(rawKey, itemHtml)
         }
         return { key: itemKey, html: itemHtml }
       }
 
       // Live tail item: render but do not cache.
-      let itemHtml = renderListItemInnerHtml(item, token)
-      if (linkMarkdownPaths) {
-        itemHtml = linkPathMentions(itemHtml)
+      return {
+        key: itemKey,
+        html: this.postProcess(
+          renderListItemInnerHtml(item, token),
+          linkMarkdownPaths,
+          larkTabId,
+        ),
       }
-      return { key: itemKey, html: itemHtml }
     })
 
     const start = typeof token.start === 'number' ? token.start : 1
@@ -355,13 +410,14 @@ export class MarkdownBlockCache {
   clear(): void {
     this.cache.clear()
     this.linkMode = null
+    this.larkTabId = null
     this.hlVersion = null
   }
 
   /** Check whether a block's raw text is cached. */
   has(raw: string): boolean {
-    return this.cache.has(this.cacheKey(raw, true)) ||
-      this.cache.has(this.cacheKey(raw, false))
+    return this.cache.has(this.cacheKey(raw, true, '')) ||
+      this.cache.has(this.cacheKey(raw, false, ''))
   }
 }
 
