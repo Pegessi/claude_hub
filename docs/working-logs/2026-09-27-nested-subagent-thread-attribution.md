@@ -118,3 +118,44 @@ fail closed to main-stream attribution.
   Real captures always show an explicit owner before the bare completions.
 - Persisted normalized streams predate these fields; re-normalization/replay
   of a historical tab does not retroactively stamp old events.
+
+## Backfill / old-session reopen — verified verdict (2026-09-28)
+
+The commander question: after deploy, does reopening an OLD multi-spawn tab
+(e.g. `a50d8522`) auto-move child content from the main timeline into sub-agent
+cards? **No — not without a one-time migration.** Evidence:
+
+- Chat is a **native** session. On reopen the SSE history endpoint replays the
+  flat `AgentStreamStore` JSONL (`api/agent_stream.py read_since`); the native
+  poll loop returns at `tailer.py` before `_tail_file`, so there is **no
+  raw-rollout re-normalization** for a chat tab. `TraexJsonlAdapter.discover_source`
+  returns `None` outright (no rollout discovery), and only non-chat transcript
+  sessions reach `_tail_file`.
+- The frontend groups **only** on `payload.subagent_thread`
+  (`agentStreamTimeline.ts subThreadIdOf`); there is no `code-mode-nested:`
+  call-id or spawn-registry fallback. Old flat events lack the field, so they
+  stay on the main bubble. Reopen / hard refresh / clearing browser cache all
+  re-read the same flat store and change nothing.
+- Old events are not merely *missing a tag*: pre-merge child text/thinking
+  shared the main `{turn}:assistant` / `{turn}:thinking` `message_id`, so store
+  history compaction already **coalesced child text into the main bubble
+  durably**. The child/main split cannot be reconstructed from the flat stream.
+
+Recovery path per provider (net-new work, NOT shipped):
+
+- **TraeX** (incl. `a50d8522`): no raw rollout is discovered, so there is
+  currently nothing to rebuild from — old tabs remain flat.
+- **Codex**: a rebuild is *theoretically* possible from
+  `~/.codex/sessions/rollout-*.jsonl`, but requires (1) a one-time migration
+  that re-normalizes a rollout and replaces a tab's store rows, and (2)
+  sub-thread attribution in the rollout normalizers — today
+  `_normalize_event_msg` / `_normalize_response_item` emit tool/text/thinking
+  without any `_resolve_sub_thread`/collab attribution (the merge wired
+  attribution only into the live JSON-RPC `_normalize_notification` path).
+
+**New turns are fine:** live attribution stamps `subagent_thread`, it is
+persisted verbatim into the flat stream, survives history compaction (the
+thread-scoped `message_id` keeps children off the main row), and regroups after
+a cold reopen. Pinned by
+`test_subthread_attribution_survives_persistence_and_cold_reopen` and the
+frontend `nestedSubthreadAttribution.test.mjs`. Only pre-deploy turns stay flat.
