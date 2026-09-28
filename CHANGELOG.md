@@ -5,6 +5,24 @@
 
 ## Unreleased
 
+### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
+
+- Codex turns reported `usage.reasoning` tokens (e.g. 390) but the structured
+  Chat timeline showed **zero** `thinking_delta` events — the user saw no
+  process indication while the agent ran.
+- Root cause: the current app-server emits `item/started` + `item/completed`
+  for reasoning items but **no** `item/reasoning/textDelta`. The reasoning
+  `content`/`summary` are empty and the actual reasoning is encrypted
+  server-side (Fernet `gAAAAAB…` in the rollout); only token counts are
+  exposed via `thread/tokenUsage/updated`. The adapter's
+  `_normalize_tool_item` dropped reasoning items (its `else` branch assumed
+  "reasoning items already arrive as deltas").
+- Fix: when a reasoning item has no displayable text, emit a truthful
+  in-flight `STATUS` — "Thinking…" on `item/started`, "Done thinking" on
+  `item/completed` — with a stable `message_id` + `snapshot` so the frontend
+  replaces the indicator in place. No reasoning content is fabricated or
+  exposed.
+
 ### fix(chat): render agent-quoted bare-token images (Lark `img_v3_`, extensible) instead of "image unavailable"
 
 - Inbound Lark IM images are downloaded by lark-cli to

@@ -588,3 +588,50 @@ async def test_subthread_attribution_survives_persistence_and_cold_reopen(
     assert not any(
         e.type == AgentStreamEventType.THINKING_DELTA and _thread(e) is None for e in events
     )
+
+
+def test_reasoning_item_emits_truthful_thinking_status() -> None:
+    """A reasoning item with no text still surfaces a process indicator.
+
+    The current app-server emits ``item/started`` + ``item/completed`` for
+    reasoning items but NO ``item/reasoning/textDelta`` (content/summary are
+    empty; the reasoning is encrypted server-side). The adapter must emit a
+    truthful in-flight status instead of dropping the item, so the user sees
+    process activity without fabricated reasoning content.
+    """
+    adapter = CodexJsonlAdapter()
+    rs_id = "rs_0b197a71508c0c82016aba900f82dc87d097031c4f3d2b55d4"
+
+    started = adapter.normalize_line(
+        {
+            "method": "item/started",
+            "params": {
+                "threadId": MAIN,
+                "item": {"type": "reasoning", "id": rs_id, "summary": [], "content": []},
+            },
+        },
+        _ctx(),
+    )
+    assert len(started) == 1
+    assert started[0].type == AgentStreamEventType.STATUS
+    assert started[0].payload["text"] == "Thinking…"
+    assert started[0].payload["snapshot"] is True
+    assert started[0].message_id == f"reasoning:{rs_id}"
+
+    completed = adapter.normalize_line(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": MAIN,
+                "item": {"type": "reasoning", "id": rs_id, "summary": [], "content": []},
+            },
+        },
+        _ctx(),
+    )
+    assert len(completed) == 1
+    assert completed[0].type == AgentStreamEventType.STATUS
+    # Same stable message_id + snapshot: the frontend replaces the start
+    # indicator in place rather than appending a second status.
+    assert completed[0].payload["text"] == "Done thinking"
+    assert completed[0].message_id == f"reasoning:{rs_id}"
+    assert completed[0].payload["snapshot"] is True
