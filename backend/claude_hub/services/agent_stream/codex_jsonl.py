@@ -176,6 +176,12 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         # same host — which may omit the thread id — then still attribute to
         # the right child instead of a shared synthetic bucket. Per session.
         self._nested_owner_by_parent: Dict[str, Dict[str, str]] = {}
+        # In-flight reasoning items per turn, so a cancelled/interrupted turn
+        # (or any terminal without ``item/completed`` for reasoning) can
+        # finalize the "Thinking…" status instead of leaving it stale. Keyed
+        # by turn (``ctx.turn_id`` or session id), value maps reasoning item
+        # id → the sub-thread it belongs to (None for the main thread).
+        self._inflight_reasoning: Dict[str, Dict[str, Optional[str]]] = {}
 
     def capabilities(self, session: ManagedSession) -> StreamCapabilities:
         """Advertise structured Codex chat only after its rollout exists."""
@@ -468,6 +474,31 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             if usage is not None:
                 completed["usage"] = usage
             events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
+            # Finalize any in-flight reasoning statuses so a cancelled/
+            # interrupted turn (or any terminal without ``item/completed`` for
+            # reasoning) never shows a stale "Thinking…" indicator. The final
+            # status replaces the in-flight one in place (same message_id +
+            # snapshot).
+            turn_key = ctx.turn_id or ctx.session_id
+            inflight = self._inflight_reasoning.pop(turn_key, {})
+            for rs_id, sub_thread in inflight.items():
+                final_text = (
+                    "Thinking interrupted"
+                    if status in ("cancelled", "failed")
+                    else "Done thinking"
+                )
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.STATUS,
+                        {
+                            "text": final_text,
+                            "provider_status": "reasoning",
+                            "snapshot": True,
+                        },
+                        message_id=f"reasoning:{rs_id}",
+                        sub_thread_id=sub_thread,
+                    )
+                )
         elif method == "error":
             error = params.get("error")
             if isinstance(error, dict) and error.get("message"):
@@ -572,6 +603,45 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                         "snapshot": True,
                     },
                     message_id=self._plan_message_id(item["id"], ctx),
+                )
+            ]
+        if kind == "reasoning":
+            # The current app-server emits ``item/started`` + ``item/completed``
+            # for reasoning items but NO ``item/reasoning/textDelta`` — the
+            # reasoning content/summary are empty and the actual reasoning is
+            # encrypted server-side (only token counts are exposed via
+            # ``thread/tokenUsage/updated``). Emit a truthful in-flight status
+            # so the user sees process activity without fabricating reasoning
+            # content. The stable message_id + snapshot lets the completion
+            # update replace the start indicator in place.
+            if method not in ("item/started", "item/completed"):
+                return []
+            text = "Thinking…" if method == "item/started" else "Done thinking"
+            # Route to the owning child thread (a child's reasoning must not
+            # appear on the main stream).
+            sub_thread = self._resolve_sub_thread(
+                {"threadId": params_thread_id} if isinstance(params_thread_id, str) else {},
+                ctx,
+                item["id"],
+                item,
+            )
+            # Track in-flight reasoning so a cancelled/interrupted turn can
+            # finalize the status instead of leaving "Thinking…" stale.
+            turn_key = ctx.turn_id or ctx.session_id
+            if method == "item/started":
+                self._inflight_reasoning.setdefault(turn_key, {})[item["id"]] = sub_thread
+            else:
+                self._inflight_reasoning.get(turn_key, {}).pop(item["id"], None)
+            return [
+                ctx.event(
+                    AgentStreamEventType.STATUS,
+                    {
+                        "text": text,
+                        "provider_status": "reasoning",
+                        "snapshot": True,
+                    },
+                    message_id=f"reasoning:{item['id']}",
+                    sub_thread_id=sub_thread,
                 )
             ]
         name: str

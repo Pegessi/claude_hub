@@ -526,6 +526,13 @@
                       />
                     </div>
 
+                    <div
+                      v-else-if="sub.kind === 'status'"
+                      class="event-status subthread-status"
+                    >
+                      <span>{{ sub.text }}</span>
+                    </div>
+
                     <details
                       v-else-if="sub.kind === 'tool_group'"
                       class="tool-card tool-card--group"

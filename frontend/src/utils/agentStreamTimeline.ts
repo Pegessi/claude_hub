@@ -82,6 +82,10 @@ export type TimelineSubthreadPart =
   | { kind: 'agent_image'; key: string; tool: TimelineTool; path: string }
   // A ``sendInput`` directive the main agent posted to this child thread.
   | { kind: 'instruction'; key: string; tool: TimelineTool }
+  // A child's in-flight process status (e.g. "Thinking…"). The stable
+  // messageId + snapshot lets a later update (or the turn's terminal
+  // finalization) replace it in place rather than appending a second row.
+  | { kind: 'status'; key: string; text: string; messageId?: string | null }
 
 export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
@@ -449,6 +453,30 @@ function applySubthreadEvent(
         return true
       }
       return false
+    }
+    case 'status': {
+      const text = statusText(event)
+      if (!text) return false
+      const parts = child.part.parts
+      // Stable in-place snapshot: replace an existing child status with the
+      // same messageId rather than appending a second row.
+      if (event.payload.snapshot === true && event.message_id) {
+        const existing = parts.find(
+          part => part.kind === 'status' && part.messageId === event.message_id,
+        )
+        if (existing?.kind === 'status') {
+          if (existing.text === text) return false
+          existing.text = text
+          return true
+        }
+      }
+      parts.push({
+        kind: 'status',
+        key: `sub-status-${event.message_id ?? 'event'}-${event.stream_sequence}`,
+        text,
+        messageId: event.message_id,
+      })
+      return true
     }
     default:
       return false

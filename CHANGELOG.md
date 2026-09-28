@@ -5,6 +5,36 @@
 
 ## Unreleased
 
+### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
+
+- Codex turns reported `usage.reasoning` tokens (e.g. 390) but the structured
+  Chat timeline showed **zero** `thinking_delta` events — the user saw no
+  process indication while the agent ran.
+- Root cause: the current app-server emits `item/started` + `item/completed`
+  for reasoning items but **no** `item/reasoning/textDelta`. The reasoning
+  `content`/`summary` are empty and the actual reasoning is encrypted
+  server-side (Fernet `gAAAAAB…` in the rollout); only token counts are
+  exposed via `thread/tokenUsage/updated`. The adapter's
+  `_normalize_tool_item` dropped reasoning items (its `else` branch assumed
+  "reasoning items already arrive as deltas").
+- Fix: when a reasoning item has no displayable text, emit a truthful
+  in-flight `STATUS` — "Thinking…" on `item/started`, "Done thinking" on
+  `item/completed` — with a stable `message_id` + `snapshot` so the frontend
+  replaces the indicator in place. No reasoning content is fabricated or
+  exposed.
+- Review follow-up (two defects fixed):
+  - **Subthread routing**: the reasoning branch previously returned before
+    `_resolve_sub_thread`, so a child's `STATUS` got no `subagent_thread`
+    and appeared on the main stream. It now routes to the owning child
+    thread, and the frontend `applySubthreadEvent` handles child `STATUS`
+    with stable in-place snapshot replacement.
+  - **Stale status finalization**: a cancelled/interrupted turn (or any
+    terminal without `item/completed` for an in-flight reasoning item) left
+    a stale "Thinking…" indicator. The `turn/completed` handler now
+    finalizes each in-flight reasoning status in place ("Thinking
+    interrupted" for cancelled/failed, "Done thinking" otherwise), so
+    completed turns never show an in-flight status.
+
 ### fix(chat): render agent-quoted bare-token images (Lark `img_v3_`, extensible) instead of "image unavailable"
 
 - Inbound Lark IM images are downloaded by lark-cli to
