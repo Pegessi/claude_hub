@@ -11,11 +11,16 @@ on the main stream.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List
+
+import pytest
 
 from claude_hub.models import AgentStreamEvent, AgentStreamEventType, AgentType
 from claude_hub.services.agent_stream.base import NormalizeContext
 from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter, TraexJsonlAdapter
+from claude_hub.services.agent_stream.store import AgentStreamStore
 
 MAIN = "thread-main"
 F6 = "01a0e2f6-ef37-7031-b97e-fecf618eef5a"
@@ -385,3 +390,201 @@ def test_registry_is_scoped_per_session() -> None:
     # s2 has no spawned thread and no explicit thread id → synthetic group,
     # never s1's F6.
     assert other[0].payload["subagent_thread"] != F6
+
+
+# ── persistence + cold reopen ────────────────────────────────────────────────
+#
+# TraeX/Codex Chat is a NATIVE session: on reopen the UI history is replayed
+# from the flat persisted ``AgentStreamStore`` JSONL — there is no raw-rollout
+# re-normalization for native sessions (``TraexJsonlAdapter.discover_source``
+# returns None and the native poll loop returns before ``_tail_file``). So the
+# multi-spawn grouping only survives a tab reopen if ``subagent_thread`` is
+# persisted verbatim into that flat stream and survives history compaction.
+# These tests pin that end-to-end contract (adapter -> store -> cold replay).
+
+
+T1 = "01a0e38b-b3c6-7642-93b0-37b8c4445674"
+T2 = "01a0e38b-c4a2-7d10-bf7d-70b73ec27dc4"
+T3 = "01a0e38b-d768-70f3-926a-5b18bd203db2"
+
+
+def _multi_spawn_events(
+    adapter: CodexJsonlAdapter, ctx: NormalizeContext
+) -> List[AgentStreamEvent]:
+    """Live JSON-RPC shape for one turn with three parallel spawned workers."""
+    events: List[AgentStreamEvent] = []
+
+    def _spawn(thread: str) -> None:
+        events.extend(
+            adapter.normalize_line(
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": MAIN,
+                        "item": {
+                            "type": "collabAgentToolCall",
+                            "id": f"sp-{thread[:6]}",
+                            "tool": "spawnAgent",
+                            "prompt": "work",
+                            "receiverThreadIds": [thread],
+                        },
+                    },
+                },
+                ctx,
+            )
+        )
+
+    def _nested(host: str, exec_id: str, thread_id: str | None) -> None:
+        params: Dict[str, Any] = {
+            "item": {
+                "type": "commandExecution",
+                "id": f"code-mode-nested:29:{host}:exec-{exec_id}",
+                "command": ["ls"],
+            }
+        }
+        if thread_id is not None:
+            params["threadId"] = thread_id
+        events.extend(adapter.normalize_line({"method": "item/started", "params": params}, ctx))
+
+    for thread in (T1, T2, T3):
+        _spawn(thread)
+    events.extend(
+        adapter.normalize_line(
+            {"method": "item/agentMessage/delta", "params": {"threadId": MAIN, "delta": "MAIN"}},
+            ctx,
+        )
+    )
+    # T2 owner learned from a reasoning delta carrying its host token.
+    events.extend(
+        adapter.normalize_line(
+            {
+                "method": "item/reasoning/textDelta",
+                "params": {
+                    "threadId": T2,
+                    "itemId": "code-mode-nested:29:H2:r-1",
+                    "delta": "think a",
+                },
+            },
+            ctx,
+        )
+    )
+    events.extend(
+        adapter.normalize_line(
+            {
+                "method": "item/reasoning/textDelta",
+                "params": {
+                    "threadId": T2,
+                    "itemId": "code-mode-nested:29:H2:r-1",
+                    "delta": " think b",
+                },
+            },
+            ctx,
+        )
+    )
+    events.extend(
+        adapter.normalize_line(
+            {"method": "item/agentMessage/delta", "params": {"threadId": T1, "delta": "t1 report"}},
+            ctx,
+        )
+    )
+    _nested("H1", "1", T1)  # explicit owner
+    _nested("H2", "2", None)  # bare; learned from the T2 reasoning delta
+    _nested("H3", "3", T3)
+    events.extend(
+        adapter.normalize_line(
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "commandExecution",
+                        "id": "code-mode-nested:29:H3:exec-3",
+                        "exitCode": 0,
+                        "aggregatedOutput": "ok",
+                    }
+                },
+            },
+            ctx,
+        )
+    )
+    return events
+
+
+async def test_subthread_attribution_survives_persistence_and_cold_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    wm_pkg = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_pkg, "STATE_ROOT", Path(tempfile.mkdtemp()))
+
+    adapter = TraexJsonlAdapter()
+    ctx = _ctx()
+    live_store = AgentStreamStore("ws1", "s1")
+    for event in _multi_spawn_events(adapter, ctx):
+        await live_store.append(event)
+
+    # Simulate a backend/tab restart: a fresh store instance reads ONLY the
+    # persisted flat JSONL (the path the SSE history endpoint replays), with
+    # history compaction enabled.
+    cold_store = AgentStreamStore("ws1", "s1")
+    events = list((await cold_store.read_since(-1, limit=500, compact=True)).events)
+
+    def _thread(event: AgentStreamEvent) -> object:
+        return event.payload.get("subagent_thread")
+
+    # ① multi-spawn nested tools keep their OWN child thread id (no collapse).
+    nested = {
+        str(e.call_id): _thread(e)
+        for e in events
+        if e.type == AgentStreamEventType.TOOL_CALL_STARTED
+        and str(e.call_id).startswith("code-mode-nested")
+    }
+    assert nested == {
+        "code-mode-nested:29:H1:exec-1": T1,
+        "code-mode-nested:29:H2:exec-2": T2,
+        "code-mode-nested:29:H3:exec-3": T3,
+    }
+    # The H3 completion arrived bare (no threadId) but still follows its host.
+    completed = {
+        str(e.call_id): _thread(e)
+        for e in events
+        if e.type == AgentStreamEventType.TOOL_CALL_COMPLETED
+    }
+    assert completed["code-mode-nested:29:H3:exec-3"] == T3
+
+    # spawnAgent instruction cards are the main agent's own: never stamped.
+    spawn_cards = [
+        e
+        for e in events
+        if e.type == AgentStreamEventType.TOOL_CALL_STARTED
+        and e.payload.get("name") == "spawnAgent"
+    ]
+    assert spawn_cards and all(_thread(e) is None for e in spawn_cards)
+
+    # ② the main turn's text contains only the main agent's own content.
+    main_text = "".join(
+        e.payload.get("text", "")
+        for e in events
+        if e.type == AgentStreamEventType.TEXT_DELTA and _thread(e) is None
+    )
+    assert "MAIN" in main_text
+    assert "t1 report" not in main_text and "think" not in main_text
+
+    child_text = {
+        _thread(e): e.payload.get("text", "")
+        for e in events
+        if e.type == AgentStreamEventType.TEXT_DELTA and _thread(e) is not None
+    }
+    assert child_text.get(T1) == "t1 report"
+
+    # The two T2 thinking deltas compact into ONE child row (thread-scoped
+    # message id keeps it off the main ``turn-1:thinking`` row).
+    thinking = {
+        _thread(e): e.payload.get("text", "")
+        for e in events
+        if e.type == AgentStreamEventType.THINKING_DELTA
+    }
+    assert thinking == {T2: "think a think b"}
+    assert not any(
+        e.type == AgentStreamEventType.THINKING_DELTA and _thread(e) is None for e in events
+    )
