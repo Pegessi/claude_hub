@@ -41,6 +41,21 @@ globalThis.__codeHighlight = await import(
   `data:text/javascript;base64,${Buffer.from(hlMocked).toString('base64')}`
 )
 
+// ── Load quotedImage.ts (zero-dependency util) for the import below ──────
+const quotedSource = await readFile(
+  new URL('../src/utils/quotedImage.ts', import.meta.url),
+  'utf8',
+)
+const { outputText: quotedOutputText } = ts.transpileModule(quotedSource, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2020,
+  },
+})
+globalThis.__quotedImage = await import(
+  `data:text/javascript;base64,${Buffer.from(quotedOutputText).toString('base64')}`
+)
+
 // ── Load markdownBlocks.ts with mocked dompurify ────────────────────────
 const source = await readFile(
   new URL('../src/utils/markdownBlocks.ts', import.meta.url),
@@ -68,6 +83,10 @@ const mocked = outputText
   .replace(
     /import \{ highlightVersion, renderCodeBlockHtml \} from ['"]@\/utils\/codeHighlight['"];?/,
     'const { highlightVersion, renderCodeBlockHtml } = globalThis.__codeHighlight;',
+  )
+  .replace(
+    /import \{ rewriteQuotedImageSrcs \} from ['"]@\/utils\/quotedImage['"];?/,
+    'const { rewriteQuotedImageSrcs } = globalThis.__quotedImage;',
   )
 
 globalThis.__marked = marked
@@ -760,4 +779,68 @@ test('long streamed list: per-delta render time is informational (not asserted)'
   console.log(
     `[informational] max per-delta list render for ${ITEM_COUNT} items: ${maxRenderMs.toFixed(2)}ms`,
   )
+})
+
+// ── Bare quoted-image token rewriting through the block cache ────────────
+
+const QUOTED_KEY = 'img_v3_0215v_f958a4be-ef9b-4a06-b887-0a048973208g'
+
+test('bare quoted-image src is rewritten only when quotedTabId is given', () => {
+  const src = `![Image](${QUOTED_KEY})`
+
+  const without = new MarkdownBlockCache()
+  // No tab id: the bare key stays as marked emitted it.
+  const plain = renderString(without, src, { complete: true, quotedTabId: '' })
+  assert.match(plain, new RegExp(`<img src="${QUOTED_KEY}"`))
+
+  const withTab = new MarkdownBlockCache()
+  const rewritten = renderString(withTab, src, {
+    complete: true,
+    quotedTabId: 'tab-a',
+  })
+  assert.match(
+    rewritten,
+    /<img src="\/api\/workspaces\/tabs\/tab-a\/stream\/quoted-image\?key=/,
+  )
+  assert.match(rewritten, new RegExp(`data-quoted-img="${QUOTED_KEY}"`))
+})
+
+test('ordinary and foreign image urls are unaffected with quotedTabId set', () => {
+  const cache = new MarkdownBlockCache()
+  const html = renderString(
+    cache,
+    '![u](https://example.com/a.png)\n\n![d](data:image/png;base64,AAAA)',
+    { complete: true, quotedTabId: 'tab-a' },
+  )
+  assert.match(html, /<img src="https:\/\/example\.com\/a\.png"/)
+  assert.match(html, /<img src="data:image\/png;base64,AAAA"/)
+  assert.doesNotMatch(html, /data-quoted-img/)
+
+  // An unregistered provider token is left as-is (not proxied).
+  const foreign = renderString(cache, '![s](slack_F1234567890ABCDE)', {
+    complete: true,
+    quotedTabId: 'tab-a',
+  })
+  assert.match(foreign, /<img src="slack_F1234567890ABCDE"/)
+  assert.doesNotMatch(foreign, /quoted-image/)
+})
+
+test('quoted rewrite applies inside list items', () => {
+  const cache = new MarkdownBlockCache()
+  const blocks = cache.render(`- ![Image](${QUOTED_KEY})`, {
+    complete: true,
+    quotedTabId: 'tab-a',
+  })
+  assert.equal(blocks.length, 1)
+  assert.ok('list' in blocks[0])
+  assert.match(blocks[0].list.items[0].html, /stream\/quoted-image\?key=/)
+})
+
+test('switching quotedTabId invalidates cached rewritten html', () => {
+  const cache = new MarkdownBlockCache()
+  const src = `![Image](${QUOTED_KEY})`
+  const a = renderString(cache, src, { complete: true, quotedTabId: 'tab-a' })
+  const b = renderString(cache, src, { complete: true, quotedTabId: 'tab-b' })
+  assert.match(a, /tabs\/tab-a\/stream\/quoted-image/)
+  assert.match(b, /tabs\/tab-b\/stream\/quoted-image/)
 })

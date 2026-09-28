@@ -5,6 +5,40 @@
 
 ## Unreleased
 
+### fix(chat): render agent-quoted bare-token images (Lark `img_v3_`, extensible) instead of "image unavailable"
+
+- Inbound Lark IM images are downloaded by lark-cli to
+  `~/.claude/oncall/.tmp_img/<sender>/lark-im-resources/img_v3_<key>.<ext>`,
+  but agents quote them in markdown with only the bare stem
+  `![Image](img_v3_<key>)`. The browser resolved that stem as a relative URL →
+  404 → broken image. The existing `agent-image` reader could not serve them:
+  it only handles explicit paths inside the tab cwd, and these files live
+  outside the cwd.
+- New **provider-neutral resolver layer**
+  (`backend/claude_hub/services/agent_stream/quoted_images.py`): a resolver
+  registry dispatches a bare token by shape — first match wins — behind one
+  endpoint `GET /api/workspaces/tabs/{tab_id}/stream/quoted-image?key=…`.
+  `LarkImgV3Resolver` is the first registered provider (fixed-shape glob
+  `<root>/*/lark-im-resources/<key>.<ext>` over PNG/JPEG/GIF/WebP). All
+  resolvers share one security base (`LocalFileResolver`): anchored key
+  charset (no separators/glob chars/controls, ≤256), root confinement after
+  full symlink resolution, magic-byte image sniff, 10 MiB read cap,
+  `get_current_user` + tab ownership, uniform opaque 404 with
+  `X-Content-Type-Options: nosniff`. Results are typed
+  `LocalImage`/`DataImage`/`RedirectImage` so a future Slack/DingTalk/CDN or
+  skill-local provider — including one that returns a remote URL (route
+  already supports a 307) — is one new resolver, with no route or frontend
+  contract change.
+- Frontend mirrors the design in `utils/quotedImage.ts`: a matcher list
+  (first matcher = `img_v3_`), `isBareQuotedImageKey` /
+  `resolveQuotedImageUrl` / `rewriteQuotedImageSrcs`. `MarkdownBlockCache`
+  (used by every chat-pane `MarkdownContent`) rewrites a recognized bare
+  token to the tab-scoped endpoint and tags it `data-quoted-img`;
+  http(s)/data/blob/attachment URLs, cwd-absolute paths, and **unregistered
+  bare tokens** pass through untouched. A failed load degrades to a
+  restrained inline "[image unavailable]" placeholder instead of a
+  broken-image frame.
+
 ### fix(chat): silence watchdog no longer reaps a just-started turn before its first record drains
 
 - A stop-restart/relaunch turn intermittently produced no usable lifecycle

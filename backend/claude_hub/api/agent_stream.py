@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, NoReturn, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from ..auth.dependencies import get_current_user
@@ -58,6 +58,7 @@ from ..services.agent_stream import (
     StructuredSourceUnavailable,
     TailerManager,
     get_adapter_for_session,
+    quoted_images,
 )
 from ..services.agent_stream.attachments import AgentStreamAttachmentStore
 from ..services.agent_stream.attachments import _magic_mime as sniff_image_mime
@@ -1791,6 +1792,92 @@ async def get_tab_agent_image(
             "Cache-Control": _AGENT_IMAGE_CACHE_CONTROL,
         },
     )
+
+
+# ── Agent-quoted bare-token images (Lark ``img_v3_`` and future providers) ──
+#
+# Agents quote images in markdown with provider-specific bare tokens — Lark's
+# ``img_v3_<key>`` today, potentially Slack/DingTalk/CDN/skill-local tokens
+# later. The token is not a URL the browser can load. The
+# :mod:`services.agent_stream.quoted_images` resolver layer maps such a token
+# to real bytes (or, in future, a redirect/inline result) via a provider
+# registry; Lark is simply the first registered resolver.
+#
+# This route is provider-neutral. Shared security posture, enforced inside the
+# resolvers:
+#
+#   1. tab/session ownership — same live-tab lookup as the
+#      attachment/agent-image endpoints;
+#   2. per-provider key allowlist — anchored charset, length bound, no control
+#      chars; the caller never supplies a filesystem path;
+#   3. root confinement — resolved real paths stay inside a provider's roots
+#      (symlinks fully expanded);
+#   4. content allowlist — magic bytes must sniff as PNG/JPEG/GIF/WebP;
+#   5. no information leak — every failure is the same opaque 404 with
+#      ``nosniff``.
+
+
+def _quoted_image_not_available() -> HTTPException:
+    """Uniform opaque 404 for every denied quoted-image request."""
+    return HTTPException(
+        status_code=404,
+        detail="image not available",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": _ATTACHMENT_NO_STORE,
+        },
+    )
+
+
+@router.get("/tabs/{tab_id}/stream/quoted-image")
+async def get_tab_quoted_image(
+    tab_id: str,
+    key: str = Query(
+        ...,
+        max_length=quoted_images.QUOTED_IMAGE_KEY_MAX_LEN,
+        description="Bare provider image token, e.g. img_v3_0215v_…",
+    ),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Resolve and serve an agent-quoted bare-token image.
+
+    Provider-neutral entry point; dispatch, containment and content checks
+    live in :mod:`services.agent_stream.quoted_images`.
+    """
+    _terminal_tab_session_or_404(tab_id)
+    try:
+        result = quoted_images.resolve_quoted_image(key)
+    except quoted_images.QuotedImageUnavailable:
+        raise _quoted_image_not_available() from None
+
+    if isinstance(result, quoted_images.LocalImage):
+        return Response(
+            content=result.data,
+            media_type=result.media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": _AGENT_IMAGE_CACHE_CONTROL,
+            },
+        )
+    if isinstance(result, quoted_images.DataImage):
+        return Response(
+            content=result.data,
+            media_type=result.media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": _ATTACHMENT_NO_STORE,
+            },
+        )
+    if isinstance(result, quoted_images.RedirectImage):
+        # Reserved for a future remote/CDN provider: hand the browser the
+        # provider URL instead of proxying bytes. nosniff stays on the
+        # redirect response itself.
+        return RedirectResponse(
+            url=result.location,
+            status_code=307,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+    raise _quoted_image_not_available()
 
 
 __all__ = ["router", "_reset_tailer_manager"]
