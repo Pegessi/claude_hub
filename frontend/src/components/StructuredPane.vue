@@ -178,6 +178,7 @@
                 <MarkdownContent
                   v-if="turn.userText"
                   :text="turn.userText"
+                  :tab-id="props.tabId"
                   compact
                 />
                 <div
@@ -309,6 +310,7 @@
               <div class="conversation-bubble conversation-bubble--assistant">
                 <MarkdownContent
                   :text="part.text"
+                  :tab-id="props.tabId"
                   compact
                   :complete="turn.completed"
                 />
@@ -518,6 +520,7 @@
                     >
                       <MarkdownContent
                         :text="sub.text"
+                        :tab-id="props.tabId"
                         compact
                         :complete="turn.completed"
                       />
@@ -880,6 +883,7 @@
               <MarkdownContent
                 v-if="turn.userText"
                 :text="turn.userText"
+                :tab-id="props.tabId"
                 compact
               />
               <div
