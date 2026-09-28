@@ -114,6 +114,20 @@ STREAM_INACTIVITY_TIMEOUT_S = 600.0
 ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S = float(
     os.environ.get("CLAUDE_HUB_ACTIVE_TURN_LIVENESS_TIMEOUT_S", "7200")
 )
+# Minimum silence before either silence watchdog (inactivity / hard liveness)
+# may reap a turn, regardless of a smaller configured timeout (the zeroed
+# timeouts used in tests are the only case that binds: real configs are 600s+).
+# Each watchdog evaluates at the TOP of a poll tick, BEFORE that tick's next
+# record is read. On a freshly started turn the provider's first records can
+# already be buffered in transport stdout without having been drained yet, so
+# the watchdog briefly observes a brand-new activity stamp (age ≈ 0) and an
+# empty active-tool set. With a zero/near-zero timeout that microsecond-old turn
+# was killed before its first ``item/started`` registered — the very tool that
+# would have suppressed the inactivity reap — discarding the buffered
+# ``item/completed`` and losing the stop-restart turn lifecycle. This debounce
+# spans several poll ticks, long enough to drain the handoff, far below any real
+# timeout.
+_MIN_TURN_SILENCE_S = 0.25
 # Provider capacity queue (TraeX/Codex ``queue/status``): the turn has been
 # accepted but model generation has NOT started, so a queue heartbeat is not
 # evidence that the model stream is alive. Two distinct bounds apply while a
@@ -1021,7 +1035,10 @@ class SessionTailer:
         if self._waiting_for_external_activity() or self._goal_terminal_at is not None:
             return False
         last = self._last_event_at
-        return last is not None and (time.monotonic() - last > STREAM_INACTIVITY_TIMEOUT_S)
+        if last is None:
+            return False
+        silence_for = time.monotonic() - last
+        return silence_for > STREAM_INACTIVITY_TIMEOUT_S and silence_for >= _MIN_TURN_SILENCE_S
 
     def _turn_hard_liveness_expired(self) -> bool:
         """True when an active turn has emitted NOTHING past the outer bound.
@@ -1038,7 +1055,12 @@ class SessionTailer:
         if self._blocking_approval_call_ids:
             return False
         last = self._last_event_at
-        return last is not None and (time.monotonic() - last > ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S)
+        if last is None:
+            return False
+        silence_for = time.monotonic() - last
+        return (
+            silence_for > ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S and silence_for >= _MIN_TURN_SILENCE_S
+        )
 
     def _note_assistant_text(self, transport: ProviderSession) -> None:
         """Track a complete trailing Goal terminal signal in the raw text.
@@ -1619,7 +1641,12 @@ class SessionTailer:
             if transport.turn_in_flight:
                 if self._turn_in_flight_since is None:
                     self._turn_in_flight_since = time.monotonic()
-                    self._last_event_at = time.monotonic()
+                    # Seed the watchdog clock on first observation, but do not
+                    # clobber a stamp that already records real activity (or one
+                    # a caller deliberately back-dated): overwriting it here used
+                    # to reset a known-old silence to age 0 on the next tick.
+                    if self._last_event_at is None:
+                        self._last_event_at = time.monotonic()
             elif self._turn_in_flight_since is not None:
                 self._turn_in_flight_since = None
                 self._last_event_at = None
