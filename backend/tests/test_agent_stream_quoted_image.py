@@ -1,25 +1,21 @@
-"""Tests for the restricted Lark (Feishu) image endpoint.
+"""Tests for the provider-neutral agent-quoted image endpoint.
 
-``GET /api/workspaces/tabs/{tab_id}/stream/lark-image?key=img_v3_...`` maps a
-bare ``img_v3_<key>`` token (as it appears in Lark markdown bodies) back to the
-file lark-cli already downloaded under
-``<root>/<sender>/lark-im-resources/img_v3_<key>.<ext>``.
+``GET /api/workspaces/tabs/{tab_id}/stream/quoted-image?key=...`` resolves a
+bare provider image token through the resolver registry in
+``services.agent_stream.quoted_images``. The Lark ``img_v3_`` resolver is the
+first registered provider; the tests cover:
 
-It must stay a restricted reader:
-
-* the key matches a strict ``img_v3_[A-Za-z0-9_-]+`` charset — no path
-  separators, traversal, or glob metacharacters can reach the filesystem;
-* the file is located by a fixed-shape glob inside the monkeypatched resource
-  root — never by a caller-supplied path;
-* a symlink that resolves outside the root is denied;
-* only files whose magic bytes sniff as PNG/JPEG/GIF/WebP are served;
-* the tab must exist (same ownership lookup as the other stream endpoints);
-* every denial is an opaque 404 with ``X-Content-Type-Options: nosniff``.
+* the shared security base (key allowlist, root confinement, magic sniff,
+  size, opaque 404) via the Lark resolver;
+* provider dispatch — an unregistered bare token is never proxied;
+* the extension point — a newly registered resolver owns its key shape with
+  no route/contract change, and may return a redirect result.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -28,6 +24,7 @@ import pytest
 from httpx import AsyncClient
 
 from claude_hub.models import AgentType, ExecutionTarget, SessionKind
+from claude_hub.services.agent_stream import quoted_images as qi
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
@@ -60,7 +57,7 @@ def _make_tab(tab_id: str) -> SimpleNamespace:
 
 @pytest.fixture
 def resource_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Stand-in for ``~/.claude/oncall/.tmp_img`` with one sender tree."""
+    """Stand-in lark resource root with one sender tree."""
     from claude_hub.api import agent_stream as agent_stream_api
 
     root = tmp_path / "tmp_img"
@@ -68,7 +65,7 @@ def resource_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     resources.mkdir(parents=True)
     (resources / f"{KEY}.jpg").write_bytes(JPEG_BYTES)
 
-    monkeypatch.setattr(agent_stream_api, "_lark_image_resource_root", lambda: root)
+    monkeypatch.setattr(qi, "default_lark_resource_root", lambda: root)
     monkeypatch.setattr(
         agent_stream_api.ttyd_manager,
         "get_tab",
@@ -79,9 +76,12 @@ def resource_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 async def _get_image(client: AsyncClient, tab_id: str, key: str):
     return await client.get(
-        f"/api/workspaces/tabs/{tab_id}/stream/lark-image",
+        f"/api/workspaces/tabs/{tab_id}/stream/quoted-image",
         params={"key": key},
     )
+
+
+# ── Lark resolver through the neutral endpoint (security base) ─────────────
 
 
 async def test_valid_key_returns_bytes_and_content_type(
@@ -106,8 +106,6 @@ async def test_png_sniff_across_another_sender_dir(
 
 
 async def test_unknown_tab_is_404(client: AsyncClient, resource_root: Path) -> None:
-    # The unknown-tab 404 comes from the shared tab lookup (no custom headers);
-    # every *image* denial below carries the opaque nosniff response.
     resp = await _get_image(client, "tab-other", KEY)
     assert resp.status_code == 404
 
@@ -115,13 +113,14 @@ async def test_unknown_tab_is_404(client: AsyncClient, resource_root: Path) -> N
 async def test_missing_key_is_404(client: AsyncClient, resource_root: Path) -> None:
     resp = await _get_image(client, "tab-a", "img_v3_does-not-exist")
     assert resp.status_code == 404
+    assert resp.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize(
     "bad_key",
     [
         "img_v2_0215v_f958a4be",  # wrong prefix
-        "photo.jpg",  # bare filename, no img_v3 prefix
+        "photo.jpg",  # bare filename, no registered prefix
         "img_v3_",  # prefix only
         "img_v3_a/../../etc/passwd",  # traversal with separators
         "img_v3_..",  # dot outside charset
@@ -164,17 +163,102 @@ async def test_symlink_resolving_outside_root_is_404(
 async def test_file_outside_resources_dir_is_not_glob_reachable(
     client: AsyncClient, resource_root: Path
 ) -> None:
-    # Same key stem at the root and directly under a sender dir (missing the
+    # Files at the root / directly under a sender dir (missing the
     # lark-im-resources segment) must not be served.
     (resource_root / f"{KEY}.png").write_bytes(PNG_BYTES)
-    sender = resource_root / "chuxuan"
-    (sender / "img_v3_loose.png").write_bytes(PNG_BYTES)
-    resp = await _get_image(client, "tab-a", KEY)
-    # The valid <sender>/lark-im-resources/<key>.jpg still wins for KEY; a key
-    # with no file in a resources dir must 404 even if a loose copy exists.
-    assert resp.status_code == 200
+    (resource_root / "chuxuan" / "img_v3_loose.png").write_bytes(PNG_BYTES)
     resp_loose = await _get_image(client, "tab-a", "img_v3_loose")
     assert resp_loose.status_code == 404
+
+
+# ── Provider dispatch / registry ───────────────────────────────────────────
+
+
+async def test_unregistered_bare_key_is_not_proxied_404(
+    client: AsyncClient, resource_root: Path
+) -> None:
+    # Well-formed-looking bare tokens from some other provider (Slack/DingTalk/
+    # CDN/skill-local) must 404 until a resolver is registered for them.
+    for foreign in ["slack_F1234567890ABCDE", "ding_abc-123", "cdn_xyz_789", "tmpimg_42"]:
+        resp = await _get_image(client, "tab-a", foreign)
+        assert resp.status_code == 404, foreign
+
+
+def test_lark_is_registered_as_a_provider() -> None:
+    names = [r.name for r in qi.registered_resolvers()]
+    assert "lark-img-v3" in names
+
+
+def test_registry_dispatch_picks_lark_for_img_v3() -> None:
+    resolver = next(r for r in qi.registered_resolvers() if r.matches("img_v3_abc"))
+    assert resolver.name == "lark-img-v3"
+    # A foreign token matches no resolver at the dispatch entry point.
+    with pytest.raises(qi.QuotedImageUnavailable):
+        qi.resolve_quoted_image("slack_F1234567890ABCDE")
+
+
+def test_extension_point_new_local_resolver_without_route_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Registering a provider is the only change needed to own a key shape."""
+
+    class SkillTmpResolver(qi.LocalFileResolver):
+        name = "skill-tmp"
+        key_pattern = re.compile(r"skilltmp_[A-Za-z0-9_-]+")
+
+        def roots(self):  # type: ignore[override]
+            return [tmp_path / "skillimg"]
+
+        def candidate_files(self, key):  # type: ignore[override]
+            return [tmp_path / "skillimg" / f"{key}.png"]
+
+    store = tmp_path / "skillimg"
+    store.mkdir()
+    (store / "skilltmp_42.png").write_bytes(PNG_BYTES)
+
+    resolver = SkillTmpResolver()
+    monkeypatch.setattr(qi, "_REGISTRY", [*qi.registered_resolvers(), resolver])
+
+    result = qi.resolve_quoted_image("skilltmp_42")
+    assert isinstance(result, qi.LocalImage)
+    assert result.media_type == "image/png"
+    # The Lark provider still owns its own shape (dispatch is multi-provider).
+    assert any(r.matches("img_v3_x") for r in qi.registered_resolvers())
+
+
+def test_extension_point_redirect_result_shape() -> None:
+    """A future remote/CDN provider can return a RedirectImage."""
+
+    class CdnResolver(qi.QuotedImageResolver):
+        name = "cdn"
+        key_pattern = re.compile(r"cdn_[A-Za-z0-9_-]+")
+
+        def _resolve(self, key):  # type: ignore[override]
+            return qi.RedirectImage(location=f"https://cdn.example.com/{key}.webp")
+
+    resolver = CdnResolver()
+    result = resolver.resolve("cdn_abc")
+    assert isinstance(result, qi.RedirectImage)
+    assert result.location == "https://cdn.example.com/cdn_abc.webp"
+
+
+async def test_registered_redirect_resolver_gets_a_307(
+    client: AsyncClient, resource_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import re as _re
+
+    class CdnResolver(qi.QuotedImageResolver):
+        name = "cdn-test"
+        key_pattern = _re.compile(r"cdnredir_[A-Za-z0-9_-]+")
+
+        def _resolve(self, key):  # type: ignore[override]
+            return qi.RedirectImage(location="https://cdn.example.com/x.webp")
+
+    monkeypatch.setattr(qi, "_REGISTRY", [*qi.registered_resolvers(), CdnResolver()])
+    resp = await _get_image(client, "tab-a", "cdnredir_abc")
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "https://cdn.example.com/x.webp"
+    assert resp.headers["x-content-type-options"] == "nosniff"
 
 
 async def test_missing_resource_root_is_404(
@@ -185,7 +269,7 @@ async def test_missing_resource_root_is_404(
     def get_tab(tab_id: str) -> Optional[SimpleNamespace]:
         return _make_tab("tab-a") if tab_id == "tab-a" else None
 
-    monkeypatch.setattr(agent_stream_api, "_lark_image_resource_root", lambda: None)
+    monkeypatch.setattr(qi, "default_lark_resource_root", lambda: None)
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", get_tab)
     resp = await _get_image(client, "tab-a", KEY)
     assert resp.status_code == 404
