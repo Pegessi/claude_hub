@@ -5,6 +5,7 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
 ### fix(chat): manual Stop resets any wedged/reconnecting turn (idempotent cancel + late-completion lock)
 
 - Even after the capacity-queue fix, two wedges remained: a repeat Stop after
@@ -73,6 +74,31 @@
   mapped to one coalesced **status**, not a terminal **error**. The
   authoritative long-poll tolerates transient blips with capped backoff while
   staying live instead of failing on one dropped poll.
+
+### fix(chat): nested sub-agent content grouped by thread (multi-spawn)
+
+- TraeX/Codex collab turns (`spawnAgent` / `sendInput`) no longer flatten a
+  child worker's thinking, prose, and tools into the main assistant bubble.
+  The backend adapter stamps every child record with `payload.subagent_thread`
+  (thread-scoped `message_id`); the structured Chat mounts one expandable
+  **sub-thread card per receiver thread**. `spawnAgent` keeps its standalone
+  sub-agent launch card; only follow-up `sendInput` directives are filed as
+  in-card instructions, so the delegated prompt renders exactly once.
+- **Multi-spawn attribution**: a turn that spawns several parallel code-mode
+  workers (real tab 4ed6b70c: one F6 + three `01a0e38b…` spawns) previously
+  dumped every `code-mode-nested:29:…` tool into one synthetic `code-mode-29`
+  bucket, because the registry only attributed when exactly one thread had
+  been spawned. The adapter now learns the `host call token → child thread`
+  mapping from any record of that host carrying an explicit owner id
+  (`params.threadId` / item-level `threadId`/`senderThreadId`/`agentThreadId`)
+  and places the host's later thread-less started/completed records on the
+  same child; genuinely unattributable hosts still nest off-main in a stable
+  synthetic group rather than polluting the main stream.
+- Fixed a Vue `:key` bug in the sub-thread block: the per-part loop keyed on
+  `sub.kind`, which repeats across dozens of text/thinking/tool rows and made
+  Vue reuse wrong vnodes (dropped rows). It now keys on the reducer's unique
+  `sub.key`.
+
 
 ### feat(mobile): left-edge swipe session drawer with pinned sessions
 

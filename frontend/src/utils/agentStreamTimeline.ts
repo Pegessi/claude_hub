@@ -68,6 +68,21 @@ export interface TimelineAttachment {
   height?: number
 }
 
+/** One row rendered inside a nested sub-agent thread group (``subthread``).
+ *
+ *  This is the child-thread analogue of {@link TimelinePart}, deliberately
+ *  narrower: a child emits thinking, prose, tool calls, and the directives the
+ *  main agent posts to it (``sendInput``). Control-plane rows (approvals,
+ *  errors, plan statuses) are not produced by the collab child in captured
+ *  streams and stay on the main stream if they ever arrive. */
+export type TimelineSubthreadPart =
+  | { kind: 'thinking'; key: string; text: string }
+  | { kind: 'text'; key: string; text: string; at: string }
+  | { kind: 'tool_group'; key: string; tools: TimelineTool[] }
+  | { kind: 'agent_image'; key: string; tool: TimelineTool; path: string }
+  // A ``sendInput`` directive the main agent posted to this child thread.
+  | { kind: 'instruction'; key: string; tool: TimelineTool }
+
 export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
   // Plan proposals are the delivery in Plan mode; progress checklists remain
@@ -84,6 +99,12 @@ export type TimelinePart =
   // the pane can render a dedicated Codex-style sub-agent card. Carries the
   // same TimelineTool (status/result mutate in place) plus the parsed view.
   | { kind: 'subagent'; key: string; tool: TimelineTool }
+  // A nested sub-agent thread (TraeX/Codex collab: a spawned worker or a peer
+  // addressed by sendInput). All of the child's own thinking/text/tools and the
+  // directives the main agent sent it are grouped here instead of being
+  // flattened into the main assistant stream. The block is expandable, so no
+  // child content is lost; the main bubble keeps only the main agent's voice.
+  | { kind: 'subthread'; key: string; threadId: string; parts: TimelineSubthreadPart[] }
   // An agent-produced local image (view_image / image Read), split out of the
   // tool groups so the pane renders the actual picture (click → lightbox)
   // instead of a raw path string. ``tool`` carries the live status; ``path``
@@ -245,6 +266,17 @@ interface ReducerState {
   /** Tool/approval call ids already attributed to a turn with a real turn id.
    *  A later null-turn event carrying one of these ids is a provider replay. */
   attributedToolIds: Set<string>
+  /** Nested sub-agent threads keyed by turn key → provider thread id. The
+   *  mounted ``subthread`` part is pushed into the turn once (its ``parts``
+   *  array is then mutated in place); child tools resolve in their own map so
+   *  a child call id can never collide with a main-thread call id. */
+  threadsByTurn: Map<string, Map<string, SubthreadState>>
+}
+
+interface SubthreadState {
+  part: Extract<TimelinePart, { kind: 'subthread' }>
+  tools: TimelineTool[]
+  toolMap: Map<string, TimelineTool>
 }
 
 function createReducerState(): ReducerState {
@@ -255,6 +287,171 @@ function createReducerState(): ReducerState {
     textChunksByTurn: new Map(),
     legacyCurrent: null,
     attributedToolIds: new Set(),
+    threadsByTurn: new Map(),
+  }
+}
+
+/** Provider thread id the backend stamped on a nested sub-agent event, or
+ *  ``null`` for a main-thread event. The value comes from
+ *  ``payload.subagent_thread``; non-string / empty values fail closed to the
+ *  main stream so an anomalous record is never lost into a phantom group. */
+function subThreadIdOf(event: AgentStreamEvent): string | null {
+  const value = event.payload.subagent_thread
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
+}
+
+/** Get (creating + mounting on first reference) the nested group for one
+ *  sub-agent thread of a turn. The mount position is wherever the child first
+ *  produces content or receives a directive, so the block stays in arrival
+ *  order relative to the main agent's own rows. */
+function ensureSubthread(
+  state: ReducerState,
+  turn: TimelineTurn,
+  threadId: string,
+  toolMapKey: string,
+): SubthreadState {
+  let byThread = state.threadsByTurn.get(toolMapKey)
+  if (!byThread) {
+    byThread = new Map()
+    state.threadsByTurn.set(toolMapKey, byThread)
+  }
+  let child = byThread.get(threadId)
+  if (!child) {
+    const part: Extract<TimelinePart, { kind: 'subthread' }> = {
+      kind: 'subthread',
+      key: `subthread-${threadId}`,
+      threadId,
+      parts: [],
+    }
+    child = { part, tools: [], toolMap: new Map() }
+    byThread.set(threadId, child)
+    turn.parts.push(part)
+  }
+  return child
+}
+
+/** Append/extend a text or thinking row inside a child thread, merging into the
+ *  preceding same-kind child row the way the main stream does. */
+function appendSubthreadText(
+  child: SubthreadState,
+  kind: 'thinking' | 'text',
+  text: string,
+  sequence: number,
+  at: string,
+): void {
+  if (!text) return
+  const parts = child.part.parts
+  const last = parts[parts.length - 1]
+  if (last !== undefined && last.kind === kind) {
+    last.text += text
+    return
+  }
+  parts.push(
+    kind === 'thinking'
+      ? { kind: 'thinking', key: `sub-thinking-${sequence}`, text }
+      : { kind: 'text', key: `sub-text-${sequence}`, text, at },
+  )
+}
+
+/** Route one sub-agent-thread event into its nested group. Returns whether the
+ *  turn visibly mutated. Only the types the adapter tags with
+ *  ``subagent_thread`` reach here; anything else is ignored (caller falls
+ *  through to main handling). */
+function applySubthreadEvent(
+  state: ReducerState,
+  turn: TimelineTurn,
+  threadId: string,
+  event: AgentStreamEvent,
+  toolMapKey: string,
+): boolean {
+  const child = ensureSubthread(state, turn, threadId, toolMapKey)
+  switch (event.type) {
+    case 'thinking_delta': {
+      const text = payloadString(event, 'text')
+      if (!text) return false
+      appendSubthreadText(child, 'thinking', text, event.stream_sequence, event.created_at)
+      return true
+    }
+    case 'text_delta': {
+      const text = payloadString(event, 'text')
+      if (!text) return false
+      appendSubthreadText(child, 'text', text, event.stream_sequence, event.created_at)
+      return true
+    }
+    case 'tool_call_started': {
+      const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
+      const toolName = payloadString(event, 'name') || 'unknown'
+      const argsRecord = payloadRecord(event, 'args')
+      const imagePath = agentImagePathFromTool(toolName, argsRecord)
+      const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
+      if (child.toolMap.has(identity)) return false
+      let argsText = ''
+      try {
+        argsText = JSON.stringify(argsRecord, null, 2)
+      } catch {
+        argsText = String(event.payload.args ?? '')
+      }
+      const tool: TimelineTool = {
+        key: `tool-${identity}`,
+        callId,
+        name: toolName,
+        status: 'running',
+        argsText,
+        resultText: '',
+        ...(imagePath !== null ? { imagePath } : {}),
+      }
+      child.toolMap.set(identity, tool)
+      child.tools.push(tool)
+      const parts = child.part.parts
+      if (imagePath !== null) {
+        parts.push({ kind: 'agent_image', key: `sub-agent-image-${identity}`, tool, path: imagePath })
+      } else {
+        const last = parts[parts.length - 1]
+        if (last && last.kind === 'tool_group') {
+          last.tools.push(tool)
+        } else {
+          parts.push({ kind: 'tool_group', key: `sub-tool-group-${event.stream_sequence}`, tools: [tool] })
+        }
+      }
+      return true
+    }
+    case 'tool_call_completed': {
+      const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
+      const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
+      let tool = child.toolMap.get(identity)
+      if (!tool) {
+        // Completed without its start (truncated/corrupt transcript): still
+        // surface it rather than dropping the child's result.
+        tool = {
+          key: `tool-${identity}`,
+          callId,
+          name: payloadString(event, 'name') || 'tool',
+          status: 'running',
+          argsText: '',
+          resultText: '',
+        }
+        child.toolMap.set(identity, tool)
+        child.tools.push(tool)
+        const parts = child.part.parts
+        const last = parts[parts.length - 1]
+        if (last && last.kind === 'tool_group') {
+          last.tools.push(tool)
+        } else {
+          parts.push({ kind: 'tool_group', key: `sub-tool-group-${event.stream_sequence}`, tools: [tool] })
+        }
+      }
+      const newStatus: TimelineTool['status'] =
+        payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
+      const newResult = payloadString(event, 'result')
+      if (tool.status !== newStatus || tool.resultText !== newResult) {
+        tool.status = newStatus
+        tool.resultText = newResult
+        return true
+      }
+      return false
+    }
+    default:
+      return false
   }
 }
 
@@ -331,6 +528,18 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     state.toolsByTurn.set(toolMapKey, toolMap)
   }
 
+  // Nested sub-agent thread event (stamped with ``subagent_thread``): keep it
+  // out of the main assistant bubble/process counts and into the child's own
+  // expandable group. Returns before any main bookkeeping, so the main thread
+  // retains only the main agent's own content and its final conclusion.
+  const routedThreadId = subThreadIdOf(event)
+  if (routedThreadId !== null) {
+    if (applySubthreadEvent(state, turn, routedThreadId, event, toolMapKey)) {
+      turn.renderRevision += 1
+    }
+    return
+  }
+
   let mutated = false
 
   switch (event.type) {
@@ -384,6 +593,12 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         turn.completionStatus = payloadString(event, 'status') || 'completed'
         for (const tool of turn.tools) {
           if (tool.status === 'running') tool.status = 'completed'
+        }
+        // Finalize still-running tools inside every nested child thread too.
+        for (const byThread of state.threadsByTurn.get(toolMapKey)?.values() ?? []) {
+          for (const tool of byThread.tools) {
+            if (tool.status === 'running') tool.status = 'completed'
+          }
         }
         mutated = true
       }
@@ -485,10 +700,31 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
               tool,
               path: imagePath,
             })
+          } else if (subagent && subagent.directive && subagent.threadIds.length > 0) {
+            // TraeX/Codex sendInput: a follow-up directive posted TO one or
+            // more already-running child threads. It is not the main agent's
+            // own speech, so mount each addressed child's nested group (if not
+            // already present from streamed child content) and file the prompt
+            // inside it as an inbound instruction row. The call itself stays on
+            // the main map above so its completion (agentsStates) resolves by
+            // call id. The original spawnAgent is NOT filed here — it keeps its
+            // dedicated sub-agent card below, so the delegated prompt is shown
+            // exactly once.
+            for (const tid of subagent.threadIds) {
+              const child = ensureSubthread(state, turn, tid, toolMapKey)
+              child.part.parts.push({
+                kind: 'instruction',
+                key: `sub-instruction-${identity}-${tid}`,
+                tool,
+              })
+            }
           } else if (subagent) {
-            // Each sub-agent is an independent Codex-style card. It is never
-            // merged into a neighbouring tool group and never breaks one: the
-            // normal tools before and after it simply form separate groups.
+            // Claude/Cursor sub-agent OR a TraeX spawnAgent (the launch card):
+            // each is an independent Codex-style card, never merged into a
+            // neighbouring tool group and never breaking one (tools before/
+            // after group separately). The child thread's later streamed
+            // content and sendInput directives render in their own nested
+            // group, not in this card.
             turn.parts.push({ kind: 'subagent', key: `subagent-${identity}`, tool })
           } else {
             // Group consecutive tool calls into a single tool_group part so the
@@ -671,6 +907,7 @@ function isProcessPart(part: TimelinePart): boolean {
     part.kind === 'tool' ||
     part.kind === 'tool_group' ||
     part.kind === 'subagent' ||
+    part.kind === 'subthread' ||
     part.kind === 'agent_image' ||
     (part.kind === 'text' && part.fromPlan === true)
   )
@@ -778,8 +1015,16 @@ export function turnClockLabel(turn: TimelineTurn): string {
 export function countProcessSteps(process: TimelinePart[]): number {
   let steps = 0
   for (const part of process) {
-    if (part.kind === 'tool_group') steps += part.tools.length
-    else if (part.kind === 'tool' || part.kind === 'subagent' || part.kind === 'agent_image') {
+    if (part.kind === 'tool_group') {
+      steps += part.tools.length
+    } else if (part.kind === 'subthread') {
+      // Count the child thread's own tool actions (its directives are the
+      // main agent's calls, already represented by their tool on the turn).
+      for (const child of part.parts) {
+        if (child.kind === 'tool_group') steps += child.tools.length
+        else if (child.kind === 'agent_image') steps += 1
+      }
+    } else if (part.kind === 'tool' || part.kind === 'subagent' || part.kind === 'agent_image') {
       steps += 1
     }
   }
