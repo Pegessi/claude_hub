@@ -1942,6 +1942,7 @@ class SessionTailer:
                 agent_type=session.agent_type,
                 run_epoch=self._run_epoch,
                 turn_id=self._active_turn_id,
+                main_thread_id=getattr(transport, "active_thread_id", None),
             )
             try:
                 events = self.adapter.normalize_line(record, ctx)

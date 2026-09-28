@@ -11,9 +11,13 @@
  *   Cursor CLI  → tool name ``Task``       args: { description, prompt,
  *                                                subagentType, agentId, ... }
  *   TraeX       → tool name ``spawnAgent`` args: { prompt, receiverThreadIds }
+ *   TraeX/Codex → tool name ``sendInput``  args: { prompt, receiverThreadIds }
+ *                 (a follow-up directive posted to an already-running child
+ *                 thread; rendered as an instruction inside that child group)
  *
- * Codex has no sub-agent tool in the captured history, so it never matches and
- * its calls keep rendering as ordinary tool blocks.
+ * Codex has no spawn tool in the captured history, so a plain Codex call never
+ * matches and keeps rendering as an ordinary tool block; ``sendInput`` is
+ * matched for both Codex and TraeX because it is the same collab protocol.
  *
  * A match requires BOTH the exact tool name AND that provider's argument
  * signature. A name alone is never enough: a same-named helper on a different
@@ -33,10 +37,14 @@ export interface SubagentView {
   description: string
   /** The delegated prompt. Always a string (``''`` when unavailable). */
   prompt: string
-  /** TraeX-only: the receiver thread ids the sub-agent was spawned against. */
+  /** TraeX/Codex collab: the receiver thread ids the call addressed. */
   threadIds: string[]
   /** Claude background-delegation flag (``run_in_background``). */
   background: boolean
+  /** True for ``sendInput`` — a directive to an existing child thread rather
+   *  than a fresh spawn. Renders as an instruction row inside the child's
+   *  nested group instead of the standalone spawn card. */
+  directive: boolean
 }
 
 /** Lifecycle status shared with {@link TimelineTool}; kept structural here so
@@ -91,6 +99,7 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
         prompt,
         threadIds: [],
         background: record.run_in_background === true,
+        directive: false,
       }
     }
     case 'Task': {
@@ -110,11 +119,15 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
         prompt,
         threadIds: [],
         background: false,
+        directive: false,
       }
     }
-    case 'spawnAgent': {
-      // TraeX. The child conversation is addressed by receiver thread ids;
-      // there is no human description or sub-agent type in the payload.
+    case 'spawnAgent':
+    case 'sendInput': {
+      // TraeX/Codex collab protocol. The child conversation is addressed by
+      // receiver thread ids; there is no human description or sub-agent type
+      // in the payload. ``sendInput`` is a follow-up directive to an existing
+      // thread (``directive: true``), ``spawnAgent`` launches the local worker.
       if (!record) return null
       const prompt = stringField(record, 'prompt')
       if (!nonEmptyString(prompt)) return null
@@ -127,6 +140,7 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
         prompt,
         threadIds,
         background: false,
+        directive: name === 'sendInput',
       }
     }
     default:

@@ -550,7 +550,15 @@ test('an open process header stays reachable from any scroll depth', () => {
 })
 
 test('a long thinking, tool, or sub-agent card can be collapsed from its own footer', () => {
-  const collapses = structuredPane.match(/class="details-collapse"/g) ?? []
+  // Count footers in the top-level branches only. The nested sub-thread block
+  // reuses the same collapse control for its own child cards and legitimately
+  // adds more, so exclude that branch when asserting the three top-level cards.
+  const subthreadStart = structuredPane.indexOf(`v-else-if="part.kind === 'subthread'"`)
+  const subthreadEnd = structuredPane.indexOf(`v-else-if="part.kind === 'agent_image'"`)
+  assert.ok(subthreadStart > -1 && subthreadEnd > subthreadStart)
+  const topLevelPane =
+    structuredPane.slice(0, subthreadStart) + structuredPane.slice(subthreadEnd)
+  const collapses = topLevelPane.match(/class="details-collapse"/g) ?? []
   assert.equal(
     collapses.length,
     3,

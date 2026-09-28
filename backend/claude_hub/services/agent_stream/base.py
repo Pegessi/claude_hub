@@ -91,7 +91,23 @@ class NormalizeContext:
     agent_type: AgentType
     run_epoch: Optional[int]
     turn_id: Optional[str] = None
+    # Provider-native id of the thread the user's turn runs in (Codex/TraeX
+    # ``thread/start`` id). The adapter compares a record's ``threadId`` against
+    # it to distinguish the main agent from a nested sub-agent thread; ``None``
+    # on one-shot/transcript paths disables that distinction (safe fallback:
+    # everything stays on the main stream, the pre-feature shape).
+    main_thread_id: Optional[str] = None
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def _sub_message_id(self, sub_thread_id: Optional[str], role: str) -> str:
+        """Thread-scoped message id for a sub-agent's text/thinking delta.
+
+        Distinct from the main ``{turn_id}:{role}`` so the coalescers (which
+        key text merging on ``message_id``) never merge a child's stream into
+        the main agent's. Falls back to the main role id when unattributed."""
+        if isinstance(sub_thread_id, str) and sub_thread_id:
+            return f"{self.turn_id}:sub:{sub_thread_id}:{role}"
+        return f"{self.turn_id}:{role}"
 
     def event(
         self,
@@ -100,6 +116,7 @@ class NormalizeContext:
         *,
         call_id: Optional[str] = None,
         message_id: Optional[str] = None,
+        sub_thread_id: Optional[str] = None,
     ) -> AgentStreamEvent:
         """Build an event pre-populated with this context's identity fields.
 
@@ -116,11 +133,16 @@ class NormalizeContext:
             if type == AgentStreamEventType.TURN_STARTED:
                 message_id = f"{self.turn_id}:user"
             elif type == AgentStreamEventType.TEXT_DELTA:
-                message_id = f"{self.turn_id}:assistant"
+                message_id = self._sub_message_id(sub_thread_id, "assistant")
             elif type == AgentStreamEventType.THINKING_DELTA:
-                message_id = f"{self.turn_id}:thinking"
+                message_id = self._sub_message_id(sub_thread_id, "thinking")
             elif type == AgentStreamEventType.TURN_COMPLETED:
                 message_id = self.turn_id
+        if isinstance(sub_thread_id, str) and sub_thread_id:
+            # ``subagent_thread`` is the single attribution field the frontend
+            # timeline uses to nest a sub-agent's thinking/text/tools. Mutating
+            # a copy keeps the caller's payload dict aliased elsewhere untouched.
+            payload = {**payload, "subagent_thread": sub_thread_id}
         return AgentStreamEvent(
             stream_sequence=0,  # assigned by the store on append
             session_id=self.session_id,
