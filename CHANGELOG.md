@@ -5,6 +5,33 @@
 
 ## Unreleased
 
+### fix(chat): render Lark (Feishu) `img_v3_` images quoted by agents instead of "image unavailable"
+
+- Inbound Lark IM images are downloaded by lark-cli to
+  `~/.claude/oncall/.tmp_img/<sender>/lark-im-resources/img_v3_<key>.<ext>`,
+  but agents quote them in markdown with only the bare stem
+  `![Image](img_v3_<key>)`. The browser resolved that stem as a relative URL →
+  404 → broken image. The existing `agent-image` reader could not serve them:
+  it only handles explicit paths inside the tab cwd, and these files live
+  outside the cwd.
+- Added a restricted read-only endpoint
+  `GET /api/workspaces/tabs/{tab_id}/stream/lark-image?key=img_v3_…` that
+  locates the downloaded file itself via a fixed-shape glob
+  (`<root>/*/lark-im-resources/<key>.<ext>` over the PNG/JPEG/GIF/WebP
+  suffixes): the caller never supplies a path, the key must fully match
+  `img_v3_[A-Za-z0-9_-]+` (≤256 chars, no control chars), the fully resolved
+  real file must retain the `<sender>/lark-im-resources/<file>` shape inside
+  the root (symlink escapes denied), and magic bytes must sniff as a
+  whitelisted image. Auth and tab ownership reuse the existing stream-endpoint
+  dependencies; every denial is an opaque 404 with `X-Content-Type-Options:
+  nosniff`.
+- The markdown render pipeline (`MarkdownBlockCache`, used by every
+  `MarkdownContent` in the chat panes) rewrites a bare `img_v3_` `<img src>`
+  to the endpoint URL (tab-scoped). http(s)/data/blob/attachment URLs and the
+  existing view_image/Read agent-image path are untouched. A failed load
+  degrades to a restrained inline "[image unavailable]" placeholder instead of
+  a broken-image frame.
+
 ### fix(chat): silence watchdog no longer reaps a just-started turn before its first record drains
 
 - A stop-restart/relaunch turn intermittently produced no usable lifecycle

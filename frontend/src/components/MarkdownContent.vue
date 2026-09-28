@@ -4,6 +4,7 @@
     class="markdown-content"
     :class="{ compact }"
     @click="handleClick"
+    @error.capture="handleError"
   >
     <template
       v-for="block in blocks"
@@ -57,11 +58,14 @@ const props = withDefaults(defineProps<{
   linkMarkdownPaths?: boolean
   /** When true, the final block is also cached (stream has ended). */
   complete?: boolean
+  /** Owning tab id; enables bare ``img_v3_`` lark-image src rewriting. */
+  tabId?: string
 }>(), {
   text: '',
   compact: false,
   linkMarkdownPaths: false,
   complete: false,
+  tabId: '',
 })
 
 const emit = defineEmits<{
@@ -99,8 +103,23 @@ const blocks = computed(() => {
   return blockCache.render(source, {
     complete: props.complete,
     linkMarkdownPaths: props.linkMarkdownPaths,
+    larkTabId: props.tabId,
   })
 })
+
+// A proxied Lark image that fails to load (404 / not downloaded yet) is
+// replaced in place by a restrained text placeholder — never a broken-image
+// icon or a large error frame. The ``error`` event does not bubble, so the
+// capture-phase listener on the root is what sees it.
+function handleError(event: Event) {
+  const target = event.target
+  if (!(target instanceof HTMLImageElement)) return
+  if (!target.dataset.larkImg) return
+  const placeholder = document.createElement('span')
+  placeholder.className = 'lark-img-missing'
+  placeholder.textContent = '[image unavailable]'
+  target.replaceWith(placeholder)
+}
 
 function handleClick(event: MouseEvent) {
   const target = event.target instanceof Element
@@ -306,6 +325,23 @@ function handleClick(event: MouseEvent) {
 
 .markdown-block :deep(li + li) {
   margin-top: 4px;
+}
+
+/* Lark images proxied from a bare img_v3_ key: keep them inline with text. */
+.markdown-block :deep(img[data-lark-img]) {
+  max-width: 100%;
+  border-radius: var(--ch-radius-sm);
+}
+
+/* Restrained fallback shown when a proxied Lark image cannot be loaded —
+   muted inline text, not a broken-image frame. */
+.markdown-block :deep(.lark-img-missing) {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  color: var(--ch-color-text-muted);
+  font-size: 0.9em;
 }
 
 .markdown-block :deep(table) {
