@@ -41,19 +41,19 @@ globalThis.__codeHighlight = await import(
   `data:text/javascript;base64,${Buffer.from(hlMocked).toString('base64')}`
 )
 
-// ── Load larkImage.ts (zero-dependency util) for the import below ───────
-const larkSource = await readFile(
-  new URL('../src/utils/larkImage.ts', import.meta.url),
+// ── Load quotedImage.ts (zero-dependency util) for the import below ──────
+const quotedSource = await readFile(
+  new URL('../src/utils/quotedImage.ts', import.meta.url),
   'utf8',
 )
-const { outputText: larkOutputText } = ts.transpileModule(larkSource, {
+const { outputText: quotedOutputText } = ts.transpileModule(quotedSource, {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
     target: ts.ScriptTarget.ES2020,
   },
 })
-globalThis.__larkImage = await import(
-  `data:text/javascript;base64,${Buffer.from(larkOutputText).toString('base64')}`
+globalThis.__quotedImage = await import(
+  `data:text/javascript;base64,${Buffer.from(quotedOutputText).toString('base64')}`
 )
 
 // ── Load markdownBlocks.ts with mocked dompurify ────────────────────────
@@ -85,8 +85,8 @@ const mocked = outputText
     'const { highlightVersion, renderCodeBlockHtml } = globalThis.__codeHighlight;',
   )
   .replace(
-    /import \{ rewriteLarkImageSrcs \} from ['"]@\/utils\/larkImage['"];?/,
-    'const { rewriteLarkImageSrcs } = globalThis.__larkImage;',
+    /import \{ rewriteQuotedImageSrcs \} from ['"]@\/utils\/quotedImage['"];?/,
+    'const { rewriteQuotedImageSrcs } = globalThis.__quotedImage;',
   )
 
 globalThis.__marked = marked
@@ -781,61 +781,66 @@ test('long streamed list: per-delta render time is informational (not asserted)'
   )
 })
 
-// ── Bare img_v3_ lark-image rewriting through the block cache ────────────
+// ── Bare quoted-image token rewriting through the block cache ────────────
 
-const LARK_KEY = 'img_v3_0215v_f958a4be-ef9b-4a06-b887-0a048973208g'
+const QUOTED_KEY = 'img_v3_0215v_f958a4be-ef9b-4a06-b887-0a048973208g'
 
-test('bare img_v3 src is rewritten only when larkTabId is given', () => {
-  const src = `![Image](${LARK_KEY})`
+test('bare quoted-image src is rewritten only when quotedTabId is given', () => {
+  const src = `![Image](${QUOTED_KEY})`
 
   const without = new MarkdownBlockCache()
   // No tab id: the bare key stays as marked emitted it.
-  const plain = renderString(without, src, { complete: true, larkTabId: '' })
-  assert.match(plain, new RegExp(`<img src="${LARK_KEY}"`))
+  const plain = renderString(without, src, { complete: true, quotedTabId: '' })
+  assert.match(plain, new RegExp(`<img src="${QUOTED_KEY}"`))
 
   const withTab = new MarkdownBlockCache()
   const rewritten = renderString(withTab, src, {
     complete: true,
-    larkTabId: 'tab-a',
+    quotedTabId: 'tab-a',
   })
   assert.match(
     rewritten,
-    /<img src="\/api\/workspaces\/tabs\/tab-a\/stream\/lark-image\?key=/,
+    /<img src="\/api\/workspaces\/tabs\/tab-a\/stream\/quoted-image\?key=/,
   )
-  assert.match(rewritten, new RegExp(`data-lark-img="${LARK_KEY}"`))
+  assert.match(rewritten, new RegExp(`data-quoted-img="${QUOTED_KEY}"`))
 })
 
-test('ordinary image urls are unaffected with larkTabId set', () => {
+test('ordinary and foreign image urls are unaffected with quotedTabId set', () => {
   const cache = new MarkdownBlockCache()
   const html = renderString(
     cache,
     '![u](https://example.com/a.png)\n\n![d](data:image/png;base64,AAAA)',
-    { complete: true, larkTabId: 'tab-a' },
+    { complete: true, quotedTabId: 'tab-a' },
   )
   assert.match(html, /<img src="https:\/\/example\.com\/a\.png"/)
   assert.match(html, /<img src="data:image\/png;base64,AAAA"/)
-  assert.doesNotMatch(html, /data-lark-img/)
+  assert.doesNotMatch(html, /data-quoted-img/)
+
+  // An unregistered provider token is left as-is (not proxied).
+  const foreign = renderString(cache, '![s](slack_F1234567890ABCDE)', {
+    complete: true,
+    quotedTabId: 'tab-a',
+  })
+  assert.match(foreign, /<img src="slack_F1234567890ABCDE"/)
+  assert.doesNotMatch(foreign, /quoted-image/)
 })
 
-test('lark rewrite applies inside list items', () => {
+test('quoted rewrite applies inside list items', () => {
   const cache = new MarkdownBlockCache()
-  const blocks = cache.render(`- ![Image](${LARK_KEY})`, {
+  const blocks = cache.render(`- ![Image](${QUOTED_KEY})`, {
     complete: true,
-    larkTabId: 'tab-a',
+    quotedTabId: 'tab-a',
   })
   assert.equal(blocks.length, 1)
   assert.ok('list' in blocks[0])
-  assert.match(
-    blocks[0].list.items[0].html,
-    /stream\/lark-image\?key=/,
-  )
+  assert.match(blocks[0].list.items[0].html, /stream\/quoted-image\?key=/)
 })
 
-test('switching larkTabId invalidates cached rewritten html', () => {
+test('switching quotedTabId invalidates cached rewritten html', () => {
   const cache = new MarkdownBlockCache()
-  const src = `![Image](${LARK_KEY})`
-  const a = renderString(cache, src, { complete: true, larkTabId: 'tab-a' })
-  const b = renderString(cache, src, { complete: true, larkTabId: 'tab-b' })
-  assert.match(a, /tabs\/tab-a\/stream\/lark-image/)
-  assert.match(b, /tabs\/tab-b\/stream\/lark-image/)
+  const src = `![Image](${QUOTED_KEY})`
+  const a = renderString(cache, src, { complete: true, quotedTabId: 'tab-a' })
+  const b = renderString(cache, src, { complete: true, quotedTabId: 'tab-b' })
+  assert.match(a, /tabs\/tab-a\/stream\/quoted-image/)
+  assert.match(b, /tabs\/tab-b\/stream\/quoted-image/)
 })
