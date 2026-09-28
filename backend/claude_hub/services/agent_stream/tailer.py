@@ -114,6 +114,23 @@ STREAM_INACTIVITY_TIMEOUT_S = 600.0
 ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S = float(
     os.environ.get("CLAUDE_HUB_ACTIVE_TURN_LIVENESS_TIMEOUT_S", "7200")
 )
+# Provider capacity queue (TraeX/Codex ``queue/status``): the turn has been
+# accepted but model generation has NOT started, so a queue heartbeat is not
+# evidence that the model stream is alive. Two distinct bounds apply while a
+# turn is in this waiting state:
+#
+# * ``QUEUED_TURN_MAX_WAIT_S`` — a LIVE queue that keeps heartbeating but never
+#   reaches generation past this bound is terminalized (cancelled, not
+#   restarted: the wait is server-side capacity; resending re-queues). This is
+#   the escape hatch for "queue position 357 at ~1/minute", where the provider
+#   is healthy but the user would otherwise be locked out for hours. Stop is
+#   always available regardless. 0 disables the cap (wait indefinitely).
+# * ``QUEUE_HEARTBEAT_STALL_S`` — a turn the provider DECLARED as queued but
+#   whose queue heartbeats then fall silent past this bound is treated as a
+#   wedged/dead runtime and reaped via the hard-liveness path (kill + relaunch
+#   + resume). A healthy queue emits roughly one status per second.
+QUEUED_TURN_MAX_WAIT_S = float(os.environ.get("CLAUDE_HUB_QUEUED_TURN_MAX_WAIT_S", "1800"))
+QUEUE_HEARTBEAT_STALL_S = float(os.environ.get("CLAUDE_HUB_QUEUE_HEARTBEAT_STALL_S", "90"))
 # Grace between a Goal turn's trailing terminal signal and the provider's
 # completion record. One-shot CLIs (Claude/Cursor) can have their stdout held
 # open by a lingering child after the final assistant text, so the result
@@ -136,6 +153,16 @@ _INACTIVITY_TIMEOUT_MESSAGE = "Turn stopped after the stream went silent."
 # including while a tool was nominally outstanding: the provider process is
 # wedged or gone without an EOF.
 _HARD_LIVENESS_TIMEOUT_MESSAGE = "Turn stopped after the provider stopped producing any output."
+# A live provider capacity queue never advanced to generation within the cap.
+# The runtime is healthy (it keeps reporting its position); the request simply
+# did not get capacity. Cancel rather than restart so resending re-queues.
+_QUEUE_CAP_TIMEOUT_MESSAGE = (
+    "Turn stopped after waiting too long for model capacity. "
+    "Resend your message to rejoin the queue."
+)
+# A turn was declared queued but the queue heartbeats then stopped: the runtime
+# went away mid-wait, so it is reaped and resumed like any other dead turn.
+_QUEUE_STALL_MESSAGE = "Turn stopped while queued after the provider stopped responding."
 # Turn-interior event types that only have meaning attributed to a live Hub
 # turn. A record of one of these arriving with no owning turn (``turn_id`` is
 # null AND no turn is active) is an unreferenceable replay/background record —
@@ -154,6 +181,17 @@ _UNATTRIBUTED_DROP_TYPES = frozenset(
         AgentStreamEventType.APPROVAL_REQUIRED,
         AgentStreamEventType.APPROVAL_RESOLVED,
         AgentStreamEventType.TURN_COMPLETED,
+    }
+)
+# Provider records proving the active turn has left the capacity queue and is
+# genuinely executing (model tokens or a tool call). Any one of these clears
+# the contiguous queue wait tracked for the liveness watchdog.
+_GENERATION_ACTIVITY_TYPES = frozenset(
+    {
+        AgentStreamEventType.TEXT_DELTA,
+        AgentStreamEventType.THINKING_DELTA,
+        AgentStreamEventType.TOOL_CALL_STARTED,
+        AgentStreamEventType.TOOL_CALL_COMPLETED,
     }
 )
 
@@ -438,6 +476,20 @@ class SessionTailer:
         self._active_tool_call_ids: Set[str] = set()
         self._blocking_approval_call_ids: Set[str] = set()
         self._waiting_for_model_capacity = False
+        # Capacity-queue waiting state (TraeX/Codex ``queue/status``). The turn
+        # is accepted but generation has not started. ``_queued_since`` stamps
+        # the start of the CURRENT contiguous queued stretch (cleared the moment
+        # real model output or a ``ready`` arrives); ``_last_queue_at`` is the
+        # latest queue heartbeat. A queue heartbeat does NOT refresh
+        # ``_last_event_at``: queueing is not model-stream liveness.
+        self._queued_since: Optional[float] = None
+        self._last_queue_at: Optional[float] = None
+        # Visible text of the last persisted queue snapshot for the active turn.
+        # Consecutive queue/status snapshots that repeat the same rendered text
+        # are suppressed at the source (they share one stable message id and the
+        # frontend replaces rather than appends them), so a ~1/s flood cannot
+        # bloat the durable stream; a changed position still persists.
+        self._last_persisted_queue_text: Optional[str] = None
         # When the model's trailing Goal terminal envelope arrived, the stamp
         # at which it first became complete. While set, the silence watchdog is
         # suppressed; after ``GOAL_TERMINAL_GRACE_S`` without a provider
@@ -456,6 +508,15 @@ class SessionTailer:
         # publish, and the transport send so a busy second send never mutates
         # state that the in-flight first turn still depends on.
         self._send_lock = asyncio.Lock()
+        # A user Stop persists the ``cancelled`` edge and releases the Hub
+        # active-turn guard immediately, then lets the provider teardown
+        # (interrupt grace / kill+relaunch+resume) run in this background task.
+        # While it is pending the provider guard is still held and the watchdog
+        # must not double-reap; composer sends await this barrier before
+        # acquiring ``_send_lock`` so a fast resend is ordered AFTER the
+        # kill/relaunch and reaches the fresh server.
+        self._turn_teardown_task: Optional["asyncio.Task[None]"] = None
+        self._turn_teardown_pending = False
 
         # Semantic coalescer for text_delta / thinking_delta bursts. Merges
         # consecutive same-stream deltas within a ~60ms window so the fanout
@@ -516,8 +577,20 @@ class SessionTailer:
         self._visible_assistant_text = ""
         self._active_tool_call_ids.clear()
         self._blocking_approval_call_ids.clear()
-        self._waiting_for_model_capacity = False
+        self._reset_queue_wait_state()
         self._goal_terminal_at = None
+
+    def _reset_queue_wait_state(self) -> None:
+        """Clear the capacity-queue waiting tracking for the active turn.
+
+        Called on every turn boundary (reset, completion, cancel, EOF) and the
+        moment real model output proves generation has begun, so a queue stretch
+        can never leak across turns or linger after the model starts producing.
+        """
+        self._waiting_for_model_capacity = False
+        self._queued_since = None
+        self._last_queue_at = None
+        self._last_persisted_queue_text = None
 
     def _terminalize_native_runtime(self, status: Any) -> None:
         if status == "completed":
@@ -638,6 +711,12 @@ class SessionTailer:
             raise RuntimeError("no native transport for this session; use the terminal send path")
         if self._native_error is not None:
             raise RuntimeError(self._native_error)
+        # A prior manual Stop may still be killing/relaunching the provider.
+        # Wait for that bounded teardown BEFORE taking the send lock so the new
+        # turn/start reaches the fresh app-server rather than the process being
+        # killed. The composer-side lock was already released by the cancelled
+        # edge, so this only bounds a resend sent within the teardown window.
+        await self._await_turn_teardown()
         if not transport._started:
             await transport.start()
 
@@ -669,7 +748,10 @@ class SessionTailer:
             #    _run_epoch are never overwritten — unless the caller steers.
             if transport.turn_in_flight:
                 if delivery == "steer":
-                    await self._cancel_active_turn_locked(transport)
+                    # Steer immediately re-sends on the same transport, so its
+                    # cancel must finish tearing down the old provider turn
+                    # (kill one-shot / interrupt persistent) before we deliver.
+                    await self._cancel_active_turn_locked(transport, await_teardown=True)
                 else:
                     raise RuntimeError(
                         "a turn is already in flight; wait for it to complete before "
@@ -832,7 +914,18 @@ class SessionTailer:
         so the durable UI state and the actual idle runtime converge again.
         """
         transport = self._native_transport
+        # A second Stop while the first one's provider teardown is still
+        # running is idempotent: the cancelled edge is already durable and the
+        # guard is released, so report success without awaiting the teardown.
+        if self._turn_teardown_pending:
+            return True
         async with self._send_lock:
+            # The first Stop's background teardown can win the race with a
+            # second caller that was already queued on the lock. Do NOT cancel
+            # again (that would persist a second terminal edge); report the
+            # in-flight Stop as the idempotent success it is.
+            if self._turn_teardown_pending:
+                return True
             if transport is not None and transport.turn_in_flight:
                 if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
                     return False
@@ -1026,7 +1119,7 @@ class SessionTailer:
         self._active_turn_id = None
         self._active_tool_call_ids.clear()
         self._blocking_approval_call_ids.clear()
-        self._waiting_for_model_capacity = False
+        self._reset_queue_wait_state()
         self._goal_terminal_at = None
         # Retire the one-shot reader generation and terminate the lingering
         # process so stale records/EOF cannot be attributed to the next turn and
@@ -1040,8 +1133,11 @@ class SessionTailer:
 
     def _record_watchdog_activity(self, event: AgentStreamEvent) -> None:
         """Track conditions that legitimately pause model streaming."""
-        if event.type in {AgentStreamEventType.TEXT_DELTA, AgentStreamEventType.THINKING_DELTA}:
-            self._waiting_for_model_capacity = False
+        # Any model output or tool activity proves the turn left the capacity
+        # queue and is genuinely executing: clear the contiguous queue wait so
+        # a later re-queue starts a fresh stretch (and re-persists its marker).
+        if event.type in _GENERATION_ACTIVITY_TYPES:
+            self._reset_queue_wait_state()
         call_id = event.call_id or (
             event.payload.get("tool_call_id") if isinstance(event.payload, dict) else None
         )
@@ -1052,30 +1148,116 @@ class SessionTailer:
         elif event.type == AgentStreamEventType.TOOL_CALL_COMPLETED:
             self._active_tool_call_ids.discard(call_id)
 
-    def _note_raw_provider_wait(self, record: Any) -> None:
+    def _note_raw_provider_wait(self, record: Any) -> bool:
         """Track provider-level capacity queueing from a raw JSON-RPC record.
 
         TraeX/Codex app-servers emit ``queue/status`` notifications while the
         turn waits for model capacity; no model deltas arrive during that wait,
-        so it must not count as a dead stream. ``ready`` (and any later model
-        delta) clears the wait. This reads the raw record rather than adding an
+        so a queued heartbeat must not count as model-stream liveness. Returns
+        ``True`` only while the provider reports the turn as still queued
+        (``state`` of ``queued``/``waiting``); ``ready`` and any later model
+        delta clear the wait. This reads the raw record rather than adding an
         internal field to the persisted, user-visible STATUS payload.
         """
         if not isinstance(record, dict) or record.get("method") != "queue/status":
-            return
+            return False
         params = record.get("params")
         state = params.get("state") if isinstance(params, dict) else None
-        self._waiting_for_model_capacity = state in {"queued", "waiting"}
+        now = time.monotonic()
+        if state in {"queued", "waiting"}:
+            if self._queued_since is None:
+                self._queued_since = now
+            self._last_queue_at = now
+            self._waiting_for_model_capacity = True
+            return True
+        # ``ready`` (capacity granted, generation starting) or an unknown state:
+        # the wait is over; the first model delta also clears it defensively.
+        self._reset_queue_wait_state()
+        return False
+
+    def _is_duplicate_queue_snapshot(self, event: AgentStreamEvent) -> bool:
+        """Suppress identical per-second capacity-queue STATUS snapshots.
+
+        A queued turn emits ``queue/status`` with one stable ``message_id``
+        roughly every second. The frontend replaces that single status part in
+        place, so persisting an event only when the rendered text changes (the
+        queue position moves, or the state enters/leaves the queue) keeps the
+        durable stream and the 2.5s poll payload from flooding with thousands
+        of identical rows while preserving every visible update.
+        """
+        if event.type is not AgentStreamEventType.STATUS:
+            return False
+        payload = event.payload
+        if (
+            not isinstance(payload, dict)
+            or payload.get("provider_status") != "queue/status"
+            or payload.get("snapshot") is not True
+        ):
+            return False
+        text = payload.get("text")
+        text = text if isinstance(text, str) else ""
+        if self._active_turn_id is not None and text and text == self._last_persisted_queue_text:
+            return True
+        self._last_persisted_queue_text = text or None
+        return False
+
+    def _queued_heartbeat_stalled(self) -> bool:
+        """True when a declared queue stopped heartbeating past the stall bound.
+
+        The provider said the turn was queued but then went silent: a wedged or
+        vanished runtime mid-wait, reaped (kill + relaunch + resume) like any
+        other dead turn. A live queue that merely moves slowly does NOT trip
+        this — only a queue whose heartbeats actually stop does.
+        """
+        if not self._waiting_for_model_capacity or self._blocking_approval_call_ids:
+            return False
+        last = self._last_queue_at
+        return last is not None and (time.monotonic() - last > QUEUE_HEARTBEAT_STALL_S)
+
+    def _queued_wait_cap_expired(self) -> bool:
+        """True when a LIVE queue never reached generation within the cap.
+
+        Distinct from :meth:`_queued_heartbeat_stalled`: here the provider is
+        healthy and keeps reporting its position, but capacity never arrived.
+        We cancel (never restart — resending simply re-queues) so the user is
+        not locked out for hours. Stop is available regardless; a cap of 0
+        disables the bound for sites that want to wait indefinitely.
+        """
+        if QUEUED_TURN_MAX_WAIT_S <= 0:
+            return False
+        if not self._waiting_for_model_capacity or self._blocking_approval_call_ids:
+            return False
+        since = self._queued_since
+        return since is not None and (time.monotonic() - since > QUEUED_TURN_MAX_WAIT_S)
 
     async def _cancel_active_turn_locked(
         self,
         transport: ProviderSession,
         *,
         error_message: Optional[str] = None,
+        await_teardown: bool = False,
     ) -> None:
-        """Cancel the in-flight turn while ``_send_lock`` is held."""
+        """Cancel the in-flight turn while ``_send_lock`` is held.
+
+        The durable terminal edge is persisted and the Hub active-turn guard is
+        released BEFORE the provider's interrupt/teardown. A persistent
+        app-server can take its bounded time to confirm an interrupt or to
+        kill+relaunch+resume; releasing first means a capacity-queued or wedged
+        turn the user (or the watchdog) cancelled is never left holding the
+        guard while that teardown runs, and the persisted/fanned ``cancelled``
+        edge unlocks the composer immediately.
+
+        ``await_teardown=False`` (manual user Stop): provider teardown runs in
+        a background task — the cancel HTTP returns as soon as the terminal
+        edge is durable, never waiting for the provider process to actually
+        exit. Sends and the watchdog are serialized behind the teardown via the
+        ``_turn_teardown_task`` barrier. ``await_teardown=True`` (steer,
+        watchdog reap, shutdown) keeps the previous inline behavior because the
+        caller immediately needs the torn-down transport.
+        """
         turn_id = self._active_turn_id
         publish_error: Optional[Exception] = None
+        completed: Optional[AgentStreamEvent] = None
         if turn_id is not None:
             try:
                 completed = await self._publish_turn_completion(
@@ -1090,22 +1272,102 @@ class SessionTailer:
                     self.session_id,
                 )
                 publish_error = exc
-        await transport.cancel_active_turn()
+        # Release the Hub-side guard now. Late records from the turn being
+        # retired are filtered by the transport's discard-turn id; any that slip
+        # through arrive with no owning turn after the terminal edge and are
+        # dropped as unattributed, so they cannot pin the next turn.
         self._active_turn_id = None
-        if turn_id is not None and publish_error is None:
-            self._notify_post_persist(completed)
         # A cancelled turn can no longer answer a pending card or own an
         # outstanding tool wait; drop stale tracking so it cannot be resolved
         # against a later turn.
         self._pending_approvals.clear()
         self._active_tool_call_ids.clear()
         self._blocking_approval_call_ids.clear()
-        self._waiting_for_model_capacity = False
+        self._reset_queue_wait_state()
         self._goal_terminal_at = None
+        if turn_id is not None and publish_error is None and completed is not None:
+            self._notify_post_persist(completed)
+        # Provider teardown. It is bounded (a native interrupt waits on a short
+        # grace and otherwise kill+relaunches) and never re-raises into a wedged
+        # guard: the turn is already terminal Hub-side. Manual Stop backgrounds
+        # it so the user keeps a responsive composer while the persistent
+        # app-server is being killed/resumed; inline callers await it here.
+        if await_teardown:
+            try:
+                await transport.cancel_active_turn()
+            except Exception:
+                logger.exception(
+                    "native provider cancel after terminalizing turn failed for session %s",
+                    self.session_id,
+                )
+            self._turn_teardown_pending = False
+        else:
+            self._spawn_turn_teardown(transport)
         if publish_error is not None:
             raise RuntimeError("turn stopped but its cancelled state could not be persisted") from (
                 publish_error
             )
+
+    def _spawn_turn_teardown(self, transport: ProviderSession) -> None:
+        """Run ``transport.cancel_active_turn`` after the send lock is freed.
+
+        The cancelled edge is already durable and the Hub guard is released;
+        only the provider-side interrupt / kill+relaunch+resume remains, and it
+        must not block the cancel response or hold the composer lock. The task
+        re-acquires ``_send_lock`` (FIFO behind anyone already waiting) so the
+        teardown completes before the watchdog can act and — together with the
+        barrier awaited in ``send_message`` — before a new turn reaches the
+        provider being replaced.
+        """
+        if self._turn_teardown_task is not None or self._turn_teardown_pending:
+            return
+        self._turn_teardown_pending = True
+        task = asyncio.create_task(
+            self._run_turn_teardown(transport),
+            name=f"agent-stream-cancel-teardown-{self.session_id[:8]}",
+        )
+        self._turn_teardown_task = task
+        task.add_done_callback(self._turn_teardown_done)
+
+    async def _run_turn_teardown(self, transport: ProviderSession) -> None:
+        try:
+            async with self._send_lock:
+                try:
+                    await transport.cancel_active_turn()
+                except Exception:
+                    logger.exception(
+                        "native provider cancel teardown failed for session %s",
+                        self.session_id,
+                    )
+                self._turn_teardown_pending = False
+        except asyncio.CancelledError:
+            self._turn_teardown_pending = False
+            raise
+
+    def _turn_teardown_done(self, task: "asyncio.Task[None]") -> None:
+        if self._turn_teardown_task is task:
+            self._turn_teardown_task = None
+        self._turn_teardown_pending = False
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.exception(
+                "agent_stream cancel teardown task failed for session %s",
+                self.session_id,
+                exc_info=exc,
+            )
+
+    async def _await_turn_teardown(self) -> None:
+        """Block until any backgrounded Stop teardown has finished."""
+        task = self._turn_teardown_task
+        if task is not None:
+            try:
+                await task
+            except Exception:
+                logger.exception(
+                    "waiting on cancel teardown failed for session %s", self.session_id
+                )
 
     async def _reap_active_turn_locked(
         self, transport: ProviderSession, error_message: str
@@ -1118,7 +1380,11 @@ class SessionTailer:
         running; ``False`` when the process was stopped and the consumer should
         exit (the next send/subscribe restarts it).
         """
-        await self._cancel_active_turn_locked(transport, error_message=error_message)
+        await self._cancel_active_turn_locked(
+            transport,
+            error_message=error_message,
+            await_teardown=True,
+        )
         if getattr(transport, "_client_requested_stop", False):
             return True
         await transport.stop()
@@ -1249,6 +1515,10 @@ class SessionTailer:
             # the backend reloads while a turn is active, persist its terminal
             # edge first so the next process does not replay an immortal
             # Stop/Queue turn from history.
+            # Finish (or inherit) a manual Stop's backgrounded provider
+            # teardown before shutting the transport down so it is not killed
+            # mid kill+relaunch and a fresh resume does not outlive the tailer.
+            await self._await_turn_teardown()
             if self._native_transport.turn_in_flight:
                 try:
                     async with self._send_lock:
@@ -1256,6 +1526,7 @@ class SessionTailer:
                             await self._cancel_active_turn_locked(
                                 self._native_transport,
                                 error_message=_RUNTIME_INTERRUPTED_MESSAGE,
+                                await_teardown=True,
                             )
                 except Exception:
                     logger.exception(
@@ -1352,19 +1623,78 @@ class SessionTailer:
             elif self._turn_in_flight_since is not None:
                 self._turn_in_flight_since = None
                 self._last_event_at = None
+            # Every watchdog branch is skipped while a manual Stop's provider
+            # teardown is running: the Hub turn is already terminal and the
+            # background task owns the provider guard, so the watchdogs must
+            # neither double-cancel nor race the kill/relaunch.
+            watchdogs_armed = transport.turn_in_flight and not self._turn_teardown_pending
             # Goal terminal without a provider result record: the model already
             # emitted its trailing goal-status envelope, but a one-shot CLI never
             # followed with a completion record. After the grace period, finish
             # the turn from the model output so the Goal controller can route it
             # instead of cancelling it as silent ten minutes later.
-            if transport.turn_in_flight and self._goal_terminal_grace_expired():
+            if watchdogs_armed and self._goal_terminal_grace_expired():
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._goal_terminal_grace_expired():
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._goal_terminal_grace_expired()
+                        ):
                             await self._synthesize_goal_completion_locked(transport)
                 except Exception:
                     logger.exception(
                         "native Goal completion synthesis failed for session %s",
+                        self.session_id,
+                    )
+                continue
+            # Capacity queue, heartbeat stalled: the provider declared the turn
+            # queued and then stopped reporting — a dead/wedged runtime mid-wait
+            # (distinct from a slow-but-live queue, which keeps heartbeating and
+            # is handled below). Reap it like any dead turn: kill, relaunch,
+            # resume the thread so the tab stays live.
+            if watchdogs_armed and self._queued_heartbeat_stalled():
+                restarted_in_place = False
+                try:
+                    async with self._send_lock:
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._queued_heartbeat_stalled()
+                        ):
+                            restarted_in_place = await self._reap_active_turn_locked(
+                                transport,
+                                _QUEUE_STALL_MESSAGE,
+                            )
+                except Exception:
+                    logger.exception(
+                        "native queue-heartbeat stall reap failed for session %s",
+                        self.session_id,
+                    )
+                if not restarted_in_place:
+                    break
+                continue
+            # Capacity queue, live but past the cap: the runtime is healthy and
+            # keeps reporting its position, but model capacity never arrived.
+            # Cancel (do NOT stop/restart — resending simply re-queues) so the
+            # user is never locked out for hours. Stop remains available at any
+            # time regardless of this bound.
+            if watchdogs_armed and self._queued_wait_cap_expired():
+                try:
+                    async with self._send_lock:
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._queued_wait_cap_expired()
+                        ):
+                            await self._cancel_active_turn_locked(
+                                transport,
+                                error_message=_QUEUE_CAP_TIMEOUT_MESSAGE,
+                                await_teardown=True,
+                            )
+                except Exception:
+                    logger.exception(
+                        "native queued-turn cap cancel failed for session %s",
                         self.session_id,
                     )
                 continue
@@ -1373,11 +1703,15 @@ class SessionTailer:
             # Outstanding tool calls and blocking approval questions are
             # legitimate external waits, and active long-running turns have no
             # absolute duration cap.
-            if transport.turn_in_flight and self._stream_inactive():
+            if watchdogs_armed and self._stream_inactive():
                 restarted_in_place = False
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._stream_inactive():
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._stream_inactive()
+                        ):
                             restarted_in_place = await self._reap_active_turn_locked(
                                 transport,
                                 _INACTIVITY_TIMEOUT_MESSAGE,
@@ -1398,11 +1732,15 @@ class SessionTailer:
             # reaped and the next send restarts it. Legitimately long work
             # keeps emitting SOME record and refreshes the stamp; an open
             # approval card exempts the turn because it is waiting on a human.
-            if transport.turn_in_flight and self._turn_hard_liveness_expired():
+            if watchdogs_armed and self._turn_hard_liveness_expired():
                 restarted_in_place = False
                 try:
                     async with self._send_lock:
-                        if transport.turn_in_flight and self._turn_hard_liveness_expired():
+                        if (
+                            transport.turn_in_flight
+                            and not self._turn_teardown_pending
+                            and self._turn_hard_liveness_expired()
+                        ):
                             restarted_in_place = await self._reap_active_turn_locked(
                                 transport,
                                 _HARD_LIVENESS_TIMEOUT_MESSAGE,
@@ -1482,12 +1820,19 @@ class SessionTailer:
                     # The persistent provider died; the in-flight turn (if
                     # any) is abandoned. Emit an error and a failed
                     # turn_completed for the active turn so the frontend
-                    # never leaves it pending, then fail the session.
-                    fatal_failure = await self._fail_active_turn(
-                        "native transport process exited", transport
-                    )
-                    self._active_turn_id = None
-                    transport.acknowledge_turn_complete()
+                    # never leaves it pending, then fail the session. The
+                    # identity recheck under the send lock prevents a race
+                    # with a manual Stop that already terminalized this turn:
+                    # only one of the two edges is ever persisted.
+                    async with self._send_lock:
+                        if self._active_turn_id is not None:
+                            fatal_failure = await self._fail_active_turn(
+                                "native transport process exited", transport
+                            )
+                        else:
+                            fatal_failure = None
+                        self._active_turn_id = None
+                        transport.acknowledge_turn_complete()
                     if fatal_failure is not None:
                         self._notify_post_persist(fatal_failure)
                     self._hard_failed = True
@@ -1565,7 +1910,7 @@ class SessionTailer:
                 self._active_turn_id = None
                 self._active_tool_call_ids.clear()
                 self._blocking_approval_call_ids.clear()
-                self._waiting_for_model_capacity = False
+                self._reset_queue_wait_state()
                 self._goal_terminal_at = None
                 transport.acknowledge_turn_complete()
                 if failed is not None:
@@ -1575,10 +1920,21 @@ class SessionTailer:
             # before wait_for resumes this consumer. Recheck at consumption.
             if not transport.accepts_notification(record):
                 continue
-            # Accepted record: the turn is making progress, so reset the
-            # stream inactivity clock.
-            self._last_event_at = time.monotonic()
-            self._note_raw_provider_wait(record)
+            # Accepted record. A non-queue record is real progress and refreshes
+            # the model-stream / hard-liveness clocks. A capacity-queue
+            # heartbeat is NOT liveness (generation has not started), so it must
+            # not reset the clocks — otherwise a turn queued for hours is kept
+            # "alive" forever by its own ~1/s status notifications.
+            queued = self._note_raw_provider_wait(record)
+            if not queued:
+                self._last_event_at = time.monotonic()
+            elif self._active_turn_id is None and self._turn_completed_seen:
+                # A capacity-queue heartbeat with no owning turn, after this
+                # consumer already terminalized a turn: a Stop/cap-cancelled
+                # turn whose process still had a heartbeat in flight. Drop it
+                # before normalization so it cannot mint an unattributed status
+                # legacy turn that re-locks the composer.
+                continue
             transport.maybe_capture_conversation_id(record)
             ctx = NormalizeContext(
                 session_id=self.session_id,
@@ -1655,6 +2011,15 @@ class SessionTailer:
                 is_turn_completed = event.type == AgentStreamEventType.TURN_COMPLETED
                 if event.run_epoch is None:
                     event.run_epoch = self._run_epoch
+                # Drop identical per-second capacity-queue snapshots at the
+                # source: they share one stable message id and the UI replaces
+                # them in place, so persisting only when the rendered text
+                # changes keeps the durable stream / poll payload free of a
+                # ~1/s flood. The raw heartbeat above still drives the queue
+                # watchdog, so dropping the persisted event does not hide a
+                # stall.
+                if self._is_duplicate_queue_snapshot(event):
+                    continue
                 self._record_approval_card(event)
                 self._record_watchdog_activity(event)
                 if event.type == AgentStreamEventType.TEXT_DELTA and not event.payload.get("plan"):
@@ -1707,6 +2072,23 @@ class SessionTailer:
                     else event
                 )
                 event = redact_event(event)
+                if is_turn_completed:
+                    # The provider's own terminal record is persisted and the
+                    # guard released under ``_send_lock`` so it cannot interleave
+                    # with a manual Stop's ``cancelled`` edge for the same turn.
+                    try:
+                        consumed = await self._consume_turn_completion_record(
+                            event, observer_event, transport
+                        )
+                    except Exception:
+                        logger.exception(
+                            "agent_stream turn_completed finalize failed for session %s",
+                            self.session_id,
+                        )
+                        continue
+                    if not consumed:
+                        continue
+                    continue
                 try:
                     await self._publish(event)
                 except Exception:
@@ -1715,53 +2097,78 @@ class SessionTailer:
                         self.session_id,
                     )
                     continue
-                if is_turn_completed:
-                    # Pending cards are deliberately NOT dropped here. A card
-                    # routinely outlives its turn: Claude and Cursor have no
-                    # blocking-question channel, so the tool returns a
-                    # placeholder, the agent ends the turn, and the user answers
-                    # the card afterwards. Clearing on completion meant that
-                    # answer found an empty set and no ``approval_resolved`` was
-                    # ever persisted — leaving an answered card looking
-                    # unanswered after a reload. Each entry carries the card's
-                    # own ``turn_id``/``run_epoch``, so a late answer is stamped
-                    # with the turn that owns the card, not whatever is running
-                    # now.
-                    # Mark that the provider emitted a terminal completion for
-                    # the active turn. At EOF we use this to decide whether a
-                    # failed turn_completed must be synthesized.
-                    self._turn_completed_seen = True
-                    self._terminalize_native_runtime(event.payload.get("status"))
-                    # ``TURN_COMPLETED`` is the provider's explicit turn-end
-                    # signal for every adapter we ship:
-                    #   - Claude: top-level ``result`` record (after the final
-                    #     ``assistant`` snapshot; never on ``message_stop``).
-                    #   - Cursor: ``turn_ended`` record.
-                    #   - Codex: ``turn/completed`` notification.
-                    # There are no trailing records after it, so it is safe to
-                    # release the active turn id and the turn guard immediately
-                    # — both for persistent transports (Codex app-server, which
-                    # has no per-turn EOF) and for one-shot transports (Claude /
-                    # Cursor, whose subprocess may linger after the turn because
-                    # a long-running tool call e.g. ``pnpm dev`` keeps the
-                    # process alive). Releasing here prevents the turn guard
-                    # from staying stuck ``True`` until the subprocess finally
-                    # exits.
-                    #
-                    # The completion event has already been persisted and fanned
-                    # out above, so a concurrent ``send_message`` cannot publish
-                    # a new turn_started that sequences ahead of this turn's
-                    # completion.
-                    self._active_turn_id = None
-                    self._active_tool_call_ids.clear()
-                    self._blocking_approval_call_ids.clear()
-                    self._waiting_for_model_capacity = False
-                    self._goal_terminal_at = None
+
+    async def _consume_turn_completion_record(
+        self,
+        event: AgentStreamEvent,
+        observer_event: AgentStreamEvent,
+        transport: ProviderSession,
+    ) -> bool:
+        """Persist the provider's terminal ``turn_completed`` and release the
+        guard, atomically against a concurrent manual Stop.
+
+        The provider's own terminal record can race a user Stop that has
+        already persisted a ``cancelled`` edge for the same Hub turn. Both run
+        under the tailer's ``_send_lock`` and re-check turn identity:
+
+        * a completion for the currently active Hub turn → persist + release;
+        * a null-id completion with no active turn → provider/process terminal
+          edge (cold-start replay, one-shot result); persist + release;
+        * anything else (Stop already terminalized, or a newer turn active) →
+          dropped, so a turn never gets two terminal edges and a late
+          completion can never clear a newer turn's guard.
+
+        Returns ``False`` when the record was dropped.
+        """
+        completion_turn_id = event.turn_id
+        async with self._send_lock:
+            active = self._active_turn_id
+            if completion_turn_id is not None and active != completion_turn_id:
+                logger.warning(
+                    "dropping stale turn_completed for turn %s while active=%s session %s",
+                    completion_turn_id,
+                    active,
+                    self.session_id,
+                )
+                # Stop already retired this turn; cancel_active_turn's teardown
+                # owns provider-guard release. Only release an orphaned provider
+                # guard when no newer Hub turn is running on the transport.
+                if active is None and transport.turn_in_flight:
                     transport.acknowledge_turn_complete()
-                    self._notify_post_persist(observer_event)
-                    self._assistant_text = ""
-                    self._visible_assistant_text = ""
-                    self._goal_protocol_sanitizer = None
+                return False
+            try:
+                await self._publish(event)
+            except Exception:
+                logger.exception(
+                    "agent_stream store append failed for turn_completed session %s",
+                    self.session_id,
+                )
+                # Persistence failed, but the provider turn is over: release
+                # anyway rather than wedging the composer.
+            # Pending cards are deliberately NOT dropped on completion: a card
+            # routinely outlives its turn (Claude/Cursor have no blocking
+            # question channel, so the user answers the card after the agent
+            # ends the turn). Each card carries its own turn id/epoch, so a late
+            # answer is stamped with the owning turn, not the current one.
+            self._turn_completed_seen = True
+            self._terminalize_native_runtime(event.payload.get("status"))
+            # ``TURN_COMPLETED`` is every shipped adapter's final record for the
+            # turn (Claude ``result``, Cursor ``turn_ended``, Codex/TraeX
+            # ``turn/completed``), so releasing immediately is safe for both
+            # persistent app-servers and one-shot CLIs whose subprocess lingers
+            # (e.g. a long-running tool child). Done under the send lock so a
+            # concurrent send cannot start a turn before the release.
+            self._active_turn_id = None
+            self._active_tool_call_ids.clear()
+            self._blocking_approval_call_ids.clear()
+            self._waiting_for_model_capacity = False
+            self._goal_terminal_at = None
+            transport.acknowledge_turn_complete()
+            self._notify_post_persist(observer_event)
+            self._assistant_text = ""
+            self._visible_assistant_text = ""
+            self._goal_protocol_sanitizer = None
+        return True
 
     def _notify_post_persist(self, event: AgentStreamEvent) -> None:
         """Schedule observers after completion persistence and guard release."""

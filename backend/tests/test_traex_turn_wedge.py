@@ -464,6 +464,10 @@ async def test_explicit_stop_with_confirmed_interrupt_keeps_server_and_resends(
     harness.current.exec_item(CALL_ID, "started")
 
     assert await tailer.cancel_turn() is True
+    # The Hub turn is terminal immediately; the provider interrupt teardown
+    # finishes in the background.
+    assert tailer._active_turn_id is None
+    await tailer._await_turn_teardown()
     assert transport.turn_in_flight is False
     assert len(harness.servers) == 1
     interrupts = harness.current.request_params("turn/interrupt")

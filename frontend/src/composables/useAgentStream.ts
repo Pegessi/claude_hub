@@ -37,6 +37,17 @@ export type StreamSource = 'managed-session' | 'terminal-tab'
 const HYDRATION_FETCH_TIMEOUT_MS = 15_000
 /** Large enough to avoid hundreds of serial round trips for delta-heavy history. */
 const HYDRATION_PAGE_LIMIT = 5_000
+/**
+ * The authoritative ``/wait`` long-poll tolerates transient transport blips
+ * (a proxy 502, a brief backend reload during a long queue) instead of failing
+ * closed on the first error: it retries with capped exponential backoff while
+ * staying ``live`` (so Stop/Send stay armed and no reconnect banner flashes).
+ * Only after the budget is exhausted does it surface ``failed``. A genuine
+ * session loss therefore still fails, but a single dropped poll never does.
+ */
+const LONG_POLL_MAX_RETRIES = 6
+const LONG_POLL_RETRY_BASE_MS = 1_000
+const LONG_POLL_RETRY_MAX_MS = 5_000
 
 export interface UseAgentStreamApi {
   capabilities: ShallowRef<StreamCapabilities | null>
@@ -51,6 +62,8 @@ export interface UseAgentStreamApi {
   setMode: (mode: string) => Promise<void>
   /** Tear down the stream (SSE / long-poll). Safe to call repeatedly. */
   stop: () => void
+  /** Re-issue the in-flight /wait immediately (e.g. right after Stop). */
+  nudge: () => void
   /** Clear in-memory state and optionally restore a cached history snapshot. */
   reset: (snapshot?: AgentStreamHistorySnapshot) => void
 }
@@ -99,6 +112,14 @@ export function useAgentStream(): UseAgentStreamApi {
   let currentStreamPath: string | null = null
   let eventSource: EventSource | null = null
   let longPollAbort: AbortController | null = null
+  /**
+   * Aborts ONLY the in-flight ``/wait`` request without stopping the loop, so
+   * an explicit nudge (e.g. after Stop) makes the loop re-issue immediately
+   * and fetch the just-persisted terminal edge in one RTT, instead of waiting
+   * for the previous 30s long-poll to time out. ``longPollAbort`` above is the
+   * generation-level signal: aborting it tears the whole loop down.
+   */
+  let waitRequestAbort: AbortController | null = null
   /** Aborts the in-flight capabilities / events hydration fetches. */
   let hydrationAbort: AbortController | null = null
   /** Aborts a mode update when its source is switched or unmounted. */
@@ -153,6 +174,17 @@ export function useAgentStream(): UseAgentStreamApi {
       longPollAbort.abort()
       longPollAbort = null
     }
+    waitRequestAbort = null
+  }
+
+  /**
+   * Re-issue the in-flight ``/wait`` immediately (coalesced; abort is
+   * idempotent). Used after a successful Stop so the cancelled terminal edge
+   * arrives in one RTT even while the surface is off-live and the previous
+   * long-poll still has up to 30s left on the server.
+   */
+  function nudge() {
+    waitRequestAbort?.abort()
   }
 
   function abortHydration() {
@@ -243,12 +275,12 @@ export function useAgentStream(): UseAgentStreamApi {
     return (await res.json()) as AgentStreamEventPage
   }
 
-  async function waitEvents(streamPath: string, since: number): Promise<AgentStreamEventPage> {
+  async function waitEvents(streamPath: string, since: number, signal?: AbortSignal): Promise<AgentStreamEventPage> {
     const res = await fetch(`${streamPath}/wait`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ since_sequence: since, timeout_seconds: 30 }),
-      signal: longPollAbort?.signal,
+      signal: signal ?? longPollAbort?.signal,
     })
     if (!res.ok) throw new Error(`wait HTTP ${res.status}`)
     return (await res.json()) as AgentStreamEventPage
@@ -256,13 +288,54 @@ export function useAgentStream(): UseAgentStreamApi {
 
   /** Authoritative live reconciliation loop; SSE is only an accelerator. */
   async function longPollLoop(sourceId: string, streamPath: string, generationId: number) {
+    let consecutiveFailures = 0
     while (!stopped && currentSessionId === sourceId && stateMachine.isCurrent(generationId)) {
+      // One short-lived controller per request lets an explicit nudge abort
+      // just this /wait (so it re-issues immediately) while the generation's
+      // longPollAbort still tears the whole loop down.
+      const reqController = new AbortController()
+      waitRequestAbort = reqController
+      const parentSignal = longPollAbort?.signal
+      if (parentSignal) {
+        if (parentSignal.aborted) reqController.abort()
+        else parentSignal.addEventListener('abort', () => reqController.abort(), { once: true })
+      }
       try {
-        const page = await waitEvents(streamPath, sequenceBuffer.cursor)
+        const page = await waitEvents(streamPath, sequenceBuffer.cursor, reqController.signal)
         applyPage(page, generationId)
+        consecutiveFailures = 0
       } catch (err) {
         if (stopped || currentSessionId !== sourceId || !stateMachine.isCurrent(generationId)) return
-        // Surface the failure and stop; the Chat surface stays fail-closed.
+        if (longPollAbort?.signal.aborted) return
+        // An explicit nudge (e.g. right after Stop): re-issue /wait at once so
+        // the just-persisted terminal edge lands in one RTT instead of waiting
+        // out the previous 30s poll. Not counted as a transport failure.
+        if (reqController.signal.aborted) {
+          continue
+        }
+        // Transient blip: stay live and retry with capped backoff rather than
+        // failing on one dropped poll (which used to disable Stop and flash a
+        // reconnect banner during a long provider queue).
+        if (consecutiveFailures < LONG_POLL_MAX_RETRIES) {
+          consecutiveFailures += 1
+          const delay = Math.min(
+            LONG_POLL_RETRY_BASE_MS * 2 ** (consecutiveFailures - 1),
+            LONG_POLL_RETRY_MAX_MS,
+          )
+          await new Promise<void>(resolve => {
+            const timer = setTimeout(resolve, delay)
+            reqController.signal.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(timer)
+                resolve()
+              },
+              { once: true },
+            )
+          })
+          continue
+        }
+        // Budget exhausted — surface the failure and stop; fail closed.
         const message = err instanceof Error ? err.message : 'stream wait failed'
         if (stateMachine.fail(generationId, message)) {
           errorMessage.value = message
@@ -512,6 +585,7 @@ export function useAgentStream(): UseAgentStreamApi {
     retry,
     setMode,
     stop,
+    nudge,
     reset,
   }
 }

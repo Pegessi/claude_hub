@@ -54,6 +54,21 @@ from .native import (
 
 _FLAT_OBJ_RE = re.compile(r"\{[^{}]*\}")
 _CMD_RE = re.compile(r'"cmd"\s*:\s*"((?:[^"\\]|\\.)*)"')
+# A transient provider control-plane notice delivered through the ``error``
+# channel. TraeX/Codex report their OWN transport reconnect/backoff attempts
+# (e.g. "Reconnecting… 1/5") as an error notification while the turn stays
+# alive and keeps queueing/generating. These are NOT terminal: mapping them to
+# ``error`` made the frontend treat the turn as finished (dropping its
+# in-flight lock and hiding Stop) for what was really a recoverable retry. Map
+# them to a single coalesced STATUS instead. Real, fatal provider failures
+# (turn/completed error, process death) keep their own terminal paths.
+_TRANSIENT_NOTICE_RE = re.compile(r"^\s*(?:reconnect(?:ing|ed)?|retrying)\b", re.IGNORECASE)
+_TRANSIENT_NOTICE_MESSAGE_ID = "provider-status:reconnect"
+
+
+def _transient_provider_notice(message: Any) -> bool:
+    """True when an ``error``-channel message is a recoverable reconnect."""
+    return isinstance(message, str) and bool(_TRANSIENT_NOTICE_RE.match(message))
 
 
 def _codex_tool_args(raw_input: Any) -> Dict[str, Any]:
@@ -221,6 +236,27 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             events.extend(self._normalize_response_item(payload, payload_type, ctx))
         return events
 
+    def _error_or_status_event(self, ctx: NormalizeContext, message: str) -> AgentStreamEvent:
+        """Map an error-channel message to ERROR, or to a coalesced STATUS.
+
+        A recoverable provider reconnect/backoff notice (``Reconnecting… n/m``)
+        is not a turn-terminal error: the turn is still alive. Emit it as one
+        stable-id snapshot STATUS (the UI replaces it in place and never treats
+        it as terminal) instead of an ERROR that would drop the active-turn
+        lock and hide Stop.
+        """
+        if _transient_provider_notice(message):
+            return ctx.event(
+                AgentStreamEventType.STATUS,
+                {
+                    "text": message,
+                    "provider_status": "provider/reconnecting",
+                    "snapshot": True,
+                },
+                message_id=_TRANSIENT_NOTICE_MESSAGE_ID,
+            )
+        return ctx.event(AgentStreamEventType.ERROR, {"message": message})
+
     def _normalize_notification(
         self, method: str, params: Any, ctx: NormalizeContext
     ) -> List[AgentStreamEvent]:
@@ -270,7 +306,7 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         elif method == "error":
             error = params.get("error")
             if isinstance(error, dict) and error.get("message"):
-                events.append(ctx.event(AgentStreamEventType.ERROR, {"message": error["message"]}))
+                events.append(self._error_or_status_event(ctx, error["message"]))
         elif method in {"item/started", "item/completed"}:
             events.extend(self._normalize_tool_item(params.get("item"), method, ctx))
         elif method == "item/agentMessage/delta":
