@@ -5,7 +5,26 @@
 
 ## Unreleased
 
-<<<<<<< HEAD
+### fix(chat): silence watchdog no longer reaps a just-started turn before its first record drains
+
+- A stop-restart/relaunch turn intermittently produced no usable lifecycle
+  after the nested sub-agent-thread merge: the inactivity (and hard-liveness)
+  watchdog evaluates at the **top** of each poll tick, *before* that tick's
+  next provider record is read. On a freshly started turn the first
+  `item/started` / `item/completed` records can already be buffered in the
+  transport's stdout queue while the watchdog still sees an activity stamp of
+  age ≈ 0 and an empty active-tool set. With the zero/near-zero timeouts used
+  in fast tests (and any sub-tick configuration), that microsecond-old turn was
+  reaped before the suppressing `item/started` registered, discarding the
+  buffered completion and wedging the stop-restart-relaunch first turn.
+- Added a small minimum-silence debounce (`_MIN_TURN_SILENCE_S`, 0.25s) to both
+  `_stream_inactive` and `_turn_hard_liveness_expired` — long enough to drain
+  the start handoff, far below the real 600s/7200s timeouts — and stopped the
+  first-observation tick from clobbering an already-set (or deliberately
+  back-dated) `_last_event_at`. Sends remain serialized through `_send_lock`,
+  so production never observes the restart's stop→resume gap; the affected
+  wedge test now waits on the resumed thread like the explicit-Stop test.
+
 ### fix(chat): manual Stop resets any wedged/reconnecting turn (idempotent cancel + late-completion lock)
 
 - Even after the capacity-queue fix, two wedges remained: a repeat Stop after
