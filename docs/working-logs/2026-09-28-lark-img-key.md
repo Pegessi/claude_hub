@@ -1,8 +1,16 @@
-# Lark `img_v3_` images in Chat — endpoint + markdown src rewrite
+# Agent-quoted images in Chat — resolver/proxy layer (Lark `img_v3_` first)
 
 Date: 2026-09-28
 Branch: `fix/chat-lark-img-key` (base `main` f63bbfc)
 Task: 4314001b — `[lark-img P1] 飞书 img_v3 图片端点+markdown src改写`
+
+Commits:
+
+1. `74fcaa0` — initial lark-specific endpoint + markdown rewrite (review round 1).
+2. `53f4ccf` — backend generalized into a resolver registry; route renamed to
+   `/stream/quoted-image`.
+3. (this round, follow-up commit) — frontend matcher layer + renamed
+   contracts, docs.
 
 ## Symptom
 
@@ -24,129 +32,184 @@ lark-cli had already downloaded the image locally:
 (`<sender>` subdirectories per peer — observed `chuxuan/`, `sc/`; `.jpg`
 observed, `.png/.jpeg/.gif/.webp` also possible.)
 
-### Root cause (file:line)
+### Root cause
 
 - marked turns the bare key into `<img src="img_v3_0215v_…">`. The browser
   resolves it relative to the Hub page URL → Hub 404 → broken image.
 - The pre-existing restricted reader
-  `GET /tabs/{id}/stream/agent-image?path=…` (`backend/claude_hub/api/agent_stream.py:1773`
-  before this change) only serves files inside the tab session's
-  `workspace_path` (cwd allowlist, `_agent_image_allowed_roots`). The Lark
-  downloads live in `~/.claude/oncall/.tmp_img`, **outside** every tab cwd,
-  and the markdown never carries an absolute path anyway. So no existing link
-  could serve these images.
+  `GET /tabs/{id}/stream/agent-image?path=…` (`backend/claude_hub/api/agent_stream.py`)
+  only serves files inside the tab session's `workspace_path` (cwd
+  allowlist). The Lark downloads live in `~/.claude/oncall/.tmp_img`,
+  **outside** every tab cwd, and the markdown never carries an absolute path.
 
-## Design
+## Generic architecture (review round 2)
 
-### Backend — `GET /api/workspaces/tabs/{tab_id}/stream/lark-image?key=…`
+Review feedback: don't special-case Lark — agents will quote images from many
+sources (other Lark keys, Slack/DingTalk/CDN, base64, skill-local temp
+images). The fix is now an extensible **agent-quoted image resolve/proxy
+layer**; Lark `img_v3_` is simply the first registered provider.
 
-New restricted reader in `backend/claude_hub/api/agent_stream.py`, modeled on
-the agent-image endpoint but **key-based, never path-based**:
+### Backend
 
-1. **Auth / ownership** — `Depends(get_current_user)` + the shared
-   `_terminal_tab_session_or_404(tab_id)` live-tab lookup, identical to the
-   attachment/agent-image endpoints. Not an unauthenticated image proxy.
-2. **No caller-controlled path** — the query value is only a key. It must
-   fully match `^img_v3_[A-Za-z0-9_-]+$`, be ≤ 256 chars, and contain no
-   control characters. Slashes, backslashes, `:`, `*`, `?`, `.`, spaces and
-   quotes are all outside the charset, so traversal/glob-injection/absolute
-   payloads fail validation before any filesystem call.
-3. **Fixed-root lookup** — `_lark_image_resource_root()` returns
-   `Path.home()/.claude/oncall/.tmp_img` (a function so tests monkeypatch a
-   tmp tree). The file is found by globbing exactly
-   `<root>/*/lark-im-resources/<key><suffix>` for the whitelisted suffixes
-   (`.png .jpg .jpeg .gif .webp`). No path segment comes from the client.
-4. **Containment after symlink resolution** — `candidate.resolve(strict=True)`
-   fully expands links; the result must be a regular file,
-   `relative_to(real_root)` must succeed, and the relative shape must be
-   exactly `<sender>/lark-im-resources/<file>` (3 parts, middle segment
-   `lark-im-resources`). A symlink pointing outside the root, or a file
-   dropped at the root / directly under a sender dir, is not reachable.
-5. **Content allowlist** — bytes are sniffed with the existing
-   `sniff_image_mime` (PNG/JPEG/GIF/WebP magic, reused from
-   `services/agent_stream/attachments.py`). A text file named
-   `img_v3_x.jpg` is refused. Read is capped at 10 MiB
-   (`_AGENT_IMAGE_MAX_BYTES`).
-6. **No information leak** — every failure (bad key, missing root/file,
-   non-regular, escape, oversized, bad magic) is the same opaque 404
-   ("image not available") with `X-Content-Type-Options: nosniff`; success
-   carries `Cache-Control: private, max-age=300`.
+`backend/claude_hub/services/agent_stream/quoted_images.py` (new):
 
-Remote sessions: the endpoint reuses the tab lookup; resource files are a
-host-local concept, and the fixed root is the backend host's home — remote
-tabs authenticate and 404 just like local tabs without a download.
+- **Result types** — `LocalImage(data, media_type)`, `DataImage(data,
+  media_type)`, `RedirectImage(location)`; `QuotedImageResult` is their
+  union. Lark returns `LocalImage` today; the route already renders
+  `RedirectImage` as a `307` and `DataImage` as inline bytes, so a remote/CDN
+  or inline provider needs no route change.
+- **`QuotedImageResolver`** (base): `name`, anchored `key_pattern`,
+  `max_key_length`; `matches(key)` performs the shared key validation
+  (string, non-empty, ≤256, no control chars, anchored full-match);
+  `resolve(key)` validates then calls provider `_resolve`.
+- **`LocalFileResolver(QuotedImageResolver)`** — the shared security base for
+  the usual "key → file under allowed roots" providers. Subclasses implement
+  only `roots()`, `candidate_files(key)`, and optionally
+  `accepts_resolved(real, root)`. The base:
+  1. resolves every root with `Path.resolve(strict=True)`;
+  2. fully resolves each candidate (symlinks expanded) and requires a regular
+     file accepted by `accepts_resolved` against a resolved root;
+  3. reads with a 10 MiB cap (`QUOTED_IMAGE_MAX_BYTES`);
+  4. sniffs magic via the existing attachments `_magic_mime`
+     (PNG/JPEG/GIF/WebP);
+  5. raises `QuotedImageUnavailable` for every failure.
+- **Registry** — `register_resolver()`, `registered_resolvers()`,
+  `resolve_quoted_image(key)`; first match wins, so register from most
+  specific to most general. `LarkImgV3Resolver` is registered at import.
+- **`LarkImgV3Resolver(LocalFileResolver)`** — key pattern
+  `img_v3_[A-Za-z0-9_-]+`; root from `default_lark_resource_root()`
+  (`Path.home()/.claude/oncall/.tmp_img`, a function for monkeypatching);
+  candidates come from globbing `*/lark-im-resources/<key><suffix>` over the
+  five image suffixes; `accepts_resolved` enforces the exact 3-part shape
+  `<sender>/lark-im-resources/<file>` after resolution.
 
-### Frontend — bare-key recognition + markdown src rewrite
+`backend/claude_hub/api/agent_stream.py`:
 
-- `frontend/src/utils/larkImage.ts` (new):
-  - `isBareLarkImageKey(src)` — type/length/charset guard; rejects anything
-    with a scheme marker (`:`), `/`, `\`, whitespace, or glob/query
-    metacharacters, and anything that is not the exact `img_v3_…` token.
-  - `larkImageEndpointUrl(tabId, key)` — encoded endpoint URL.
-  - `rewriteLarkImageSrcs(html, tabId)` — one regex pass over sanitized
-    marked output replacing only `<img … src="bare-key">` values, tagging the
-    element with `data-lark-img="<key>"`. Non-`<img>` matches (anchors, code,
-    plain text) and non-bare srcs pass through byte-for-byte. No DOM required,
-    so the util is unit-testable under Node.
-- `frontend/src/utils/markdownBlocks.ts` — `MarkdownBlockCache.render()`
-  gains a `larkTabId` option; the rewrite is a new post-process pass
-  (alongside `linkPathMentions`) for both html blocks and list items. The
-  cache key and invalidation include the tab id (the URL embeds it), so
-  switching tabs can never serve another tab's rewritten URL.
-- `frontend/src/components/MarkdownContent.vue` — new optional `tabId` prop
-  threaded into the cache; a capture-phase `@error` listener replaces a
-  `data-lark-img` image that fails to load with a muted inline
-  `[image unavailable]` placeholder (`.lark-img-missing`) — no broken-image
-  icon, no large error frame.
-- `frontend/src/components/StructuredPane.vue` — all four `MarkdownContent`
-  call sites (user text desktop/mobile, assistant text, sub-agent text) pass
-  `:tab-id="props.tabId"`.
+- Single provider-neutral route
+  `GET /api/workspaces/tabs/{tab_id}/stream/quoted-image?key=…`
+  (`get_tab_quoted_image`): `Depends(get_current_user)` + shared
+  `_terminal_tab_session_or_404(tab_id)` ownership lookup, then dispatch; any
+  `QuotedImageUnavailable` becomes the same opaque 404
+  ("image not available", `X-Content-Type-Options: nosniff`). Local/data
+  responses carry nosniff (`LocalImage` gets `Cache-Control: private,
+  max-age=300`; `DataImage` no-store; redirect keeps nosniff on the 307).
+- The round-1 `/stream/lark-image` route was **renamed, not aliased** — there
+  is only one surface and one frontend contract.
 
-### Unchanged image paths (no regression)
+### Frontend
 
-User-uploaded attachments (`/stream/attachments/…`), `data:` previews,
-`blob:`, ordinary http(s) images, and the agent-image card for
-view_image/Claude-Read absolute cwd paths all fail the bare-key test and are
-emitted exactly as before.
+`frontend/src/utils/quotedImage.ts` (renamed from `larkImage.ts`):
+
+- `QuotedImageMatcher { name, pattern }` and the `QUOTED_IMAGE_MATCHERS` list;
+  `LARK_IMG_V3_MATCHER` (`/^img_v3_[A-Za-z0-9_-]+$/`) is entry #1. First
+  match wins.
+- `isBareQuotedImageKey(src)` — matcher match plus defense-in-depth guards
+  (non-string/empty/≤256 rejected; untrimmed rejected; any `:`, `/`, `\`
+  rejected) so a loose future pattern can never proxy an ordinary URL or
+  local path.
+- `quotedImageProviderName(src)` — dispatch introspection (null when
+  unregistered).
+- `resolveQuotedImageUrl(tabId, src)` — null unless a registered matcher
+  owns the token; URL is
+  `/api/workspaces/tabs/{tabId}/stream/quoted-image?key=…` with both parts
+  percent-encoded.
+- `rewriteQuotedImageSrcs(html, tabId)` — one regex pass over sanitized
+  marked output; only `<img … src="bare-token">` is rewritten and tagged
+  `data-quoted-img="<token>"`. Anchors/code/text and all non-bare srcs pass
+  through byte-for-byte. No DOM needed (unit-testable in Node).
+
+Wiring:
+
+- `utils/markdownBlocks.ts` — `MarkdownBlockCache.render()` option renamed to
+  `quotedTabId`; rewrite is a post-process pass (with `linkPathMentions`) for
+  html blocks and list items; cache key + invalidation include the tab id.
+- `components/MarkdownContent.vue` — `tabId` prop (unchanged name, generic
+  meaning), capture-phase `@error` swaps a `data-quoted-img` image that fails
+  to load with a muted `.quoted-img-missing` `[image unavailable]`
+  placeholder.
+- `components/StructuredPane.vue` — the four `MarkdownContent` sites pass
+  `:tab-id="props.tabId"` (unchanged from round 1).
+
+### How to add a new image source (the extension point)
+
+Backend (no route/test-contract change):
+
+```python
+class SlackResolver(qi.LocalFileResolver):       # or qi.QuotedImageResolver
+    name = "slack"
+    key_pattern = re.compile(r"slack_[A-Za-z0-9_-]+")
+    def roots(self): return [Path.home() / ".cache" / "slack-img"]
+    def candidate_files(self, key): return ...    # fixed-shape glob/path
+    # accepts_resolved() override only for extra shape checks
+qi.register_resolver(SlackResolver())
+```
+
+For a remote source, extend `QuotedImageResolver` directly and return
+`RedirectImage("https://…")` (307 today) or `DataImage(...)`.
+
+Frontend (one matcher):
+
+```ts
+export const SLACK_MATCHER: QuotedImageMatcher = {
+  name: 'slack', pattern: /^slack_[A-Za-z0-9_-]+$/,
+}
+// add to QUOTED_IMAGE_MATCHERS (order = specificity)
+```
+
+Nothing else changes: the route, the cache, and `MarkdownContent` are
+provider-neutral. Until both sides register a shape, an unknown bare token
+renders as its original src (and the browser naturally 404s) — never
+mis-proxied to a provider that doesn't own it.
 
 ## Tests
 
-Backend — `backend/tests/test_agent_stream_lark_image.py` (19 cases, resource
-root monkeypatched to a tmp tree):
+Backend — `backend/tests/test_agent_stream_quoted_image.py` (25 cases, root
+monkeypatched to tmp):
 
-- valid key → 200 + correct content-type + nosniff; PNG across a second sender
-  dir; unknown tab → 404; missing key → 404;
+- Lark security base through the neutral endpoint: valid jpeg/png → 200 +
+  content-type + nosniff; unknown tab → 404; missing key → 404;
 - 11 parametrized malformed keys → 404 (wrong prefix, prefix-only, `../`,
-  separators, `.`, NUL/control, `*`, `?`, leading traversal, empty);
-- non-image bytes with image extension → 404 (magic);
-- symlink resolving outside the root → 404;
-- files outside `lark-im-resources/` (root level, sender level) not
-  glob-reachable; missing resource root → 404.
+  separators, `.`, NUL, `*`, `?`, leading traversal, empty);
+- non-image magic → 404; symlink escaping root → 404; files outside
+  `lark-im-resources/` not glob-reachable; missing root → 404;
+- **dispatch/registry**: unregistered foreign bare tokens (`slack_…`,
+  `ding_…`, `cdn_…`, `tmpimg_…`) → 404 / `QuotedImageUnavailable`;
+  `lark-img-v3` registered and wins `img_v3_`;
+- **extension point**: a newly registered `LocalFileResolver` subclass owns
+  its key with no route change while Lark still owns `img_v3_`; a
+  `RedirectImage` resolver yields a `307` + `location` + nosniff through the
+  real HTTP route.
 
 Frontend:
 
-- `frontend/tests/larkImage.test.mjs` (new, 16 cases): recognition of
-  valid/invalid keys, URL encoding, rewrite of double/single-quoted src,
-  passthrough for http/https/data/blob/relative/absolute/attachment srcs and
-  malformed look-alikes, anchors/text untouched, multiple images, empty input.
-- `frontend/tests/markdownBlocks.test.mjs` (+4): rewrite through the block
-  cache only when `larkTabId` is set, ordinary URLs unaffected, list-item
-  rewrite, cache invalidation on tab-id switch.
+- `frontend/tests/quotedImage.test.mjs` (17 cases): matcher registry shape;
+  valid/invalid/foreign token recognition; provider-name dispatch; URL
+  encoding + null for non-bare/foreign/empty-tab; double/single-quoted
+  rewrite; http/https/data/blob/relative/absolute/attachment passthrough;
+  malformed/foreign src not proxied; anchors/text untouched; multiple
+  images; empty-input passthrough.
+- `frontend/tests/markdownBlocks.test.mjs` (4 integration cases): rewrite
+  only with `quotedTabId`; ordinary URLs and an unregistered foreign token
+  left as-is; list-item rewrite; cache invalidation on tab-id switch.
 
-Validation run: targeted backend pytest (new + existing agent-image suite)
-green; black/isort/mypy clean on the changed module. Frontend
-`vue-tsc --noEmit` = 0, `pnpm lint:check` = 0, `pnpm build` green, 583 node
-unit tests pass (excluding `forkFromTurn.test.mjs`, which fails identically on
-unmodified `main` under Node 25 — `localStorage.getItem is not a function`, an
-environment-only pre-existing failure unrelated to this change). Full
-`tests/` not run per task instruction (real-IO suites need a browser/tmux).
+Validation: backend targeted pytest (quoted-image + existing agent-image
+regression) = 41 passed; black/isort/mypy clean. Frontend `vue-tsc --noEmit`
+= 0, `pnpm lint:check` = 0, `pnpm build` green; 586 node unit tests pass
+(all suites except `forkFromTurn.test.mjs`, which fails identically on
+unmodified `main` under Node 25 — `localStorage.getItem is not a function`,
+pre-existing/environmental). Full `tests/` not run per instruction.
 
 ## Files
 
-- `backend/claude_hub/api/agent_stream.py` — endpoint + resolver/validation.
-- `backend/tests/test_agent_stream_lark_image.py` — new.
-- `frontend/src/utils/larkImage.ts` — new.
-- `frontend/src/utils/markdownBlocks.ts` — rewrite pass + cache key.
-- `frontend/src/components/MarkdownContent.vue` — `tabId` prop, error fallback.
-- `frontend/src/components/StructuredPane.vue` — pass `tab-id` at 4 sites.
-- `frontend/tests/larkImage.test.mjs`, `frontend/tests/markdownBlocks.test.mjs`.
+- `backend/claude_hub/services/agent_stream/quoted_images.py` — new layer.
+- `backend/claude_hub/api/agent_stream.py` — single `/stream/quoted-image`
+  route + result-type handling.
+- `backend/tests/test_agent_stream_quoted_image.py` — new (replaces the
+  round-1 lark-named test file).
+- `frontend/src/utils/quotedImage.ts` — matcher layer (replaces
+  `larkImage.ts`).
+- `frontend/src/utils/markdownBlocks.ts` — generic rewrite pass + cache key.
+- `frontend/src/components/MarkdownContent.vue` — `data-quoted-img`,
+  `.quoted-img-missing`, `quotedTabId`.
+- `frontend/src/components/StructuredPane.vue` — passes `tab-id` (4 sites).
+- `frontend/tests/quotedImage.test.mjs`, `frontend/tests/markdownBlocks.test.mjs`.
