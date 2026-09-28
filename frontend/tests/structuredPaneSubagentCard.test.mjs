@@ -13,9 +13,14 @@ const source = readFileSync(
 // unreliable).
 const subStart = source.indexOf(`v-else-if="part.kind === 'subagent'"`)
 const approvalStart = source.indexOf(`v-else-if="part.kind === 'approval'"`)
+// The nested sub-thread branch legitimately renders its child tool inputs
+// (argsText), so the standalone spawn card's block must be sliced before it
+// rather than all the way to the approval branch.
+const subthreadStart = source.indexOf(`v-else-if="part.kind === 'subthread'"`)
 assert.ok(subStart > -1, 'pane must render a dedicated sub-agent part branch')
-assert.ok(approvalStart > subStart, 'approval branch must follow the sub-agent branch')
-const subBlock = source.slice(subStart, approvalStart)
+assert.ok(subthreadStart > subStart, 'sub-thread branch must follow the sub-agent branch')
+assert.ok(approvalStart > subthreadStart, 'approval branch must follow the sub-thread branch')
+const subBlock = source.slice(subStart, subthreadStart)
 
 test('sub-agent calls render a dedicated card, not the generic tool block', () => {
   assert.match(subBlock, /class="subagent-card"/, 'must render a .subagent-card')

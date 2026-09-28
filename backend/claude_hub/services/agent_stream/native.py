@@ -1604,6 +1604,23 @@ class ProviderSession(ABC):
         the id from ``message_start``; Codex captures it during thread/start.
         """
 
+    @property
+    def active_thread_id(self) -> Optional[str]:
+        """Provider-native id of the thread the active user turn runs in.
+
+        Codex/TraeX hold the verified ``thread/start`` id in ``_thread_id``
+        (mirrored into ``_conversation_id``). The stream adapter compares each
+        item's ``threadId`` against this to tell the main agent apart from a
+        nested sub-agent thread. One-shot providers (Claude/Cursor) have no
+        persistent thread and return ``None``, which makes the adapter fall
+        back to main-stream attribution for everything."""
+        thread_id = getattr(self, "_thread_id", None)
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+        if self._conversation_id and self._conversation_id_verified:
+            return self._conversation_id
+        return None
+
     async def _spawn_oneshot(self, cmd: List[str], stdin_text: str) -> None:
         """Spawn a one-shot streaming subprocess for Claude/Cursor turns.
 

@@ -415,10 +415,17 @@ async def test_silent_tool_completion_then_no_turn_end_stop_restarts_and_resends
 
     async def _reaped() -> bool:
         types = await _event_types(store)
+        # Wait for the full kill+relaunch+resume handoff, not just guard release:
+        # ``stop()`` inside restart drops ``turn_in_flight`` before ``start()``
+        # runs initialize/thread/resume on the replacement server. A real
+        # send_message cannot observe that gap (the watchdog reap holds
+        # ``_send_lock`` across the whole restart), but this raw-state poll can,
+        # so gate on the resumed thread too (mirrors the explicit-Stop test).
         return (
             AgentStreamEventType.TURN_COMPLETED in types
             and len(harness.servers) == 2
             and not transport.turn_in_flight
+            and "thread/resume" in harness.current.request_methods()
         )
 
     await _wait_until(5.0, _reaped)
