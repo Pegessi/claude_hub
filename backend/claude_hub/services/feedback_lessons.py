@@ -9,6 +9,7 @@ from typing import Any
 
 from ..models import (
     AgentReport,
+    FeedbackFailureEvidence,
     FeedbackLesson,
     FeedbackLessonCreate,
     FeedbackLessonDraft,
@@ -26,7 +27,7 @@ from ..models import (
 )
 
 FEEDBACK_INDEX_SCHEMA_VERSION = 1
-FEEDBACK_SUMMARY_PROMPT_VERSION = 5
+FEEDBACK_SUMMARY_PROMPT_VERSION = 6
 
 # Reaper-prompt digest truncation limits keep Feedback Reaper prompts bounded
 # so smaller-context agents (codex, cursor) can process them. All free-text
@@ -42,6 +43,7 @@ _DIGEST_MAX_PATH_CHARS = 120
 _DIGEST_MAX_VALIDATION_ITEMS = 2
 _DIGEST_MAX_RISKS_ITEMS = 2
 _DIGEST_MAX_CHANGED_FILES = 6
+_DIGEST_MAX_FAILURE_EVIDENCE = 3
 # Active-lesson payload caps (these must keep the fingerprint field EXACT —
 # it is the authoritative merge key; Reaper echoes it back verbatim).
 _LESSON_MAX_ID = 80
@@ -1112,6 +1114,13 @@ class FeedbackLessonStore:
         task: dict[str, Any] = raw_task if isinstance(raw_task, dict) else {}
         artifacts: dict[str, Any] = raw_artifacts if isinstance(raw_artifacts, dict) else {}
         reports: list[Any] = raw_reports if isinstance(raw_reports, list) else []
+        failure_reports = [
+            report
+            for report in reports
+            if isinstance(report, dict)
+            and str(report.get("state") or "")
+            in {"review_failed", "needs_input", "review_needs_input", "blocked", "failed"}
+        ]
         report_state_sequence = [
             str(report.get("state"))
             for report in reports
@@ -1155,6 +1164,10 @@ class FeedbackLessonStore:
                 _DIGEST_MAX_RISKS_ITEMS,
             ),
             report_states=self._unique_strings(report_state_sequence),
+            failure_evidence=[
+                self._failure_evidence(report)
+                for report in failure_reports[-_DIGEST_MAX_FAILURE_EVIDENCE:]
+            ],
             # report_state_sequence intentionally omitted: the unique states + counts
             # (review_failed_count, needs_input_count, report_total) carry the signal
             # the Reaper needs; the full per-report sequence is redundant bulk.
@@ -1163,6 +1176,17 @@ class FeedbackLessonStore:
             needs_input_count=needs_input_count,
             report_total=len(reports),
             completed_at=str(task.get("completed_at") or ""),
+        )
+
+    def _failure_evidence(self, report: dict[str, Any]) -> FeedbackFailureEvidence:
+        return FeedbackFailureEvidence(
+            report_id=self._truncate_str(
+                str(report.get("id") or report.get("report_id") or ""), 80
+            ),
+            state=self._truncate_str(str(report.get("state") or ""), 32),
+            message=self._truncate_str(str(report.get("message") or ""), 240),
+            validation=self._truncate_str(str(report.get("validation") or ""), 320),
+            risks=self._truncate_str(str(report.get("risks") or ""), 160),
         )
 
     def _compact_digest_for_prompt(self, digest: FeedbackTaskDigest) -> dict[str, Any]:
@@ -1189,6 +1213,10 @@ class FeedbackLessonStore:
             "review_failed_count": digest.review_failed_count,
             "needs_input_count": digest.needs_input_count,
             "report_total": digest.report_total,
+            "failure_evidence": [
+                self._failure_evidence(item.model_dump()).model_dump()
+                for item in digest.failure_evidence[-_DIGEST_MAX_FAILURE_EVIDENCE:]
+            ],
             "report_states": self._truncate_list(
                 [self._truncate_str(s, 32) for s in digest.report_states], 8
             ),
@@ -1318,6 +1346,7 @@ class FeedbackLessonStore:
           report state sequence).
         - Multi-evidence (Signal B) lessons require at least one cited task with
           rf+ni >= 1 so recurrence is not asserted from textual similarity alone.
+        - Every cited task must have a readable record in this workspace.
 
         Confidence cap (always on):
         - Single-evidence lessons: capped at SINGLE_EVIDENCE_CONFIDENCE_CAP (0.6).
@@ -1341,15 +1370,19 @@ class FeedbackLessonStore:
             signals = [
                 self._task_iteration_signal(workspace_id, task_id) for task_id in evidence_task_ids
             ]
+            missing_ids = [
+                task_id for task_id, signal in zip(evidence_task_ids, signals) if signal is None
+            ]
+            if missing_ids:
+                raise FeedbackLessonValidationError(
+                    "no task record was found in this workspace for evidence task(s): "
+                    + ", ".join(missing_ids)
+                    + "; lesson cannot be verified"
+                )
             observed_signals = [signal for signal in signals if signal is not None]
 
             if len(evidence_task_ids) == 1:
-                signal = signals[0]
-                if signal is None:
-                    raise FeedbackLessonValidationError(
-                        f"single-evidence lesson cites task {evidence_task_ids[0]} but no task "
-                        "record was found on disk; lesson cannot be verified"
-                    )
+                signal = observed_signals[0]
                 if not signal.has_signal_a:
                     raise FeedbackLessonValidationError(
                         "single-evidence lesson requires Signal A "
@@ -1382,17 +1415,29 @@ class FeedbackLessonStore:
         records_dir = self.state_root / workspace_id / "task_records"
         if not records_dir.exists():
             return None
-        for path in records_dir.glob(f"*{task_id}*.json"):
+        # IDs are untrusted report input, not glob patterns or paths. The
+        # record's exact task identity is authoritative, including legacy names.
+        for path in records_dir.glob("*.json"):
+            if task_id not in path.name:
+                continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("workspace_id") not in (None, workspace_id):
                 continue
             task_block = payload.get("task")
             if not isinstance(task_block, dict):
                 continue
+            if task_block.get("workspace_id") not in (None, workspace_id):
+                continue
             if str(task_block.get("id") or "") != task_id:
                 continue
-            reports = payload.get("reports") or []
+            reports = payload.get("reports")
+            if not isinstance(reports, list):
+                continue
             states = [
                 str(report.get("state"))
                 for report in reports
