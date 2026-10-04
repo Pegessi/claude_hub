@@ -2,6 +2,26 @@
 
 > AI-friendly deep architecture reference. Read this to understand the system before making changes.
 
+## Five-layer responsibility map
+
+The layers organize existing responsibilities and ownership. They do not add a
+parallel orchestrator, store or approval mechanism.
+
+| Layer | Existing owners | Durable facts / derived views |
+| --- | --- | --- |
+| Intent | `models/schemas.py`, `workspace_manager/_tasks.py`, `_task_updates.py`, Task Graph API/CLI | Task/Goal Packet, dependency records, acceptance criteria |
+| Context | `workspace_manager/_prompts.py`, `_persistence.py`, feedback lesson retrieval | Prompts/snapshots are derived caches; verify against task/report records and Git |
+| Execution | `workspace_manager/_dispatch.py`, `_sessions.py`, `_messaging.py`, provider adapters | Session assignment, runtime seat, worktree/resource ownership, delivery receipts |
+| Verification | `workspace_manager/_review.py`, `_reports.py`, `workspace_state_policy.py` | Validation/evaluation reports, reproducible artifact evidence and acceptance decisions |
+| Governance | `runtime_isolation.py`, `session_seat.py`, auth, feedback store and task lifecycle policy | Runtime/permission limits, lifecycle transitions and evidence-backed lessons |
+
+Paths above are relative to `backend/claude_hub/`. Read/write transitions go
+through the existing Task/report APIs. A snapshot is a navigation aid, not a
+second database; no consumer may infer completed/accepted work from its prose.
+The independent Hub evaluator remains the autonomous gate even when a simple
+worker runs without native subagents. See [agent workflow](docs/AGENT_WORKFLOW.md)
+for delegation, recovery, review evidence and safe directory hygiene.
+
 ## System Overview
 
 ```
