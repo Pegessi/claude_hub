@@ -26,6 +26,11 @@
   for isolated tests; credentials come only from explicit environment values.
 - Added the shared `get_public_base_url()` contract with strict origin
   validation and public-env, provider-env, then local-port precedence.
+- Added a Chat-scoped Feishu connection panel with authenticated status loading,
+  one-time code generation and copy, pending-code polling, explicit cross-Chat
+  state, confirmed disconnect, and a real OAuth login link for 401 responses.
+  The panel sends only the concrete Chat tab id; it cannot select a cwd, shell,
+  provider session, or managed Workspace target.
 - Design, security boundaries, fixed-source references, and live-verification
   limits are recorded in
   `docs/working-logs/2026-10-04-feishu-bot-binding-v1.md`.

@@ -2,10 +2,10 @@
 
 ## Scope
 
-This change adds a backend-only first version for binding one authenticated
-Claude Hub user to one existing local direct Chat tab. It does not register a
-real Feishu application, provision permissions, start a tunnel, or create a new
-agent runtime.
+This change adds the first version for binding one authenticated Claude Hub user
+to one existing local direct Chat tab, including the Chat-side connection panel.
+It does not register a real Feishu application, provision permissions, start a
+tunnel, or create a new agent runtime.
 
 The supported flow is:
 
@@ -21,6 +21,22 @@ The supported flow is:
    its `assistant_text` to the same Feishu chat.
 6. The Web user can inspect or remove only the binding keyed by their own
    authenticated `open_id` through `GET/DELETE /api/feishu/bot/binding`.
+
+## Chat connection panel
+
+Every existing local direct Chat mounts one small Feishu connection panel. It
+reads the authenticated user's current binding and distinguishes five observable
+states: unbound, pending code, bound to this Chat, bound to another Chat, and
+error. Generating a code sends only the current `tab_id`; no client-controlled
+cwd, shell, provider session, or Workspace target is accepted.
+
+A pending code is polled only while the Chat pane is active and stops when the
+KeepAlive pane is deactivated. Moving an existing binding to another Chat still
+requires the same Feishu user to send a newly generated code; the old binding
+remains active until that code is consumed. Disconnect uses the server's DELETE
+operation and therefore removes both the binding and every outstanding code for
+the authenticated owner. A 401 response never produces local optimistic state;
+the panel shows the existing `/api/auth/login` Feishu login entry instead.
 
 ## Identity and target boundary
 
