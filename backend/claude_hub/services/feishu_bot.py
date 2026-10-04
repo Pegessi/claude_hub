@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -16,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import httpx
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from claude_hub.config import settings
 from claude_hub.services.runtime_isolation import resolve_runtime_home
@@ -24,8 +28,11 @@ _BIND_CODE_ALPHABET = string.ascii_uppercase + string.digits
 _BIND_CODE_PREFIX = "CH-"
 _BIND_CODE_LENGTH = 10
 _DEFAULT_BIND_CODE_TTL_SECONDS = 600
+_BIND_CODE_RATE_WINDOW_SECONDS = 60
+_BIND_CODE_RATE_MAX = 5
+_CONSUMED_CODE_RETENTION_SECONDS = 24 * 60 * 60
 _EVENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
-_MAX_EVENT_BYTES = 256 * 1024
+MAX_FEISHU_EVENT_BYTES = 256 * 1024
 _MAX_INPUT_CHARS = 4_000
 _MAX_REPLY_CHARS = 20_000
 _EVENT_MAX_AGE_SECONDS = 300
@@ -51,6 +58,10 @@ class BindingCodeError(FeishuBotError):
     """Raised when a binding code is invalid, expired, replayed, or mismatched."""
 
 
+class BindingRateLimitError(FeishuBotError):
+    """Raised when one owner requests too many binding codes."""
+
+
 @dataclass(frozen=True)
 class FeishuBotConfig:
     """Explicit environment configuration for one Feishu Bot application."""
@@ -58,7 +69,7 @@ class FeishuBotConfig:
     app_id: str
     app_secret: str
     verification_token: str
-    encrypt_key: str
+    encrypt_key: str | None = None
     api_base_url: str = "https://open.feishu.cn"
 
     @classmethod
@@ -68,7 +79,6 @@ class FeishuBotConfig:
             "app_id": env.get("CLAUDE_HUB_FEISHU_BOT_APP_ID", "").strip(),
             "app_secret": env.get("CLAUDE_HUB_FEISHU_BOT_APP_SECRET", "").strip(),
             "verification_token": env.get("CLAUDE_HUB_FEISHU_BOT_VERIFICATION_TOKEN", "").strip(),
-            "encrypt_key": env.get("CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY", "").strip(),
         }
         missing = [name for name, value in values.items() if not value]
         if missing:
@@ -82,7 +92,8 @@ class FeishuBotConfig:
                 "Feishu Bot and Web login must use the same app_id so open_id identity matches"
             )
         base_url = env.get("CLAUDE_HUB_FEISHU_API_BASE_URL", "https://open.feishu.cn").rstrip("/")
-        return cls(api_base_url=base_url, **values)
+        encrypt_key = env.get("CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY", "").strip() or None
+        return cls(api_base_url=base_url, encrypt_key=encrypt_key, **values)
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,7 @@ class FeishuBinding:
     """An authorized p2p conversation bound to one existing Hub Chat tab."""
 
     owner_open_id: str
+    owner_email: str
     sender_open_id: str
     app_id: str
     chat_id: str
@@ -103,8 +115,10 @@ class PendingBinding:
     """A single-use browser-issued binding request."""
 
     owner_open_id: str
+    owner_email: str
     tab_id: str
     workspace_id: str | None
+    issued_at: float
     expires_at: float
     consumed_at: float | None = None
 
@@ -130,7 +144,7 @@ class FeishuBindingStore:
         self._lock = threading.RLock()
 
     def _empty(self) -> dict[str, Any]:
-        return {"version": 1, "pending": {}, "bindings": {}, "events": {}}
+        return {"version": 1, "pending": {}, "bindings": {}, "events": {}, "rate_limits": {}}
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -144,6 +158,10 @@ class FeishuBindingStore:
         for key in ("pending", "bindings", "events"):
             if not isinstance(value.get(key), dict):
                 raise FeishuBotError(f"Invalid Feishu Bot state field {key!r} at {self.path}")
+        if "rate_limits" not in value:
+            value["rate_limits"] = {}
+        if not isinstance(value["rate_limits"], dict):
+            raise FeishuBotError(f"Invalid Feishu Bot state field 'rate_limits' at {self.path}")
         return value
 
     def _save(self, state: dict[str, Any]) -> None:
@@ -166,30 +184,102 @@ class FeishuBindingStore:
     def _code_digest(code: str) -> str:
         return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _pending_from_dict(value: dict[str, Any]) -> PendingBinding:
+        expires_at = float(value["expires_at"])
+        return PendingBinding(
+            owner_open_id=str(value["owner_open_id"]),
+            owner_email=str(value.get("owner_email", "")),
+            tab_id=str(value["tab_id"]),
+            workspace_id=(
+                str(value["workspace_id"]) if value.get("workspace_id") is not None else None
+            ),
+            issued_at=float(value.get("issued_at", expires_at - _DEFAULT_BIND_CODE_TTL_SECONDS)),
+            expires_at=expires_at,
+            consumed_at=(
+                float(value["consumed_at"]) if value.get("consumed_at") is not None else None
+            ),
+        )
+
+    @staticmethod
+    def _binding_from_dict(value: dict[str, Any]) -> FeishuBinding:
+        return FeishuBinding(
+            owner_open_id=str(value["owner_open_id"]),
+            owner_email=str(value.get("owner_email", "")),
+            sender_open_id=str(value["sender_open_id"]),
+            app_id=str(value["app_id"]),
+            chat_id=str(value["chat_id"]),
+            tab_id=str(value["tab_id"]),
+            workspace_id=(
+                str(value["workspace_id"]) if value.get("workspace_id") is not None else None
+            ),
+            created_at=float(value["created_at"]),
+        )
+
+    def _prune_code_state(self, state: dict[str, Any], now: float) -> None:
+        consumed_cutoff = now - _CONSUMED_CODE_RETENTION_SECONDS
+        retained_pending: dict[str, Any] = {}
+        for digest, value in state["pending"].items():
+            if not isinstance(value, dict):
+                continue
+            expires_at = float(value.get("expires_at", 0))
+            consumed_at = value.get("consumed_at")
+            consumed_recently = isinstance(consumed_at, (int, float)) and (
+                float(consumed_at) >= consumed_cutoff
+            )
+            if expires_at >= now or consumed_recently:
+                retained_pending[digest] = value
+        state["pending"] = retained_pending
+        rate_cutoff = now - _BIND_CODE_RATE_WINDOW_SECONDS
+        state["rate_limits"] = {
+            owner: [
+                float(issued_at)
+                for issued_at in timestamps
+                if isinstance(issued_at, (int, float)) and float(issued_at) >= rate_cutoff
+            ]
+            for owner, timestamps in state["rate_limits"].items()
+            if isinstance(timestamps, list)
+        }
+        state["rate_limits"] = {
+            owner: timestamps for owner, timestamps in state["rate_limits"].items() if timestamps
+        }
+
     def create_code(
         self,
         owner_open_id: str,
+        owner_email: str,
         tab_id: str,
         workspace_id: str | None,
         ttl_seconds: int = _DEFAULT_BIND_CODE_TTL_SECONDS,
     ) -> tuple[str, PendingBinding]:
-        code = _BIND_CODE_PREFIX + "".join(
-            secrets.choice(_BIND_CODE_ALPHABET) for _ in range(_BIND_CODE_LENGTH)
-        )
-        pending = PendingBinding(
-            owner_open_id=owner_open_id,
-            tab_id=tab_id,
-            workspace_id=workspace_id,
-            expires_at=self._now() + ttl_seconds,
-        )
+        now = self._now()
         with self._lock:
             state = self._load()
+            self._prune_code_state(state, now)
+            issue_times = state["rate_limits"].setdefault(owner_open_id, [])
+            if len(issue_times) >= _BIND_CODE_RATE_MAX:
+                self._save(state)
+                raise BindingRateLimitError(
+                    f"At most {_BIND_CODE_RATE_MAX} binding codes may be requested per minute"
+                )
+            issue_times.append(now)
             for digest, value in list(state["pending"].items()):
                 if value.get("owner_open_id") == owner_open_id and value.get("consumed_at") is None:
                     del state["pending"][digest]
+            code = _BIND_CODE_PREFIX + "".join(
+                secrets.choice(_BIND_CODE_ALPHABET) for _ in range(_BIND_CODE_LENGTH)
+            )
+            pending = PendingBinding(
+                owner_open_id=owner_open_id,
+                owner_email=owner_email,
+                tab_id=tab_id,
+                workspace_id=workspace_id,
+                issued_at=now,
+                expires_at=now + ttl_seconds,
+            )
             state["pending"][self._code_digest(code)] = asdict(pending)
             self._save(state)
-        return code, pending
+            return code, pending
 
     def consume_code(
         self,
@@ -198,6 +288,7 @@ class FeishuBindingStore:
         sender_open_id: str,
         app_id: str,
         chat_id: str,
+        owner_is_authorized: Callable[[str, str], bool],
     ) -> FeishuBinding:
         digest = self._code_digest(code)
         with self._lock:
@@ -205,15 +296,18 @@ class FeishuBindingStore:
             value = state["pending"].get(digest)
             if not isinstance(value, dict):
                 raise BindingCodeError("Binding code is invalid")
-            pending = PendingBinding(**value)
+            pending = self._pending_from_dict(value)
             if pending.consumed_at is not None:
                 raise BindingCodeError("Binding code has already been used")
             if self._now() > pending.expires_at:
                 raise BindingCodeError("Binding code has expired")
             if not hmac.compare_digest(pending.owner_open_id, sender_open_id):
                 raise BindingCodeError("Binding code belongs to a different Feishu user")
+            if not owner_is_authorized(pending.owner_open_id, pending.owner_email):
+                raise BindingCodeError("Binding owner is no longer authorized")
             binding = FeishuBinding(
                 owner_open_id=pending.owner_open_id,
+                owner_email=pending.owner_email,
                 sender_open_id=sender_open_id,
                 app_id=app_id,
                 chat_id=chat_id,
@@ -229,7 +323,7 @@ class FeishuBindingStore:
     def get_owner_binding(self, owner_open_id: str) -> FeishuBinding | None:
         with self._lock:
             value = self._load()["bindings"].get(owner_open_id)
-        return FeishuBinding(**value) if isinstance(value, dict) else None
+        return self._binding_from_dict(value) if isinstance(value, dict) else None
 
     def get_sender_binding(
         self, sender_open_id: str, app_id: str, chat_id: str
@@ -246,9 +340,15 @@ class FeishuBindingStore:
         return binding
 
     def delete_owner_binding(self, owner_open_id: str) -> bool:
+        """Remove the owner's binding and every outstanding pairing code."""
+
         with self._lock:
             state = self._load()
             removed = state["bindings"].pop(owner_open_id, None) is not None
+            for digest, value in list(state["pending"].items()):
+                if isinstance(value, dict) and value.get("owner_open_id") == owner_open_id:
+                    del state["pending"][digest]
+                    removed = True
             if removed:
                 self._save(state)
             return removed
@@ -343,23 +443,21 @@ class FeishuBotClient:
 
 
 def _parse_json_object(raw_body: bytes) -> dict[str, Any]:
-    if len(raw_body) > _MAX_EVENT_BYTES:
-        raise FeishuEventPayloadError(f"Feishu event exceeds {_MAX_EVENT_BYTES} byte limit")
+    if len(raw_body) > MAX_FEISHU_EVENT_BYTES:
+        raise FeishuEventPayloadError(f"Feishu event exceeds {MAX_FEISHU_EVENT_BYTES} byte limit")
     try:
         payload = json.loads(raw_body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FeishuEventPayloadError("Feishu event body is not valid JSON") from exc
     if not isinstance(payload, dict):
         raise FeishuEventPayloadError("Feishu event body must be a JSON object")
-    if "encrypt" in payload:
-        raise FeishuEventPayloadError("Encrypted Feishu events are not supported")
     return payload
 
 
 def _verify_signature(
     raw_body: bytes,
     headers: Mapping[str, str],
-    config: FeishuBotConfig,
+    encrypt_key: str,
     now: float,
 ) -> None:
     try:
@@ -372,10 +470,34 @@ def _verify_signature(
         raise FeishuEventVerificationError("Missing Feishu request signature headers")
     if abs(now - timestamp) > _EVENT_MAX_AGE_SECONDS:
         raise FeishuEventVerificationError("Feishu request timestamp is outside replay window")
-    signed = str(timestamp).encode() + nonce.encode() + config.encrypt_key.encode() + raw_body
+    signed = str(timestamp).encode() + nonce.encode() + encrypt_key.encode() + raw_body
     expected = hashlib.sha256(signed).hexdigest()
     if not hmac.compare_digest(signature, expected):
         raise FeishuEventVerificationError("Invalid Feishu request signature")
+
+
+def _decrypt_callback(encrypted_value: Any, encrypt_key: str) -> bytes:
+    if not isinstance(encrypted_value, str) or not encrypted_value:
+        raise FeishuEventPayloadError("Encrypted Feishu event is missing ciphertext")
+    try:
+        ciphertext = base64.b64decode(encrypted_value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise FeishuEventVerificationError("Encrypted Feishu event is not valid base64") from exc
+    if len(ciphertext) < 32 or len(ciphertext) % 16 != 0:
+        raise FeishuEventVerificationError("Encrypted Feishu event has invalid ciphertext length")
+    iv, encrypted_body = ciphertext[:16], ciphertext[16:]
+    key = hashlib.sha256(encrypt_key.encode("utf-8")).digest()
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    padded = decryptor.update(encrypted_body) + decryptor.finalize()
+    unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+    try:
+        plaintext = unpadder.update(padded) + unpadder.finalize()
+    except ValueError as exc:
+        raise FeishuEventVerificationError("Encrypted Feishu event has invalid padding") from exc
+    plaintext = bytes(plaintext)
+    if len(plaintext) > MAX_FEISHU_EVENT_BYTES:
+        raise FeishuEventPayloadError(f"Feishu event exceeds {MAX_FEISHU_EVENT_BYTES} byte limit")
+    return plaintext
 
 
 def _event_created_seconds(value: Any) -> float:
@@ -398,8 +520,21 @@ def parse_feishu_callback(
 ) -> tuple[str, str | FeishuMessageEvent]:
     """Authenticate and parse URL verification or a p2p text message event."""
 
-    payload = _parse_json_object(raw_body)
+    outer_payload = _parse_json_object(raw_body)
     current_time = time.time() if now is None else now
+    encrypted_value = outer_payload.get("encrypt")
+    if encrypted_value is not None:
+        if config.encrypt_key is None:
+            raise FeishuEventPayloadError("Encrypted Feishu event received without an Encrypt Key")
+        normalized_headers = {key.lower(): value for key, value in headers.items()}
+        _verify_signature(raw_body, normalized_headers, config.encrypt_key, current_time)
+        payload = _parse_json_object(_decrypt_callback(encrypted_value, config.encrypt_key))
+    else:
+        if config.encrypt_key is not None:
+            raise FeishuEventPayloadError(
+                "Plaintext Feishu event is not accepted while an Encrypt Key is configured"
+            )
+        payload = outer_payload
 
     if payload.get("type") == "url_verification":
         token = payload.get("token")
@@ -410,8 +545,6 @@ def parse_feishu_callback(
             raise FeishuEventPayloadError("Feishu challenge is missing")
         return "challenge", challenge
 
-    normalized_headers = {key.lower(): value for key, value in headers.items()}
-    _verify_signature(raw_body, normalized_headers, config, current_time)
     header = payload.get("header")
     event = payload.get("event")
     if not isinstance(header, dict) or not isinstance(event, dict):
@@ -475,6 +608,7 @@ def parse_feishu_callback(
 
 __all__ = [
     "BindingCodeError",
+    "BindingRateLimitError",
     "FeishuBinding",
     "FeishuBindingStore",
     "FeishuBotClient",
@@ -484,5 +618,6 @@ __all__ = [
     "FeishuEventPayloadError",
     "FeishuEventVerificationError",
     "FeishuMessageEvent",
+    "MAX_FEISHU_EVENT_BYTES",
     "parse_feishu_callback",
 ]

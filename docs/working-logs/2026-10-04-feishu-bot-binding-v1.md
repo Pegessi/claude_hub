@@ -13,6 +13,7 @@ The supported flow is:
    `POST /api/feishu/bot/bind/start` with a server-known `tab_id` and, when the
    tab belongs to a Workspace, its matching `workspace_id`.
 2. Claude Hub returns a ten-minute, single-use code and the canonical event URL.
+   Code creation is limited to five requests per user per minute.
 3. The same Feishu user sends that code to the configured Bot in a p2p chat.
 4. Later p2p text messages from that exact `app_id` + `open_id` + `chat_id`
    binding enter the existing direct Chat provider session.
@@ -37,7 +38,11 @@ session id, or Workspace id in an event.
 
 The Bot app id must equal the OAuth app id. Feishu `open_id` values are scoped
 to an app, so mismatched applications are rejected instead of treating their
-identifiers as the same person.
+identifiers as the same person. The binding stores the OAuth-provided email as
+trusted identity data. Current open-id/email allowlists are checked when the
+code is consumed, immediately before dispatch, and again before the completed
+assistant response is sent. Revocation therefore prevents new execution, while
+an unbind or rebind during a running turn suppresses its old response.
 
 ## Existing Chat adapter
 
@@ -51,26 +56,37 @@ policy as browser Chat input.
 
 ## Callback validation and persistence
 
-`POST /api/feishu/bot/events` supports the official plaintext
-`url_verification` challenge and `im.message.receive_v1` schema. It accepts only
-user-authored p2p text messages with bounded body and text sizes. Normal events
-require:
+`POST /api/feishu/bot/events` supports the official `url_verification`
+challenge and `im.message.receive_v1` schema. It accepts only user-authored p2p
+text messages. The request stream stops with HTTP 413 as soon as it crosses 256
+KiB, including chunked requests without `Content-Length`; decoded text is
+limited separately.
 
-- a matching Verification Token and app id;
-- `X-Lark-Request-Timestamp`, `X-Lark-Request-Nonce`, and
-  `X-Lark-Signature` validated with the configured Encrypt Key;
-- request and event timestamps within five minutes;
-- message-id deduplication, as required by the Feishu receive-message
-  documentation (event id alone is not a sufficient deduplication key).
+When `CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY` is configured, the secure mode:
 
-Encrypted callback bodies are explicitly rejected. This version does not claim
-support for Feishu encrypted-event mode.
+- verifies `X-Lark-Request-Timestamp`, `X-Lark-Request-Nonce`, and
+  `X-Lark-Signature` against the exact encrypted request bytes before decryption;
+- rejects request timestamps outside five minutes;
+- decrypts the official `base64(iv + ciphertext)` AES-256-CBC format with the
+  SHA-256-derived key and PKCS7 validation, using `cryptography` rather than a
+  local cipher implementation.
 
-Bindings, hashed pairing codes, and claimed message ids are atomically stored
-in `<CLAUDE_HUB_HOME>/feishu_bot.json` with mode `0600`. Bindings and dedup
-claims survive process restart. A claimed event is handled at most once; if the
-process dies after the claim, v1 does not automatically replay that in-flight
-turn because doing so could execute the same user instruction twice.
+Without an Encrypt Key, the official plaintext mode accepts the plaintext
+challenge/event and validates its Verification Token, app id, and event
+`create_time`. That mode has no request signature and is intentionally described
+as unsigned; deployments requiring source authentication should use encrypted
+mode.
+
+Both modes enforce an event timestamp window and persistent message-id
+deduplication, as required by the Feishu receive-message documentation (event id
+alone is not a sufficient deduplication key).
+
+Bindings, hashed pairing codes, bounded code-rate history, and claimed message
+ids are atomically stored in `<CLAUDE_HUB_HOME>/feishu_bot.json` with mode
+`0600`. Unbinding removes all outstanding codes for that owner. Bindings and
+dedup claims survive process restart. A claimed event is handled at most once;
+if the process dies after the claim, v1 does not automatically replay that
+in-flight turn because doing so could execute the same user instruction twice.
 
 ## Configuration
 
@@ -80,7 +96,8 @@ in API responses or logs:
 - `CLAUDE_HUB_FEISHU_BOT_APP_ID`
 - `CLAUDE_HUB_FEISHU_BOT_APP_SECRET`
 - `CLAUDE_HUB_FEISHU_BOT_VERIFICATION_TOKEN`
-- `CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY`
+- `CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY` (recommended; omit only to use the
+  unsigned plaintext mode)
 - optional test/enterprise API override: `CLAUDE_HUB_FEISHU_API_BASE_URL`
 
 External URLs use
