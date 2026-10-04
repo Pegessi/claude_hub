@@ -5,6 +5,26 @@
 
 ## Unreleased
 
+### feat(feishu): bind one Bot conversation to an existing Hub Chat tab
+
+- Added strict real-session APIs for generating single-use binding codes,
+  reading the caller's binding, and unbinding it. The server validates the
+  existing local direct Chat tab and optional Workspace association; callback
+  senders cannot choose a cwd, shell, session, or target.
+- Added signed, replay-bounded `im.message.receive_v1` handling with app,
+  Verification Token, p2p sender, conversation, text-size, and persistent
+  `message_id` deduplication checks. Unsupported encrypted events fail
+  explicitly.
+- Feishu messages now use the existing direct Chat `TailerManager` and provider
+  session, wait for the matching persisted completion, and return its assistant
+  text to the same authorized p2p conversation. Bot HTTP calls are injectable
+  for isolated tests; credentials come only from explicit environment values.
+- Added the shared `get_public_base_url()` contract with strict origin
+  validation and public-env, provider-env, then local-port precedence.
+- Design, security boundaries, fixed-source references, and live-verification
+  limits are recorded in
+  `docs/working-logs/2026-10-04-feishu-bot-binding-v1.md`.
+
 ### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
 
 - Codex turns reported `usage.reasoning` tokens (e.g. 390) but the structured
