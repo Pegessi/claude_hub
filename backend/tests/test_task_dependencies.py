@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from importlib import import_module
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -23,6 +24,8 @@ from claude_hub.models import (
     DispatchDecisionRequest,
     ManagedSession,
     ManagedSessionStatus,
+    ScheduledTask,
+    ScheduledTaskKind,
     User,
     WorkspaceCreate,
     WorkspaceSessionRole,
@@ -332,3 +335,275 @@ async def test_start_preserves_dependency_edit_during_session_preparation(
         await manager.start_task(dependent.id)
     assert manager.tasks[dependent.id].depends_on_task_ids == [prerequisite.id]
     assert manager.tasks[dependent.id].status == WorkspaceTaskStatus.TODO
+
+
+def scheduled_task(workspace):
+    now = _wm._now()
+    return ScheduledTask(
+        id="schedule",
+        name="schedule",
+        workspace_id=workspace.id,
+        kind=ScheduledTaskKind.HUB_TASK,
+        task_title="scheduled child",
+        message="work",
+        agent_type=AgentType.CLAUDE,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prerequisite_done", [False, True])
+async def test_scheduled_fire_preserves_todo_edits_during_worker_creation(
+    manager, workspace, monkeypatch, prerequisite_done
+):
+    prerequisite = create(manager, workspace, "prerequisite")
+    if prerequisite_done:
+        manager.tasks[prerequisite.id] = prerequisite.model_copy(
+            update={"status": WorkspaceTaskStatus.DONE}
+        )
+    session = session_for(manager, workspace)
+
+    async def ensure_and_edit(*args, **kwargs):
+        task = next(t for t in manager.tasks.values() if t.internal_kind == "scheduled")
+        await manager.update_task(
+            task.id,
+            WorkspaceTaskUpdate(depends_on_task_ids=[prerequisite.id], prompt="new contract"),
+        )
+        return session
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", ensure_and_edit)
+    monkeypatch.setattr(manager, "_rename_session_for_task", AsyncMock(return_value=session))
+    monkeypatch.setattr(manager, "_lesson_context_payload", lambda *args: [])
+    send = AsyncMock()
+    cleanup = AsyncMock()
+    monkeypatch.setattr(manager, "_send_dispatch_message", send)
+    monkeypatch.setattr(manager, "_best_effort_delete_session", cleanup)
+    if prerequisite_done:
+        await manager._fire_hub_task(scheduled_task(workspace))
+        send.assert_awaited_once()
+        assert "new contract" in send.call_args.args[2]
+        cleanup.assert_not_called()
+    else:
+        with pytest.raises(ValueError, match="dependencies"):
+            await manager._fire_hub_task(scheduled_task(workspace))
+        send.assert_not_called()
+        cleanup.assert_awaited_once_with(session.id)
+    task = next(t for t in manager.tasks.values() if t.internal_kind == "scheduled")
+    assert task.depends_on_task_ids == [prerequisite.id]
+    assert task.prompt == "new contract"
+    assert task.status == (
+        WorkspaceTaskStatus.WORKING if prerequisite_done else WorkspaceTaskStatus.FAILED
+    )
+    fresh = WorkspaceManager()
+    assert fresh.tasks[task.id].depends_on_task_ids == [prerequisite.id]
+    assert fresh.tasks[task.id].prompt == "new contract"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prerequisite_done", [False, True])
+@pytest.mark.parametrize("edit_during", ["rename", "clear"])
+async def test_final_dispatch_uses_fresh_contract_after_async_preparation(
+    manager, workspace, monkeypatch, prerequisite_done, edit_during
+):
+    prerequisite = create(manager, workspace, "prerequisite")
+    if prerequisite_done:
+        manager.tasks[prerequisite.id] = prerequisite.model_copy(
+            update={"status": WorkspaceTaskStatus.DONE}
+        )
+    dependent = create(manager, workspace, "dependent", clear_context=edit_during == "clear")
+    session = session_for(manager, workspace)
+
+    async def edit():
+        await manager.update_task(
+            dependent.id,
+            WorkspaceTaskUpdate(depends_on_task_ids=[prerequisite.id], prompt="new contract"),
+        )
+
+    async def rename(*args, **kwargs):
+        if edit_during == "rename":
+            await edit()
+        return session
+
+    async def clear(*args, **kwargs):
+        assert args[1] == "/clear"
+        await edit()
+
+    monkeypatch.setattr(manager, "_rename_session_for_task", rename)
+    monkeypatch.setattr(manager, "send_session_message", clear)
+    monkeypatch.setattr(manager, "_lesson_context_payload", lambda *args: [])
+    send = AsyncMock()
+    monkeypatch.setattr(manager, "_send_dispatch_message", send)
+    if prerequisite_done:
+        await manager._dispatch_task_to_session(dependent, session)
+        send.assert_awaited_once()
+        assert "new contract" in send.call_args.args[2]
+    else:
+        with pytest.raises(ValueError, match="dependencies"):
+            await manager._dispatch_task_to_session(dependent, session)
+        send.assert_not_called()
+    assert manager.tasks[dependent.id].depends_on_task_ids == [prerequisite.id]
+    assert manager.tasks[dependent.id].prompt == "new contract"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spawn_fails", [False, True])
+async def test_orphan_recovery_preserves_operator_todo_edit_while_spawning(
+    manager, workspace, monkeypatch, spawn_fails
+):
+    prerequisite = create(manager, workspace, "prerequisite")
+    dependent = create(manager, workspace, "orphan")
+    dead = session_for(manager, workspace).model_copy(
+        update={"status": ManagedSessionStatus.STOPPED}
+    )
+    manager.sessions[dead.id] = dead
+    now = _wm._now()
+    orphan = dependent.model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "system_internal": True,
+            "internal_kind": "scheduled",
+            "session_id": dead.id,
+            "updated_at": now - timedelta(seconds=_wm.HUBTASK_ORPHAN_GRACE_SECONDS + 1),
+        }
+    )
+    manager.tasks[orphan.id] = orphan
+    replacement = dead.model_copy(update={"id": "replacement", "status": ManagedSessionStatus.IDLE})
+
+    async def ensure_and_edit(*args, **kwargs):
+        await manager.update_task(orphan.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.TODO))
+        await manager.update_task(
+            orphan.id,
+            WorkspaceTaskUpdate(depends_on_task_ids=[prerequisite.id], prompt="operator contract"),
+        )
+        if spawn_fails:
+            raise RuntimeError("spawn failed after operator update")
+        manager.sessions[replacement.id] = replacement
+        return replacement
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", ensure_and_edit)
+    send = AsyncMock()
+    cleanup = AsyncMock()
+    monkeypatch.setattr(manager, "_send_dispatch_message", send)
+    monkeypatch.setattr(manager, "_best_effort_delete_session", cleanup)
+    await manager._converge_one_orphaned_hub_task(orphan, now)
+    current = manager.tasks[orphan.id]
+    assert current.status == WorkspaceTaskStatus.TODO
+    assert current.depends_on_task_ids == [prerequisite.id]
+    assert current.prompt == "operator contract"
+    send.assert_not_called()
+    if spawn_fails:
+        cleanup.assert_not_called()
+    else:
+        cleanup.assert_awaited_once_with(replacement.id)
+    assert WorkspaceManager().tasks[orphan.id].depends_on_task_ids == [prerequisite.id]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_failure_cleanup_survives_state_write_failure(
+    manager, workspace, monkeypatch
+):
+    prerequisite = create(manager, workspace, "prerequisite")
+    session = session_for(manager, workspace)
+
+    async def ensure_and_edit(*args, **kwargs):
+        task = next(t for t in manager.tasks.values() if t.internal_kind == "scheduled")
+        await manager.update_task(
+            task.id, WorkspaceTaskUpdate(depends_on_task_ids=[prerequisite.id])
+        )
+
+        def fail_save():
+            raise OSError("failure state not committed")
+
+        monkeypatch.setattr(manager, "_save_state", fail_save)
+        return session
+
+    cleanup = AsyncMock()
+    monkeypatch.setattr(manager, "ensure_workspace_agent", ensure_and_edit)
+    monkeypatch.setattr(manager, "_best_effort_delete_session", cleanup)
+    with pytest.raises(OSError, match="not committed") as error:
+        await manager._fire_hub_task(scheduled_task(workspace))
+    assert isinstance(error.value.__context__, ValueError)
+    cleanup.assert_awaited_once_with(session.id)
+    task = next(t for t in manager.tasks.values() if t.internal_kind == "scheduled")
+    assert task.depends_on_task_ids == [prerequisite.id]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_failure_does_not_delete_worker_reassigned_to_another_task(
+    manager, workspace, monkeypatch
+):
+    prerequisite = create(manager, workspace, "prerequisite")
+    other = create(manager, workspace, "other owner")
+    session = session_for(manager, workspace)
+
+    async def ensure_and_edit(*args, **kwargs):
+        task = next(t for t in manager.tasks.values() if t.internal_kind == "scheduled")
+        await manager.update_task(
+            task.id, WorkspaceTaskUpdate(depends_on_task_ids=[prerequisite.id])
+        )
+        manager.tasks[other.id] = other.model_copy(
+            update={"status": WorkspaceTaskStatus.QUEUED, "session_id": session.id}
+        )
+        manager.sessions[session.id] = session.model_copy(
+            update={"task_id": other.id, "current_task_id": other.id}
+        )
+        return session
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", ensure_and_edit)
+    with pytest.raises(ValueError, match="dependencies"):
+        await manager._fire_hub_task(scheduled_task(workspace))
+    # Exercise real best-effort deletion and its existing reference guard.
+    assert manager.sessions[session.id].current_task_id == other.id
+    assert manager.tasks[other.id].status == WorkspaceTaskStatus.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_not_clobber_dependency_edit_while_delivery_is_pending(
+    manager, workspace, monkeypatch
+):
+    prerequisite = create(manager, workspace, "prerequisite")
+    dependent = create(manager, workspace, "dependent")
+    queued = dependent.model_copy(update={"status": WorkspaceTaskStatus.QUEUED})
+    manager.tasks[queued.id] = queued
+    session = session_for(manager, workspace)
+    monkeypatch.setattr(manager, "_rename_session_for_task", AsyncMock(return_value=session))
+    monkeypatch.setattr(manager, "_lesson_context_payload", lambda *args: [])
+
+    async def send_and_reopen(*args, **kwargs):
+        await manager.update_task(queued.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.TODO))
+        await manager.update_task(
+            queued.id, WorkspaceTaskUpdate(depends_on_task_ids=[prerequisite.id])
+        )
+
+    monkeypatch.setattr(manager, "_send_dispatch_message", send_and_reopen)
+    await manager._dispatch_task_to_session(queued, session)
+    assert manager.tasks[queued.id].status == WorkspaceTaskStatus.TODO
+    assert manager.tasks[queued.id].depends_on_task_ids == [prerequisite.id]
+
+
+@pytest.mark.asyncio
+async def test_continue_does_not_clobber_operator_reopen_during_rename(
+    manager, workspace, monkeypatch
+):
+    prerequisite = create(manager, workspace, "prerequisite")
+    dependent = create(manager, workspace, "dependent")
+    session = session_for(manager, workspace)
+    manager.tasks[dependent.id] = dependent.model_copy(
+        update={"status": WorkspaceTaskStatus.FAILED, "session_id": session.id}
+    )
+
+    async def rename_and_reopen(*args, **kwargs):
+        await manager.update_task(
+            dependent.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.TODO)
+        )
+        await manager.update_task(
+            dependent.id, WorkspaceTaskUpdate(depends_on_task_ids=[prerequisite.id])
+        )
+        return session
+
+    monkeypatch.setattr(manager, "_rename_session_for_task", rename_and_reopen)
+    with pytest.raises(RuntimeError, match="Task changed"):
+        await manager.continue_task(dependent.id)
+    assert manager.tasks[dependent.id].status == WorkspaceTaskStatus.TODO
+    assert manager.tasks[dependent.id].depends_on_task_ids == [prerequisite.id]
