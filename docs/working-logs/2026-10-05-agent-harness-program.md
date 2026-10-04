@@ -23,8 +23,8 @@ for user review; do not merge or deploy them from this program.
 | Task dependencies and recovery snapshots | `codex/agent-os-tasks` | Task schema, task mutations/dispatch, CLI, persistence, Task Graph guide | Invalid edges rejected without side effects; blocked work cannot start; cold recovery and bounded derived snapshots preserve authoritative state |
 | Context and delegation | `codex/agent-os-context` | Prompt builder, root instruction pair, workflow guide, isolated prompt measurement | Simple/complex/recovery instructions agree; delegation has explicit ownership and evidence; root instructions remain equal and navigable |
 | Verification and feedback | `codex/agent-os-verification` | Reviewer placement, feedback evidence/digests, feedback schema | Review the worker's actual checkout; reject unsupported lesson provenance; preserve bounded failure evidence through digest and prompt |
-| Directory hygiene | To be assigned | Bounded repository/worktree inspection and safe cleanup workflow | Preserve dirty/untracked/ignored/occupied/unknown state; never scan the home directory or infer safety from age |
-| Coordination and integration | `codex/agent-os-coordination` | This delivery record and integration evidence | Review fixed SHAs, combine branches in an isolated checkout, run relevant regression checks, record limitations and merge order |
+| Directory hygiene | `codex/agent-os-hygiene` | Bounded repository/worktree inspection and safe cleanup workflow | Preserve dirty/untracked/ignored/occupied/unknown state; never scan the home directory or infer safety from age |
+| Coordination and integration | `codex/agent-os-integration` | This delivery record and integration evidence | Review fixed SHAs, combine branches in an isolated checkout, run relevant regression checks, record limitations and merge order |
 
 The first three writers start independently from the same baseline. Shared
 schema edits are restricted to separate Task and Feedback classes. The
@@ -81,6 +81,20 @@ complex assignment 9,162 characters / approximately 2,117 tokens; simple
 assignment 8,955 / approximately 2,069; review with ten verbose reports 38,907 /
 approximately 9,926. Measurements describe context size, not task quality or
 end-to-end performance.
+
+A remote-session reuse test already fails on the untouched baseline:
+`test_cli_reuse_lifecycle.py::test_ensure_workspace_agent_explicit_remote_target_creates_remote`
+passes an `object()` fixture where production now expects `profile.interactive`.
+The baseline reproducer fails with `AttributeError` in 0.22 s. This unrelated
+fixture defect is not counted as a regression or silently treated as passing.
+
+The verification branch first delivery is `6795ae8`: 164 focused tests passed,
+format/import-order checks passed on touched Python files, and targeted mypy
+checks passed. Independent review and combined verification remain pending.
+
+The optional integration branch combines independent commits and resolves only
+shared changelog insertions. The user may review/merge features independently
+or use the tested combined branch. `main` remains unchanged.
 
 Implementation, independent review, validation evidence, and final branch SHAs
 will be recorded here after the corresponding checks complete.
