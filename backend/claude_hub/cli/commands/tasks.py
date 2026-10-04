@@ -32,6 +32,7 @@ TASK_STATUS_FIELDS = [
     "agent_type",
     "task_mode",
     "execution_complexity",
+    "depends_on_task_ids",
     "session_id",
     "review_session_id",
     "review_cycle",
@@ -113,6 +114,7 @@ TASK_DETAIL_FIELDS = [
     "agent_type",
     "task_mode",
     "execution_complexity",
+    "depends_on_task_ids",
     "session_id",
     "review_cycle",
     "reviewed_cycle",
@@ -458,6 +460,9 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
     default=None,
     help="Parent Task id for an explicit Task Graph edge.",
 )
+@click.option(
+    "--depends-on", multiple=True, help="Prerequisite task id (repeatable; requires done)."
+)
 @click.option("--agent-tag", default=None, help="Optional agent label tag.")
 @click.option("--session-id", default=None, help="Target existing session id.")
 @click.option(
@@ -490,6 +495,7 @@ def task_create(
     review_profiles: tuple,
     related_task_id: Optional[str],
     parent_task_id: Optional[str],
+    depends_on: tuple,
     agent_tag: Optional[str],
     session_id: Optional[str],
     clear_context: Optional[bool],
@@ -513,6 +519,8 @@ def task_create(
         clear_context=clear_context,
         timeout_seconds=timeout_seconds,
     )
+    if depends_on:
+        body["depends_on_task_ids"] = list(depends_on)
     if attachment_json:
         body["attachments"] = parse_attachment_json(attachment_json)
     try:
@@ -772,6 +780,10 @@ def task_continue(
     help="Review profile list (repeatable).",
 )
 @click.option("--related-task-id", default=None, help="Related task id.")
+@click.option(
+    "--depends-on", multiple=True, help="Replace prerequisite ids (repeatable; todo only)."
+)
+@click.option("--clear-dependencies", is_flag=True, help="Clear all prerequisites (todo only).")
 @click.option("--agent-tag", default=None, help="Agent label tag (empty string clears).")
 @click.option("--session-id", default=None, help="Session id.")
 @click.option(
@@ -803,6 +815,8 @@ def task_update(
     execution_complexity: Optional[str],
     review_profiles: tuple,
     related_task_id: Optional[str],
+    depends_on: tuple,
+    clear_dependencies: bool,
     agent_tag: Optional[str],
     session_id: Optional[str],
     clear_context: Optional[bool],
@@ -811,6 +825,8 @@ def task_update(
     payload_json: Optional[str],
 ) -> None:
     """Update task metadata or status."""
+    if depends_on and clear_dependencies:
+        raise click.UsageError("--depends-on and --clear-dependencies are mutually exclusive")
     body = merge_payload(
         payload_json,
         title=title,
@@ -823,6 +839,8 @@ def task_update(
         session_id=session_id,
         clear_context=clear_context,
     )
+    if depends_on or clear_dependencies:
+        body["depends_on_task_ids"] = list(depends_on)
     if review_profiles:
         body["review_profiles"] = list(review_profiles)
     if attachment_json:

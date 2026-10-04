@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### feat(workspace): explicit task prerequisites and recoverable state snapshots
+
+- Persist and validate independent task dependency edges; gate starts, resumes,
+  queued dispatch and crash recovery on prerequisite completion, and protect
+  referenced tasks from deletion. CLI supports repeatable `--depends-on` and
+  explicit dependency clearing.
+- Derive bounded recovery snapshots from committed state bytes, with source
+  hashes, goal/progress/evidence excerpts, blockers and recovery guidance.
+  Cache write failures cannot undo a committed update; cold startup repairs
+  stale or missing snapshots. See `docs/TASK_GRAPH.md`.
+
 ### fix(agents): align bounded delegation, context recovery and review evidence
 
 - Map the existing system into intent/context/execution/verification/governance;
