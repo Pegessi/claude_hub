@@ -4,6 +4,7 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 
 from ...models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
 from ..request_fingerprint import request_fingerprint
+from ..task_dependencies import validate_task_dependencies
 from ..task_graph import (
     make_task_consumer_key,
     resolve_task_tree_fields,
@@ -59,6 +60,9 @@ class _TasksMixin:
         parent_task_id, root_task_id, task_path = resolve_task_tree_fields(
             self.tasks, workspace_id, task_id, payload.parent_task_id or None
         )
+        dependencies = validate_task_dependencies(
+            self.tasks, workspace_id, task_id, payload.depends_on_task_ids
+        )
         now = _wm._now()
         attachments = self._persist_attachments(workspace_id, task_id, payload.attachments)
         autonomy_policy = (
@@ -91,6 +95,7 @@ class _TasksMixin:
             clear_context=payload.clear_context,
             timeout_seconds=payload.timeout_seconds,
             parent_task_id=parent_task_id,
+            depends_on_task_ids=dependencies,
             root_task_id=root_task_id,
             path=task_path,
             consumer_ack_sequence=0,

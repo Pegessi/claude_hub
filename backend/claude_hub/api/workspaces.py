@@ -44,6 +44,7 @@ from ..models import (
 )
 from ..models.task_mailbox import TaskEvent
 from ..services import workspace_manager
+from ..services.task_dependencies import TaskHasDependentsError
 from ..services.task_graph import TaskHasDescendantsError
 from ..services.task_mailbox import TaskCallIdConflict
 from ..services.workspace_identity import (
@@ -566,6 +567,7 @@ async def update_task(
         and payload.review_profiles is None
         and payload.autonomy_policy is None
         and payload.autonomous_run is None
+        and payload.depends_on_task_ids is None
         and "agent_tag" not in payload.model_fields_set
     ):
         raise HTTPException(status_code=400, detail="No task update provided")
@@ -587,7 +589,7 @@ async def delete_task(
         workspace_manager.delete_task(task_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
-    except TaskHasDescendantsError as e:
+    except (TaskHasDescendantsError, TaskHasDependentsError) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
 

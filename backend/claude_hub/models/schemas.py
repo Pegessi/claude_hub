@@ -832,6 +832,8 @@ class WorkspaceTaskCreate(BaseModel):
     timeout_seconds: Optional[int] = None
     # Task Graph parent. Independent of related_task_id (session-affinity).
     parent_task_id: Optional[str] = None
+    # Explicit execution prerequisites, separate from supervision/session affinity.
+    depends_on_task_ids: List[str] = Field(default_factory=list)
     agent_tag: Optional[str] = None
 
     @field_validator("agent_tag", mode="before")
@@ -877,6 +879,8 @@ class WorkspaceTaskUpdate(BaseModel):
     clear_context: Optional[bool] = None
     session_id: Optional[str] = None
     parent_task_id: Optional[str] = None
+    # Explicit execution prerequisites, separate from supervision/session affinity.
+    depends_on_task_ids: Optional[List[str]] = None
     agent_tag: Optional[str] = None
 
     @field_validator("agent_tag", mode="before")
@@ -908,6 +912,8 @@ class WorkspaceTask(BaseModel):
     clear_context: Optional[bool] = None
     # Task Graph: parent/root/path. related_task_id stays a dispatch hint.
     parent_task_id: Optional[str] = None
+    # Explicit execution prerequisites, separate from supervision/session affinity.
+    depends_on_task_ids: List[str] = Field(default_factory=list)
     root_task_id: Optional[str] = None
     path: str = ""
     # Consumer cursor for this Task when it waits on its subtree. Not a Session field.
