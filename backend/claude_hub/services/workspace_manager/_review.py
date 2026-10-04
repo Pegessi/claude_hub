@@ -76,7 +76,7 @@ class _ReviewMixin:
                 return reviewer
             if reviewer and reviewer.status != ManagedSessionStatus.STOPPED:
                 logger.info(
-                    "Reviewer %s is busy with another task; falling through to first "
+                    "Reviewer %s is unavailable or on a different checkout; trying an "
                     "available reviewer for task_id=%s",
                     reviewer.id,
                     task.id,
@@ -85,6 +85,7 @@ class _ReviewMixin:
         reviewer = self._first_available_reviewer(
             workspace.id,
             target=placement["target"],
+            cwd=placement["cwd"],
             remote_profile_id=placement["remote_profile_id"],
             remote_cwd=placement["remote_cwd"],
         )
@@ -163,9 +164,12 @@ class _ReviewMixin:
         placement = self._reviewer_placement(workspace, task)
         if reviewer.target != placement["target"]:
             return False
+        from ..workspace_identity import normalize_remote_cwd, resolve_path
+
         if placement["target"] != ExecutionTarget.REMOTE:
-            return True
-        from ..workspace_identity import normalize_remote_cwd
+            return resolve_path(reviewer.workspace_path or workspace.path) == resolve_path(
+                placement["cwd"]
+            )
 
         reviewer_profile = reviewer.remote_profile_id or workspace.remote_profile_id
         wanted_profile = placement["remote_profile_id"]
