@@ -79,3 +79,29 @@ Interpreter: `/Users/bytedance/claude_hub/backend/.venv/bin/python`, with
   tests (216.80 seconds); a subsequent combined boundary run encountered slow
   legacy review-cycle waiting. Neither is claimed as a full-suite pass.
 - No live agent service, browser UI or deployment acceptance was performed.
+
+## Independent review follow-up: async contract preservation
+
+Independent review reproduced a P2 in the first candidate: while scheduled
+worker creation awaited, a legal todo PATCH could add a prerequisite. Scheduling
+then copied the earlier task object and erased the edge before the new dispatch
+gate saw it. Final dispatch similarly checked the fresh object but wrote an
+older one after session rename/clear. This was a real gate bypass, not merely
+stale display data.
+
+Scheduling, dispatch and continue now read the current task after preparation
+and use that same object for validation and writes. Orphan recovery abandons its
+automatic attempt if the operator changes status/binding while a replacement is
+being created. Failure paths update current records; scheduled failure cleanup
+runs even if the failure-state save raises, and the existing session reference
+guard protects a worker reassigned to another task. Post-send updates preserve
+new reports or operator state rather than overwriting them from an old copy.
+
+Regression tests invoke the actual scheduled fire path with an update during
+worker creation: an unfinished prerequisite is retained durably and sends zero
+assignment prompts; a done prerequisite remains recorded and allows the updated
+contract to dispatch. Additional cases cover rename/clear windows, orphan spawn
+success/failure, continue/reopen, persistence-failure cleanup and reassigned
+worker protection. The final focused suite passes 87 tests; six existing
+scheduled hub-task/orphan tests also pass. These tests stub transport; they do
+not claim a new exactly-once delivery guarantee for tmux.
