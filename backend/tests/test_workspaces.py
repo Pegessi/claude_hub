@@ -3506,6 +3506,12 @@ def test_workspace_feedback_summary_uses_visible_managed_reaper_task(
     ]
     assert audit_reports
 
+    # This fixture stubs _save_state. Commit its source before rendering the
+    # derived cache, whose contract excludes uncommitted in-memory mutations.
+    workspace_manager._atomic_write_text(
+        workspace_manager._workspace_state_file(workspace["id"]),
+        json.dumps(workspace_manager._workspace_state_payload(workspace["id"]), indent=2),
+    )
     workspace_manager._write_snapshot(workspace["id"])
     snapshot = workspace_manager.snapshot_path(workspace["id"]).read_text(encoding="utf-8")
     assert internal_task.id in snapshot
