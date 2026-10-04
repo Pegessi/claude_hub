@@ -1258,16 +1258,17 @@ class _TmuxQueriesMixin:
         workspace_id: str,
         *,
         target: ExecutionTarget,
+        cwd: str,
         remote_profile_id: str | None = None,
         remote_cwd: str | None = None,
     ) -> Optional[ManagedSession]:
         """Internal review dispatch only — not CLI agent-create reuse.
 
-        Hub review routing may pick any idle reviewer on the same execution
-        target; CLI ``agent create`` with ``reuse_existing`` must use
+        Hub review routing requires the worker's execution directory as well
+        as target; sharing a repo does not mean sharing a worktree. CLI reuse uses
         ``_find_compatible_workspace_agent`` instead.
         """
-        from ..workspace_identity import normalize_remote_cwd
+        from ..workspace_identity import normalize_remote_cwd, resolve_path
 
         wanted_remote_cwd = (
             normalize_remote_cwd(remote_cwd) if target == ExecutionTarget.REMOTE else None
@@ -1282,6 +1283,11 @@ class _TmuxQueriesMixin:
             and not session.current_task_id
             and not self._reviewer_has_active_task_binding(session)
             and session.target == target
+            and (
+                target != ExecutionTarget.LOCAL
+                or resolve_path(session.workspace_path or self.workspaces[workspace_id].path)
+                == resolve_path(cwd)
+            )
             and (
                 target != ExecutionTarget.REMOTE
                 or (

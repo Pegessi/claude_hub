@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix(workspace): bind reviews to the worker checkout and retain feedback evidence
+
+- Local reviewers are reused only in the worker's execution directory, including
+  equivalent symlink paths; sharing a repository no longer permits reviewing a
+  different worktree. Remote placement and legacy root-directory sessions retain
+  their existing semantics.
+- Feedback summaries retain bounded failed-report excerpts with source report IDs.
+  Automatic lesson creation verifies every cited task record in the workspace
+  before granting multi-task confidence. Manual confirmation and old digest loading
+  remain supported; lesson guidance distinguishes iteration counts from causal evidence.
+
 ### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
 
 - Codex turns reported `usage.reasoning` tokens (e.g. 390) but the structured

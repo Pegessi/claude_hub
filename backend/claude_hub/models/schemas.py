@@ -1473,6 +1473,16 @@ class FeedbackReaperRun(BaseModel):
     created_at: datetime
 
 
+class FeedbackFailureEvidence(BaseModel):
+    """Bounded source report excerpt, not an inferred root cause or verdict."""
+
+    report_id: str = Field(default="", max_length=80)
+    state: str = Field(default="", max_length=32)
+    message: str = Field(default="", max_length=240)
+    validation: str = Field(default="", max_length=320)
+    risks: str = Field(default="", max_length=160)
+
+
 class FeedbackTaskDigest(BaseModel):
     """Compact reusable digest for a completed workspace task record."""
 
@@ -1484,6 +1494,7 @@ class FeedbackTaskDigest(BaseModel):
     validation: List[str] = Field(default_factory=list)
     risks: List[str] = Field(default_factory=list)
     report_states: List[str] = Field(default_factory=list)
+    failure_evidence: List[FeedbackFailureEvidence] = Field(default_factory=list, max_length=3)
     report_state_sequence: List[str] = Field(default_factory=list)
     review_failed_count: int = 0
     needs_input_count: int = 0
