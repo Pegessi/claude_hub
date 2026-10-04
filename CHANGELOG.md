@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+### fix(agents): align bounded delegation, context recovery and review evidence
+
+- Map the existing system into intent/context/execution/verification/governance;
+  keep root instructions short and link detailed workflow and task navigation.
+- Let simple autonomous work execute directly while preserving the independent
+  Hub evaluator; scope delegation by dependencies, ownership and evidence rather
+  than fixed agent counts or model tiers.
+- Preserve the chosen strategy on recovery, read back persisted reports before
+  retrying, and require reproducible reviewer/subagent handoff evidence.
+- Fix extra closing braces in generated worker/subagent/reviewer report JSON examples.
+- Isolate prompt measurement before backend imports and verify checkout provenance.
+
 ### fix(workspace): bind reviews to the worker checkout and retain feedback evidence
 
 - Local reviewers are reused only in the worker's execution directory, including
