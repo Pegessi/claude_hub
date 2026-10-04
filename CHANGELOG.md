@@ -11,10 +11,15 @@
   reading the caller's binding, and unbinding it. The server validates the
   existing local direct Chat tab and optional Workspace association; callback
   senders cannot choose a cwd, shell, session, or target.
-- Added signed, replay-bounded `im.message.receive_v1` handling with app,
-  Verification Token, p2p sender, conversation, text-size, and persistent
-  `message_id` deduplication checks. Unsupported encrypted events fail
-  explicitly.
+- Added official encrypted callback handling with raw-body signature validation,
+  AES-256-CBC decryption through `cryptography`, PKCS7 validation, request/event
+  replay windows, and persistent `message_id` deduplication. Plaintext mode is
+  supported only when no Encrypt Key is configured and is explicitly unsigned;
+  oversized streamed bodies fail before buffering beyond the limit.
+- Binding authorization is rechecked against the current OAuth allowlist when a
+  code is consumed, before dispatch, and before the completed response is sent.
+  Unbinding also invalidates pending codes, changed bindings suppress in-flight
+  replies, and code generation has a small persistent rate limit.
 - Feishu messages now use the existing direct Chat `TailerManager` and provider
   session, wait for the matching persisted completion, and return its assistant
   text to the same authorized p2p conversation. Bot HTTP calls are injectable

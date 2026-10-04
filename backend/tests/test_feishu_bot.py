@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import time
@@ -11,6 +12,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi.testclient import TestClient
 
 from claude_hub.api import agent_stream as stream_api
@@ -29,6 +32,7 @@ from claude_hub.models import (
 from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.feishu_bot import (
     BindingCodeError,
+    BindingRateLimitError,
     FeishuBindingStore,
     FeishuBotConfig,
     FeishuEventPayloadError,
@@ -50,6 +54,32 @@ def _callback_headers(body: bytes, now: int, *, encrypt_key: str = "encrypt-key"
         "x-lark-request-nonce": nonce,
         "x-lark-signature": _sign(body, now, nonce, encrypt_key),
     }
+
+
+def _encrypted_callback(
+    payload: dict,
+    now: int,
+    *,
+    encrypt_key: str = "encrypt-key",
+    iv: bytes = b"0123456789abcdef",
+) -> tuple[bytes, dict[str, str]]:
+    plaintext = json.dumps(payload).encode()
+    padder = padding.PKCS7(algorithms.AES.block_size).padder()
+    padded = padder.update(plaintext) + padder.finalize()
+    key = hashlib.sha256(encrypt_key.encode()).digest()
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    ciphertext = iv + encryptor.update(padded) + encryptor.finalize()
+    body = json.dumps({"encrypt": base64.b64encode(ciphertext).decode()}).encode()
+    return body, _callback_headers(body, now, encrypt_key=encrypt_key)
+
+
+def _invalid_padding_callback(now: int) -> tuple[bytes, dict[str, str]]:
+    iv = b"0123456789abcdef"
+    key = hashlib.sha256(b"encrypt-key").digest()
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    ciphertext = iv + encryptor.update(b"\x00" * 16) + encryptor.finalize()
+    body = json.dumps({"encrypt": base64.b64encode(ciphertext).decode()}).encode()
+    return body, _callback_headers(body, now)
 
 
 def _message_payload(
@@ -176,6 +206,38 @@ def test_binding_start_validates_workspace_target_and_owner(configured_bot, monk
     assert client.get("/api/feishu/bot/binding", cookies=other_cookie).json() == {"binding": None}
 
 
+def test_delete_endpoint_revokes_unconsumed_code(configured_bot, monkeypatch) -> None:
+    _install_chat_target(monkeypatch)
+    sent: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def send_text(self, chat_id: str, text: str) -> None:
+            sent.append(text)
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    client = TestClient(app)
+    cookies = _login_cookie("ou-owner")
+    code = client.post(
+        "/api/feishu/bot/bind/start",
+        json={"tab_id": "tab-1", "workspace_id": "ws-1"},
+        cookies=cookies,
+    ).json()["code"]
+    assert client.delete("/api/feishu/bot/binding", cookies=cookies).status_code == 204
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text=code, message_id="om-revoked-code"), now
+    )
+
+    response = client.post("/api/feishu/bot/events", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert "invalid" in sent[-1]
+    assert configured_bot.get_owner_binding("ou-owner") is None
+
+
 def test_binding_start_rejects_non_chat_target(configured_bot, monkeypatch) -> None:
     _install_chat_target(monkeypatch)
     monkeypatch.setattr(
@@ -199,16 +261,19 @@ def test_binding_start_rejects_non_chat_target(configured_bot, monkeypatch) -> N
 def test_binding_codes_expire_reject_other_sender_and_are_single_use(tmp_path) -> None:
     now = [100.0]
     store = FeishuBindingStore(tmp_path / "state.json", now=lambda: now[0])
-    wrong_code, _ = store.create_code("ou-owner", "tab-1", None)
+    wrong_code, _ = store.create_code("ou-owner", "owner@example.test", "tab-1", None)
     with pytest.raises(BindingCodeError, match="different Feishu user"):
         store.consume_code(
             wrong_code,
             sender_open_id="ou-other",
             app_id="cli-bot",
             chat_id="oc-chat",
+            owner_is_authorized=lambda *_: True,
         )
 
-    expired_code, _ = store.create_code("ou-owner", "tab-1", None, ttl_seconds=1)
+    expired_code, _ = store.create_code(
+        "ou-owner", "owner@example.test", "tab-1", None, ttl_seconds=1
+    )
     now[0] = 102.0
     with pytest.raises(BindingCodeError, match="expired"):
         store.consume_code(
@@ -216,15 +281,17 @@ def test_binding_codes_expire_reject_other_sender_and_are_single_use(tmp_path) -
             sender_open_id="ou-owner",
             app_id="cli-bot",
             chat_id="oc-chat",
+            owner_is_authorized=lambda *_: True,
         )
 
     now[0] = 200.0
-    code, _ = store.create_code("ou-owner", "tab-1", None)
+    code, _ = store.create_code("ou-owner", "owner@example.test", "tab-1", None)
     store.consume_code(
         code,
         sender_open_id="ou-owner",
         app_id="cli-bot",
         chat_id="oc-chat",
+        owner_is_authorized=lambda *_: True,
     )
     with pytest.raises(BindingCodeError, match="already been used"):
         store.consume_code(
@@ -232,9 +299,75 @@ def test_binding_codes_expire_reject_other_sender_and_are_single_use(tmp_path) -
             sender_open_id="ou-owner",
             app_id="cli-bot",
             chat_id="oc-chat",
+            owner_is_authorized=lambda *_: True,
         )
     assert store.get_sender_binding("ou-owner", "cli-bot", "oc-chat") is not None
     assert store.get_sender_binding("ou-owner", "cli-bot", "oc-other") is None
+
+
+def test_unbind_revokes_pending_codes_with_and_without_binding(tmp_path) -> None:
+    store = FeishuBindingStore(tmp_path / "state.json")
+    pending_only, _ = store.create_code("ou-owner", "owner@example.test", "tab-1", None)
+    assert store.delete_owner_binding("ou-owner")
+    with pytest.raises(BindingCodeError, match="invalid"):
+        store.consume_code(
+            pending_only,
+            sender_open_id="ou-owner",
+            app_id="cli-bot",
+            chat_id="oc-chat",
+            owner_is_authorized=lambda *_: True,
+        )
+
+    first, _ = store.create_code("ou-owner", "owner@example.test", "tab-1", None)
+    store.consume_code(
+        first,
+        sender_open_id="ou-owner",
+        app_id="cli-bot",
+        chat_id="oc-chat",
+        owner_is_authorized=lambda *_: True,
+    )
+    pending_after_binding, _ = store.create_code("ou-owner", "owner@example.test", "tab-1", None)
+    assert store.delete_owner_binding("ou-owner")
+    assert store.get_owner_binding("ou-owner") is None
+    with pytest.raises(BindingCodeError, match="invalid"):
+        store.consume_code(
+            pending_after_binding,
+            sender_open_id="ou-owner",
+            app_id="cli-bot",
+            chat_id="oc-chat",
+            owner_is_authorized=lambda *_: True,
+        )
+
+
+def test_binding_code_rate_limit_is_bounded_and_expires(tmp_path) -> None:
+    now = [100.0]
+    path = tmp_path / "state.json"
+    store = FeishuBindingStore(path, now=lambda: now[0])
+    for _ in range(5):
+        store.create_code("ou-owner", "owner@example.test", "tab-1", None)
+    restarted_store = FeishuBindingStore(path, now=lambda: now[0])
+    with pytest.raises(BindingRateLimitError, match="per minute"):
+        restarted_store.create_code("ou-owner", "owner@example.test", "tab-1", None)
+
+    now[0] += 61
+    restarted_store.create_code("ou-owner", "owner@example.test", "tab-1", None)
+    state = json.loads(path.read_text())
+    assert len(state["rate_limits"]["ou-owner"]) == 1
+    assert len(state["pending"]) == 1
+
+
+def test_binding_code_rechecks_current_authorization(tmp_path) -> None:
+    store = FeishuBindingStore(tmp_path / "state.json")
+    code, _ = store.create_code("ou-owner", "owner@example.test", "tab-1", None)
+    with pytest.raises(BindingCodeError, match="no longer authorized"):
+        store.consume_code(
+            code,
+            sender_open_id="ou-owner",
+            app_id="cli-bot",
+            chat_id="oc-chat",
+            owner_is_authorized=lambda *_: False,
+        )
+    assert store.get_owner_binding("ou-owner") is None
 
 
 def test_challenge_and_event_verification(bot_config) -> None:
@@ -244,78 +377,123 @@ def test_challenge_and_event_verification(bot_config) -> None:
         "token": "verify-token",
         "type": "url_verification",
     }
-    body = json.dumps(challenge).encode()
-    assert parse_feishu_callback(body, {}, bot_config, now=now) == (
+    body, headers = _encrypted_callback(challenge, now)
+    assert parse_feishu_callback(body, headers, bot_config, now=now) == (
         "challenge",
         "challenge-value",
     )
+    with pytest.raises(FeishuEventPayloadError, match="Plaintext"):
+        parse_feishu_callback(json.dumps(challenge).encode(), {}, bot_config, now=now)
 
-    bad_token = {**challenge, "token": "wrong"}
-    bad_body = json.dumps(bad_token).encode()
+    bad_token_body, bad_token_headers = _encrypted_callback({**challenge, "token": "wrong"}, now)
     with pytest.raises(FeishuEventVerificationError, match="verification token"):
-        parse_feishu_callback(bad_body, {}, bot_config, now=now)
+        parse_feishu_callback(bad_token_body, bad_token_headers, bot_config, now=now)
 
-    event_body = json.dumps(_message_payload(now=now, text="hello")).encode()
+    event_body, event_headers = _encrypted_callback(_message_payload(now=now, text="hello"), now)
+    kind, parsed = parse_feishu_callback(event_body, event_headers, bot_config, now=now)
+    assert kind == "message"
+    assert parsed.text == "hello"
+
     with pytest.raises(FeishuEventVerificationError, match="signature"):
         parse_feishu_callback(
             event_body,
-            {**_callback_headers(event_body, now), "x-lark-signature": "bad"},
+            {**event_headers, "x-lark-signature": "bad"},
             bot_config,
             now=now,
         )
     with pytest.raises(FeishuEventVerificationError, match="replay window"):
-        parse_feishu_callback(
-            event_body,
-            _callback_headers(event_body, now - 301),
-            bot_config,
-            now=now,
+        stale_body, stale_headers = _encrypted_callback(
+            _message_payload(now=now, text="hello"), now - 301
         )
+        parse_feishu_callback(stale_body, stale_headers, bot_config, now=now)
+    with pytest.raises(FeishuEventVerificationError, match="signature"):
+        wrong_key = bot_config.__class__(
+            app_id=bot_config.app_id,
+            app_secret=bot_config.app_secret,
+            verification_token=bot_config.verification_token,
+            encrypt_key="wrong-key",
+        )
+        parse_feishu_callback(event_body, event_headers, wrong_key, now=now)
+
+    tampered = json.loads(event_body)
+    encoded = tampered["encrypt"]
+    tampered["encrypt"] = encoded[:-1] + ("A" if encoded[-1] != "A" else "B")
+    tampered_body = json.dumps(tampered).encode()
+    with pytest.raises(FeishuEventVerificationError, match="signature"):
+        parse_feishu_callback(tampered_body, event_headers, bot_config, now=now)
+
+    padding_body, padding_headers = _invalid_padding_callback(now)
+    with pytest.raises(FeishuEventVerificationError, match="padding"):
+        parse_feishu_callback(padding_body, padding_headers, bot_config, now=now)
+
+    wrong_app_body, wrong_app_headers = _encrypted_callback(
+        _message_payload(now=now, text="hello", app_id="cli-other"), now
+    )
     with pytest.raises(FeishuEventVerificationError, match="app_id"):
-        wrong_app_body = json.dumps(
-            _message_payload(now=now, text="hello", app_id="cli-other")
-        ).encode()
-        parse_feishu_callback(
-            wrong_app_body,
-            _callback_headers(wrong_app_body, now),
-            bot_config,
-            now=now,
-        )
-    oversized_body = json.dumps(_message_payload(now=now, text="x" * 4_001)).encode()
+        parse_feishu_callback(wrong_app_body, wrong_app_headers, bot_config, now=now)
+    oversized_body, oversized_headers = _encrypted_callback(
+        _message_payload(now=now, text="x" * 4_001), now
+    )
     with pytest.raises(FeishuEventPayloadError, match="character limit"):
-        parse_feishu_callback(
-            oversized_body,
-            _callback_headers(oversized_body, now),
-            bot_config,
-            now=now,
-        )
-    encrypted_body = json.dumps({"encrypt": "ciphertext"}).encode()
-    with pytest.raises(FeishuEventPayloadError, match="Encrypted"):
+        parse_feishu_callback(oversized_body, oversized_headers, bot_config, now=now)
+
+
+def test_plaintext_mode_is_explicitly_unsigned(bot_config) -> None:
+    now = int(time.time())
+    plaintext_config = bot_config.__class__(
+        app_id=bot_config.app_id,
+        app_secret=bot_config.app_secret,
+        verification_token=bot_config.verification_token,
+        encrypt_key=None,
+    )
+    challenge = {
+        "challenge": "plain-challenge",
+        "token": "verify-token",
+        "type": "url_verification",
+    }
+    assert parse_feishu_callback(json.dumps(challenge).encode(), {}, plaintext_config, now=now) == (
+        "challenge",
+        "plain-challenge",
+    )
+    encrypted_body, encrypted_headers = _encrypted_callback(challenge, now)
+    with pytest.raises(FeishuEventPayloadError, match="without an Encrypt Key"):
         parse_feishu_callback(
             encrypted_body,
-            _callback_headers(encrypted_body, now),
-            bot_config,
+            encrypted_headers,
+            plaintext_config,
             now=now,
         )
+    kind, parsed = parse_feishu_callback(
+        json.dumps(_message_payload(now=now, text="plain event")).encode(),
+        {},
+        plaintext_config,
+        now=now,
+    )
+    assert kind == "message"
+    assert parsed.text == "plain event"
 
 
-def test_challenge_endpoint_and_bad_verification(configured_bot) -> None:
+def test_encrypted_challenge_endpoint_and_bad_verification(configured_bot) -> None:
     client = TestClient(app)
-    valid = client.post(
-        "/api/feishu/bot/events",
-        json={
+    now = int(time.time())
+    valid_body, valid_headers = _encrypted_callback(
+        {
             "challenge": "challenge-value",
             "token": "verify-token",
             "type": "url_verification",
         },
+        now,
     )
-    rejected = client.post(
-        "/api/feishu/bot/events",
-        json={
+    bad_body, bad_headers = _encrypted_callback(
+        {
             "challenge": "challenge-value",
             "token": "wrong",
             "type": "url_verification",
         },
+        now,
     )
+    valid = client.post("/api/feishu/bot/events", content=valid_body, headers=valid_headers)
+    rejected = client.post("/api/feishu/bot/events", content=bad_body, headers=bad_headers)
 
     assert valid.json() == {"challenge": "challenge-value"}
     assert rejected.status_code == 401
@@ -350,11 +528,13 @@ def test_full_bind_dispatch_reply_dedup_read_and_unbind(configured_bot, monkeypa
     code = started.json()["code"]
 
     now = int(time.time())
-    bind_body = json.dumps(_message_payload(now=now, text=code, message_id="om-bind")).encode()
+    bind_body, bind_headers = _encrypted_callback(
+        _message_payload(now=now, text=code, message_id="om-bind"), now
+    )
     bound = client.post(
         "/api/feishu/bot/events",
         content=bind_body,
-        headers=_callback_headers(bind_body, now),
+        headers=bind_headers,
     )
     assert bound.status_code == 200
     assert sent[-1] == ("oc-chat", "已连接 Claude Hub Chat：tab-1")
@@ -363,13 +543,14 @@ def test_full_bind_dispatch_reply_dedup_read_and_unbind(configured_bot, monkeypa
     assert binding["tab_id"] == "tab-1"
     assert binding["workspace_id"] == "ws-1"
 
-    message_body = json.dumps(
-        _message_payload(now=now, text="Continue the existing work", message_id="om-chat")
-    ).encode()
+    message_body, message_headers = _encrypted_callback(
+        _message_payload(now=now, text="Continue the existing work", message_id="om-chat"),
+        now,
+    )
     first = client.post(
         "/api/feishu/bot/events",
         content=message_body,
-        headers=_callback_headers(message_body, now),
+        headers=message_headers,
     )
     monkeypatch.setattr(
         bot_api,
@@ -379,7 +560,7 @@ def test_full_bind_dispatch_reply_dedup_read_and_unbind(configured_bot, monkeypa
     duplicate = client.post(
         "/api/feishu/bot/events",
         content=message_body,
-        headers=_callback_headers(message_body, now),
+        headers=message_headers,
     )
     assert first.status_code == 200
     assert duplicate.json() == {"ok": True, "duplicate": True}
@@ -394,6 +575,13 @@ def test_full_bind_dispatch_reply_dedup_read_and_unbind(configured_bot, monkeypa
 
     assert client.delete("/api/feishu/bot/binding", cookies=cookies).status_code == 204
     assert client.get("/api/feishu/bot/binding", cookies=cookies).json() == {"binding": None}
+    replay_after_unbind = client.post(
+        "/api/feishu/bot/events",
+        content=message_body,
+        headers=message_headers,
+    )
+    assert replay_after_unbind.json() == {"ok": True, "duplicate": True}
+    assert len(dispatched) == 1
 
 
 def test_wrong_sender_cannot_consume_binding_code(configured_bot, monkeypatch) -> None:
@@ -416,24 +604,134 @@ def test_wrong_sender_cannot_consume_binding_code(configured_bot, monkeypatch) -
         cookies=cookies,
     ).json()["code"]
     now = int(time.time())
-    body = json.dumps(
+    body, headers = _encrypted_callback(
         _message_payload(
             now=now,
             text=code,
             message_id="om-other",
             sender_open_id="ou-other",
             chat_id="oc-other",
-        )
-    ).encode()
+        ),
+        now,
+    )
     response = client.post(
         "/api/feishu/bot/events",
         content=body,
-        headers=_callback_headers(body, now),
+        headers=headers,
     )
 
     assert response.status_code == 200
     assert "different Feishu user" in sent[-1]
     assert client.get("/api/feishu/bot/binding", cookies=cookies).json() == {"binding": None}
+
+
+def test_revoked_owner_cannot_dispatch(configured_bot, monkeypatch) -> None:
+    _install_chat_target(monkeypatch)
+    sent: list[str] = []
+    dispatched: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def send_text(self, chat_id: str, text: str) -> None:
+            sent.append(text)
+
+    async def fail_if_dispatched(tab_id: str, text: str, turn_id: str) -> str:
+        dispatched.append(text)
+        return "must not run"
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", fail_if_dispatched)
+    client = TestClient(app)
+    code = client.post(
+        "/api/feishu/bot/bind/start",
+        json={"tab_id": "tab-1", "workspace_id": "ws-1"},
+        cookies=_login_cookie("ou-owner"),
+    ).json()["code"]
+    configured_bot.consume_code(
+        code,
+        sender_open_id="ou-owner",
+        app_id="cli-bot",
+        chat_id="oc-chat",
+        owner_is_authorized=lambda *_: True,
+    )
+    monkeypatch.setattr(settings, "auth_allowed_open_ids", "ou-other")
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text="must not execute", message_id="om-revoked"), now
+    )
+
+    response = client.post("/api/feishu/bot/events", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert dispatched == []
+    assert sent == ["Claude Hub 授权已失效，请在网页重新绑定。"]
+    assert configured_bot.get_owner_binding("ou-owner") is None
+
+
+def test_unbind_during_turn_suppresses_old_target_reply(configured_bot, monkeypatch) -> None:
+    _install_chat_target(monkeypatch)
+    sent: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def send_text(self, chat_id: str, text: str) -> None:
+            sent.append(text)
+
+    async def unbind_then_complete(tab_id: str, text: str, turn_id: str) -> str:
+        configured_bot.delete_owner_binding("ou-owner")
+        return "secret old target result"
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", unbind_then_complete)
+    client = TestClient(app)
+    code = client.post(
+        "/api/feishu/bot/bind/start",
+        json={"tab_id": "tab-1", "workspace_id": "ws-1"},
+        cookies=_login_cookie("ou-owner"),
+    ).json()["code"]
+    configured_bot.consume_code(
+        code,
+        sender_open_id="ou-owner",
+        app_id="cli-bot",
+        chat_id="oc-chat",
+        owner_is_authorized=lambda *_: True,
+    )
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text="long task", message_id="om-in-flight"), now
+    )
+
+    response = client.post("/api/feishu/bot/events", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_event_body_limit_stops_chunked_request_without_content_length(
+    configured_bot,
+) -> None:
+    yielded_late_chunk = False
+
+    async def chunks():
+        nonlocal yielded_late_chunk
+        yield b"x" * ((256 * 1024) - 1)
+        yield b"xx"
+        yielded_late_chunk = True
+        raise AssertionError("event reader continued after crossing its size limit")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post("/api/feishu/bot/events", content=chunks())
+
+    assert response.status_code == 413
+    assert not yielded_late_chunk
 
 
 @pytest.mark.asyncio

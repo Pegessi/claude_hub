@@ -17,13 +17,14 @@ from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.feishu_bot import (
+    MAX_FEISHU_EVENT_BYTES,
     BindingCodeError,
+    BindingRateLimitError,
     FeishuBinding,
     FeishuBindingStore,
     FeishuBotClient,
     FeishuBotConfig,
     FeishuBotConfigurationError,
-    FeishuBotError,
     FeishuEventPayloadError,
     FeishuEventVerificationError,
     FeishuMessageEvent,
@@ -75,6 +76,20 @@ async def require_real_feishu_user(
     if user is None or user.open_id == "local":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     return user
+
+
+def _owner_is_authorized(open_id: str, email: str) -> bool:
+    """Re-evaluate a binding owner against the current OAuth allowlist."""
+
+    if not settings.auth_enabled or open_id == "local":
+        return False
+    allowed_open_ids = settings.allowed_open_ids_list
+    if allowed_open_ids:
+        return open_id in allowed_open_ids
+    allowed_emails = [value.lower() for value in settings.allowed_emails_list]
+    if allowed_emails:
+        return bool(email) and email.lower() in allowed_emails
+    return True
 
 
 def _bot_config() -> FeishuBotConfig:
@@ -129,11 +144,15 @@ async def start_feishu_binding(
 
     _bot_config()
     workspace_id = _validate_bind_target(payload.tab_id, payload.workspace_id)
-    code, pending = _binding_store.create_code(
-        current_user.open_id,
-        payload.tab_id,
-        workspace_id,
-    )
+    try:
+        code, pending = _binding_store.create_code(
+            current_user.open_id,
+            current_user.email,
+            payload.tab_id,
+            workspace_id,
+        )
+    except BindingRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     return FeishuBindStartResponse(
         code=code,
         expires_at=datetime.fromtimestamp(pending.expires_at, tz=timezone.utc),
@@ -163,6 +182,19 @@ def _binding_code(text: str) -> str | None:
     return match.group(1).upper() if match is not None else None
 
 
+def _binding_is_current(binding: FeishuBinding, config: FeishuBotConfig) -> bool:
+    if binding.app_id != config.app_id:
+        return False
+    if not _owner_is_authorized(binding.owner_open_id, binding.owner_email):
+        return False
+    current = _binding_store.get_sender_binding(
+        binding.sender_open_id,
+        binding.app_id,
+        binding.chat_id,
+    )
+    return current == binding
+
+
 def _turn_id(message_id: str) -> str:
     digest = hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
     return f"feishu-{digest}"
@@ -190,6 +222,7 @@ async def _handle_message_event(
                     sender_open_id=event.sender_open_id,
                     app_id=event.app_id,
                     chat_id=event.chat_id,
+                    owner_is_authorized=_owner_is_authorized,
                 )
             except BindingCodeError as exc:
                 await client.send_text(event.chat_id, f"绑定失败：{exc}")
@@ -199,6 +232,8 @@ async def _handle_message_event(
             except HTTPException:
                 _binding_store.delete_owner_binding(created_binding.owner_open_id)
                 await client.send_text(event.chat_id, "绑定失败：Claude Hub 目标当前不可用。")
+                return
+            if not _binding_is_current(created_binding, config):
                 return
             await client.send_text(
                 event.chat_id,
@@ -218,12 +253,19 @@ async def _handle_message_event(
                 "当前单聊尚未连接 Claude Hub，请先在 Hub 网页生成绑定码。",
             )
             return
+        if not _binding_is_current(binding, config):
+            _binding_store.delete_owner_binding(binding.owner_open_id)
+            await client.send_text(event.chat_id, "Claude Hub 授权已失效，请在网页重新绑定。")
+            return
         _validate_bind_target(binding.tab_id, binding.workspace_id)
         assistant_text = await dispatch_tab_chat_and_wait(
             binding.tab_id,
             event.text,
             _turn_id(event.message_id),
         )
+        if not _binding_is_current(binding, config):
+            logger.info("Feishu Bot reply suppressed because the binding changed during the turn")
+            return
         await client.send_text(event.chat_id, assistant_text)
         status_value = "completed"
     except HTTPException as exc:
@@ -236,6 +278,20 @@ async def _handle_message_event(
         _binding_store.finish_message(event.message_id, status_value)
 
 
+async def _read_bounded_event_body(request: Request) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_FEISHU_EVENT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Feishu event exceeds {MAX_FEISHU_EVENT_BYTES} byte limit",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/events")
 async def receive_feishu_event(
     request: Request,
@@ -244,7 +300,7 @@ async def receive_feishu_event(
     """Validate and acknowledge a Feishu URL challenge or p2p message event."""
 
     config = _bot_config()
-    raw_body = await request.body()
+    raw_body = await _read_bounded_event_body(request)
     try:
         event_kind, value = parse_feishu_callback(raw_body, request.headers, config)
     except FeishuEventVerificationError as exc:
