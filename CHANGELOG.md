@@ -5,6 +5,14 @@
 
 ## Unreleased
 
+### chore(worktrees): add a conservative read-only inventory
+
+- `scripts/worktree_inventory.py --repo <path>` reports registered worktrees
+  under the canonical root, preserving dirty, untracked, ignored, unmerged,
+  occupied, locked, prunable, outside-root and unknown cases. JSON and compact
+  output include reasons, timestamps and time budgets; only matched process IDs
+  are exposed. The tool never removes files, branches, sessions or registrations.
+
 ### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
 
 - Codex turns reported `usage.reasoning` tokens (e.g. 390) but the structured
