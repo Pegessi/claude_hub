@@ -5,6 +5,14 @@
 
 ## Unreleased
 
+### chore(worktrees): add a conservative read-only inventory
+
+- `scripts/worktree_inventory.py --repo <path>` reports registered worktrees
+  under the canonical root, preserving dirty, untracked, ignored, unmerged,
+  occupied, locked, prunable, outside-root and unknown cases. JSON and compact
+  output include reasons, timestamps and time budgets; only matched process IDs
+  are exposed. The tool never removes files, branches, sessions or registrations.
+
 ### feat(workspace): explicit task prerequisites and recoverable state snapshots
 
 - Persist and validate independent task dependency edges; gate starts, resumes,
