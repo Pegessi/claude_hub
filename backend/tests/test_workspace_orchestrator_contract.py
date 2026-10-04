@@ -7,13 +7,18 @@ orchestrator-contract wording survives future refactors.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from claude_hub.models import (
     AcceptanceCheck,
     AcceptanceCheckStatus,
     AgentReport,
+    AgentReportCreate,
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
@@ -54,7 +59,7 @@ def _make_task(
         status=WorkspaceTaskStatus.WORKING,
         task_mode=mode,
         execution_complexity=complexity,
-        autonomy_policy=AutonomyPolicy() if mode == WorkspaceTaskMode.AUTONOMOUS else None,
+        autonomy_policy=(AutonomyPolicy() if mode == WorkspaceTaskMode.AUTONOMOUS else None),
         autonomous_run=(
             AutonomousRun(id="run-t-1", task_id="t-1")
             if mode == WorkspaceTaskMode.AUTONOMOUS
@@ -65,243 +70,71 @@ def _make_task(
     )
 
 
-# ---------------------------------------------------------------------------
-# _execution_complexity_assignment_block
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("complexity", list(WorkspaceTaskExecutionComplexity))
+def test_complexity_matches_cost_and_ownership_contract(complexity):
+    task = _make_task(mode=WorkspaceTaskMode.AUTONOMOUS, complexity=complexity)
+    block = workspace_manager._execution_complexity_assignment_block(task)
+    assert "no minimum agent count" in block
+    assert "one writer per owned scope" in block
+    assert "isolated worktrees/resources" in block
+    assert "10-15x" not in block
+    assert ">=3" not in block
+    if complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
+        assert "Execute directly" in block
+    elif complexity == WorkspaceTaskExecutionComplexity.COMPLEX:
+        assert "dependencies" in block and "tightly coupled changes serial" in block
+    else:
+        assert "goal_packet.assumptions" in block
 
 
-def test_complexity_block_includes_cost_guardrail_for_all_levels():
-    for level in WorkspaceTaskExecutionComplexity:
-        task = _make_task(mode=WorkspaceTaskMode.AUTONOMOUS, complexity=level)
-        block = workspace_manager._execution_complexity_assignment_block(task)
-        assert "expensive" in block, f"missing cost anchor on {level}"
-        assert "breadth-first parallel" in block
-        assert "cleanly isolated" in block
+@pytest.mark.parametrize("agent_type", list(AgentType))
+def test_runtime_contract_uses_actual_capabilities_and_model_evidence(agent_type):
+    task = _make_task(
+        mode=WorkspaceTaskMode.AUTONOMOUS,
+        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
+        agent_type=agent_type,
+    )
+    block = workspace_manager._autonomous_assignment_block(task, agent_type)
+    assert "runtime-default" in block and "external:<api>" in block
+    assert "respect explicit user model choices" in block
+    assert "users CANNOT override" not in block
+    assert "-> opus" not in block and "-> sonnet" not in block
+    if agent_type == AgentType.TERMINAL:
+        assert "no native sub-agent capability" in block
+        assert "Do NOT fabricate" in block
+    else:
+        assert "actually available in this session" in block
+        assert "unsupported" in block
+    for field in (
+        "owner",
+        "inputs",
+        "depends_on",
+        "allowed_paths",
+        "budget",
+        "stop_condition",
+    ):
+        assert field in block
+    assert "Research/review delegates are read-only" in block
+    assert "Evidence handoff" in block
+    assert "only for actual delegations" in block
 
 
-def test_complexity_block_complex_demands_orchestrator_mode():
+def test_observability_retains_evidence_backed_blockers():
     task = _make_task(
         mode=WorkspaceTaskMode.AUTONOMOUS,
         complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
     )
-    block = workspace_manager._execution_complexity_assignment_block(task)
-    assert "orchestrator" in block.lower()
-
-
-def test_complexity_block_simple_does_not_force_orchestrator():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.SIMPLE,
-    )
-    block = workspace_manager._execution_complexity_assignment_block(task)
-    # Soft guidance, not a hard mandate
-    assert "Execute directly" in block
-
-
-# ---------------------------------------------------------------------------
-# _subagent_capability_hint
-# ---------------------------------------------------------------------------
-
-
-def test_capability_hint_claude_mentions_task_tool_and_model_param():
-    hint = workspace_manager._subagent_capability_hint(AgentType.CLAUDE)
-    assert "Task tool" in hint
-    assert "subagent_type" in hint
-    assert "model" in hint
-
-
-def test_capability_hint_cursor_acknowledges_version_dependence():
-    hint = workspace_manager._subagent_capability_hint(AgentType.CURSOR)
-    assert "cursor" in hint.lower()
-    # Version pinning caveat preserved (shorter wording):
-    assert "version" in hint or "unsupported" in hint
-
-
-def test_capability_hint_codex_acknowledges_version_dependence():
-    hint = workspace_manager._subagent_capability_hint(AgentType.CODEX)
-    assert "codex" in hint.lower()
-    assert "version" in hint or "unsupported" in hint
-
-
-def test_capability_hint_terminal_degrades_gracefully():
-    hint = workspace_manager._subagent_capability_hint(AgentType.TERMINAL)
-    assert "Degrade" in hint or "degrade" in hint
-    assert "Do NOT fabricate" in hint
-
-
-# ---------------------------------------------------------------------------
-# _autonomous_assignment_block
-# ---------------------------------------------------------------------------
-
-
-def test_autonomous_block_empty_for_non_autonomous():
-    task = _make_task(
-        mode=WorkspaceTaskMode.REVIEWED,
-        complexity=WorkspaceTaskExecutionComplexity.AUTO,
-    )
-    assert workspace_manager._autonomous_assignment_block(task) == ""
-
-
-def test_autonomous_block_complex_includes_orchestrator_contract_and_primitives():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
-    )
-    block = workspace_manager._autonomous_assignment_block(task, AgentType.CLAUDE)
-    # Header still there
-    assert "Autonomous Mode V1 is enabled" in block
-    # Contract keywords
-    assert "Orchestrator Contract" in block
-    assert "P-PLAN" in block and "P-EXECUTE" in block and "P-JUDGE" in block
-    assert "P-INTEGRATE" in block and "P-VALIDATE" in block and "P-RESEARCH" in block
-    # External-API model marker preserved
-    assert "external:<api>" in block or "external:api" in block
-    # Envelope schema
-    assert "subtask-envelope" in block
-    assert "final-only" in block
-    # Ledger schema
-    assert "subagent-ledger" in block
-    # Model pinning (slash-separated compact form)
-    assert (
-        "P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE -> opus" in block
-        or "P-PLAN, P-EXECUTE, P-JUDGE" in block
-    )
-    # Hard enforcement on complex
-    assert "REQUIRED" in block
-    # Opaque delegated/external work must remain observable.
-    assert "Observability" in block or "observability" in block
+    block = workspace_manager._autonomous_assignment_block(task)
     assert "heartbeat" in block
-    assert "role.id" in block
-    assert "contract violation" in block
-    # Per-CLI hint embedded
-    assert "claude runtime" in block
+    assert "no autonomous next action remains" in block
+    assert "name the blocker with evidence" in block
 
 
-def test_autonomous_block_forbids_bare_blocked_or_needs_input_reports():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
-    )
-    block = workspace_manager._autonomous_assignment_block(task, AgentType.CLAUDE)
-    # Observability rule preserved (shorter wording):
-    assert "blocked/needs_input" in block or "blocked or needs_input" in block
-    assert "no autonomous next action remains" in block or "no autonomous step is" in block
-    assert "name the blocker" in block
-    assert "contract violation" in block
-    assert "needs your response" in block
-
-
-def test_autonomous_block_simple_softens_enforcement():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.SIMPLE,
-    )
-    block = workspace_manager._autonomous_assignment_block(task, AgentType.CLAUDE)
-    assert "Enforcement (simple)" in block
-    # Even simple tasks must spawn one P-JUDGE pre-flight
-    assert "P-JUDGE" in block
-
-
-def test_autonomous_block_auto_demands_explicit_mode_choice():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.AUTO,
-    )
-    block = workspace_manager._autonomous_assignment_block(task, AgentType.CLAUDE)
-    assert "Enforcement (auto)" in block
-    assert "goal_packet.assumptions" in block
-
-
-def test_autonomous_block_swaps_capability_hint_per_runtime():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
-    )
-    claude_block = workspace_manager._autonomous_assignment_block(task, AgentType.CLAUDE)
-    cursor_block = workspace_manager._autonomous_assignment_block(task, AgentType.CURSOR)
-    terminal_block = workspace_manager._autonomous_assignment_block(task, AgentType.TERMINAL)
-    assert "claude runtime" in claude_block
-    assert "cursor runtime" in cursor_block
-    assert "no native sub-agent capability" in terminal_block
-
-
-def test_autonomous_block_codex_does_not_require_claude_model_pinning():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
-        agent_type=AgentType.CODEX,
-    )
-    block = workspace_manager._autonomous_assignment_block(task, AgentType.CODEX)
-    assert "Claude opus/sonnet pinning is NOT required" in block
-    assert "runtime-default" in block
-    assert "model_or_api" in block
-
-
-# ---------------------------------------------------------------------------
-# _autonomous_review_block
-# ---------------------------------------------------------------------------
-
-
-def test_review_block_empty_for_non_autonomous():
-    task = _make_task(
-        mode=WorkspaceTaskMode.DIRECT,
-        complexity=WorkspaceTaskExecutionComplexity.AUTO,
-    )
+@pytest.mark.parametrize("mode", [WorkspaceTaskMode.DIRECT, WorkspaceTaskMode.REVIEWED])
+def test_autonomous_contract_does_not_leak_into_other_task_modes(mode):
+    task = _make_task(mode=mode, complexity=WorkspaceTaskExecutionComplexity.AUTO)
+    assert workspace_manager._autonomous_assignment_block(task) == ""
     assert workspace_manager._autonomous_review_block(task) == ""
-
-
-def test_review_block_demands_ledger_verification():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
-    )
-    block = workspace_manager._autonomous_review_block(task)
-    assert "Subagent ledger verification" in block
-    assert "subagent-ledger" in block
-    # Model pinning rule preserved (slash-separated compact form):
-    assert (
-        "P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE" in block
-        or "P-PLAN, P-EXECUTE, P-JUDGE, and P-INTEGRATE" in block
-    )
-    assert "external:" in block or "external:<api>" in block
-    # Specific guidance to fail when ledger is missing
-    assert "review_failed" in block
-
-
-def test_review_block_codex_model_pinning_is_runtime_aware():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
-        agent_type=AgentType.CODEX,
-    )
-    block = workspace_manager._autonomous_review_block(task)
-    # Runtime is labelled (compact form: "worker runtime: codex" on the Run line):
-    assert "codex" in block
-    assert "Do NOT fail solely because Claude opus/sonnet pinning is absent" in block
-    assert "runtime-default" in block
-
-
-# ---------------------------------------------------------------------------
-# _autonomous_continue_orchestrator_reminder
-# ---------------------------------------------------------------------------
-
-
-def test_continue_reminder_present_for_autonomous():
-    task = _make_task(
-        mode=WorkspaceTaskMode.AUTONOMOUS,
-        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
-    )
-    reminder = workspace_manager._autonomous_continue_orchestrator_reminder(task)
-    assert "Orchestrator-mode reminder" in reminder
-    assert "P-EXECUTE" in reminder and "P-VALIDATE" in reminder and "P-JUDGE" in reminder
-    assert "do not restart" in reminder.lower()
-
-
-def test_continue_reminder_absent_for_non_autonomous():
-    task = _make_task(
-        mode=WorkspaceTaskMode.REVIEWED,
-        complexity=WorkspaceTaskExecutionComplexity.COMPLEX,
-    )
     assert workspace_manager._autonomous_continue_orchestrator_reminder(task) == ""
 
 
@@ -424,7 +257,9 @@ def test_auto_continue_messages_carry_endpoint_when_sent(monkeypatch):
 
     # Branch 1: interruption detected -> AUTO_CONTINUE_MESSAGE.
     monkeypatch.setattr(
-        workspace_manager, "_auto_continue_interruption_reason", lambda _o: "interrupted"
+        workspace_manager,
+        "_auto_continue_interruption_reason",
+        lambda _o: "interrupted",
     )
     asyncio.run(workspace_manager._auto_continue_stopped_task(session, task, sampled))
 
@@ -475,7 +310,9 @@ def test_auto_continue_reminder_call_id_stable_per_attempt_then_advances(monkeyp
     monkeypatch.setattr(workspace_manager, "_latest_report_state", lambda _t: None)
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
     monkeypatch.setattr(
-        workspace_manager, "_auto_continue_interruption_reason", lambda _o: "interrupted"
+        workspace_manager,
+        "_auto_continue_interruption_reason",
+        lambda _o: "interrupted",
     )
 
     sampled = datetime.utcnow()
@@ -750,3 +587,139 @@ def test_hard_recovery_worker_uses_resume_briefing_after_first_iteration():
     workspace_manager.workspaces.pop(w.id, None)
     workspace_manager.sessions.pop(session.id, None)
     workspace_manager.sessions.pop(reviewer_session.id, None)
+
+
+@pytest.mark.parametrize("complexity", list(WorkspaceTaskExecutionComplexity))
+@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CODEX, AgentType.TERMINAL])
+def test_generated_task_lifecycle_preserves_strategy_and_independent_gate(
+    monkeypatch, tmp_path, complexity, agent_type
+):
+    """Check the assembled agent-visible lifecycle, including both recovery paths."""
+    now = datetime.utcnow()
+    workspace = Workspace(
+        id="ws-lifecycle",
+        name="Lifecycle",
+        path=str(tmp_path),
+        target=ExecutionTarget.LOCAL,
+        default_agent_type=agent_type,
+        default_branch="main",
+        session_prefix="lc",
+        created_at=now,
+        updated_at=now,
+    )
+    session = _make_session().model_copy(
+        update={
+            "workspace_id": workspace.id,
+            "workspace_path": str(tmp_path),
+            "agent_type": agent_type,
+        }
+    )
+    reviewer = session.model_copy(update={"id": "independent-reviewer"})
+    task = _make_task(
+        mode=WorkspaceTaskMode.AUTONOMOUS, complexity=complexity, agent_type=agent_type
+    ).model_copy(
+        update={
+            "workspace_id": workspace.id,
+            "session_id": session.id,
+            "goal_packet": GoalPacket(
+                objective="Preserve task recovery semantics",
+                acceptance_criteria=["Recovery keeps the original task identity"],
+                assumptions=[f"Execution strategy: {complexity.value}"],
+            ),
+        }
+    )
+    trigger = AgentReport(
+        id="worker-handoff",
+        workspace_id=workspace.id,
+        task_id=task.id,
+        session_id=session.id,
+        state=AgentReportState.COMPLETED,
+        message="Candidate for independent evaluation",
+        changed_files=["backend/feature.py"],
+        validation="pytest tests/test_feature.py => passed",
+        created_at=now,
+    )
+    monkeypatch.setattr(workspace_manager, "workspaces", {workspace.id: workspace})
+    monkeypatch.setattr(workspace_manager, "sessions", {session.id: session, reviewer.id: reviewer})
+    monkeypatch.setattr(workspace_manager, "tasks", {task.id: task})
+    monkeypatch.setattr(workspace_manager, "reports", {trigger.id: trigger})
+    assignment = workspace_manager._build_task_assignment_prompt(
+        workspace, task, session, lesson_context=[]
+    )
+    review = workspace_manager._build_review_prompt(
+        workspace, task, reviewer, trigger, lesson_context=[]
+    )
+    continuation = workspace_manager._build_continue_prompt(task, ContinueTaskRequest(), session)
+    cold_recovery = workspace_manager._build_hard_recovery_worker_prompt(
+        workspace, task, session, "interrupted"
+    )
+    task.review_cycle = 2
+    resumed = workspace_manager._build_hard_recovery_worker_prompt(
+        workspace, task, session, "interrupted"
+    )
+
+    assert "evaluator routing is mandatory" in assignment
+    assert "independent Hub evaluator" in review
+    assert "review_passed for passed work awaiting human acceptance" in review
+    assert "choosing serial execution is not itself a defect" in review
+    assert "commands, cwd, outcomes and evidence paths" in review
+    assert "base/head SHA" in review
+    for prompt in (assignment, review, continuation, cold_recovery, resumed):
+        assert task.id in prompt
+        assert "MUST spawn" not in prompt
+        assert "P-EXECUTE and one P-JUDGE actually ran" not in prompt
+        assert "Stay in orchestrator mode" not in prompt
+        assert "users CANNOT override" not in prompt
+        bodies = re.findall(r"-d '([^']+)'", prompt)
+        bodies.extend(line for line in prompt.splitlines() if line.startswith('{"task_id"'))
+        for body in bodies:
+            # Every generated executable example must be valid report JSON,
+            # including non-f-string tails concatenated with f-string prefixes.
+            report = AgentReportCreate.model_validate(json.loads(body))
+            assert report.task_id == task.id
+            assert report.call_id
+    for prompt in (assignment, cold_recovery, resumed):
+        assert "snapshot is a generated navigation aid" in prompt
+    for prompt in (continuation, cold_recovery, resumed):
+        assert "preserve the recorded simple/complex strategy" in prompt
+        assert "independent Hub evaluator remains mandatory" in prompt
+    assert "reuse its call_id only for the same report" in resumed
+    assert "do not turn ready_for_review into completed" in cold_recovery
+    if complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
+        assert "implement and run mechanical checks directly" in assignment
+        assert "sub-agent is optional" in assignment
+
+
+def test_subagent_completion_example_preserves_lightweight_evidence_handoff(tmp_path):
+    now = datetime.utcnow()
+    workspace = Workspace(
+        id="ws-subagent",
+        name="Subagent",
+        path=str(tmp_path),
+        target=ExecutionTarget.LOCAL,
+        default_agent_type=AgentType.CLAUDE,
+        default_branch="main",
+        session_prefix="sa",
+        created_at=now,
+        updated_at=now,
+    )
+    task = _make_task(
+        mode=WorkspaceTaskMode.SUBAGENT, complexity=WorkspaceTaskExecutionComplexity.SIMPLE
+    )
+    session = _make_session()
+    prompt = workspace_manager._build_task_assignment_prompt(
+        workspace, task, session, lesson_context=[]
+    )
+    reports = [
+        AgentReportCreate.model_validate(json.loads(body))
+        for body in re.findall(r"-d '([^']+)'", prompt)
+    ]
+    completed = next(report for report in reports if report.state == AgentReportState.COMPLETED)
+    assert completed.task_id == task.id
+    assert completed.call_id
+    assert completed.validation and "base/head" in completed.validation
+    assert completed.risks and "unverified" in completed.risks
+    assert completed.message_en is None and completed.goal_packet is None
+    assert "caller owns acceptance and any required review" in prompt
+    assert "ownership conflict" in prompt and "stop_condition" in prompt
+    assert "Orchestrator Contract" not in prompt
