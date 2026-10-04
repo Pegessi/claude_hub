@@ -146,13 +146,16 @@ export function useFeishuBinding(tabId: Ref<string>) {
         throw new Error('Sign in with Feishu to manage this connection.')
       }
       if (!response.ok) throw new Error(await errorDetail(response))
-      pendingCode.value = await response.json() as FeishuBindingCode
+      const nextPendingCode = await response.json() as FeishuBindingCode
+      if (epoch !== requestEpoch || requestController.signal.aborted) return false
+      pendingCode.value = nextPendingCode
       pollingEnabled = true
       schedulePoll()
       return true
     } catch (cause) {
       if (epoch !== requestEpoch || requestController.signal.aborted) return false
       error.value = cause instanceof Error ? cause.message : 'Failed to generate a binding code.'
+      if (pollingEnabled && pendingCode.value) schedulePoll()
       return false
     } finally {
       if (epoch === requestEpoch) isMutating.value = false
@@ -188,6 +191,7 @@ export function useFeishuBinding(tabId: Ref<string>) {
     } catch (cause) {
       if (epoch !== requestEpoch || requestController.signal.aborted) return false
       error.value = cause instanceof Error ? cause.message : 'Failed to disconnect Feishu.'
+      if (pollingEnabled && pendingCode.value) schedulePoll()
       return false
     } finally {
       if (epoch === requestEpoch) isMutating.value = false
