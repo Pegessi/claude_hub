@@ -9,7 +9,9 @@
 
 - Persist and validate independent task dependency edges; gate starts, resumes,
   queued dispatch and crash recovery on prerequisite completion, and protect
-  referenced tasks from deletion. CLI supports repeatable `--depends-on` and
+  referenced tasks from deletion. Async worker preparation and recovery preserve
+  concurrent task edits so they cannot erase a prerequisite before dispatch.
+  CLI supports repeatable `--depends-on` and
   explicit dependency clearing.
 - Derive bounded recovery snapshots from committed state bytes, with source
   hashes, goal/progress/evidence excerpts, blockers and recovery guidance.

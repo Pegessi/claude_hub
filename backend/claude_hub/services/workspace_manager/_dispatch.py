@@ -433,7 +433,10 @@ class _DispatchMixin:
             task,
             updated_at=now,
         )
-        require_task_dependencies(self.tasks, self.tasks.get(task.id, task))
+        task = self.tasks[task.id]
+        if task.status not in (WorkspaceTaskStatus.REVIEW, WorkspaceTaskStatus.FAILED):
+            raise RuntimeError("Task changed while preparing to continue")
+        require_task_dependencies(self.tasks, task)
         autonomous_run = task.autonomous_run
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
             autonomous_run = autonomous_run or self._default_autonomous_run(
@@ -871,6 +874,14 @@ class _DispatchMixin:
                     task_id,
                 )
                 continue
+            current = self.tasks.get(task.id)
+            if (
+                current is None
+                or current.status != WorkspaceTaskStatus.QUEUED
+                or current.session_id not in (None, session.id)
+            ):
+                continue
+            task = current
             now = _wm._now()
             self.tasks[task.id] = task.model_copy(
                 update={
@@ -926,8 +937,11 @@ class _DispatchMixin:
         if not workspace:
             raise KeyError(task.workspace_id)
 
-        require_task_dependencies(self.tasks, self.tasks.get(task.id, task))
+        task = self.tasks[task.id]
+        require_task_dependencies(self.tasks, task)
         session = await self._rename_session_for_task(session, task)
+        task = self.tasks[task.id]
+        require_task_dependencies(self.tasks, task)
 
         if task.clear_context:
             await self.send_session_message(session.id, "/clear")
@@ -961,7 +975,8 @@ class _DispatchMixin:
         # the re-send. If it is still in pending_call_ids, the pump sends
         # it to the tmux inbox exactly once.
         # ------------------------------------------------------------------
-        require_task_dependencies(self.tasks, self.tasks.get(task.id, task))
+        task = self.tasks[task.id]
+        require_task_dependencies(self.tasks, task)
         dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
         self.sessions[session.id] = session.model_copy(
             update={
@@ -1021,6 +1036,10 @@ class _DispatchMixin:
             ),
         )
 
+        current = self.tasks.get(task.id)
+        if current is None or current.status != task.status or current.session_id != session.id:
+            return
+        task = current
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,
