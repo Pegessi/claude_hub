@@ -15,6 +15,7 @@ an arbitrary file-read primitive:
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,115 @@ async def _get_image(client: AsyncClient, tab_id: str, path: str):
         f"/api/workspaces/tabs/{tab_id}/stream/agent-image",
         params={"path": path},
     )
+
+
+def _write_image_reference(
+    text: str,
+    *,
+    tab_id: str = "tab-a",
+    kind: str = "text_delta",
+    role: str = "assistant",
+    split: bool = False,
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    path = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}").path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    chunks = [text[: len(text) // 2], text[len(text) // 2 :]] if split else [text]
+    events = [
+        {
+            "session_id": f"terminal-tab-{tab_id}",
+            "tab_id": tab_id,
+            "type": kind,
+            "turn_id": "turn-a",
+            "message_id": f"turn-a:{role}",
+            "run_epoch": 1,
+            "redacted": True,
+            "payload": {
+                "role": role,
+                "assistant_text" if kind == "turn_completed" else "text": chunk,
+            },
+        }
+        for chunk in chunks
+    ]
+    path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+
+
+@pytest.mark.parametrize(
+    "kind,split", [("text_delta", False), ("text_delta", True), ("turn_completed", False)]
+)
+async def test_assistant_referenced_temp_image_is_allowed(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, kind: str, split: bool
+) -> None:
+    outside = tmp_path / "preview & detail.png"
+    outside.write_bytes(PNG_BYTES)
+    _write_image_reference(f"![Preview](<{outside}>)", kind=kind, split=split)
+    resp = await _get_image(client, "tab-a", str(outside))
+    assert resp.status_code == 200
+    assert resp.content == PNG_BYTES
+
+
+@pytest.mark.parametrize(
+    "kind,role,tab_id",
+    [
+        ("text_delta", "user", "tab-a"),
+        ("tool_call_completed", "assistant", "tab-a"),
+        ("text_delta", "assistant", "tab-b"),
+    ],
+)
+async def test_other_sources_do_not_grant_temp_image_access(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, kind: str, role: str, tab_id: str
+) -> None:
+    outside = tmp_path / "private.png"
+    outside.write_bytes(PNG_BYTES)
+    _write_image_reference(f"![Preview]({outside})", kind=kind, role=role, tab_id=tab_id)
+    assert (await _get_image(client, "tab-a", str(outside))).status_code == 404
+
+
+async def test_temp_reference_grants_exact_file_only(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "preview.png"
+    outside.write_bytes(PNG_BYTES)
+    other = tmp_path / "other.png"
+    other.write_bytes(PNG_BYTES)
+    _write_image_reference(f"![Preview]({outside})")
+    assert (await _get_image(client, "tab-a", str(other))).status_code == 404
+    outside.write_text("not an image")
+    assert (await _get_image(client, "tab-a", str(outside))).status_code == 404
+
+
+async def test_referenced_temp_symlink_is_denied(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "linked.png"
+    real = tmp_path / "target.png"
+    real.write_bytes(PNG_BYTES)
+    outside.symlink_to(real)
+    _write_image_reference(f"![Preview]({outside})")
+    assert (await _get_image(client, "tab-a", str(outside))).status_code == 404
+
+
+async def test_reference_cannot_grant_non_temp_file(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    # Model a non-temp file without inspecting or modifying the real home.
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp",))
+    outside = tmp_path / "private.png"
+    outside.write_bytes(PNG_BYTES)
+    _write_image_reference(f"![Preview]({outside})")
+    assert (await _get_image(client, "tab-a", str(outside))).status_code == 404
+
+
+async def test_path_mention_without_markdown_image_is_not_a_grant(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "private.png"
+    outside.write_bytes(PNG_BYTES)
+    _write_image_reference(f"File at {outside}. [Link]({outside})")
+    assert (await _get_image(client, "tab-a", str(outside))).status_code == 404
 
 
 async def test_valid_absolute_image_returns_bytes_and_content_type(

@@ -63,6 +63,7 @@ from ..services.agent_stream import (
 from ..services.agent_stream.attachments import AgentStreamAttachmentStore
 from ..services.agent_stream.attachments import _magic_mime as sniff_image_mime
 from ..services.agent_stream.base import discover_source_cached
+from ..services.agent_stream.local_images import referenced_temporary_image
 
 logger = logging.getLogger(__name__)
 
@@ -1698,7 +1699,9 @@ def _agent_image_allowed_roots(session: ManagedSession) -> List[Path]:
     return [root]
 
 
-def _resolve_agent_image(session: ManagedSession, raw_path: str) -> Tuple[bytes, str]:
+def _resolve_agent_image(
+    session: ManagedSession, raw_path: str, *, referenced_image: Optional[Path] = None
+) -> Tuple[bytes, str]:
     """Validate *raw_path* as an agent image and return ``(bytes, mime)``.
 
     Raises the opaque 404 from :func:`_agent_image_not_available` for an empty
@@ -1728,21 +1731,23 @@ def _resolve_agent_image(session: ManagedSession, raw_path: str) -> Tuple[bytes,
         is_absolute = False
 
     # Relative paths are anchored at the session root only. An absolute path is
-    # accepted solely if it is already inside that root (the normal case —
-    # view_image emits an absolute path under cwd); otherwise it can never be
-    # relative_to() a root and is denied below.
+    # accepted inside cwd or as an exact temporary file already authorized
+    # from this session's assistant output. Never authorize its parent root.
     anchors = [candidate] if is_absolute else [root / candidate for root in roots]
 
     resolved: Optional[Path] = None
     for anchor in anchors:
         try:
             real = anchor.resolve(strict=True)
-        except OSError:
+        except (OSError, ValueError, RuntimeError):
             continue
         # Only regular files (resolve() follows symlinks, so a link that points
         # outside the root fails the relative_to check that follows).
         if not real.is_file():
             continue
+        if referenced_image is not None and real == referenced_image:
+            resolved = real
+            break
         for root in roots:
             try:
                 real.relative_to(root)
@@ -1777,13 +1782,23 @@ async def get_tab_agent_image(
     path: str = Query(..., max_length=4096, description="Absolute or cwd-relative image path"),
     current_user: User = Depends(get_current_user),
 ) -> Response:
-    """Serve an agent-produced image that lives inside the tab's working dir.
+    """Serve an image inside cwd or an assistant-quoted temporary image.
 
     Restricted reader for ``view_image``-style tool output — see
     :func:`_resolve_agent_image` for the containment and content allowlist.
     """
     session = _terminal_tab_session_or_404(tab_id)
-    data, mime = _resolve_agent_image(session, path)
+
+    def read_image() -> Tuple[bytes, str]:
+        try:
+            return _resolve_agent_image(session, path)
+        except HTTPException:
+            referenced = referenced_temporary_image(session, path)
+            if referenced is None:
+                raise
+            return _resolve_agent_image(session, path, referenced_image=referenced)
+
+    data, mime = await asyncio.to_thread(read_image)
     return Response(
         content=data,
         media_type=mime,

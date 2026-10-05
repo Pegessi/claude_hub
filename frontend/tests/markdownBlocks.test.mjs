@@ -844,3 +844,15 @@ test('switching quotedTabId invalidates cached rewritten html', () => {
   assert.match(a, /tabs\/tab-a\/stream\/quoted-image/)
   assert.match(b, /tabs\/tab-b\/stream\/quoted-image/)
 })
+
+test('local markdown images keep their tab scope through block and list caching', () => {
+  const cache = new MarkdownBlockCache()
+  const src = '![Preview](</tmp/A & B.png>)\n\n- ![Detail](./detail.jpg)'
+  const a = renderString(cache, src, { complete: true, quotedTabId: 'tab-a' })
+  assert.match(a, /stream\/agent-image\?path=%2Ftmp%2FA%20%26%20B.png/)
+  assert.match(a, /stream\/agent-image\?path=.%2Fdetail.jpg/)
+  assert.equal((a.match(/data-local-img="1"/g) || []).length, 2)
+  const b = renderString(cache, src, { complete: true, quotedTabId: 'tab-b' })
+  assert.doesNotMatch(b, /tabs\/tab-a\//)
+  assert.equal((b.match(/tabs\/tab-b\//g) || []).length, 2)
+})
