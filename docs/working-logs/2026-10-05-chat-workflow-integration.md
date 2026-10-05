@@ -136,7 +136,14 @@ improvement benchmark has been performed.
   bounded recent user-message tail. The backend verifies provenance, not the
   semantic truth of the lesson subsequently generated.
 
-The opt-in `backend/tests/manual_chat_workflow_smoke.py --with-provider` starts
-an isolated backend, exercises real Codex through a one-shot linked task, then
-checks report history, cleanup, restart recovery and the built Chat UI. It never
-targets an existing Hub or creates a recurring user schedule.
+The opt-in `backend/tests/manual_chat_workflow_smoke.py` now requires explicit
+runtime/evidence parents, an owner-only Codex auth file, an existing Chromium
+executable, a Codex model ID, and a network mode, in addition to `--with-provider`.
+See the [isolation candidate and current validation record](2026-10-06-chat-workflow-recovery.md#manual-smoke-isolation-candidate)
+for the complete argument and authorization requirements.
+
+An authorized run uses real work APIs and a one-shot Codex worker to check report
+history, cleanup, restart recovery, and the built Chat UI. Browser inspection
+mocks the source stream and Feishu binding; it is not real Bot or full Chat-stream
+acceptance. The harness never targets an existing Hub or creates a recurring user
+schedule. Its new deterministic tests do not constitute real-provider validation.

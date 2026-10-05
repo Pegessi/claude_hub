@@ -103,6 +103,15 @@
   corrections only against exact persisted user-message evidence. Empty or
   unrelated lesson queries now return no injected lesson index.
 
+### test(smoke): isolate manual workflow acceptance
+
+- Require explicit account, model, network, browser, and task-owned runtime inputs
+  for the opt-in workflow smoke; never target an existing Hub or download a browser.
+- Retain the loopback listener across restart, verify owned descendant cleanup,
+  and defer repeated interruption signals through cleanup and result recording.
+- Keep source-stream and Feishu UI fixtures separate from real work API checks.
+  Deterministic tests do not constitute real-provider or Bot acceptance.
+
 ### chore(worktrees): add a conservative read-only inventory
 
 - `scripts/worktree_inventory.py --repo <path>` reports registered worktrees
