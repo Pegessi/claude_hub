@@ -24,7 +24,8 @@ not independently verified truth.
 
 - Visible active Chat: one reader, 15-second polling while work is active,
   60-second polling otherwise, plus immediate refresh at Chat turn boundaries.
-- Hidden document or deactivated cached pane: no background work polling.
+- Hidden document, Agent Workspace application mode, or deactivated cached pane:
+  no background work polling.
   Reopening resumes an authoritative read. Backend execution is independent.
 - Polls are aborted on deactivation/tab switch; response versions and captured
   source tabs prevent stale results overwriting a mutation or a different Chat.
