@@ -753,3 +753,65 @@ def test_cancelled_child_turn_finalizes_inflight_thinking_status() -> None:
     # The final status stays routed to the child thread.
     assert status_events[0].payload.get("subagent_thread") == F6
     assert status_events[0].message_id == f"reasoning:{rs_id}"
+
+
+@pytest.mark.parametrize("adapter_type", [CodexJsonlAdapter, TraexJsonlAdapter])
+@pytest.mark.parametrize("status", ["completed", "failed", "interrupted"])
+def test_child_turn_lifecycle_cannot_complete_parent(adapter_type, status) -> None:
+    adapter = adapter_type()
+    ctx = _ctx()
+
+    def emit(method, thread, **params):
+        return adapter.normalize_line(
+            {"method": method, "params": {"threadId": thread, **params}}, ctx
+        )
+
+    assert emit("turn/started", F6, turn={"id": "child-turn"}) == []
+    for thread in (MAIN, F6, FEC):
+        emit("item/started", thread, item={"type": "reasoning", "id": f"rs-{thread}"})
+    emit(
+        "thread/tokenUsage/updated",
+        MAIN,
+        tokenUsage={"last": {"inputTokens": 100, "outputTokens": 7}},
+    )
+    emit(
+        "thread/tokenUsage/updated",
+        F6,
+        tokenUsage={"last": {"inputTokens": 900, "outputTokens": 80}},
+    )
+    child = emit(
+        "turn/completed",
+        F6,
+        turn={"id": "child-turn", "status": status, "error": {"message": "child error"}},
+    )
+    assert all(e.type == AgentStreamEventType.STATUS for e in child)
+    assert all(e.payload.get("subagent_thread") == F6 for e in child)
+    thinking = [e for e in child if e.payload.get("provider_status") == "reasoning"]
+    assert len(thinking) == 1
+    assert thinking[0].message_id == f"reasoning:rs-{F6}"
+
+    main = emit("turn/completed", MAIN, turn={"id": "parent-turn", "status": "completed"})
+    terminal = [e for e in main if e.type == AgentStreamEventType.TURN_COMPLETED]
+    assert len(terminal) == 1
+    assert terminal[0].payload["usage"]["input"] == 100
+    assert {e.message_id for e in main if e.type == AgentStreamEventType.STATUS} == {
+        f"reasoning:rs-{MAIN}",
+        f"reasoning:rs-{FEC}",
+    }
+
+
+def test_child_error_and_goal_notifications_cannot_control_parent() -> None:
+    adapter = CodexJsonlAdapter()
+    child_error = adapter.normalize_line(
+        {"method": "error", "params": {"threadId": F6, "error": {"message": "failed"}}},
+        _ctx(),
+    )
+    assert len(child_error) == 1
+    assert child_error[0].type == AgentStreamEventType.STATUS
+    assert child_error[0].payload["subagent_thread"] == F6
+    assert (
+        adapter.normalize_line(
+            {"method": "thread/goal/completed", "params": {"threadId": F6}}, _ctx()
+        )
+        == []
+    )
