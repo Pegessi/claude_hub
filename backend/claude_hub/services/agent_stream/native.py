@@ -2668,7 +2668,15 @@ class CodexNativeSession(ProviderSession):
 
     async def _handle_notification(self, record: Dict[str, Any]) -> None:
         self._handshake_complete = True
-        if record.get("method") == "turn/completed":
+        params = record.get("params")
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        is_child = (
+            isinstance(thread_id, str)
+            and bool(thread_id)
+            and bool(self.active_thread_id)
+            and thread_id != self.active_thread_id
+        )
+        if record.get("method") == "turn/completed" and not is_child:
             # Keep the turn guard until the tailer consumes completion.
             inflight = self._inflight_images
             self._inflight_images = []

@@ -275,7 +275,9 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             events.extend(self._normalize_response_item(payload, payload_type, ctx))
         return events
 
-    def _error_or_status_event(self, ctx: NormalizeContext, message: str) -> AgentStreamEvent:
+    def _error_or_status_event(
+        self, ctx: NormalizeContext, message: str, sub_thread: Optional[str] = None
+    ) -> AgentStreamEvent:
         """Map an error-channel message to ERROR, or to a coalesced STATUS.
 
         A recoverable provider reconnect/backoff notice (``Reconnecting… n/m``)
@@ -284,6 +286,14 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         it as terminal) instead of an ERROR that would drop the active-turn
         lock and hide Stop.
         """
+        if sub_thread is not None:
+            # Child failures are visible inside the child's timeline, never a
+            # terminal ERROR for the parent Chat or its scheduled/Goal run.
+            return ctx.event(
+                AgentStreamEventType.STATUS,
+                {"text": message, "provider_status": "error"},
+                sub_thread_id=sub_thread,
+            )
         if _transient_provider_notice(message):
             return ctx.event(
                 AgentStreamEventType.STATUS,
@@ -436,6 +446,10 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             return events
         sub_thread = self._resolve_sub_thread(params, ctx, params.get("itemId"))
         if method == "turn/started":
+            if sub_thread is not None:
+                # Child turns share this app-server stream but cannot open a
+                # top-level Hub turn (including late child continuations).
+                return events
             turn = params.get("turn")
             provider_turn_id = turn.get("id") if isinstance(turn, dict) else params.get("turnId")
             payload: Dict[str, Any] = {"summary": ""}
@@ -443,10 +457,14 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                 payload["provider_turn_id"] = provider_turn_id
             events.append(ctx.event(AgentStreamEventType.TURN_STARTED, payload))
         elif method == "thread/tokenUsage/updated":
+            if sub_thread is not None:
+                return events
             usage = normalize_provider_usage(params, "codex")
             if usage is not None:
                 self._latest_usage[ctx.session_id] = usage
         elif method.startswith("thread/goal/") or method.startswith("goal/"):
+            if sub_thread is not None:
+                return events
             events.append(
                 ctx.event(
                     AgentStreamEventType.STATUS,
@@ -464,28 +482,36 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                     status = turn_status
                 error = turn.get("error")
                 if isinstance(error, dict) and error.get("message"):
-                    events.append(
-                        ctx.event(AgentStreamEventType.ERROR, {"message": error["message"]})
-                    )
-            completed: Dict[str, Any] = {"status": status}
-            usage = normalize_provider_usage(params, "codex") or self._latest_usage.pop(
-                ctx.session_id, None
-            )
-            if usage is not None:
-                completed["usage"] = usage
-            events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
+                    if sub_thread is not None:
+                        events.append(
+                            self._error_or_status_event(ctx, error["message"], sub_thread)
+                        )
+                    else:
+                        events.append(
+                            ctx.event(AgentStreamEventType.ERROR, {"message": error["message"]})
+                        )
+            if sub_thread is None:
+                completed: Dict[str, Any] = {"status": status}
+                cached_usage = self._latest_usage.pop(ctx.session_id, None)
+                usage = normalize_provider_usage(params, "codex") or cached_usage
+                if usage is not None:
+                    completed["usage"] = usage
+                events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
             # Finalize any in-flight reasoning statuses so a cancelled/
             # interrupted turn (or any terminal without ``item/completed`` for
             # reasoning) never shows a stale "Thinking…" indicator. The final
             # status replaces the in-flight one in place (same message_id +
             # snapshot).
             turn_key = ctx.turn_id or ctx.session_id
-            inflight = self._inflight_reasoning.pop(turn_key, {})
-            for rs_id, sub_thread in inflight.items():
+            inflight = self._inflight_reasoning.get(turn_key, {})
+            for rs_id, owner_thread in list(inflight.items()):
+                # A child completion only finalizes its own reasoning; parent
+                # completion still closes the entire user-turn display.
+                if sub_thread is not None and owner_thread != sub_thread:
+                    continue
+                del inflight[rs_id]
                 final_text = (
-                    "Thinking interrupted"
-                    if status in ("cancelled", "failed")
-                    else "Done thinking"
+                    "Thinking interrupted" if status in ("cancelled", "failed") else "Done thinking"
                 )
                 events.append(
                     ctx.event(
@@ -496,13 +522,15 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                             "snapshot": True,
                         },
                         message_id=f"reasoning:{rs_id}",
-                        sub_thread_id=sub_thread,
+                        sub_thread_id=owner_thread,
                     )
                 )
+            if not inflight:
+                self._inflight_reasoning.pop(turn_key, None)
         elif method == "error":
             error = params.get("error")
             if isinstance(error, dict) and error.get("message"):
-                events.append(self._error_or_status_event(ctx, error["message"]))
+                events.append(self._error_or_status_event(ctx, error["message"], sub_thread))
         elif method in {"item/started", "item/completed"}:
             events.extend(
                 self._normalize_tool_item(params.get("item"), method, ctx, params.get("threadId"))
@@ -681,7 +709,7 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         is_collab = kind == "collabAgentToolCall"
         if is_collab and method == "item/started":
             self._remember_collab_threads(name, args, ctx)
-        sub_thread: Optional[str] = None
+        sub_thread = None
         if not is_collab:
             sub_thread = self._resolve_sub_thread(
                 {"threadId": params_thread_id} if isinstance(params_thread_id, str) else {},
