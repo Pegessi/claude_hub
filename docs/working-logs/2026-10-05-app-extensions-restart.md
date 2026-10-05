@@ -66,3 +66,13 @@ reports restart unavailable.
   frontend checks, focused backend tests, and real isolated restart against the
   integrated tree. Backend SPA-root tests run after the frontend build because
   Vite temporarily removes `dist` during a rebuild.
+
+## Menu icon follow-up
+
+Added 18 px clock, globe, and restart SVG icons with matching stroke weight,
+muted color, and 10 px label spacing. Icons are decorative (`aria-hidden`) and
+do not change accessible names. Removed the network summary's invisible 1 px
+border so its icon and text align with the other actions. Verified desktop and
+390 px mobile Terminal/Workspace menus in an isolated browser preview; measured
+identical icon and label x positions for all three actions. Build/type check and
+frontend lint passed. No live restart or new scheduled task was performed.

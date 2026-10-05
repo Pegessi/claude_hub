@@ -78,6 +78,30 @@
     @toggle="handleMenuToggle"
   >
     <summary class="network-access-menu-summary">
+      <svg
+        class="network-access-menu-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <circle
+          cx="12"
+          cy="12"
+          r="9"
+        />
+        <ellipse
+          cx="12"
+          cy="12"
+          rx="4"
+          ry="9"
+        />
+        <path d="M3 12h18" />
+      </svg>
       <div>
         <span>Frontend Access</span>
         <strong>Port {{ frontendPort }}</strong>
@@ -560,8 +584,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  border: 1px solid transparent;
+  gap: 10px;
+  border: 0;
   border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text);
@@ -581,9 +605,17 @@ onUnmounted(() => {
 }
 
 .network-access-menu-summary > div {
+  flex: 1;
   min-width: 0;
   display: grid;
   gap: 1px;
+}
+
+.network-access-menu-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--ch-color-text-muted);
 }
 
 .network-access-menu-summary span {

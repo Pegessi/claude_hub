@@ -4,7 +4,25 @@
     class="extension-action"
     @click="appStore.openScheduledTasks(); emit('select')"
   >
-    Scheduled tasks
+    <svg
+      class="extension-action-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+      />
+      <path d="M12 7v5l3 2" />
+    </svg>
+    <span>Scheduled tasks</span>
   </button>
   <NetworkAccessMenu variant="menu" />
   <button
@@ -12,7 +30,21 @@
     class="extension-action"
     @click="appStore.restartDialogVisible = true; emit('select')"
   >
-    Restart service
+    <svg
+      class="extension-action-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M20 4v6h-6" />
+      <path d="M20 10a8 8 0 1 0-2 7.3" />
+    </svg>
+    <span>Restart service</span>
   </button>
 </template>
 
@@ -28,6 +60,7 @@ const emit = defineEmits<{ select: [] }>()
 .extension-action {
   display: flex;
   align-items: center;
+  gap: 10px;
   width: 100%;
   min-height: 40px;
   padding: 9px 10px;
@@ -39,6 +72,13 @@ const emit = defineEmits<{ select: [] }>()
   font-size: var(--ch-font-size-sm);
   text-align: left;
   cursor: pointer;
+}
+
+.extension-action-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--ch-color-text-muted);
 }
 
 .extension-action:hover { background: var(--ch-color-surface-control-hover); }
