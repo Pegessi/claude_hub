@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+import sys
+from contextvars import ContextVar
+from typing import Any, Optional, Sequence
 
 import click
 
@@ -31,7 +34,114 @@ def as_json(ctx: click.Context) -> bool:
     return settings.json_output
 
 
-@click.group(help=lifecycle_group_help("Claude Hub command-line interface."))
+_JSON_OUTPUT: ContextVar[bool] = ContextVar("claude_hub_cli_json_output", default=False)
+_CAPTURE_EXPLICIT_EXIT: ContextVar[bool] = ContextVar(
+    "claude_hub_cli_capture_explicit_exit", default=False
+)
+
+
+class _ExplicitClickExit(Exception):
+    """Carry an explicit ``ctx.exit`` through Click's non-standalone main."""
+
+    def __init__(self, exit_code: int) -> None:
+        super().__init__(exit_code)
+        self.exit_code = exit_code
+
+
+class _MachineReadableGroup(click.Group):
+    """Keep JSON-mode failures parseable without changing Click exit semantics."""
+
+    def _parse_root_json_output(
+        self,
+        args: Sequence[str],
+        prog_name: Optional[str],
+        extra: dict[str, Any],
+    ) -> bool:
+        """Resolve the root JSON option with Click's parser in resilient mode."""
+        parse_extra = dict(extra)
+        parse_extra["resilient_parsing"] = True
+        try:
+            with self.make_context(prog_name or "claude-hub", list(args), **parse_extra) as ctx:
+                return bool(ctx.params.get("json_output", False))
+        except click.ClickException:
+            return False
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except click.exceptions.Exit as exc:
+            if _CAPTURE_EXPLICIT_EXIT.get():
+                raise _ExplicitClickExit(exc.exit_code) from exc
+            raise
+
+    def main(
+        self,
+        args: Optional[Sequence[str]] = None,
+        prog_name: Optional[str] = None,
+        complete_var: Optional[str] = None,
+        standalone_mode: bool = True,
+        windows_expand_args: bool = True,
+        **extra: Any,
+    ) -> Any:
+        if not standalone_mode:
+            return super().main(
+                args=args,
+                prog_name=prog_name,
+                complete_var=complete_var,
+                standalone_mode=False,
+                windows_expand_args=windows_expand_args,
+                **extra,
+            )
+
+        raw_args = list(args) if args is not None else sys.argv[1:]
+        json_token = _JSON_OUTPUT.set(self._parse_root_json_output(raw_args, prog_name, extra))
+        exit_token = _CAPTURE_EXPLICIT_EXIT.set(True)
+        try:
+            try:
+                super().main(
+                    args=raw_args,
+                    prog_name=prog_name,
+                    complete_var=complete_var,
+                    standalone_mode=False,
+                    windows_expand_args=windows_expand_args,
+                    **extra,
+                )
+            except _ExplicitClickExit as exc:
+                raise SystemExit(exc.exit_code) from exc
+            except click.ClickException as exc:
+                if _JSON_OUTPUT.get():
+                    click.echo(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": exc.format_message(),
+                                "exit_code": exc.exit_code,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        err=True,
+                    )
+                else:
+                    exc.show()
+                raise SystemExit(exc.exit_code) from exc
+            except click.Abort as exc:
+                if _JSON_OUTPUT.get():
+                    click.echo(
+                        json.dumps({"ok": False, "error": "Aborted.", "exit_code": 1}),
+                        err=True,
+                    )
+                else:
+                    click.echo("Aborted!", err=True)
+                raise SystemExit(1) from exc
+            raise SystemExit(0)
+        finally:
+            _CAPTURE_EXPLICIT_EXIT.reset(exit_token)
+            _JSON_OUTPUT.reset(json_token)
+
+
+@click.group(
+    cls=_MachineReadableGroup, help=lifecycle_group_help("Claude Hub command-line interface.")
+)
 @click.option(
     "--base-url",
     envvar="CLAUDE_HUB_URL",
