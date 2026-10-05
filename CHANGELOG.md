@@ -70,6 +70,12 @@
   and pause/stop actions in Chat. Routine unchanged checks stay out of the
   transcript. Visible/reopened Chats notify once per meaningful result;
   inactive views do not run a new application-wide polling loop.
+- Converge one-shot Chat-linked tasks with unavailable workers to an explicit
+  failed state without automatic replay, preserving normal review eligibility
+  and recorded worker ownership during cleanup.
+- Reload schedules after acquiring the dispatch lock and skip records deleted
+  during cleanup, so Pause/Stop/deletion cannot launch stale work or restore
+  deleted tasks.
 - Accept explicit server-authored Web and Feishu origins as human correction
   evidence without coupling feedback capture to provider text-format metadata.
   Machine and malformed origins remain excluded.
