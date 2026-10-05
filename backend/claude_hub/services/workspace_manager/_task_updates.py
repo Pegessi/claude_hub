@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..task_dependencies import require_task_dependencies, validate_task_dependencies
 from ..task_graph import reparent_task
 from ._constants import *  # noqa: F401,F403
 
@@ -37,6 +38,7 @@ class _TaskUpdatesMixin:
                 payload.clear_context is not None,
                 payload.session_id is not None,
                 payload.parent_task_id is not None,
+                payload.depends_on_task_ids is not None,
                 "agent_tag" in payload.model_fields_set,
             ]
         )
@@ -44,6 +46,14 @@ class _TaskUpdatesMixin:
         if has_todo_only_fields:
             if task.status != WorkspaceTaskStatus.TODO:
                 raise ValueError("Only todo tasks can be edited")
+
+        if payload.depends_on_task_ids is not None:
+            update["depends_on_task_ids"] = validate_task_dependencies(
+                self.tasks, task.workspace_id, task.id, payload.depends_on_task_ids
+            )
+        if payload.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+            if task.status != WorkspaceTaskStatus.WORKING:
+                require_task_dependencies(self.tasks, task.model_copy(update=update))
 
         # Compute effective title and prompt
         effective_title = task.title

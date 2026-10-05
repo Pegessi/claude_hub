@@ -268,6 +268,7 @@ class _WorkspacesMixin:
 
     async def stop_background_monitor(self) -> None:
         if not self._monitor_task:
+            await self._stop_feedback_automation()
             return
         self._monitor_task.cancel()
         try:
@@ -276,6 +277,7 @@ class _WorkspacesMixin:
             pass
         finally:
             self._monitor_task = None
+            await self._stop_feedback_automation()
 
     async def _background_monitor_loop(self) -> None:
         while True:
@@ -329,6 +331,7 @@ class _WorkspacesMixin:
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                 await self._tick_resident_agents()
                 await self._tick_scheduled_tasks()
+                self._kick_feedback_automation()
             except asyncio.CancelledError:
                 raise
             except Exception:

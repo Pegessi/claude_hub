@@ -4,6 +4,7 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 
 from ...models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
 from ..request_fingerprint import request_fingerprint
+from ..task_dependencies import validate_task_dependencies
 from ..task_graph import (
     make_task_consumer_key,
     resolve_task_tree_fields,
@@ -35,6 +36,7 @@ class _TasksMixin:
         *,
         system_internal: bool = False,
         internal_kind: str | None = None,
+        source_work_id: str | None = None,
     ) -> WorkspaceTask:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
@@ -59,6 +61,9 @@ class _TasksMixin:
         parent_task_id, root_task_id, task_path = resolve_task_tree_fields(
             self.tasks, workspace_id, task_id, payload.parent_task_id or None
         )
+        dependencies = validate_task_dependencies(
+            self.tasks, workspace_id, task_id, payload.depends_on_task_ids
+        )
         now = _wm._now()
         attachments = self._persist_attachments(workspace_id, task_id, payload.attachments)
         autonomy_policy = (
@@ -71,6 +76,7 @@ class _TasksMixin:
             workspace_id=workspace_id,
             title=title,
             prompt=prompt,
+            source_work_id=source_work_id,
             attachments=attachments,
             goal_packet=payload.goal_packet,
             review_profiles=payload.review_profiles,
@@ -91,6 +97,7 @@ class _TasksMixin:
             clear_context=payload.clear_context,
             timeout_seconds=payload.timeout_seconds,
             parent_task_id=parent_task_id,
+            depends_on_task_ids=dependencies,
             root_task_id=root_task_id,
             path=task_path,
             consumer_ack_sequence=0,
@@ -405,6 +412,8 @@ class _TasksMixin:
         self,
         workspace_id: str,
         payload: FeedbackSummaryRequest,
+        *,
+        summary_input: dict[str, Any] | None = None,
     ) -> FeedbackSummaryRun:
         workspace = self.workspaces.get(workspace_id)
         if not workspace:
@@ -452,11 +461,14 @@ class _TasksMixin:
                 )
             if active_task.status == WorkspaceTaskStatus.TODO:
                 if not store.has_staged_summary_input(workspace_id, active_run.id):
+                    if summary_input is not None:
+                        summary_input["run_id"] = active_run.id
                     return await self._prepare_and_start_feedback_summary_task(
                         workspace,
                         payload,
                         active_task,
                         active_run,
+                        summary_input=summary_input,
                     )
                 return await self._start_feedback_summary_task(
                     active_task,
@@ -465,14 +477,15 @@ class _TasksMixin:
                 )
             return active_run
 
-        summary_input = store.prepare_summary_input(
-            workspace_id,
-            self._workspace_task_records_dir(workspace_id),
-            mode=payload.mode,
-            limit=payload.limit,
-            force=payload.force,
-            now=now,
-        )
+        if summary_input is None:
+            summary_input = store.prepare_summary_input(
+                workspace_id,
+                self._workspace_task_records_dir(workspace_id),
+                mode=payload.mode,
+                limit=payload.limit,
+                force=payload.force,
+                now=now,
+            )
         if summary_input["cache_hit"]:
             # Still prune the processed index of deleted-disk entries even when
             # no new records are being summarized.

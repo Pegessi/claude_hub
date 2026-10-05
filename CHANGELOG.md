@@ -57,6 +57,69 @@
   semantics, and Chat send/queue/recovery behavior now fail safely across
   cancellation, disconnect, and retry boundaries.
 
+### feat(chat): link durable work and bounded feedback to the conversation
+
+- Share a small execution policy between Chat and Task prompts: direct work,
+  available native subagents, and Hub delegation are separate from whether
+  work needs a durable Task. Existing review modes remain available.
+- Add source-Chat-scoped `claude-hub work` and API commands for idempotent
+  one-shot tasks and grouped monitoring checks using the existing scheduler
+  and task/report lifecycle. Preserve configured provider/environment/cwd;
+  explicit unsupported model overrides and remote source Chats fail clearly.
+- Show compact work cards, meaningful results, review state, interval controls
+  and pause/stop actions in Chat. Routine unchanged checks stay out of the
+  transcript. Visible/reopened Chats notify once per meaningful result;
+  inactive views do not run a new application-wide polling loop.
+- Automatically consider fresh feedback in quiet windows with a persistent
+  cursor, bounded reads/context, cooldown and user controls. Reuse existing
+  staged summarization, exclude internal tasks, and record explicit Chat
+  corrections only against exact persisted user-message evidence. Empty or
+  unrelated lesson queries now return no injected lesson index.
+
+### chore(worktrees): add a conservative read-only inventory
+
+- `scripts/worktree_inventory.py --repo <path>` reports registered worktrees
+  under the canonical root, preserving dirty, untracked, ignored, unmerged,
+  occupied, locked, prunable, outside-root and unknown cases. JSON and compact
+  output include reasons, timestamps and time budgets; only matched process IDs
+  are exposed. The tool never removes files, branches, sessions or registrations.
+
+### feat(workspace): explicit task prerequisites and recoverable state snapshots
+
+- Persist and validate independent task dependency edges; gate starts, resumes,
+  queued dispatch and crash recovery on prerequisite completion, and protect
+  referenced tasks from deletion. Async worker preparation and recovery preserve
+  concurrent task edits so they cannot erase a prerequisite before dispatch.
+  CLI supports repeatable `--depends-on` and
+  explicit dependency clearing.
+- Derive bounded recovery snapshots from committed state bytes, with source
+  hashes, goal/progress/evidence excerpts, blockers and recovery guidance.
+  Cache write failures cannot undo a committed update; cold startup repairs
+  stale or missing snapshots. See `docs/TASK_GRAPH.md`.
+
+### fix(agents): align bounded delegation, context recovery and review evidence
+
+- Map the existing system into intent/context/execution/verification/governance;
+  keep root instructions short and link detailed workflow and task navigation.
+- Let simple autonomous work execute directly while preserving the independent
+  Hub evaluator; scope delegation by dependencies, ownership and evidence rather
+  than fixed agent counts or model tiers.
+- Preserve the chosen strategy on recovery, read back persisted reports before
+  retrying, and require reproducible reviewer/subagent handoff evidence.
+- Fix extra closing braces in generated worker/subagent/reviewer report JSON examples.
+- Isolate prompt measurement before backend imports and verify checkout provenance.
+
+### fix(workspace): bind reviews to the worker checkout and retain feedback evidence
+
+- Local reviewers are reused only in the worker's execution directory, including
+  equivalent symlink paths; sharing a repository no longer permits reviewing a
+  different worktree. Remote placement and legacy root-directory sessions retain
+  their existing semantics.
+- Feedback summaries retain bounded failed-report excerpts with source report IDs.
+  Automatic lesson creation verifies every cited task record in the workspace
+  before granting multi-task confidence. Manual confirmation and old digest loading
+  remain supported; lesson guidance distinguishes iteration counts from causal evidence.
+
 ### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
 
 - Codex turns reported `usage.reasoning` tokens (e.g. 390) but the structured

@@ -3258,6 +3258,8 @@ def test_manual_feedback_reaper_promotes_lesson(
     assert manual_lesson_response.status_code == 201
     manual_lesson = manual_lesson_response.json()
     assert manual_lesson["title"] == "Use comma-separated symbols"
+    # Every cited task needs its own source record, including a merge citation.
+    write_iteration_task_record_fixture(state_root, workspace["id"], "task-two")
     duplicate_lesson_response = client.post(
         f"/api/workspaces/{workspace['id']}/lessons",
         json={
@@ -3506,6 +3508,12 @@ def test_workspace_feedback_summary_uses_visible_managed_reaper_task(
     ]
     assert audit_reports
 
+    # This fixture stubs _save_state. Commit its source before rendering the
+    # derived cache, whose contract excludes uncommitted in-memory mutations.
+    workspace_manager._atomic_write_text(
+        workspace_manager._workspace_state_file(workspace["id"]),
+        json.dumps(workspace_manager._workspace_state_payload(workspace["id"]), indent=2),
+    )
     workspace_manager._write_snapshot(workspace["id"])
     snapshot = workspace_manager.snapshot_path(workspace["id"]).read_text(encoding="utf-8")
     assert internal_task.id in snapshot
