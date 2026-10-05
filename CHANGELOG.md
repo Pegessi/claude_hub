@@ -7,6 +7,8 @@
 
 ### feat(ui): consolidate extensions and add supervised service restart
 
+- Add matching clock, globe, and restart icons to the expanded desktop and
+  mobile extension menus, with aligned labels and consistent spacing.
 - Desktop now groups Scheduled tasks, network access, and Restart service in
   one three-dot menu. Mobile reuses the existing Terminal and Workspace menus.
   Header controls share the same height and center line.
