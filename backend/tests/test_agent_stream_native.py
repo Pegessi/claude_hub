@@ -2353,11 +2353,190 @@ async def test_codex_cancel_active_turn_clears_pending_questions() -> None:
     sess._process = proc
     sess._pending_questions[42] = _codex_question_request()["params"]
     sess._turn_in_flight = True
-    # cancel_active_turn awaits turn/cancel via _send_request; mock it so the
-    # test does not block on the 10s startup-grace timeout.
-    sess._send_request = AsyncMock(return_value={})  # type: ignore[method-assign]
+    sess._thread_id = "thread-real"
+    sess._provider_turn_id = "turn-real"
+
+    # Codex 0.160 exposes turn/interrupt and requires both native ids. Its
+    # empty response accepts the request; turn/completed confirms execution
+    # actually stopped.
+    async def confirm_interrupt(_method: str, _params: Dict[str, Any]) -> Dict[str, Any]:
+        await sess._handle_notification(
+            {"method": "turn/completed", "params": {"turn": {"id": "turn-real"}}}
+        )
+        return {}
+
+    sess._send_request = AsyncMock(side_effect=confirm_interrupt)  # type: ignore[method-assign]
     await sess.cancel_active_turn()
+    sess._send_request.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "turn/interrupt",
+        {"threadId": "thread-real", "turnId": "turn-real"},
+    )
     assert sess._pending_questions == {}
+    assert sess._provider_turn_id is None
+    assert sess._turn_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_codex_cancel_filters_late_records_until_completion() -> None:
+    sess = _codex_session()
+    sess._turn_in_flight = True
+    sess._thread_id = "thread-active"
+    sess._provider_turn_id = "turn-active"
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = proc
+    sess._send_request = AsyncMock(return_value={})  # type: ignore[method-assign]
+
+    cancellation = asyncio.create_task(sess.cancel_active_turn())
+    await asyncio.sleep(0)
+    sess._send_request.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "turn/interrupt",
+        {"threadId": "thread-active", "turnId": "turn-active"},
+    )
+    await sess._handle_notification(
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"turnId": "turn-active", "delta": "late"},
+        }
+    )
+    assert sess._notification_queue.empty()
+    late_question = _codex_question_request()
+    late_question["params"]["turnId"] = "turn-active"
+    await sess._handle_server_request(late_question)
+    assert sess._pending_questions == {}
+    rejected = next(message for message in _written_requests(proc) if message.get("id") == 42)
+    assert rejected["error"] == {"code": -32600, "message": "turn interrupted"}
+    await sess._handle_notification(
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-active"}}}
+    )
+    await asyncio.wait_for(cancellation, timeout=1.0)
+
+    assert sess._notification_queue.empty()
+    assert sess._provider_turn_id is None
+    assert sess._turn_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_codex_late_cancelled_completion_keeps_next_turn_images(tmp_path: Path) -> None:
+    sess = _codex_session()
+    sess._turn_in_flight = True
+    sess._thread_id = "thread-shared"
+    sess._provider_turn_id = "turn-a"
+    turn_a_image = tmp_path / "turn-a.png"
+    turn_a_image.write_bytes(_VALID_PNG)
+    sess._inflight_images = [turn_a_image]
+
+    async def confirm_interrupt(_method: str, _params: Dict[str, Any]) -> Dict[str, Any]:
+        await sess._handle_notification(
+            {"method": "turn/completed", "params": {"turn": {"id": "turn-a"}}}
+        )
+        return {}
+
+    sess._send_request = AsyncMock(side_effect=confirm_interrupt)  # type: ignore[method-assign]
+    await sess.cancel_active_turn()
+    assert not turn_a_image.exists()
+
+    turn_b_image = tmp_path / "turn-b.png"
+    turn_b_image.write_bytes(_VALID_PNG)
+    sess._provider_turn_id = "turn-b"
+    sess._inflight_images = [turn_b_image]
+    await sess._handle_notification(
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-a"}}}
+    )
+
+    assert sess._inflight_images == [turn_b_image]
+    assert turn_b_image.exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_interrupt_ack_without_completion_restarts(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native_module, "_STARTUP_GRACE_S", 0.01)
+    sess = _codex_session()
+    sess._turn_in_flight = True
+    sess._thread_id = "thread-timeout"
+    sess._provider_turn_id = "turn-timeout"
+    sess._pending_questions[42] = _codex_question_request()["params"]
+    sess._send_request = AsyncMock(return_value={})  # type: ignore[method-assign]
+    sess.restart_for_recovery = AsyncMock()  # type: ignore[method-assign]
+
+    await sess.cancel_active_turn()
+
+    sess.restart_for_recovery.assert_awaited_once_with()  # type: ignore[attr-defined]
+    assert sess._pending_questions == {}
+    assert sess._provider_turn_id is None
+    assert sess._turn_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_codex_cancel_completed_turn_does_not_interrupt() -> None:
+    """A completion queued before Stop makes the interrupt request unnecessary."""
+    sess = _codex_session()
+    sess._thread_id = "thread-complete"
+    sess._provider_turn_id = "turn-complete"
+    sess._turn_in_flight = True
+    sess._notification_queue.put_nowait(
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-complete"}}}
+    )
+    sess._send_request = AsyncMock()  # type: ignore[method-assign]
+
+    await sess.cancel_active_turn()
+
+    sess._send_request.assert_not_awaited()  # type: ignore[attr-defined]
+    assert sess._provider_turn_id is None
+    assert sess._turn_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_codex_unknown_interrupt_method_restarts_instead_of_reporting_success() -> None:
+    """The Codex 0.160 unknown-method response must take recovery, not success."""
+    sess = _codex_session()
+    sess._turn_in_flight = True
+    sess._thread_id = "thread-old"
+    sess._provider_turn_id = "turn-old"
+    sess._pending_questions[42] = _codex_question_request()["params"]
+    real_error = RuntimeError(
+        "codex turn/interrupt error: {'code': -32600, "
+        "'message': 'Invalid request: unknown variant'}"
+    )
+    sess._send_request = AsyncMock(side_effect=real_error)  # type: ignore[method-assign]
+    sess.restart_for_recovery = AsyncMock()  # type: ignore[method-assign]
+
+    await sess.cancel_active_turn()
+
+    sess.restart_for_recovery.assert_awaited_once_with()  # type: ignore[attr-defined]
+    assert sess._pending_questions == {}
+    assert sess._provider_turn_id is None
+    assert sess._turn_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_codex_process_exit_during_interrupt_restarts_and_cleans_images(
+    tmp_path: Path,
+) -> None:
+    sess = _codex_session()
+    sess._turn_in_flight = True
+    sess._thread_id = "thread-exited"
+    sess._provider_turn_id = "turn-exited"
+    staged = tmp_path / "staged.png"
+    inflight = tmp_path / "inflight.png"
+    staged.write_bytes(_VALID_PNG)
+    inflight.write_bytes(_VALID_PNG)
+    sess._staged_images = [staged]
+    sess._inflight_images = [inflight]
+    sess._send_request = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("codex app-server is not running")
+    )
+    sess.restart_for_recovery = AsyncMock()  # type: ignore[method-assign]
+
+    await sess.cancel_active_turn()
+
+    sess.restart_for_recovery.assert_awaited_once_with()  # type: ignore[attr-defined]
+    assert sess._staged_images == []
+    assert sess._inflight_images == []
+    assert not staged.exists()
+    assert not inflight.exists()
+    assert sess._provider_turn_id is None
     assert sess._turn_in_flight is False
 
 
