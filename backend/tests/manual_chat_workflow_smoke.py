@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -37,6 +38,7 @@ def main() -> None:
     env = dict(os.environ)
     env.update(
         CLAUDE_HUB_HOME=str(runtime),
+        CLAUDE_HUB_STATE_ROOT=str(runtime / "workspaces"),
         CLAUDE_HUB_TMUX_SOCKET=socket_name,
         CLAUDE_HUB_URL=url,
         PYTHONPATH=str(backend),
@@ -45,8 +47,10 @@ def main() -> None:
     )
     env.pop("CLAUDE_HUB_TAB_ID", None)
     env.pop("CLAUDE_HUB_TEST_BACKEND_URL", None)
+    env.pop("CLAUDE_HUB_ALLOW_LIVE_RUNTIME", None)
     result: dict = {"checkout": str(checkout), "runtime": str(runtime), "url": url}
     process = None
+    owned_groups: list[int] = []
     work_id = tab_id = None
     log = (runtime / "server-output.log").open("w")
     try:
@@ -65,7 +69,9 @@ def main() -> None:
             env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
+        owned_groups.append(process.pid)
         with httpx.Client(base_url=url, trust_env=False, timeout=150) as client:
             for _ in range(100):
                 if process.poll() is not None:
@@ -114,7 +120,8 @@ def main() -> None:
                 "assignment: first send kind=progress summary=HUB_WORKFLOW_PROGRESS with validation=transport-smoke. "
                 "Then send kind=completed summary=HUB_WORKFLOW_COMPLETE with validation=transport-smoke, and stop. "
                 "Use the explicit source tab/task/session IDs provided by that assignment. "
-                "The work CLI is available via python -m claude_hub.cli using the inherited PYTHONPATH."
+                f"The work CLI interpreter is {sys.executable}; run it with -m claude_hub.cli "
+                "using the inherited PYTHONPATH."
             )
             command = [
                 sys.executable,
@@ -173,7 +180,7 @@ def main() -> None:
                     break
                 time.sleep(1)
             (runtime / "work.json").write_text(json.dumps(work, indent=2))
-            assert work["status"] == "completed", f"work did not finish: {work['status']}"
+            assert work["status"] == "review", f"work did not await acceptance: {work['status']}"
             assert work["latest_result"]["summary"] == "HUB_WORKFLOW_COMPLETE"
             assert work["run_count"] == 1 and len(work["executions"]) == 1
             result["observed_progress_poll"] = seen_progress
@@ -184,6 +191,33 @@ def main() -> None:
                 for r in reports
             )
             result["progress_preserved_before_completion"] = "pass"
+            # Direct tasks retain the existing caller acceptance gate. The test
+            # controller accepts only after checking the requested report evidence.
+            accepted = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "claude_hub.cli",
+                    "task",
+                    "accept",
+                    task_id,
+                    "--workspace-id",
+                    wid,
+                    "--cleanup-session",
+                ],
+                cwd=backend,
+                env=cli_env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            (runtime / "cli-accept.json").write_text(accepted.stdout)
+            (runtime / "cli-accept.stderr").write_text(accepted.stderr)
+            assert accepted.returncode == 0, "controller acceptance failed; see CLI artifact"
+            work = request("GET", f"/api/tabs/{tab_id}/work/{work_id}")
+            assert work["status"] == "completed"
+            (runtime / "work.json").write_text(json.dumps(work, indent=2))
+            result["caller_acceptance"] = "pass"
             for _ in range(20):
                 sessions = request("GET", "/api/workspaces/sessions")
                 owned = [
@@ -214,7 +248,9 @@ def main() -> None:
                 env=env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
+            owned_groups.append(process.pid)
             for _ in range(100):
                 try:
                     if client.get("/health").status_code == 200:
@@ -252,7 +288,7 @@ def main() -> None:
     finally:
         if process and process.poll() is None:
             # Stop only the task-owned work, then terminate only this backend.
-            if work_id and tab_id:
+            if work_id and tab_id and result.get("status") != "pass":
                 try:
                     with httpx.Client(base_url=url, trust_env=False, timeout=15) as client:
                         client.patch(f"/api/tabs/{tab_id}/work/{work_id}", json={"action": "stop"})
@@ -265,6 +301,11 @@ def main() -> None:
                 process.kill()
                 process.wait(timeout=5)
         log.close()
+        for group in owned_groups:
+            try:
+                os.killpg(group, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         # An isolated tmux server is owned by this test, including on failed startup.
         subprocess.run(["tmux", "-L", socket_name, "kill-server"], capture_output=True, check=False)
         (runtime / "result.json").write_text(json.dumps(result, indent=2))
