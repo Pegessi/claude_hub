@@ -2,14 +2,45 @@ import ipaddress
 import re
 import socket
 import subprocess
+from typing import Any
+from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from ..auth.dependencies import get_current_user
 from ..models import User
+from ..services import service_restart
 
 router = APIRouter(prefix="/api/system", tags=["system"])
+
+
+class RestartRequest(BaseModel):
+    instance_id: str
+    request_id: UUID
+
+
+@router.get("/restart")
+async def get_restart_status(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+    return service_restart.public_status(service_restart.get_store().read())
+
+
+@router.post("/restart", status_code=202)
+async def restart_service(
+    body: RestartRequest,
+    current_user: User = Depends(get_current_user),
+    x_claude_hub_restart: str | None = Header(default=None),
+) -> dict[str, Any]:
+    # A non-simple request forces the browser's CORS preflight. Cross-origin
+    # forms/links cannot restart a locally authenticated Hub.
+    if x_claude_hub_restart != "1":
+        raise HTTPException(status_code=403, detail="Restart confirmation header required.")
+    try:
+        return service_restart.request_restart(body.instance_id, str(body.request_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 class NetworkAddress(BaseModel):

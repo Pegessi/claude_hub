@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { AppMode, ColorScheme } from '@/types'
+import { RESTART_STORAGE_KEY } from '@/utils/serviceRestart'
 
 const STORAGE_KEY_MODE = 'claude_hub_app_mode'
 const STORAGE_KEY_THEME = 'claude_hub_color_scheme'
@@ -13,6 +14,7 @@ export const useAppStore = defineStore('app', () => {
   const mode = ref<AppMode>((localStorage.getItem(STORAGE_KEY_MODE) as AppMode) || 'terminal')
   const colorScheme = ref<ColorScheme>(normalizeTheme(localStorage.getItem(STORAGE_KEY_THEME)))
   const scheduledTasksVisible = ref(false)
+  const restartDialogVisible = ref(!!sessionStorage.getItem(RESTART_STORAGE_KEY))
   const scheduledTaskCreateTargetTabId = ref<string | null>(null)
   const scheduledTaskCreateRequest = ref(0)
 
@@ -45,6 +47,7 @@ export const useAppStore = defineStore('app', () => {
     mode,
     colorScheme,
     scheduledTasksVisible,
+    restartDialogVisible,
     scheduledTaskCreateTargetTabId,
     scheduledTaskCreateRequest,
     setMode,

@@ -141,7 +141,7 @@
             >
               Refresh
             </LoadingButton>
-            <NetworkAccessMenu variant="menu" />
+            <AppExtensionActions @select="closeWorkspaceMobileMenu" />
             <button
               type="button"
               class="workspace-mobile-menu-item workspace-mobile-menu-item--theme"
@@ -2992,7 +2992,7 @@ import AgentConfigFields from '@/components/AgentConfigFields.vue'
 import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+import AppExtensionActions from '@/components/AppExtensionActions.vue'
 import {
   defaultLaunchEnvPresetForAgent,
   parseLaunchEnv,

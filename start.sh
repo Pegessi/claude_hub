@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./start.sh           Production mode (default): build the frontend, then run
-#                        a single uvicorn process that serves both the API and
+#                        a supervised uvicorn process that serves the API and
 #                        the built SPA on :8173. No --reload, no vite dev server.
 #   ./start.sh --dev     Dev mode: vite dev (HMR on :5173) + uvicorn --reload
 #                        (:8173), for active development with hot reload.
@@ -148,16 +148,10 @@ else
     cd "$PROJECT_ROOT/backend"
     # SERVE_FRONTEND=true makes FastAPI serve the built SPA at the same origin
     # as the API, so a single uvicorn process serves everything on :8173.
-    SERVE_FRONTEND=true uv run uvicorn claude_hub.main:app --host 0.0.0.0 --port 8173 &
-    BACKEND_PID=$!
-    echo -e "${GREEN}✓ Backend started on http://localhost:8173 (PID: $BACKEND_PID)${NC}"
-
-    echo ""
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  Claude Hub is running in PRODUCTION mode!${NC}"
-    echo -e "${GREEN}  App:      http://localhost:8173${NC}"
-    echo -e "${GREEN}  API Docs: http://localhost:8173/docs${NC}"
-    echo -e "${GREEN}========================================${NC}"
+    # The launcher survives a backend restart requested from the UI. Exec
+    # preserves Ctrl+C / service-manager ownership instead of leaving orphans.
+    exec env SERVE_FRONTEND=true uv run python -m claude_hub.service_launcher \
+        --host "${CLAUDE_HUB_HOST:-0.0.0.0}" --port "${CLAUDE_HUB_PORT:-8173}"
 fi
 
 echo ""
