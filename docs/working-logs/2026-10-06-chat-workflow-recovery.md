@@ -57,3 +57,28 @@ empty source results before the fix. Afterward, 39 feedback tests and scoped myp
 passed; quoting a synthetic pre-redaction secret is rejected and the correction
 file contains no such value. Evidence is in `feedback-redaction-before/` and
 `feedback-redaction-after/` under the same task artifact root.
+
+## Combined feature checkpoint
+
+`6a1f693` combines the workflow fixes with Bot candidate `3ab6204`; the only text
+conflicts were API router imports and CHANGELOG, and both sides were preserved.
+Upstream main was independently rechecked at `c37b7f3`. Follow-up `af29874` retains
+rebinding advice for a genuinely deleted binding target without confusing it
+with a transient transport failure.
+
+- Combined frontend: 629 unit tests, ESLint, TypeScript, and production build
+  passed. Both fully mocked browser walkthroughs passed at desktop/mobile sizes.
+  The workflow script now accepts an existing browser executable and blocks
+  cross-origin requests, WebSockets, and service workers before navigation.
+- Combined backend excluding `test_workspaces.py`: 612 tests passed across 20
+  named suites. Full backend mypy passed for 122 source files.
+- The broader first attempt was deliberately interrupted after one stale
+  reviewer-prompt assertion and 342 passes. Fake terminal bootstrap also waited
+  25 seconds per invocation. Neither result is presented as full-suite success;
+  the workspace fixture and semantic assertion still need follow-up.
+- Static review server port 33301 was released and its PID absent after testing.
+
+Evidence directories: `joint-frontend`, `joint-browser`, `joint-backend`,
+`joint-backend-scoped`, and `joint-binding-reason` under the artifact root above.
+Browser results do not establish real Bot/provider execution. No main merge,
+push, production restart, or external Bot changes were performed.
