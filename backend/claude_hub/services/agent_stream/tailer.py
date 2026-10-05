@@ -74,6 +74,7 @@ from .transcript_fork import (
     restore_transcript,
     snapshot_transcript,
 )
+from .turn_source import provider_text_for_stored_turn
 
 logger = logging.getLogger(__name__)
 
@@ -2929,6 +2930,8 @@ class TailerManager:
         text: str,
         client_turn_id: str,
         turn_id: str,
+        *,
+        turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Edit a previously sent message and rerun the conversation from there.
 
@@ -2979,7 +2982,14 @@ class TailerManager:
         # second caller waits (no fail-fast).
         edit_lock = self._edit_locks.setdefault(session.id, asyncio.Lock())
         async with edit_lock:
-            await self._edit_resend_locked(session, text, client_turn_id, turn_id, adapter)
+            await self._edit_resend_locked(
+                session,
+                text,
+                client_turn_id,
+                turn_id,
+                adapter,
+                turn_metadata=turn_metadata,
+            )
 
     async def _stop_tailer_for_edit(self, tailer: SessionTailer) -> None:
         """Stop ``tailer`` for an edit-resend, refusing if a turn is running.
@@ -3018,13 +3028,15 @@ class TailerManager:
         client_turn_id: str,
         turn_id: str,
         adapter: Any,
+        *,
+        turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Inner edit-resend logic, executed under the per-session edit lock."""
         store = self.get_store(session.workspace_id, session.id)
-        turn_info = await store.find_turn(turn_id)
+        turn_info = await store.find_turn_with_metadata(turn_id)
         if turn_info is None:
             raise ValueError(f"turn {turn_id!r} not found in event store")
-        stream_seq, turn_index, turn_text, attachment_metas = turn_info
+        stream_seq, turn_index, turn_text, attachment_metas, original_metadata = turn_info
 
         # Read the original turn's attachment preview bytes BEFORE truncating
         # so they can be re-sent to the provider.  The durable cache stores
@@ -3087,7 +3099,12 @@ class TailerManager:
 
             # Fork the provider transcript.  This matches the edited turn to
             # a provider user message by content and raises if it cannot.
-            fork_transcript(session, adapter, turn_index, turn_text)
+            fork_transcript(
+                session,
+                adapter,
+                turn_index,
+                provider_text_for_stored_turn(turn_text, original_metadata),
+            )
 
             # Restart the tailer with a fresh transport that reads the forked
             # transcript, then deliver the edited text (with the original
@@ -3097,6 +3114,8 @@ class TailerManager:
             send_kwargs: Dict[str, Any] = {}
             if attachment_metas:
                 send_kwargs["reuse_attachments"] = attachment_metas
+            if turn_metadata:
+                send_kwargs["turn_metadata"] = dict(turn_metadata)
             await tailer.send_message(text, images, client_turn_id, **send_kwargs)
         except BaseException:
             # Discard any tailer created during the failed attempt so it

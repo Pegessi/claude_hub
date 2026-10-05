@@ -14,6 +14,7 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from claude_hub.api import agent_stream as stream_api
@@ -30,6 +31,10 @@ from claude_hub.models import (
     User,
 )
 from claude_hub.services import ttyd_manager, workspace_manager
+from claude_hub.services.agent_stream.turn_source import (
+    FEISHU_PROVIDER_TEXT_FORMAT_V1,
+    format_feishu_provider_text_v1,
+)
 from claude_hub.services.feishu_bot import (
     BindingCodeError,
     BindingRateLimitError,
@@ -214,7 +219,7 @@ def test_delete_endpoint_revokes_unconsumed_code(configured_bot, monkeypatch) ->
         def __init__(self, config) -> None:
             pass
 
-        async def send_text(self, chat_id: str, text: str) -> None:
+        async def reply_text(self, message_id: str, text: str) -> None:
             sent.append(text)
 
     monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
@@ -502,17 +507,22 @@ def test_encrypted_challenge_endpoint_and_bad_verification(configured_bot) -> No
 def test_full_bind_dispatch_reply_dedup_read_and_unbind(configured_bot, monkeypatch) -> None:
     _install_chat_target(monkeypatch)
     sent: list[tuple[str, str]] = []
-    dispatched: list[tuple[str, str, str]] = []
+    dispatched: list[tuple[str, str, str, dict]] = []
 
     class FakeFeishuClient:
         def __init__(self, config) -> None:
             assert config.app_id == "cli-bot"
 
-        async def send_text(self, chat_id: str, text: str) -> None:
-            sent.append((chat_id, text))
+        async def reply_text(self, message_id: str, text: str) -> None:
+            sent.append((message_id, text))
 
-    async def fake_dispatch(tab_id: str, text: str, turn_id: str) -> str:
-        dispatched.append((tab_id, text, turn_id))
+    async def fake_dispatch(
+        tab_id: str,
+        text: str,
+        turn_id: str,
+        **kwargs,
+    ) -> str:
+        dispatched.append((tab_id, text, turn_id, kwargs))
         return "Hub assistant reply"
 
     monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
@@ -537,7 +547,7 @@ def test_full_bind_dispatch_reply_dedup_read_and_unbind(configured_bot, monkeypa
         headers=bind_headers,
     )
     assert bound.status_code == 200
-    assert sent[-1] == ("oc-chat", "已连接 Claude Hub Chat：tab-1")
+    assert sent[-1] == ("om-bind", "已连接 Claude Hub Chat：tab-1")
     binding = client.get("/api/feishu/bot/binding", cookies=cookies).json()["binding"]
     assert binding["owner_open_id"] == "ou-owner"
     assert binding["tab_id"] == "tab-1"
@@ -564,14 +574,31 @@ def test_full_bind_dispatch_reply_dedup_read_and_unbind(configured_bot, monkeypa
     )
     assert first.status_code == 200
     assert duplicate.json() == {"ok": True, "duplicate": True}
+    metadata = {
+        "origin": "feishu",
+        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        "feishu": {
+            "app_id": "cli-bot",
+            "chat_id": "oc-chat",
+            "message_id": "om-chat",
+            "sender_open_id": "ou-owner",
+        },
+    }
     assert dispatched == [
         (
             "tab-1",
-            "Continue the existing work",
+            format_feishu_provider_text_v1(
+                "Continue the existing work",
+                app_id="cli-bot",
+                chat_id="oc-chat",
+                message_id="om-chat",
+                sender_open_id="ou-owner",
+            ),
             "feishu-" + hashlib.sha256(b"om-chat").hexdigest()[:32],
+            {"visible_text": "Continue the existing work", "turn_metadata": metadata},
         )
     ]
-    assert sent[-1] == ("oc-chat", "Hub assistant reply")
+    assert sent[-1] == ("om-chat", "Hub assistant reply")
 
     assert client.delete("/api/feishu/bot/binding", cookies=cookies).status_code == 204
     assert client.get("/api/feishu/bot/binding", cookies=cookies).json() == {"binding": None}
@@ -592,7 +619,7 @@ def test_wrong_sender_cannot_consume_binding_code(configured_bot, monkeypatch) -
         def __init__(self, config) -> None:
             pass
 
-        async def send_text(self, chat_id: str, text: str) -> None:
+        async def reply_text(self, message_id: str, text: str) -> None:
             sent.append(text)
 
     monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
@@ -634,10 +661,10 @@ def test_revoked_owner_cannot_dispatch(configured_bot, monkeypatch) -> None:
         def __init__(self, config) -> None:
             pass
 
-        async def send_text(self, chat_id: str, text: str) -> None:
+        async def reply_text(self, message_id: str, text: str) -> None:
             sent.append(text)
 
-    async def fail_if_dispatched(tab_id: str, text: str, turn_id: str) -> str:
+    async def fail_if_dispatched(tab_id: str, text: str, turn_id: str, **kwargs) -> str:
         dispatched.append(text)
         return "must not run"
 
@@ -678,10 +705,15 @@ def test_unbind_during_turn_suppresses_old_target_reply(configured_bot, monkeypa
         def __init__(self, config) -> None:
             pass
 
-        async def send_text(self, chat_id: str, text: str) -> None:
+        async def reply_text(self, message_id: str, text: str) -> None:
             sent.append(text)
 
-    async def unbind_then_complete(tab_id: str, text: str, turn_id: str) -> str:
+    async def unbind_then_complete(
+        tab_id: str,
+        text: str,
+        turn_id: str,
+        **kwargs,
+    ) -> str:
         configured_bot.delete_owner_binding("ou-owner")
         return "secret old target result"
 
@@ -709,6 +741,113 @@ def test_unbind_during_turn_suppresses_old_target_reply(configured_bot, monkeypa
 
     assert response.status_code == 200
     assert sent == []
+
+
+def test_rebind_during_turn_suppresses_reply_to_old_message(configured_bot, monkeypatch) -> None:
+    _install_chat_target(monkeypatch)
+    sent: list[tuple[str, str]] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def reply_text(self, message_id: str, text: str) -> None:
+            sent.append((message_id, text))
+
+    async def rebind_then_complete(
+        tab_id: str,
+        text: str,
+        turn_id: str,
+        **kwargs,
+    ) -> str:
+        code, _ = configured_bot.create_code("ou-owner", "ou-owner@example.test", "tab-1", "ws-1")
+        configured_bot.consume_code(
+            code,
+            sender_open_id="ou-owner",
+            app_id="cli-bot",
+            chat_id="oc-new-chat",
+            owner_is_authorized=lambda *_: True,
+        )
+        return "old target result"
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", rebind_then_complete)
+    client = TestClient(app)
+    code = client.post(
+        "/api/feishu/bot/bind/start",
+        json={"tab_id": "tab-1", "workspace_id": "ws-1"},
+        cookies=_login_cookie("ou-owner"),
+    ).json()["code"]
+    configured_bot.consume_code(
+        code,
+        sender_open_id="ou-owner",
+        app_id="cli-bot",
+        chat_id="oc-chat",
+        owner_is_authorized=lambda *_: True,
+    )
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text="long task", message_id="om-old"), now
+    )
+
+    response = client.post("/api/feishu/bot/events", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert sent == []
+    assert configured_bot.get_sender_binding("ou-owner", "cli-bot", "oc-new-chat")
+
+
+def test_busy_chat_replies_to_same_message_without_claiming_binding_expired(
+    configured_bot, monkeypatch
+) -> None:
+    _install_chat_target(monkeypatch)
+    sent: list[tuple[str, str]] = []
+    dispatched: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def reply_text(self, message_id: str, text: str) -> None:
+            sent.append((message_id, text))
+
+    async def busy(tab_id: str, text: str, turn_id: str, **kwargs) -> str:
+        dispatched.append(text)
+        raise HTTPException(status_code=409, detail="a turn is already in flight")
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", busy)
+    code, _ = configured_bot.create_code("ou-owner", "ou-owner@example.test", "tab-1", "ws-1")
+    configured_bot.consume_code(
+        code,
+        sender_open_id="ou-owner",
+        app_id="cli-bot",
+        chat_id="oc-chat",
+        owner_is_authorized=lambda *_: True,
+    )
+    answer = json.dumps(
+        {
+            "type": "ask_question_response",
+            "answers": [{"questionId": "q1", "selected": ["red"]}],
+        }
+    )
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text=answer, message_id="om-busy"), now
+    )
+
+    response = TestClient(app).post("/api/feishu/bot/events", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert dispatched and dispatched[0] != answer
+    assert dispatched[0].endswith(answer)
+    assert sent == [
+        (
+            "om-busy",
+            "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。",
+        )
+    ]
+    assert configured_bot.get_sender_binding("ou-owner", "cli-bot", "oc-chat")
 
 
 @pytest.mark.asyncio
@@ -753,15 +892,21 @@ async def test_feishu_client_uses_injected_http_transport(bot_config) -> None:
     ) as http_client:
         client = bot_api.FeishuBotClient(bot_config, client=http_client)
         await client.send_text("oc-chat", "assistant reply")
+        await client.reply_text("om-inbound", "exact reply")
 
     assert [request.url.path for request in requests] == [
         "/open-apis/auth/v3/tenant_access_token/internal",
         "/open-apis/im/v1/messages",
+        "/open-apis/im/v1/messages/om-inbound/reply",
     ]
     assert requests[1].headers["authorization"] == "Bearer tenant-token"
     sent_body = json.loads(requests[1].content)
     assert sent_body["receive_id"] == "oc-chat"
     assert json.loads(sent_body["content"]) == {"text": "assistant reply"}
+    reply_body = json.loads(requests[2].content)
+    assert "receive_id" not in reply_body
+    assert reply_body["msg_type"] == "text"
+    assert json.loads(reply_body["content"]) == {"text": "exact reply"}
 
 
 @pytest.mark.asyncio
@@ -779,10 +924,10 @@ async def test_external_chat_adapter_reuses_existing_stream_manager(monkeypatch)
             unsubscribed.append((session_id, queue_arg))
 
     manager = FakeManager()
-    dispatched: list[tuple[str, str, str]] = []
+    dispatched: list[tuple[str, str, str, dict]] = []
 
-    async def fake_dispatch(tab_id, payload) -> str:
-        dispatched.append((tab_id, payload.text, payload.client_turn_id))
+    async def fake_dispatch(tab_id, payload, **kwargs) -> str:
+        dispatched.append((tab_id, payload.text, payload.client_turn_id, kwargs))
         await queue.put(
             AgentStreamEvent(
                 stream_sequence=4,
@@ -801,10 +946,36 @@ async def test_external_chat_adapter_reuses_existing_stream_manager(monkeypatch)
     monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
     monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
 
+    metadata = {
+        "origin": "feishu",
+        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        "feishu": {
+            "app_id": "cli-bot",
+            "chat_id": "oc-chat",
+            "message_id": "om-1",
+            "sender_open_id": "ou-owner",
+        },
+    }
     result = await stream_api.dispatch_tab_chat_and_wait(
-        "tab-1", "question", "feishu-turn", timeout_seconds=1
+        "tab-1",
+        "provider question",
+        "feishu-turn",
+        visible_text="question",
+        turn_metadata=metadata,
+        timeout_seconds=1,
     )
 
     assert result == "existing session reply"
-    assert dispatched == [("tab-1", "question", "feishu-turn")]
+    assert dispatched == [
+        (
+            "tab-1",
+            "provider question",
+            "feishu-turn",
+            {
+                "visible_text": "question",
+                "turn_metadata": metadata,
+                "allow_question_answer": False,
+            },
+        )
+    ]
     assert unsubscribed == [(session.id, queue)]

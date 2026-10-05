@@ -48,7 +48,13 @@ const bundled = `${durationJs}\n${questionJs}\n${subagentJs}\n${agentImageJs}\n$
 const mod = await import(
   `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
 )
-const { deliveryAt, groupEventsIntoTurns, messageClockLabel, turnClockLabel } = mod
+const {
+  deliveryAt,
+  groupEventsIntoTurns,
+  messageClockLabel,
+  messageSourceLabel,
+  turnClockLabel,
+} = mod
 
 /** Expected clock label for an ISO instant, in the same local time the source uses. */
 function clockOf(iso) {
@@ -79,6 +85,54 @@ test('turn_started creates a turn with the user message from summary', () => {
   const turns = groupEventsIntoTurns(events)
   assert.equal(turns.length, 1)
   assert.equal(turns[0].userText, 'Hello')
+})
+
+test('serialized turn history preserves explicit source without inferring from turn ids', () => {
+  const history = [
+    makeEvent(1, 'turn_started', {
+      summary: 'from Feishu',
+      metadata: {
+        origin: 'feishu',
+        feishu: {
+          app_id: 'cli-bot',
+          chat_id: 'oc-chat',
+          message_id: 'om-message',
+          sender_open_id: 'ou-sender',
+        },
+      },
+    }, { turn_id: 'feishu-durable' }),
+    // A provider lifecycle echo without metadata must not erase the
+    // authoritative source recorded by the server-authored turn start.
+    makeEvent(2, 'turn_started', { summary: 'from Feishu' }, { turn_id: 'feishu-durable' }),
+    makeEvent(3, 'turn_started', {
+      summary: 'from Web',
+      metadata: { origin: 'web' },
+    }, { turn_id: 'web-durable' }),
+    makeEvent(4, 'turn_started', {
+      summary: 'legacy message',
+    }, { turn_id: 'feishu-name-is-not-provenance' }),
+  ]
+
+  // Hydration receives JSON-decoded durable events, not the original object
+  // identities, so round-trip them before reducing.
+  const turns = groupEventsIntoTurns(JSON.parse(JSON.stringify(history)))
+
+  assert.equal(turns.length, 3)
+  assert.equal(turns[0].userText, 'from Feishu')
+  assert.equal(turns[0].origin, 'feishu')
+  assert.deepEqual(turns[0].feishu, {
+    appId: 'cli-bot',
+    chatId: 'oc-chat',
+    messageId: 'om-message',
+    senderOpenId: 'ou-sender',
+  })
+  assert.equal(messageSourceLabel(turns[0]), 'Feishu · ou-sender')
+  assert.equal(turns[1].origin, 'web')
+  assert.equal(turns[1].feishu, null)
+  assert.equal(messageSourceLabel(turns[1]), null)
+  assert.equal(turns[2].origin, 'unknown')
+  assert.equal(turns[2].feishu, null)
+  assert.equal(messageSourceLabel(turns[2]), null)
 })
 
 test('text_delta appends to assistant text within the current turn', () => {

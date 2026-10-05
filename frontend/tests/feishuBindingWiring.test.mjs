@@ -11,6 +11,13 @@ test('local direct Chat surface mounts one Feishu binding panel for its concrete
   assert.match(pane, /import FeishuBindingPanel from '@\/components\/FeishuBindingPanel\.vue'/)
 })
 
+test('message source is rendered from each durable turn instead of binding state or turn id', () => {
+  assert.match(pane, /:data-message-origin="turn\.origin"/)
+  assert.match(pane, /v-if="turn\.origin === 'feishu'"/)
+  assert.match(pane, /\{\{ messageSourceLabel\(turn\) \}\}/)
+  assert.doesNotMatch(pane, /turn\.turnId.*(?:startsWith|includes).*feishu/)
+})
+
 test('binding UI exposes stable accessible controls and observable states', () => {
   assert.ok(panel.includes('aria-label="Feishu connection settings"'))
   assert.ok(panel.includes('data-testid="feishu-binding-trigger"'))

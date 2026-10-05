@@ -16,6 +16,10 @@ from claude_hub.auth.dependencies import get_current_user_from_cookie
 from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services import ttyd_manager, workspace_manager
+from claude_hub.services.agent_stream.turn_source import (
+    FEISHU_PROVIDER_TEXT_FORMAT_V1,
+    format_feishu_provider_text_v1,
+)
 from claude_hub.services.feishu_bot import (
     MAX_FEISHU_EVENT_BYTES,
     BindingCodeError,
@@ -200,9 +204,29 @@ def _turn_id(message_id: str) -> str:
     return f"feishu-{digest}"
 
 
-async def _send_failure(client: FeishuBotClient, chat_id: str, text: str) -> None:
+def _turn_metadata(event: FeishuMessageEvent) -> dict[str, Any]:
+    return {
+        "origin": "feishu",
+        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        "feishu": {
+            "app_id": event.app_id,
+            "chat_id": event.chat_id,
+            "message_id": event.message_id,
+            "sender_open_id": event.sender_open_id,
+        },
+    }
+
+
+def _is_chat_busy_error(exc: HTTPException) -> bool:
+    detail = str(exc.detail)
+    return exc.status_code == 409 and (
+        "active Goal" in detail or "turn is already in flight" in detail
+    )
+
+
+async def _send_failure(client: FeishuBotClient, message_id: str, text: str) -> None:
     try:
-        await client.send_text(chat_id, text)
+        await client.reply_text(message_id, text)
     except Exception:
         logger.exception("Feishu Bot could not send a failure response")
 
@@ -225,18 +249,18 @@ async def _handle_message_event(
                     owner_is_authorized=_owner_is_authorized,
                 )
             except BindingCodeError as exc:
-                await client.send_text(event.chat_id, f"绑定失败：{exc}")
+                await client.reply_text(event.message_id, f"绑定失败：{exc}")
                 return
             try:
                 _validate_bind_target(created_binding.tab_id, created_binding.workspace_id)
             except HTTPException:
                 _binding_store.delete_owner_binding(created_binding.owner_open_id)
-                await client.send_text(event.chat_id, "绑定失败：Claude Hub 目标当前不可用。")
+                await client.reply_text(event.message_id, "绑定失败：Claude Hub 目标当前不可用。")
                 return
             if not _binding_is_current(created_binding, config):
                 return
-            await client.send_text(
-                event.chat_id,
+            await client.reply_text(
+                event.message_id,
                 f"已连接 Claude Hub Chat：{created_binding.tab_id}",
             )
             status_value = "completed"
@@ -248,32 +272,44 @@ async def _handle_message_event(
             event.chat_id,
         )
         if binding is None:
-            await client.send_text(
-                event.chat_id,
+            await client.reply_text(
+                event.message_id,
                 "当前单聊尚未连接 Claude Hub，请先在 Hub 网页生成绑定码。",
             )
             return
         if not _binding_is_current(binding, config):
             _binding_store.delete_owner_binding(binding.owner_open_id)
-            await client.send_text(event.chat_id, "Claude Hub 授权已失效，请在网页重新绑定。")
+            await client.reply_text(event.message_id, "Claude Hub 授权已失效，请在网页重新绑定。")
             return
         _validate_bind_target(binding.tab_id, binding.workspace_id)
         assistant_text = await dispatch_tab_chat_and_wait(
             binding.tab_id,
-            event.text,
+            format_feishu_provider_text_v1(
+                event.text,
+                app_id=event.app_id,
+                chat_id=event.chat_id,
+                message_id=event.message_id,
+                sender_open_id=event.sender_open_id,
+            ),
             _turn_id(event.message_id),
+            visible_text=event.text,
+            turn_metadata=_turn_metadata(event),
         )
         if not _binding_is_current(binding, config):
             logger.info("Feishu Bot reply suppressed because the binding changed during the turn")
             return
-        await client.send_text(event.chat_id, assistant_text)
+        await client.reply_text(event.message_id, assistant_text)
         status_value = "completed"
     except HTTPException as exc:
         logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
-        await _send_failure(client, event.chat_id, "Claude Hub 目标当前不可用，请在网页重新绑定。")
+        if _is_chat_busy_error(exc):
+            message = "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"
+        else:
+            message = "Claude Hub 目标当前不可用，请在网页重新绑定。"
+        await _send_failure(client, event.message_id, message)
     except Exception:
         logger.exception("Feishu Bot message dispatch failed")
-        await _send_failure(client, event.chat_id, "Claude Hub 处理消息失败，请稍后重试。")
+        await _send_failure(client, event.message_id, "Claude Hub 处理消息失败，请稍后重试。")
     finally:
         _binding_store.finish_message(event.message_id, status_value)
 
