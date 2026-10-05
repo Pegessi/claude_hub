@@ -2050,7 +2050,13 @@ class SessionTailer:
                     continue
                 self._record_approval_card(event)
                 self._record_watchdog_activity(event)
-                if event.type == AgentStreamEventType.TEXT_DELTA and not event.payload.get("plan"):
+                if (
+                    event.type == AgentStreamEventType.TEXT_DELTA
+                    and not event.payload.get("plan")
+                    and not event.payload.get("subagent_thread")
+                ):
+                    # Child text remains in its own persisted timeline. It
+                    # cannot become the parent's final answer/Goal envelope.
                     text = event.payload.get("text")
                     if isinstance(text, str):
                         self._assistant_text += text
