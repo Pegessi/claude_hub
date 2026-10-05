@@ -1,10 +1,88 @@
+import asyncio
+import importlib
+import json
+import socket
+import subprocess
+import uuid
+from contextlib import suppress
 from datetime import datetime
+from pathlib import Path
+from typing import Callable
 
 import pytest
+from fastapi import FastAPI
 from httpx import AsyncClient
 from pytest import MonkeyPatch
 
-from claude_hub.models import AgentType, ExecutionTarget, TerminalTab
+from claude_hub.api.tabs import router as tabs_router
+from claude_hub.auth.dependencies import get_current_user
+from claude_hub.models import AgentType, ExecutionTarget, TerminalTab, User
+from claude_hub.services.ttyd_manager import TabStartupTimeoutError, TTYDManager
+
+api_tabs_module = importlib.import_module("claude_hub.api.tabs")
+ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
+
+
+async def _post_tab_then_disconnect(
+    create_started: asyncio.Event,
+    *,
+    on_disconnect: Callable[[], None] | None = None,
+    wait_before_disconnect_delivery: asyncio.Event | None = None,
+) -> list[dict]:
+    """Invoke the tabs router with a real ASGI http.disconnect message."""
+    app = FastAPI()
+    app.include_router(tabs_router)
+    app.dependency_overrides[get_current_user] = lambda: User(
+        open_id="local", name="Local User", email="local@localhost", avatar_url=None
+    )
+    payload = json.dumps(
+        {
+            "name": "proxy-ab-controlled",
+            "agent_type": "codex",
+            "session_kind": "chat",
+            "cwd": "/tmp/proxy-ab-controlled",
+            "env": {"CODEX_MODEL": "gpt-6.1-sol"},
+        }
+    ).encode()
+    incoming: asyncio.Queue[dict] = asyncio.Queue()
+    await incoming.put({"type": "http.request", "body": payload, "more_body": False})
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        message = await incoming.get()
+        if message["type"] == "http.disconnect":
+            if on_disconnect is not None:
+                on_disconnect()
+            if wait_before_disconnect_delivery is not None:
+                await wait_before_disconnect_delivery.wait()
+        return message
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/tabs",
+        "raw_path": b"/api/tabs",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(payload)).encode()),
+        ],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8173),
+        "root_path": "",
+        "state": {},
+    }
+    request_task = asyncio.create_task(app(scope, receive, send))
+    await create_started.wait()
+    await incoming.put({"type": "http.disconnect"})
+    await request_task
+    return sent
 
 
 @pytest.mark.asyncio
@@ -29,6 +107,215 @@ async def test_create_tab_rejects_retired_agent_session_kind(client: AsyncClient
 
     assert response.status_code == 422
     assert "session_kind" in response.text
+
+
+@pytest.mark.asyncio
+async def test_create_tab_timeout_returns_gateway_timeout(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    async def fake_create_tab(**kwargs: object) -> TerminalTab:
+        raise TabStartupTimeoutError("tab startup timed out after 15s")
+
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.create_tab", fake_create_tab)
+
+    response = await client.post("/api/tabs", json={"name": "Timed out", "agent_type": "terminal"})
+
+    assert response.status_code == 504
+    assert response.json() == {"detail": "tab startup timed out after 15s"}
+
+
+@pytest.mark.asyncio
+async def test_create_tab_asgi_disconnect_cancels_and_waits_for_rollback(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    create_started = asyncio.Event()
+    rollback_completed = asyncio.Event()
+    captured: dict[str, object] = {}
+
+    async def fake_create_tab(**kwargs: object) -> TerminalTab:
+        captured.update(kwargs)
+        create_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            rollback_completed.set()
+
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.create_tab", fake_create_tab)
+
+    sent = await _post_tab_then_disconnect(create_started)
+
+    assert rollback_completed.is_set()
+    assert captured["agent_type"] == AgentType.CODEX
+    assert captured["session_kind"].value == "chat"
+    assert captured["cwd"] == "/tmp/proxy-ab-controlled"
+    assert captured["env"] == {"CODEX_MODEL": "gpt-6.1-sol"}
+    response_start = next(message for message in sent if message["type"] == "http.response.start")
+    assert response_start["status"] == 499
+
+
+@pytest.mark.asyncio
+async def test_create_tab_disconnect_rolls_back_create_completed_before_response(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+    create_completed = asyncio.Event()
+    deleted: list[str] = []
+    created = TerminalTab(
+        id="completed-before-disconnect-response",
+        name="proxy-ab-controlled",
+        shell="codex",
+        cwd="/tmp/proxy-ab-controlled",
+        solo_mode=False,
+        agent_type=AgentType.CODEX,
+        target=ExecutionTarget.LOCAL,
+        remote_profile_id=None,
+        remote_cwd=None,
+        remote_reconnect=True,
+        port=12017,
+        created_at=datetime.now(),
+        is_active=True,
+        workspace_id=None,
+    )
+
+    async def fake_create_tab(**kwargs: object) -> TerminalTab:
+        create_started.set()
+        await allow_create.wait()
+        create_completed.set()
+        return created
+
+    async def fake_delete_tab(tab_id: str) -> bool:
+        deleted.append(tab_id)
+        return True
+
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.create_tab", fake_create_tab)
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.delete_tab", fake_delete_tab)
+
+    sent = await _post_tab_then_disconnect(
+        create_started,
+        on_disconnect=allow_create.set,
+        wait_before_disconnect_delivery=create_completed,
+    )
+
+    assert deleted == [created.id]
+    response_start = next(message for message in sent if message["type"] == "http.response.start")
+    assert response_start["status"] == 499
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    ttyd_manager_module.shutil.which("tmux") is None
+    or ttyd_manager_module.shutil.which("ttyd") is None,
+    reason="tmux and ttyd are required",
+)
+async def test_create_tab_handler_cancellation_rolls_back_real_owned_resources(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Server-side handler cancellation cannot leave its child create running."""
+    socket_name = f"ch-asgi-cancel-{uuid.uuid4().hex[:8]}"
+    tmux_tmp = Path("/tmp") / f"ch-tmux-{uuid.uuid4().hex[:8]}"
+    tmux_tmp.mkdir(mode=0o700)
+    home = tmp_path / "home"
+    xdg_config = tmp_path / "xdg-config"
+    runtime = tmp_path / "runtime"
+    for directory in (home, xdg_config, runtime):
+        directory.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
+    monkeypatch.setenv("CLAUDE_HUB_TMUX_SOCKET", socket_name)
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmp))
+    monkeypatch.setattr(ttyd_manager_module, "STATE_FILE", runtime / "tabs.json")
+    monkeypatch.setattr(ttyd_manager_module, "ORDER_FILE", runtime / "tab_order.json")
+    monkeypatch.setattr(ttyd_manager_module, "LAUNCH_ENV_DIR", runtime / "launch_env")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(ttyd_manager_module.settings, "ttyd_base_port", port)
+    manager = TTYDManager()
+    monkeypatch.setattr(api_tabs_module, "ttyd_manager", manager)
+
+    app = FastAPI()
+    app.include_router(tabs_router)
+    app.dependency_overrides[get_current_user] = lambda: User(
+        open_id="local", name="Local User", email="local@localhost", avatar_url=None
+    )
+    payload = json.dumps(
+        {"name": "cancelled-handler", "agent_type": "terminal", "cwd": str(tmp_path)}
+    ).encode()
+    incoming: asyncio.Queue[dict] = asyncio.Queue()
+    await incoming.put({"type": "http.request", "body": payload, "more_body": False})
+
+    async def receive() -> dict:
+        return await incoming.get()
+
+    async def send(message: dict) -> None:
+        pytest.fail(f"cancelled handler must not commit a response: {message}")
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/tabs",
+        "raw_path": b"/api/tabs",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8173),
+        "root_path": "",
+        "state": {},
+    }
+    handler_task = asyncio.create_task(app(scope, receive, send))
+    owned_session = ""
+    try:
+        for _ in range(200):
+            listed = subprocess.run(
+                ttyd_manager_module.tmux_command("list-sessions", "-F", "#{session_name}"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            owned = [
+                name
+                for name in listed.stdout.splitlines()
+                if name.startswith(ttyd_manager_module.TMUX_SESSION_PREFIX)
+                and name != "__tmux_server_keepalive__"
+            ]
+            if owned:
+                owned_session = owned[0]
+                break
+            await asyncio.sleep(0.01)
+        assert owned_session
+
+        handler_task.cancel()
+        await asyncio.sleep(0)
+        handler_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handler_task
+
+        assert manager.processes == {}
+        assert manager._tab_order == []
+        assert (
+            subprocess.run(
+                ttyd_manager_module.tmux_command("has-session", "-t", owned_session),
+                capture_output=True,
+                check=False,
+            ).returncode
+            != 0
+        )
+        assert ttyd_manager_module._is_local_port_available(port) is True
+    finally:
+        if not handler_task.done():
+            handler_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await handler_task
+        for tab_id in list(manager.processes):
+            await manager.delete_tab(tab_id)
+        subprocess.run(
+            ttyd_manager_module.tmux_command("kill-server"), capture_output=True, check=False
+        )
+        ttyd_manager_module.shutil.rmtree(tmux_tmp, ignore_errors=True)
 
 
 @pytest.mark.asyncio

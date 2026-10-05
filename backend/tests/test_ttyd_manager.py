@@ -4,10 +4,13 @@ import importlib
 import json
 import os
 import shlex
+import socket
 import stat
 import subprocess
+import sys
 import threading
 import uuid
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +32,7 @@ from claude_hub.models import (
 from claude_hub.services.ttyd_manager import (
     DEFAULT_CLAUDE_LAUNCH_ENV,
     TabLimitExceededError,
+    TabStartupTimeoutError,
     TTYDManager,
     TTYDProcess,
     _event_turn_ordinals,
@@ -182,8 +186,87 @@ def _claude_settings_path(command: str) -> str:
     return parts[settings_index + 1]
 
 
+def test_tmux_server_probe_uses_server_scoped_command(monkeypatch: MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    timeouts: list[float] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(cmd)
+        timeouts.append(float(kwargs["timeout"]))
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(ttyd_manager_module.subprocess, "run", fake_run)
+
+    assert ttyd_manager_module._tmux_server_running() is False
+    assert calls == [ttyd_manager_module.tmux_command("show-options", "-s")]
+    assert timeouts == [ttyd_manager_module._TMUX_CONTROL_TIMEOUT_SECONDS]
+
+
+@pytest.mark.skipif(
+    ttyd_manager_module.shutil.which("tmux") is None, reason="tmux is not installed"
+)
+def test_tmux_server_probe_and_cold_start_on_isolated_socket(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    socket_name = f"ch-probe-{uuid.uuid4().hex[:8]}"
+    tmux_tmp = Path("/tmp") / f"ch-tmux-{uuid.uuid4().hex[:8]}"
+    tmux_tmp.mkdir(mode=0o700)
+    home = tmp_path / "home"
+    xdg_config = tmp_path / "xdg-config"
+    home.mkdir()
+    xdg_config.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
+    monkeypatch.setenv("CLAUDE_HUB_TMUX_SOCKET", socket_name)
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmp))
+
+    def run_tmux(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ttyd_manager_module.tmux_command(*args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+    run_tmux("kill-server")
+    socket_dir = tmux_tmp / f"tmux-{os.getuid()}"
+    socket_dir.mkdir(mode=0o700, exist_ok=True)
+    socket_path = socket_dir / socket_name
+    try:
+        # Missing and stale sockets are both non-responsive, even though the
+        # stale socket still exists in the filesystem.
+        assert ttyd_manager_module._tmux_server_running() is False
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(socket_path))
+        stale.close()
+        assert socket_path.exists()
+        assert ttyd_manager_module._tmux_server_running() is False
+        socket_path.unlink(missing_ok=True)
+
+        # A responsive server is live with either zero or one session.
+        empty_start = run_tmux("start-server", ";", "set-option", "-s", "exit-empty", "off")
+        assert empty_start.returncode == 0, empty_start.stderr
+        assert ttyd_manager_module._tmux_server_running() is True
+        empty_list = run_tmux("list-sessions")
+        assert empty_list.returncode == 0
+        assert empty_list.stdout == ""
+        assert run_tmux("new-session", "-d", "-s", "existing").returncode == 0
+        assert ttyd_manager_module._tmux_server_running() is True
+
+        assert run_tmux("kill-server").returncode == 0
+        assert ttyd_manager_module._tmux_server_running() is False
+        assert ttyd_manager_module._ensure_tmux_server() is True
+        assert run_tmux("has-session", "-t", "__tmux_server_keepalive__").returncode == 0
+    finally:
+        run_tmux("kill-server")
+        socket_path.unlink(missing_ok=True)
+        ttyd_manager_module.shutil.rmtree(tmux_tmp, ignore_errors=True)
+
+
 def test_ensure_tmux_server_refreshes_launch_environment(monkeypatch: MonkeyPatch) -> None:
     calls: list[list[str]] = []
+    timeouts: list[float] = []
 
     monkeypatch.setenv("HOME", "/Users/example")
     monkeypatch.setenv("PATH", "/opt/example/bin:/usr/bin")
@@ -193,6 +276,7 @@ def test_ensure_tmux_server_refreshes_launch_environment(monkeypatch: MonkeyPatc
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
+        timeouts.append(float(kwargs["timeout"]))
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(ttyd_manager_module.subprocess, "run", fake_run)
@@ -211,6 +295,94 @@ def test_ensure_tmux_server_refreshes_launch_environment(monkeypatch: MonkeyPatc
     assert (
         ttyd_manager_module.tmux_command("set-environment", "-gu", "PYTEST_CURRENT_TEST") in calls
     )
+    assert timeouts
+    assert set(timeouts) == {ttyd_manager_module._TMUX_CONTROL_TIMEOUT_SECONDS}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tmux_ensure_reaps_launcher_before_owned_session_cleanup(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cancelled ensure cannot create its owned tmux session after rollback."""
+    started = tmp_path / "launcher-started"
+    late_effect = tmp_path / "launcher-late-effect"
+    launcher = tmp_path / "delayed_launcher.py"
+    launcher.write_text(
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(0.5)\n"
+        "pathlib.Path(sys.argv[2]).write_text('late')\n"
+    )
+    killed_sessions: list[str] = []
+
+    async def fake_session_exists(session_name: str) -> bool:
+        return False
+
+    async def fake_kill_session(session_name: str) -> None:
+        launcher_pid = int(started.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(launcher_pid, 0)
+        killed_sessions.append(session_name)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", fake_session_exists)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_kill_session", fake_kill_session)
+    monkeypatch.setattr(ttyd_manager_module, "_ensure_tmux_server", lambda: None)
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "tmux_command",
+        lambda *args: [sys.executable, str(launcher), str(started), str(late_effect)],
+    )
+    process = TTYDProcess(
+        tab_id="owned-launcher",
+        port=12009,
+        name="Owned launcher",
+        shell="/bin/sh",
+        cwd=str(tmp_path),
+        agent_type=AgentType.TERMINAL,
+    )
+
+    ensure_task = asyncio.create_task(process.ensure_tmux_session())
+    for _ in range(100):
+        if started.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert started.exists()
+
+    ensure_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ensure_task
+    await asyncio.sleep(0.6)
+
+    assert late_effect.exists() is False
+    assert killed_sessions == [process.tmux_session]
+
+
+@pytest.mark.asyncio
+async def test_ensure_tmux_preserves_preexisting_session(monkeypatch: MonkeyPatch) -> None:
+    killed_sessions: list[str] = []
+
+    async def fake_session_exists(session_name: str) -> bool:
+        return True
+
+    async def unexpected_spawn(*args: object, **kwargs: object) -> None:
+        pytest.fail("pre-existing tmux sessions must not launch a creator process")
+
+    async def fake_kill_session(session_name: str) -> None:
+        killed_sessions.append(session_name)
+
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", fake_session_exists)
+    monkeypatch.setattr(ttyd_manager_module.asyncio, "create_subprocess_exec", unexpected_spawn)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_kill_session", fake_kill_session)
+    process = TTYDProcess(
+        tab_id="preexisting-session",
+        port=12008,
+        name="Pre-existing",
+        shell="/bin/sh",
+        agent_type=AgentType.TERMINAL,
+    )
+
+    assert await process.ensure_tmux_session() is False
+    assert killed_sessions == []
 
 
 def test_get_next_port_skips_existing_listener(monkeypatch: MonkeyPatch) -> None:
@@ -327,6 +499,312 @@ async def test_create_tab_start_failure_stops_unpersisted_process(
     assert [kill_tmux for _, kill_tmux in stopped] == ([False, True] if tmux_created else [False])
     assert manager.processes == {}
     assert manager._tab_order == []
+
+
+@pytest.mark.asyncio
+async def test_create_tab_tmux_ensure_timeout_rolls_back_owned_resources(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A client-independent deadline covers the unregistered tmux create wait."""
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12014
+    manager.processes = {}
+    manager._tab_order = []
+    ensure_cancelled = asyncio.Event()
+    stopped: list[bool] = []
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            ensure_cancelled.set()
+
+    async def fake_start(self: TTYDProcess) -> None:
+        pytest.fail("ttyd must not start after tmux creation times out")
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        stopped.append(kill_tmux)
+
+    monkeypatch.setattr(ttyd_manager_module, "_TAB_CREATE_STARTUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+
+    with pytest.raises(TabStartupTimeoutError, match="timed out after 0.01s"):
+        await manager.create_tab(
+            name="proxy-ab-controlled",
+            cwd=str(tmp_path),
+            agent_type=AgentType.CODEX,
+            session_kind=SessionKind.CHAT,
+            env={"CODEX_MODEL": "gpt-6.1-sol"},
+        )
+
+    assert ensure_cancelled.is_set()
+    assert stopped == [False]
+    assert manager.processes == {}
+    assert manager._tab_order == []
+
+
+@pytest.mark.asyncio
+async def test_create_tab_ttyd_start_timeout_rolls_back_owned_resources(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same deadline covers ttyd startup after tmux has been created."""
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12015
+    manager.processes = {}
+    manager._tab_order = []
+    start_cancelled = asyncio.Event()
+    stopped: list[bool] = []
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return True
+
+    async def fake_start(self: TTYDProcess) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            start_cancelled.set()
+
+    async def fake_stop(self: TTYDProcess, kill_tmux: bool = False) -> None:
+        stopped.append(kill_tmux)
+
+    monkeypatch.setattr(ttyd_manager_module, "_TAB_CREATE_STARTUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "stop", fake_stop)
+
+    with pytest.raises(TabStartupTimeoutError, match="timed out after 0.01s"):
+        await manager.create_tab(
+            name="Timed out ttyd",
+            shell="/bin/zsh",
+            cwd=str(tmp_path),
+            agent_type=AgentType.TERMINAL,
+        )
+
+    assert start_cancelled.is_set()
+    assert stopped == [True]
+    assert manager.processes == {}
+    assert manager._tab_order == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    ttyd_manager_module.shutil.which("tmux") is None
+    or ttyd_manager_module.shutil.which("ttyd") is None,
+    reason="tmux and ttyd are required",
+)
+async def test_real_cold_create_success_cleans_owned_resources(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    socket_name = f"ch-ok-{uuid.uuid4().hex[:8]}"
+    tmux_tmp = Path("/tmp") / f"ch-tmux-{uuid.uuid4().hex[:8]}"
+    tmux_tmp.mkdir(mode=0o700)
+    home = tmp_path / "home"
+    xdg_config = tmp_path / "xdg-config"
+    home.mkdir()
+    xdg_config.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
+    monkeypatch.setenv("CLAUDE_HUB_TMUX_SOCKET", socket_name)
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmp))
+    monkeypatch.setattr(
+        ttyd_manager_module, "_is_local_port_available", _REAL_IS_LOCAL_PORT_AVAILABLE
+    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(ttyd_manager_module.settings, "ttyd_base_port", port)
+    manager = TTYDManager()
+    tab_id: str | None = None
+
+    try:
+        tab = await manager.create_tab(
+            name="Real cold success",
+            shell="/bin/sh",
+            cwd=str(tmp_path),
+            agent_type=AgentType.TERMINAL,
+        )
+        tab_id = tab.id
+        process = manager.processes[tab.id]
+        assert process.process is not None
+        assert process.process.returncode is None
+        assert (
+            subprocess.run(
+                ttyd_manager_module.tmux_command("has-session", "-t", process.tmux_session),
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+
+        assert await manager.delete_tab(tab.id) is True
+        tab_id = None
+        assert manager.processes == {}
+        assert manager._tab_order == []
+        assert _REAL_IS_LOCAL_PORT_AVAILABLE(port) is True
+        assert (
+            subprocess.run(
+                ttyd_manager_module.tmux_command("has-session", "-t", "__tmux_server_keepalive__"),
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+    finally:
+        if tab_id is not None:
+            await manager.delete_tab(tab_id)
+        subprocess.run(
+            ttyd_manager_module.tmux_command("kill-server"), capture_output=True, check=False
+        )
+        ttyd_manager_module.shutil.rmtree(tmux_tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    ttyd_manager_module.shutil.which("tmux") is None, reason="tmux is not installed"
+)
+async def test_real_cold_create_failure_rolls_back_owned_resources(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    socket_name = f"ch-fail-{uuid.uuid4().hex[:8]}"
+    tmux_tmp = Path("/tmp") / f"ch-tmux-{uuid.uuid4().hex[:8]}"
+    tmux_tmp.mkdir(mode=0o700)
+    home = tmp_path / "home"
+    xdg_config = tmp_path / "xdg-config"
+    home.mkdir()
+    xdg_config.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
+    monkeypatch.setenv("CLAUDE_HUB_TMUX_SOCKET", socket_name)
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmp))
+    monkeypatch.setattr(
+        ttyd_manager_module, "_is_local_port_available", _REAL_IS_LOCAL_PORT_AVAILABLE
+    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(ttyd_manager_module.settings, "ttyd_base_port", port)
+    monkeypatch.setattr(ttyd_manager_module.settings, "ttyd_path", str(tmp_path / "missing-ttyd"))
+    manager = TTYDManager()
+
+    try:
+        with pytest.raises(FileNotFoundError):
+            await manager.create_tab(
+                name="Real cold failure",
+                shell="/bin/sh",
+                cwd=str(tmp_path),
+                agent_type=AgentType.TERMINAL,
+            )
+
+        listed = subprocess.run(
+            ttyd_manager_module.tmux_command("list-sessions", "-F", "#{session_name}"),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert listed.returncode == 0
+        assert set(listed.stdout.splitlines()) == {"__tmux_server_keepalive__"}
+        assert manager.processes == {}
+        assert manager._tab_order == []
+        assert _REAL_IS_LOCAL_PORT_AVAILABLE(port) is True
+    finally:
+        subprocess.run(
+            ttyd_manager_module.tmux_command("kill-server"), capture_output=True, check=False
+        )
+        ttyd_manager_module.shutil.rmtree(tmux_tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    ttyd_manager_module.shutil.which("tmux") is None
+    or ttyd_manager_module.shutil.which("ttyd") is None,
+    reason="tmux and ttyd are required",
+)
+async def test_real_cold_create_cancellation_rolls_back_owned_resources(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    socket_name = f"ch-cancel-{uuid.uuid4().hex[:8]}"
+    tmux_tmp = Path("/tmp") / f"ch-tmux-{uuid.uuid4().hex[:8]}"
+    tmux_tmp.mkdir(mode=0o700)
+    home = tmp_path / "home"
+    xdg_config = tmp_path / "xdg-config"
+    home.mkdir()
+    xdg_config.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
+    monkeypatch.setenv("CLAUDE_HUB_TMUX_SOCKET", socket_name)
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmp))
+    monkeypatch.setattr(
+        ttyd_manager_module, "_is_local_port_available", _REAL_IS_LOCAL_PORT_AVAILABLE
+    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(ttyd_manager_module.settings, "ttyd_base_port", port)
+    manager = TTYDManager()
+    create_task = asyncio.create_task(
+        manager.create_tab(
+            name="Real cold cancellation",
+            shell="/bin/sh",
+            cwd=str(tmp_path),
+            agent_type=AgentType.TERMINAL,
+        )
+    )
+    owned_session = ""
+
+    try:
+        for _ in range(200):
+            listed = subprocess.run(
+                ttyd_manager_module.tmux_command("list-sessions", "-F", "#{session_name}"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            owned = [
+                name
+                for name in listed.stdout.splitlines()
+                if name.startswith(ttyd_manager_module.TMUX_SESSION_PREFIX)
+                and name != "__tmux_server_keepalive__"
+            ]
+            if owned:
+                owned_session = owned[0]
+                break
+            await asyncio.sleep(0.01)
+        assert owned_session
+
+        create_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await create_task
+
+        assert (
+            subprocess.run(
+                ttyd_manager_module.tmux_command("has-session", "-t", owned_session),
+                capture_output=True,
+                check=False,
+            ).returncode
+            != 0
+        )
+        assert (
+            subprocess.run(
+                ttyd_manager_module.tmux_command("has-session", "-t", "__tmux_server_keepalive__"),
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+        assert manager.processes == {}
+        assert manager._tab_order == []
+        assert _REAL_IS_LOCAL_PORT_AVAILABLE(port) is True
+    finally:
+        if not create_task.done():
+            create_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await create_task
+        subprocess.run(
+            ttyd_manager_module.tmux_command("kill-server"), capture_output=True, check=False
+        )
+        ttyd_manager_module.shutil.rmtree(tmux_tmp, ignore_errors=True)
 
 
 @pytest.mark.asyncio

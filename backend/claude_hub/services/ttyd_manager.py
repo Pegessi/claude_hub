@@ -53,6 +53,11 @@ ORDER_FILE = _RUNTIME_HOME / "tab_order.json"
 LAUNCH_ENV_DIR = _RUNTIME_HOME / "launch_env"
 TMUX_SESSION_PREFIX = "claude-hub-"
 _ORPHAN_TMUX_PRUNE_GRACE_SECONDS = 60.0
+_TMUX_CONTROL_TIMEOUT_SECONDS = 5.0
+# A tab is not registered until both its tmux session and ttyd listener are
+# ready. Bound its asynchronous launcher waits; synchronous tmux control calls
+# have their own timeout above.
+_TAB_CREATE_STARTUP_TIMEOUT_SECONDS = 15.0
 _MANAGED_TMUX_SESSION_RE = re.compile(rf"^{re.escape(TMUX_SESSION_PREFIX)}[0-9a-f]{{8}}$")
 
 #: Schema identifier for the same-pane Cursor CLI transcript format.
@@ -302,6 +307,10 @@ class TabLimitExceededError(Exception):
     """
 
 
+class TabStartupTimeoutError(RuntimeError):
+    """Raised after an unregistered tab startup times out and is rolled back."""
+
+
 class CursorPosition(TypedDict):
     cursor_x: int
     cursor_y: int
@@ -352,16 +361,17 @@ def _tmux_session_name(tab_id: str) -> str:
 
 
 def _tmux_server_running() -> bool:
-    """Check if tmux server is running."""
+    """Return whether the configured tmux server accepts server-scoped queries."""
     try:
         ret = subprocess.run(
-            tmux_command("ls"),
+            tmux_command("show-options", "-s"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=_TMUX_CONTROL_TIMEOUT_SECONDS,
         ).returncode
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-    return ret == 0 or ret == 1  # 0 = has sessions, 1 = no sessions but server running
+    return ret == 0
 
 
 _TMUX_LAUNCH_ENV_KEYS = (
@@ -397,20 +407,30 @@ def _refresh_tmux_server_environment() -> None:
             if value is not None
             else tmux_command("set-environment", "-gu", key)
         )
-        result = subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_TMUX_CONTROL_TIMEOUT_SECONDS,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            logger.warning("Timed out or failed to refresh tmux global environment key %s", key)
+            continue
         if result.returncode != 0:
             logger.warning("Failed to refresh tmux global environment key %s", key)
 
     for key in _TMUX_STALE_ENV_KEYS:
-        result = subprocess.run(
-            tmux_command("set-environment", "-gu", key),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            result = subprocess.run(
+                tmux_command("set-environment", "-gu", key),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_TMUX_CONTROL_TIMEOUT_SECONDS,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            logger.warning("Timed out or failed to clear stale tmux global environment key %s", key)
+            continue
         if result.returncode != 0:
             logger.warning("Failed to clear stale tmux global environment key %s", key)
 
@@ -429,6 +449,7 @@ def _ensure_tmux_server() -> bool:
             tmux_command("new-session", "-d", "-s", "__tmux_server_keepalive__"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=_TMUX_CONTROL_TIMEOUT_SECONDS,
         ).returncode
         if ret == 0:
             logger.info("tmux server started successfully with keepalive session")
@@ -517,6 +538,26 @@ async def _tmux_list_session_created() -> dict[str, float]:
         except ValueError:
             logger.warning("Ignoring tmux session with invalid creation time: %r", line)
     return sessions
+
+
+async def _finish_tmux_launcher_rollback(
+    proc: asyncio.subprocess.Process, session_name: str
+) -> None:
+    """Reap a cancelled tmux launcher before removing its owned session."""
+    if proc.returncode is None:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+    await _tmux_kill_session(session_name)
 
 
 async def _tmux_kill_session(session_name: str) -> None:
@@ -2024,7 +2065,22 @@ asyncio.run(_main())
             stderr=asyncio.subprocess.PIPE,
             env=_agent_spawn_env(),
         )
-        _, stderr = await proc.communicate()
+        try:
+            _, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            # This launcher belongs to the absent session checked above. Stop
+            # and reap it before removing the session, otherwise a late
+            # ``tmux new-session`` could recreate the resource after rollback.
+            cleanup_task = asyncio.create_task(
+                _finish_tmux_launcher_rollback(proc, self.tmux_session)
+            )
+            while not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    continue
+            await cleanup_task
+            raise
         if proc.returncode != 0:
             error = stderr.decode("utf-8", errors="ignore").strip()
             raise RuntimeError(error or f"tmux new-session failed with code {proc.returncode}")
@@ -3574,6 +3630,11 @@ class TTYDManager:
         )
         tmux_created = False
         process_stopped_without_tmux = False
+        startup_deadline = asyncio.get_running_loop().time() + _TAB_CREATE_STARTUP_TIMEOUT_SECONDS
+
+        def remaining_startup_time() -> float:
+            return max(0.0, startup_deadline - asyncio.get_running_loop().time())
+
         try:
             # Stamp launch clocks before starting (ttyd lazy-executes: start()
             # awaits ~1 s during which the agent is already running in tmux).
@@ -3587,9 +3648,31 @@ class TTYDManager:
             ensure_cancel: Optional[asyncio.CancelledError] = None
             while not ensure_task.done():
                 try:
-                    tmux_created = await asyncio.shield(ensure_task)
+                    tmux_created = await asyncio.wait_for(
+                        asyncio.shield(ensure_task), timeout=remaining_startup_time()
+                    )
                 except asyncio.CancelledError as exc:
                     ensure_cancel = ensure_cancel or exc
+                except asyncio.TimeoutError as exc:
+                    ensure_task.cancel()
+                    try:
+                        await ensure_task
+                    except asyncio.CancelledError:
+                        # ensure_tmux_session terminated and reaped its launcher,
+                        # then removed only the session it proved absent before
+                        # launch. No tmux ownership is inferred here.
+                        pass
+                    except Exception:
+                        # The ensure task could not finish its own rollback.
+                        # Retry the uniquely named session cleanup below while
+                        # preserving the startup timeout as the caller contract.
+                        tmux_created = True
+                        logger.exception("Failed to roll back timed out tmux ensure for %s", tab_id)
+                    if ensure_cancel is not None:
+                        raise ensure_cancel
+                    raise TabStartupTimeoutError(
+                        f"tab startup timed out after {_TAB_CREATE_STARTUP_TIMEOUT_SECONDS:g}s"
+                    ) from exc
             if ensure_task.done():
                 tmux_created = ensure_task.result()
             if ensure_cancel is not None:
@@ -3597,10 +3680,14 @@ class TTYDManager:
 
             for attempt in range(1, _MAX_TTYD_BIND_ATTEMPTS + 1):
                 try:
-                    await process.start()
+                    await asyncio.wait_for(process.start(), timeout=remaining_startup_time())
                     break
                 except asyncio.CancelledError:
                     raise
+                except asyncio.TimeoutError as exc:
+                    raise TabStartupTimeoutError(
+                        f"tab startup timed out after {_TAB_CREATE_STARTUP_TIMEOUT_SECONDS:g}s"
+                    ) from exc
                 except Exception:
                     # A port can be claimed after allocation but before ttyd
                     # binds. Stop the failed attempt, then retry only when the
