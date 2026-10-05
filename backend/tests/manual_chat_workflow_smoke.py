@@ -121,7 +121,8 @@ def main() -> None:
                 "Then send kind=completed summary=HUB_WORKFLOW_COMPLETE with validation=transport-smoke, and stop. "
                 "Use the explicit source tab/task/session IDs provided by that assignment. "
                 f"The work CLI interpreter is {sys.executable}; run it with -m claude_hub.cli "
-                "using the inherited PYTHONPATH."
+                f"and explicitly set PYTHONPATH={backend} for each command to load this candidate "
+                "instead of the installed main checkout."
             )
             command = [
                 sys.executable,
@@ -282,7 +283,7 @@ def main() -> None:
                 browser.close()
                 assert not page_errors, page_errors
             result["status"] = "pass"
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         result.update(status="failed", error_type=type(exc).__name__, error=str(exc)[:1000])
         raise
     finally:

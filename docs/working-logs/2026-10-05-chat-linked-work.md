@@ -40,8 +40,10 @@ claude-hub work report WORK_ID --tab-id SOURCE_TAB --task-id TASK_ID \
 
 This writes the canonical task report with its outcome before terminal cleanup.
 `no_change` completes one unchanged check; `completed` ends the entire monitor.
-`anomaly` completes a check and retains a notable result. `progress` keeps the
-execution active, and `decision` uses the existing needs-input report state.
+`anomaly` completes a check and retains a notable result. `progress` keeps a
+one-shot execution active; for a monitor it completes only the current check,
+allowing the next scheduled check. `decision` uses the existing needs-input
+report state.
 Existing reports can also be classified with `--report-id`. Results must cite a
 report from the linked execution; the ordinary assignment validator still runs
 for new reports. A report/call id cannot be reused with conflicting contents.
