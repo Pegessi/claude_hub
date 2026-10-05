@@ -82,3 +82,38 @@ Evidence directories: `joint-frontend`, `joint-browser`, `joint-backend`,
 `joint-backend-scoped`, and `joint-binding-reason` under the artifact root above.
 Browser results do not establish real Bot/provider execution. No main merge,
 push, production restart, or external Bot changes were performed.
+
+## Private process-cleanup guard
+
+`backend/tests/smoke_runtime_guard.py` is only for a dedicated Linux smoke
+controller. It is not part of the Hub server. The controller must stop creating
+children and close third-party runtimes before final cleanup. The guarantee
+covers ordinary fork/exec descendants while the controller remains alive; it
+does not cover forcibly killing that controller with SIGKILL.
+
+The helper checks actual pidfd support and subreaper state. It inspects direct
+children across controller threads, then rechecks current parent PID and start
+time after opening each pidfd. It never authorizes a signal from a multi-level
+PPID snapshot. TERM and KILL have separate finite budgets. Read, signal, identity,
+and budget failures remain recorded even if later observations are empty.
+Known Popen objects collect their own exit statuses before adopted children are
+reaped; success also requires ECHILD and a complete empty direct-child scan.
+
+Validation:
+
+- 27 pure fault-injection tests passed without real OS signals, descriptors,
+  process creation, or /proc reads. The helper passed mypy.
+- The process test is skipped by default. After static review, explicit opt-in
+  passed on this host using only bounded Python test processes. It verified
+  double-fork/setsid cleanup, the SIGKILL escalation, adopted-daemon reaping,
+  retained starter exit status, readable pidfd completion, and an unaffected
+  sibling. The starter is explicitly waited before cleanup; live-Popen polling
+  transitions are covered by the pure mock test, not this process test.
+- Test daemons have an independent lifetime bound and parent-death protection;
+  the parent establishes a verified pidfd before permitting cleanup.
+
+Evidence: `process-guard-mock/` and `process-guard-owned-processes/` under the same
+artifact root. These results do not authorize or validate any provider run.
+**The guard has not yet been integrated into `manual_chat_workflow_smoke.py`;
+do not run that manual provider smoke until its remaining isolation, browser,
+and final-cleanup changes have been reviewed and validated.**
