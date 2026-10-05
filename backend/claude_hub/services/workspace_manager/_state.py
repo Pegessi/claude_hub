@@ -20,6 +20,7 @@ class _StateMixin:
     _scheduled_chat_recovery_pending: bool
 
     def __init__(self) -> None:
+        self._feedback_started_at = _wm._now()
         self.workspaces: dict[str, Workspace] = {}
         self.tasks: dict[str, WorkspaceTask] = {}
         self.sessions: dict[str, ManagedSession] = {}

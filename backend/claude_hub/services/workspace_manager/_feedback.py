@@ -1,9 +1,12 @@
 """Feedback lesson management."""
 
 import re
+from typing import Callable
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ...models import FeedbackSummaryMode
+from ..feedback_automation import FeedbackAutomationSettings, FeedbackAutomationStore
 from ._constants import *  # noqa: F401,F403
 
 # Canonical fingerprint format produced by FeedbackLessonStore._lesson_fingerprint:
@@ -17,6 +20,167 @@ _MAX_FP_LEN_HARD = 64  # absolute ceiling — anything longer is treated as lega
 
 
 class _FeedbackMixin:
+    _feedback_chat_busy: Callable[[], bool] | None = None
+    _feedback_automation_task: asyncio.Task[None] | None = None
+
+    def _kick_feedback_automation(self) -> None:
+        if self._feedback_automation_task is None or self._feedback_automation_task.done():
+            self._feedback_automation_task = asyncio.create_task(self._tick_feedback_automation())
+
+    async def _stop_feedback_automation(self) -> None:
+        task = self._feedback_automation_task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._feedback_automation_task = None
+
+    def _feedback_foreground_busy(self, workspace_id: str) -> bool:
+        active = any(
+            session.workspace_id == workspace_id
+            and (
+                session.status in {ManagedSessionStatus.SPAWNING, ManagedSessionStatus.WORKING}
+                or session.runtime_status == AgentRuntimeStatus.WORKING
+                or session.pending_call_ids
+                or session.processing_call_ids
+            )
+            for session in self.sessions.values()
+        )
+        return bool(active or (self._feedback_chat_busy and self._feedback_chat_busy()))
+
+    def feedback_automation_status(self, workspace_id: str) -> dict[str, Any]:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        return (
+            FeedbackAutomationStore(self._feedback_store().state_root)
+            .state(workspace_id, getattr(self, "_feedback_started_at", _wm._now()))
+            .model_dump(mode="json")
+        )
+
+    def configure_feedback_automation(
+        self, workspace_id: str, settings: FeedbackAutomationSettings
+    ) -> dict[str, Any]:
+        if workspace_id not in self.workspaces:
+            raise KeyError(workspace_id)
+        store = FeedbackAutomationStore(self._feedback_store().state_root)
+        state = store.state(workspace_id, getattr(self, "_feedback_started_at", _wm._now()))
+        state.settings = settings
+        store.save(workspace_id, state)
+        return state.model_dump(mode="json")
+
+    async def _tick_feedback_automation(self) -> None:
+        """At most one new bounded Reaper while the workspace has no active work.
+
+        Cooldown is claimed on disk before dispatch (including failures). The
+        existing workspace summary lock and staged completion keep retries from
+        duplicating active tasks or marking evidence consumed before success.
+        """
+        if not hasattr(self, "_feedback_automation_lock"):
+            self._feedback_automation_lock = asyncio.Lock()
+        if self._feedback_automation_lock.locked():
+            return
+        async with self._feedback_automation_lock:
+            now = _wm._now()
+            # Existing manual reapers retain ownership too. Do not multiply
+            # background model sessions across many quiet workspaces.
+            active_reapers = [
+                task
+                for wid in self.workspaces
+                if (task := self._active_feedback_summary_task(wid)) is not None
+            ]
+            if any(task.status != WorkspaceTaskStatus.TODO for task in active_reapers):
+                return
+            store = self._feedback_store()
+            controls = FeedbackAutomationStore(store.state_root)
+            for workspace_id in list(self.workspaces):
+                try:
+                    state = controls.state(workspace_id, getattr(self, "_feedback_started_at", now))
+                    if active_reapers:
+                        if (
+                            len(active_reapers) != 1
+                            or active_reapers[0].workspace_id != workspace_id
+                        ):
+                            continue
+                        active_run = store.summary_run_for_task(workspace_id, active_reapers[0].id)
+                        if active_run is None or active_run.id != state.last_run_id:
+                            continue  # a manual Reaper remains manually owned
+                    if not state.settings.enabled:
+                        continue
+                    if state.last_checked_at and (now - state.last_checked_at).total_seconds() < 60:
+                        continue
+                    state.last_checked_at = now
+                    if (
+                        state.last_attempt_at
+                        and (now - state.last_attempt_at).total_seconds()
+                        < state.settings.cooldown_seconds
+                    ):
+                        controls.save(workspace_id, state)
+                        continue
+                    if self._feedback_foreground_busy(workspace_id):
+                        state.last_outcome = "foreground_busy"
+                        controls.save(workspace_id, state)
+                        continue
+                    lock = self._feedback_summary_locks.setdefault(workspace_id, asyncio.Lock())
+                    if lock.locked():
+                        continue
+                    async with lock:
+                        summary_input = await asyncio.to_thread(
+                            store.prepare_summary_input,
+                            workspace_id,
+                            self._workspace_task_records_dir(workspace_id),
+                            mode=FeedbackSummaryMode.INCREMENTAL,
+                            limit=state.settings.max_records,
+                            force=False,
+                            now=now,
+                            automatic_since=state.initialized_at,
+                            automatic_cursor=state.scan_cursor,
+                        )
+                        latest = controls.state(workspace_id, now)
+                        if latest.settings != state.settings or self._feedback_foreground_busy(
+                            workspace_id
+                        ):
+                            continue
+                        state.scan_cursor = summary_input["_scan_cursor"]
+                        if summary_input["cache_hit"] and not active_reapers:
+                            state.last_outcome = "no_fresh_eligible_evidence"
+                            controls.save(workspace_id, state)
+                            continue
+                        # This is an input/context limit, not a token billing cap.
+                        summary_input["_prompt_char_limit"] = 24_000
+                        state.last_attempt_at = now
+                        state.last_run_id = (
+                            active_run.id if active_reapers else summary_input["run_id"]
+                        )
+                        state.last_outcome = "dispatching"
+                        controls.save(workspace_id, state)
+                        try:
+                            run = await self._summarize_workspace_feedback_locked(
+                                workspace_id,
+                                FeedbackSummaryRequest(limit=state.settings.max_records),
+                                summary_input=summary_input,
+                            )
+                            state.last_run_id = run.id
+                            state.last_outcome = "started" if run.task_id else "no_input"
+                        except Exception:
+                            state.last_outcome = "dispatch_failed"
+                            logger.exception(
+                                "Automatic feedback dispatch failed in %s", workspace_id
+                            )
+                        # A configure/off request may have arrived while model
+                        # startup awaited I/O. Preserve its newer settings.
+                        latest = controls.state(workspace_id, now)
+                        latest.last_run_id = state.last_run_id
+                        latest.last_outcome = state.last_outcome
+                        controls.save(workspace_id, latest)
+                        return
+                except Exception:
+                    # Invalid/corrupt state is fail-closed and isolated to this
+                    # workspace; never block foreground scheduling.
+                    logger.exception("Automatic feedback check failed in %s", workspace_id)
+
     def create_feedback_lesson(
         self,
         workspace_id: str,
@@ -60,7 +224,10 @@ class _FeedbackMixin:
         # All other fields are bounded to fixed maxima so adversarial
         # title/summary/tags/id values cannot blow the prompt.
         store = self._feedback_store()
-        _HARD_BUDGET = store.REAPER_PROMPT_HARD_CHAR_LIMIT  # defense in depth
+        _HARD_BUDGET = min(
+            store.REAPER_PROMPT_HARD_CHAR_LIMIT,
+            summary_input.get("_prompt_char_limit", store.REAPER_PROMPT_HARD_CHAR_LIMIT),
+        )
         _LESSON_MAX = 20
         _LESSON_MAX_ID = 80
         _LESSON_MAX_TITLE = 80
@@ -77,6 +244,7 @@ class _FeedbackMixin:
             "Extraction signals (at least one required per lesson):\n"
             "  A) Iteration cost: single task with review_failed_count>=1 OR needs_input_count>=2.\n"
             "  B) Cross-task recurrence: same root pattern in >=2 digests.\n"
+            "  C) Explicit Chat correction: preserve the exact quote's scope and source IDs.\n"
             "Implementation-detail lessons need A or B with observable evidence; a single clean-pass final_summary is not a lesson.\n"
             "Iteration counts are eligibility signals, not proof of a root cause. Ground each lesson in failure_evidence "
             "(source report_id, command/path/result) and validation; if the excerpts do not support a causal claim, skip it.\n"
@@ -91,11 +259,10 @@ class _FeedbackMixin:
             "Server enforcement: applies_when/do/avoid non-empty; single-evidence tasks need review_failed>=1 or needs_input>=2;\n"
             "Every cited task must have a readable record in this workspace; multi-evidence needs >=2 cited tasks "
             "with >=1 showing iteration. Pure summary similarity is not evidence.\n"
+            "For C cite source_record_ids; evidence_task_ids may be empty. Provenance does not prove your interpretation.\n"
             "\n"
-            "Dedup (deterministic via fingerprint): compare against active_lessons. If a new lesson would duplicate an\n"
-            "existing one (matching core meaning even if wording differs), EITHER skip creation OR POST with the existing\n"
-            "lesson's fingerprint field echoed verbatim — the server merges on exact fingerprint match. The fingerprint is\n"
-            "the authoritative merge key; do not try to recompute it. Do not rely on title+tags alone.\n"
+            "Dedup: compare core meaning against active_lessons. Skip duplicates or echo the existing fingerprint "
+            "verbatim to merge. Never recompute fingerprints or rely on title+tags alone.\n"
             "\n"
             f"POST /api/workspaces/{workspace.id}/lessons\n"
             'Payload: {"title":"...","summary":"...","applies_when":["..."],"do":"...","avoid":"...","tags":["..."],"scope":"workspace","confidence":0.6,"evidence_task_ids":["..."],"fingerprint":"<existing-fingerprint-if-merge>"}\n'
@@ -155,7 +322,9 @@ class _FeedbackMixin:
                 "summary_run": {
                     "id": summary_input["run_id"],
                     "mode": summary_input["mode"],
-                    "input_record_ids": [d.get("task_id", "") for d in clean],
+                    "input_record_ids": [
+                        d.get("source_record_id") or d.get("task_id", "") for d in clean
+                    ],
                 },
                 "active_lessons": lesson_payload,
                 "input_task_digests": clean,
@@ -170,7 +339,7 @@ class _FeedbackMixin:
         while len(prompt) > _HARD_BUDGET and len(digests) >= 1:
             digests.pop(0)
             prompt = _assemble(digests)
-        committed_task_ids = [d.get("task_id", "") for d in digests]
+        committed_task_ids = [d.get("source_record_id") or d.get("task_id", "") for d in digests]
         committed_paths = [d.get("_path", "") for d in digests if d.get("_path")]
         return prompt, committed_task_ids, committed_paths
 
