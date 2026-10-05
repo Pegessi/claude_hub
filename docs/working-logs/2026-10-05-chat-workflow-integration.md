@@ -83,6 +83,44 @@ tests and five manual lifecycle cases. Input budgets are record/character/read
 and frequency limits; they are not billing or output-token caps. See the
 [feedback delivery log](2026-10-05-chat-feedback-automation.md).
 
+Final production candidate `7dba387` includes bridge `075b50f`, feedback
+`1023e77`, UI `01288b7`, shared policy and the integrated acceptance harness.
+An independent native Codex reviewer examined the combined lifecycle and final
+incremental changes; no remaining confirmed introduced defect was found in
+that scope. Review drove fixes for report/stop races, pause presentation,
+cleanup recovery, report terminality and explicit delegated acceptance guidance.
+
+Combined backend acceptance passed 223 tests covering linked work, feedback,
+scheduling, report atomicity, abort, mailbox, public API and runtime contracts.
+The final shared-policy change passed all 144 native transport, orchestrator
+contract and prompt-measurement tests. The mailbox rollback fixture now uses
+its actual workspace cwd: the previous `/tmp` value violated existing assignment
+validation, independently reproduced on the original integration baseline.
+Changed backend files pass Black and isort using `backend/pyproject.toml`;
+`AGENTS.md` and `CLAUDE.md` remain identical. Targeted mypy still reports the
+existing duplicate `sub_thread` declaration in `codex_jsonl.py:684`; this is
+not an all-backend or all-CI-green claim.
+
+The real one-shot Codex smoke on `7dba387` passed creation retry deduplication,
+progress reporting, completion reporting, explicit controller acceptance,
+caller-owned worker cleanup, cold backend restart, and the built frontend
+against the actual API with no browser page errors. The controller accepted
+only after checking the requested evidence. This proves the acceptance path;
+it does not measure whether a free-form Chat parent independently makes the
+right delegation or acceptance decision. The screenshot shows a completed
+linked card and result notification. Evidence files are `result.json`,
+`work.json`, CLI outputs, server logs and `browser.png` under:
+
+`/var/folders/sg/n3v76wfd73gc06sq76ntb5rr0000gn/T/hub-chat-workflow-live-tkzy_z5t/`
+
+Two earlier harness attempts informed this final run: one incorrectly expected
+direct work to bypass acceptance; another imported the installed main CLI after
+the worker shell reset `PYTHONPATH`. The harness now preserves acceptance and
+explicitly loads the candidate CLI. All test backends and their isolated tmux
+servers were stopped. Recurring monitor behavior is covered by deterministic
+manager/API tests, not a live recurring schedule. No token-cost or latency
+improvement benchmark has been performed.
+
 ## User-facing boundaries
 
 - Cards update and notify in the active or reopened Chat. There is no new
