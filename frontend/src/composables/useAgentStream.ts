@@ -296,9 +296,10 @@ export function useAgentStream(): UseAgentStreamApi {
       const reqController = new AbortController()
       waitRequestAbort = reqController
       const parentSignal = longPollAbort?.signal
+      const onParentAbort = () => reqController.abort()
       if (parentSignal) {
         if (parentSignal.aborted) reqController.abort()
-        else parentSignal.addEventListener('abort', () => reqController.abort(), { once: true })
+        else parentSignal.addEventListener('abort', onParentAbort, { once: true })
       }
       try {
         const page = await waitEvents(streamPath, sequenceBuffer.cursor, reqController.signal)
@@ -342,6 +343,9 @@ export function useAgentStream(): UseAgentStreamApi {
           connectionState.value = 'failed'
         }
         return
+      } finally {
+        parentSignal?.removeEventListener('abort', onParentAbort)
+        if (waitRequestAbort === reqController) waitRequestAbort = null
       }
     }
   }
@@ -504,6 +508,15 @@ export function useAgentStream(): UseAgentStreamApi {
         }
         throw new Error(detail)
       }
+      // The retry request can outlive a KeepAlive deactivation. If this
+      // instance has since stopped or started a newer generation, its late 200
+      // must not restart a hidden stream or replace the reactivated one.
+      if (
+        stopped
+        || !stateMachine.isCurrent(generationId)
+        || currentSessionId !== sourceId
+        || currentStreamPath !== streamPath
+      ) return
       await start(sourceId, source)
     } catch (err) {
       if (stopped || !stateMachine.isCurrent(generationId)) return

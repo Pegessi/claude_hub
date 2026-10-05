@@ -72,7 +72,10 @@ test('turn completion uses bounded version-aware Goal reconciliation', () => {
 test('active Goal locks composer actions and queued draft flushing', () => {
   assert.ok(pane.includes('goalBlocksPlan(goal.value)'))
   assert.match(pane, /:disabled="isSending || connectionState !== 'live' || goalComposerLocked"/)
-  assert.ok(pane.includes('while (draftQueue.value.length > 0 && !turnInFlight.value && !isSending.value && !goalComposerLocked.value)'))
+  assert.match(
+    pane,
+    /async function flushDraftQueue\(\)[\s\S]*?isSubmissionReady\.value[\s\S]*?!isDraftQueuePaused\.value[\s\S]*?!goalComposerLocked\.value/,
+  )
   assert.ok(pane.includes('if (!messageOverride && goalComposerLocked.value)'))
   assert.ok(pane.includes('Pause or complete the active Goal before sending messages'))
 })
