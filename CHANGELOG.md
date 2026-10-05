@@ -70,6 +70,9 @@
   and pause/stop actions in Chat. Routine unchanged checks stay out of the
   transcript. Visible/reopened Chats notify once per meaningful result;
   inactive views do not run a new application-wide polling loop.
+- Accept explicit server-authored Web and Feishu origins as human correction
+  evidence without coupling feedback capture to provider text-format metadata.
+  Machine and malformed origins remain excluded.
 - Automatically consider fresh feedback in quiet windows with a persistent
   cursor, bounded reads/context, cooldown and user controls. Reuse existing
   staged summarization, exclude internal tasks, and record explicit Chat

@@ -1,6 +1,7 @@
 """Automatic feedback must be quiet, fresh-only, bounded and source-backed."""
 
 import asyncio
+import hashlib
 import importlib
 import json
 from contextlib import contextmanager
@@ -28,6 +29,9 @@ from claude_hub.services.feedback_lessons import FeedbackLessonStore, FeedbackLe
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 wm = importlib.import_module("claude_hub.services.workspace_manager")
+
+
+_MISSING = object()
 
 
 def _record(
@@ -89,17 +93,23 @@ def _event(
     *,
     turn: str = "turn-1",
     text: str = "Always verify the feature checkout before reviewing.",
-    metadata: dict | None = None,
+    metadata: object = _MISSING,
+    message_id: str | None = None,
+    redacted: bool = False,
 ) -> None:
     directory = root / "terminal-tabs/agent_streams"
     directory.mkdir(parents=True, exist_ok=True)
+    payload = {"summary": text}
+    if metadata is not _MISSING:
+        payload["metadata"] = metadata
     event = {
         "type": "turn_started",
         "tab_id": "tab-1",
         "turn_id": turn,
-        "message_id": f"{turn}:user",
+        "message_id": message_id if message_id is not None else f"{turn}:user",
         "stream_sequence": 1,
-        "payload": {"summary": text, **({"metadata": metadata} if metadata else {})},
+        "payload": payload,
+        "redacted": redacted,
     }
     with (directory / "terminal-tab-tab-1.jsonl").open("a") as out:
         out.write(json.dumps(event) + "\n")
@@ -278,13 +288,64 @@ def test_correction_exact_source_dedup_and_staged_commit(tmp_path: Path) -> None
         store.create_lesson("other", payload)
 
 
-def test_sources_exclude_synthetic_turns_and_path_injection(tmp_path: Path) -> None:
+def test_sources_and_capture_accept_explicit_human_origins(tmp_path: Path) -> None:
+    legacy = "Legacy user correction remains eligible."
+    web = "Web user correction remains eligible."
+    feishu = "Feishu user correction hashes the visible summary."
+    _event(tmp_path, turn="legacy", text=legacy)
+    _event(
+        tmp_path,
+        turn="web",
+        text=web,
+        metadata={"origin": "web", "trace_id": "trace-web"},
+    )
+    _event(
+        tmp_path,
+        turn="feishu",
+        text=feishu,
+        metadata={"origin": "feishu", "provider_text_format": "feishu-v2"},
+    )
+    controls = FeedbackAutomationStore(tmp_path)
+
+    sources = controls.sources("tab-1")
+    assert [item["turn_id"] for item in sources] == ["legacy", "web", "feishu"]
+    assert sources[-1]["text"] == feishu
+    assert sources[-1]["source_sha256"] == hashlib.sha256(feishu.encode()).hexdigest()
+
+    correction = controls.capture(
+        "ws",
+        ChatCorrectionCreate(
+            tab_id="tab-1",
+            turn_id="feishu",
+            message_id="feishu:user",
+            quote="hashes the visible summary",
+        ),
+        datetime(2026, 10, 5, 10),
+    )
+    assert correction.source_sha256 == hashlib.sha256(feishu.encode()).hexdigest()
+
+
+def test_sources_exclude_machine_malformed_and_untrusted_rows(tmp_path: Path) -> None:
     _event(tmp_path, turn="scheduled-1")
     _event(tmp_path, turn="goal-1")
-    _event(tmp_path, turn="machine", metadata={"protocol": "goal-continuation-v1"})
-    _event(tmp_path)
+    _event(tmp_path, turn="goal", metadata={"origin": "goal"})
+    _event(tmp_path, turn="scheduled", metadata={"origin": "scheduled_task"})
+    _event(tmp_path, turn="unknown", metadata={"origin": "other-machine"})
+    _event(tmp_path, turn="missing-origin", metadata={})
+    _event(tmp_path, turn="null-metadata", metadata=None)
+    _event(tmp_path, turn="string-metadata", metadata="web")
+    _event(tmp_path, turn="list-origin", metadata={"origin": ["web"]})
+    _event(tmp_path, turn="dict-origin", metadata={"origin": {"kind": "feishu"}})
+    _event(tmp_path, turn="redacted-web", metadata={"origin": "web"}, redacted=True)
+    _event(
+        tmp_path,
+        turn="bad-message-id",
+        metadata={"origin": "web"},
+        message_id="another-turn:user",
+    )
     controls = FeedbackAutomationStore(tmp_path)
-    assert [item["turn_id"] for item in controls.sources("tab-1")] == ["turn-1"]
+
+    assert controls.sources("tab-1") == []
     with pytest.raises(ValueError, match="invalid tab"):
         controls.sources("../../escape")
 

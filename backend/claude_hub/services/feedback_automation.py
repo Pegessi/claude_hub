@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _TAIL_BYTES = 256 * 1024
+_HUMAN_TURN_ORIGINS = frozenset({"web", "feishu"})
 
 
 class FeedbackAutomationSettings(BaseModel):
@@ -53,6 +54,18 @@ class ChatCorrection(BaseModel):
     quote: str
     source_sha256: str
     created_at: datetime
+
+
+def _has_human_turn_source(payload: dict[str, Any]) -> bool:
+    """Accept legacy user turns or an explicit server-authored human origin."""
+
+    if "metadata" not in payload:
+        return True
+    metadata = payload["metadata"]
+    if not isinstance(metadata, dict):
+        return False
+    origin = metadata.get("origin")
+    return isinstance(origin, str) and origin in _HUMAN_TURN_ORIGINS
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -114,7 +127,7 @@ class FeedbackAutomationStore:
                 or not isinstance(turn_id, str)
                 or not turn_id
                 or turn_id.startswith(("scheduled-", "goal-"))
-                or payload.get("metadata")
+                or not _has_human_turn_source(payload)
                 or message_id != f"{turn_id}:user"
                 or not isinstance(summary, str)
                 or not summary.strip()
