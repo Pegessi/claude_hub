@@ -1,6 +1,7 @@
 """Bootstrap, assignment, review, and continue prompt builders."""
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
+from claude_hub.services.agent_execution_policy import EXECUTION_POLICY
 
 from ._constants import *  # noqa: F401,F403
 
@@ -339,6 +340,7 @@ class _PromptsMixin:
             f"{lesson_context_block}"
             f"{self._execution_complexity_assignment_block(task)}"
             f"{self._autonomous_assignment_block(task, session.agent_type)}"
+            f"{self._task_context_contract_block()}"
             "Start by reading the state snapshot; use the task description to choose the correct project "
             "directory. Check for uncommitted changes before editing.\n\n"
             "Before substantive implementation, derive a Goal Packet from the task prompt and include it "
@@ -382,7 +384,7 @@ class _PromptsMixin:
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
             f'"call_id":"{started_call_id}",'
-            '"message":"Started","message_en":"Started","message_zh":"已开始"}}\'\n\n'
+            '"message":"Started","message_en":"Started","message_zh":"已开始"}\'\n\n'
             "Call-id ACK contract (at-least-once delivery to your tmux inbox):\n"
             "Messages from your supervisor may be prefixed with a `[call_id:<id>]` marker "
             "(followups, continue prompts, etc.). The Hub delivers each call_id to your "
@@ -404,7 +406,7 @@ class _PromptsMixin:
             "Example report body with ACKs:\n"
             f'{{"task_id":"{task.id}","state":"working","call_id":"{progress_call_id}",'
             '"message":"...","message_en":"...",'
-            '"message_zh":"...","acked_call_ids":["followup-abc123"]}}\n'
+            '"message_zh":"...","acked_call_ids":["followup-abc123"]}\n'
         )
 
     def _build_subagent_assignment_prompt(
@@ -462,7 +464,11 @@ class _PromptsMixin:
             f"{attachment_note}"
             f"{lesson_context_block}"
             "You are a sub-agent executing a task delegated by another agent.\n"
-            "No Goal Packet, no AI review, no bilingual messages. Just do the work.\n\n"
+            "The caller owns acceptance and any required review; no separate Goal Packet or bilingual "
+            "messages are required here. Work only within the delegated inputs, scope and ownership. "
+            "Stop and report missing inputs, an ownership conflict, exhausted budget, or a step beyond "
+            "the stated stop_condition. Do not silently broaden the task.\n\n"
+            f"{self._task_context_contract_block()}"
             "Start by reading the state snapshot; use the task description to choose the correct "
             "project directory. Check for uncommitted changes before editing.\n\n"
             "Report states: started -> working (as you progress) -> completed when done.\n"
@@ -473,19 +479,23 @@ class _PromptsMixin:
             "Every report MUST include a non-empty call_id. Use a stable, per-logical-report "
             f"call_id (e.g. `{task.id}-{{state}}-{{n}}` where n increments for each new report). "
             "Reuse the SAME call_id if resubmitting after a failure so the Hub deduplicates.\n\n"
-            "Minimal report fields: task_id, state, call_id, message, changed_files.\n\n"
+            "Minimal report fields: task_id, state, call_id, message, changed_files. On completion, "
+            "include validation (cwd, base/head, commands and results or why not run), evidence paths, "
+            "risks/unverified criteria, and the next action for your caller.\n\n"
             "Started report example:\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"started",'
             f'"call_id":"{started_call_id}",'
-            '"message":"Started"}}\'\n\n'
+            '"message":"Started"}\'\n\n'
             "Completed report example:\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"completed",'
             f'"call_id":"{completed_call_id}",'
-            '"message":"summary of changes","changed_files":["path/to/file"]}}\'\n\n'
+            '"message":"summary and next action","changed_files":["path/to/file"],'
+            '"validation":"cwd; base/head; command => result; evidence path",'
+            '"risks":"unverified criteria or none"}\'\n\n'
             "Call-id ACK contract: messages from your supervisor may be prefixed with a "
             "`[call_id:<id>]` marker. ACK every call_id you process by listing it in "
             "`acked_call_ids` of your next report. The dispatch call_id "
@@ -591,79 +601,57 @@ class _PromptsMixin:
         )
         self.reports[report.id] = report
 
+    def _task_context_contract_block(self) -> str:
+        return (
+            "Context is a bounded cache: the snapshot is a generated navigation aid, not the source "
+            "of truth. Confirm current Task/report records and Git status/base/head before acting; "
+            "read only relevant files and evidence. Resolve conflicts against those records, not old "
+            "conversation summaries, and never edit generated state to change task status.\n\n"
+        )
+
     def _execution_complexity_assignment_block(self, task: WorkspaceTask) -> str:
         if task.execution_complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
-            guidance = "Small task. Execute directly, keep the plan compact; spawn subagents only for a concrete blocker."
+            guidance = "Small task. Execute directly; delegate only a bounded need that improves the outcome."
         elif task.execution_complexity == WorkspaceTaskExecutionComplexity.COMPLEX:
             guidance = (
-                "Complex task. Act as orchestrator: decompose, delegate bounded subtasks to subagents "
-                "(implement/test/research/review), keep scopes explicit, and personally integrate+validate "
-                "before reporting completion."
+                "Complex task. Act as orchestrator: map dependencies, delegate independent bounded work "
+                "when useful, and integrate and validate the result. Keep tightly coupled changes serial."
             )
         else:
             guidance = (
-                "Auto: before implementation judge simple vs complex and state your choice in the first working "
-                "report. If complex, orchestrate and delegate; if simple, execute directly."
+                "Auto: choose simple or complex before implementation and record the strategy and reason "
+                "in goal_packet.assumptions and the first working report."
             )
-        cost_guard = (
-            "Orchestrator mode is expensive (10-15x token cost of a linear agent). Use it ONLY when "
-            "(1) breadth-first parallel across >=3 independent threads, "
-            "(2) a single context cannot hold the material, or "
-            "(3) subtasks are cleanly isolated so a sub-agent mistake will not pollute the main thread. "
-            "Otherwise prefer a single linear agent."
-        )
         return (
             "Execution complexity guidance:\n"
+            f"{EXECUTION_POLICY}"
             f"- Selected complexity: {task.execution_complexity.value}\n"
             f"- {guidance}\n"
-            f"- {cost_guard}\n\n"
+            "- Delegation must justify its coordination cost through independent work, context isolation, "
+            "or specialist evidence. There is no minimum agent count. Use one writer per owned scope; "
+            "parallel writers need disjoint files and isolated worktrees/resources.\n\n"
         )
 
     def _subagent_capability_hint(self, agent_type: AgentType) -> str:
-        """Per-CLI sub-agent invocation hints for the orchestrator contract."""
-        if agent_type == AgentType.CLAUDE:
+        """Use only capabilities exposed by the running CLI, without guessed flags."""
+        if agent_type == AgentType.TERMINAL:
             return (
-                "claude runtime: use the Task tool with subagent_type set to a built-in or repo-shipped "
-                "agent (general-purpose, Explore, Plan, code-reviewer, .claude/agents/*.md). Pass model "
-                'explicitly per the pinning below. Example: Task(subagent_type="general-purpose", '
-                'model="opus", description="<role.id>", prompt="<envelope>").\n'
-            )
-        if agent_type == AgentType.CURSOR:
-            return (
-                "cursor runtime: use cursor's native sub-agent/spawn capability (YOLO on by default). "
-                "If per-role model pinning is unsupported in your version, run the parent at the highest "
-                "available tier and note the limitation in workflow.notes.\n"
-            )
-        if agent_type == AgentType.CODEX:
-            return (
-                "codex runtime: use codex's subtask/fan-out capability for bounded delegations. "
-                "If per-role model pinning is unsupported, note it in workflow.notes.\n"
+                "Terminal runtime has no native sub-agent capability. Degrade to direct execution and "
+                "record the limitation; the Hub evaluator remains independent. Do NOT fabricate agents.\n"
             )
         return (
-            "This runtime has no native sub-agent capability. Degrade to single-agent execution and "
-            "record the degradation in Goal Packet assumptions. Do NOT fabricate a subagent ledger.\n"
+            f"{agent_type.value} runtime: use only the sub-agent tools actually available in this session. "
+            "If delegation is unsupported in this runtime/version, execute serially and record the "
+            "limitation in workflow.notes. Do not invent tool names, CLI flags, or agent/model claims.\n"
         )
 
     def _model_evidence_contract_block(self, agent_type: AgentType) -> str:
-        """Runtime-aware model/API evidence rules for autonomous subtask ledgers."""
-        if agent_type == AgentType.CLAUDE:
-            return (
-                "Primitive -> Model pinning (claude; users CANNOT override):\n"
-                "  P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE -> opus;  P-VALIDATE/P-RESEARCH -> sonnet.\n"
-                "  P-EXECUTE that only calls an external API (image-gen, TTS, ...) records "
-                "model_or_api=external:<api-name> instead of an LLM model.\n\n"
-            )
-        if agent_type in {AgentType.CURSOR, AgentType.CODEX}:
-            return (
-                f"Primitive -> Model evidence ({agent_type.value}): Claude opus/sonnet pinning is NOT "
-                "required. Record the actual model/tier used in `model_or_api`, or `runtime-default` / "
-                "`unsupported:<short-reason>` with a note in workflow.notes. External-API P-EXECUTE "
-                "records model_or_api=external:<api-name>.\n\n"
-            )
+        """Model selection is a user/runtime decision, not a prompt-enforced tier."""
         return (
-            "Terminal runtime: no sub-agent model pinning. Record `model_or_api=runtime-default` and "
-            "explain single-agent degradation in assumptions/workflow.notes. Do NOT claim Claude "
-            "opus/sonnet pinning.\n\n"
+            f"Model/API evidence ({agent_type.value}): respect explicit user model choices; otherwise "
+            "use the configured runtime default. Record the actual model/API when exposed, or "
+            "model_or_api=runtime-default / unsupported:<reason>; external calls use external:<api>. "
+            "Do not infer a model from role names or require a fixed provider/tier.\n\n"
         )
 
     def _autonomous_assignment_block(
@@ -694,58 +682,60 @@ class _PromptsMixin:
     ) -> str:
         complexity = task.execution_complexity
         if complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
-            enforcement = (
-                "Enforcement (simple): execute directly, but you MUST spawn one P-JUDGE sub-agent for an "
-                "independent pre-flight review before posting the review-gate report.\n"
+            strategy = (
+                "Execution (simple): implement and run mechanical checks directly. A native P-JUDGE "
+                "sub-agent is optional; the independent Hub evaluator is mandatory.\n"
             )
         elif complexity == WorkspaceTaskExecutionComplexity.COMPLEX:
-            enforcement = (
-                "Enforcement (complex): orchestrator mode REQUIRED. Workflow MUST include at least one "
-                "P-EXECUTE and one P-JUDGE dispatch. Posting a review-gate report without a complete "
-                "subagent ledger is a contract violation.\n"
+            strategy = (
+                "Execution (complex): declare bounded roles and dependency edges in workflow.notes. "
+                "Delegate where isolation helps; record why tightly coupled work stays serial.\n"
             )
-        else:  # AUTO
-            enforcement = (
-                "Enforcement (auto): declare orchestrator vs single-agent mode in your first working "
-                "report and justify in goal_packet.assumptions. If orchestrator, the contract below is "
-                "mandatory; if single-agent, still spawn one P-JUDGE before review-gate.\n"
+        else:
+            strategy = (
+                "Execution (auto): follow the simple/complex strategy recorded in goal_packet.assumptions; "
+                "explain any change before expanding the workflow.\n"
             )
-
-        capability_hint = self._subagent_capability_hint(agent_type)
-        model_evidence = self._model_evidence_contract_block(agent_type)
-
+        if complexity == WorkspaceTaskExecutionComplexity.SIMPLE:
+            return (
+                "## Orchestrator Contract (Auto Mode)\n\n"
+                f"{strategy}"
+                f"{self._subagent_capability_hint(agent_type)}"
+                f"{self._model_evidence_contract_block(agent_type)}"
+                "If delegation becomes useful, give each delegate an owner, inputs/base/head, "
+                "allowed paths and read/write scope, budget, stop_condition and evidence handoff. "
+                "Keep one writer per scope and research/review read-only. Record only actual "
+                "delegations in a subagent-ledger; otherwise report your commands/results directly. "
+                "Final evidence includes cwd, base/head, artifacts, unverified criteria and risks. "
+                "Post progress during long work; name any blocker and the next action.\n\n"
+            )
         return (
             "## Orchestrator Contract (Auto Mode)\n\n"
-            "You are the orchestrator and the only voice the user hears for this task. Do NOT do bulk "
-            "execution, validation, or judging in your own context. Decompose into bounded subtasks and "
-            "delegate via your runtime's native sub-agent capability.\n\n"
-            f"{capability_hint}\n"
-            "Role primitives: P-PLAN (decompose/spec), P-EXECUTE (produce artifact), P-VALIDATE (mechanical "
-            "checks: tests/lint/schema/hashes), P-JUDGE (qualitative critique vs acceptance), "
-            "P-INTEGRATE (combine outputs into deliverable), P-RESEARCH (external knowledge).\n\n"
-            f"{model_evidence}"
-            "In your first working report declare a `workflow:` block: concrete roles (from primitives above), "
-            "dependency edges, and `notes:` justifying the schema. Any non-trivial workflow MUST contain "
-            ">=1 P-EXECUTE and >=1 P-JUDGE; P-VALIDATE is required when an objective check exists. "
-            "P-VALIDATE and P-JUDGE are SEPARATE -- do not fold either into your own context.\n\n"
-            "Observability: for any sub-agent/API/validation step that runs >few minutes, post a working "
-            "heartbeat (role.id, primitive, elapsed, last artifact, next action) before/during the wait. "
-            "Do NOT post blocked/needs_input while an autonomous step is still running; those are only "
-            "allowed when no autonomous next action remains and must name the blocker with evidence. Bare "
-            '"needs your response" is a contract violation.\n\n'
-            "Subtask envelope (use for EVERY dispatch, regardless of runtime):\n"
-            "  [subtask-envelope]\n"
-            "  role.id / primitive / objective (one-sentence contract) / success_criteria (maps to "
-            "goal_packet.acceptance) / inputs (files/links/artifacts) / output_schema (patch/prompt/URI/"
-            "report/...) / tools_allowed (whitelist) / context_budget (token/step budget) / "
-            "return_mode: final-only (default; full-transcript only when auditing).\n\n"
-            "Subagent ledger (REQUIRED in validation on review-gate):\n"
-            "  subagent-ledger:\n"
-            "    - role.id=<id> primitive=<P-*> agent=<runtime:tool#kind> "
-            "model_or_api=<opus|sonnet|actual|runtime-default|unsupported:reason|external:api>\n"
-            "      goal=<...> decision=<accepted|rejected|retried> evidence=<paths/uris/test-names>\n"
-            "    - ...\n\n"
-            f"{enforcement}\n"
+            f"{strategy}"
+            "The owner integrates outputs and validates the final result. Role primitives describe work, "
+            "not required agent counts: P-PLAN (scope/dependencies), P-EXECUTE (artifact), "
+            "P-VALIDATE (mechanical checks), P-JUDGE (independent critique), P-INTEGRATE (integration), "
+            "P-RESEARCH (evidence). Run objective checks when available; self-review does not replace "
+            "the Hub evaluator.\n\n"
+            f"{self._subagent_capability_hint(agent_type)}"
+            f"{self._model_evidence_contract_block(agent_type)}"
+            "Subtask envelope (EVERY delegation):\n"
+            "  [subtask-envelope] role.id / primitive / owner / objective / success_criteria / "
+            "inputs (task/report IDs, files, base/head, evidence refs) / depends_on / scope "
+            "(allowed_paths, read-only or writer, worktree and resource ownership) / tools_allowed / "
+            "budget / stop_condition / output_schema / return_mode: final-only.\n"
+            "Research/review delegates are read-only. Stop and report when ownership conflicts, inputs "
+            "are missing, budget is exhausted, or the next step exceeds scope; do not silently expand.\n\n"
+            "Evidence handoff: result, changed files/artifacts and head SHA, commands with cwd and outcomes, "
+            "unverified criteria, risks, and next action. The owner checks evidence before accepting it.\n"
+            "Subagent ledger (only for actual delegations, in review-gate validation):\n"
+            "  subagent-ledger: role.id / primitive / owner / agent / model_or_api / "
+            "decision=<accepted|rejected|retried> / evidence=<paths, commands, outcomes>.\n"
+            "For direct execution, report checks and explain the strategy; do not fabricate a ledger.\n\n"
+            "Observability: for work taking more than a few minutes, post a working heartbeat with "
+            "owner, elapsed time, last evidence and next action. Use blocked/needs_input only when no "
+            "autonomous next action remains; name the blocker with evidence. Bare 'needs your response' "
+            "is a contract violation.\n\n"
         )
 
     def _effective_review_profiles(
@@ -1053,7 +1043,7 @@ class _PromptsMixin:
             f'-d \'{{"task_id":"{task.id}","state":"review_started",'
             f'"call_id":"{review_started_call_id}",'
             '"message":"Started review","message_en":"Started review",'
-            '"message_zh":"开始评审"}}\'\n'
+            '"message_zh":"开始评审"}\'\n'
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"review_passed",'
@@ -1065,7 +1055,7 @@ class _PromptsMixin:
             '"review_profiles":["general"],"profile_results":[{"profile":"general",'
             '"status":"passed","evidence":"Evidence reviewed.","blocking_findings":[],'
             '"non_blocking_findings":[]}],"artifact_refs":[],"confidence":0.8,'
-            '"requires_human_judgment":false}}\'\n\n'
+            '"requires_human_judgment":false}\'\n\n'
             "Use review_failed when the implementation agent can still fix concrete defects. "
             "Use review_needs_input only for genuine blockers outside its control."
         )
@@ -1096,14 +1086,19 @@ class _PromptsMixin:
                 "explicit user requirements/attachments, the trigger's changed_files/validation/risks/"
                 "acceptance_check, enabled review profiles + REVIEW.md guidance, repo conventions, "
                 "and any blocked/needs_input context.\n"
-                "- Inspect changed files and related code paths enough to verify correctness and scope.\n"
+                "- Start from requirements and the actual checkout diff/call paths, using the worker report "
+                "as claims to verify. Record execution cwd and base/head SHA; check that they identify the "
+                "candidate under review before running tests.\n"
                 "- Adversarial defect hunt (BEFORE the verdict): actively try to break the change by "
                 "enumerating failure modes and checking each against the actual code: edge/boundary "
                 "inputs; error/exception paths; concurrency/ordering/shared-state races; regressions to "
                 "existing flows/persistence/migrations; scope leakage/side effects; security/permission "
-                "assumptions. Treat anything you cannot rule out by reading code as a candidate defect, not fine.\n"
-                "- Evaluate validation evidence: independently spot-check highest-risk claims rather than "
-                "accepting them at face value; decide whether missing tests/checks are acceptable or blocking.\n"
+                "assumptions. Seek counterevidence before reporting a finding; distinguish a demonstrated "
+                "defect from an unverified risk.\n"
+                "- Independently replay checks appropriate to risk. In validation/artifact_refs record "
+                "commands, cwd, outcomes and evidence paths; in risks record checks not run and limits. "
+                "Each finding should give severity, confidence, file/line, causal failure scenario and "
+                "supporting evidence. Missing evidence is not a passing result.\n"
             )
         )
         return (
@@ -1146,11 +1141,10 @@ class _PromptsMixin:
         return (
             "Execution complexity review context:\n"
             f"- Selected complexity: {task.execution_complexity.value}\n"
-            "- Verify the implementation strategy matched the selected complexity. "
-            "For simple tasks, unnecessary delegation and process overhead are scope risks. "
-            "For complex tasks, lack of decomposition, delegated specialist work where available, "
-            "or missing integrator-level validation can be blocking. For auto tasks, verify the "
-            "agent explicitly chose and followed a simple or complex strategy.\n\n"
+            "- Check the declared strategy against dependencies, scope ownership and evidence. "
+            "Simple work may run directly; complex work needs decomposition and integration checks, "
+            "but not a minimum agent count. Auto must record a simple/complex choice. Missing required "
+            "validation is blocking; choosing serial execution is not itself a defect.\n\n"
         )
 
     def _autonomous_review_block(self, task: WorkspaceTask) -> str:
@@ -1158,44 +1152,23 @@ class _PromptsMixin:
             return ""
         policy = task.autonomy_policy or AutonomyPolicy()
         run = task.autonomous_run
-        if task.agent_type == AgentType.CLAUDE:
-            model_verification = (
-                "- Verify model pinning (claude): P-PLAN/P-EXECUTE/P-JUDGE/P-INTEGRATE must be opus; "
-                "P-VALIDATE/P-RESEARCH may be sonnet. External-API P-EXECUTE records "
-                "model_or_api=external:<api>. Wrong-tier model on a key primitive is a contract violation.\n"
-            )
-        elif task.agent_type in {AgentType.CURSOR, AgentType.CODEX}:
-            model_verification = (
-                f"- Verify model/API evidence for {task.agent_type.value}. Do NOT fail solely because "
-                "Claude opus/sonnet pinning is absent (this runtime may not expose it). Accept "
-                "model_or_api=runtime-default, unsupported:<reason>, an actual runtime model name, or "
-                "external:<api> when workflow.notes explains. Treat missing evidence as a ledger quality "
-                "issue, not as a wrong-tier violation.\n"
-            )
-        else:
-            model_verification = (
-                "- Verify terminal-runtime degradation honestly records direct execution or "
-                "model_or_api=runtime-default. Do NOT require Claude pinning for plain terminal, and "
-                "do not accept fabricated sub-agent/model claims.\n"
-            )
         return (
             "Autonomous evaluation context:\n"
             f"- Run: {run.model_dump_json() if run else 'null'}; worker runtime: {task.agent_type.value}\n"
             f"- Max iterations: {policy.max_iterations}; strictness: {policy.evaluation_strictness.value}; "
             f"artifact review: {policy.require_artifact_review}.\n"
-            "Act as the evaluator for this iteration. Score against the Goal Packet, rubric/run evidence, "
-            "validation, artifacts, and prior evaluation history. Use review_passed when the run should "
-            "move to passed (awaiting human acceptance), review_failed when targeted revision is possible "
-            "within budget, review_needs_input when product judgment/credentials/unavailable artifacts/unsafe "
-            "scope prevents evaluation.\n\n"
-            "Subagent ledger verification (orchestrator contract):\n"
-            "- Complex autonomous tasks MUST embed a `subagent-ledger:` section in the review-gate "
-            "validation field. Missing/empty ledger on a complex task is a contract violation "
-            "(review_failed with a blocking issue).\n"
-            "- Each ledger entry must carry role.id, primitive (P-*), agent, model_or_api, decision, evidence.\n"
-            f"{model_verification}"
-            "- Verify workflow.roles from the first working report matches the ledger; at least one "
-            "P-EXECUTE and one P-JUDGE actually ran; P-VALIDATE is present when objective checks exist.\n\n"
+            "You are the independent Hub evaluator; native sub-agent review or worker self-review "
+            "does not replace this gate. Score against the Goal Packet and verified evidence. "
+            "Use review_passed for passed work awaiting human acceptance, review_failed for fixable "
+            "blocking issues, review_needs_input for unavailable evidence or decisions outside the "
+            "worker's control.\n\n"
+            "Subagent ledger verification (when delegation occurred):\n"
+            "- Match each claimed delegation to its owner, inputs, scope, actual runtime/model evidence "
+            "and accepted/rejected/retried result. Missing evidence for claimed work is blocking.\n"
+            "- For direct execution, assess commands/results and the strategy rationale; do not demand "
+            "a fabricated subagent-ledger or fail solely because no native P-JUDGE ran.\n"
+            "- Respect user model choices. Accept runtime-default, unsupported:<reason>, actual model "
+            "names or external:<api> with honest limits; do not enforce a fixed provider/tier.\n\n"
         )
 
     def _build_continue_prompt(
@@ -1239,12 +1212,11 @@ class _PromptsMixin:
         if task.task_mode != WorkspaceTaskMode.AUTONOMOUS:
             return ""
         return (
-            "Orchestrator-mode reminder: stay in orchestrator mode for this revision. Address the "
-            "evaluator's blocking issues by dispatching new sub-agent subtasks (P-EXECUTE for fixes, "
-            "P-VALIDATE for re-tests, P-JUDGE for re-review) rather than folding fixes into your own "
-            "context. Append new ledger entries to your existing subagent ledger; do not restart it. "
-            "If your own context feels decayed (confused about earlier decisions, contradictory "
-            "instructions), prefer a fresh sub-agent rather than reasoning in the main thread.\n\n"
+            "Revision strategy: preserve the recorded simple/complex strategy and ownership boundaries. "
+            "Fix only blocking issues, rerun relevant checks, and retain passing evidence. Reuse "
+            "delegation only when it helps; append actual results to an existing ledger, do not restart "
+            "or fabricate it. If context is stale, reload current task/report records and Git evidence. "
+            "The independent Hub evaluator remains mandatory.\n\n"
         )
 
     # ---- Revision-resume briefing (used after hard recovery on iteration>=2) ----
@@ -1349,13 +1321,15 @@ class _PromptsMixin:
             f"State snapshot: {self.snapshot_path(workspace.id)}\n"
             f"Task description: {task.prompt}\n\n"
             f"{gp_block}{changed_block}{feedback_block}"
+            f"{self._task_context_contract_block()}"
+            f"{self._autonomous_continue_orchestrator_reminder(task)}"
             "Resume steps:\n"
             "1. Re-read the state snapshot and inspect the files listed above before editing.\n"
-            "2. Stay in orchestrator mode; address ONLY the blocking issues above (or pick up "
-            "from the last working state if no reviewer feedback exists). Append new entries to "
-            "your subagent ledger rather than restarting it.\n"
-            "3. If the task was already ready_for_review/completed before the error, repost that "
-            "report immediately instead of redoing work.\n"
+            "2. Reload the full Goal Packet and latest report if the compact briefing omits needed "
+            "boundaries, validation steps or the recorded strategy. Address blocking feedback, or "
+            "resume the last verified working state.\n"
+            "3. Check whether a prior ready_for_review/completed report was persisted before retrying "
+            "it; reuse its call_id only for the same report. Do not infer completion from a summary.\n"
             "4. Report working/progress/blocked/completed with the same task_id.\n\n"
             f"{self._report_endpoint_curl(session, task.id, purpose='worker-recovery-progress', attempt=recovery_attempt)}"
         )
@@ -1415,9 +1389,10 @@ class _PromptsMixin:
             f"Task description:\n{task.prompt}\n\n"
             f"{goal_packet_line}"
             f"{self._autonomous_continue_orchestrator_reminder(task)}"
-            "Resume work now. Start by reading the state snapshot and checking the current state "
-            "of any files you were editing. If the task was already complete (e.g., you already "
-            "posted a ready_for_review report before the error), post a completed report immediately.\n\n"
+            f"{self._task_context_contract_block()}"
+            "Resume work now. Check the current task/report and files before acting. If a prior report "
+            "was not persisted, retry that same report with its original call_id; do not turn "
+            "ready_for_review into completed based only on a conversation summary.\n\n"
             f"{self._report_endpoint_curl(session, task.id, purpose='worker-recovery-progress', attempt=recovery_attempt)}"
         )
 

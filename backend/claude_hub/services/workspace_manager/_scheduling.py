@@ -32,6 +32,7 @@ durable run with a deterministic turn id in that same atomic write.
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..task_dependencies import require_task_dependencies
 from ._constants import *  # noqa: F401,F403
 
 
@@ -687,6 +688,7 @@ class _SchedulingMixin:
             await self._recover_scheduled_chat_runs()
             self._scheduled_chat_recovery_pending = False
         now = _wm._now()
+        await self._reconcile_chat_work()
         self._disable_deleted_chat_targets(now)
         await self._reap_stale_scheduled_chat_runs(now)
         for task_id in list(self.scheduled_tasks.keys()):
@@ -758,6 +760,29 @@ class _SchedulingMixin:
                 # Already advanced by a concurrent manual fire.
                 return None
 
+            if task.source_tab_id and task.work_kind:
+                if self._chat_work_active(task):
+                    # Coalesce missed checks; never build a replay backlog.
+                    task.next_run_at = self._compute_next_run(task, now)
+                    self._save_scheduled_tasks()
+                    return None
+                executions = self._chat_work_executions(task)
+                if (
+                    executions
+                    and executions[0].status == WorkspaceTaskStatus.FAILED
+                    and task.last_status != "retry_requested"
+                ):
+                    task.enabled = False
+                    task.last_status = "error"
+                    task.last_error = (
+                        executions[0].failure_reason
+                        or "Previous execution failed; resume explicitly"
+                    )
+                    task.next_run_at = None
+                    self._save_scheduled_tasks()
+                    return None
+
+            before_stamp = task.model_copy(deep=True) if task.source_tab_id else None
             scheduled_for = now if manual else (task.next_run_at or now)
             # Stamp BEFORE the side effect (crash-idempotent, same pattern as
             # resident agents): persist last_run_at / run_count / next_run_at
@@ -774,7 +799,12 @@ class _SchedulingMixin:
             chat_run: Optional[ScheduledTaskRun] = None
             if task.kind == ScheduledTaskKind.CHAT_TURN:
                 chat_run = self._queue_scheduled_chat_run(task, scheduled_for, now)
-            self._save_scheduled_tasks()
+            try:
+                self._save_scheduled_tasks()
+            except Exception:
+                if before_stamp is not None:
+                    self.scheduled_tasks[task.id] = before_stamp
+                raise
 
             try:
                 if task.kind == ScheduledTaskKind.CHAT_TURN:
@@ -793,6 +823,9 @@ class _SchedulingMixin:
                 logger.exception("Scheduled task %s failed to fire", task.id)
                 task.last_status = "error"
                 task.last_error = str(exc)
+                if task.source_tab_id:
+                    task.enabled = False
+                    task.next_run_at = None
 
             task.updated_at = _wm._now()
             self._save_scheduled_tasks()
@@ -1387,6 +1420,9 @@ class _SchedulingMixin:
         (skipping human review) and the auto-cleanup hook deletes the ephemeral
         session so no agent / reviewer resources are held.
         """
+        if task.source_tab_id and task.work_kind:
+            await self._fire_chat_work_task(task)
+            return
         now = _wm._now()
         # Validation at create/update time guarantees task_title and message are
         # set for hub_task; assert so the type checker sees non-Optional str.
@@ -1414,26 +1450,47 @@ class _SchedulingMixin:
                 reuse_existing=False,
             ),
         )
-        internal_task = internal_task.model_copy(
-            update={
-                "status": WorkspaceTaskStatus.QUEUED,
-                "queued_at": now,
-                "dispatch_attempt": internal_task.dispatch_attempt + 1,
-                "dispatch_reason": "scheduled",
-                "updated_at": now,
-            }
-        )
-        self.tasks[internal_task.id] = internal_task
         try:
-            await self._dispatch_task_to_session(internal_task, session)
-        except Exception:
-            # Mark the internal task failed and tear down the ephemeral
-            # orchestrator so a dispatch failure strands neither a task nor a
-            # session.
-            self.tasks[internal_task.id] = internal_task.model_copy(
-                update={"status": WorkspaceTaskStatus.FAILED, "updated_at": _wm._now()}
+            # Agent creation yields while the task is still editable. Validate
+            # and transition the current contract, never the pre-await copy.
+            internal_task = self.tasks[internal_task.id]
+            if internal_task.status != WorkspaceTaskStatus.TODO:
+                raise RuntimeError("Scheduled task changed while its worker was being created")
+            require_task_dependencies(self.tasks, internal_task)
+            internal_task = internal_task.model_copy(
+                update={
+                    "status": WorkspaceTaskStatus.QUEUED,
+                    "queued_at": now,
+                    "dispatch_attempt": internal_task.dispatch_attempt + 1,
+                    "dispatch_reason": "scheduled",
+                    "updated_at": now,
+                }
             )
-            await self._best_effort_delete_session(session.id)
+            self.tasks[internal_task.id] = internal_task
+            await self._dispatch_task_to_session(internal_task, session)
+        except Exception as exc:
+            # Preserve edits made during async preparation/dispatch, including
+            # dependencies. A concurrent terminal report or reassignment wins.
+            try:
+                current = self.tasks.get(internal_task.id)
+                if (
+                    current is not None
+                    and current.status in (WorkspaceTaskStatus.TODO, WorkspaceTaskStatus.QUEUED)
+                    and current.session_id in (None, session.id)
+                ):
+                    self.tasks[current.id] = current.model_copy(
+                        update={
+                            "status": WorkspaceTaskStatus.FAILED,
+                            "failure_reason": str(exc),
+                            "failed_at": _wm._now(),
+                            "updated_at": _wm._now(),
+                        }
+                    )
+                    self._save_state()
+            finally:
+                # Persistence failure must not skip cleanup. delete_session's
+                # non-terminal-reference guard protects a reassigned worker.
+                await self._best_effort_delete_session(session.id)
             raise
 
     # ------------------------------------------------------------------
@@ -1536,6 +1593,17 @@ class _SchedulingMixin:
         if (now - live.updated_at).total_seconds() < HUBTASK_ORPHAN_GRACE_SECONDS:
             return
 
+        if live.source_work_id:
+            # A linked worker may already have made external changes. Preserve
+            # delivery uncertainty instead of silently replaying on a new model.
+            await self._fail_orphaned_hub_task(
+                live,
+                dead_session,
+                reason="Linked work worker became unavailable; inspect evidence and resume explicitly",
+                now=now,
+            )
+            return
+
         if live.dispatch_attempt >= HUBTASK_ORPHAN_MAX_ATTEMPTS:
             await self._fail_orphaned_hub_task(
                 live,
@@ -1575,6 +1643,18 @@ class _SchedulingMixin:
             )
             return
 
+        # Operator edits or a new binding during worker creation supersede
+        # this recovery attempt. Do not overwrite or resume that newer contract.
+        current = self.tasks.get(live.id)
+        if (
+            current is None
+            or current.status != WorkspaceTaskStatus.WORKING
+            or current.session_id != live.session_id
+        ):
+            await self._best_effort_delete_session(new_session.id)
+            return
+        live = current
+
         # Re-bind the task to the new worker and open a new dispatch attempt.
         # The fresh dispatch call_id (dispatch:{id}:{attempt}) has no uncertain
         # marker, so the fail-closed uncertain contract on the dead session is
@@ -1609,15 +1689,21 @@ class _SchedulingMixin:
                 live.id,
                 new_session.id,
             )
-            self.tasks[rebound.id] = rebound.model_copy(
-                update={
-                    "status": WorkspaceTaskStatus.FAILED,
-                    "failure_reason": "scheduled task redispatch to a fresh worker failed",
-                    "failed_at": _wm._now(),
-                    "updated_at": _wm._now(),
-                }
-            )
-            self._save_state()
+            current = self.tasks.get(rebound.id)
+            if (
+                current is not None
+                and current.status == WorkspaceTaskStatus.QUEUED
+                and current.session_id == new_session.id
+            ):
+                self.tasks[current.id] = current.model_copy(
+                    update={
+                        "status": WorkspaceTaskStatus.FAILED,
+                        "failure_reason": "scheduled task redispatch to a fresh worker failed",
+                        "failed_at": _wm._now(),
+                        "updated_at": _wm._now(),
+                    }
+                )
+                self._save_state()
             await self._best_effort_delete_session(new_session.id)
             await self._best_effort_delete_session(live.session_id)
             return
@@ -1633,6 +1719,14 @@ class _SchedulingMixin:
         reason: str,
         now: datetime,
     ) -> None:
+        current = self.tasks.get(task.id)
+        if (
+            current is None
+            or current.status != WorkspaceTaskStatus.WORKING
+            or current.session_id != task.session_id
+        ):
+            return
+        task = current
         failed = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.FAILED,

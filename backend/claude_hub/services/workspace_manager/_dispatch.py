@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ..task_dependencies import require_task_dependencies, task_dependency_blockers
 from ._constants import *  # noqa: F401,F403
 
 # Dispatch reasons that pin a queued task to one specific agent so firmly that
@@ -28,6 +29,9 @@ class _DispatchMixin:
             raise KeyError(task.workspace_id)
         if task.status == WorkspaceTaskStatus.DONE:
             raise RuntimeError("Done tasks cannot be started")
+
+        if task.status != WorkspaceTaskStatus.WORKING:
+            require_task_dependencies(self.tasks, task)
 
         # Idempotency: if the task was already started (QUEUED or WORKING),
         # do not re-dispatch. A crash between the dispatch side effect and
@@ -68,6 +72,15 @@ class _DispatchMixin:
                     reuse_existing=False,
                 ),
             )
+
+        # Session preparation awaits external work; a todo edit may have changed
+        # prerequisites meanwhile. Never overwrite that newer task contract.
+        task = self.tasks[task_id]
+        if task.status == WorkspaceTaskStatus.DONE:
+            raise RuntimeError("Done tasks cannot be started")
+        if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+            return task
+        require_task_dependencies(self.tasks, task)
 
         base_update: dict[str, Any] = {
             "status": WorkspaceTaskStatus.QUEUED,
@@ -348,6 +361,7 @@ class _DispatchMixin:
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
+        require_task_dependencies(self.tasks, task)
         target = self.sessions.get(payload.target_session_id)
         if not target or target.workspace_id != task.workspace_id:
             raise KeyError(payload.target_session_id)
@@ -385,6 +399,8 @@ class _DispatchMixin:
         if task.status not in (WorkspaceTaskStatus.REVIEW, WorkspaceTaskStatus.FAILED):
             raise RuntimeError("Only review or failed tasks can continue")
 
+        require_task_dependencies(self.tasks, task)
+
         # For FAILED tasks whose original session is gone or stopped, reassign
         # to a new agent via start_task. The failure_reason stays on the task so
         # the assignment prompt surfaces it to the new worker; we clear it after
@@ -417,6 +433,10 @@ class _DispatchMixin:
             task,
             updated_at=now,
         )
+        task = self.tasks[task.id]
+        if task.status not in (WorkspaceTaskStatus.REVIEW, WorkspaceTaskStatus.FAILED):
+            raise RuntimeError("Task changed while preparing to continue")
+        require_task_dependencies(self.tasks, task)
         autonomous_run = task.autonomous_run
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
             autonomous_run = autonomous_run or self._default_autonomous_run(
@@ -736,6 +756,7 @@ class _DispatchMixin:
             if task.session_id == session_id
             and task.status == WorkspaceTaskStatus.QUEUED
             and not task.dispatch_pending
+            and not task_dependency_blockers(self.tasks, task)
         ]
         if not tasks:
             return None
@@ -751,6 +772,8 @@ class _DispatchMixin:
             if task.workspace_id != workspace_id:
                 continue
             if task.status != WorkspaceTaskStatus.QUEUED or task.dispatch_pending:
+                continue
+            if task_dependency_blockers(self.tasks, task):
                 continue
             if task.session_id == free_session_id:
                 continue
@@ -808,6 +831,8 @@ class _DispatchMixin:
             task = self.tasks.get(task_id)
             if not task or task.status != WorkspaceTaskStatus.QUEUED:
                 continue
+            if task_dependency_blockers(self.tasks, task):
+                continue
             logger.info(
                 "Recovering queued task ownership: session_id=%s holds QUEUED task_id=%s; "
                 "re-sending assignment prompt",
@@ -849,6 +874,14 @@ class _DispatchMixin:
                     task_id,
                 )
                 continue
+            current = self.tasks.get(task.id)
+            if (
+                current is None
+                or current.status != WorkspaceTaskStatus.QUEUED
+                or current.session_id not in (None, session.id)
+            ):
+                continue
+            task = current
             now = _wm._now()
             self.tasks[task.id] = task.model_copy(
                 update={
@@ -904,7 +937,11 @@ class _DispatchMixin:
         if not workspace:
             raise KeyError(task.workspace_id)
 
+        task = self.tasks[task.id]
+        require_task_dependencies(self.tasks, task)
         session = await self._rename_session_for_task(session, task)
+        task = self.tasks[task.id]
+        require_task_dependencies(self.tasks, task)
 
         if task.clear_context:
             await self.send_session_message(session.id, "/clear")
@@ -938,6 +975,8 @@ class _DispatchMixin:
         # the re-send. If it is still in pending_call_ids, the pump sends
         # it to the tmux inbox exactly once.
         # ------------------------------------------------------------------
+        task = self.tasks[task.id]
+        require_task_dependencies(self.tasks, task)
         dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
         self.sessions[session.id] = session.model_copy(
             update={
@@ -997,6 +1036,10 @@ class _DispatchMixin:
             ),
         )
 
+        current = self.tasks.get(task.id)
+        if current is None or current.status != task.status or current.session_id != session.id:
+            return
+        task = current
         self.tasks[task.id] = task.model_copy(
             update={
                 "status": WorkspaceTaskStatus.WORKING,

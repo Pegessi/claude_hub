@@ -333,6 +333,22 @@ async def _ensure_scheduled_chat_runtime(tab_id: str) -> bool:
     return True
 
 
+def _feedback_chat_busy() -> bool:
+    """Defer background learning during native Chat activity without waking it.
+
+    A global quiet window avoids repository probes on every monitor tick. The
+    send lock also covers startup before the provider raises its turn guard.
+    """
+    if _tab_tailer_manager is None:
+        return False
+    for tailer in _tab_tailer_manager.tailers():
+        transport = tailer.native_transport
+        if tailer._send_lock.locked() or (transport is not None and transport.turn_in_flight):
+            return True
+    return False
+
+
+workspace_manager._feedback_chat_busy = _feedback_chat_busy
 workspace_manager.configure_scheduled_chat_dispatch(_dispatch_scheduled_chat_turn)
 workspace_manager.configure_scheduled_chat_liveness(_scheduled_chat_turn_liveness)
 workspace_manager.configure_scheduled_chat_readiness(_ensure_scheduled_chat_runtime)

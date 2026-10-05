@@ -1,257 +1,108 @@
 # Claude Hub - Agent Entry Guide
 
-> `AGENTS.md` and `CLAUDE.md` must remain identical. Update both files in the
-> same commit. This guide is the short, always-read entry point; detailed design
-> history and debugging recipes live in the linked docs.
+> `AGENTS.md` and `CLAUDE.md` must remain byte-identical in the same commit.
+> This is the always-read map. Load details only for the current task.
 
----
+Claude Hub is a persistent terminal and agent workspace service: Vue 3/TypeScript/
+Vite/Pinia frontend, Python 3.11+/FastAPI backend, ttyd/tmux terminals; use pnpm and uv.
 
-**⚠️ RULE #1 — DO NOT DEVELOP DIRECTLY ON `main`. ⚠️**
+## Mandatory workflow
 
-Every feature, bug fix, UI change, test, doc update, and managed workspace
-task **must** use an isolated worktree on a feature branch. No exceptions.
-This is the single most important rule in this document. See
-[Mandatory Workflow](#mandatory-workflow).
+**Never develop directly on `main`. Every code, test, UI, documentation, review,
+experiment and managed workspace task uses an isolated feature worktree.**
 
-**⚠️ RULE #2 — ALL LINKED WORKTREES LIVE UNDER `~/claude_hub_worktree`. ⚠️**
+1. Start from clean `main`: fetch/sync first; preserve unrelated local state.
+2. Every linked worktree must be an immediate child of `~/claude_hub_worktree/`.
+   The only exception is the primary checkout at `~/claude_hub`.
+   Create the root if needed, then:
+   `git worktree add ~/claude_hub_worktree/<slug> -b codex/<feature> main`.
+3. Work only in that checkout. If you accidentally edit main, stop and preserve
+   your changes before transferring them to an isolated worktree.
+4. Frontend changes require a dedicated worktree dev/review server on its own
+   port. Stop task-owned servers before merging or leaving the task.
+5. Run validation appropriate to touched files; independently review the candidate
+   and fix actionable findings. Commit with conventional `feat:`, `fix:`, `docs:`,
+   `style:`, `refactor:`, `test:`, `chore:` or `ci:` messages.
+6. Update `CHANGELOG.md` for meaningful changes and add a focused working log for
+   significant work. Deliver branch/SHA, checks/results and unverified risks.
+7. Merge into `main` only after validation and review/approval, then push `main`.
+   A request to merge/push requires this branch-to-main flow. A request for
+   independent branches stops at branch delivery until integration is authorized.
 
-The primary checkout at `~/claude_hub` is the only exception. Do not create
-task, review, test, or temporary worktrees beside the primary checkout, under
-`/tmp`, or in another project directory.
+Worktrees beside the primary checkout, under `/tmp`, or in another project are
+forbidden. Before relocating/removing a worktree, inspect Git status and verify
+no process, tmux session, dev server or browser test uses it; preserve dirty,
+untracked and needed ignored state. Use `git worktree move`, never plain `mv`;
+use `git worktree remove` only for a proven disposable checkout.
 
----
+## Hard boundaries
 
-## Project
+- Do not stop/restart the primary Hub on 5173/8173. Feature backends must not write
+  `~/.claude_hub/workspaces` or use the default tmux server. Use isolated runtime
+  homes and `tmux -L`; set overrides before importing backend modules.
+- Do not delete, reset or overwrite unrelated/untracked files. `.cursor/`,
+  `tasks/`, `tmp_remote_media/`, captured `*.log`, `abl_*.json`, `nccl_*`,
+  `pure_pytorch_*`, `run_*.sh`, `summarize_mem*.py` and `sweep_*.sh` are protected
+  unless explicitly in scope. Age or a merged branch is not cleanup authorization.
+- No recursive scans of `/`, `/Users`, all home, or all volumes. Use bounded
+  `git ls-files`, `rg --files` and targeted reads. Stop on macOS privacy denial.
+- CodeGraph is explicit opt-in only for the current request; do not load, inspect,
+  initialize or sync it implicitly.
+- Keep one writer per owned scope. Research/review are read-only; parallel writers
+  need independent files and isolated worktrees/resources. The main service,
+  shared databases, ports, tmux and external resources are not isolated by Git.
 
-Claude Terminal Hub is a web-based persistent terminal service with a tabbed
-interface and a workspace orchestration layer that drives multiple agents
-(Claude / Cursor / plain Terminal) against the same workspace.
+## Five-layer system map
 
-## Stack
+| Layer | Responsibility and source of truth | Read first |
+| --- | --- | --- |
+| Intent | User outcome, Task, Goal Packet, dependencies and acceptance | [Task Graph](docs/TASK_GRAPH.md) |
+| Context | Bounded derived snapshots, prompts and relevant lessons; current records/Git win | [Architecture](ARCHITECTURE.md#five-layer-responsibility-map) |
+| Execution | Assigned session, owned worktree/resources, dispatch and evidence handoff | [Agent workflow](docs/AGENT_WORKFLOW.md) |
+| Verification | Reproducible checks, independent reviewer/evaluator, human acceptance | [Review profiles](docs/working-logs/2026-05-26-review-profiles-v1.md) |
+| Governance | Runtime/permission boundaries, ownership, lifecycle and durable feedback | [State policy](docs/working-logs/2026-05-23-state-machine-assessment.md) |
 
-- **Frontend**: Vue 3 (Composition API) + TypeScript + Vite + Pinia
-- **Backend**: Python 3.11+ + FastAPI + WebSocket + uv
-- **Terminal**: ttyd + tmux for terminal persistence
-- **Package managers**: pnpm for frontend, uv for backend
+These are responsibilities of existing components, not five new stores. Context
+is a cache: verify current task/report records and checkout/base/head before
+acting or recovering. Do not treat a snapshot, old summary or worker claim as
+acceptance evidence. Read the narrowest relevant source; expand only when needed.
 
-## Mandatory Workflow
+## Task and agent entry points
 
-**This workflow is mandatory. Do not skip steps. Do not take shortcuts.**
+**Task Graph / TaskMailbox**: [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md)
+(primary: `claude-hub task`). Use task records for dependencies and durable handoff.
 
-### Canonical Worktree Root
-
-Every linked Git worktree for this repository must be an immediate child of
-`~/claude_hub_worktree/`. Create the root if needed and use a short task slug
-for the directory name:
+Main and linked Git worktrees share the same Hub Workspace (canonical Git
+common-dir). Agent execution cwd is separate. Run `workspace ensure --path …`,
+then `agent status WORKSPACE_ID` before creating an agent. Best-effort reuse is
+not a concurrency/idempotency boundary. From a feature worktree use:
 
 ```bash
-mkdir -p ~/claude_hub_worktree
-git worktree add ~/claude_hub_worktree/<slug> -b feat/your-feature main
+claude-hub agent create WORKSPACE_ID --agent-type claude --cwd . --env-preset NAME_OR_ID
 ```
 
-This location rule applies equally to feature development, bug fixes, reviews,
-tests, experiments, documentation, and managed Workspace tasks. Paths such as
-`../claude_hub-<slug>`, `/tmp/<slug>`, and
-`~/Projects/codex_workspace/claude_hub-<slug>` are forbidden.
+`--env-preset` accepts any built-in preset or saved custom preset by name or id.
+Use `--no-reuse-existing` only for deliberate parallelism and `--ephemeral` only
+for task-owned sessions. After a terminal task, `claude-hub task cleanup TASK_ID`
+cleans an ephemeral session; never delete shared/persistent agents.
 
-Before relocating or removing an existing worktree, inspect its Git status and
-confirm that no process, tmux session, dev server, or browser test is using its
-path. Preserve dirty and untracked state. Use `git worktree move` for safe
-relocation and `git worktree remove` only for a worktree proven disposable;
-never move a registered worktree with plain `mv`.
+Simple work runs directly. Complex work maps dependencies before delegation;
+there is no minimum number of subagents. Every delegate needs inputs, scope,
+owner, budget, stop condition and evidence handoff. Use actual available tools
+and user/configured model choices. Worker self-review does not replace the Hub's
+required independent evaluator or human acceptance.
 
-For all feature work, bug fixes, UI changes, tests, documentation changes,
-and managed workspace tasks — even small ones:
+## Focused navigation
 
-1. Start from clean `main`: fetch/sync first.
-2. Create an isolated worktree and branch:
-   `git worktree add ~/claude_hub_worktree/<slug> -b feat/your-feature main`.
-3. **Work only inside that task worktree.** Never edit files in the `main`
-   worktree directly.
-4. For frontend changes, run a dedicated dev/review server from that worktree
-   on its own port and stop it before merging or leaving the task.
-5. Commit changes with conventional commits.
-6. Run validation appropriate to the touched files.
-7. Update `CHANGELOG.md` for meaningful shipped changes.
-8. Merge into `main` only after validation and review/approval, then push
-   `main`.
+- [Architecture and code ownership map](ARCHITECTURE.md)
+- [Detailed workflow, commands, runtime pitfalls and task-specific document index](docs/AGENT_WORKFLOW.md)
+- [Current orchestration/context contract](docs/working-logs/2026-10-05-agent-context-contract.md)
+- [Chat work routing, background tasks and feedback](docs/working-logs/2026-10-05-chat-workflow-integration.md)
+- [Recent behavior](CHANGELOG.md), [bug symptom history](WORKLOG.md)
+- [Terminal debugging](docs/terminal-debugging.md), [deployment](docs/DEPLOYMENT.md)
+- [Feedback lessons](docs/working-logs/lessons-catalog.md)
 
-A user request to merge or push means complete this branch-to-main flow. It is
-not permission to skip the worktree branch.
-
-If you catch yourself writing code on `main`, stop immediately. Stash or
-revert, create a worktree, and continue there.
-
-### Claude Hub Workspace vs Git Worktree
-
-These are different layers:
-
-- **Git worktree** (mandatory above): isolated checkout/branch for editing
-  code without touching `main`.
-- **Claude Hub Workspace**: one orchestration workspace per Git repo identity
-  (canonical `git common-dir`). Main and linked Git worktrees share the same
-  Hub Workspace. `workspace ensure` canonicalizes `Workspace.path` to the
-  primary/main worktree; agent execution cwd is separate and must be set
-  explicitly when working from a feature worktree (see below).
-
-CLI lifecycle recipe:
-
-1. `claude-hub workspace ensure --path …` — reuse or create the canonical Hub
-   Workspace for the repo (do not create a new Hub Workspace per Git worktree).
-2. Check `claude-hub agent status WORKSPACE_ID` before creating another Agent.
-   `claude-hub agent create …` best-effort reuses a compatible idle
-   orchestrator already visible to that request; this is guidance against
-   unnecessary Agents, not a concurrency/idempotency boundary. Overlapping
-   create requests may each create a session. Use `--no-reuse-existing` only
-   when parallel work genuinely needs another Agent, and `--ephemeral` only
-   for task-scoped sessions you will clean up yourself. Strict reuse matches
-   exact cwd, so bare `agent create` without `--cwd` targets the main/primary
-   checkout. **From a feature worktree**, pass `--cwd .` so the agent runs in
-   that checkout.
-3. Local Claude from a feature worktree:
-   `claude-hub agent create WORKSPACE_ID --agent-type claude --cwd . --env-preset NAME_OR_ID`.
-   `--env-preset` accepts any built-in preset or saved custom preset by name or
-   id (`day1` is only one possible custom preset). It can also come from
-   `default_env_preset` in `~/.config/claude-hub/config.toml`; explicit
-   `--env KEY=VALUE` overrides preset keys.
-4. After a terminal task on an ephemeral agent: `claude-hub task cleanup TASK_ID`.
-   Never delete reused/shared/persistent agents.
-
-## Commit And CI
-
-Use conventional commits: `feat:`, `fix:`, `docs:`, `style:`, `refactor:`,
-`test:`, `chore:`, or `ci:`.
-
-CI runs on pushes to `main` and pull requests targeting `main`:
-
-- Backend: black, isort, mypy, pytest
-- Frontend: ESLint, type check, build
-- ttyd: tmux/ttyd installation and basic functionality
-
-## Protected Local State
-
-Do not delete, reset, or overwrite untracked or unrelated files. Treat local
-noise such as `.cursor/`, `tasks/`, `tmp_remote_media/`, captured logs
-(`*.log`), and ad-hoc probe scripts (`abl_*.json`, `nccl_*`,
-`pure_pytorch_*`, `run_*.sh`, `summarize_mem*.py`, `sweep_*.sh`) as protected
-unless the user explicitly asks to modify them.
-
-## Commands
-
-Frontend:
-
-- Dev server: `cd frontend && pnpm dev`
-- Build: `cd frontend && pnpm build`
-- Lint: `cd frontend && pnpm lint`
-
-Backend:
-
-- Dev server: `cd backend && uv run uvicorn claude_hub.main:app --reload`
-- Install dependencies: `cd backend && uv sync --dev`
-- Tests: `cd backend && uv run pytest`
-
-Logs:
-
-- Backend logs: `~/.claude_hub/logs/backend.log`
-
-## Project Map
-
-```text
-claude_hub/
-├── frontend/          # Vue 3 frontend application
-├── backend/           # FastAPI backend application
-├── docker/            # Docker configuration
-├── docs/              # Documentation
-│   └── working-logs/  # Detailed design and debugging logs
-└── .github/           # GitHub Actions workflows
-```
-
-## Task Navigation
-
-Use this table before reading broad context. Load only the docs relevant to the
-task.
-
-| Task shape | Read first |
-| --- | --- |
-| Task Graph / TaskMailbox (agent use) | `docs/TASK_GRAPH.md` (primary: `claude-hub task`) |
-| Architecture / data flow | `ARCHITECTURE.md` |
-| Recent shipped behavior | `CHANGELOG.md` |
-| Bug symptom history | `WORKLOG.md` |
-| Workspace task lifecycle, reports, Goal Packet | `docs/working-logs/2026-05-23-workspace-goal-packet-v1.md` |
-| Workspace state / review routing policy | `docs/working-logs/2026-05-23-state-machine-assessment.md` |
-| Autonomous mode and evaluator loop | `docs/working-logs/2026-05-26-autonomous-mode-v1.md` |
-| Review profiles and reviewer evidence | `docs/working-logs/2026-05-26-review-profiles-v1.md` |
-| Auto Mode sub-agent orchestration | `docs/working-logs/2026-06-01-auto-mode-cli-subagent-orchestration.md` |
-| Long-running autonomous timing / heartbeat | `docs/working-logs/2026-06-04-auto-mode-observability.md` |
-| Agent API error hard-context recovery | `docs/working-logs/2026-07-11-agent-error-hard-recovery.md` |
-| Dispatch chain recovery (GP review / continue stalls) | `docs/working-logs/2026-07-15-dispatch-chain-recovery.md` |
-| Resident agent: lifecycle, run-now, periodic tasks, next-run | `docs/working-logs/2026-06-25-resident-agent-three-state-lifecycle.md`, `docs/working-logs/2026-07-01-resident-behavior-optimization.md` |
-| Feedback harness / lesson retrieval plan | `docs/working-logs/2026-06-06-feedback-harness-plan.md` |
-| Active lessons / workspace feedback | `docs/working-logs/lessons-catalog.md` |
-| Terminal replay, ttyd, tmux, Playwright terminal debug | `docs/terminal-debugging.md` |
-| Deployment | `docs/DEPLOYMENT.md` |
-| CLI (`claude-hub`) | `docs/working-logs/2026-06-15-claude-hub-cli.md` |
-| CLI workspace/agent reuse lifecycle | `docs/working-logs/2026-08-26-cli-reuse-lifecycle-policy.md` |
-| Scheduled tasks (cron / interval / one-off) | `docs/working-logs/2026-09-08-scheduled-tasks.md` |
-| Orphan reviewer tabs / tab-session reconciliation | `docs/working-logs/2026-06-19-orphan-reviewer-tab-reconcile.md` |
-| Subagent mode / worktree runtime isolation / `/clear` seat check | `docs/working-logs/2026-08-31-subagent-mode-and-session-seat.md` |
-| Claude/Cursor/Codex approval cards (AskUserQuestion / AskQuestion / requestUserInput) | `docs/working-logs/2026-09-05-claude-ask-user-question-approval.md`, `docs/working-logs/2026-09-02-chat-composer-ux-and-ask-question.md`, `docs/working-logs/2026-09-06-codex-question-approval.md` |
-| Add a new agent type / TraeX (Codex fork) terminal+Chat wiring | `docs/working-logs/2026-09-16-traex-agent.md` |
-| Structured Chat Goal mode | `docs/working-logs/2026-09-17-chat-goal-mode.md` |
-| Remote tabs / remote workspace agents and reviewers | `docs/working-logs/2026-09-20-remote-agent-pipeline.md` |
-| Long Chat turns / stream watchdog timeouts | `docs/working-logs/2026-09-20-chat-long-turn-watchdog.md` |
-| Scheduled Chat run wedge / stale reaper / backlog supersede | `docs/working-logs/2026-09-22-scheduled-chat-stale-run.md` |
-
-## Common Edit Areas
-
-| Task | Key files |
-| --- | --- |
-| Add API endpoint | `backend/claude_hub/api/*.py`, `backend/claude_hub/models/schemas.py`, `backend/claude_hub/api/__init__.py` |
-| Change terminal rendering | `backend/claude_hub/api/terminal.py`, `backend/claude_hub/services/ttyd_manager.py`, `docs/terminal-debugging.md` |
-| Change auth | `backend/claude_hub/auth/dependencies.py`, `backend/claude_hub/auth/session.py`, `backend/claude_hub/api/auth.py`, `backend/claude_hub/config.py` |
-| Add frontend component | `frontend/src/components/*.vue`, parent component, `frontend/src/types/index.ts`, relevant store |
-| Change layout/pane system | `frontend/src/stores/terminalStore.ts`, `frontend/src/components/LayoutSelector.vue`, `frontend/src/components/TerminalGridView.vue` |
-| Change workspace orchestration | `backend/claude_hub/services/workspace_manager.py`, `backend/claude_hub/services/workspace_state_policy.py`, `backend/claude_hub/api/workspaces.py`, `frontend/src/stores/workspaceStore.ts` |
-
-## Agent Types
-
-- `claude`: default Claude Code CLI session.
-- `cursor`: Cursor CLI (`agent`); always runs in YOLO mode by default and the
-  solo-mode toggle does not apply.
-- `terminal`: plain user-shell session for free-form interactive work.
-
-## Pitfalls
-
-- **No direct work on `main`**: always create a worktree + feature branch first.
-  Even small fixes and doc changes go through a worktree. See
-  [Mandatory Workflow](#mandatory-workflow).
-- **Live Hub is off-limits**: do not stop or restart the 5173/8173 main
-  service, and do not write `~/.claude_hub/workspaces` or the default tmux
-  server from a feature worktree. Worktree backends use an isolated runtime
-  home and `tmux -L`. `/clear` is fail-closed if the stored tmux name does
-  not match `claude-hub-{tab_id[:8]}`.
-- **Pinia reactivity**: use `storeToRefs()` for state refs and computed getters.
-  Actions can be destructured directly.
-- **System proxy**: backend clears proxy env vars at import in `terminal.py`.
-  If `curl`/debugging fails with 502, add `--noproxy '*'`.
-- **ttyd subprotocol**: WebSocket must use subprotocol `tty`; both
-  `accept(subprotocol="tty")` and `connect(subprotocols=["tty"])` are required.
-- **httpx proxy**: responses are auto-decompressed. Strip `content-encoding`
-  before forwarding to the client.
-- **Vite WS proxy**: WebSocket proxy entries require `ws: true`.
-- **WS cookie**: FastAPI `Cookie` is unreliable on WebSocket. Parse
-  `websocket.headers["cookie"]` manually.
-- **tmux mouse off**: keep `tmux set -g mouse off`; mouse mode intercepts drag
-  events and breaks xterm.js text selection.
-
-## Working Logs
-
-Significant development work should add a focused log under
-`docs/working-logs/YYYY-MM-DD-topic.md` with:
-
-- System overview
-- Module design
-- Key issues / pitfalls
-
-Keep root agent files short. When a lesson becomes stable, add a navigation cue
-here and put the details in a working log, `REVIEW.md`, tests, or policy code.
+Backend checks run from `backend/` with `uv run pytest` plus applicable
+black/isort/mypy checks. Frontend checks run from `frontend/` with
+`pnpm lint:check`, `pnpm exec vue-tsc --noEmit`, `pnpm build`.
+`pnpm lint` writes fixes and must not be used for read-only review.

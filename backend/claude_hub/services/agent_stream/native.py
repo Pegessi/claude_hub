@@ -67,6 +67,7 @@ from ...models import (
     StreamModeOption,
     StreamReasoningEffortOption,
 )
+from ..agent_execution_policy import EXECUTION_POLICY
 from .fork_seed import wrap_fork_seed_history
 from .provider_network import (
     PROVIDER_NETWORK_MODE_ENV,
@@ -233,15 +234,14 @@ def strip_image_attachment_guidance(text: str) -> str:
     return text[:start] + text[end:].lstrip("\n")
 
 
-# Hub Chat runtime / self-scheduling guidance.
+# Hub Chat runtime / execution guidance.
 #
 # A native Chat agent runs with ``CLAUDE_HUB_TAB_ID`` in its provider
 # subprocess env (overlaid in :meth:`ProviderSession._build_env`) and the
 # ``claude-hub`` CLI on PATH, and ``schedule create --kind chat_turn`` can
-# enqueue a turn for the current conversation, but nothing tells the agent any
-# of this. Without guidance it either never self-schedules or mistakes Chat
-# for a Terminal and uses ``--kind tab_message`` (which types into a terminal
-# pane). This block points it at the correct, Chat-native command.
+# enqueue a turn for the current conversation. Linked work can instead run in
+# its own context. Keep this capability map short and load command help only
+# for the selected path; it must not force a delegation on every user turn.
 #
 # Injected once, on the first user turn of a transport session (see
 # :meth:`ProviderSession.send_message`), as a sentinel-wrapped prompt prefix.
@@ -256,8 +256,23 @@ HUB_RUNTIME_GUIDANCE = (
     "and the `claude-hub` CLI is on PATH. This conversation's tab id is exposed "
     "by the env var `$CLAUDE_HUB_TAB_ID` — read it from the environment; never "
     "hardcode the value.\n"
+    + EXECUTION_POLICY
+    + "For linked background work, inspect `claude-hub work --help` and the selected "
+    "subcommand's help only when needed. Reuse the same request key when retrying creation; "
+    "query existing work before creating a replacement. Report a verified work ID after creation. "
+    "Keep routine check results in the work card, and surface completion, anomalies or required "
+    "decisions with concise evidence. Read current work state when the user asks to change or stop it.\n"
+    "For unfamiliar or repeated workspace problems, fetch a compact relevant lesson index with "
+    "`claude-hub feedback context <workspace-id> --query <topic>`; fetch an applicable lesson's "
+    "details with `claude-hub lessons get`. Do not load unrelated lessons or query on every turn. "
+    "When the user states an explicit reusable correction, `claude-hub feedback sources` provides "
+    "recent user-message IDs; use `feedback capture --help` to record the exact quote and source. "
+    "Do not manufacture user corrections or promote your own guess to a rule. Automatic feedback "
+    "controls are available through `claude-hub feedback status` and `feedback configure`.\n"
     "Only when the user explicitly asks you to schedule a recurring self-check "
-    "or follow-up, create one with the Chat-native kind:\n"
+    "or follow-up, schedule it. For an independent background monitor use `claude-hub work create` "
+    "with its interval option; for a follow-up that needs this conversation's context use "
+    "the Chat-native kind:\n"
     '  claude-hub schedule create --name "<short name>" --kind chat_turn '
     '--tab-id "$CLAUDE_HUB_TAB_ID" --interval <seconds> --message '
     '"<what to do when it fires>"\n'
@@ -277,7 +292,8 @@ def wrap_hub_runtime_guidance(text: str) -> str:
     """Prepend the sentinel-wrapped Hub runtime guidance to a Chat prompt.
 
     Applied once to the first user turn of every native Chat transport so the
-    agent knows it runs in Hub Chat and how to self-schedule a ``chat_turn``.
+    agent knows the lightweight execution policy and where to discover Hub
+    work, scheduling and feedback commands when they are relevant.
     The adapter strips the block on transcript read (see
     :func:`strip_hub_runtime_guidance`) so it never reaches the persisted
     timeline or the UI.

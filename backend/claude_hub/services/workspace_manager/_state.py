@@ -20,6 +20,7 @@ class _StateMixin:
     _scheduled_chat_recovery_pending: bool
 
     def __init__(self) -> None:
+        self._feedback_started_at = _wm._now()
         self.workspaces: dict[str, Workspace] = {}
         self.tasks: dict[str, WorkspaceTask] = {}
         self.sessions: dict[str, ManagedSession] = {}
@@ -166,6 +167,12 @@ class _StateMixin:
         # For STOPPED sessions the tmux inbox is gone and we cannot query the
         # receipt, so we fail closed: move processing call_ids to uncertain.
         self._recover_uncertain_deliveries()
+
+        # A snapshot may be absent/stale after a crash or a derived-output failure.
+        # Rebuild from committed files only; never save mutable state to refresh a cache.
+        for workspace_id in self.workspaces:
+            if self._workspace_state_file(workspace_id).exists():
+                self._refresh_snapshot_best_effort(workspace_id)
 
     def _recover_uncertain_deliveries(self) -> None:
         """Cold-start delivery recovery.

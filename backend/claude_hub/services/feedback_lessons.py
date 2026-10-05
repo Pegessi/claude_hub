@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import uuid
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 from ..models import (
     AgentReport,
+    FeedbackFailureEvidence,
     FeedbackLesson,
     FeedbackLessonCreate,
     FeedbackLessonDraft,
@@ -24,9 +26,10 @@ from ..models import (
     Workspace,
     WorkspaceTask,
 )
+from .feedback_automation import ChatCorrection, FeedbackAutomationStore
 
 FEEDBACK_INDEX_SCHEMA_VERSION = 1
-FEEDBACK_SUMMARY_PROMPT_VERSION = 5
+FEEDBACK_SUMMARY_PROMPT_VERSION = 7
 
 # Reaper-prompt digest truncation limits keep Feedback Reaper prompts bounded
 # so smaller-context agents (codex, cursor) can process them. All free-text
@@ -42,6 +45,7 @@ _DIGEST_MAX_PATH_CHARS = 120
 _DIGEST_MAX_VALIDATION_ITEMS = 2
 _DIGEST_MAX_RISKS_ITEMS = 2
 _DIGEST_MAX_CHANGED_FILES = 6
+_DIGEST_MAX_FAILURE_EVIDENCE = 3
 # Active-lesson payload caps (these must keep the fingerprint field EXACT —
 # it is the authoritative merge key; Reaper echoes it back verbatim).
 _LESSON_MAX_ID = 80
@@ -189,6 +193,7 @@ class FeedbackLessonStore:
             do=do,
             avoid=avoid,
             evidence_task_ids=evidence_task_ids,
+            source_record_ids=self._clean_list(payload.source_record_ids),
             confidence=payload.confidence,
             enforce_iteration_signal=enforce_iteration_signal,
         )
@@ -391,28 +396,23 @@ class FeedbackLessonStore:
     ) -> list[dict[str, Any]]:
         """Return a compact relevance-ranked lesson index for prompt injection.
 
-        Uses token-overlap search against the task query; if the query is empty
-        or produces zero matches, falls back to top-N by confidence + hit_count
-        so that high-signal lessons still surface.
+        Empty queries and zero matches return an empty index. Popularity is
+        not relevance and must not inject unrelated instructions into a Chat.
         """
         matched: list[FeedbackLesson]
+        limit = min(max(limit, 1), 10)
         if query.strip() and _tokens(query):
             matched = self.search_lessons(workspace_id, query, limit=limit)
         else:
             matched = []
-        if not matched:
-            all_lessons = self.list_lessons(workspace_id)
-            conf = lambda l: l.confidence if l.confidence is not None else 0.0
-            hits = lambda l: l.hit_count or 0
-            matched = sorted(all_lessons, key=lambda l: (conf(l), hits(l)), reverse=True)[:limit]
 
         index: list[dict[str, Any]] = []
         for lesson in matched:
             index.append(
                 {
-                    "id": lesson.id,
-                    "title": lesson.title,
-                    "tags": lesson.tags,
+                    "id": lesson.id[:80],
+                    "title": lesson.title[:100],
+                    "tags": [tag[:24] for tag in lesson.tags[:6]],
                     "confidence": lesson.confidence,
                 }
             )
@@ -542,6 +542,8 @@ class FeedbackLessonStore:
         limit: int,
         force: bool,
         now: datetime | None = None,
+        automatic_since: datetime | None = None,
+        automatic_cursor: str = "",
     ) -> dict[str, Any]:
         """Build the reaper input selection (candidates + compact records) WITHOUT
         writing the processed-records index yet. The caller must invoke
@@ -558,13 +560,48 @@ class FeedbackLessonStore:
             if item.get("path")
         }
         record_paths = sorted(task_records_dir.glob("*.json")) if task_records_dir.exists() else []
-        record_path_set = {str(p) for p in record_paths}
-
+        correction_dir = self._feedback_dir(workspace_id) / "chat-corrections"
+        correction_paths = sorted(correction_dir.glob("chat-*.json"))
+        record_paths.extend(correction_paths)
         first_scan = not existing_entries
         candidates: list[FeedbackProcessedTaskRecord] = []
-        for path in record_paths:
+        # Rotate a durable cursor rather than truncating by filename: correction
+        # IDs are hashes, and a lexicographic cap would permanently miss some.
+        scan_paths = record_paths
+        scan_cursor = automatic_cursor
+        if automatic_since is not None:
+            fresh_paths = []
+            for path in record_paths:
+                try:
+                    if path.stat().st_mtime >= automatic_since.timestamp():
+                        fresh_paths.append(path)
+                except OSError:
+                    continue
+            fresh_paths.sort(key=str)
+            pivot = bisect_right([str(path) for path in fresh_paths], automatic_cursor)
+            scan_paths = (fresh_paths[pivot:] + fresh_paths[:pivot])[:1000]
+        read_bytes = 0
+        eligible_paths: set[str] = set()
+        for path in scan_paths:
             path_key = str(path)
-            digest_bytes = path.read_bytes()
+            try:
+                if automatic_since is not None:
+                    remaining = 8 * 1024 * 1024 - read_bytes
+                    # Reserve a full per-file probe so growing/oversized files
+                    # cannot exceed the total byte budget or advance past a
+                    # record read only partially at the end of a scan.
+                    if remaining < 1024 * 1024 + 1:
+                        break
+                    with path.open("rb") as source:
+                        digest_bytes = source.read(1024 * 1024 + 1)
+                    read_bytes += len(digest_bytes)
+                    scan_cursor = path_key
+                    if len(digest_bytes) > 1024 * 1024:
+                        continue
+                else:
+                    digest_bytes = path.read_bytes()
+            except OSError:
+                continue
             sha256 = hashlib.sha256(digest_bytes).hexdigest()
             cached = existing_entries.get(path_key)
             should_read = (
@@ -579,15 +616,56 @@ class FeedbackLessonStore:
                     record_payload = json.loads(digest_bytes.decode("utf-8"))
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                     continue
+                if not isinstance(record_payload, dict):
+                    continue
+                if path.parent == correction_dir:
+                    try:
+                        correction = ChatCorrection.model_validate(record_payload)
+                    except ValueError:
+                        continue
+                    if correction.workspace_id != workspace_id or correction.id != path.stem:
+                        continue
+                    if automatic_since and correction.created_at < automatic_since:
+                        continue
+                    digest = FeedbackTaskDigest(
+                        task_id="",
+                        source_record_id=correction.id,
+                        source_tab_id=correction.tab_id,
+                        source_turn_id=correction.turn_id,
+                        source_message_id=correction.message_id,
+                        correction=correction.quote,
+                    )
+                    raw_task_id = correction.id
+                else:
+                    task_block = record_payload.get("task")
+                    if not isinstance(task_block, dict) or task_block.get("system_internal"):
+                        continue
+                    if record_payload.get("workspace_id") not in (None, workspace_id):
+                        continue
+                    if task_block.get("workspace_id") not in (None, workspace_id):
+                        continue
+                    digest = self._digest_task_record(record_payload)
+                    if automatic_since:
+                        try:
+                            archived_at = datetime.fromisoformat(record_payload["archived_at"])
+                            if archived_at < automatic_since:
+                                continue
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        # A clean pass is not a reusable lesson; require a
+                        # supported iteration signal before spending a model call.
+                        if not (digest.review_failed_count >= 1 or digest.needs_input_count >= 2):
+                            continue
+                    raw_task_id = str(task_block.get("id") or path.stem)
+                eligible_paths.add(path_key)
                 # Clamp task_id at the outer record level too so compact wrapper
                 # and input_record_ids never leak an oversized id into the prompt.
-                raw_task_id = str(record_payload.get("task", {}).get("id") or path.stem)
                 clamped_task_id = self._truncate_str(raw_task_id, _DIGEST_MAX_TASK_ID)
                 entry = FeedbackProcessedTaskRecord(
                     task_id=clamped_task_id,
                     path=path_key,
                     sha256=sha256,
-                    digest=self._digest_task_record(record_payload),
+                    digest=digest,
                     summarized_at=now,
                 )
                 candidates.append(entry)
@@ -604,7 +682,7 @@ class FeedbackLessonStore:
         if not selected_entries and (force or mode == FeedbackSummaryMode.FULL):
             fallback_candidates: list[FeedbackProcessedTaskRecord] = []
             for key in sorted(existing_entries):
-                if key not in record_path_set:
+                if key not in eligible_paths:
                     continue
                 try:
                     fallback_candidates.append(FeedbackProcessedTaskRecord(**existing_entries[key]))
@@ -623,7 +701,9 @@ class FeedbackLessonStore:
         for entry in selected_entries:
             compact_records.append(
                 {
-                    "task_id": entry.task_id,
+                    (
+                        "source_record_id" if entry.digest.source_record_id else "task_id"
+                    ): entry.task_id,
                     "digest": self._compact_digest_for_prompt(entry.digest),
                     "_path": entry.path,  # internal, stripped before serialization
                 }
@@ -649,6 +729,7 @@ class FeedbackLessonStore:
             "_record_paths": [str(p) for p in record_paths],
             "_first_scan_raw": first_scan,
             "_selected_dumps_by_path": selected_dumps_by_path,
+            "_scan_cursor": scan_cursor,
         }
 
     def commit_summary_input(
@@ -1112,6 +1193,13 @@ class FeedbackLessonStore:
         task: dict[str, Any] = raw_task if isinstance(raw_task, dict) else {}
         artifacts: dict[str, Any] = raw_artifacts if isinstance(raw_artifacts, dict) else {}
         reports: list[Any] = raw_reports if isinstance(raw_reports, list) else []
+        failure_reports = [
+            report
+            for report in reports
+            if isinstance(report, dict)
+            and str(report.get("state") or "")
+            in {"review_failed", "needs_input", "review_needs_input", "blocked", "failed"}
+        ]
         report_state_sequence = [
             str(report.get("state"))
             for report in reports
@@ -1155,6 +1243,10 @@ class FeedbackLessonStore:
                 _DIGEST_MAX_RISKS_ITEMS,
             ),
             report_states=self._unique_strings(report_state_sequence),
+            failure_evidence=[
+                self._failure_evidence(report)
+                for report in failure_reports[-_DIGEST_MAX_FAILURE_EVIDENCE:]
+            ],
             # report_state_sequence intentionally omitted: the unique states + counts
             # (review_failed_count, needs_input_count, report_total) carry the signal
             # the Reaper needs; the full per-report sequence is redundant bulk.
@@ -1165,11 +1257,30 @@ class FeedbackLessonStore:
             completed_at=str(task.get("completed_at") or ""),
         )
 
+    def _failure_evidence(self, report: dict[str, Any]) -> FeedbackFailureEvidence:
+        return FeedbackFailureEvidence(
+            report_id=self._truncate_str(
+                str(report.get("id") or report.get("report_id") or ""), 80
+            ),
+            state=self._truncate_str(str(report.get("state") or ""), 32),
+            message=self._truncate_str(str(report.get("message") or ""), 240),
+            validation=self._truncate_str(str(report.get("validation") or ""), 320),
+            risks=self._truncate_str(str(report.get("risks") or ""), 160),
+        )
+
     def _compact_digest_for_prompt(self, digest: FeedbackTaskDigest) -> dict[str, Any]:
         """Serialize a digest into the compact prompt format, applying truncation
         even to records loaded from the existing cache (which may have been
         created before truncation was added). Every free-text field is bounded
         so adversarial title/path/validation content cannot blow the budget."""
+        if digest.source_record_id:
+            return {
+                "source_record_id": digest.source_record_id,
+                "source_tab_id": digest.source_tab_id,
+                "source_turn_id": digest.source_turn_id,
+                "source_message_id": digest.source_message_id,
+                "correction": digest.correction[:1024],
+            }
         return {
             "task_id": self._truncate_str(digest.task_id, _DIGEST_MAX_TASK_ID),
             "title": self._truncate_str(digest.title, _DIGEST_MAX_TITLE),
@@ -1189,6 +1300,10 @@ class FeedbackLessonStore:
             "review_failed_count": digest.review_failed_count,
             "needs_input_count": digest.needs_input_count,
             "report_total": digest.report_total,
+            "failure_evidence": [
+                self._failure_evidence(item.model_dump()).model_dump()
+                for item in digest.failure_evidence[-_DIGEST_MAX_FAILURE_EVIDENCE:]
+            ],
             "report_states": self._truncate_list(
                 [self._truncate_str(s, 32) for s in digest.report_states], 8
             ),
@@ -1301,6 +1416,7 @@ class FeedbackLessonStore:
         do: str,
         avoid: str,
         evidence_task_ids: list[str],
+        source_record_ids: list[str],
         confidence: float | None,
         enforce_iteration_signal: bool = True,
     ) -> float | None:
@@ -1318,6 +1434,7 @@ class FeedbackLessonStore:
           report state sequence).
         - Multi-evidence (Signal B) lessons require at least one cited task with
           rf+ni >= 1 so recurrence is not asserted from textual similarity alone.
+        - Every cited task must have a readable record in this workspace.
 
         Confidence cap (always on):
         - Single-evidence lessons: capped at SINGLE_EVIDENCE_CONFIDENCE_CAP (0.6).
@@ -1332,24 +1449,38 @@ class FeedbackLessonStore:
             raise FeedbackLessonValidationError("do is required and must be non-empty")
         if not avoid:
             raise FeedbackLessonValidationError("avoid is required and must be non-empty")
-        if not evidence_task_ids:
+        correction_ids = [item for item in source_record_ids if item.startswith("chat-")]
+        for record_id in correction_ids:
+            try:
+                FeedbackAutomationStore(self.state_root).correction(workspace_id, record_id)
+            except (OSError, ValueError) as exc:
+                raise FeedbackLessonValidationError(
+                    f"no verified Chat correction record in this workspace: {record_id}"
+                ) from exc
+        if not evidence_task_ids and not correction_ids:
             raise FeedbackLessonValidationError(
                 "evidence_task_ids must cite at least one task that supports the lesson"
             )
 
-        if enforce_iteration_signal:
+        if enforce_iteration_signal and evidence_task_ids:
             signals = [
                 self._task_iteration_signal(workspace_id, task_id) for task_id in evidence_task_ids
             ]
+            missing_ids = [
+                task_id for task_id, signal in zip(evidence_task_ids, signals) if signal is None
+            ]
+            if missing_ids:
+                raise FeedbackLessonValidationError(
+                    "no task record was found in this workspace for evidence task(s): "
+                    + ", ".join(missing_ids)
+                    + "; lesson cannot be verified"
+                )
             observed_signals = [signal for signal in signals if signal is not None]
 
-            if len(evidence_task_ids) == 1:
-                signal = signals[0]
-                if signal is None:
-                    raise FeedbackLessonValidationError(
-                        f"single-evidence lesson cites task {evidence_task_ids[0]} but no task "
-                        "record was found on disk; lesson cannot be verified"
-                    )
+            if correction_ids:
+                pass  # exact explicit user correction is an independent signal
+            elif len(evidence_task_ids) == 1:
+                signal = observed_signals[0]
                 if not signal.has_signal_a:
                     raise FeedbackLessonValidationError(
                         "single-evidence lesson requires Signal A "
@@ -1367,7 +1498,7 @@ class FeedbackLessonStore:
 
         cap = (
             SINGLE_EVIDENCE_CONFIDENCE_CAP
-            if len(evidence_task_ids) == 1
+            if len(evidence_task_ids) + len(correction_ids) <= 1
             else MULTI_EVIDENCE_CONFIDENCE_CAP
         )
         if confidence is None:
@@ -1382,17 +1513,29 @@ class FeedbackLessonStore:
         records_dir = self.state_root / workspace_id / "task_records"
         if not records_dir.exists():
             return None
-        for path in records_dir.glob(f"*{task_id}*.json"):
+        # IDs are untrusted report input, not glob patterns or paths. The
+        # record's exact task identity is authoritative, including legacy names.
+        for path in records_dir.glob("*.json"):
+            if task_id not in path.name:
+                continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("workspace_id") not in (None, workspace_id):
                 continue
             task_block = payload.get("task")
             if not isinstance(task_block, dict):
                 continue
+            if task_block.get("workspace_id") not in (None, workspace_id):
+                continue
             if str(task_block.get("id") or "") != task_id:
                 continue
-            reports = payload.get("reports") or []
+            reports = payload.get("reports")
+            if not isinstance(reports, list):
+                continue
             states = [
                 str(report.get("state"))
                 for report in reports

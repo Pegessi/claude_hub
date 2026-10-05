@@ -6,6 +6,7 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 
 from ...models import TaskCleanupResult
 from ..remote_profiles import reject_unsupported_interactive
+from ..task_dependencies import TaskHasDependentsError
 from ..task_graph import TaskHasDescendantsError, task_has_descendants
 from ._constants import *  # noqa: F401,F403
 
@@ -31,6 +32,15 @@ class _SessionsMixin:
             raise TaskHasDescendantsError(
                 f"Cannot delete task {task_id}: it has child tasks. "
                 "Delete or reparent descendants first."
+            )
+
+        dependents = [
+            item.id for item in self.tasks.values() if task_id in item.depends_on_task_ids
+        ]
+        if dependents:
+            raise TaskHasDependentsError(
+                f"Cannot delete task {task_id}: required by {', '.join(dependents)}. "
+                "Remove dependency edges or delete dependent tasks first."
             )
 
         workspace_id = task.workspace_id
