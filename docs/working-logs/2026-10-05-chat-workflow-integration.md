@@ -60,3 +60,12 @@ isolated HTTP/CLI persistence checks, and browser scenarios here after integrati
 Mocked transport checks and real provider execution must be identified separately.
 All servers, tmux sockets and runtime homes used in validation are task-owned;
 the main Hub on ports 5173/8173 is not restarted or mutated.
+
+Initial shared-policy validation: all 114 native transport tests and 30
+orchestrator/prompt measurement tests passed. A real installed Codex app-server
+using `CodexNativeSession` from this checkout completed a tool-free turn with
+the expected `HUB_WORKFLOW_SMOKE_OK` response; the process was stopped in
+`finally`. It used an isolated runtime home/socket and a non-service Hub URL.
+This verifies the actual provider transport with the new policy, not the full
+work dispatch/report/cleanup path. The ephemeral evidence file is
+`/var/folders/sg/n3v76wfd73gc06sq76ntb5rr0000gn/T/hub-chat-workflow-native-kloyw6bo/result.json`.

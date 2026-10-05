@@ -97,6 +97,7 @@ required independent evaluator or human acceptance.
 - [Architecture and code ownership map](ARCHITECTURE.md)
 - [Detailed workflow, commands, runtime pitfalls and task-specific document index](docs/AGENT_WORKFLOW.md)
 - [Current orchestration/context contract](docs/working-logs/2026-10-05-agent-context-contract.md)
+- [Chat work routing, background tasks and feedback](docs/working-logs/2026-10-05-chat-workflow-integration.md)
 - [Recent behavior](CHANGELOG.md), [bug symptom history](WORKLOG.md)
 - [Terminal debugging](docs/terminal-debugging.md), [deployment](docs/DEPLOYMENT.md)
 - [Feedback lessons](docs/working-logs/lessons-catalog.md)
