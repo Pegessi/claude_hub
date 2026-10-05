@@ -17,5 +17,9 @@ EXECUTION_POLICY = (
     "A Task owner can work directly or use native subagents; neither delegation nor a long answer "
     "alone requires another Task. An assigned Task already provides that persistence. Keep tightly "
     "coupled work together and preserve explicit review "
-    "requirements. The owning agent integrates evidence and remains responsible for delivery.\n"
+    "requirements. The owning agent integrates evidence and remains responsible for delivery. "
+    "When linked work awaits acceptance, inspect its task mode, review state and evidence. "
+    "Use `claude-hub task accept --help` only when authorized to accept on the user's behalf; "
+    "otherwise surface the pending decision. Preserve explicit human acceptance and independent "
+    "review requirements.\n"
 )
