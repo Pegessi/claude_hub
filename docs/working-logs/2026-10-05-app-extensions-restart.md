@@ -23,8 +23,10 @@ menus, without adding a second overflow trigger.
   are idempotent; stale instance requests fail closed. The API never accepts a
   shell command, process ID, port, or filesystem path from the browser.
 - Only a healthy response with the newly generated backend instance identity
-  counts as recovery. Graceful shutdown is bounded at 30 seconds and readiness
-  at 120 seconds. A failed restart is recorded, never automatically retried.
+  counts as recovery. Uvicorn connection draining is bounded at 3 seconds,
+  total backend shutdown at 30 seconds, and readiness at 120 seconds. A failed
+  restart is recorded, never automatically retried. See the
+  [restart latency follow-up](2026-10-05-restart-latency.md).
 - The dialog persists the pending request in session storage, polls only GET
   after a lost response, and times out after 3 minutes without claiming success.
   Reload/reopening can resume observation. Active work is explicitly interrupted;

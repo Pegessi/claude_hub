@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### fix(runtime): speed up supervised restart and drain long-lived connections
+
+- Bound Uvicorn connection draining to three seconds so open Chat streams do
+  not consume the launcher's 30-second fallback and bypass application cleanup.
+- Stop scheduled dispatch before draining providers, flush independent stream
+  owners concurrently, and release ttyd children in parallel while preserving
+  tmux sessions. Add launcher shutdown/readiness timing logs.
+- Reuse one fresh Codex history snapshot for startup backfill; skip cold-launch
+  scans and repeated tmux environment refreshes during hot reattachment.
+
 ### fix(chat): render local Markdown images through the tab image reader
 
 - Route local Markdown image paths through the authenticated tab-scoped image
