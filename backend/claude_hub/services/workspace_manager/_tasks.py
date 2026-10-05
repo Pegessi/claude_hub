@@ -410,6 +410,8 @@ class _TasksMixin:
         self,
         workspace_id: str,
         payload: FeedbackSummaryRequest,
+        *,
+        summary_input: dict[str, Any] | None = None,
     ) -> FeedbackSummaryRun:
         workspace = self.workspaces.get(workspace_id)
         if not workspace:
@@ -457,11 +459,14 @@ class _TasksMixin:
                 )
             if active_task.status == WorkspaceTaskStatus.TODO:
                 if not store.has_staged_summary_input(workspace_id, active_run.id):
+                    if summary_input is not None:
+                        summary_input["run_id"] = active_run.id
                     return await self._prepare_and_start_feedback_summary_task(
                         workspace,
                         payload,
                         active_task,
                         active_run,
+                        summary_input=summary_input,
                     )
                 return await self._start_feedback_summary_task(
                     active_task,
@@ -470,14 +475,15 @@ class _TasksMixin:
                 )
             return active_run
 
-        summary_input = store.prepare_summary_input(
-            workspace_id,
-            self._workspace_task_records_dir(workspace_id),
-            mode=payload.mode,
-            limit=payload.limit,
-            force=payload.force,
-            now=now,
-        )
+        if summary_input is None:
+            summary_input = store.prepare_summary_input(
+                workspace_id,
+                self._workspace_task_records_dir(workspace_id),
+                mode=payload.mode,
+                limit=payload.limit,
+                force=payload.force,
+                now=now,
+            )
         if summary_input["cache_hit"]:
             # Still prune the processed index of deleted-disk entries even when
             # no new records are being summarized.

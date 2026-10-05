@@ -3258,6 +3258,8 @@ def test_manual_feedback_reaper_promotes_lesson(
     assert manual_lesson_response.status_code == 201
     manual_lesson = manual_lesson_response.json()
     assert manual_lesson["title"] == "Use comma-separated symbols"
+    # Every cited task needs its own source record, including a merge citation.
+    write_iteration_task_record_fixture(state_root, workspace["id"], "task-two")
     duplicate_lesson_response = client.post(
         f"/api/workspaces/{workspace['id']}/lessons",
         json={
