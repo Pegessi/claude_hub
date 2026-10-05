@@ -1,7 +1,7 @@
 """Full-app UI contract smoke; every API request is mocked before navigation.
 
 Run with a dedicated Vite server (never the primary 5173/8173 instance):
-  python tests/browser_chat_work.py http://127.0.0.1:5287 /tmp/chat-work-ui
+  python tests/browser_chat_work.py http://127.0.0.1:5287 /tmp/chat-work-ui [existing-browser]
 Requires the existing Playwright Python environment and Chromium. This checks
 the real Chat surface and controls, not provider execution or backend behavior.
 """
@@ -16,9 +16,19 @@ from playwright.async_api import async_playwright, expect
 
 
 async def main():
-    base, output = sys.argv[1:]
-    assert urlparse(base).hostname in ("127.0.0.1", "localhost")
-    assert urlparse(base).port not in (None, 5173, 8173)
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit(__doc__)
+    base, output = sys.argv[1:3]
+    executable = sys.argv[3] if len(sys.argv) == 4 else None
+    parsed_base = urlparse(base)
+    if (
+        parsed_base.scheme != "http"
+        or parsed_base.hostname not in ("127.0.0.1", "::1")
+        or parsed_base.port in (None, 5173, 8173, 10025, 18183)
+        or parsed_base.username is not None
+        or parsed_base.password is not None
+    ):
+        raise SystemExit("Use an owned numeric-loopback review server")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     now = "2026-10-05T03:00:00Z"
@@ -45,12 +55,26 @@ async def main():
     actions, requests, errors = [], [], []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(viewport={"width": 1280, "height": 900})
+        browser = await p.chromium.launch(headless=True, executable_path=executable)
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, service_workers="block"
+        )
+
+        async def block_websocket(socket):
+            await socket.close(code=1000, reason="mocked UI smoke")
 
         async def api(route):
             request = route.request
-            path = urlparse(request.url).path
+            parsed = urlparse(request.url)
+            if (parsed.scheme, parsed.hostname, parsed.port) != (
+                parsed_base.scheme, parsed_base.hostname, parsed_base.port
+            ):
+                await route.abort("blockedbyclient")
+                return
+            path = parsed.path
+            if not path.startswith("/api/"):
+                await route.continue_()
+                return
             requests.append((request.method, path))
             if path == "/api/auth/check":
                 body = dict(auth_required=False, user=None)
@@ -90,7 +114,8 @@ async def main():
                 body = []
             await route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
 
-        await context.route("**/api/**", api)
+        await context.route_web_socket("**/*", block_websocket)
+        await context.route("**/*", api)
         page = await context.new_page()
         page.on("pageerror", lambda error: errors.append(str(error)))
         await page.goto(base + "/?tab=ui-tab-1")
