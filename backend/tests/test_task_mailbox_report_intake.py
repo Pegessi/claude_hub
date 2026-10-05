@@ -110,7 +110,7 @@ def _task_session(
         status=ManagedSessionStatus.WORKING,
         runtime_status=AgentRuntimeStatus.IDLE,
         title=task.title,
-        workspace_path="/tmp",
+        workspace_path=manager.workspaces[workspace_id].path,
         tmux_session=f"tmux-{session_id}",
         target=ExecutionTarget.LOCAL,
         task_id=task_id,

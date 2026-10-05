@@ -1935,7 +1935,7 @@ def test_remote_workspace_forwarding_adds_reverse_ssh_port(monkeypatch: MonkeyPa
     launcher = process._build_ttyd_command(session_exists=False)[-1]
 
     assert "-o ExitOnForwardFailure=yes" in launcher
-    assert "-R 127.0.0.1:18173:127.0.0.1:8173" in launcher
+    assert f"-R 127.0.0.1:18173:127.0.0.1:{ttyd_manager_module.settings.port}" in launcher
     assert "ssh -tt -o LogLevel=ERROR" in launcher
     assert "tiger@devbox" in launcher
 
