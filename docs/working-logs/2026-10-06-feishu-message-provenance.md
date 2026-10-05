@@ -49,6 +49,25 @@ the workflow branch before the two features are combined.
   inferred or fetched with additional permissions.
 - No real Feishu OAuth, live Bot callback, or real cross-entry provider turn has
   been validated by this stage. Synthetic callbacks are not OAuth evidence.
+- A failed or uncertain Feishu reply is not automatically resent through another
+  endpoint. The answer remains in Web history; retrying delivery needs separate
+  deduplication and authorization checks. Revoked bindings receive no later
+  answer or neutral notification.
+- The existing 300-second Bot wait limit cancels only its expected turn. Cursor
+  nested completion behavior and long-text edit-resend remain validation limits.
+
+## Stable rejection reasons
+
+Known busy and unavailable-source failures carry `X-Claude-Hub-Error-Reason`;
+HTTP status and string detail are unchanged. Bot does not parse Goal wording.
+Unknown 409 responses ask the user to check the Chat state instead of rebinding.
+Subscription failure is classified before dispatch, and only a successfully
+created subscription is removed in cleanup.
+
+After this follow-up, the same four backend suites passed **177 tests**, including
+actual Goal admission rejection without consuming its pending question. Complete
+backend mypy passed **113 source files** in this Bot-only candidate. Evidence:
+`feishu-error-reasons/` under the artifact root below.
 
 ## Validation in the canonical worktree
 

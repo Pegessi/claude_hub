@@ -1347,6 +1347,9 @@ async def _send_to_native(
     )
 
 
+CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
+
+
 def _map_send_exception(exc: Exception) -> HTTPException:
     """Map provider send errors to explicit HTTP status codes.
 
@@ -1362,7 +1365,11 @@ def _map_send_exception(exc: Exception) -> HTTPException:
     if isinstance(exc, RuntimeError):
         msg = str(exc)
         if "turn is already in flight" in msg:
-            return HTTPException(status_code=409, detail=msg)
+            return HTTPException(
+                status_code=409,
+                detail=msg,
+                headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+            )
         return HTTPException(status_code=503, detail=msg)
     # Unknown errors still fail closed, never as a bare 500.
     return HTTPException(status_code=500, detail=str(exc))
@@ -1430,6 +1437,7 @@ async def _dispatch_tab_stream_input(
                 raise HTTPException(
                     status_code=409,
                     detail="Pause or finish the active Goal before sending a manual turn",
+                    headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
                 )
         await _send_to_native(
             session,
@@ -1459,10 +1467,11 @@ async def dispatch_tab_chat_and_wait(
 
     session = _terminal_tab_session_or_404(tab_id)
     manager = _get_tab_tailer_manager()
-    queue = await manager.subscribe(session)
+    queue: Optional[asyncio.Queue[AgentStreamEvent]] = None
     last_error = ""
     try:
         try:
+            queue = await manager.subscribe(session)
             expected_turn_id = await _dispatch_tab_stream_input(
                 tab_id,
                 AgentStreamSendRequest(text=text, client_turn_id=client_turn_id),
@@ -1471,7 +1480,11 @@ async def dispatch_tab_chat_and_wait(
                 allow_question_answer=False,
             )
         except StructuredSourceUnavailable as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=str(exc),
+                headers={CHAT_ERROR_REASON_HEADER: "structured_source_unavailable"},
+            ) from exc
         except HTTPException:
             raise
         except Exception as exc:
@@ -1509,7 +1522,8 @@ async def dispatch_tab_chat_and_wait(
                 raise RuntimeError(last_error or "Chat turn completed without assistant text")
             return assistant_text.strip()
     finally:
-        manager.unsubscribe(session.id, queue)
+        if queue is not None:
+            manager.unsubscribe(session.id, queue)
 
 
 @router.post("/tabs/{tab_id}/stream/send")
@@ -1997,4 +2011,9 @@ async def get_tab_quoted_image(
     raise _quoted_image_not_available()
 
 
-__all__ = ["dispatch_tab_chat_and_wait", "router", "_reset_tailer_manager"]
+__all__ = [
+    "CHAT_ERROR_REASON_HEADER",
+    "dispatch_tab_chat_and_wait",
+    "router",
+    "_reset_tailer_manager",
+]
