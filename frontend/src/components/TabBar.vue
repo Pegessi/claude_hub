@@ -124,7 +124,7 @@
           >
             Chats
           </button>
-          <NetworkAccessMenu variant="menu" />
+          <AppExtensionActions @select="closeMobileAppMenu" />
           <button
             type="button"
             class="mobile-app-menu-item"
@@ -534,7 +534,7 @@ import AgentAvatar from '@/components/AgentAvatar.vue'
 import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
-import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+import AppExtensionActions from '@/components/AppExtensionActions.vue'
 import TabActionsMenu from '@/components/TabActionsMenu.vue'
 import {
   defaultLaunchEnvPresetForAgent,
@@ -1464,7 +1464,7 @@ async function handleCreateTab() {
 }
 
 .add-tab {
-  align-self: flex-end;
+  align-self: center;
   background-color: var(--ch-color-surface-control);
   border: 1px solid var(--ch-color-border-muted);
   box-sizing: border-box;

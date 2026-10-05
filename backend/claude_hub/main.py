@@ -16,6 +16,7 @@ from .config import settings
 from .services import ttyd_manager, workspace_manager
 from .services.backend_instance_lock import BackendInstanceLock
 from .services.runtime_isolation import resolve_runtime_home
+from .services.service_restart import INSTANCE_ID
 
 # Worktree backends use an isolated runtime home so they do not share the
 # live instance lock, logs, or tabs.json with the 8173 main service.
@@ -177,7 +178,7 @@ app.include_router(api_router)
 @app.get("/health")
 async def health_check() -> dict[str, str]:
     """Health check endpoint."""
-    return {"status": "healthy"}
+    return {"status": "healthy", "instance_id": INSTANCE_ID}
 
 
 # Production frontend serving. When ``serve_frontend`` is enabled (start.sh

@@ -464,7 +464,8 @@ onUnmounted(() => {
 <style scoped>
 .agent-status {
   position: relative;
-  align-self: flex-end;
+  display: flex;
+  align-self: center;
   flex: 0 0 auto;
 }
 

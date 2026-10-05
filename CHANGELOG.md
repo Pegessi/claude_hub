@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### feat(ui): consolidate extensions and add supervised service restart
+
+- Desktop now groups Scheduled tasks, network access, and Restart service in
+  one three-dot menu. Mobile reuses the existing Terminal and Workspace menus.
+  Header controls share the same height and center line.
+- Production `start.sh` now keeps an independent launcher alive across backend
+  restarts. The UI confirms interruption of active work, waits through the
+  outage, and checks the new backend identity before reporting recovery.
+- Requests are serialized and idempotent. Unsupervised/dev servers disable
+  restart; failed or unconfirmed restarts are never automatically resubmitted.
+
 ### fix(chat): keep native subagent completion from ending the parent turn
 
 - Codex/TraeX child turn starts and completions no longer open or finish the
