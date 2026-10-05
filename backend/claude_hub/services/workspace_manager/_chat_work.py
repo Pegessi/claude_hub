@@ -243,6 +243,12 @@ class _ChatWorkMixin:
                     )
                 )
             outcome = task.chat_work_outcome or (report.chat_work_outcome if report else None)
+            if outcome in {"no_change", "completed"} and (
+                report is None
+                or report.state
+                not in {AgentReportState.COMPLETED, AgentReportState.READY_FOR_REVIEW}
+            ):
+                outcome = None
             if result is not None or outcome == "no_change":
                 continue
             kind = outcome
@@ -354,33 +360,64 @@ class _ChatWorkMixin:
             if payload.action == "stop":
                 # Persist stop intent first. Repeat Stop can finish interrupted
                 # cleanup; the normal abort event preserves prior evidence.
-                active = self._chat_work_active(work)
-                if active:
-                    session_id = active.session_id
-                    if active.status in {
+                await self._stop_chat_work_executions(work)
+            return self.chat_work_view(work)
+
+    async def _stop_chat_work_executions(self, work: ScheduledTask) -> None:
+        async with self.workspace_mutation_lock(work.workspace_id):
+            for task in self._chat_work_executions(work)[:20]:
+                if task.status in _ACTIVE and not task.manual_aborted_at:
+                    if task.status in {
                         WorkspaceTaskStatus.QUEUED,
                         WorkspaceTaskStatus.WORKING,
                         WorkspaceTaskStatus.REVIEW,
                     }:
                         await self.abort_task(
-                            active.id,
+                            task.id,
                             ManualTaskControlRequest(
                                 reason="Stopped from source Chat",
-                                call_id=f"chat-work-stop:{work.id}:{active.id}",
+                                call_id=f"chat-work-stop:{work.id}:{task.id}",
                             ),
                         )
                     else:
-                        self.tasks[active.id] = active.model_copy(
+                        self.tasks[task.id] = task.model_copy(
                             update={
                                 "manual_aborted_at": _wm._now(),
                                 "manual_abort_reason": "Stopped before dispatch",
                             }
                         )
                         self._save_state()
-                    session = self.sessions.get(session_id) if session_id else None
-                    if session and session.caller_owned_ephemeral and session.ephemeral:
-                        await self._best_effort_delete_session(session.id)
-            return self.chat_work_view(work)
+                await self._cleanup_chat_work_session(self.tasks[task.id])
+
+    async def _cleanup_chat_work_session(self, task: WorkspaceTask) -> None:
+        """Retry owned teardown without trusting mutable task assignment ids."""
+        async with self.workspace_mutation_lock(task.workspace_id):
+            task = self.tasks[task.id]
+            if not task.manual_aborted_at and task.status not in {
+                WorkspaceTaskStatus.DONE,
+                WorkspaceTaskStatus.FAILED,
+            }:
+                return
+            session = self.sessions.get(task.chat_work_owned_session_id or "")
+            workspace = self.workspaces.get(task.workspace_id)
+            if (
+                session is None
+                or session.tab_id != task.chat_work_owned_tab_id
+                or session.workspace_id != task.workspace_id
+                or not session.caller_owned_ephemeral
+                or not session.ephemeral
+                or session.role not in self._CLEANUP_ALLOWED_SESSION_ROLES
+                or session.task_id not in {None, task.id}
+                or session.current_task_id not in {None, task.id}
+                or self._non_terminal_tasks_referencing_session(session.id)
+                or (
+                    workspace is not None
+                    and session.id
+                    in {workspace.resident_agent_session_id, workspace.dispatcher_session_id}
+                )
+            ):
+                return
+            await self._best_effort_delete_session(session.id)
 
     async def report_chat_work(
         self, tab_id: str, work_id: str, payload: ChatWorkReport
@@ -412,7 +449,7 @@ class _ChatWorkMixin:
                 # The canonical intake validates assignment, commits outcome and
                 # report evidence before terminal cleanup, and retains reviewed
                 # task acceptance rules. Retries after cleanup find that report.
-                call_id = payload.call_id or (
+                call_id = (payload.call_id or "").strip() or (
                     "chat-work:"
                     + task.id
                     + ":"
@@ -439,7 +476,7 @@ class _ChatWorkMixin:
                                 if payload.kind == "decision"
                                 else (
                                     AgentReportState.WORKING
-                                    if payload.kind == "progress"
+                                    if payload.kind == "progress" and work.work_kind == "task"
                                     else AgentReportState.COMPLETED
                                 )
                             ),
@@ -461,6 +498,8 @@ class _ChatWorkMixin:
                 or report.workspace_id != work.workspace_id
             ):
                 raise ValueError("Outcome must cite a report from this work's execution")
+            if report.chat_work_outcome and report.chat_work_outcome != payload.kind:
+                raise ValueError("Report already contains a different outcome")
             task = self.tasks[task.id]
             if task.chat_work_report_id == report.id:
                 if (
@@ -530,7 +569,8 @@ class _ChatWorkMixin:
             "This command writes the normal task report and outcome atomically before terminal cleanup; "
             "do not send a separate final completion report first. "
             "OUTCOME is no_change for an unchanged successful check, anomaly for a change requiring attention, "
-            "decision for needed input, progress for a milestone, completed only when the entire requested objective "
+            "decision for needed input, progress for a milestone (finishes this monitor check but keeps a "
+            "one-shot task working), completed only when the entire requested objective "
             "is achieved (ends recurring monitoring). A successful single check is NOT monitor completion. "
             "Keep work inside the assigned scope and cwd; do not create another recurring schedule."
         )
@@ -548,6 +588,8 @@ class _ChatWorkMixin:
                 update={
                     "status": WorkspaceTaskStatus.QUEUED,
                     "session_id": session.id,
+                    "chat_work_owned_session_id": session.id,
+                    "chat_work_owned_tab_id": session.tab_id,
                     "queued_at": _wm._now(),
                     "dispatch_attempt": task.dispatch_attempt + 1,
                     "dispatch_reason": "Chat linked work",
@@ -583,49 +625,50 @@ class _ChatWorkMixin:
         for work in list(self.scheduled_tasks.values()):
             if not work.source_tab_id:
                 continue
-            lock = self._sched_fire_locks.get(work.id)
-            if lock and lock.locked():
+            lock = self._sched_fire_locks.setdefault(work.id, asyncio.Lock())
+            if lock.locked():
                 continue
-            executions = self._chat_work_executions(work)
-            if (
-                work.work_kind == "monitor"
-                and any(
-                    report.chat_work_outcome == "completed"
-                    and report.task_id in {task.id for task in executions}
-                    for report in self.reports.values()
-                )
-                and not work.work_completed_at
-            ):
-                work.enabled = False
-                work.work_completed_at = _wm._now()
-                work.next_run_at = None
-                changed = True
-            if not executions and work.run_count and not work.enabled and not work.work_stopped_at:
-                work.last_status = "error"
-                work.last_error = "Launch interrupted before task creation; resume explicitly"
-                changed = True
-            for task in executions[:20]:
-                if task.status == WorkspaceTaskStatus.TODO and not task.manual_aborted_at:
-                    self.tasks[task.id] = task.model_copy(
-                        update={
-                            "status": WorkspaceTaskStatus.FAILED,
-                            "failure_reason": "Launch interrupted before dispatch; resume explicitly",
-                            "failed_at": _wm._now(),
-                            "updated_at": _wm._now(),
-                        }
-                    )
-                    work.enabled = False
-                    work.next_run_at = None
-                    work.last_status = "error"
-                    work.last_error = "Launch interrupted before dispatch; resume explicitly"
-                    self._save_state()
-                    changed = True
+            async with lock:
+                work = self.scheduled_tasks[work.id]
+                if work.work_stopped_at:
+                    await self._stop_chat_work_executions(work)
+                    continue
+                executions = self._chat_work_executions(work)
                 if (
-                    task.status in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
-                    and task.session_id
+                    work.work_kind == "monitor"
+                    and any(
+                        report.chat_work_outcome == "completed"
+                        and report.state
+                        in {AgentReportState.COMPLETED, AgentReportState.READY_FOR_REVIEW}
+                        and report.task_id in {task.id for task in executions}
+                        for report in self.reports.values()
+                    )
+                    and not work.work_completed_at
                 ):
-                    session = self.sessions.get(task.session_id)
-                    if session and session.caller_owned_ephemeral and session.ephemeral:
-                        await self._best_effort_delete_session(session.id)
+                    work.enabled = False
+                    work.work_completed_at = _wm._now()
+                    work.next_run_at = None
+                    changed = True
+                if not executions and work.run_count and not work.enabled:
+                    work.last_status = "error"
+                    work.last_error = "Launch interrupted before task creation; resume explicitly"
+                    changed = True
+                for task in executions[:20]:
+                    if task.status == WorkspaceTaskStatus.TODO and not task.manual_aborted_at:
+                        self.tasks[task.id] = task.model_copy(
+                            update={
+                                "status": WorkspaceTaskStatus.FAILED,
+                                "failure_reason": "Launch interrupted before dispatch; resume explicitly",
+                                "failed_at": _wm._now(),
+                                "updated_at": _wm._now(),
+                            }
+                        )
+                        work.enabled = False
+                        work.next_run_at = None
+                        work.last_status = "error"
+                        work.last_error = "Launch interrupted before dispatch; resume explicitly"
+                        self._save_state()
+                        changed = True
+                    await self._cleanup_chat_work_session(self.tasks[task.id])
         if changed:
             self._save_scheduled_tasks()

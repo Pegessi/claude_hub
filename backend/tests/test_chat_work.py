@@ -441,3 +441,198 @@ async def test_invalid_edit_is_atomic_and_resume_active_monitor_is_safe(manager,
     work = manager.scheduled_tasks[created.id]
     await manager._fire_scheduled_task(work, datetime.now() + timedelta(minutes=5), manual=True)
     assert len(manager.tasks) == 1
+
+
+async def test_report_outcome_is_fingerprinted_and_padded_retry_survives_cleanup(
+    manager, setup_work
+):
+    from claude_hub.models import AgentReportCreate, AgentReportState
+
+    _, source, payload, _ = setup_work
+    body = AgentReportCreate(state=AgentReportState.COMPLETED, message="Checked")
+    no_change = body.model_copy(update={"chat_work_outcome": "no_change"})
+    complete = body.model_copy(update={"chat_work_outcome": "completed"})
+    assert manager._compute_report_fingerprint(body) != manager._compute_report_fingerprint(
+        no_change
+    )
+    assert manager._compute_report_fingerprint(no_change) != manager._compute_report_fingerprint(
+        complete
+    )
+    created = await manager.create_chat_work(source.id, payload())
+    task = manager.tasks[created.active_task_id]
+    report = ChatWorkReport(
+        task_id=task.id,
+        session_id=task.session_id,
+        kind="no_change",
+        summary="Checked",
+        call_id="  stable-check  ",
+    )
+    await manager.report_chat_work(source.id, created.id, report)
+    assert task.session_id not in manager.sessions
+    again = await manager.report_chat_work(source.id, created.id, report)
+    assert again.latest_result is None
+    persisted = next(r for r in manager.reports.values() if r.chat_work_outcome)
+    with pytest.raises(ValueError, match="different outcome"):
+        await manager.report_chat_work(
+            source.id,
+            created.id,
+            ChatWorkReport(
+                task_id=task.id, report_id=persisted.id, kind="completed", summary="Checked"
+            ),
+        )
+
+
+@pytest.mark.parametrize("kind", ["task", "monitor"])
+async def test_progress_keeps_one_shot_working_but_finishes_a_monitor_check(
+    manager, setup_work, kind
+):
+    workspace, source, _, _ = setup_work
+    created = await manager.create_chat_work(
+        source.id,
+        ChatWorkCreate(
+            request_key="milestone",
+            workspace_id=workspace.id,
+            title="Milestone",
+            prompt="Track progress",
+            kind=kind,
+            interval_seconds=60 if kind == "monitor" else None,
+        ),
+    )
+    task = manager.tasks[created.active_task_id]
+    session_id = task.session_id
+    view = await manager.report_chat_work(
+        source.id,
+        created.id,
+        ChatWorkReport(
+            task_id=task.id,
+            session_id=session_id,
+            kind="progress",
+            summary="First phase finished; more remains",
+        ),
+    )
+    assert view.latest_result.kind == "progress"
+    if kind == "task":
+        assert manager.tasks[task.id].status == WorkspaceTaskStatus.WORKING
+        assert session_id in manager.sessions
+        assert view.active_task_id == task.id
+    else:
+        assert manager.tasks[task.id].status == WorkspaceTaskStatus.DONE
+        assert session_id not in manager.sessions
+        assert view.active_task_id is None
+        assert manager.scheduled_tasks[created.id].enabled
+        assert not manager.scheduled_tasks[created.id].work_completed_at
+
+
+@pytest.mark.parametrize("retry", ["stop", "restart"])
+async def test_failed_stop_cleanup_is_durable_and_retried(manager, setup_work, monkeypatch, retry):
+    _, source, payload, _ = setup_work
+    created = await manager.create_chat_work(source.id, payload())
+    task = manager.tasks[created.active_task_id]
+    session_id = task.session_id
+    tab_id = manager.sessions[session_id].tab_id
+    delete_session = manager.delete_session
+
+    async def fail_delete(_session_id):
+        raise OSError("temporary delete failure")
+
+    monkeypatch.setattr(manager, "_interrupt_session", AsyncNoop.dispatch_noop)
+    monkeypatch.setattr(manager, "delete_session", fail_delete)
+    await manager.update_chat_work(source.id, created.id, ChatWorkUpdate(action="stop"))
+    stopped = manager.tasks[task.id]
+    assert stopped.manual_aborted_at and stopped.session_id is None
+    assert stopped.chat_work_owned_session_id == session_id
+    assert stopped.chat_work_owned_tab_id == tab_id
+    assert session_id in manager.sessions
+    if retry == "stop":
+        monkeypatch.setattr(manager, "delete_session", delete_session)
+        await manager.update_chat_work(source.id, created.id, ChatWorkUpdate(action="stop"))
+    else:
+        manager = WorkspaceManager()
+        assert manager.tasks[task.id].chat_work_owned_session_id == session_id
+        await manager._reconcile_chat_work()
+    assert session_id not in manager.sessions
+    assert manager.list_chat_work(source.id)[0].status == "stopped"
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["reincarnated", "reassigned", "referenced", "shared", "persistent", "dispatcher"],
+)
+async def test_stop_cleanup_does_not_delete_reassigned_or_shared_sessions(
+    manager, setup_work, monkeypatch, change
+):
+    _, source, payload, _ = setup_work
+    created = await manager.create_chat_work(source.id, payload())
+    task = manager.tasks[created.active_task_id]
+    session_id = task.session_id
+    delete_session = manager.delete_session
+
+    async def fail_delete(_session_id):
+        raise OSError("temporary delete failure")
+
+    monkeypatch.setattr(manager, "_interrupt_session", AsyncNoop.dispatch_noop)
+    monkeypatch.setattr(manager, "delete_session", fail_delete)
+    await manager.update_chat_work(source.id, created.id, ChatWorkUpdate(action="stop"))
+    monkeypatch.setattr(manager, "delete_session", delete_session)
+    if change == "dispatcher":
+        manager.workspaces[task.workspace_id].dispatcher_session_id = session_id
+    elif change == "referenced":
+        from claude_hub.models import WorkspaceTaskCreate
+
+        manager.create_task(
+            task.workspace_id,
+            WorkspaceTaskCreate(title="Other", prompt="Other task", session_id=session_id),
+        )
+    else:
+        updates = {
+            "reincarnated": {"tab_id": "different-session-incarnation"},
+            "reassigned": {"current_task_id": "another-task"},
+            "shared": {"caller_owned_ephemeral": False},
+            "persistent": {"ephemeral": False},
+        }
+        manager.sessions[session_id] = manager.sessions[session_id].model_copy(
+            update=updates[change]
+        )
+    await manager.update_chat_work(source.id, created.id, ChatWorkUpdate(action="stop"))
+    await manager._reconcile_chat_work()
+    assert session_id in manager.sessions
+
+
+async def test_stop_intent_recovers_if_interrupted_before_abort(manager, setup_work, monkeypatch):
+    _, source, payload, _ = setup_work
+    created = await manager.create_chat_work(source.id, payload())
+    task = manager.tasks[created.active_task_id]
+
+    async def interrupted(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(manager, "abort_task", interrupted)
+    with pytest.raises(asyncio.CancelledError):
+        await manager.update_chat_work(source.id, created.id, ChatWorkUpdate(action="stop"))
+    reloaded = WorkspaceManager()
+    monkeypatch.setattr(reloaded, "_interrupt_session", AsyncNoop.dispatch_noop)
+    await reloaded._reconcile_chat_work()
+    assert reloaded.tasks[task.id].manual_aborted_at
+    assert task.session_id not in reloaded.sessions
+
+
+async def test_nonterminal_generic_completion_claim_does_not_end_monitor(manager, setup_work):
+    from claude_hub.models import AgentReportCreate, AgentReportState
+
+    _, source, payload, _ = setup_work
+    created = await manager.create_chat_work(source.id, payload())
+    task = manager.tasks[created.active_task_id]
+    await manager.create_report(
+        task.session_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.WORKING,
+            message="Still running",
+            chat_work_outcome="completed",
+        ),
+    )
+    await manager._reconcile_chat_work()
+    view = manager.list_chat_work(source.id)[0]
+    assert manager.scheduled_tasks[created.id].enabled
+    assert view.status == "running" and view.active_task_id == task.id
+    assert view.latest_result is None
