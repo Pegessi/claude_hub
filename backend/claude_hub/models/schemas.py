@@ -896,6 +896,10 @@ class WorkspaceTask(BaseModel):
     workspace_id: str
     title: str
     prompt: str
+    source_work_id: Optional[str] = None
+    chat_work_outcome: Optional[str] = None
+    chat_work_report_id: Optional[str] = None
+    chat_work_summary: Optional[str] = None
     attachments: List[WorkspaceAttachment] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
     review_profiles: List[ReviewProfile] = Field(default_factory=list)
@@ -1223,6 +1227,9 @@ class AgentReportCreate(BaseModel):
 
     state: AgentReportState
     message: str
+    chat_work_outcome: Optional[
+        Literal["no_change", "progress", "anomaly", "completed", "decision"]
+    ] = None
     message_en: Optional[str] = None
     message_zh: Optional[str] = None
     task_id: Optional[str] = None
@@ -1293,6 +1300,9 @@ class AgentReport(BaseModel):
     call_id: Optional[str] = None
     state: AgentReportState
     message: str
+    chat_work_outcome: Optional[
+        Literal["no_change", "progress", "anomaly", "completed", "decision"]
+    ] = None
     message_en: Optional[str] = None
     message_zh: Optional[str] = None
     changed_files: List[str] = Field(default_factory=list)
@@ -1493,6 +1503,11 @@ class FeedbackTaskDigest(BaseModel):
     """Compact reusable digest for a completed workspace task record."""
 
     task_id: str
+    source_record_id: str = Field(default="", max_length=160)
+    source_tab_id: str = Field(default="", max_length=160)
+    source_turn_id: str = Field(default="", max_length=160)
+    source_message_id: str = Field(default="", max_length=160)
+    correction: str = Field(default="", max_length=1024)
     title: str = ""
     status: str = ""
     final_summary: str = ""
@@ -1895,6 +1910,20 @@ class ScheduledTask(BaseModel):
     message: Optional[str] = None
     task_title: Optional[str] = None
 
+    # Linked Chat work uses this existing schedule as its durable parent.
+    source_tab_id: Optional[str] = None
+    source_request_key: Optional[str] = None
+    source_request_fingerprint: Optional[str] = None
+    work_kind: Optional[Literal["task", "monitor"]] = None
+    work_task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
+    work_cwd: Optional[str] = None
+    work_model: Optional[str] = None
+    work_env_preset: Optional[str] = None
+    work_inherit_source_env: bool = False
+    work_stopped_at: Optional[datetime] = None
+    work_completed_at: Optional[datetime] = None
+    work_pause_requested: bool = False
+
     # Runtime state.
     last_run_at: Optional[datetime] = None
     next_run_at: Optional[datetime] = None
@@ -1972,3 +2001,81 @@ class ScheduledTaskView(ScheduledTask):
     # When that in-flight run was dispatched (or queued if dispatch stamp is
     # absent); used by the UI to flag wedged runs.
     in_flight_since: Optional[datetime] = None
+
+
+class ChatWorkCreate(BaseModel):
+    """A Chat-owned unit of durable work. Retries reuse request_key."""
+
+    request_key: str = Field(min_length=1, max_length=128)
+    workspace_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    prompt: str = Field(min_length=1, max_length=32000)
+    kind: Literal["task", "monitor"] = "task"
+    task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
+    interval_seconds: Optional[int] = Field(default=None, ge=60)
+    agent_type: Optional[AgentType] = None
+    model: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    cwd: Optional[str] = None
+    env_preset: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "ChatWorkCreate":
+        if (self.kind == "monitor") != (self.interval_seconds is not None):
+            raise ValueError("monitor requires interval_seconds; task must omit it")
+        if not self.title.strip() or not self.prompt.strip() or not self.request_key.strip():
+            raise ValueError("title, prompt and request_key must not be blank")
+        return self
+
+
+class ChatWorkUpdate(BaseModel):
+    action: Optional[Literal["pause", "resume", "stop"]] = None
+    interval_seconds: Optional[int] = Field(default=None, ge=60)
+    prompt: Optional[str] = Field(default=None, min_length=1, max_length=32000)
+
+
+class ChatWorkReport(BaseModel):
+    task_id: str
+    report_id: Optional[str] = None
+    session_id: Optional[str] = None
+    call_id: Optional[str] = None
+    validation: Optional[str] = Field(default=None, max_length=4000)
+    kind: Literal["no_change", "progress", "anomaly", "completed", "decision"]
+    summary: str = Field(min_length=1, max_length=2000)
+
+
+class ChatWorkResult(BaseModel):
+    kind: str
+    summary: str
+    task_id: Optional[str] = None
+    report_id: Optional[str] = None
+    validation: Optional[str] = None
+    created_at: datetime
+
+
+class ChatWorkExecution(BaseModel):
+    task_id: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    summary: Optional[str] = None
+    outcome: Optional[str] = None
+
+
+class ChatWorkView(BaseModel):
+    id: str
+    source_tab_id: str
+    workspace_id: str
+    title: str
+    kind: Literal["task", "monitor"]
+    status: Literal["running", "waiting", "paused", "stopped", "completed", "failed", "review"]
+    agent_type: AgentType
+    model: Optional[str] = None
+    cwd: str
+    interval_seconds: Optional[int] = None
+    next_run_at: Optional[datetime] = None
+    run_count: int
+    active_task_id: Optional[str] = None
+    latest_result: Optional[ChatWorkResult] = None
+    executions: List[ChatWorkExecution] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime

@@ -8,6 +8,7 @@ monkeypatch targets such as ``STATE_ROOT`` and ``_now``.
 
 from ._artifacts import _ArtifactsMixin
 from ._attachments import _AttachmentsMixin
+from ._chat_work import _ChatWorkMixin
 from ._constants import *  # noqa: F401,F403
 from ._constants import (  # noqa: F401  (ensure underscore-prefixed names are package attrs)
     _format_duration,
@@ -54,6 +55,7 @@ class WorkspaceManager(
     _TmuxQueriesMixin,
     _MonitorMixin,
     _SchedulingMixin,
+    _ChatWorkMixin,
 ):
     """Human-orchestrated workspace/task/session layer above TTYDManager."""
 
