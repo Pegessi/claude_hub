@@ -114,6 +114,82 @@ Validation:
 
 Evidence: `process-guard-mock/` and `process-guard-owned-processes/` under the same
 artifact root. These results do not authorize or validate any provider run.
-**The guard has not yet been integrated into `manual_chat_workflow_smoke.py`;
-do not run that manual provider smoke until its remaining isolation, browser,
-and final-cleanup changes have been reviewed and validated.**
+
+## Workspace regression fixtures
+
+The workspace fixtures now isolate `settings.port` from the parent environment
+and represent already-ready fake terminals without bypassing the product readiness
+check. Complexity and lesson assertions follow the integrated execution policy.
+The complete workspace/subagent suites and two dedicated readiness cases passed:
+158 tests, with Black/isort checks passing. Evidence is in
+`workspace-final-port-isolation/`; the test-only change is commit `446f035`.
+
+## Manual smoke isolation candidate
+
+The guard is now wired into `backend/tests/manual_chat_workflow_smoke.py`.
+The manual scenario still requires a separate, explicit authorization before
+using a real provider account. Run the controller with `python -B`; required
+arguments are:
+
+- `--with-provider`
+- `--runtime-root` and `--artifact-dir`: existing parents for newly created,
+  private, task-owned directories.
+- `--codex-auth-file`: an explicitly selected owner-only regular file.
+- `--browser-executable`: an existing Chromium executable; no browser download
+  or installation is performed.
+- `--codex-model`: an actual Codex model ID, not an assumed orchestration alias.
+- `--network-mode auto|direct|proxy`: `auto` and `proxy` also require explicit
+  `--inherit-proxy-env`; `direct` does not inherit proxy variables.
+
+Source Chat and worker execution keep the canonical feature-worktree cwd.
+Backend and report CLI processes use the private runtime cwd, with `PYTHONPATH`
+pinning imports to the candidate backend. Isolated `-I` helper processes disable
+bytecode writes explicitly. The parent retains its prebound loopback socket
+across the backend restart and closes it during final cleanup.
+
+An authorized run exercises the real work API, reports, caller acceptance,
+owned-worker cleanup, and cold recovery. Browser inspection mocks the source
+Chat stream and Feishu binding; startup and persisted-work APIs remain real. This
+is not a fully real Chat-stream or Bot acceptance test.
+
+Raw runtime logs and command outputs remain private, are never auto-uploaded,
+and are not certified sanitized. Failed runs retain their runtime. Cleanup makes
+best-effort removal of known sensitive copies, but only certifies that removal
+when writer shutdown and path absence have both been verified. Controller
+SIGKILL remains outside the cleanup guarantee.
+
+Current deterministic validation:
+
+- 42 harness boundary tests, 9 signal/cleanup regressions, and the existing 27
+  pure guard tests passed together (78 tests). The signal tests call a mocked
+  handler directly; no OS signal is sent. No provider, browser, real child-process
+  creation, or live proc inspection was performed by these tests.
+- Manual harness mypy passed; all three harness/test files passed Black/isort.
+  After adding an explicit AST node-type assertion, the 9 signal cases passed
+  again.
+- The standalone `--help` entrypoint parsed successfully without entering the
+  scenario.
+
+Independent review identified a cleanup-time interruption gap. The follow-up
+installs one handler before runtime allocation, briefly masking SIGINT/SIGTERM
+until both handlers are ready. The first interrupt enables deferral before
+raising; later signals update only two fixed boolean fields. Normal completion,
+exception handling, and final cleanup enter deferral before teardown; result
+output remains inside the finalization block. Cleanup health uses only new
+cleanup errors, while overall acceptance still requires no scenario errors.
+
+An interruption during early directory allocation may leave an empty private
+directory. At that point no provider credential has been copied and no child has
+started. This residual-directory case does not involve a running provider or a
+retained credential copy. Controller SIGKILL remains outside the guarantee.
+
+Evidence: `manual-harness-typed/`, `manual-harness-signals/`, and
+`manual-harness-signals-final/` under the same artifact root. Independent static
+follow-up review found the reported interruption gap fixed, with no remaining
+blocker in the reviewed changes. This review did not run the scenario or send OS
+signals. A fresh fetch confirmed that the candidate contains `origin/main` at
+`c37b7f37645a0159e8ee721e5dd11f97659a2238`.
+
+**No real-provider run has been performed for this integrated candidate. A
+separate authorized run is still required; real OAuth/Bot round trips need their
+own independent test authorization.**
