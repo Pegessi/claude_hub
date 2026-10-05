@@ -6,6 +6,8 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
+    <FeishuBindingPanel :tab-id="props.tabId" />
+
     <!-- Chat sessions fail closed on this surface. A stream failure never
          mounts a hidden raw terminal; users can retry or create a Terminal. -->
     <div
@@ -108,7 +110,21 @@
             v-if="turn.userText || turn.attachments?.length"
             class="conversation-row conversation-row--user"
           >
-            <div class="conversation-bubble conversation-bubble--user">
+            <div
+              class="conversation-bubble conversation-bubble--user"
+              :data-message-origin="turn.origin"
+            >
+              <div
+                v-if="turn.origin === 'feishu'"
+                class="conversation-message-source"
+                data-testid="conversation-message-source"
+              >
+                <span
+                  class="conversation-message-source__mark"
+                  aria-hidden="true"
+                >飞</span>
+                <span class="conversation-message-source__label">{{ messageSourceLabel(turn) }}</span>
+              </div>
               <!-- Inline edit mode -->
               <div
                 v-if="isEditingTurn(turn)"
@@ -1304,7 +1320,7 @@ import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted,
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { subagentProviderLabel, subagentStatusLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
@@ -1326,6 +1342,7 @@ import {
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
@@ -4216,6 +4233,35 @@ onUnmounted(() => {
   background: var(--paseo-user-bubble);
   color: #fff;
   border-bottom-right-radius: var(--ch-radius-sm);
+}
+
+.conversation-message-source {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-bottom: 6px;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.conversation-message-source__mark {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 9px;
+}
+
+.conversation-message-source__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conversation-bubble--user :deep(.markdown-content),

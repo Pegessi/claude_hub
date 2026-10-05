@@ -68,6 +68,15 @@ export interface TimelineAttachment {
   height?: number
 }
 
+export type TimelineTurnOrigin = 'feishu' | 'web' | 'unknown'
+
+export interface TimelineFeishuProvenance {
+  appId: string
+  chatId: string
+  messageId: string
+  senderOpenId: string
+}
+
 /** One row rendered inside a nested sub-agent thread group (``subthread``).
  *
  *  This is the child-thread analogue of {@link TimelinePart}, deliberately
@@ -126,6 +135,10 @@ export interface TimelineTurn {
   key: string
   turnId: string | null
   userText: string
+  /** Explicit server-authored message source. Missing legacy metadata stays unknown. */
+  origin: TimelineTurnOrigin
+  /** Verified Feishu callback identity, present only when origin is feishu. */
+  feishu: TimelineFeishuProvenance | null
   /** Mode when this turn began, not the composer's current selection. */
   mode: 'default' | 'plan' | null
   /** Durable attachment descriptors surfaced by ``turn_started``.
@@ -176,6 +189,40 @@ function payloadRecord(event: AgentStreamEvent, key: string): Record<string, unk
   return value && typeof value === 'object' ? value as Record<string, unknown> : {}
 }
 
+type ExplicitTimelineTurnOrigin = Exclude<TimelineTurnOrigin, 'unknown'>
+
+function turnProvenance(event: AgentStreamEvent): {
+  origin: ExplicitTimelineTurnOrigin
+  feishu: TimelineFeishuProvenance | null
+} | null {
+  const metadata = payloadRecord(event, 'metadata')
+  const origin = metadata.origin
+  if (origin !== 'feishu' && origin !== 'web') return null
+  if (origin === 'web') return { origin, feishu: null }
+
+  const rawFeishu = metadata.feishu
+  if (!rawFeishu || typeof rawFeishu !== 'object' || Array.isArray(rawFeishu)) {
+    return { origin, feishu: null }
+  }
+  const value = rawFeishu as Record<string, unknown>
+  const appId = value.app_id
+  const chatId = value.chat_id
+  const messageId = value.message_id
+  const senderOpenId = value.sender_open_id
+  if (
+    typeof appId !== 'string' || !appId ||
+    typeof chatId !== 'string' || !chatId ||
+    typeof messageId !== 'string' || !messageId ||
+    typeof senderOpenId !== 'string' || !senderOpenId
+  ) {
+    return { origin, feishu: null }
+  }
+  return {
+    origin,
+    feishu: { appId, chatId, messageId, senderOpenId },
+  }
+}
+
 function statusText(event: AgentStreamEvent): string {
   return payloadString(event, 'text') || payloadString(event, 'message') ||
     payloadString(event, 'status')
@@ -186,6 +233,8 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     key,
     turnId,
     userText: '',
+    origin: 'unknown',
+    feishu: null,
     mode: null,
     attachments: [],
     parts: [],
@@ -201,6 +250,12 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     statuses: [],
     renderRevision: 0,
   }
+}
+
+export function messageSourceLabel(turn: TimelineTurn): string | null {
+  if (turn.origin !== 'feishu') return null
+  const senderOpenId = turn.feishu?.senderOpenId.trim()
+  return senderOpenId ? `Feishu · ${senderOpenId}` : 'Feishu'
 }
 
 /** Append or extend the last part of the given kind with more text. */
@@ -580,6 +635,14 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         mutated = true
       }
       const summary = payloadString(event, 'summary')
+      if (turn.origin === 'unknown') {
+        const provenance = turnProvenance(event)
+        if (provenance !== null) {
+          turn.origin = provenance.origin
+          turn.feishu = provenance.feishu
+          mutated = true
+        }
+      }
       const mode = event.payload.mode
       if ((mode === 'plan' || mode === 'default') && turn.mode !== mode) {
         turn.mode = mode

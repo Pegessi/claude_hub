@@ -467,9 +467,21 @@ class AgentStreamStore:
         self._reset_read_index()
 
     async def find_turn(self, turn_id: str) -> Optional[Tuple[int, int, str, List[Dict[str, Any]]]]:
+        """Locate a turn while preserving the established four-field contract."""
+
+        result = await self.find_turn_with_metadata(turn_id)
+        if result is None:
+            return None
+        sequence, turn_index, text, attachments, _metadata = result
+        return sequence, turn_index, text, attachments
+
+    async def find_turn_with_metadata(
+        self, turn_id: str
+    ) -> Optional[Tuple[int, int, str, List[Dict[str, Any]], Dict[str, Any]]]:
         """Locate a turn by its ``turn_id``.
 
-        Returns ``(stream_sequence, turn_index, turn_text, attachments)`` where:
+        Returns ``(stream_sequence, turn_index, turn_text, attachments,
+        metadata)``. ``find_turn`` retains the historical four-field result.
 
         - ``stream_sequence`` is the ``stream_sequence`` of the matching
           ``turn_started`` event (the truncation point for the Hub store).
@@ -485,12 +497,14 @@ class AgentStreamStore:
           bytes, width, height).  Edit-resend uses it to re-reference the
           original turn's image attachments in the new turn so they are not
           silently dropped.
+        - ``metadata`` is the server-authored turn metadata used to reconstruct
+          provider-visible text without consulting mutable binding state.
 
         Returns ``None`` if no ``turn_started`` event carries ``turn_id``.
         """
         if not self._path.exists():
             return None
-        result: Optional[Tuple[int, int, str, List[Dict[str, Any]]]] = None
+        result: Optional[Tuple[int, int, str, List[Dict[str, Any]], Dict[str, Any]]] = None
 
         def _read() -> None:
             nonlocal result
@@ -512,6 +526,7 @@ class AgentStreamStore:
                         if isinstance(seq, int):
                             text = ""
                             attachments: List[Dict[str, Any]] = []
+                            metadata: Dict[str, Any] = {}
                             payload = obj.get("payload")
                             if isinstance(payload, dict):
                                 summary = payload.get("summary")
@@ -520,7 +535,10 @@ class AgentStreamStore:
                                 atts = payload.get("attachments")
                                 if isinstance(atts, list):
                                     attachments = [a for a in atts if isinstance(a, dict)]
-                            result = (seq, turn_count - 1, text, attachments)
+                                raw_metadata = payload.get("metadata")
+                                if isinstance(raw_metadata, dict):
+                                    metadata = dict(raw_metadata)
+                            result = (seq, turn_count - 1, text, attachments, metadata)
                         return
 
         await asyncio.to_thread(_read)

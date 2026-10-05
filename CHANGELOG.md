@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### feat(feishu): preserve per-message source in shared Chat sessions
+
+- Record server-authored Web or Feishu origins on accepted Chat turns. Feishu
+  source badges survive history replay and binding changes; ordinary Web and
+  unknown legacy messages retain their existing appearance.
+- Keep provider-visible source context separate from the displayed message and
+  preserve edit-resend compatibility with an immutable Feishu text format.
+- Reply to the original Feishu message, rechecking binding authorization before
+  delivery. Busy or pending-question input is rejected without claiming the
+  binding expired; shared input queuing remains a separate stage.
+- Keep HTTP error bodies compatible while adding stable busy/source reason
+  headers. Unknown Chat conflicts no longer advise unnecessary rebinding, and
+  failed subscriptions are handled before dispatch.
+- Add regression and fully mocked desktop/mobile browser coverage. Real Bot
+  authorization and end-to-end provider validation remain outside this evidence.
+
 ### fix(runtime): speed up supervised restart and drain long-lived connections
 
 - Bound Uvicorn connection draining to three seconds so open Chat streams do
@@ -130,6 +146,36 @@
   Automatic lesson creation verifies every cited task record in the workspace
   before granting multi-task confidence. Manual confirmation and old digest loading
   remain supported; lesson guidance distinguishes iteration counts from causal evidence.
+
+### feat(feishu): bind one Bot conversation to an existing Hub Chat tab
+
+- Added strict real-session APIs for generating single-use binding codes,
+  reading the caller's binding, and unbinding it. The server validates the
+  existing local direct Chat tab and optional Workspace association; callback
+  senders cannot choose a cwd, shell, session, or target.
+- Added official encrypted callback handling with raw-body signature validation,
+  AES-256-CBC decryption through `cryptography`, PKCS7 validation, request/event
+  replay windows, and persistent `message_id` deduplication. Plaintext mode is
+  supported only when no Encrypt Key is configured and is explicitly unsigned;
+  oversized streamed bodies fail before buffering beyond the limit.
+- Binding authorization is rechecked against the current OAuth allowlist when a
+  code is consumed, before dispatch, and before the completed response is sent.
+  Unbinding also invalidates pending codes, changed bindings suppress in-flight
+  replies, and code generation has a small persistent rate limit.
+- Feishu messages now use the existing direct Chat `TailerManager` and provider
+  session, wait for the matching persisted completion, and return its assistant
+  text to the same authorized p2p conversation. Bot HTTP calls are injectable
+  for isolated tests; credentials come only from explicit environment values.
+- Added the shared `get_public_base_url()` contract with strict origin
+  validation and public-env, provider-env, then local-port precedence.
+- Added a Chat-scoped Feishu connection panel with authenticated status loading,
+  one-time code generation and copy, pending-code polling, explicit cross-Chat
+  state, confirmed disconnect, and a real OAuth login link for 401 responses.
+  The panel sends only the concrete Chat tab id; it cannot select a cwd, shell,
+  provider session, or managed Workspace target.
+- Design, security boundaries, fixed-source references, and live-verification
+  limits are recorded in
+  `docs/working-logs/2026-10-04-feishu-bot-binding-v1.md`.
 
 ### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
 
