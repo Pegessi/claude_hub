@@ -1,23 +1,11 @@
 import json
-import os
+import logging
 import re
 import socket
-from urllib.parse import urlparse
-
-# Disable all proxies for localhost connections
-os.environ["NO_PROXY"] = "localhost,127.0.0.1"
-os.environ["no_proxy"] = "localhost,127.0.0.1"
-os.environ.pop("HTTP_PROXY", None)
-os.environ.pop("http_proxy", None)
-os.environ.pop("HTTPS_PROXY", None)
-os.environ.pop("https_proxy", None)
-os.environ.pop("ALL_PROXY", None)
-os.environ.pop("all_proxy", None)
-
-import logging
 from collections.abc import Sequence
 from socket import IPPROTO_TCP, TCP_NODELAY
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 import websockets
@@ -194,12 +182,14 @@ async def proxy_websocket(
             server_ws_ctx = websockets.connect(
                 server_uri,
                 subprotocols=subprotocols,
+                proxy=None,
                 sock=nodelay_sock,  # type: ignore[arg-type]
             )
         else:
             server_ws_ctx = websockets.connect(
                 server_uri,
                 subprotocols=subprotocols,
+                proxy=None,
             )
         async with server_ws_ctx as server_ws:
             # Forward messages from client to server

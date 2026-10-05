@@ -1,6 +1,10 @@
 import asyncio
+import json
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from fastapi import Request, WebSocket, WebSocketDisconnect
@@ -75,6 +79,74 @@ async def read_streaming_body(response: object) -> bytes:
     return bytes(body)
 
 
+def test_terminal_import_preserves_provider_proxy_environment() -> None:
+    """Importing the localhost proxy route must not alter child-process env."""
+    expected = {
+        "HTTP_PROXY": "http://proxy.example:8080",
+        "HTTPS_PROXY": "http://proxy.example:8443",
+        "http_proxy": "http://lower-proxy.example:8080",
+        "https_proxy": "http://lower-proxy.example:8443",
+        "ALL_PROXY": "socks5://proxy.example:1080",
+        "all_proxy": "socks5://lower-proxy.example:1080",
+        "NO_PROXY": "existing.example",
+        "no_proxy": "lower-existing.example",
+    }
+    env = {**os.environ, **expected}
+    probe = (
+        "import json, os; "
+        "import claude_hub.api.terminal; "
+        f"print('PROXY_ENV=' + json.dumps({{key: os.environ.get(key) for key in {list(expected)!r}}}))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    marker = next(line for line in completed.stdout.splitlines() if line.startswith("PROXY_ENV="))
+    assert json.loads(marker.removeprefix("PROXY_ENV=")) == expected
+
+
+def test_terminal_http_client_ignores_environment_proxy_locally() -> None:
+    assert terminal_api.client.trust_env is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_websocket_connects_to_loopback_with_invalid_proxy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+
+    received: asyncio.Future[str | bytes] = asyncio.get_running_loop().create_future()
+
+    async def handler(server_ws: Any) -> None:
+        received.set_result(await server_ws.recv())
+
+    server = await terminal_api.websockets.serve(handler, "127.0.0.1", 0)
+    try:
+        socket_address = server.sockets[0].getsockname()
+        client = FakeClientWebSocket([{"type": "websocket.receive", "text": "direct"}])
+        await proxy_websocket(
+            cast(WebSocket, client),
+            f"ws://127.0.0.1:{socket_address[1]}",
+        )
+        assert await asyncio.wait_for(received, timeout=1.0) == "direct"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 def test_generated_terminal_probe_responses_are_detected() -> None:
     assert is_generated_terminal_probe_response("0\x1b[>0;276;0c")
     assert is_generated_terminal_probe_response(b"0\x1b[>0;276;0c")
@@ -136,9 +208,11 @@ async def test_proxy_drops_generated_probe_responses_when_enabled(
     server = FakeServerWebSocket()
 
     def fake_connect(*args: object, **kwargs: object) -> FakeWebSocketConnection:
+        assert kwargs["proxy"] is None
         return FakeWebSocketConnection(server)
 
     monkeypatch.setattr(terminal_api.websockets, "connect", fake_connect)
+    monkeypatch.setattr(terminal_api, "_create_nodelay_socket_for_uri", lambda _uri: None)
     client = FakeClientWebSocket(
         [
             {"type": "websocket.receive", "text": "0hello"},
@@ -164,9 +238,11 @@ async def test_proxy_forwards_probe_responses_when_filter_disabled(
     server = FakeServerWebSocket()
 
     def fake_connect(*args: object, **kwargs: object) -> FakeWebSocketConnection:
+        assert kwargs["proxy"] is None
         return FakeWebSocketConnection(server)
 
     monkeypatch.setattr(terminal_api.websockets, "connect", fake_connect)
+    monkeypatch.setattr(terminal_api, "_create_nodelay_socket_for_uri", lambda _uri: None)
     client = FakeClientWebSocket([{"type": "websocket.receive", "text": "0\x1b[>0;276;0c"}])
 
     await proxy_websocket(

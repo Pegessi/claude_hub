@@ -1823,6 +1823,11 @@ function handleViewportResize() {
 }
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
 const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
+// A queued POST failure is delivery-uncertain: the provider may have accepted
+// it even when the browser did not receive the acknowledgement. Keep later
+// queued messages paused until the user deliberately sends the restored draft
+// and that explicit send succeeds.
+const isDraftQueuePaused = ref(false)
 const isPreparingAttachments = ref(false)
 const turnInFlight = computed(() => isChatModeLocked(
   pendingDirectTurns.value.length > 0,
@@ -2111,12 +2116,14 @@ const timelineLoadingMessage = computed(() => {
   return timelinePhase.value !== 'revealed' ? 'Opening latest messages…' : ''
 })
 
-const canSend = computed(() => connectionState.value === 'live' &&
-  !goalComposerLocked.value &&
+const isSubmissionReady = computed(() => connectionState.value === 'live' &&
   !isPreparingAttachments.value &&
   !isUpdatingMode.value &&
   !isUpdatingModel.value &&
-  !isUpdatingReasoningEffort.value &&
+  !isUpdatingReasoningEffort.value)
+
+const canSend = computed(() => isSubmissionReady.value &&
+  !goalComposerLocked.value &&
   (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
@@ -2479,23 +2486,46 @@ function enqueueDraft() {
 }
 
 async function flushDraftQueue() {
-  while (draftQueue.value.length > 0 && !turnInFlight.value && !isSending.value && !goalComposerLocked.value) {
+  while (
+    draftQueue.value.length > 0
+    && isSubmissionReady.value
+    && !isDraftQueuePaused.value
+    && !turnInFlight.value
+    && !isSending.value
+    && !goalComposerLocked.value
+  ) {
     const next = draftQueue.value.shift()
     if (!next) break
     draftMessage.value = next.message
     attachments.value = next.attachments
-    await submit('normal')
-    if (composerError.value) break
+    const sent = await submit('normal', undefined, 'queue')
+    if (!sent) break
+  }
+}
+
+function requestDraftQueueFlush() {
+  if (
+    isSubmissionReady.value
+    && !isDraftQueuePaused.value
+    && !turnInFlight.value
+    && draftQueue.value.length > 0
+    && !isSending.value
+    && !goalComposerLocked.value
+  ) {
+    void flushDraftQueue()
   }
 }
 
 watch(
-  [turnInFlight, () => draftQueue.value.length, isSending, goalComposerLocked],
-  () => {
-    if (!turnInFlight.value && draftQueue.value.length > 0 && !isSending.value && !goalComposerLocked.value) {
-      void flushDraftQueue()
-    }
-  },
+  [
+    turnInFlight,
+    () => draftQueue.value.length,
+    isSending,
+    goalComposerLocked,
+    isSubmissionReady,
+    isDraftQueuePaused,
+  ],
+  requestDraftQueueFlush,
 )
 
 /**
@@ -2915,12 +2945,21 @@ async function submitEdit(turn: TimelineTurn) {
 async function submit(
   delivery: 'normal' | 'steer' = 'normal',
   messageOverride?: string,
+  source: 'user' | 'queue' = 'user',
 ): Promise<boolean> {
   if (isSending.value) return false
   if (!messageOverride && goalComposerLocked.value) {
     composerError.value = goalComposerReason.value
     return false
   }
+  // Buttons are disabled from ``canSend``, but keyboard and watcher-driven
+  // entries call submit directly. Re-check the same availability boundary so
+  // Enter cannot dispatch during hydration/attachment preparation, and queued
+  // drafts cannot leave before recovery reaches the authoritative live state.
+  if (!messageOverride && !canSend.value) return false
+  // Approval answers and "Implement plan" use messageOverride and may bypass a
+  // Goal's ordinary composer lock, but they still require a live transport.
+  if (messageOverride && connectionState.value !== 'live') return false
   const message = messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || attachments.value.length > 0
   if (!hasContent) return false
@@ -2982,6 +3021,10 @@ async function submit(
     requestLatestAnchor(true)
     await sendToStream(message, atts, clientTurnId, delivery)
     if (messageOverride) await hydrateGoal()
+    // A successful explicit send resolves a previously uncertain queued item.
+    // Automatic queue sends never clear this flag; only deliberate user input
+    // may resume the remaining queue after an ambiguous POST failure.
+    if (!messageOverride && source === 'user') isDraftQueuePaused.value = false
     // The POST acknowledgement means provider dispatch has begun. Refresh the
     // backend-native tab status now rather than waiting for the 5s poll phase;
     // turn_started/completed/error boundaries above provide subsequent edges.
@@ -2994,6 +3037,7 @@ async function submit(
     if (!messageOverride) {
       draftMessage.value = message
       attachments.value = draftAtts
+      if (source === 'queue') isDraftQueuePaused.value = true
     }
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
     return false
