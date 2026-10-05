@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import quote
 
 import httpx
 from cryptography.hazmat.primitives import padding
@@ -440,6 +441,27 @@ class FeishuBotClient:
         payload = response.json()
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot message")
+
+    async def reply_text(self, message_id: str, text: str) -> None:
+        """Reply to one exact inbound message instead of a mutable chat target."""
+
+        token = await self._get_tenant_token()
+        bounded = text.strip() or "Claude Hub completed without a text response."
+        if len(bounded) > _MAX_REPLY_CHARS:
+            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
+        response = await self._request(
+            "POST",
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "msg_type": "text",
+                "content": json.dumps({"text": bounded}, ensure_ascii=False),
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("code") != 0:
+            raise FeishuBotError("Feishu rejected the Bot reply")
 
 
 def _parse_json_object(raw_body: bytes) -> dict[str, Any]:

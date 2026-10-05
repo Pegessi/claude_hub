@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### feat(feishu): preserve per-message source in shared Chat sessions
+
+- Record server-authored Web or Feishu origins on accepted Chat turns. Feishu
+  source badges survive history replay and binding changes; ordinary Web and
+  unknown legacy messages retain their existing appearance.
+- Keep provider-visible source context separate from the displayed message and
+  preserve edit-resend compatibility with an immutable Feishu text format.
+- Reply to the original Feishu message, rechecking binding authorization before
+  delivery. Busy or pending-question input is rejected without claiming the
+  binding expired; shared input queuing remains a separate stage.
+- Add regression and fully mocked desktop/mobile browser coverage. Real Bot
+  authorization and end-to-end provider validation remain outside this evidence.
+
 ### fix(runtime): speed up supervised restart and drain long-lived connections
 
 - Bound Uvicorn connection draining to three seconds so open Chat streams do
