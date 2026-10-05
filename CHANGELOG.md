@@ -78,7 +78,9 @@
   deleted tasks.
 - Accept explicit server-authored Web and Feishu origins as human correction
   evidence without coupling feedback capture to provider text-format metadata.
-  Machine and malformed origins remain excluded.
+  Machine and malformed origins remain excluded. Use the persisted sanitized
+  summary for evidence; the redactor's always-set flag no longer excludes every
+  production message.
 - Automatically consider fresh feedback in quiet windows with a persistent
   cursor, bounded reads/context, cooldown and user controls. Reuse existing
   staged summarization, exclude internal tasks, and record explicit Chat

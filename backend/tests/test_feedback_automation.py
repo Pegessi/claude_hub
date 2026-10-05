@@ -14,12 +14,17 @@ import pytest
 
 from claude_hub.models import (
     AgentRuntimeStatus,
+    AgentStreamEvent,
+    AgentStreamEventType,
+    AgentType,
     FeedbackLessonCreate,
     FeedbackSummaryMode,
     ManagedSessionStatus,
     Workspace,
     WorkspaceTaskStatus,
 )
+from claude_hub.services.agent_stream.redaction import redact_event
+from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.feedback_automation import (
     ChatCorrectionCreate,
     FeedbackAutomationSettings,
@@ -325,6 +330,66 @@ def test_sources_and_capture_accept_explicit_human_origins(tmp_path: Path) -> No
     assert correction.source_sha256 == hashlib.sha256(feishu.encode()).hexdigest()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", [None, "web", "feishu"])
+async def test_sources_capture_redacted_production_event_without_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, origin: str | None
+) -> None:
+    """Capture the actual redact/store output, never the original secret text."""
+    monkeypatch.setattr(wm, "STATE_ROOT", tmp_path)
+    secret = "sk-abcdefghijklmnopqrstuvwxyz"
+    original_summary = f"Never persist {secret}; use the verified checkout instead."
+    safe_summary = "Never persist [REDACTED]; use the verified checkout instead."
+    payload: dict[str, object] = {"summary": original_summary}
+    if origin is not None:
+        payload["metadata"] = {"origin": origin}
+    event = AgentStreamEvent(
+        stream_sequence=0,
+        session_id="terminal-tab-tab-1",
+        tab_id="tab-1",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TURN_STARTED,
+        turn_id="human-redacted",
+        message_id="human-redacted:user",
+        payload=payload,
+        created_at=datetime(2026, 10, 5, 10),
+    )
+    redacted = redact_event(event)
+    assert redacted.redacted is True
+    await AgentStreamStore("terminal-tabs", "terminal-tab-tab-1").append(redacted)
+    controls = FeedbackAutomationStore(tmp_path)
+    sources = controls.sources("tab-1")
+    assert len(sources) == 1
+    assert sources[0]["text"] == safe_summary
+    expected_hash = hashlib.sha256(safe_summary.encode()).hexdigest()
+    assert sources[0]["source_sha256"] == expected_hash
+    assert secret not in json.dumps(sources)
+    with pytest.raises(ValueError, match="exact correction"):
+        controls.capture(
+            "ws",
+            ChatCorrectionCreate(
+                tab_id="tab-1",
+                turn_id="human-redacted",
+                message_id="human-redacted:user",
+                quote=secret,
+            ),
+            datetime(2026, 10, 5, 10),
+        )
+    correction = controls.capture(
+        "ws",
+        ChatCorrectionCreate(
+            tab_id="tab-1",
+            turn_id="human-redacted",
+            message_id="human-redacted:user",
+            quote="use the verified checkout",
+        ),
+        datetime(2026, 10, 5, 10),
+    )
+    assert correction.source_sha256 == expected_hash
+    stored = tmp_path / "ws/feedback/chat-corrections" / f"{correction.id}.json"
+    assert secret not in stored.read_text(encoding="utf-8")
+
+
 def test_sources_exclude_machine_malformed_and_untrusted_rows(tmp_path: Path) -> None:
     _event(tmp_path, turn="scheduled-1")
     _event(tmp_path, turn="goal-1")
@@ -336,7 +401,6 @@ def test_sources_exclude_machine_malformed_and_untrusted_rows(tmp_path: Path) ->
     _event(tmp_path, turn="string-metadata", metadata="web")
     _event(tmp_path, turn="list-origin", metadata={"origin": ["web"]})
     _event(tmp_path, turn="dict-origin", metadata={"origin": {"kind": "feishu"}})
-    _event(tmp_path, turn="redacted-web", metadata={"origin": "web"}, redacted=True)
     _event(
         tmp_path,
         turn="bad-message-id",

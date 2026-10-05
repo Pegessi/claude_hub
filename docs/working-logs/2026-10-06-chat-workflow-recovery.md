@@ -43,3 +43,17 @@ Evidence: `/tmp/claude-hub-takeover-tests.KvXCMa/workflow-lifecycle-before/` and
 `workflow-lifecycle-after/`. These are deterministic tests with mocked execution,
 not real provider acceptance. The live smoke harness still needs safety work;
 the production service and external Bot resources were not touched.
+
+## Feedback evidence from production events
+
+Independent review found that `redacted=True` means an event passed through the
+redactor, even when its content was unchanged. Filtering that flag excluded all
+normal persisted turns. Feedback now uses the persisted safe summary directly;
+its hash and accepted quote never refer to the original secret text.
+
+Three regressions use the actual `AgentStreamEvent -> redact_event ->
+AgentStreamStore` path for legacy, Web, and Feishu origins. All three reproduced
+empty source results before the fix. Afterward, 39 feedback tests and scoped mypy
+passed; quoting a synthetic pre-redaction secret is rejected and the correction
+file contains no such value. Evidence is in `feedback-redaction-before/` and
+`feedback-redaction-after/` under the same task artifact root.

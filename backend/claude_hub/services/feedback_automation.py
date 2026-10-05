@@ -120,10 +120,11 @@ class FeedbackAutomationStore:
                 continue
             turn_id = item.get("turn_id")
             message_id = item.get("message_id")
+            # Every event passing the redactor is flagged, even if unchanged.
+            # Evidence must reference the persisted safe summary, not that flag.
             summary = payload.get("summary")
             if (
                 item.get("tab_id") != tab_id
-                or item.get("redacted")
                 or not isinstance(turn_id, str)
                 or not turn_id
                 or turn_id.startswith(("scheduled-", "goal-"))
