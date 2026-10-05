@@ -180,6 +180,16 @@ def _install_chat_target(monkeypatch, *, workspace_id: str | None = "ws-1") -> N
         )
 
 
+def test_deleted_workspace_preserves_rebinding_reason(monkeypatch) -> None:
+    _install_chat_target(monkeypatch)
+    monkeypatch.delitem(workspace_manager.workspaces, "ws-1")
+    with pytest.raises(HTTPException) as raised:
+        bot_api._validate_bind_target("tab-1", "ws-1")
+    assert raised.value.status_code == 409
+    assert raised.value.detail == "Chat tab workspace target no longer exists"
+    assert raised.value.headers == {stream_api.CHAT_ERROR_REASON_HEADER: "binding_target_missing"}
+
+
 def test_binding_start_rejects_local_auth_bypass(configured_bot) -> None:
     response = TestClient(app).post(
         "/api/feishu/bot/bind/start",
@@ -808,6 +818,10 @@ def test_rebind_during_turn_suppresses_reply_to_old_message(configured_bot, monk
         (
             "structured_source_unavailable",
             "Claude Hub Chat 当前不可用，本条消息尚未执行。请在网页检查 Chat 状态后重试。",
+        ),
+        (
+            "binding_target_missing",
+            "Claude Hub 目标当前不可用，请在网页重新绑定。",
         ),
         (
             None,

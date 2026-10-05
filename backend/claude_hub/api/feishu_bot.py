@@ -135,7 +135,11 @@ def _validate_bind_target(tab_id: str, requested_workspace_id: str | None) -> st
             status_code=403, detail="Chat tab does not belong to that workspace target"
         )
     if actual_workspace_id is not None and actual_workspace_id not in workspace_manager.workspaces:
-        raise HTTPException(status_code=409, detail="Chat tab workspace target no longer exists")
+        raise HTTPException(
+            status_code=409,
+            detail="Chat tab workspace target no longer exists",
+            headers={CHAT_ERROR_REASON_HEADER: "binding_target_missing"},
+        )
     return actual_workspace_id
 
 
@@ -301,9 +305,10 @@ async def _handle_message_event(
         status_value = "completed"
     except HTTPException as exc:
         logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
-        if _chat_error_reason(exc) == "chat_busy":
+        reason = _chat_error_reason(exc)
+        if reason == "chat_busy":
             message = "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"
-        elif exc.status_code == 409:
+        elif exc.status_code == 409 and reason != "binding_target_missing":
             message = (
                 "Claude Hub Chat 当前不可用，本条消息尚未执行。" "请在网页检查 Chat 状态后重试。"
             )
