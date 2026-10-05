@@ -77,6 +77,27 @@ def _ctx() -> NormalizeContext:
     )
 
 
+# ── Child resource ownership ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_type", [CodexNativeSession, TraexNativeSession])
+async def test_child_completion_keeps_parent_image_files(tmp_path, transport_type) -> None:
+    transport = transport_type(_session(AgentType.CODEX))
+    transport._thread_id = "parent-thread"
+    image = tmp_path / "inflight.png"
+    image.write_bytes(b"image")
+    transport._inflight_images = [image]
+    for thread in ("child-thread", "parent-thread"):
+        record = {
+            "method": "turn/completed",
+            "params": {"threadId": thread, "turn": {"id": thread}},
+        }
+        await transport._handle_notification(record)
+        assert await transport.read_line() == record
+        assert image.exists() == (thread == "child-thread")
+
+
 # ── factory ─────────────────────────────────────────────────────────────────
 
 

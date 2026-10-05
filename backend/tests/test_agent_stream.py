@@ -4857,6 +4857,122 @@ async def test_codex_turn_completed_ack_after_persistence_no_turn_ahead() -> Non
     await tailer.stop()
 
 
+# ── Native parent/child lifecycle isolation ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_child_completion_keeps_headless_parent_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport(eof_is_fatal=True)
+    transport.active_thread_id = "parent-thread"
+    session = _native_session(AgentType.CODEX)
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=CodexJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    try:
+        await tailer.start()
+        await tailer.send_message("work", [], client_turn_id="headless-parent")
+        monkeypatch.setattr(tailer_module, "IDLE_TTL_S", 0)
+        transport._records.put_nowait(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "child-thread",
+                    "turn": {"id": "child-turn", "status": "completed"},
+                },
+            }
+        )
+        transport._records.put_nowait(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "parent-thread", "delta": "still working"},
+            }
+        )
+        event = await _wait_for_store_event(tailer._store, AgentStreamEventType.TEXT_DELTA)
+        assert event.turn_id == "headless-parent"
+        assert event.payload["text"] == "still working"
+        assert transport.turn_in_flight
+        assert not transport.stop_called
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [AgentType.CODEX, AgentType.TRAEX])
+async def test_child_completion_preserves_parent_turn_and_final_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_type: AgentType
+) -> None:
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport(eof_is_fatal=True)
+    transport.active_thread_id = "parent-thread"
+    session = _native_session(agent_type)
+    observed = []
+
+    async def observe(event):
+        observed.append(event)
+
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=CodexJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+        post_persist_observers=[observe],
+    )
+    queue = await tailer.subscribe()
+
+    def emit(method, thread="parent-thread", **params):
+        transport._records.put_nowait({"method": method, "params": {"threadId": thread, **params}})
+
+    try:
+        await tailer.send_message("work", [], client_turn_id="parent-turn")
+        assert (await asyncio.wait_for(queue.get(), 1)).type == AgentStreamEventType.TURN_STARTED
+        emit("item/agentMessage/delta", delta="before ")
+        emit("turn/started", "child-thread", turn={"id": "child-turn"})
+        emit("item/agentMessage/delta", "child-thread", delta="child report")
+        emit("turn/completed", "child-thread", turn={"id": "child-turn", "status": "completed"})
+        emit("item/agentMessage/delta", delta="after")
+        received = []
+        while True:
+            event = await asyncio.wait_for(queue.get(), 1)
+            received.append(event)
+            if event.type == AgentStreamEventType.TEXT_DELTA and event.payload["text"] == "after":
+                break
+        assert tailer._active_turn_id == "parent-turn"
+        assert transport.turn_in_flight
+        assert not observed
+        assert not any(e.type == AgentStreamEventType.TURN_COMPLETED for e in received)
+        assert any(e.payload.get("subagent_thread") == "child-thread" for e in received)
+        emit("turn/completed", turn={"id": "provider-parent", "status": "completed"})
+        final = await asyncio.wait_for(queue.get(), 1)
+        assert final.type == AgentStreamEventType.TURN_COMPLETED
+        assert final.payload["assistant_text"] == "before after"
+        await asyncio.sleep(0)
+        assert len(observed) == 1
+        assert not transport.turn_in_flight
+
+        # A late child continuation cannot mint another top-level turn.
+        emit("turn/started", "child-thread", turn={"id": "child-followup"})
+        emit("item/reasoning/textDelta", delta="barrier")
+        await asyncio.sleep(0.05)
+        assert tailer._active_turn_id is None
+        assert not transport.turn_in_flight
+        assert queue.empty()
+    finally:
+        await tailer.stop()
+
+
 # ── long-poll wait: bounded queue-drain (no per-tick read_since) ─────────────
 
 

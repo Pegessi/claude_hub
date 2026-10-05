@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix(chat): keep native subagent completion from ending the parent turn
+
+- Codex/TraeX child turn starts and completions no longer open or finish the
+  parent Chat turn. Child failures remain visible within their own timeline;
+  child usage and Goal notifications cannot overwrite parent control state.
+- Parent final answers and Goal checkpoints exclude child text. A child's
+  completion only finalizes its own reasoning and does not delete the
+  parent's in-flight image files.
+- Fixes long multi-agent tasks appearing to stop early while the parent keeps
+  running and its remaining tools, text and final answer are discarded.
+
 ### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
 
 - Codex turns reported `usage.reasoning` tokens (e.g. 390) but the structured
