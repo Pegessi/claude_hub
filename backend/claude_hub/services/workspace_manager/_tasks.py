@@ -36,6 +36,7 @@ class _TasksMixin:
         *,
         system_internal: bool = False,
         internal_kind: str | None = None,
+        source_work_id: str | None = None,
     ) -> WorkspaceTask:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
@@ -75,6 +76,7 @@ class _TasksMixin:
             workspace_id=workspace_id,
             title=title,
             prompt=prompt,
+            source_work_id=source_work_id,
             attachments=attachments,
             goal_packet=payload.goal_packet,
             review_profiles=payload.review_profiles,

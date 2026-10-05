@@ -502,6 +502,7 @@ class _ReportsMixin:
             call_id=payload.call_id,
             state=payload.state,
             message=payload.message,
+            chat_work_outcome=payload.chat_work_outcome,
             message_en=payload.message_en,
             message_zh=payload.message_zh,
             changed_files=payload.changed_files,
