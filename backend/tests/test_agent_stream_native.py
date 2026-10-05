@@ -497,6 +497,243 @@ def test_build_env_without_tab_id_omits_overlay(monkeypatch: MonkeyPatch) -> Non
     assert "CLAUDE_HUB_TAB_ID" not in CodexNativeSession(sess)._build_env()
 
 
+@pytest.mark.asyncio
+async def test_native_provider_env_selection_uses_final_session_environment(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = _session(AgentType.CURSOR)
+    session.env = {
+        "CURSOR_API_ENDPOINT": "https://cursor.example",
+        "HTTPS_PROXY": "http://proxy.example:7890",
+    }
+    native = CursorNativeSession(session)
+    captured: dict[str, Any] = {}
+
+    async def fake_select(provider: str, env: Dict[str, str]) -> Dict[str, str]:
+        captured["provider"] = provider
+        captured["env"] = dict(env)
+        selected = dict(env)
+        selected.pop("HTTPS_PROXY", None)
+        return selected
+
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", fake_select)
+    selected = await native._build_provider_env()
+
+    assert captured["provider"] == "cursor"
+    assert captured["env"]["CURSOR_API_ENDPOINT"] == "https://cursor.example"
+    assert captured["env"]["HTTPS_PROXY"] == "http://proxy.example:7890"
+    assert "HTTPS_PROXY" not in selected
+
+
+@pytest.mark.asyncio
+async def test_native_provider_network_failure_is_exposed_as_last_error(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+
+    async def fail_select(provider: str, env: Dict[str, str]) -> Dict[str, str]:
+        raise native_module.ProviderNetworkError("direct tcp failure; proxy timeout failure")
+
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", fail_select)
+    with pytest.raises(native_module.ProviderNetworkError, match="direct tcp failure"):
+        await native._build_provider_env()
+    assert native.last_error == "direct tcp failure; proxy timeout failure"
+
+
+@pytest.mark.asyncio
+async def test_claude_selection_reads_and_overrides_high_precedence_settings(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    base_settings = launch_dir / "tab-1.settings.json"
+    base_settings.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://relay.example/v1",
+                    "HTTPS_PROXY": "http://proxy-user:proxy-sensitive@proxy.example:7890",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+    session = _session(AgentType.CLAUDE)
+    session.env = {"CLAUDE_HUB_PROVIDER_NETWORK_MODE": "auto"}
+    native = ClaudeNativeSession(session)
+    captured: dict[str, str] = {}
+
+    async def fake_select(provider: str, env: Dict[str, str]) -> Dict[str, str]:
+        assert provider == "claude"
+        captured.update(env)
+        return {
+            key: value
+            for key, value in env.items()
+            if key.lower() not in {"http_proxy", "https_proxy", "all_proxy"}
+        }
+
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", fake_select)
+    selected = await native._build_provider_env()
+    selected_settings = native._write_selected_settings(selected)
+
+    assert captured["ANTHROPIC_BASE_URL"] == "https://relay.example/v1"
+    assert captured["HTTPS_PROXY"].endswith("@proxy.example:7890")
+    assert selected_settings is not None
+    payload = json.loads(selected_settings.read_text(encoding="utf-8"))
+    assert payload["env"]["ANTHROPIC_BASE_URL"] == "https://relay.example/v1"
+    assert payload["env"]["HTTPS_PROXY"] == ""
+    assert payload["env"]["https_proxy"] == ""
+    assert selected_settings.stat().st_mode & 0o777 == 0o600
+    selected_settings.unlink()
+
+
+@pytest.mark.asyncio
+async def test_claude_uses_same_settings_snapshot_when_file_changes_after_probe(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    base_settings = launch_dir / "tab-1.settings.json"
+    base_settings.write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://old.example/v1"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+    session = _session(AgentType.CLAUDE)
+    session.env = {"CLAUDE_HUB_PROVIDER_NETWORK_MODE": "direct"}
+    native = ClaudeNativeSession(session)
+
+    async def change_after_snapshot(provider: str, env: Dict[str, str]) -> Dict[str, str]:
+        assert env["ANTHROPIC_BASE_URL"] == "https://old.example/v1"
+        base_settings.write_text(
+            json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://new.example/v1"}}),
+            encoding="utf-8",
+        )
+        return dict(env)
+
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", change_after_snapshot)
+    selected = await native._build_provider_env()
+    selected_settings = native._write_selected_settings(selected)
+
+    assert selected_settings is not None
+    payload = json.loads(selected_settings.read_text(encoding="utf-8"))
+    assert payload["env"]["ANTHROPIC_BASE_URL"] == "https://old.example/v1"
+    selected_settings.unlink()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "settings_content",
+    ["{not-json", "[]", '{"env": ["not", "an", "object"]}', '{"env": {"KEY": 1}}'],
+)
+async def test_claude_malformed_existing_settings_fail_before_selection(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    settings_content: str,
+) -> None:
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    (launch_dir / "tab-1.settings.json").write_text(settings_content, encoding="utf-8")
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+    select = AsyncMock(return_value={})
+    spawn = AsyncMock()
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", select)
+    native = ClaudeNativeSession(_session(AgentType.CLAUDE))
+    monkeypatch.setattr(native, "_spawn_oneshot", spawn)
+
+    with pytest.raises(native_module.ProviderNetworkError, match="Claude tab settings"):
+        await native.send_message("must not launch", [])
+
+    select.assert_not_awaited()
+    spawn.assert_not_awaited()
+    assert not native.turn_in_flight
+    assert list(launch_dir.glob("*.network-*.settings.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_unreadable_existing_settings_fail_before_selection(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    (launch_dir / "tab-1.settings.json").mkdir()
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+    select = AsyncMock(return_value={})
+    spawn = AsyncMock()
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", select)
+    native = ClaudeNativeSession(_session(AgentType.CLAUDE))
+    monkeypatch.setattr(native, "_spawn_oneshot", spawn)
+
+    with pytest.raises(native_module.ProviderNetworkError, match="unreadable or malformed"):
+        await native.send_message("must not launch", [])
+
+    select.assert_not_awaited()
+    spawn.assert_not_awaited()
+    assert not native.turn_in_flight
+    assert list(launch_dir.glob("*.network-*.settings.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_missing_settings_preserves_inherited_endpoint_without_promotion(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://parent.example")
+    session = _session(AgentType.CLAUDE)
+    session.env = {"CLAUDE_HUB_PROVIDER_NETWORK_MODE": "auto"}
+    native = ClaudeNativeSession(session)
+    captured: Dict[str, str] = {}
+
+    async def fake_select(provider: str, env: Dict[str, str]) -> Dict[str, str]:
+        captured.update(env)
+        return dict(env)
+
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", fake_select)
+    selected = await native._build_provider_env()
+    selected_settings = native._write_selected_settings(selected)
+
+    assert "ANTHROPIC_BASE_URL" not in captured
+    assert selected["ANTHROPIC_BASE_URL"] == "https://parent.example"
+    assert selected_settings is None
+
+
+@pytest.mark.asyncio
+async def test_claude_tab_without_endpoint_does_not_promote_parent_endpoint(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    base_settings = launch_dir / "tab-1.settings.json"
+    base_settings.write_text(
+        json.dumps({"env": {"ANTHROPIC_AUTH_TOKEN": "test-credential"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://parent.example")
+    session = _session(AgentType.CLAUDE)
+    session.env = {"CLAUDE_HUB_PROVIDER_NETWORK_MODE": "auto"}
+    native = ClaudeNativeSession(session)
+    captured: Dict[str, str] = {}
+
+    async def fake_select(provider: str, env: Dict[str, str]) -> Dict[str, str]:
+        captured.update(env)
+        return dict(env)
+
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", fake_select)
+    selected = await native._build_provider_env()
+
+    assert "ANTHROPIC_BASE_URL" not in captured
+    assert selected["ANTHROPIC_BASE_URL"] == "https://parent.example"
+    assert native._write_selected_settings(selected) is None
+    assert native._build_command()[-1] == str(base_settings)
+    assert list(launch_dir.glob("*.network-*.settings.json")) == []
+
+
 def test_claude_transcript_strips_hub_runtime_guidance_string_content() -> None:
     """A string-content Claude user message carrying the first-turn block
     normalizes back to the clean text (never reaches the timeline/UI)."""
@@ -771,6 +1008,64 @@ def _written_requests(proc: _FakeProcess) -> List[Dict[str, Any]]:
             if line:
                 out.append(json.loads(line))
     return out
+
+
+@pytest.mark.asyncio
+async def test_codex_start_passes_selected_environment_to_app_server(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    proc = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"thread": {"id": "th-1"}}}).encode()
+            + b"\n",
+        ]
+    )
+    session = _session(AgentType.CODEX)
+    native = CodexNativeSession(session)
+    spawn = AsyncMock(return_value=proc)
+
+    async def fake_select(provider: str, env: Dict[str, str]) -> Dict[str, str]:
+        assert provider == "codex"
+        return {**env, "SELECTED_ROUTE": "direct"}
+
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", fake_select)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    await native.start()
+
+    assert spawn.await_args.kwargs["env"]["SELECTED_ROUTE"] == "direct"
+
+
+@pytest.mark.asyncio
+async def test_codex_start_reselects_when_config_changes_between_probe_and_spawn(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    first = _FakeProcess([json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n"])
+    second = _FakeProcess(
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": {}}).encode() + b"\n",
+            json.dumps({"jsonrpc": "2.0", "id": 3, "result": {"thread": {"id": "th-2"}}}).encode()
+            + b"\n",
+        ]
+    )
+    native = _codex_session()
+    fingerprints = MagicMock(side_effect=["old", "old", "new", "new", "new", "new"])
+    preflight = AsyncMock(side_effect=[{"ROUTE": "old"}, {"ROUTE": "new"}])
+    spawn = AsyncMock(side_effect=[first, second])
+    monkeypatch.setattr(native, "_provider_network_fingerprint", fingerprints)
+    monkeypatch.setattr(native, "_build_provider_env", preflight)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    await native.start()
+
+    assert first._terminated is True
+    assert spawn.await_count == 2
+    assert preflight.await_count == 2
+    assert spawn.await_args_list[0].kwargs["env"] == {"ROUTE": "old"}
+    assert spawn.await_args_list[1].kwargs["env"] == {"ROUTE": "new"}
+    assert native._network_config_fingerprint == "new"
+    assert native._thread_id == "th-2"
 
 
 @pytest.mark.asyncio
@@ -1310,6 +1605,129 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
     assert turns[0]["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.6-sol"
     assert turns[1]["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.4"
     assert turns[2]["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_cls,agent_type,changed_key",
+    [
+        (CodexNativeSession, AgentType.CODEX, "HTTPS_PROXY"),
+        (TraexNativeSession, AgentType.TRAEX, "TRAE_API_BASE_URL"),
+    ],
+)
+async def test_persistent_network_change_restarts_before_accepting_next_turn(
+    monkeypatch: MonkeyPatch,
+    session_cls: Any,
+    agent_type: AgentType,
+    changed_key: str,
+) -> None:
+    session = _session(agent_type)
+    session.env = {
+        "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "inherit",
+        changed_key: "https://one.example",
+    }
+    native = session_cls(session)
+    native._started = True
+    native._process = _FakeProcess([])
+    native._network_config_fingerprint = native._provider_network_fingerprint()
+    events: List[str] = []
+
+    async def fake_preflight() -> Dict[str, str]:
+        events.append("preflight")
+        assert not native.turn_in_flight
+        return native._build_env()
+
+    async def fake_restart() -> None:
+        events.append("restart")
+        assert not native.turn_in_flight
+        native._network_config_fingerprint = native._provider_network_fingerprint()
+
+    async def fake_send(text: str) -> None:
+        events.append("send")
+        assert native.turn_in_flight
+        native._end_turn()
+
+    monkeypatch.setattr(native, "_build_provider_env", fake_preflight)
+    monkeypatch.setattr(native, "restart_for_recovery", fake_restart)
+    monkeypatch.setattr(native, "_send_text", fake_send)
+
+    native.update_env(
+        {
+            "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "inherit",
+            changed_key: "https://two.example",
+        }
+    )
+    await native.send_message("next", [])
+
+    assert events == ["preflight", "restart", "send"]
+
+
+@pytest.mark.asyncio
+async def test_persistent_network_change_failure_keeps_old_process_and_rejects_prompt(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = _session(AgentType.CODEX)
+    session.env = {
+        "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "inherit",
+        "HTTPS_PROXY": "https://one.example",
+    }
+    native = CodexNativeSession(session)
+    old_process = _FakeProcess([])
+    native._started = True
+    native._process = old_process
+    native._network_config_fingerprint = native._provider_network_fingerprint()
+    restart = AsyncMock()
+    send = AsyncMock()
+
+    async def fail_preflight() -> Dict[str, str]:
+        raise native_module.ProviderNetworkError("direct timeout; proxy tcp failure")
+
+    monkeypatch.setattr(native, "_build_provider_env", fail_preflight)
+    monkeypatch.setattr(native, "restart_for_recovery", restart)
+    monkeypatch.setattr(native, "_send_text", send)
+    native.update_env(
+        {
+            "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "inherit",
+            "HTTPS_PROXY": "https://two.example",
+        }
+    )
+
+    with pytest.raises(native_module.ProviderNetworkError, match="direct timeout"):
+        await native.send_message("must not be sent", [])
+
+    assert native._process is old_process
+    assert not native.turn_in_flight
+    restart.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_persistent_model_only_change_does_not_restart_network(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = _session(AgentType.CODEX)
+    session.env = {"CLAUDE_HUB_PROVIDER_NETWORK_MODE": "inherit"}
+    native = CodexNativeSession(session)
+    native._started = True
+    native._process = _FakeProcess([])
+    native._network_config_fingerprint = native._provider_network_fingerprint()
+    restart = AsyncMock()
+
+    async def fake_send(text: str) -> None:
+        native._end_turn()
+
+    monkeypatch.setattr(native, "restart_for_recovery", restart)
+    monkeypatch.setattr(native, "_send_text", fake_send)
+
+    native.update_env(
+        {
+            "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "inherit",
+            "CODEX_MODEL": "gpt-5.4",
+        }
+    )
+    await native.send_message("next", [])
+
+    restart.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,10 @@ else:
     os.environ["CLAUDE_HUB_HOME"] = str(_OWNED_TEST_RUNTIME)
     os.environ["CLAUDE_HUB_TMUX_SOCKET"] = f"ch-pytest-{uuid.uuid4().hex[:12]}"
 
+# Unit and integration tests must never probe a developer's configured provider
+# endpoint. Tests for route selection pass an explicit environment and probe.
+os.environ["CLAUDE_HUB_PROVIDER_NETWORK_MODE"] = "inherit"
+
 # Import only after owned-test isolation is installed. Importing this module
 # initializes the services package, whose managers bind runtime paths eagerly.
 from claude_hub.services.runtime_isolation import tmux_command  # noqa: E402

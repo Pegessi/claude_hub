@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import logging
 import os
@@ -67,6 +68,15 @@ from ...models import (
     StreamReasoningEffortOption,
 )
 from .fork_seed import wrap_fork_seed_history
+from .provider_network import (
+    PROVIDER_NETWORK_MODE_ENV,
+    PROXY_ENV_NAMES,
+    ProviderEndpointUnknownError,
+    ProviderNetworkError,
+    provider_network_configuration_fingerprint,
+    resolve_provider_endpoint,
+    select_provider_subprocess_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -995,6 +1005,9 @@ class ProviderSession(ABC):
         # Available models, populated by ``prepare_capabilities`` from the
         # runtime-discovered (cursor) or curated static (claude/codex) list.
         self._available_models: List[StreamModelOption] = []
+        # Claude prepares a settings file and matching process environment as
+        # one unit before calling the shared one-shot launcher.
+        self._prepared_provider_env: Optional[Dict[str, str]] = None
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
@@ -1230,6 +1243,9 @@ class ProviderSession(ABC):
 
     # ── input ───────────────────────────────────────────────────────────────
 
+    async def _prepare_for_send(self) -> None:
+        """Apply provider lifecycle changes before accepting the next turn."""
+
     async def send_message(self, text: str, images: List[bytes]) -> None:
         """Atomically deliver a user turn (text + images) to the provider.
 
@@ -1242,6 +1258,7 @@ class ProviderSession(ABC):
         (both lock-free); this method owns the lock and the turn guard.
         """
         async with self._send_lock:
+            await self._prepare_for_send()
             self._begin_turn()
             try:
                 if images:
@@ -1569,6 +1586,29 @@ class ProviderSession(ABC):
             env["PATH"] = os.environ.get("PATH", "")
         return env
 
+    def _provider_configuration_env(self) -> Dict[str, str]:
+        """Return the effective provider configuration visible at launch."""
+        return self._build_env()
+
+    async def _build_provider_env(self) -> Dict[str, str]:
+        """Select direct or proxied networking for the next subprocess."""
+        try:
+            selected = await select_provider_subprocess_env(
+                self.session.agent_type.value,
+                self._provider_configuration_env(),
+            )
+        except ProviderNetworkError as exc:
+            self._last_error = str(exc)
+            raise
+        self._last_error = None
+        return selected
+
+    def _provider_network_fingerprint(self) -> str:
+        return provider_network_configuration_fingerprint(
+            self.session.agent_type.value,
+            self._provider_configuration_env(),
+        )
+
     def _resume_arg(self) -> List[str]:
         """Return the session-id argument for the next turn.
 
@@ -1640,6 +1680,10 @@ class ProviderSession(ABC):
         # advance per spawn at exactly one, which is what
         # ``CursorNativeSession._send_text`` relies on when it registers
         # staged images under the predicted next generation.
+        provider_env = self._prepared_provider_env
+        self._prepared_provider_env = None
+        if provider_env is None:
+            provider_env = await self._build_provider_env()
         await self._terminate_process()
         generation = self._stdout_generation
         self._stderr_buffer = b""
@@ -1651,7 +1695,7 @@ class ProviderSession(ABC):
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=self._build_env(),
+                env=provider_env,
             )
         except FileNotFoundError:
             self._last_error = f"provider binary not found: {cmd[0]}"
@@ -1712,8 +1756,109 @@ class ClaudeNativeSession(ProviderSession):
         )
         # Staged image bytes for the next turn's user message content blocks.
         self._staged_images: List[bytes] = []
+        self._network_settings_by_gen: Dict[int, Path] = {}
+        self._validated_tab_settings_payload: Optional[Dict[str, Any]] = None
+        self._validated_claude_launch_env: Optional[Dict[str, str]] = None
+        self._tab_endpoint_is_authoritative = False
 
-    def _build_command(self) -> List[str]:
+    def _tab_settings_path(self) -> Optional[Path]:
+        tab_id = getattr(self.session, "tab_id", None)
+        if not tab_id:
+            return None
+        path = _runtime_home() / "launch_env" / f"{tab_id}.settings.json"
+        return path if path.exists() or path.is_symlink() else None
+
+    def _provider_configuration_env(self) -> Dict[str, str]:
+        env = self._build_env()
+        settings_path = self._tab_settings_path()
+        if settings_path is None:
+            self._validated_tab_settings_payload = {}
+            self._validated_claude_launch_env = dict(env)
+            self._tab_endpoint_is_authoritative = False
+            env.pop("ANTHROPIC_BASE_URL", None)
+            return env
+        try:
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProviderNetworkError(
+                "Claude tab settings file is unreadable or malformed"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ProviderNetworkError("Claude tab settings file must contain a JSON object")
+        settings_env = payload.get("env", {})
+        if not isinstance(settings_env, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in settings_env.items()
+        ):
+            raise ProviderNetworkError("Claude tab settings env must contain only string values")
+        self._validated_tab_settings_payload = payload
+        env.update(settings_env)
+        self._validated_claude_launch_env = dict(env)
+        endpoint = settings_env.get("ANTHROPIC_BASE_URL")
+        self._tab_endpoint_is_authoritative = isinstance(endpoint, str) and bool(endpoint.strip())
+        if not self._tab_endpoint_is_authoritative:
+            env.pop("ANTHROPIC_BASE_URL", None)
+        return env
+
+    async def _build_provider_env(self) -> Dict[str, str]:
+        selected = await super()._build_provider_env()
+        if not self._tab_endpoint_is_authoritative:
+            if self._validated_claude_launch_env is None:
+                raise ProviderNetworkError("Claude launch environment was not validated")
+            return dict(self._validated_claude_launch_env)
+        return selected
+
+    def _write_selected_settings(self, provider_env: Dict[str, str]) -> Optional[Path]:
+        mode = provider_env.get(PROVIDER_NETWORK_MODE_ENV, "auto").strip().lower()
+        if mode == "inherit":
+            return None
+        if not self._tab_endpoint_is_authoritative:
+            if mode == "auto":
+                return None
+            raise ProviderEndpointUnknownError(
+                "forced Claude network mode requires ANTHROPIC_BASE_URL in tab settings"
+            )
+        try:
+            endpoint = resolve_provider_endpoint("claude", provider_env)
+        except ProviderEndpointUnknownError:
+            if mode == "auto":
+                return None
+            raise
+        if self._validated_tab_settings_payload is None:
+            raise ProviderNetworkError("Claude tab settings were not validated before launch")
+        payload = copy.deepcopy(self._validated_tab_settings_payload)
+        settings_env = payload.setdefault("env", {})
+        if not isinstance(settings_env, dict):
+            raise ProviderNetworkError("Claude tab settings env must be an object")
+        settings_env["ANTHROPIC_BASE_URL"] = endpoint
+        # Claude settings env has higher precedence than the process env. Set
+        # every proxy spelling so a user-level settings file cannot silently
+        # restore a route that the preflight did not select.
+        for lower, upper in zip(PROXY_ENV_NAMES[::2], PROXY_ENV_NAMES[1::2]):
+            value = provider_env.get(lower) or provider_env.get(upper) or ""
+            settings_env[lower] = value
+            settings_env[upper] = value
+        launch_dir = _runtime_home() / "launch_env"
+        launch_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, raw_path = tempfile.mkstemp(
+            prefix=f"{getattr(self.session, 'tab_id', 'chat')}.network-",
+            suffix=".settings.json",
+            dir=str(launch_dir),
+        )
+        path = Path(raw_path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream)
+            os.chmod(path, 0o600)
+        except Exception:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return path
+
+    def _build_command(self, settings_path: Optional[Path] = None) -> List[str]:
         cmd = [
             "claude",
             "--print",
@@ -1741,11 +1886,9 @@ class ClaudeNativeSession(ProviderSession):
         # through the same per-tab settings file terminal launches pass
         # (written by ttyd_manager), so the tab's configured provider wins
         # over any user-level settings env (e.g. a global relay override).
-        tab_id = getattr(self.session, "tab_id", None)
-        if tab_id:
-            settings_path = _runtime_home() / "launch_env" / f"{tab_id}.settings.json"
-            if settings_path.is_file():
-                cmd.extend(["--settings", str(settings_path)])
+        effective_settings_path = settings_path or self._tab_settings_path()
+        if effective_settings_path is not None:
+            cmd.extend(["--settings", str(effective_settings_path)])
         return cmd
 
     def available_modes(self) -> List[StreamModeOption]:
@@ -1804,12 +1947,49 @@ class ClaudeNativeSession(ProviderSession):
         return json.dumps(envelope)
 
     async def _send_text(self, text: str) -> None:
-        cmd = self._build_command()
+        provider_env = await self._build_provider_env()
+        settings_path = self._write_selected_settings(provider_env)
+        cmd = self._build_command(settings_path)
         stdin_text = self._build_stdin(text)
         # Clear staged images after they've been incorporated into the
         # envelope for this turn.
         self._staged_images = []
-        await self._spawn_oneshot(cmd, stdin_text)
+        generation = self._stdout_generation + 1
+        if settings_path is not None:
+            self._network_settings_by_gen[generation] = settings_path
+        try:
+            self._prepared_provider_env = provider_env
+            await self._spawn_oneshot(cmd, stdin_text)
+        except (Exception, asyncio.CancelledError):
+            path = self._network_settings_by_gen.pop(generation, None)
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        finally:
+            self._prepared_provider_env = None
+
+    async def _drain_oneshot_stdout(self, generation: int) -> None:
+        try:
+            await super()._drain_oneshot_stdout(generation)
+        finally:
+            path = self._network_settings_by_gen.pop(generation, None)
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    async def stop(self) -> None:
+        await super().stop()
+        for path in self._network_settings_by_gen.values():
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._network_settings_by_gen.clear()
 
     def _stage_images(self, images: List[bytes]) -> None:
         """Stage images for the next turn's user message content blocks.
@@ -1947,9 +2127,27 @@ class CodexNativeSession(ProviderSession):
         self._provider_goal_api_available: Optional[bool] = None
         self._model_discovery_attempted = False
         self._provider_model_options: Optional[List[StreamModelOption]] = None
+        self._network_config_fingerprint: Optional[str] = None
 
     def _build_command(self) -> List[str]:
         return ["codex", "app-server", "--stdio"]
+
+    async def _prepare_for_send(self) -> None:
+        if self._turn_in_flight:
+            return
+        if not self._started or self._process is None:
+            return
+        current = self._provider_network_fingerprint()
+        if self._network_config_fingerprint is None:
+            self._network_config_fingerprint = current
+            return
+        if current == self._network_config_fingerprint:
+            return
+        # Validate the replacement route before stopping a healthy app-server.
+        # This runs before _begin_turn, so no prompt has been accepted and no
+        # retry or duplicate submission is possible.
+        await self._build_provider_env()
+        await self.restart_for_recovery()
 
     async def stop(self) -> None:
         """Terminate the app-server and clean up any staged image temp files."""
@@ -1986,53 +2184,81 @@ class CodexNativeSession(ProviderSession):
                 await self._terminate_process()
             self._started = False
 
-            # ``stop()`` cancels the previous stdout reader, whose ``finally``
-            # block deliberately publishes an EOF sentinel so an active
-            # consumer cannot hang.  After an idle reap there is no active
-            # consumer, so that sentinel remains queued.  Reusing the queue
-            # for a new app-server would make the fresh process look dead on
-            # its first read.  Each persistent process generation therefore
-            # owns a fresh notification queue.
-            self._notification_queue = asyncio.Queue()
-
             cmd = self._build_command()
-            try:
-                self._process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    cwd=self._cwd or None,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=self._build_env(),
-                )
-            except FileNotFoundError:
-                self._last_error = f"provider binary not found: {cmd[0]}"
-                raise
-            except OSError as exc:
-                self._last_error = f"failed to launch provider: {exc}"
-                raise
-            self._started = True
-            self._reader_task = asyncio.create_task(self._drain_stdout())
-            self._stderr_task = asyncio.create_task(self._drain_stderr())
-            try:
-                await self._initialize()
-            except Exception as exc:
-                self._last_error = f"codex app-server initialization failed: {exc}"
-                self._started = False
-                await self._terminate_process()
-                raise RuntimeError(self._last_error) from exc
-            self._last_error = None
+            for attempt in range(2):
+                # Every retry owns a fresh queue; EOF from a superseded process
+                # must never terminate the replacement generation.
+                self._notification_queue = asyncio.Queue()
+                network_config_fingerprint = self._provider_network_fingerprint()
+                provider_env = await self._build_provider_env()
+                if self._provider_network_fingerprint() != network_config_fingerprint:
+                    if attempt == 0:
+                        continue
+                    self._last_error = (
+                        "provider network configuration changed repeatedly during preflight"
+                    )
+                    raise ProviderNetworkError(self._last_error)
+                try:
+                    self._process = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        cwd=self._cwd or None,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=provider_env,
+                    )
+                except FileNotFoundError:
+                    self._last_error = f"provider binary not found: {cmd[0]}"
+                    raise
+                except OSError as exc:
+                    self._last_error = f"failed to launch provider: {exc}"
+                    raise
+                self._started = True
+                self._reader_task = asyncio.create_task(self._drain_stdout())
+                self._stderr_task = asyncio.create_task(self._drain_stderr())
+                try:
+                    await self._initialize_protocol()
+                except Exception as exc:
+                    self._last_error = f"codex app-server initialization failed: {exc}"
+                    self._started = False
+                    await self._terminate_process()
+                    raise RuntimeError(self._last_error) from exc
+                if self._provider_network_fingerprint() != network_config_fingerprint:
+                    self._started = False
+                    await self._terminate_process()
+                    if attempt == 0:
+                        continue
+                    self._last_error = (
+                        "provider network configuration changed repeatedly during startup"
+                    )
+                    raise ProviderNetworkError(self._last_error)
+                try:
+                    await self._initialize_thread()
+                except Exception as exc:
+                    self._last_error = f"codex app-server initialization failed: {exc}"
+                    self._started = False
+                    await self._terminate_process()
+                    raise RuntimeError(self._last_error) from exc
+                self._last_error = None
+                self._network_config_fingerprint = network_config_fingerprint
+                return
 
     async def _initialize(self) -> None:
-        """Run the JSON-RPC ``initialize`` handshake and create/resume a thread."""
+        """Run the JSON-RPC initialization handshake and create or resume a thread."""
+        await self._initialize_protocol()
+        await self._initialize_thread()
+
+    async def _initialize_protocol(self) -> None:
+        """Complete the local app-server protocol handshake."""
         init_params = {
             "clientInfo": {"name": "claude-hub", "version": "1.0.0"},
             "capabilities": {"experimentalApi": True},
         }
         await self._send_request("initialize", init_params)
-        # The protocol expects an ``initialized`` notification after the
-        # initialize response.
         await self._send_notification("initialized", {})
+
+    async def _initialize_thread(self) -> None:
+        """Create or resume the provider thread after network config is stable."""
         # Resume an existing thread when the session pins one; otherwise start
         # a fresh thread.
         if self._conversation_id:
