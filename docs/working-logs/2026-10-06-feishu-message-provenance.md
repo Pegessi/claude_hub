@@ -61,6 +61,8 @@ the workflow branch before the two features are combined.
 Known busy and unavailable-source failures carry `X-Claude-Hub-Error-Reason`;
 HTTP status and string detail are unchanged. Bot does not parse Goal wording.
 Unknown 409 responses ask the user to check the Chat state instead of rebinding.
+A deleted workspace is separately marked `binding_target_missing` and retains
+its existing rebinding advice; its HTTP status and detail also stay unchanged.
 Subscription failure is classified before dispatch, and only a successfully
 created subscription is removed in cleanup.
 
