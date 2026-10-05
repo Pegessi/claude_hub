@@ -58,10 +58,12 @@ import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRe
 import { useChatWork } from '@/composables/useChatWork'
 import ChatWorkCard from '@/components/ChatWorkCard.vue'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { useAppStore } from '@/stores/appStore'
 import { createWorkResultTracker } from '@/utils/chatWorkNotifications'
 
 const props = defineProps<{ tabId: string; refreshKey?: number }>()
 const terminalStore = useTerminalStore()
+const appStore = useAppStore()
 let storage: Storage | null = null
 try { storage = localStorage } catch { /* Storage can be unavailable in private contexts. */ }
 const newlyObservedResults = createWorkResultTracker(storage)
@@ -73,7 +75,7 @@ const attentionCount = computed(() => work.value.filter(item =>
 ).length)
 let paneActive = false
 watch(work, items => {
-  if (!paneActive || document.visibilityState === 'hidden') return
+  if (!paneActive || appStore.mode !== 'terminal' || document.visibilityState === 'hidden') return
   const updates = newlyObservedResults(items)
   if (!updates.length) return
   const first = updates[0]
@@ -86,7 +88,7 @@ watch(work, items => {
   })
 })
 function reconcileVisibility() {
-  if (paneActive && document.visibilityState !== 'hidden') void start()
+  if (paneActive && appStore.mode === 'terminal' && document.visibilityState !== 'hidden') void start()
   else stop()
 }
 function activate() { paneActive = true; reconcileVisibility() }
@@ -103,6 +105,7 @@ onUnmounted(() => {
 })
 watch(() => props.refreshKey, () => { if (paneActive) void refresh() })
 watch(() => props.tabId, () => { expanded.value = true })
+watch(() => appStore.mode, reconcileVisibility)
 </script>
 
 <style scoped>
