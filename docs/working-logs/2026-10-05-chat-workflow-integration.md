@@ -55,9 +55,9 @@ created to implement this change.
 
 ## Acceptance evidence
 
-Record final commit SHAs, independent review findings, targeted test commands,
-isolated HTTP/CLI persistence checks, and browser scenarios here after integration.
-Mocked transport checks and real provider execution must be identified separately.
+Final commit SHAs, independent review findings, targeted checks and live smoke
+results are recorded below. Mocked transport checks and real provider execution
+are identified separately.
 All servers, tmux sockets and runtime homes used in validation are task-owned;
 the main Hub on ports 5173/8173 is not restarted or mutated.
 
@@ -69,3 +69,36 @@ the expected `HUB_WORKFLOW_SMOKE_OK` response; the process was stopped in
 This verifies the actual provider transport with the new policy, not the full
 work dispatch/report/cleanup path. The ephemeral evidence file is
 `/var/folders/sg/n3v76wfd73gc06sq76ntb5rr0000gn/T/hub-chat-workflow-native-kloyw6bo/result.json`.
+
+UI commits `b9d28bd` and `01288b7` passed 602 unit tests, ESLint, TypeScript and
+production build in the combined checkout. The full-app mocked API browser
+walkthrough covered desktop/mobile, source-tab changes, preserved composer
+drafts, reload and controls with no page errors. Evidence is under
+`/tmp/claude-hub-chat-work-ui/`. Polling also stops while the app is showing
+Workspace mode, even though its Chat pane remains mounted.
+
+Feedback commit `1023e77` adds fresh-evidence automation and exact correction
+capture. Its focused checks passed 38 automation/store tests, 17 evidence
+tests and five manual lifecycle cases. Input budgets are record/character/read
+and frequency limits; they are not billing or output-token caps. See the
+[feedback delivery log](2026-10-05-chat-feedback-automation.md).
+
+## User-facing boundaries
+
+- Cards update and notify in the active or reopened Chat. There is no new
+  application-wide subscription or push notification for a hidden Chat.
+- Chat-linked launch currently supports local source Chats. Remote launches
+  are rejected rather than redirected to the local machine. Existing remote
+  Hub features are unchanged.
+- Inherited environment settings depend on the source tab record still being
+  available; a saved preset can be selected for independently configured work.
+- Explicit provider/model selection is supported where the runtime honors it.
+  No automatic quota discovery or unverified cross-provider failover is added.
+- Direct Chat corrections are selected deliberately and matched against a
+  bounded recent user-message tail. The backend verifies provenance, not the
+  semantic truth of the lesson subsequently generated.
+
+The opt-in `backend/tests/manual_chat_workflow_smoke.py --with-provider` starts
+an isolated backend, exercises real Codex through a one-shot linked task, then
+checks report history, cleanup, restart recovery and the built Chat UI. It never
+targets an existing Hub or creates a recurring user schedule.

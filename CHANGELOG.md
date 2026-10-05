@@ -5,6 +5,25 @@
 
 ## Unreleased
 
+### feat(chat): link durable work and bounded feedback to the conversation
+
+- Share a small execution policy between Chat and Task prompts: direct work,
+  available native subagents, and Hub delegation are separate from whether
+  work needs a durable Task. Existing review modes remain available.
+- Add source-Chat-scoped `claude-hub work` and API commands for idempotent
+  one-shot tasks and grouped monitoring checks using the existing scheduler
+  and task/report lifecycle. Preserve configured provider/environment/cwd;
+  explicit unsupported model overrides and remote source Chats fail clearly.
+- Show compact work cards, meaningful results, review state, interval controls
+  and pause/stop actions in Chat. Routine unchanged checks stay out of the
+  transcript. Visible/reopened Chats notify once per meaningful result;
+  inactive views do not run a new application-wide polling loop.
+- Automatically consider fresh feedback in quiet windows with a persistent
+  cursor, bounded reads/context, cooldown and user controls. Reuse existing
+  staged summarization, exclude internal tasks, and record explicit Chat
+  corrections only against exact persisted user-message evidence. Empty or
+  unrelated lesson queries now return no injected lesson index.
+
 ### chore(worktrees): add a conservative read-only inventory
 
 - `scripts/worktree_inventory.py --repo <path>` reports registered worktrees
