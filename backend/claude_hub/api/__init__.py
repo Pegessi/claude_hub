@@ -7,6 +7,7 @@ from .clipboard import router as clipboard_router
 from .codex import router as codex_router
 from .env_presets import router as env_presets_router
 from .feedback_automation import router as feedback_automation_router
+from .feishu_bot import router as feishu_bot_router
 from .filesystem import router as filesystem_router
 from .goal_runs import router as goal_runs_router
 from .remote import router as remote_router
@@ -23,6 +24,7 @@ api_router.include_router(feedback_automation_router)
 api_router.include_router(tabs_router)
 api_router.include_router(terminal_router)
 api_router.include_router(filesystem_router)
+api_router.include_router(feishu_bot_router)
 api_router.include_router(goal_runs_router)
 api_router.include_router(remote_router)
 api_router.include_router(system_router)

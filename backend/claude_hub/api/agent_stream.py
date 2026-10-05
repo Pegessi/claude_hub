@@ -1363,6 +1363,9 @@ async def _send_to_native(
     )
 
 
+CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
+
+
 def _map_send_exception(exc: Exception) -> HTTPException:
     """Map provider send errors to explicit HTTP status codes.
 
@@ -1378,7 +1381,11 @@ def _map_send_exception(exc: Exception) -> HTTPException:
     if isinstance(exc, RuntimeError):
         msg = str(exc)
         if "turn is already in flight" in msg:
-            return HTTPException(status_code=409, detail=msg)
+            return HTTPException(
+                status_code=409,
+                detail=msg,
+                headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+            )
         return HTTPException(status_code=503, detail=msg)
     # Unknown errors still fail closed, never as a bare 500.
     return HTTPException(status_code=500, detail=str(exc))
@@ -1393,7 +1400,12 @@ async def send_stream_input(
     session = _session_or_404(managed_session_id)
     manager = _get_tailer_manager()
     try:
-        await _send_to_native(session, payload, manager)
+        await _send_to_native(
+            session,
+            payload,
+            manager,
+            turn_metadata={"origin": "web"},
+        )
     except StructuredSourceUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except HTTPException:
@@ -1403,49 +1415,151 @@ async def send_stream_input(
     return {"ok": True}
 
 
-@router.post("/tabs/{tab_id}/stream/send")
-async def send_tab_stream_input(
+async def _dispatch_tab_stream_input(
     tab_id: str,
     payload: AgentStreamSendRequest,
-    current_user: User = Depends(get_current_user),
-) -> Dict[str, Any]:
+    *,
+    visible_text: Optional[str] = None,
+    turn_metadata: Optional[Dict[str, Any]] = None,
+    allow_question_answer: bool = True,
+) -> str:
+    """Deliver one turn through the existing direct-Chat admission path."""
     from ..services.goal_run import get_goal_admission_lock, get_goal_manager
 
     async with get_goal_admission_lock(tab_id):
         goal = get_goal_manager().current(tab_id)
         session = _terminal_tab_session_or_404(tab_id)
         manager = _get_tab_tailer_manager()
-        try:
-            if goal is not None and (
-                goal.status.value == "active" or goal.dispatch_state.value != "idle"
+        if goal is not None and (
+            goal.status.value == "active" or goal.dispatch_state.value != "idle"
+        ):
+            if (
+                allow_question_answer
+                and goal.status.value == "active"
+                and goal.current_turn_id
+                and not payload.attachments
             ):
-                if (
-                    goal.status.value == "active"
-                    and goal.current_turn_id
-                    and not payload.attachments
+                if await manager.answer_pending_question(
+                    session, payload.text, goal.current_turn_id
                 ):
-                    if await manager.answer_pending_question(
-                        session, payload.text, goal.current_turn_id
-                    ):
-                        return {"ok": True}
-                    if await manager.accepts_question_followup(
-                        session, payload.text, goal.current_turn_id
-                    ):
-                        goal = await get_goal_manager().pause(
-                            goal.id, f"answer:{payload.client_turn_id}"
-                        )
-                if goal.status.value == "active" or goal.dispatch_state.value != "idle":
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Pause or finish the active Goal before sending a manual turn",
+                    return str(goal.current_turn_id)
+                if await manager.accepts_question_followup(
+                    session, payload.text, goal.current_turn_id
+                ):
+                    goal = await get_goal_manager().pause(
+                        goal.id, f"answer:{payload.client_turn_id}"
                     )
-            await _send_to_native(session, payload, manager)
+            if goal.status.value == "active" or goal.dispatch_state.value != "idle":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Pause or finish the active Goal before sending a manual turn",
+                    headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+                )
+        await _send_to_native(
+            session,
+            payload,
+            manager,
+            visible_text=visible_text,
+            turn_metadata=turn_metadata,
+        )
+        return payload.client_turn_id
+
+
+async def dispatch_tab_chat_and_wait(
+    tab_id: str,
+    text: str,
+    client_turn_id: str,
+    *,
+    visible_text: Optional[str] = None,
+    turn_metadata: Optional[Dict[str, Any]] = None,
+    timeout_seconds: float = 300.0,
+) -> str:
+    """Send through an existing Chat tab and return its completed assistant text.
+
+    This is the narrow external-conversation adapter. It shares the same
+    ``TailerManager`` and provider session as the Web Chat composer and never
+    creates an agent, shell, working directory, or provider conversation.
+    """
+
+    session = _terminal_tab_session_or_404(tab_id)
+    manager = _get_tab_tailer_manager()
+    queue: Optional[asyncio.Queue[AgentStreamEvent]] = None
+    last_error = ""
+    try:
+        try:
+            queue = await manager.subscribe(session)
+            expected_turn_id = await _dispatch_tab_stream_input(
+                tab_id,
+                AgentStreamSendRequest(text=text, client_turn_id=client_turn_id),
+                visible_text=visible_text,
+                turn_metadata=turn_metadata,
+                allow_question_answer=False,
+            )
         except StructuredSourceUnavailable as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            raise HTTPException(
+                status_code=409,
+                detail=str(exc),
+                headers={CHAT_ERROR_REASON_HEADER: "structured_source_unavailable"},
+            ) from exc
         except HTTPException:
             raise
         except Exception as exc:
-            raise _map_send_exception(exc)
+            raise _map_send_exception(exc) from exc
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                await manager.cancel_turn(session, expected_turn_id=expected_turn_id)
+                raise TimeoutError(
+                    f"Chat turn {expected_turn_id} did not complete within {timeout_seconds} seconds"
+                )
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                await manager.cancel_turn(session, expected_turn_id=expected_turn_id)
+                raise TimeoutError(
+                    f"Chat turn {expected_turn_id} did not complete within {timeout_seconds} seconds"
+                ) from exc
+            if event.turn_id != expected_turn_id:
+                continue
+            if event.type == AgentStreamEventType.ERROR:
+                message = event.payload.get("message")
+                if isinstance(message, str):
+                    last_error = message
+                continue
+            if event.type != AgentStreamEventType.TURN_COMPLETED:
+                continue
+            status_value = event.payload.get("status")
+            if status_value not in {None, "completed", "success"}:
+                raise RuntimeError(last_error or f"Chat turn ended with status {status_value}")
+            assistant_text = event.payload.get("assistant_text")
+            if not isinstance(assistant_text, str) or not assistant_text.strip():
+                raise RuntimeError(last_error or "Chat turn completed without assistant text")
+            return assistant_text.strip()
+    finally:
+        if queue is not None:
+            manager.unsubscribe(session.id, queue)
+
+
+@router.post("/tabs/{tab_id}/stream/send")
+async def send_tab_stream_input(
+    tab_id: str,
+    payload: AgentStreamSendRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    try:
+        await _dispatch_tab_stream_input(
+            tab_id,
+            payload,
+            turn_metadata={"origin": "web"},
+        )
+    except StructuredSourceUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _map_send_exception(exc)
     return {"ok": True}
 
 
@@ -1568,6 +1682,7 @@ async def edit_resend_stream(
             payload.text,
             payload.client_turn_id,
             payload.turn_id,
+            turn_metadata={"origin": "web"},
         )
     except HTTPException:
         raise
@@ -1602,6 +1717,7 @@ async def edit_resend_tab_stream(
                 payload.text,
                 payload.client_turn_id,
                 payload.turn_id,
+                turn_metadata={"origin": "web"},
             )
         except HTTPException:
             raise
@@ -1911,4 +2027,9 @@ async def get_tab_quoted_image(
     raise _quoted_image_not_available()
 
 
-__all__ = ["router", "_reset_tailer_manager"]
+__all__ = [
+    "CHAT_ERROR_REASON_HEADER",
+    "dispatch_tab_chat_and_wait",
+    "router",
+    "_reset_tailer_manager",
+]

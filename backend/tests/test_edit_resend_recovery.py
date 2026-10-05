@@ -79,8 +79,13 @@ async def _append_turn(
     turn_id: str,
     text: str,
     event_type: AgentStreamEventType = AgentStreamEventType.TURN_STARTED,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> AgentStreamEvent:
     """Append one ``turn_started`` (or other) event to the Hub store."""
+    payload: Dict[str, Any] = {"summary": text, "attachments": []}
+    if metadata is not None:
+        payload["metadata"] = dict(metadata)
     event = AgentStreamEvent(
         stream_sequence=0,  # overwritten by store.append
         session_id=store.session_id,
@@ -89,7 +94,7 @@ async def _append_turn(
         type=event_type,
         turn_id=turn_id,
         message_id=f"{turn_id}:user",
-        payload={"summary": text, "attachments": []},
+        payload=payload,
         created_at=datetime.now(timezone.utc),
     )
     return await store.append(event)
@@ -300,6 +305,76 @@ async def test_success_truncates_after_edited_turn(
             content = obj["message"]["content"]
             kept_texts.append(content[0]["text"])
     assert kept_texts == ["msg0"], f"expected only msg0, got {kept_texts}"
+
+
+@pytest.mark.asyncio
+async def test_web_edit_resend_rebuilds_feishu_provider_text_and_resets_source(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Web edit locates the Feishu provider input, then creates a Web turn."""
+
+    from claude_hub.services.agent_stream.turn_source import (
+        FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        format_feishu_provider_text_v1,
+    )
+
+    session = _session()
+    visible_text = "message from Feishu"
+    metadata = {
+        "origin": "feishu",
+        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        "feishu": {
+            "app_id": "cli-bot",
+            "chat_id": "oc-old",
+            "message_id": "om-old",
+            "sender_open_id": "ou-owner",
+        },
+    }
+    provider_text = format_feishu_provider_text_v1(
+        visible_text,
+        app_id="cli-bot",
+        chat_id="oc-old",
+        message_id="om-old",
+        sender_open_id="ou-owner",
+    )
+    transcript_path = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript_path, ["msg0", provider_text, "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(store, "t1", visible_text, metadata=metadata)
+    await _append_turn(store, "t2", "msg2")
+    legacy_result = await store.find_turn("t1")
+    assert legacy_result is not None
+    assert len(legacy_result) == 4
+    detailed_result = await store.find_turn_with_metadata("t1")
+    assert detailed_result is not None
+    assert detailed_result[4] == metadata
+
+    manager, mock_tailer = _make_manager(session)
+    await manager.edit_resend(
+        session,
+        "edited in Web",
+        "web-edit-turn",
+        "t1",
+        turn_metadata={"origin": "web"},
+    )
+
+    mock_tailer.send_message.assert_called_once_with(
+        "edited in Web",
+        [],
+        "web-edit-turn",
+        turn_metadata={"origin": "web"},
+    )
+    kept_texts: List[str] = []
+    with transcript_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            value = json.loads(line)
+            kept_texts.append(value["message"]["content"][0]["text"])
+    assert kept_texts == ["msg0"]
 
 
 # ── 3b. attachment preservation (success) ──────────────────────────────────

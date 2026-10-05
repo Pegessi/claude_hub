@@ -3507,6 +3507,138 @@ async def test_native_first_turn_is_fanned_out_not_swallowed_by_backfill() -> No
 
 
 @pytest.mark.asyncio
+async def test_feishu_turn_persists_source_while_provider_receives_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provider context and the durable visible message stay separate."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+    from claude_hub.services.agent_stream.turn_source import (
+        FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        format_feishu_provider_text_v1,
+    )
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    metadata = {
+        "origin": "feishu",
+        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        "feishu": {
+            "app_id": "cli-bot",
+            "chat_id": "oc-chat",
+            "message_id": "om-source",
+            "sender_open_id": "ou-owner",
+        },
+    }
+    provider_text = format_feishu_provider_text_v1(
+        "visible question",
+        app_id="cli-bot",
+        chat_id="oc-chat",
+        message_id="om-source",
+        sender_open_id="ou-owner",
+    )
+    tailer = SessionTailer(
+        workspace_id="ws-feishu-source",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+
+    await tailer.send_message(
+        provider_text,
+        [],
+        client_turn_id="feishu-source-turn",
+        visible_text="visible question",
+        turn_metadata=metadata,
+    )
+    page = await tailer.store.read_since(-1, limit=20)
+    started = next(
+        event for event in page.events if event.type == AgentStreamEventType.TURN_STARTED
+    )
+
+    assert transport.sent_messages == [(provider_text, [])]
+    assert started.payload["summary"] == "visible question"
+    assert started.payload["metadata"] == metadata
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_wrapped_feishu_question_answer_is_not_consumed_as_native_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase one fails busy instead of consuming an untracked Feishu answer."""
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+    from claude_hub.services.agent_stream.turn_source import format_feishu_provider_text_v1
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    transport._turn_in_flight = True
+    transport.answer_pending_question = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-feishu-answer",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=transport,
+    )
+    answer = json.dumps(
+        {
+            "type": "ask_question_response",
+            "answers": [{"questionId": "q1", "selected": ["red"]}],
+        }
+    )
+    provider_text = format_feishu_provider_text_v1(
+        answer,
+        app_id="cli-bot",
+        chat_id="oc-chat",
+        message_id="om-answer",
+        sender_open_id="ou-owner",
+    )
+
+    with pytest.raises(RuntimeError, match="turn is already in flight"):
+        await tailer.send_message(
+            provider_text,
+            [],
+            client_turn_id="feishu-answer-turn",
+            visible_text=answer,
+            turn_metadata={"origin": "feishu"},
+        )
+
+    transport.answer_pending_question.assert_not_awaited()
+    assert transport.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_web_tab_send_marks_source_server_side(monkeypatch: pytest.MonkeyPatch) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+
+    captured: list[dict] = []
+
+    async def fake_dispatch(tab_id, payload, **kwargs) -> str:
+        captured.append({"tab_id": tab_id, "payload": payload, **kwargs})
+        return payload.client_turn_id
+
+    monkeypatch.setattr(agent_stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+    payload = agent_stream_api.AgentStreamSendRequest(
+        text="direct message", client_turn_id="web-turn"
+    )
+
+    result = await agent_stream_api.send_tab_stream_input(
+        "tab-web",
+        payload,
+        User(open_id="ou-web", name="Web User", email="web@example.test"),
+    )
+
+    assert result == {"ok": True}
+    assert captured[0]["turn_metadata"] == {"origin": "web"}
+    assert "visible_text" not in captured[0]
+
+
+@pytest.mark.asyncio
 async def test_goal_turn_hides_internal_prompt_and_protocol_from_visible_transcript(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
