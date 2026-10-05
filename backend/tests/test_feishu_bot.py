@@ -9,6 +9,7 @@ import json
 import time
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -30,7 +31,7 @@ from claude_hub.models import (
     SessionKind,
     User,
 )
-from claude_hub.services import ttyd_manager, workspace_manager
+from claude_hub.services import goal_run, ttyd_manager, workspace_manager
 from claude_hub.services.agent_stream.turn_source import (
     FEISHU_PROVIDER_TEXT_FORMAT_V1,
     format_feishu_provider_text_v1,
@@ -797,8 +798,25 @@ def test_rebind_during_turn_suppresses_reply_to_old_message(configured_bot, monk
     assert configured_bot.get_sender_binding("ou-owner", "cli-bot", "oc-new-chat")
 
 
-def test_busy_chat_replies_to_same_message_without_claiming_binding_expired(
-    configured_bot, monkeypatch
+@pytest.mark.parametrize(
+    ("reason", "expected_message"),
+    [
+        (
+            "chat_busy",
+            "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。",
+        ),
+        (
+            "structured_source_unavailable",
+            "Claude Hub Chat 当前不可用，本条消息尚未执行。请在网页检查 Chat 状态后重试。",
+        ),
+        (
+            None,
+            "Claude Hub Chat 当前不可用，本条消息尚未执行。请在网页检查 Chat 状态后重试。",
+        ),
+    ],
+)
+def test_chat_conflict_replies_to_same_message_without_claiming_binding_expired(
+    configured_bot, monkeypatch, reason: str | None, expected_message: str
 ) -> None:
     _install_chat_target(monkeypatch)
     sent: list[tuple[str, str]] = []
@@ -813,7 +831,8 @@ def test_busy_chat_replies_to_same_message_without_claiming_binding_expired(
 
     async def busy(tab_id: str, text: str, turn_id: str, **kwargs) -> str:
         dispatched.append(text)
-        raise HTTPException(status_code=409, detail="a turn is already in flight")
+        headers = {stream_api.CHAT_ERROR_REASON_HEADER: reason} if reason is not None else None
+        raise HTTPException(status_code=409, detail="test conflict", headers=headers)
 
     monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
     monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", busy)
@@ -841,12 +860,7 @@ def test_busy_chat_replies_to_same_message_without_claiming_binding_expired(
     assert response.status_code == 200
     assert dispatched and dispatched[0] != answer
     assert dispatched[0].endswith(answer)
-    assert sent == [
-        (
-            "om-busy",
-            "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。",
-        )
-    ]
+    assert sent == [("om-busy", expected_message)]
     assert configured_bot.get_sender_binding("ou-owner", "cli-bot", "oc-chat")
 
 
@@ -978,4 +992,99 @@ async def test_external_chat_adapter_reuses_existing_stream_manager(monkeypatch)
             },
         )
     ]
+    assert unsubscribed == [(session.id, queue)]
+
+
+@pytest.mark.asyncio
+async def test_external_goal_input_is_rejected_without_consuming_question(monkeypatch) -> None:
+    current = SimpleNamespace(
+        status=SimpleNamespace(value="active"),
+        dispatch_state=SimpleNamespace(value="idle"),
+        current_turn_id="goal-turn",
+    )
+    manager = SimpleNamespace(
+        answer_pending_question=AsyncMock(return_value=True),
+        accepts_question_followup=AsyncMock(return_value=True),
+    )
+    send = AsyncMock()
+    monkeypatch.setattr(goal_run, "get_goal_admission_lock", lambda tab_id: asyncio.Lock())
+    monkeypatch.setattr(
+        goal_run, "get_goal_manager", lambda: SimpleNamespace(current=lambda tab_id: current)
+    )
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda tab_id: object())
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
+    monkeypatch.setattr(stream_api, "_send_to_native", send)
+    with pytest.raises(HTTPException) as raised:
+        await stream_api._dispatch_tab_stream_input(
+            "tab-1",
+            stream_api.AgentStreamSendRequest(text="answer", client_turn_id="external-turn"),
+            allow_question_answer=False,
+        )
+    assert raised.value.status_code == 409
+    assert raised.value.headers == {stream_api.CHAT_ERROR_REASON_HEADER: "chat_busy"}
+    manager.answer_pending_question.assert_not_awaited()
+    manager.accepts_question_followup.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+def test_inflight_send_error_has_stable_busy_reason_without_changing_body() -> None:
+    mapped = stream_api._map_send_exception(
+        RuntimeError("a turn is already in flight; wait for completion")
+    )
+    assert mapped.status_code == 409
+    assert mapped.detail == "a turn is already in flight; wait for completion"
+    assert mapped.headers == {stream_api.CHAT_ERROR_REASON_HEADER: "chat_busy"}
+
+
+@pytest.mark.asyncio
+async def test_external_chat_adapter_classifies_structured_source_failure(monkeypatch) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+
+    class FailedManager:
+        async def subscribe(self, session_arg):
+            assert session_arg is session
+            raise stream_api.StructuredSourceUnavailable("native source unavailable")
+
+        def unsubscribe(self, session_id, queue_arg) -> None:
+            raise AssertionError("a failed subscription must not be unsubscribed")
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FailedManager())
+    with pytest.raises(HTTPException) as raised:
+        await stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=1
+        )
+    assert raised.value.status_code == 409
+    assert raised.value.detail == "native source unavailable"
+    assert raised.value.headers == {
+        stream_api.CHAT_ERROR_REASON_HEADER: "structured_source_unavailable"
+    }
+
+
+@pytest.mark.asyncio
+async def test_external_chat_adapter_preserves_unknown_409(monkeypatch) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    unsubscribed: list[tuple[str, object]] = []
+
+    class FakeManager:
+        async def subscribe(self, session_arg):
+            return queue
+
+        def unsubscribe(self, session_id, queue_arg) -> None:
+            unsubscribed.append((session_id, queue_arg))
+
+    async def conflict(tab_id, payload, **kwargs) -> str:
+        raise HTTPException(status_code=409, detail="unclassified Chat conflict")
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", conflict)
+    with pytest.raises(HTTPException) as raised:
+        await stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=1
+        )
+    assert raised.value.status_code == 409
+    assert raised.value.detail == "unclassified Chat conflict"
+    assert not raised.value.headers
     assert unsubscribed == [(session.id, queue)]

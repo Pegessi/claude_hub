@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from claude_hub.api.agent_stream import dispatch_tab_chat_and_wait
+from claude_hub.api.agent_stream import CHAT_ERROR_REASON_HEADER, dispatch_tab_chat_and_wait
 from claude_hub.auth.dependencies import get_current_user_from_cookie
 from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
@@ -217,11 +217,10 @@ def _turn_metadata(event: FeishuMessageEvent) -> dict[str, Any]:
     }
 
 
-def _is_chat_busy_error(exc: HTTPException) -> bool:
-    detail = str(exc.detail)
-    return exc.status_code == 409 and (
-        "active Goal" in detail or "turn is already in flight" in detail
-    )
+def _chat_error_reason(exc: HTTPException) -> str | None:
+    if exc.status_code != 409:
+        return None
+    return (exc.headers or {}).get(CHAT_ERROR_REASON_HEADER)
 
 
 async def _send_failure(client: FeishuBotClient, message_id: str, text: str) -> None:
@@ -302,8 +301,12 @@ async def _handle_message_event(
         status_value = "completed"
     except HTTPException as exc:
         logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
-        if _is_chat_busy_error(exc):
+        if _chat_error_reason(exc) == "chat_busy":
             message = "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"
+        elif exc.status_code == 409:
+            message = (
+                "Claude Hub Chat 当前不可用，本条消息尚未执行。" "请在网页检查 Chat 状态后重试。"
+            )
         else:
             message = "Claude Hub 目标当前不可用，请在网页重新绑定。"
         await _send_failure(client, event.message_id, message)

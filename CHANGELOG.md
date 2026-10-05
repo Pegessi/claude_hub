@@ -15,6 +15,9 @@
 - Reply to the original Feishu message, rechecking binding authorization before
   delivery. Busy or pending-question input is rejected without claiming the
   binding expired; shared input queuing remains a separate stage.
+- Keep HTTP error bodies compatible while adding stable busy/source reason
+  headers. Unknown Chat conflicts no longer advise unnecessary rebinding, and
+  failed subscriptions are handled before dispatch.
 - Add regression and fully mocked desktop/mobile browser coverage. Real Bot
   authorization and end-to-end provider validation remain outside this evidence.
 
