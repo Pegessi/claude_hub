@@ -58,7 +58,7 @@ const props = withDefaults(defineProps<{
   linkMarkdownPaths?: boolean
   /** When true, the final block is also cached (stream has ended). */
   complete?: boolean
-  /** Owning tab id; enables bare quoted-image token src rewriting. */
+  /** Owning tab id; enables local/provider image src rewriting. */
   tabId?: string
 }>(), {
   text: '',
@@ -107,17 +107,17 @@ const blocks = computed(() => {
   })
 })
 
-// A proxied quoted image that fails to load (404 / not downloaded yet) is
+// A proxied image that fails to load (404 / expired temporary file) is
 // replaced in place by a restrained text placeholder — never a broken-image
 // icon or a large error frame. The ``error`` event does not bubble, so the
 // capture-phase listener on the root is what sees it.
 function handleError(event: Event) {
   const target = event.target
   if (!(target instanceof HTMLImageElement)) return
-  if (!target.dataset.quotedImg) return
+  if (!target.dataset.quotedImg && !target.dataset.localImg) return
   const placeholder = document.createElement('span')
   placeholder.className = 'quoted-img-missing'
-  placeholder.textContent = '[image unavailable]'
+  placeholder.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
   target.replaceWith(placeholder)
 }
 
@@ -327,9 +327,11 @@ function handleClick(event: MouseEvent) {
   margin-top: 4px;
 }
 
-/* Images proxied from a bare provider token: keep them inline with text. */
-.markdown-block :deep(img[data-quoted-img]) {
+/* Proxied local/provider images stay within the chat width on mobile too. */
+.markdown-block :deep(img[data-quoted-img]),
+.markdown-block :deep(img[data-local-img]) {
   max-width: 100%;
+  height: auto;
   border-radius: var(--ch-radius-sm);
 }
 

@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### fix(chat): render local Markdown images through the tab image reader
+
+- Route local Markdown image paths through the authenticated tab-scoped image
+  endpoint, including screenshots under the OS temporary directory explicitly
+  quoted by that tab's assistant. Preserve cwd, image-type, and size limits;
+  prompts, tool output, and other tabs cannot grant access to temporary files.
+- Keep images within the chat width on mobile and show a restrained alt-text
+  placeholder for missing local/provider images instead of a broken-image icon.
+
 ### feat(ui): consolidate extensions and add supervised service restart
 
 - Add matching clock, globe, and restart icons to the expanded desktop and

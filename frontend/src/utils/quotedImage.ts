@@ -19,8 +19,8 @@
  *   contract never change.
  *
  * Anything already loadable by the browser — http(s), ``data:``, ``blob:``,
- * an existing attachment/agent-image URL, a relative or cwd-absolute path —
- * is not a bare token and is passed through untouched.
+ * or an existing attachment/agent-image URL — is passed through untouched.
+ * Local raster image paths use the tab-scoped agent-image reader instead.
  */
 
 /** Maximum key length accepted by the backend resolver layer. */
@@ -28,7 +28,7 @@ const QUOTED_IMAGE_KEY_MAX_LEN = 256
 
 /** Endpoint path builder. Tab id and key are always percent-encoded. */
 function quotedImageEndpointUrl(tabId: string, key: string): string {
-  return `/api/workspaces/tabs/${encodeURIComponent(tabId)}/stream/quoted-image?key=${encodeURIComponent(key)}`
+  return `/api/workspaces/tabs/${encodeImagePart(tabId)}/stream/quoted-image?key=${encodeImagePart(key)}`
 }
 
 /**
@@ -97,25 +97,55 @@ export function resolveQuotedImageUrl(tabId: string, src: unknown): string | nul
   return quotedImageEndpointUrl(tabId, src)
 }
 
-/**
- * Matches the ``src`` attribute of an ``<img>`` tag in already-sanitized
- * marked output. marked/DOMPurify always emit quoted attributes, and a bare
- * token contains no quotes or ``&``, so a single regex pass is safe and needs
- * no DOM (also keeps this util unit-testable in Node).
- */
-const IMG_SRC_ATTR_RE = /(<img\b[^>]*?\bsrc=)(["'])(.*?)\2/gi
+function decodeImagePath(src: string): string {
+  const entities: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
+  const decoded = src.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt);/gi, (match, entity: string) => {
+    if (!entity.startsWith('#')) return entities[entity.toLowerCase()] ?? match
+    const code = entity[1].toLowerCase() === 'x'
+      ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10)
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match
+  })
+  try { return decodeURIComponent(decoded) } catch { return decoded }
+}
+
+function encodeImagePart(value: string): string {
+  // encodeURIComponent leaves apostrophes intact; src may be single-quoted.
+  return encodeURIComponent(value).replace(/'/g, '%27')
+}
+
+export function resolveLocalImageUrl(tabId: string, src: string): string | null {
+  const path = decodeImagePath(src)
+  if (!tabId || !path || path.length > 4096 || path !== path.trim()) return null
+  if (/^[a-z][a-z\d+.-]*:|^\/\//i.test(path)) return null
+  if ([...path].some((char) => char.charCodeAt(0) < 32)) return null
+  if (/^\/(?:api|assets|static)\//.test(path)) return null
+  if (!/\.(?:png|jpe?g|gif|webp)$/i.test(path)) return null
+  try {
+    return `/api/workspaces/tabs/${encodeImagePart(tabId)}/stream/agent-image?path=${encodeImagePart(path)}`
+  } catch {
+    // A malformed Unicode filename must not prevent the whole chat rendering.
+    return null
+  }
+}
+
+// Consume whole tags/attributes so data-src and src= inside alt text cannot
+// be mistaken for the actual source. Input has already passed DOMPurify.
+const IMG_TAG_RE = /<img\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi
+const QUOTED_ATTR_RE = /([\w:-]+)\s*=\s*("[^"]*"|'[^']*')/g
 
 /**
- * Rewrite every proxied bare-token ``<img src>`` in a rendered HTML string to
- * the backend quoted-image endpoint, tagging each rewritten element so the UI
- * can degrade gracefully on load failure. All other src values pass through
- * byte-for-byte.
+ * Route provider tokens and local paths to their restricted readers. Tag the
+ * images so the UI can degrade gracefully on load failure.
  */
 export function rewriteQuotedImageSrcs(html: string, tabId: string): string {
   if (!html || !tabId) return html
-  return html.replace(IMG_SRC_ATTR_RE, (match, prefix: string, quote: string, src: string) => {
-    const url = resolveQuotedImageUrl(tabId, src)
-    if (url === null) return match
-    return `${prefix}${quote}${url}${quote} data-quoted-img="${src}"`
-  })
+  return html.replace(IMG_TAG_RE, (tag) => tag.replace(QUOTED_ATTR_RE, (attr, name: string, value: string) => {
+    if (name.toLowerCase() !== 'src') return attr
+    const src = value.slice(1, -1)
+    const quotedUrl = resolveQuotedImageUrl(tabId, src)
+    const url = quotedUrl ?? resolveLocalImageUrl(tabId, src)
+    if (url === null) return attr
+    const marker = quotedUrl ? `data-quoted-img="${src}"` : 'data-local-img="1"'
+    return `${name}=${value[0]}${url}${value[0]} ${marker}`
+  }))
 }

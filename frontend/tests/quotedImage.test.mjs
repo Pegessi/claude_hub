@@ -129,19 +129,48 @@ test('rewrites single-quoted src too', () => {
   )
 })
 
-test('leaves http(s)/data/blob/relative/absolute srcs untouched', () => {
+test('leaves browser-loadable URLs untouched', () => {
   const cases = [
     '<img src="https://example.com/a.jpg">',
     '<img src="http://example.com/a.jpg">',
     '<img src="data:image/png;base64,AAAA">',
     '<img src="blob:https://example.com/uuid">',
-    '<img src="./shot.png">',
+    '<img src="//example.com/a.png">',
+    '<img src="/assets/logo.png">',
     '<img src="/api/workspaces/tabs/tab-a/stream/attachments/x">',
-    '<img src="/Users/me/work/shot.png">',
   ]
   for (const html of cases) {
     assert.equal(rewriteQuotedImageSrcs(html, 'tab-a'), html, html)
   }
+})
+
+test('routes absolute and relative local images through the owning tab', () => {
+  for (const path of ['/tmp/shot.jpg', '/Users/me/work/shot.png', './shot.png', 'plot.webp']) {
+    const out = rewriteQuotedImageSrcs(`<img src="${path}" alt="Preview">`, 'tab-a')
+    assert.ok(out.includes(`/api/workspaces/tabs/tab-a/stream/agent-image?path=${encodeURIComponent(path)}`))
+    assert.ok(out.includes('data-local-img="1"'))
+    assert.ok(out.includes('alt="Preview"'))
+  }
+})
+
+test('decodes URI/HTML paths once and does not confuse alt or data-src with src', () => {
+  const html = `<img alt='src="/tmp/wrong.png"' data-src="/tmp/also-wrong.png" src="/tmp/A%20%26%20B%27s.png">`
+  const out = rewriteQuotedImageSrcs(html, 'tab-a')
+  assert.ok(out.includes(`alt='src="/tmp/wrong.png"'`))
+  assert.ok(out.includes('data-src="/tmp/also-wrong.png"'))
+  assert.ok(out.includes('path=%2Ftmp%2FA%20%26%20B%27s.png'))
+  assert.match(rewriteQuotedImageSrcs('<img src="/tmp/a&amp;b.png">', 'tab-a'), /path=%2Ftmp%2Fa%26b.png/)
+})
+
+test('local path quotes cannot escape a rewritten attribute', () => {
+  const out = rewriteQuotedImageSrcs(`<img src='/tmp/x&#39; onerror=&#39;bad.png'>`, 'tab-a')
+  assert.ok(out.includes('path=%2Ftmp%2Fx%27%20onerror%3D%27bad.png'))
+  assert.equal((out.match(/src='/g) || []).length, 1)
+  assert.ok(!out.includes(" onerror='"))
+})
+
+test('malformed Unicode paths do not break chat rendering', () => {
+  assert.doesNotThrow(() => rewriteQuotedImageSrcs('<img src="/tmp/\ud800.png">', 'tab-a'))
 })
 
 test('does not proxy malformed or foreign bare srcs', () => {
