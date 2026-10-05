@@ -1493,6 +1493,11 @@ class FeedbackTaskDigest(BaseModel):
     """Compact reusable digest for a completed workspace task record."""
 
     task_id: str
+    source_record_id: str = Field(default="", max_length=160)
+    source_tab_id: str = Field(default="", max_length=160)
+    source_turn_id: str = Field(default="", max_length=160)
+    source_message_id: str = Field(default="", max_length=160)
+    correction: str = Field(default="", max_length=1024)
     title: str = ""
     status: str = ""
     final_summary: str = ""
