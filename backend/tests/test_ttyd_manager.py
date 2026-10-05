@@ -4678,7 +4678,11 @@ def test_hot_restart_reattaches_only_tabs_with_surviving_tmux(
     monkeypatch.setattr(manager, "_save_state", lambda: None)
     monkeypatch.setattr(ttyd_manager_module, "_ensure_tmux_server", lambda: None)
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", fake_session_exists)
-    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", lambda: {})
+
+    def unexpected_cold_scan():
+        pytest.fail("hot reattach must not run the cold-launch ownership scan")
+
+    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", unexpected_cold_scan)
     monkeypatch.setattr(
         ttyd_manager_module.os,
         "popen",
@@ -4694,6 +4698,95 @@ def test_hot_restart_reattaches_only_tabs_with_surviving_tmux(
     assert stopped_codex.is_active is False
     assert stopped_terminal.is_active is False
     assert stopped_remote.is_active is False
+
+
+def test_codex_backfill_uses_one_fresh_scan_per_startup(monkeypatch, tmp_path):
+    manager = TTYDManager.__new__(TTYDManager)
+    tabs = [
+        SimpleNamespace(
+            from_persisted_state=True,
+            agent_type=AgentType.CODEX,
+            target=ExecutionTarget.LOCAL,
+            cwd=str(tmp_path),
+            agent_session_id=f"sid-{i}",
+            tab_id=str(i),
+            name=str(i),
+            tmux_session=f"tmux-{i}",
+        )
+        for i in range(32)
+    ]
+    manager.processes = {p.tab_id: p for p in tabs}
+    scans = []
+    entries = {
+        p.agent_session_id: SimpleNamespace(cwd=str(tmp_path), ts=100, path="rollout") for p in tabs
+    }
+
+    def scan():
+        scans.append(True)
+        return entries
+
+    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", scan)
+    manager._backfill_codex_session_ids()
+    assert len(scans) == 1
+    # The next startup must see a fresh snapshot, never a process-global cache.
+    manager._backfill_codex_session_ids()
+    assert len(scans) == 2
+
+
+def test_codex_backfill_shared_scan_keeps_ambiguous_sessions_unpinned(monkeypatch, tmp_path):
+    manager = TTYDManager.__new__(TTYDManager)
+    tabs = [
+        SimpleNamespace(
+            from_persisted_state=True,
+            agent_type=AgentType.CODEX,
+            target=ExecutionTarget.LOCAL,
+            cwd=str(tmp_path / name),
+            agent_session_id=None,
+            tab_id=name,
+            name=name,
+            tmux_session=name,
+        )
+        for name in ("unique", "ambiguous", "stopped")
+    ]
+    manager.processes = {p.tab_id: p for p in tabs}
+    entries = {
+        sid: SimpleNamespace(cwd=str(tmp_path / cwd), ts=100, path=str(tmp_path / f"rollout-{sid}"))
+        for sid, cwd in (("u", "unique"), ("a", "ambiguous"), ("b", "ambiguous"), ("s", "stopped"))
+    }
+    for entry in entries.values():
+        Path(entry.path).touch()
+    monkeypatch.setattr(ttyd_manager_module, "_codex_scan_sessions", lambda: entries)
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "_tmux_session_created",
+        lambda name: None if name == "stopped" else 100,
+    )
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    manager._backfill_codex_session_ids()
+    assert [p.agent_session_id for p in tabs] == ["u", None, None]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stops_ttyd_concurrently_and_preserves_every_tmux():
+    manager = TTYDManager.__new__(TTYDManager)
+    entered = set()
+    all_entered = asyncio.Event()
+
+    async def stop(tab_id, *, kill_tmux=False):
+        assert kill_tmux is False
+        entered.add(tab_id)
+        if len(entered) == 8:
+            all_entered.set()
+        await asyncio.wait_for(all_entered.wait(), timeout=1)
+
+    from functools import partial
+
+    manager.processes = {
+        str(i): SimpleNamespace(name=str(i), tmux_session=f"tmux-{i}", stop=partial(stop, i))
+        for i in range(8)
+    }
+    await manager.cleanup()
+    assert len(entered) == 8
 
 
 def test_cold_restart_recovers_all_saved_non_codex_tabs(monkeypatch: MonkeyPatch) -> None:

@@ -946,7 +946,9 @@ def _codex_id_exists(sid: str, cwd: Optional[str] = None) -> bool:
 _codex_id_in_index = _codex_id_exists
 
 
-def _codex_candidates_for_cwd(cwd: str) -> List[Tuple[float, str, str]]:
+def _codex_candidates_for_cwd(
+    cwd: str, scan: Optional[Dict[str, ScanEntry]] = None
+) -> List[Tuple[float, str, str]]:
     """Find codex rollout sessions started in ``cwd`` and return candidates.
 
     Returns list of ``(start_epoch, session_id, path)`` tuples. Used by the
@@ -958,7 +960,7 @@ def _codex_candidates_for_cwd(cwd: str) -> List[Tuple[float, str, str]]:
         target = os.path.realpath(cwd)
     except OSError:
         target = cwd
-    for sid, entry in _codex_scan_sessions().items():
+    for sid, entry in (scan if scan is not None else _codex_scan_sessions()).items():
         if not entry.cwd:
             continue
         try:
@@ -2092,14 +2094,15 @@ asyncio.run(_main())
             logger.warning(f"Process for tab {self.tab_id} already running")
             return
 
-        # Ensure tmux server is running first
-        _ensure_tmux_server()
-
         # Check if tmux session already exists
         session_exists = await _tmux_session_exists_async(self.tmux_session)
         if session_exists:
             logger.info(f"tmux session {self.tmux_session} exists, will reattach")
         else:
+            # Hot reattach does not launch a pane. Refreshing the server's
+            # launch environment for every live tab is unnecessary (and
+            # performs many synchronous tmux subprocess calls per tab).
+            _ensure_tmux_server()
             logger.info(f"tmux session {self.tmux_session} does not exist, will create new")
 
         cmd = self._build_ttyd_command(session_exists=session_exists)
@@ -4767,6 +4770,7 @@ class TTYDManager:
         when an unambiguous match is found.
         """
         backfilled = False
+        scan: Optional[Dict[str, ScanEntry]] = None
         for process in list(self.processes.values()):
             try:
                 if not (
@@ -4779,7 +4783,12 @@ class TTYDManager:
                 # Skip tabs that already have a real codex session id (exists
                 # in session_index). Placeholder uuids generated at __init__
                 # are not in the index and still need backfill.
-                if process.agent_session_id and _codex_id_in_index(process.agent_session_id):
+                # One startup-local snapshot for both existence and candidate
+                # checks. Never reuse it for cold-launch attribution, which
+                # must observe changes made by newly launched providers.
+                if scan is None:
+                    scan = _codex_scan_sessions()
+                if process.agent_session_id and process.agent_session_id in scan:
                     continue
 
                 label = f"tab {process.tab_id} ({process.name})"
@@ -4791,7 +4800,7 @@ class TTYDManager:
 
                 # Collect codex rollouts in this cwd and compute |start - session_created|.
                 candidates: List[Tuple[float, str, str]] = []
-                for start_epoch, sid, path in _codex_candidates_for_cwd(process.cwd):
+                for start_epoch, sid, path in _codex_candidates_for_cwd(process.cwd, scan):
                     candidates.append((abs(start_epoch - session_created), sid, path))
 
                 within_window = [c for c in candidates if c[0] <= _BACKFILL_MATCH_WINDOW_S]
@@ -5354,7 +5363,7 @@ class TTYDManager:
             )
 
         async with GLOBAL_CODEX_LAUNCH_LOCK:
-            pre_global_scan = _codex_scan_sessions()
+            pre_global_scan = _codex_scan_sessions() if cold_codex else {}
             launched_codex: List[TTYDProcess] = []
             for cwd_key in sorted(by_cwd.keys()):
                 tabs = by_cwd[cwd_key]
@@ -5646,11 +5655,22 @@ class TTYDManager:
         logger.info("=" * 60)
         logger.info("CLEANING UP - tmux sessions WILL BE PRESERVED")
         logger.info("=" * 60)
-        for process in list(self.processes.values()):
+
+        async def stop_one(process: TTYDProcess) -> None:
             logger.info(
                 f"Will preserve tmux session: {process.tmux_session} for tab: {process.name}"
             )
             await process.stop(kill_tmux=False)
+
+        # Each ttyd has its own bounded wait; serial shutdown multiplies that
+        # wait by the number of tabs and can exhaust the launcher's budget.
+        results = await asyncio.gather(
+            *(stop_one(process) for process in list(self.processes.values())),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         logger.info("Cleanup complete - all tmux sessions preserved")
 
 

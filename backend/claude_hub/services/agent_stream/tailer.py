@@ -3297,10 +3297,18 @@ class TailerManager:
 
     async def stop_all(self) -> None:
         async with self._lock:
-            for tailer in list(self._tailers.values()):
-                await tailer.stop()
+            tailers = list(self._tailers.values())
+            # Each owner still flushes and terminalizes its own active turn.
+            # Independent provider teardown must not serialize across tabs.
+            results = await asyncio.gather(
+                *(tailer.stop() for tailer in tailers), return_exceptions=True
+            )
+            for tailer in tailers:
                 _HARD_FAILED_SESSION_IDS.discard(tailer.session_id)
             self._tailers.clear()
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
 
 async def discard_session_stream(workspace_id: str, session_id: str) -> None:

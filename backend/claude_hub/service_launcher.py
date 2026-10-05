@@ -47,6 +47,10 @@ class ServiceLauncher:
             **self.env,
             "CLAUDE_HUB_LAUNCHER_ID": self.launcher_id,
             "CLAUDE_HUB_INSTANCE_ID": self.instance_id,
+            # Uvicorn otherwise waits forever for SSE responses before it
+            # enters lifespan shutdown. Leave the rest of the 30s outer
+            # budget for flushing streams and releasing owned ttyd children.
+            "UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN": "3",
         }
         self.child = subprocess.Popen(self.command, env=env, start_new_session=True)
 
@@ -91,8 +95,11 @@ class ServiceLauncher:
         self.store.update_operation(
             "restarting", "Restarting the service. Waiting for it to reconnect…"
         )
+        started = time.monotonic()
         try:
             self.stop_backend()
+            stopped = time.monotonic()
+            print(f"Restart: backend stopped in {stopped - started:.2f}s", flush=True)
             self.start_backend()
             self.wait_healthy()
         except (OSError, RuntimeError) as exc:
@@ -101,6 +108,11 @@ class ServiceLauncher:
             # silently retry an operation that might interrupt fresh work.
             print(f"Restart failed: {exc}", flush=True)
         else:
+            print(
+                f"Restart: new backend ready in {time.monotonic() - stopped:.2f}s; "
+                f"total {time.monotonic() - started:.2f}s",
+                flush=True,
+            )
             self.store.update_operation("succeeded", "The service is back online.")
 
     def run(self) -> int:

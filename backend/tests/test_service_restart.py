@@ -3,6 +3,7 @@
 import os
 import socket
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
@@ -164,3 +165,108 @@ def test_health_probe_uses_matching_loopback_family():
     assert health_url("0.0.0.0", 18174) == "http://127.0.0.1:18174/health"
     assert health_url("::", 18174) == "http://[::1]:18174/health"
     assert health_url("::1", 18174) == "http://[::1]:18174/health"
+
+
+def test_restart_drains_live_sse_and_runs_lifespan_cleanup(tmp_path):
+    """A real open stream must not consume the launcher's 30s kill budget."""
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    (tmp_path / "stream_fixture.py").write_text("""
+import asyncio, os
+from pathlib import Path
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    Path(os.environ["CLEANUP_MARKER"]).write_text("cleaned")
+app = FastAPI(lifespan=lifespan)
+@app.get("/health")
+async def health():
+    return {"status":"healthy", "instance_id":os.environ["CLAUDE_HUB_INSTANCE_ID"]}
+@app.get("/events")
+async def events():
+    async def stream():
+        while True:
+            yield "data: alive\\n\\n"
+            await asyncio.sleep(1)
+    return StreamingResponse(stream(), media_type="text/event-stream")
+""")
+    marker = tmp_path / "cleanup.txt"
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "stream_fixture:app",
+            "--app-dir",
+            str(tmp_path),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
+        ],
+        f"http://127.0.0.1:{port}/health",
+        env={**os.environ, "CLEANUP_MARKER": str(marker)},
+        startup_timeout=10,
+    )
+    store.initialize(launcher.launcher_id)
+    stream = None
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_id = launcher.instance_id
+        stream = launcher.http.open(f"http://127.0.0.1:{port}/events", timeout=5)
+        assert stream.readline().startswith(b"data:")
+        with store.locked() as state:
+            state["operation"] = {"id": "stream", "instance_id": old_id, "status": "preparing"}
+        started = time.monotonic()
+        launcher.restart()
+        elapsed = time.monotonic() - started
+        assert marker.exists(), "SIGKILL skipped application shutdown"
+        assert elapsed < 10, f"stream restart took {elapsed:.2f}s"
+        assert launcher.instance_id != old_id
+        assert store.read()["operation"]["status"] == "succeeded"
+    finally:
+        if stream is not None:
+            stream.close()
+        launcher.stop_backend()
+
+
+@pytest.mark.asyncio
+async def test_stream_shutdown_flushes_sessions_concurrently_before_returning():
+    import asyncio
+    from types import SimpleNamespace
+
+    from claude_hub.services.agent_stream.tailer import TailerManager
+
+    manager = TailerManager.__new__(TailerManager)
+    manager._lock = asyncio.Lock()
+    entered = set()
+    flushed = set()
+    all_entered = asyncio.Event()
+
+    async def stop(session_id):
+        entered.add(session_id)
+        if len(entered) == 8:
+            all_entered.set()
+        await asyncio.wait_for(all_entered.wait(), timeout=1)
+        flushed.add(session_id)
+
+    from functools import partial
+
+    manager._tailers = {
+        str(i): SimpleNamespace(session_id=str(i), stop=partial(stop, str(i))) for i in range(8)
+    }
+    await manager.stop_all()
+    assert flushed == {str(i) for i in range(8)}
+    assert manager._tailers == {}
