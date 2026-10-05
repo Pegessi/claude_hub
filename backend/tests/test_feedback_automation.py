@@ -426,6 +426,8 @@ async def test_disabling_during_dispatch_survives_completion(
 ) -> None:
     now = datetime.now()
     manager = _manager(tmp_path, monkeypatch, now)
+    # Allow for filesystem timestamp granularity so this test reaches dispatch.
+    manager._feedback_started_at = now - timedelta(seconds=1)
     manager.feedback_automation_status("ws")
     _record(tmp_path, "fresh", now + timedelta(seconds=1))
 
@@ -435,7 +437,9 @@ async def test_disabling_during_dispatch_survives_completion(
 
     monkeypatch.setattr(manager, "_summarize_workspace_feedback_locked", dispatch)
     await manager._tick_feedback_automation()
-    assert manager.feedback_automation_status("ws")["settings"]["enabled"] is False
+    status = manager.feedback_automation_status("ws")
+    assert status["last_outcome"] == "started"
+    assert status["settings"]["enabled"] is False
 
 
 @pytest.mark.asyncio
