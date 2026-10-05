@@ -734,6 +734,14 @@ class _SchedulingMixin:
     ) -> Optional[ScheduledTaskRun]:
         lock = self._sched_fire_locks.setdefault(task.id, asyncio.Lock())
         async with lock:
+            # Updates replace schedule objects while this caller waits.
+            current = self.scheduled_tasks.get(task.id)
+            if current is None:
+                if manual:
+                    raise KeyError(task.id)
+                return None
+            task = current
+
             # Re-check eligibility under the lock: a concurrent fire (the 5s
             # tick vs a manual run-now, or two run-now clicks) may have already
             # stamped this task. Without this re-check a one-shot could fire
@@ -1547,7 +1555,8 @@ class _SchedulingMixin:
         candidates = [
             task
             for task in self.tasks.values()
-            if task.status == WorkspaceTaskStatus.WORKING and self._is_scheduled_hub_task(task)
+            if task.status == WorkspaceTaskStatus.WORKING
+            and (self._is_scheduled_hub_task(task) or task.source_work_id)
         ]
         for task in candidates:
             bound_id = task.session_id
@@ -1583,7 +1592,7 @@ class _SchedulingMixin:
         live = self.tasks.get(task.id)
         if live is None or live.status != WorkspaceTaskStatus.WORKING:
             return
-        if not self._is_scheduled_hub_task(live) or not live.session_id:
+        if not (self._is_scheduled_hub_task(live) or live.source_work_id) or not live.session_id:
             return
         dead_session = self.sessions.get(live.session_id)
         if not self._hub_task_worker_is_dead(live, dead_session):
@@ -1754,5 +1763,7 @@ class _SchedulingMixin:
             task.id,
             reason,
         )
-        if dead_session is not None:
+        if task.source_work_id:
+            await self._cleanup_chat_work_session(failed)
+        elif dead_session is not None:
             await self._best_effort_delete_session(dead_session.id)

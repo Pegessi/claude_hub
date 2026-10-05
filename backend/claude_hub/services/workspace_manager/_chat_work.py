@@ -366,19 +366,29 @@ class _ChatWorkMixin:
     async def _stop_chat_work_executions(self, work: ScheduledTask) -> None:
         async with self.workspace_mutation_lock(work.workspace_id):
             for task in self._chat_work_executions(work)[:20]:
+                current_task = self.tasks.get(task.id)
+                if current_task is None:
+                    continue
+                task = current_task
                 if task.status in _ACTIVE and not task.manual_aborted_at:
                     if task.status in {
                         WorkspaceTaskStatus.QUEUED,
                         WorkspaceTaskStatus.WORKING,
                         WorkspaceTaskStatus.REVIEW,
                     }:
-                        await self.abort_task(
-                            task.id,
-                            ManualTaskControlRequest(
-                                reason="Stopped from source Chat",
-                                call_id=f"chat-work-stop:{work.id}:{task.id}",
-                            ),
-                        )
+                        try:
+                            await self.abort_task(
+                                task.id,
+                                ManualTaskControlRequest(
+                                    reason="Stopped from source Chat",
+                                    call_id=f"chat-work-stop:{work.id}:{task.id}",
+                                ),
+                            )
+                        except KeyError as exc:
+                            # Task deletion can complete while interruption awaits.
+                            if exc.args != (task.id,) or task.id in self.tasks:
+                                raise
+                            continue
                     else:
                         self.tasks[task.id] = task.model_copy(
                             update={
@@ -387,12 +397,15 @@ class _ChatWorkMixin:
                             }
                         )
                         self._save_state()
-                await self._cleanup_chat_work_session(self.tasks[task.id])
+                await self._cleanup_chat_work_session(task)
 
     async def _cleanup_chat_work_session(self, task: WorkspaceTask) -> None:
         """Retry owned teardown without trusting mutable task assignment ids."""
         async with self.workspace_mutation_lock(task.workspace_id):
-            task = self.tasks[task.id]
+            current_task = self.tasks.get(task.id)
+            if current_task is None:
+                return
+            task = current_task
             if not task.manual_aborted_at and task.status not in {
                 WorkspaceTaskStatus.DONE,
                 WorkspaceTaskStatus.FAILED,
@@ -629,7 +642,10 @@ class _ChatWorkMixin:
             if lock.locked():
                 continue
             async with lock:
-                work = self.scheduled_tasks[work.id]
+                current_work = self.scheduled_tasks.get(work.id)
+                if current_work is None:
+                    continue
+                work = current_work
                 if work.work_stopped_at:
                     await self._stop_chat_work_executions(work)
                     continue
@@ -654,6 +670,10 @@ class _ChatWorkMixin:
                     work.last_error = "Launch interrupted before task creation; resume explicitly"
                     changed = True
                 for task in executions[:20]:
+                    current_task = self.tasks.get(task.id)
+                    if current_task is None:
+                        continue
+                    task = current_task
                     if task.status == WorkspaceTaskStatus.TODO and not task.manual_aborted_at:
                         self.tasks[task.id] = task.model_copy(
                             update={
@@ -669,6 +689,6 @@ class _ChatWorkMixin:
                         work.last_error = "Launch interrupted before dispatch; resume explicitly"
                         self._save_state()
                         changed = True
-                    await self._cleanup_chat_work_session(self.tasks[task.id])
+                    await self._cleanup_chat_work_session(task)
         if changed:
             self._save_scheduled_tasks()
