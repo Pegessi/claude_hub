@@ -54,6 +54,18 @@ _VALID_IMAGE_BYTES: dict[str, bytes] = {
 }
 
 
+@pytest.fixture(autouse=True)
+def deterministic_workspace_runtime(monkeypatch: MonkeyPatch) -> None:
+    """Isolate metadata ports and use ready fake terminals for API tests."""
+    monkeypatch.setattr(workspace_module.settings, "port", 8173)
+
+    async def fake_capture_tmux_output(_tmux_session: str) -> str:
+        # Individual tests can override this module-local default as needed.
+        return "? for shortcuts"
+
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_tmux_output)
+
+
 def _data_url(mime: str, raw: bytes) -> str:
     import base64
 
@@ -207,7 +219,9 @@ def stub_workspace_terminal(
         return None
 
     async def fake_capture_tmux_output(_tmux_session: str) -> str:
-        return ""
+        # This fixture represents an already-bootstrapped fake agent terminal.
+        # Preserve the real readiness check without waiting its timeout per tab.
+        return "? for shortcuts"
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
     monkeypatch.setattr(workspace_module.ttyd_manager, "update_tab", fake_update_tab)
@@ -660,7 +674,9 @@ def test_task_execution_complexity_prompts_and_legacy_normalization(
     reviewer_prompt = sent_messages[-1][1]
     assert "Task execution complexity: complex" in reviewer_prompt
     assert "Execution complexity review context" in reviewer_prompt
-    assert "lack of decomposition" in reviewer_prompt
+    assert "complex work needs decomposition and integration checks" in reviewer_prompt
+    assert "not a minimum agent count" in reviewer_prompt
+    assert "choosing serial execution is not itself a defect" in reviewer_prompt
 
     auto_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
@@ -4082,7 +4098,7 @@ def test_reaper_prompt_stays_under_hard_budget_with_adversarial_input(
         ), f"fingerprint truncated or malformed: {fp!r}"
 
 
-def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
+def test_lessons_index_filters_by_relevance_without_full_body_leak(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4180,10 +4196,10 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
         f"/api/workspaces/{emoji_workspace['id']}/lessons",
         json={
             "id": "emoji-only-workspace-lesson",
-            "title": "Emoji-only workspace still gets index",
-            "summary": "All active lessons appear in the index regardless of query overlap.",
-            "applies_when": ["any task"],
-            "do": "Agent decides autonomously which lessons apply.",
+            "title": "Emoji-specific formatting guidance",
+            "summary": "Use this lesson only when emoji formatting is relevant.",
+            "applies_when": ["emoji formatting"],
+            "do": "Apply the documented emoji formatting rules.",
             "avoid": "Do not force-fit lessons.",
             "tags": ["emoji"],
             "scope": "workspace",
@@ -4204,9 +4220,10 @@ def test_lessons_index_includes_all_active_lessons_without_full_body_leak(
     emoji_started_task = emoji_start_response.json()
     assert emoji_started_task["feedback_lesson_ids"] == []
     emoji_prompt = sent_messages[-1][1]
-    assert "Relevant lessons" in emoji_prompt
-    assert "emoji-only-workspace-lesson" in emoji_prompt
-    assert "Agent decides autonomously which lessons apply." not in emoji_prompt
+    assert "Workspace lessons: none active for this workspace" in emoji_prompt
+    assert "Relevant lessons" not in emoji_prompt
+    assert "emoji-only-workspace-lesson" not in emoji_prompt
+    assert "Apply the documented emoji formatting rules." not in emoji_prompt
     task_reports = [
         report
         for report in workspace_manager.reports_for_workspace(emoji_workspace["id"])
