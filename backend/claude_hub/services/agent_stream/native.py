@@ -66,6 +66,7 @@ from ...models import (
     StreamModeOption,
     StreamReasoningEffortOption,
 )
+from ..agent_execution_policy import EXECUTION_POLICY
 from .fork_seed import wrap_fork_seed_history
 
 logger = logging.getLogger(__name__)
@@ -223,15 +224,14 @@ def strip_image_attachment_guidance(text: str) -> str:
     return text[:start] + text[end:].lstrip("\n")
 
 
-# Hub Chat runtime / self-scheduling guidance.
+# Hub Chat runtime / execution guidance.
 #
 # A native Chat agent runs with ``CLAUDE_HUB_TAB_ID`` in its provider
 # subprocess env (overlaid in :meth:`ProviderSession._build_env`) and the
 # ``claude-hub`` CLI on PATH, and ``schedule create --kind chat_turn`` can
-# enqueue a turn for the current conversation, but nothing tells the agent any
-# of this. Without guidance it either never self-schedules or mistakes Chat
-# for a Terminal and uses ``--kind tab_message`` (which types into a terminal
-# pane). This block points it at the correct, Chat-native command.
+# enqueue a turn for the current conversation. Linked work can instead run in
+# its own context. Keep this capability map short and load command help only
+# for the selected path; it must not force a delegation on every user turn.
 #
 # Injected once, on the first user turn of a transport session (see
 # :meth:`ProviderSession.send_message`), as a sentinel-wrapped prompt prefix.
@@ -246,8 +246,16 @@ HUB_RUNTIME_GUIDANCE = (
     "and the `claude-hub` CLI is on PATH. This conversation's tab id is exposed "
     "by the env var `$CLAUDE_HUB_TAB_ID` — read it from the environment; never "
     "hardcode the value.\n"
+    + EXECUTION_POLICY
+    + "For linked background work, inspect `claude-hub work --help` and the selected "
+    "subcommand's help only when needed. Reuse the same request key when retrying creation; "
+    "query existing work before creating a replacement. Report a verified work ID after creation. "
+    "Keep routine check results in the work card, and surface completion, anomalies or required "
+    "decisions with concise evidence. Read current work state when the user asks to change or stop it.\n"
     "Only when the user explicitly asks you to schedule a recurring self-check "
-    "or follow-up, create one with the Chat-native kind:\n"
+    "or follow-up, schedule it. For an independent background monitor use `claude-hub work create` "
+    "with its interval option; for a follow-up that needs this conversation's context use "
+    "the Chat-native kind:\n"
     '  claude-hub schedule create --name "<short name>" --kind chat_turn '
     '--tab-id "$CLAUDE_HUB_TAB_ID" --interval <seconds> --message '
     '"<what to do when it fires>"\n'

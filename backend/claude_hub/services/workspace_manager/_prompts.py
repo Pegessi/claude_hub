@@ -1,6 +1,7 @@
 """Bootstrap, assignment, review, and continue prompt builders."""
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
+from claude_hub.services.agent_execution_policy import EXECUTION_POLICY
 
 from ._constants import *  # noqa: F401,F403
 
@@ -623,6 +624,7 @@ class _PromptsMixin:
             )
         return (
             "Execution complexity guidance:\n"
+            f"{EXECUTION_POLICY}"
             f"- Selected complexity: {task.execution_complexity.value}\n"
             f"- {guidance}\n"
             "- Delegation must justify its coordination cost through independent work, context isolation, "
