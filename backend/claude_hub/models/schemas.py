@@ -900,6 +900,10 @@ class WorkspaceTask(BaseModel):
     chat_work_outcome: Optional[str] = None
     chat_work_report_id: Optional[str] = None
     chat_work_summary: Optional[str] = None
+    # Persist the owned session incarnation even when abort clears session_id.
+    # Human-readable session ids can be reused; tab identity must match too.
+    chat_work_owned_session_id: Optional[str] = None
+    chat_work_owned_tab_id: Optional[str] = None
     attachments: List[WorkspaceAttachment] = Field(default_factory=list)
     goal_packet: Optional[GoalPacket] = None
     review_profiles: List[ReviewProfile] = Field(default_factory=list)

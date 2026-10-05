@@ -219,6 +219,9 @@ class _ReportsMixin:
         )
         data = report.model_dump(mode="json")
         content = {k: data.get(k) for k in content_fields}
+        # Preserve existing non-linked report fingerprints across upgrades.
+        if report.chat_work_outcome is not None:
+            content["chat_work_outcome"] = report.chat_work_outcome
         canonical = json.dumps(content, sort_keys=True, default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
