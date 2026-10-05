@@ -24,6 +24,7 @@ from claude_hub.models import (
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
+    RemoteProfile,
     TerminalTab,
     Workspace,
     WorkspaceCreate,
@@ -42,6 +43,12 @@ from claude_hub.services.workspace_manager import WorkspaceManager, workspace_ma
 def make_client(handler: Callable[[httpx.Request], httpx.Response], **kwargs: Any) -> HubClient:
     transport = httpx.MockTransport(handler)
     return HubClient(base_url="http://testserver", transport=transport, **kwargs)
+
+
+def _remote_profile_a(profile_id: str) -> RemoteProfile | None:
+    if profile_id != "profile-a":
+        return None
+    return RemoteProfile(id=profile_id, name="Profile A", ssh_host="profile-a")
 
 
 def patch_get_client(
@@ -1309,7 +1316,7 @@ async def test_create_workspace_stores_normalized_remote_cwd(
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
-        lambda profile_id: object() if profile_id == "profile-a" else None,
+        _remote_profile_a,
     )
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1339,7 +1346,7 @@ async def test_ensure_workspace_agent_omitted_target_on_remote_workspace_creates
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
-        lambda profile_id: object() if profile_id == "profile-a" else None,
+        _remote_profile_a,
     )
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1395,7 +1402,7 @@ async def test_ensure_workspace_agent_explicit_remote_target_creates_remote(
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
-        lambda profile_id: object() if profile_id == "profile-a" else None,
+        _remote_profile_a,
     )
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1451,7 +1458,7 @@ def test_find_compatible_on_remote_workspace_omitted_target_matches_local_only(
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
-        lambda profile_id: object() if profile_id == "profile-a" else None,
+        _remote_profile_a,
     )
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -2829,7 +2836,7 @@ def test_update_workspace_combined_path_remote_cwd_uses_effective_identity(
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
-        lambda profile_id: object() if profile_id == "profile-a" else None,
+        _remote_profile_a,
     )
     repo_a = tmp_path / "repo-a"
     repo_b = tmp_path / "repo-b"
@@ -2879,7 +2886,7 @@ def test_update_workspace_remote_cwd_only_collision_fails_closed(
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
-        lambda profile_id: object() if profile_id == "profile-a" else None,
+        _remote_profile_a,
     )
     repo = tmp_path / "repo"
     repo.mkdir()

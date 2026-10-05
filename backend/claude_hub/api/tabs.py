@@ -1,7 +1,9 @@
+import asyncio
 import logging
+from contextlib import suppress
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..auth.dependencies import get_current_user
@@ -14,7 +16,7 @@ from ..models import (
     User,
 )
 from ..services import ttyd_manager
-from ..services.ttyd_manager import TabLimitExceededError
+from ..services.ttyd_manager import TabLimitExceededError, TabStartupTimeoutError
 from .agent_stream import _get_tab_tailer_manager, _terminal_tab_stream_session
 
 logger = logging.getLogger(__name__)
@@ -53,17 +55,52 @@ async def list_tab_statuses(
     return await ttyd_manager.list_tab_agent_statuses()
 
 
+async def _wait_for_disconnect(request: Request) -> None:
+    """Wait for the ASGI disconnect emitted after the request body is consumed."""
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            return
+
+
+async def _rollback_create_task(create_task: asyncio.Task[TerminalTab]) -> None:
+    """Cancel an in-flight create or delete its unacknowledged result."""
+    if not create_task.done():
+        create_task.cancel()
+    try:
+        created = await create_task
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        # TTYDManager owns rollback for failed startup before registration.
+        return
+    if not await ttyd_manager.delete_tab(created.id):
+        raise RuntimeError(f"newly created tab {created.id} was not registered for rollback")
+
+
+async def _finish_create_rollback(create_task: asyncio.Task[TerminalTab]) -> None:
+    """Finish request-owned rollback despite repeated handler cancellation."""
+    rollback_task = asyncio.create_task(_rollback_create_task(create_task))
+    while not rollback_task.done():
+        try:
+            await asyncio.shield(rollback_task)
+        except asyncio.CancelledError:
+            continue
+    await rollback_task
+
+
 @router.post("", response_model=TerminalTab, status_code=201)
 async def create_tab(
     tab: TerminalTabCreate,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ) -> TerminalTab:
     """Create a new terminal tab."""
     logger.info(
         f"Received create_tab request: name={tab.name}, solo_mode={tab.solo_mode}, shell={tab.shell}, cwd={tab.cwd}, agent_type={tab.agent_type}, session_kind={tab.session_kind}, target={tab.target}, remote_profile_id={tab.remote_profile_id}, agent_session_id={tab.agent_session_id}, user={current_user.email}"
     )
-    try:
-        return await ttyd_manager.create_tab(
+    create_task = asyncio.create_task(
+        ttyd_manager.create_tab(
             name=tab.name,
             shell=tab.shell,
             cwd=tab.cwd,
@@ -78,10 +115,33 @@ async def create_tab(
             env=tab.env,
             agent_session_id=tab.agent_session_id,
         )
+    )
+    disconnect_task = asyncio.create_task(_wait_for_disconnect(request))
+    try:
+        done, _ = await asyncio.wait(
+            {create_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if disconnect_task in done:
+            await _finish_create_rollback(create_task)
+            raise HTTPException(
+                status_code=499, detail="Client disconnected; tab creation rolled back"
+            )
+        return await create_task
+    except asyncio.CancelledError:
+        # Server shutdown/reload can cancel the handler without producing an
+        # ASGI disconnect event. The child task must not outlive its request.
+        await _finish_create_rollback(create_task)
+        raise
     except TabLimitExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc))
+    except TabStartupTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        disconnect_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await disconnect_task
 
 
 @router.put("/order")

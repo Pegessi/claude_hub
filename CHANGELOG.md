@@ -16,6 +16,15 @@
 - Fixes long multi-agent tasks appearing to stop early while the parent keeps
   running and its remaining tools, text and final answer are discarded.
 
+### feat(chat): harden Codex reliability and select provider routes per subprocess
+
+- Native provider startup now preserves terminal proxy isolation, selects a
+  direct or configured-proxy route without mutating the Hub environment, and
+  emits one credential-free structured route record for deployment checks.
+- Codex interruption, late-event handling, tab startup rollback, CLI failure
+  semantics, and Chat send/queue/recovery behavior now fail safely across
+  cancellation, disconnect, and retry boundaries.
+
 ### fix(chat): surface a truthful "Thinking…" status for Codex turns (reasoning content is provider-encrypted)
 
 - Codex turns reported `usage.reasoning` tokens (e.g. 390) but the structured
