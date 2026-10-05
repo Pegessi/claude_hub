@@ -282,7 +282,8 @@ def wrap_hub_runtime_guidance(text: str) -> str:
     """Prepend the sentinel-wrapped Hub runtime guidance to a Chat prompt.
 
     Applied once to the first user turn of every native Chat transport so the
-    agent knows it runs in Hub Chat and how to self-schedule a ``chat_turn``.
+    agent knows the lightweight execution policy and where to discover Hub
+    work, scheduling and feedback commands when they are relevant.
     The adapter strips the block on transcript read (see
     :func:`strip_hub_runtime_guidance`) so it never reaches the persisted
     timeline or the UI.
