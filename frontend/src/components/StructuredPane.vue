@@ -932,6 +932,11 @@
       Latest
     </button>
 
+    <ChatWorkPanel
+      :tab-id="tabId"
+      :refresh-key="workRefreshKey"
+    />
+
     <GoalStatusBar
       v-if="goal"
       :goal="goal"
@@ -1324,6 +1329,7 @@ import MarkdownContent from '@/components/MarkdownContent.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
+import ChatWorkPanel from '@/components/ChatWorkPanel.vue'
 import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
@@ -1863,6 +1869,7 @@ watch(
 )
 
 const GOAL_REFRESH_DELAYS_MS = [0, 120, 300, 650, 1200] as const
+const workRefreshKey = ref(0)
 let goalRefreshEpoch = 0
 
 function goalSnapshotVersion(): string {
@@ -1913,6 +1920,7 @@ async function refreshGoalAfterTurn(turnId: string | null): Promise<void> {
 // because its observer updates the separate control plane asynchronously.
 watch(events, (latest, previous) => {
   if (hasChatStatusRefreshBoundary(previous, latest)) {
+    workRefreshKey.value++
     void terminalStore.fetchAgentStatuses()
     const previousLength = previous.length <= latest.length ? previous.length : 0
     let completed = null as (typeof latest)[number] | null
