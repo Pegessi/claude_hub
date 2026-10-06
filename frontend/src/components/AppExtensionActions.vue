@@ -24,6 +24,33 @@
     </svg>
     <span>Scheduled tasks</span>
   </button>
+  <button
+    type="button"
+    class="extension-action"
+    @click="appStore.openFeishuBotSettings(); emit('select')"
+  >
+    <svg
+      class="extension-action-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <rect
+        x="4"
+        y="7"
+        width="16"
+        height="13"
+        rx="3"
+      />
+      <path d="M12 3v4M8 12h.01M16 12h.01M8 16h8" />
+    </svg>
+    <span>Feishu Bot settings</span>
+  </button>
   <NetworkAccessMenu variant="menu" />
   <button
     type="button"

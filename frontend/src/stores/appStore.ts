@@ -13,6 +13,7 @@ function normalizeTheme(value: string | null): ColorScheme {
 export const useAppStore = defineStore('app', () => {
   const mode = ref<AppMode>((localStorage.getItem(STORAGE_KEY_MODE) as AppMode) || 'terminal')
   const colorScheme = ref<ColorScheme>(normalizeTheme(localStorage.getItem(STORAGE_KEY_THEME)))
+  const feishuBotSettingsVisible = ref(false)
   const scheduledTasksVisible = ref(false)
   const restartDialogVisible = ref(!!sessionStorage.getItem(RESTART_STORAGE_KEY))
   const scheduledTaskCreateTargetTabId = ref<string | null>(null)
@@ -38,6 +39,14 @@ export const useAppStore = defineStore('app', () => {
     scheduledTasksVisible.value = true
   }
 
+  function openFeishuBotSettings() {
+    feishuBotSettingsVisible.value = true
+  }
+
+  function closeFeishuBotSettings() {
+    feishuBotSettingsVisible.value = false
+  }
+
   function closeScheduledTasks() {
     scheduledTasksVisible.value = false
     scheduledTaskCreateTargetTabId.value = null
@@ -46,6 +55,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     mode,
     colorScheme,
+    feishuBotSettingsVisible,
     scheduledTasksVisible,
     restartDialogVisible,
     scheduledTaskCreateTargetTabId,
@@ -55,5 +65,7 @@ export const useAppStore = defineStore('app', () => {
     toggleColorScheme,
     openScheduledTasks,
     closeScheduledTasks,
+    openFeishuBotSettings,
+    closeFeishuBotSettings,
   }
 })

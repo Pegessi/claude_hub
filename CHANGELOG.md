@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### feat(feishu): add administrator-managed Webhook Bot settings
+
+- Add one instance-wide settings dialog under Extensions, separate from per-Chat
+  binding. Explicit Feishu OAuth administrators can validate, save, rotate, or
+  deactivate a Bot; ordinary users see only safe configuration status.
+- Keep complete environment configurations read-only and reject partial or
+  damaged configuration rather than combining credential sources. Stored
+  credentials use private files; API responses never return secret values.
+- Use revision checks and binding generations to reject stale saves and revoke
+  old routing without deleting Chat history. Recheck outbound authorization
+  under a bounded publication gate and do not retry uncertain reply delivery.
+- Add offline API, client, and desktop/mobile browser regressions. A saved
+  configuration does not claim successful Webhook or provider connectivity.
+- Document administrator setup, credential precedence, and validation limits in
+  [the manual Bot configuration guide](docs/working-logs/2026-10-06-feishu-manual-config.md).
+
 ### feat(feishu): preserve per-message source in shared Chat sessions
 
 - Record server-authored Web or Feishu origins on accepted Chat turns. Feishu
