@@ -41,10 +41,12 @@ from claude_hub.services.feishu_bot import (
     BindingRateLimitError,
     FeishuBindingStore,
     FeishuBotConfig,
+    FeishuBotError,
     FeishuEventPayloadError,
     FeishuEventVerificationError,
     parse_feishu_callback,
 )
+from claude_hub.services.feishu_bot_config import FeishuBotConfigStore
 
 
 def _sign(body: bytes, timestamp: int, nonce: str, encrypt_key: str) -> str:
@@ -148,6 +150,12 @@ def configured_bot(monkeypatch, tmp_path):
     monkeypatch.setattr(session_store, "SESSIONS_FILE", tmp_path / "sessions.json")
     store = FeishuBindingStore(tmp_path / "feishu_bot.json")
     monkeypatch.setattr(bot_api, "_binding_store", store)
+    monkeypatch.setattr(
+        bot_api,
+        "_config_store",
+        FeishuBotConfigStore(tmp_path / "secrets" / "feishu_bot.json"),
+    )
+    monkeypatch.setattr(bot_api, "_config_publish_lock", asyncio.Lock())
     return store
 
 
@@ -230,7 +238,12 @@ def test_delete_endpoint_revokes_unconsumed_code(configured_bot, monkeypatch) ->
         def __init__(self, config) -> None:
             pass
 
-        async def reply_text(self, message_id: str, text: str) -> None:
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(
+            self, message_id: str, text: str, *, access_token: str | None = None
+        ) -> None:
             sent.append(text)
 
     monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
@@ -524,7 +537,12 @@ def test_full_bind_dispatch_reply_dedup_read_and_unbind(configured_bot, monkeypa
         def __init__(self, config) -> None:
             assert config.app_id == "cli-bot"
 
-        async def reply_text(self, message_id: str, text: str) -> None:
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(
+            self, message_id: str, text: str, *, access_token: str | None = None
+        ) -> None:
             sent.append((message_id, text))
 
     async def fake_dispatch(
@@ -630,7 +648,12 @@ def test_wrong_sender_cannot_consume_binding_code(configured_bot, monkeypatch) -
         def __init__(self, config) -> None:
             pass
 
-        async def reply_text(self, message_id: str, text: str) -> None:
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(
+            self, message_id: str, text: str, *, access_token: str | None = None
+        ) -> None:
             sent.append(text)
 
     monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
@@ -672,7 +695,12 @@ def test_revoked_owner_cannot_dispatch(configured_bot, monkeypatch) -> None:
         def __init__(self, config) -> None:
             pass
 
-        async def reply_text(self, message_id: str, text: str) -> None:
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(
+            self, message_id: str, text: str, *, access_token: str | None = None
+        ) -> None:
             sent.append(text)
 
     async def fail_if_dispatched(tab_id: str, text: str, turn_id: str, **kwargs) -> str:
@@ -704,7 +732,7 @@ def test_revoked_owner_cannot_dispatch(configured_bot, monkeypatch) -> None:
 
     assert response.status_code == 200
     assert dispatched == []
-    assert sent == ["Claude Hub 授权已失效，请在网页重新绑定。"]
+    assert sent == []
     assert configured_bot.get_owner_binding("ou-owner") is None
 
 
@@ -716,7 +744,12 @@ def test_unbind_during_turn_suppresses_old_target_reply(configured_bot, monkeypa
         def __init__(self, config) -> None:
             pass
 
-        async def reply_text(self, message_id: str, text: str) -> None:
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(
+            self, message_id: str, text: str, *, access_token: str | None = None
+        ) -> None:
             sent.append(text)
 
     async def unbind_then_complete(
@@ -762,7 +795,12 @@ def test_rebind_during_turn_suppresses_reply_to_old_message(configured_bot, monk
         def __init__(self, config) -> None:
             pass
 
-        async def reply_text(self, message_id: str, text: str) -> None:
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(
+            self, message_id: str, text: str, *, access_token: str | None = None
+        ) -> None:
             sent.append((message_id, text))
 
     async def rebind_then_complete(
@@ -840,7 +878,12 @@ def test_chat_conflict_replies_to_same_message_without_claiming_binding_expired(
         def __init__(self, config) -> None:
             pass
 
-        async def reply_text(self, message_id: str, text: str) -> None:
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(
+            self, message_id: str, text: str, *, access_token: str | None = None
+        ) -> None:
             sent.append((message_id, text))
 
     async def busy(tab_id: str, text: str, turn_id: str, **kwargs) -> str:
@@ -938,7 +981,9 @@ async def test_feishu_client_uses_injected_http_transport(bot_config) -> None:
 
 
 @pytest.mark.asyncio
-async def test_external_chat_adapter_reuses_existing_stream_manager(monkeypatch) -> None:
+async def test_external_chat_adapter_reuses_existing_stream_manager(
+    monkeypatch,
+) -> None:
     session = SimpleNamespace(id="terminal-tab-tab-1")
     queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
     unsubscribed: list[tuple[str, object]] = []
@@ -964,7 +1009,10 @@ async def test_external_chat_adapter_reuses_existing_stream_manager(monkeypatch)
                 agent_type=AgentType.CLAUDE,
                 type=AgentStreamEventType.TURN_COMPLETED,
                 turn_id=payload.client_turn_id,
-                payload={"status": "completed", "assistant_text": "existing session reply"},
+                payload={
+                    "status": "completed",
+                    "assistant_text": "existing session reply",
+                },
                 created_at=datetime.now(),
             )
         )
@@ -1010,7 +1058,9 @@ async def test_external_chat_adapter_reuses_existing_stream_manager(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_external_goal_input_is_rejected_without_consuming_question(monkeypatch) -> None:
+async def test_external_goal_input_is_rejected_without_consuming_question(
+    monkeypatch,
+) -> None:
     current = SimpleNamespace(
         status=SimpleNamespace(value="active"),
         dispatch_state=SimpleNamespace(value="idle"),
@@ -1023,7 +1073,9 @@ async def test_external_goal_input_is_rejected_without_consuming_question(monkey
     send = AsyncMock()
     monkeypatch.setattr(goal_run, "get_goal_admission_lock", lambda tab_id: asyncio.Lock())
     monkeypatch.setattr(
-        goal_run, "get_goal_manager", lambda: SimpleNamespace(current=lambda tab_id: current)
+        goal_run,
+        "get_goal_manager",
+        lambda: SimpleNamespace(current=lambda tab_id: current),
     )
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda tab_id: object())
     monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
@@ -1051,7 +1103,9 @@ def test_inflight_send_error_has_stable_busy_reason_without_changing_body() -> N
 
 
 @pytest.mark.asyncio
-async def test_external_chat_adapter_classifies_structured_source_failure(monkeypatch) -> None:
+async def test_external_chat_adapter_classifies_structured_source_failure(
+    monkeypatch,
+) -> None:
     session = SimpleNamespace(id="terminal-tab-tab-1")
 
     class FailedManager:
@@ -1102,3 +1156,324 @@ async def test_external_chat_adapter_preserves_unknown_409(monkeypatch) -> None:
     assert raised.value.detail == "unclassified Chat conflict"
     assert not raised.value.headers
     assert unsubscribed == [(session.id, queue)]
+
+
+def test_invalid_binding_cleanup_does_not_delete_same_generation_rebind(
+    configured_bot, monkeypatch
+) -> None:
+    _install_chat_target(monkeypatch)
+    sent: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(self, message_id, text, *, access_token=None) -> None:
+            sent.append(text)
+
+    code, _ = configured_bot.create_code("ou-owner", "ou-owner@example.test", "tab-1", "ws-1")
+    configured_bot.consume_code(
+        code,
+        sender_open_id="ou-owner",
+        app_id="cli-bot",
+        chat_id="oc-old-chat",
+        owner_is_authorized=lambda *_: True,
+    )
+    replaced = False
+
+    def invalidate_after_rebind(binding, snapshot) -> bool:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            new_code, _ = configured_bot.create_code(
+                "ou-owner", "ou-owner@example.test", "tab-1", "ws-1"
+            )
+            configured_bot.consume_code(
+                new_code,
+                sender_open_id="ou-owner",
+                app_id="cli-bot",
+                chat_id="oc-new-chat",
+                owner_is_authorized=lambda *_: True,
+            )
+        return False
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    monkeypatch.setattr(bot_api, "_binding_is_current", invalidate_after_rebind)
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(
+            now=now,
+            text="must not execute",
+            message_id="om-same-generation-rebind",
+            chat_id="oc-old-chat",
+        ),
+        now,
+    )
+    response = TestClient(app).post("/api/feishu/bot/events", content=body, headers=headers)
+    assert response.status_code == 200
+    assert sent == []
+    assert configured_bot.get_sender_binding("ou-owner", "cli-bot", "oc-new-chat") is not None
+
+
+def test_config_rotation_during_turn_suppresses_old_snapshot_reply(
+    configured_bot, monkeypatch, tmp_path
+) -> None:
+    _install_chat_target(monkeypatch)
+    for name in (
+        "CLAUDE_HUB_FEISHU_BOT_APP_ID",
+        "CLAUDE_HUB_FEISHU_BOT_APP_SECRET",
+        "CLAUDE_HUB_FEISHU_BOT_VERIFICATION_TOKEN",
+        "CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    config_store = FeishuBotConfigStore(tmp_path / "manual" / "feishu_bot.json")
+    first = config_store.replace(
+        FeishuBotConfig(
+            app_id="cli-bot",
+            app_secret="old-secret",
+            verification_token="verify-token",
+            encrypt_key="encrypt-key",
+        ),
+        expected_revision=0,
+        allow_app_id_change=False,
+    )
+    monkeypatch.setattr(bot_api, "_config_store", config_store)
+    sent: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(self, message_id, text, *, access_token=None) -> None:
+            sent.append(text)
+
+    async def rotate_then_complete(tab_id, text, turn_id, **kwargs) -> str:
+        rotated = config_store.replace(
+            FeishuBotConfig(
+                app_id="cli-bot",
+                app_secret="new-secret",
+                verification_token="verify-token",
+                encrypt_key="encrypt-key",
+            ),
+            expected_revision=first.revision or 0,
+            allow_app_id_change=False,
+        )
+        assert rotated.binding_generation == first.binding_generation
+        return "old snapshot answer"
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", rotate_then_complete)
+    code, _ = configured_bot.create_code(
+        "ou-owner",
+        "ou-owner@example.test",
+        "tab-1",
+        "ws-1",
+        app_id="cli-bot",
+        binding_generation=first.binding_generation,
+    )
+    configured_bot.consume_code(
+        code,
+        sender_open_id="ou-owner",
+        app_id="cli-bot",
+        chat_id="oc-chat",
+        owner_is_authorized=lambda *_: True,
+        expected_app_id="cli-bot",
+        expected_binding_generation=first.binding_generation,
+    )
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text="long task", message_id="om-config-rotation"),
+        now,
+    )
+    response = TestClient(app).post("/api/feishu/bot/events", content=body, headers=headers)
+    assert response.status_code == 200
+    assert sent == []
+    binding = configured_bot.get_sender_binding("ou-owner", "cli-bot", "oc-chat")
+    assert binding is not None
+    assert binding.binding_generation == first.binding_generation
+    persisted = json.loads(configured_bot.path.read_text(encoding="utf-8"))
+    assert persisted["events"]["om-config-rotation"]["status"] == "failed"
+
+
+def test_revoked_pending_code_owner_receives_no_reply(configured_bot, monkeypatch) -> None:
+    _install_chat_target(monkeypatch)
+    sent: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(self, message_id, text, *, access_token=None) -> None:
+            sent.append(text)
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    client = TestClient(app)
+    code = client.post(
+        "/api/feishu/bot/bind/start",
+        json={"tab_id": "tab-1", "workspace_id": "ws-1"},
+        cookies=_login_cookie("ou-owner"),
+    ).json()["code"]
+    monkeypatch.setattr(settings, "auth_allowed_open_ids", "ou-other")
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text=code, message_id="om-revoked-pending"), now
+    )
+    response = client.post("/api/feishu/bot/events", content=body, headers=headers)
+    assert response.status_code == 200
+    assert sent == []
+    assert configured_bot.get_owner_binding("ou-owner") is None
+
+
+@pytest.mark.parametrize(
+    "failure_mode,expected_reply_attempts",
+    [("revoke_before_reply", 0), ("reply_timeout", 1)],
+)
+def test_failed_target_reply_keeps_created_binding_authorization(
+    configured_bot, monkeypatch, failure_mode, expected_reply_attempts
+) -> None:
+    _install_chat_target(monkeypatch)
+    reply_attempts: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(self, message_id, text, *, access_token=None) -> None:
+            reply_attempts.append(message_id)
+            if failure_mode == "reply_timeout":
+                raise httpx.ReadTimeout("uncertain outbound result")
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    client = TestClient(app)
+    code = client.post(
+        "/api/feishu/bot/bind/start",
+        json={"tab_id": "tab-1", "workspace_id": "ws-1"},
+        cookies=_login_cookie("ou-owner"),
+    ).json()["code"]
+
+    def reject_consumed_target(tab_id, workspace_id):
+        if failure_mode == "revoke_before_reply":
+            monkeypatch.setattr(settings, "auth_allowed_open_ids", "ou-other")
+        raise HTTPException(status_code=409, detail="target disappeared")
+
+    monkeypatch.setattr(bot_api, "_validate_bind_target", reject_consumed_target)
+    now = int(time.time())
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text=code, message_id=f"om-{failure_mode}"), now
+    )
+    response = client.post("/api/feishu/bot/events", content=body, headers=headers)
+    assert response.status_code == 200
+    assert reply_attempts == [f"om-{failure_mode}"] * expected_reply_attempts
+    assert configured_bot.get_owner_binding("ou-owner") is None
+
+
+@pytest.mark.parametrize("bad_token", ["", "   "])
+@pytest.mark.asyncio
+async def test_feishu_client_rejects_empty_tenant_token(bot_config, bad_token: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"code": 0, "tenant_access_token": bad_token, "expire": 7200}
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://open.feishu.test"
+    ) as http_client:
+        client = bot_api.FeishuBotClient(bot_config, client=http_client)
+        with pytest.raises(FeishuBotError, match="tenant token request"):
+            await client.validate_credentials()
+
+
+@pytest.mark.asyncio
+async def test_explicit_reply_token_never_fetches_token_under_publish_gate(
+    bot_config,
+) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        assert not request.url.path.endswith("/tenant_access_token/internal")
+        return httpx.Response(200, json={"code": 0})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://open.feishu.test"
+    ) as http_client:
+        client = bot_api.FeishuBotClient(bot_config, client=http_client)
+        with pytest.raises(FeishuBotError, match="tenant token is empty"):
+            await client.reply_text("om-empty", "answer", access_token="")
+        await client.reply_text("om-valid", "answer", access_token="explicit-token")
+    assert paths == ["/open-apis/im/v1/messages/om-valid/reply"]
+
+
+@pytest.mark.parametrize("reply_times_out", [False, True])
+def test_failed_target_cleanup_error_never_sends_second_reply(
+    configured_bot, monkeypatch, reply_times_out: bool
+) -> None:
+    _install_chat_target(monkeypatch)
+    reply_attempts: list[str] = []
+
+    class FakeFeishuClient:
+        def __init__(self, config) -> None:
+            pass
+
+        async def get_tenant_token(self) -> str:
+            return "tenant-token"
+
+        async def reply_text(
+            self, message_id: str, text: str, *, access_token: str | None = None
+        ) -> None:
+            reply_attempts.append(message_id)
+            if reply_times_out:
+                raise httpx.ReadTimeout("uncertain outbound result")
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", FakeFeishuClient)
+    client = TestClient(app)
+    code = client.post(
+        "/api/feishu/bot/bind/start",
+        json={"tab_id": "tab-1", "workspace_id": "ws-1"},
+        cookies=_login_cookie("ou-owner"),
+    ).json()["code"]
+
+    def reject_consumed_target(tab_id: str, workspace_id: str | None) -> str | None:
+        raise HTTPException(status_code=409, detail="target disappeared")
+
+    def fail_cleanup(owner_open_id: str) -> bool:
+        raise OSError("simulated binding cleanup failure")
+
+    monkeypatch.setattr(bot_api, "_validate_bind_target", reject_consumed_target)
+    monkeypatch.setattr(configured_bot, "delete_owner_binding", fail_cleanup)
+    now = int(time.time())
+    message_id = f"om-cleanup-error-{reply_times_out}"
+    body, headers = _encrypted_callback(
+        _message_payload(now=now, text=code, message_id=message_id), now
+    )
+    response = client.post("/api/feishu/bot/events", content=body, headers=headers)
+    assert response.status_code == 200
+    assert reply_attempts == [message_id]
+    persisted = json.loads(configured_bot.path.read_text(encoding="utf-8"))
+    assert persisted["events"][message_id]["status"] == "failed"
+
+
+@pytest.fixture(autouse=True)
+def forbid_live_http(monkeypatch):
+    """Keep failure paths offline; explicit ASGI and mock transports still work."""
+
+    async def reject_async(*args, **kwargs):
+        pytest.fail("Live HTTP is forbidden in Bot unit tests")
+
+    def reject_sync(*args, **kwargs):
+        pytest.fail("Live HTTP is forbidden in Bot unit tests")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_async)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", reject_sync)

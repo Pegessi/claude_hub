@@ -59,6 +59,10 @@ class BindingCodeError(FeishuBotError):
     """Raised when a binding code is invalid, expired, replayed, or mismatched."""
 
 
+class BindingOwnerUnauthorizedError(BindingCodeError):
+    """Raised when the pairing owner no longer has permission."""
+
+
 class BindingRateLimitError(FeishuBotError):
     """Raised when one owner requests too many binding codes."""
 
@@ -109,6 +113,7 @@ class FeishuBinding:
     tab_id: str
     workspace_id: str | None
     created_at: float
+    binding_generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,8 @@ class PendingBinding:
     issued_at: float
     expires_at: float
     consumed_at: float | None = None
+    app_id: str = ""
+    binding_generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -197,6 +204,8 @@ class FeishuBindingStore:
             ),
             issued_at=float(value.get("issued_at", expires_at - _DEFAULT_BIND_CODE_TTL_SECONDS)),
             expires_at=expires_at,
+            app_id=str(value.get("app_id", "")),
+            binding_generation=int(value.get("binding_generation", 0)),
             consumed_at=(
                 float(value["consumed_at"]) if value.get("consumed_at") is not None else None
             ),
@@ -215,6 +224,7 @@ class FeishuBindingStore:
                 str(value["workspace_id"]) if value.get("workspace_id") is not None else None
             ),
             created_at=float(value["created_at"]),
+            binding_generation=int(value.get("binding_generation", 0)),
         )
 
     def _prune_code_state(self, state: dict[str, Any], now: float) -> None:
@@ -252,6 +262,9 @@ class FeishuBindingStore:
         tab_id: str,
         workspace_id: str | None,
         ttl_seconds: int = _DEFAULT_BIND_CODE_TTL_SECONDS,
+        *,
+        app_id: str = "",
+        binding_generation: int = 0,
     ) -> tuple[str, PendingBinding]:
         now = self._now()
         with self._lock:
@@ -277,6 +290,8 @@ class FeishuBindingStore:
                 workspace_id=workspace_id,
                 issued_at=now,
                 expires_at=now + ttl_seconds,
+                app_id=app_id,
+                binding_generation=binding_generation,
             )
             state["pending"][self._code_digest(code)] = asdict(pending)
             self._save(state)
@@ -290,6 +305,8 @@ class FeishuBindingStore:
         app_id: str,
         chat_id: str,
         owner_is_authorized: Callable[[str, str], bool],
+        expected_app_id: str | None = None,
+        expected_binding_generation: int | None = None,
     ) -> FeishuBinding:
         digest = self._code_digest(code)
         with self._lock:
@@ -302,10 +319,19 @@ class FeishuBindingStore:
                 raise BindingCodeError("Binding code has already been used")
             if self._now() > pending.expires_at:
                 raise BindingCodeError("Binding code has expired")
+            if expected_app_id is not None and not hmac.compare_digest(
+                pending.app_id, expected_app_id
+            ):
+                raise BindingCodeError("Binding code belongs to a previous Bot application")
+            if (
+                expected_binding_generation is not None
+                and pending.binding_generation != expected_binding_generation
+            ):
+                raise BindingCodeError("Binding code belongs to a previous Bot configuration")
             if not hmac.compare_digest(pending.owner_open_id, sender_open_id):
                 raise BindingCodeError("Binding code belongs to a different Feishu user")
             if not owner_is_authorized(pending.owner_open_id, pending.owner_email):
-                raise BindingCodeError("Binding owner is no longer authorized")
+                raise BindingOwnerUnauthorizedError("Binding owner is no longer authorized")
             binding = FeishuBinding(
                 owner_open_id=pending.owner_open_id,
                 owner_email=pending.owner_email,
@@ -315,6 +341,7 @@ class FeishuBindingStore:
                 tab_id=pending.tab_id,
                 workspace_id=pending.workspace_id,
                 created_at=self._now(),
+                binding_generation=pending.binding_generation,
             )
             state["pending"][digest]["consumed_at"] = self._now()
             state["bindings"][binding.owner_open_id] = asdict(binding)
@@ -353,6 +380,18 @@ class FeishuBindingStore:
             if removed:
                 self._save(state)
             return removed
+
+    def clear_routing_state(self) -> bool:
+        """Revoke all bindings and codes while preserving message deduplication."""
+
+        with self._lock:
+            state = self._load()
+            changed = bool(state["pending"] or state["bindings"])
+            state["pending"] = {}
+            state["bindings"] = {}
+            if changed:
+                self._save(state)
+            return changed
 
     def claim_message(self, message_id: str) -> bool:
         """Persist an at-most-once claim, using the official message deduplication key."""
@@ -402,7 +441,7 @@ class FeishuBotClient:
         async with httpx.AsyncClient(base_url=self._config.api_base_url, timeout=15.0) as client:
             return await client.request(method, path, **kwargs)
 
-    async def _get_tenant_token(self) -> str:
+    async def get_tenant_token(self) -> str:
         now = time.monotonic()
         if self._tenant_token and now < self._token_expires_at:
             return self._tenant_token
@@ -413,16 +452,17 @@ class FeishuBotClient:
         )
         response.raise_for_status()
         payload = response.json()
-        if payload.get("code") != 0 or not isinstance(payload.get("tenant_access_token"), str):
+        raw_token = payload.get("tenant_access_token")
+        if payload.get("code") != 0 or not isinstance(raw_token, str) or not raw_token.strip():
             raise FeishuBotError("Feishu rejected the Bot tenant token request")
-        self._tenant_token = payload["tenant_access_token"]
+        self._tenant_token = raw_token
         expires_in = payload.get("expire", 7200)
         ttl = int(expires_in) if isinstance(expires_in, int) else 7200
         self._token_expires_at = now + max(60, ttl - 60)
         return self._tenant_token
 
     async def send_text(self, chat_id: str, text: str) -> None:
-        token = await self._get_tenant_token()
+        token = await self.get_tenant_token()
         bounded = text.strip() or "Claude Hub completed without a text response."
         if len(bounded) > _MAX_REPLY_CHARS:
             bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
@@ -442,10 +482,14 @@ class FeishuBotClient:
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot message")
 
-    async def reply_text(self, message_id: str, text: str) -> None:
+    async def reply_text(
+        self, message_id: str, text: str, *, access_token: str | None = None
+    ) -> None:
         """Reply to one exact inbound message instead of a mutable chat target."""
 
-        token = await self._get_tenant_token()
+        token = await self.get_tenant_token() if access_token is None else access_token
+        if not token.strip():
+            raise FeishuBotError("Feishu Bot tenant token is empty")
         bounded = text.strip() or "Claude Hub completed without a text response."
         if len(bounded) > _MAX_REPLY_CHARS:
             bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
@@ -462,6 +506,11 @@ class FeishuBotClient:
         payload = response.json()
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot reply")
+
+    async def validate_credentials(self) -> None:
+        """Validate app credentials without returning or persisting the token."""
+
+        await self.get_tenant_token()
 
 
 def _parse_json_object(raw_body: bytes) -> dict[str, Any]:

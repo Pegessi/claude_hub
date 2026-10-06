@@ -131,6 +131,10 @@
         :create-request="scheduledTaskCreateRequest"
         @close="appStore.closeScheduledTasks()"
       />
+      <FeishuBotSettingsDialog
+        v-if="feishuBotSettingsVisible"
+        @close="appStore.closeFeishuBotSettings()"
+      />
       <ServiceRestartDialog
         v-if="appStore.restartDialogVisible"
         @close="appStore.restartDialogVisible = false"
@@ -151,6 +155,7 @@ import ChatSidebar from '@/components/ChatSidebar.vue'
 import ArchivedSessionsPanel from '@/components/ArchivedSessionsPanel.vue'
 import AppExtensionsMenu from '@/components/AppExtensionsMenu.vue'
 import ServiceRestartDialog from '@/components/ServiceRestartDialog.vue'
+import FeishuBotSettingsDialog from '@/components/FeishuBotSettingsDialog.vue'
 import ScheduledTasksPanel from '@/components/ScheduledTasksPanel.vue'
 import LoginView from '@/views/LoginView.vue'
 import { useAppStore } from '@/stores/appStore'
@@ -166,6 +171,7 @@ const { tabs, error, activePane, activePaneIsChat } = storeToRefs(store)
 const {
   mode,
   colorScheme,
+  feishuBotSettingsVisible,
   scheduledTasksVisible,
   scheduledTaskCreateTargetTabId,
   scheduledTaskCreateRequest,
