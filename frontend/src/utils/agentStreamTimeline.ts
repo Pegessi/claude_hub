@@ -94,7 +94,24 @@ export type TimelineSubthreadPart =
   // A child's in-flight process status (e.g. "Thinking…"). The stable
   // messageId + snapshot lets a later update (or the turn's terminal
   // finalization) replace it in place rather than appending a second row.
-  | { kind: 'status'; key: string; text: string; messageId?: string | null }
+  | { kind: 'status'; key: string; text: string; messageId?: string | null; isError?: boolean }
+
+export type TimelineSubagentLifecycle =
+  | 'unknown'
+  | 'active'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export interface TimelineSubthread {
+  key: string
+  threadId: string
+  parts: TimelineSubthreadPart[]
+  /** The correlated native spawn call. Its status is dispatch status only. */
+  launchTool: TimelineTool | null
+  /** Provider-observed child-turn lifecycle; never inferred from parent state. */
+  lifecycleStatus: TimelineSubagentLifecycle
+}
 
 export type TimelinePart =
   | { kind: 'thinking'; key: string; text: string }
@@ -112,12 +129,9 @@ export type TimelinePart =
   // the pane can render a dedicated Codex-style sub-agent card. Carries the
   // same TimelineTool (status/result mutate in place) plus the parsed view.
   | { kind: 'subagent'; key: string; tool: TimelineTool }
-  // A nested sub-agent thread (TraeX/Codex collab: a spawned worker or a peer
-  // addressed by sendInput). All of the child's own thinking/text/tools and the
-  // directives the main agent sent it are grouped here instead of being
-  // flattened into the main assistant stream. The block is expandable, so no
-  // child content is lost; the main bubble keeps only the main agent's voice.
-  | { kind: 'subthread'; key: string; threadId: string; parts: TimelineSubthreadPart[] }
+  // One expandable native-subagent region per parent turn. Child identity is
+  // always the complete provider thread id; each row retains its full process.
+  | { kind: 'subagents'; key: string; threads: TimelineSubthread[] }
   // An agent-produced local image (view_image / image Read), split out of the
   // tool groups so the pane renders the actual picture (click → lightbox)
   // instead of a raw path string. ``tool`` carries the live status; ``path``
@@ -325,15 +339,18 @@ interface ReducerState {
   /** Tool/approval call ids already attributed to a turn with a real turn id.
    *  A later null-turn event carrying one of these ids is a provider replay. */
   attributedToolIds: Set<string>
-  /** Nested sub-agent threads keyed by turn key → provider thread id. The
-   *  mounted ``subthread`` part is pushed into the turn once (its ``parts``
-   *  array is then mutated in place); child tools resolve in their own map so
-   *  a child call id can never collide with a main-thread call id. */
+  /** Nested sub-agent threads keyed by turn key → full provider thread id.
+   *  One turn-level region is mounted on first reference; child tools resolve
+   *  in their own maps so call ids cannot collide with the main thread. */
   threadsByTurn: Map<string, Map<string, SubthreadState>>
+  subagentRegionByTurn: Map<
+    string,
+    Extract<TimelinePart, { kind: 'subagents' }>
+  >
 }
 
 interface SubthreadState {
-  part: Extract<TimelinePart, { kind: 'subthread' }>
+  thread: TimelineSubthread
   tools: TimelineTool[]
   toolMap: Map<string, TimelineTool>
 }
@@ -347,6 +364,7 @@ function createReducerState(): ReducerState {
     legacyCurrent: null,
     attributedToolIds: new Set(),
     threadsByTurn: new Map(),
+    subagentRegionByTurn: new Map(),
   }
 }
 
@@ -369,6 +387,16 @@ function ensureSubthread(
   threadId: string,
   toolMapKey: string,
 ): SubthreadState {
+  let region = state.subagentRegionByTurn.get(toolMapKey)
+  if (!region) {
+    region = {
+      kind: 'subagents',
+      key: `subagents-${toolMapKey}`,
+      threads: [],
+    }
+    state.subagentRegionByTurn.set(toolMapKey, region)
+    turn.parts.push(region)
+  }
   let byThread = state.threadsByTurn.get(toolMapKey)
   if (!byThread) {
     byThread = new Map()
@@ -376,17 +404,42 @@ function ensureSubthread(
   }
   let child = byThread.get(threadId)
   if (!child) {
-    const part: Extract<TimelinePart, { kind: 'subthread' }> = {
-      kind: 'subthread',
+    const thread: TimelineSubthread = {
       key: `subthread-${threadId}`,
       threadId,
       parts: [],
+      launchTool: null,
+      lifecycleStatus: 'unknown',
     }
-    child = { part, tools: [], toolMap: new Map() }
+    child = { thread, tools: [], toolMap: new Map() }
     byThread.set(threadId, child)
-    turn.parts.push(part)
+    region.threads.push(thread)
   }
   return child
+}
+
+function subagentLifecycleOf(event: AgentStreamEvent): TimelineSubagentLifecycle | null {
+  if (payloadString(event, 'provider_status') !== 'subagent_lifecycle') return null
+  const status = payloadString(event, 'subagent_status')
+  return status === 'active' || status === 'completed' || status === 'failed' ||
+    status === 'cancelled' ? status : null
+}
+
+function childActivityRestartsLifecycle(
+  event: AgentStreamEvent,
+  child: SubthreadState,
+): boolean {
+  if (event.type === 'thinking_delta' || event.type === 'text_delta') {
+    return payloadString(event, 'text').length > 0
+  }
+  if (event.type === 'tool_call_started') {
+    const callId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
+    const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
+    return !child.toolMap.has(identity)
+  }
+  return event.type === 'status' &&
+    payloadString(event, 'provider_status') === 'reasoning' &&
+    statusText(event) === 'Thinking…'
 }
 
 /** Append/extend a text or thinking row inside a child thread, merging into the
@@ -399,7 +452,7 @@ function appendSubthreadText(
   at: string,
 ): void {
   if (!text) return
-  const parts = child.part.parts
+  const parts = child.thread.parts
   const last = parts[parts.length - 1]
   if (last !== undefined && last.kind === kind) {
     last.text += text
@@ -416,6 +469,17 @@ function appendSubthreadText(
  *  turn visibly mutated. Only the types the adapter tags with
  *  ``subagent_thread`` reach here; anything else is ignored (caller falls
  *  through to main handling). */
+function subthreadEventCanMount(
+  event: AgentStreamEvent,
+  lifecycle: TimelineSubagentLifecycle | null,
+): boolean {
+  if (event.type === 'thinking_delta' || event.type === 'text_delta') {
+    return payloadString(event, 'text').length > 0
+  }
+  if (event.type === 'status') return lifecycle !== null || statusText(event).length > 0
+  return event.type === 'tool_call_started' || event.type === 'tool_call_completed'
+}
+
 function applySubthreadEvent(
   state: ReducerState,
   turn: TimelineTurn,
@@ -423,17 +487,28 @@ function applySubthreadEvent(
   event: AgentStreamEvent,
   toolMapKey: string,
 ): boolean {
+  const lifecycle = subagentLifecycleOf(event)
+  if (!subthreadEventCanMount(event, lifecycle)) return false
   const child = ensureSubthread(state, turn, threadId, toolMapKey)
+  let lifecycleChanged = false
+  if (lifecycle !== null && child.thread.lifecycleStatus !== lifecycle) {
+    child.thread.lifecycleStatus = lifecycle
+    lifecycleChanged = true
+  } else if (lifecycle === null && childActivityRestartsLifecycle(event, child) &&
+             child.thread.lifecycleStatus !== 'active') {
+    child.thread.lifecycleStatus = 'active'
+    lifecycleChanged = true
+  }
   switch (event.type) {
     case 'thinking_delta': {
       const text = payloadString(event, 'text')
-      if (!text) return false
+      if (!text) return lifecycleChanged
       appendSubthreadText(child, 'thinking', text, event.stream_sequence, event.created_at)
       return true
     }
     case 'text_delta': {
       const text = payloadString(event, 'text')
-      if (!text) return false
+      if (!text) return lifecycleChanged
       appendSubthreadText(child, 'text', text, event.stream_sequence, event.created_at)
       return true
     }
@@ -443,7 +518,7 @@ function applySubthreadEvent(
       const argsRecord = payloadRecord(event, 'args')
       const imagePath = agentImagePathFromTool(toolName, argsRecord)
       const identity = callId ?? event.message_id ?? `sequence-${event.stream_sequence}`
-      if (child.toolMap.has(identity)) return false
+      if (child.toolMap.has(identity)) return lifecycleChanged
       let argsText = ''
       try {
         argsText = JSON.stringify(argsRecord, null, 2)
@@ -461,7 +536,7 @@ function applySubthreadEvent(
       }
       child.toolMap.set(identity, tool)
       child.tools.push(tool)
-      const parts = child.part.parts
+      const parts = child.thread.parts
       if (imagePath !== null) {
         parts.push({ kind: 'agent_image', key: `sub-agent-image-${identity}`, tool, path: imagePath })
       } else {
@@ -491,7 +566,7 @@ function applySubthreadEvent(
         }
         child.toolMap.set(identity, tool)
         child.tools.push(tool)
-        const parts = child.part.parts
+        const parts = child.thread.parts
         const last = parts[parts.length - 1]
         if (last && last.kind === 'tool_group') {
           last.tools.push(tool)
@@ -507,12 +582,13 @@ function applySubthreadEvent(
         tool.resultText = newResult
         return true
       }
-      return false
+      return lifecycleChanged
     }
     case 'status': {
       const text = statusText(event)
-      if (!text) return false
-      const parts = child.part.parts
+      if (!text) return lifecycleChanged
+      const isError = payloadString(event, 'provider_status') === 'error'
+      const parts = child.thread.parts
       // Stable in-place snapshot: replace an existing child status with the
       // same messageId rather than appending a second row.
       if (event.payload.snapshot === true && event.message_id) {
@@ -520,8 +596,9 @@ function applySubthreadEvent(
           part => part.kind === 'status' && part.messageId === event.message_id,
         )
         if (existing?.kind === 'status') {
-          if (existing.text === text) return false
+          if (existing.text === text && Boolean(existing.isError) === isError) return lifecycleChanged
           existing.text = text
+          existing.isError = isError
           return true
         }
       }
@@ -530,11 +607,24 @@ function applySubthreadEvent(
         key: `sub-status-${event.message_id ?? 'event'}-${event.stream_sequence}`,
         text,
         messageId: event.message_id,
+        ...(isError ? { isError: true } : {}),
       })
       return true
     }
     default:
-      return false
+      return lifecycleChanged
+  }
+}
+
+function detachToolFromMainParts(turn: TimelineTurn, tool: TimelineTool): void {
+  for (let index = turn.parts.length - 1; index >= 0; index -= 1) {
+    const part = turn.parts[index]
+    if (part.kind !== 'tool_group') continue
+    const toolIndex = part.tools.indexOf(tool)
+    if (toolIndex < 0) continue
+    part.tools.splice(toolIndex, 1)
+    if (part.tools.length === 0) turn.parts.splice(index, 1)
+    return
   }
 }
 
@@ -685,12 +775,6 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         for (const tool of turn.tools) {
           if (tool.status === 'running') tool.status = 'completed'
         }
-        // Finalize still-running tools inside every nested child thread too.
-        for (const byThread of state.threadsByTurn.get(toolMapKey)?.values() ?? []) {
-          for (const tool of byThread.tools) {
-            if (tool.status === 'running') tool.status = 'completed'
-          }
-        }
         mutated = true
       }
       break
@@ -803,19 +887,22 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
             // exactly once.
             for (const tid of subagent.threadIds) {
               const child = ensureSubthread(state, turn, tid, toolMapKey)
-              child.part.parts.push({
+              child.thread.parts.push({
                 kind: 'instruction',
                 key: `sub-instruction-${identity}-${tid}`,
                 tool,
               })
             }
+          } else if (subagent && subagent.threadIds.length > 0) {
+            // A native spawn and its child stream are one UI entity. Attach the
+            // dispatch call to every full receiver id instead of rendering a
+            // second standalone card. Tool status remains dispatch-only.
+            for (const tid of subagent.threadIds) {
+              ensureSubthread(state, turn, tid, toolMapKey).thread.launchTool = tool
+            }
           } else if (subagent) {
-            // Claude/Cursor sub-agent OR a TraeX spawnAgent (the launch card):
-            // each is an independent Codex-style card, never merged into a
-            // neighbouring tool group and never breaking one (tools before/
-            // after group separately). The child thread's later streamed
-            // content and sendInput directives render in their own nested
-            // group, not in this card.
+            // Claude/Cursor calls in captured streams have no provider thread
+            // id. Keep the existing standalone fallback rather than guessing.
             turn.parts.push({ kind: 'subagent', key: `subagent-${identity}`, tool })
           } else {
             // Group consecutive tool calls into a single tool_group part so the
@@ -887,6 +974,31 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           lastPart.tools.push(tool)
         } else {
           turn.parts.push({ kind: 'tool_group', key: `tool-group-${event.stream_sequence}`, tools: [tool] })
+        }
+      }
+      // Native app-server spawn starts before its child id exists. Recover the
+      // identity from item/completed, detach the temporary generic tool row,
+      // and attach the same TimelineTool to the full-id child row.
+      if (!tool.subagent) {
+        const recovered = parseSubagent(payloadString(event, 'name'), event.payload.args)
+        if (recovered && recovered.threadIds.length > 0) {
+          tool.name = payloadString(event, 'name') || tool.name
+          tool.subagent = recovered
+          detachToolFromMainParts(turn, tool)
+          if (recovered.directive) {
+            for (const threadId of recovered.threadIds) {
+              ensureSubthread(state, turn, threadId, toolMapKey).thread.parts.push({
+                kind: 'instruction',
+                key: `sub-instruction-${identity}-${threadId}`,
+                tool,
+              })
+            }
+          } else {
+            for (const threadId of recovered.threadIds) {
+              ensureSubthread(state, turn, threadId, toolMapKey).thread.launchTool = tool
+            }
+          }
+          mutated = true
         }
       }
       let newStatus: TimelineTool['status'] =
@@ -998,7 +1110,7 @@ function isProcessPart(part: TimelinePart): boolean {
     part.kind === 'tool' ||
     part.kind === 'tool_group' ||
     part.kind === 'subagent' ||
-    part.kind === 'subthread' ||
+    part.kind === 'subagents' ||
     part.kind === 'agent_image' ||
     (part.kind === 'text' && part.fromPlan === true)
   )
@@ -1049,8 +1161,28 @@ export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
  *  pending belongs to the newest turn, and the newest completed turn is never
  *  folded (``StructuredPane.isTurnFoldable``). Anything folded here is history
  *  the reader has already moved past, one click away. */
+export function subagentRegionErrorCount(
+  region: Extract<TimelinePart, { kind: 'subagents' }>,
+): number {
+  const issues = new Set<string>()
+  for (const child of region.threads) {
+    if (child.launchTool?.status === 'failed') issues.add(`launch:${child.launchTool.key}`)
+    for (const row of child.parts) {
+      if (row.kind === 'status' && row.isError) issues.add(`status:${child.threadId}:${row.key}`)
+      const tools = row.kind === 'tool_group' ? row.tools : row.kind === 'agent_image' ? [row.tool] : []
+      for (const tool of tools) {
+        if (tool.status === 'failed') issues.add(`tool:${child.threadId}:${tool.key}`)
+      }
+    }
+  }
+  return issues.size
+}
+
 function isPinnedPart(part: TimelinePart): boolean {
-  return part.kind === 'error'
+  return part.kind === 'error' || (part.kind === 'subagents' && (
+    subagentRegionErrorCount(part) > 0 ||
+    part.threads.some(child => child.lifecycleStatus === 'failed')
+  ))
 }
 
 /** When the turn's last message began, or ``null`` when it never spoke.
@@ -1108,13 +1240,16 @@ export function countProcessSteps(process: TimelinePart[]): number {
   for (const part of process) {
     if (part.kind === 'tool_group') {
       steps += part.tools.length
-    } else if (part.kind === 'subthread') {
-      // Count the child thread's own tool actions (its directives are the
-      // main agent's calls, already represented by their tool on the turn).
-      for (const child of part.parts) {
-        if (child.kind === 'tool_group') steps += child.tools.length
-        else if (child.kind === 'agent_image') steps += 1
+    } else if (part.kind === 'subagents') {
+      const launches = new Set<TimelineTool>()
+      for (const thread of part.threads) {
+        if (thread.launchTool) launches.add(thread.launchTool)
+        for (const child of thread.parts) {
+          if (child.kind === 'tool_group') steps += child.tools.length
+          else if (child.kind === 'agent_image') steps += 1
+        }
       }
+      steps += launches.size
     } else if (part.kind === 'tool' || part.kind === 'subagent' || part.kind === 'agent_image') {
       steps += 1
     }

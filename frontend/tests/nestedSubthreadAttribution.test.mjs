@@ -88,6 +88,12 @@ function sub(type, threadId, payload = {}, overrides = {}) {
   })
 }
 
+function childThreads(turn) {
+  const regions = turn.parts.filter((part) => part.kind === 'subagents')
+  assert.ok(regions.length <= 1, 'a parent turn must have at most one sub-agent region')
+  return regions[0]?.threads ?? []
+}
+
 function realSequence() {
   seq = 0
   return [
@@ -156,14 +162,15 @@ test('parseSubagent recognizes sendInput as a directive and keeps spawnAgent a s
 test('subthread deltas/tools group by thread; main bubble keeps only the main agent', () => {
   const [turn] = groupEventsIntoTurns(realSequence())
 
-  // Exactly two nested groups, one per receiver thread, in first-seen order.
-  const groups = turn.parts.filter((p) => p.kind === 'subthread')
-  assert.deepEqual(groups.map((g) => g.threadId), [F6, FEC])
+  // Exactly one region with two full-id rows in first-seen order.
+  assert.equal(turn.parts.filter((part) => part.kind === 'subagents').length, 1)
+  const groups = childThreads(turn)
+  assert.deepEqual(groups.map((group) => group.threadId), [F6, FEC])
 
   const f6 = groups[0]
   const kinds = f6.parts.map((p) => p.kind)
-  // thinking + text + tool group + the sendInput directive (the spawn itself
-  // keeps its own dedicated sub-agent card, so it is not duplicated here).
+  // Thinking, text, tool work, and follow-up directives stay inside the
+  // child row. The correlated spawn is attached to the same row.
   assert.ok(kinds.includes('instruction'))
   assert.ok(kinds.includes('thinking'))
   assert.ok(kinds.includes('text'))
@@ -172,17 +179,15 @@ test('subthread deltas/tools group by thread; main bubble keeps only the main ag
   const childTools = f6.parts.find((p) => p.kind === 'tool_group').tools
   assert.equal(childTools[0].name, 'exec_command')
   assert.equal(childTools[0].status, 'completed')
-  // Only the follow-up sendInput is filed as an in-group instruction; the
-  // spawnAgent launch renders its own dedicated sub-agent card on the turn.
   const instructions = f6.parts.filter((p) => p.kind === 'instruction')
   assert.deepEqual(instructions.map((i) => i.tool.name), ['sendInput'])
 
-  // The spawn launch keeps its standalone sub-agent card (no regression to the
-  // existing card) in arrival order before the child thread region.
-  const spawnCard = turn.parts.find((p) => p.kind === 'subagent')
-  assert.ok(spawnCard)
-  assert.equal(spawnCard.tool.name, 'spawnAgent')
-  assert.equal(turn.parts.indexOf(spawnCard), turn.parts.indexOf(groups[0]) - 1)
+  // The matching spawn is launch metadata on the same full-id row, not a
+  // second standalone card. Its completion means dispatch completed only.
+  assert.equal(turn.parts.filter((p) => p.kind === 'subagent').length, 0)
+  assert.equal(f6.launchTool.name, 'spawnAgent')
+  assert.equal(f6.launchTool.status, 'completed')
+  assert.equal(f6.lifecycleStatus, 'active')
 
   // Main assistant text contains only the main agent's two prose lines.
   assert.equal(turn.assistantText, '我先派内建 worker 去做。Kernel 已完成，单 launch。')
@@ -207,7 +212,7 @@ test('multiple receiver threads are grouped separately and an unattributed event
   }, { call_id: 'call_mainread', message_id: null }))
   const [turn] = groupEventsIntoTurns(events)
 
-  const groups = turn.parts.filter((p) => p.kind === 'subthread')
+  const groups = childThreads(turn)
   assert.equal(groups.length, 2)
   assert.equal(groups[1].threadId, FEC)
   assert.match(groups[1].parts.find((p) => p.kind === 'text').text, /allclose/)
@@ -226,7 +231,7 @@ test('empty/whitespace subagent_thread safely degrades to the main stream', () =
     ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
   ]
   const [turn] = groupEventsIntoTurns(events)
-  assert.equal(turn.parts.filter((p) => p.kind === 'subthread').length, 0)
+  assert.equal(childThreads(turn).length, 0)
   assert.equal(turn.assistantText, 'child?')
 })
 
@@ -238,8 +243,8 @@ test('copy text and process counts do not fold child prose into the main answer'
   assert.ok(!/allclose passes/.test(copy))
   assert.ok(!/starting on merlin_dev/.test(copy))
 
-  // Work steps = the spawnAgent launch card (1) plus the child's one exec tool
-  // (1). The sendInput directive is an instruction, not a tool action, and is
+  // Work steps = the correlated spawn dispatch (1) plus the child's one exec
+  // tool (1). The sendInput directive is not counted again, and is
   // not double-counted; child prose is never counted.
   const steps = countProcessSteps(turn.parts)
   assert.equal(steps, 2)
@@ -270,7 +275,7 @@ test('every rendered subthread part key is unique even when kinds repeat', () =>
     ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
   ]
   const [turn] = groupEventsIntoTurns(events)
-  const groups = turn.parts.filter((p) => p.kind === 'subthread')
+  const groups = childThreads(turn)
   assert.equal(groups.length, 1)
   const keys = groups[0].parts.map((p) => p.key)
   assert.equal(new Set(keys).size, keys.length, `duplicate subthread keys: ${keys}`)
@@ -302,7 +307,7 @@ test('four spawned child threads each get their own group with unique keys', () 
     ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
   ]
   const [turn] = groupEventsIntoTurns(events)
-  const groups = turn.parts.filter((p) => p.kind === 'subthread')
+  const groups = childThreads(turn)
   assert.deepEqual(groups.map((g) => g.threadId), [F6, T1, T2, T3])
   // Top-level group keys are unique as well.
   const groupKeys = groups.map((g) => g.key)
@@ -321,13 +326,103 @@ test('incremental reducer groups subthread events identically on append', () => 
   const first = reducer.reduce(events.slice(0, 8))
   // (The reducer mutates turn objects in place, so the streaming snapshot's
   // counts must be captured before the second reduce appends FEC.)
-  const firstGroupCount = first[0].parts.filter((p) => p.kind === 'subthread').length
+  const firstGroupCount = childThreads(first[0]).length
   const full = reducer.reduce(events)
   // Streaming half-way already mounted the F6 group with its first rows.
   assert.equal(firstGroupCount, 1)
-  const groups = full[0].parts.filter((p) => p.kind === 'subthread')
+  const groups = childThreads(full[0])
   assert.deepEqual(groups.map((g) => g.threadId), [F6, FEC])
   assert.equal(full[0].assistantText, '我先派内建 worker 去做。Kernel 已完成，单 launch。')
+})
+
+test('dispatch and parent completion never complete a child without lifecycle evidence', () => {
+  seq = 0
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'delegate' }, { message_id: `${TURN}:user` }),
+    ev('tool_call_started', {
+      tool_call_id: 'spawn-only', name: 'spawnAgent',
+      args: { prompt: 'quiet child', receiverThreadIds: [F6] },
+    }, { call_id: 'spawn-only' }),
+    ev('tool_call_completed', {
+      tool_call_id: 'spawn-only', status: 'completed', result: '{}',
+    }, { call_id: 'spawn-only' }),
+    ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
+  ])
+  const child = childThreads(turn)[0]
+  assert.equal(child.launchTool.status, 'completed')
+  assert.equal(child.lifecycleStatus, 'unknown')
+})
+
+test('child activity is active without tools and parent completion does not change it', () => {
+  seq = 0
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'delegate' }, { message_id: `${TURN}:user` }),
+    sub('text_delta', F6, { text: 'report only' }),
+    ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
+  ])
+  const child = childThreads(turn)[0]
+  assert.equal(child.lifecycleStatus, 'active')
+  assert.equal(child.parts.filter((part) => part.kind === 'tool_group').length, 0)
+})
+
+test('only scoped lifecycle evidence terminalizes and later activity reopens the child', () => {
+  seq = 0
+  const lifecycle = (status) => sub('status', F6, {
+    text: `Sub-agent turn ${status}`,
+    provider_status: 'subagent_lifecycle',
+    subagent_status: status,
+    snapshot: true,
+  }, { message_id: `subagent-lifecycle:${F6}` })
+  const reducer = new mod.IncrementalTimelineReducer()
+  let turns = reducer.reduce([
+    ev('turn_started', { summary: 'delegate' }, { message_id: `${TURN}:user` }),
+    lifecycle('active'),
+    lifecycle('completed'),
+  ])
+  assert.equal(childThreads(turns[0])[0].lifecycleStatus, 'completed')
+
+  turns = reducer.reduce([
+    ev('turn_started', { summary: 'delegate' }, { message_id: `${TURN}:user` }),
+    lifecycle('active'),
+    lifecycle('completed'),
+    sub('text_delta', F6, { text: 'follow-up' }),
+  ])
+  assert.equal(childThreads(turns[0])[0].lifecycleStatus, 'active')
+})
+
+test('parent completion leaves a child tool running', () => {
+  seq = 0
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'delegate' }, { message_id: `${TURN}:user` }),
+    sub('tool_call_started', F6, {
+      tool_call_id: 'child-tool', name: 'exec_command', args: { cmd: 'sleep 9' },
+    }, { call_id: 'child-tool', message_id: null }),
+    ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
+  ])
+  const child = childThreads(turn)[0]
+  assert.equal(child.parts.find((part) => part.kind === 'tool_group').tools[0].status, 'running')
+  assert.equal(child.lifecycleStatus, 'active')
+})
+
+test('full provider ids with the same prefix remain separate rows', () => {
+  const left = '01a0e38b-0000-7031-b97e-aaaaaaaaaaaa'
+  const right = '01a0e38b-0000-7031-b97e-bbbbbbbbbbbb'
+  seq = 0
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'parallel' }, { message_id: `${TURN}:user` }),
+    ev('tool_call_started', {
+      tool_call_id: 'spawn-left', name: 'spawnAgent',
+      args: { prompt: 'left', receiverThreadIds: [left] },
+    }, { call_id: 'spawn-left' }),
+    ev('tool_call_started', {
+      tool_call_id: 'spawn-right', name: 'spawnAgent',
+      args: { prompt: 'right', receiverThreadIds: [right] },
+    }, { call_id: 'spawn-right' }),
+  ])
+  const children = childThreads(turn)
+  assert.deepEqual(children.map((child) => child.threadId), [left, right])
+  assert.equal(new Set(children.map((child) => child.key)).size, 2)
+  assert.equal(turn.parts.filter((part) => part.kind === 'subagent').length, 0)
 })
 
 test('child status with stable snapshot replaces in place, not appended', () => {
@@ -354,7 +449,7 @@ test('child status with stable snapshot replaces in place, not appended', () => 
     ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
   ]
   const [turn] = groupEventsIntoTurns(events)
-  const group = turn.parts.find((p) => p.kind === 'subthread')
+  const group = childThreads(turn)[0]
   assert.ok(group, 'F6 subthread group should exist')
   // Only ONE status part (replaced in place), with the final text.
   const statuses = group.parts.filter((p) => p.kind === 'status')
@@ -385,11 +480,114 @@ test('cancelled turn finalizes in-flight child status (snapshot replay)', () => 
     ev('turn_completed', { status: 'cancelled' }, { message_id: TURN }),
   ]
   const [turn] = groupEventsIntoTurns(events)
-  const group = turn.parts.find((p) => p.kind === 'subthread')
+  const group = childThreads(turn)[0]
   assert.ok(group, 'F6 subthread group should exist')
   const statuses = group.parts.filter((p) => p.kind === 'status')
   assert.equal(statuses.length, 1)
   assert.equal(statuses[0].text, 'Thinking interrupted')
   // The in-flight "Thinking…" is gone — no stale indicator.
   assert.ok(!statuses.some((s) => s.text === 'Thinking…'))
+})
+
+
+test('spawn completion can recover a receiver id missing from start', () => {
+  seq = 0
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'late id' }, { message_id: `${TURN}:user` }),
+    ev('tool_call_started', {
+      tool_call_id: 'late-spawn', name: 'spawnAgent',
+      args: { prompt: 'inspect', receiverThreadIds: [] },
+    }, { call_id: 'late-spawn' }),
+    ev('tool_call_completed', {
+      tool_call_id: 'late-spawn', name: 'spawnAgent', status: 'completed',
+      args: { prompt: 'inspect', receiverThreadIds: [F6] }, result: '{}',
+    }, { call_id: 'late-spawn' }),
+  ])
+  const child = childThreads(turn)[0]
+  assert.equal(child.threadId, F6)
+  assert.equal(child.launchTool.name, 'spawnAgent')
+  assert.equal(child.launchTool.status, 'completed')
+  assert.equal(child.lifecycleStatus, 'unknown')
+  assert.equal(turn.parts.filter((part) => part.kind === 'subagent').length, 0)
+  assert.equal(
+    turn.parts.filter((part) => part.kind === 'tool_group')
+      .flatMap((part) => part.tools)
+      .filter((tool) => tool.callId === 'late-spawn').length,
+    0,
+  )
+})
+
+
+test('completion recovery never detaches an unaddressed fallback tool', () => {
+  seq = 0
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'fallback' }, { message_id: `${TURN}:user` }),
+    ev('tool_call_completed', {
+      tool_call_id: 'claude-late', name: 'Agent', status: 'completed',
+      args: { description: 'review', prompt: 'review code', subagent_type: 'Explore' },
+      result: 'done',
+    }, { call_id: 'claude-late' }),
+  ])
+  assert.equal(childThreads(turn).length, 0)
+  const generic = turn.parts.find((part) => part.kind === 'tool_group')
+  assert.ok(generic)
+  assert.equal(generic.tools[0].callId, 'claude-late')
+})
+
+test('empty child deltas do not reopen a completed child turn', () => {
+  seq = 0
+  const lifecycle = (status) => sub('status', F6, {
+    text: `Sub-agent turn ${status}`,
+    provider_status: 'subagent_lifecycle', subagent_status: status, snapshot: true,
+  }, { message_id: `subagent-lifecycle:${F6}` })
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'empty replay' }, { message_id: `${TURN}:user` }),
+    lifecycle('completed'),
+    sub('text_delta', F6, { text: '' }),
+    sub('thinking_delta', F6, { text: '' }),
+  ])
+  assert.equal(childThreads(turn)[0].lifecycleStatus, 'completed')
+})
+
+test('duplicate child tool start does not reopen completion but a new call does', () => {
+  seq = 0
+  const lifecycle = (status) => sub('status', F6, {
+    text: `Sub-agent turn ${status}`,
+    provider_status: 'subagent_lifecycle', subagent_status: status, snapshot: true,
+  }, { message_id: `subagent-lifecycle:${F6}` })
+  const reducer = new mod.IncrementalTimelineReducer()
+  let events = [
+    ev('turn_started', { summary: 'replay' }, { message_id: `${TURN}:user` }),
+    sub('tool_call_started', F6, {
+      tool_call_id: 'child-call', name: 'exec_command', args: { cmd: 'true' },
+    }, { call_id: 'child-call', message_id: null }),
+    lifecycle('completed'),
+  ]
+  let turns = reducer.reduce(events)
+  assert.equal(childThreads(turns[0])[0].lifecycleStatus, 'completed')
+
+  events = events.concat(sub('tool_call_started', F6, {
+    tool_call_id: 'child-call', name: 'exec_command', args: { cmd: 'true' },
+  }, { call_id: 'child-call', message_id: null }))
+  turns = reducer.reduce(events)
+  assert.equal(childThreads(turns[0])[0].lifecycleStatus, 'completed')
+
+  events = events.concat(sub('tool_call_started', F6, {
+    tool_call_id: 'child-call-2', name: 'exec_command', args: { cmd: 'echo new' },
+  }, { call_id: 'child-call-2', message_id: null }))
+  turns = reducer.reduce(events)
+  assert.equal(childThreads(turns[0])[0].lifecycleStatus, 'active')
+})
+
+test('empty or unsupported child events do not mount a phantom region', () => {
+  seq = 0
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'empty child' }, { message_id: `${TURN}:user` }),
+    sub('text_delta', F6, { text: '' }),
+    sub('thinking_delta', F6, { text: '' }),
+    sub('status', F6, { text: '' }),
+  ])
+  assert.equal(turn.renderRevision, 1)
+  assert.equal(childThreads(turn).length, 0)
+  assert.equal(turn.parts.some((part) => part.kind === 'subagents'), false)
 })

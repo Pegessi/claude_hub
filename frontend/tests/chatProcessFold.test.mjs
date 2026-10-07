@@ -57,6 +57,7 @@ const {
   getCompletedPlanText,
   groupEventsIntoTurns,
   splitTurnProcess,
+  subagentRegionErrorCount,
   turnElapsedMs,
   turnProcessLabel,
 } = mod
@@ -553,7 +554,7 @@ test('a long thinking, tool, or sub-agent card can be collapsed from its own foo
   // Count footers in the top-level branches only. The nested sub-thread block
   // reuses the same collapse control for its own child cards and legitimately
   // adds more, so exclude that branch when asserting the three top-level cards.
-  const subthreadStart = structuredPane.indexOf(`v-else-if="part.kind === 'subthread'"`)
+  const subthreadStart = structuredPane.indexOf(`v-else-if="part.kind === 'subagents'"`)
   const subthreadEnd = structuredPane.indexOf(`v-else-if="part.kind === 'agent_image'"`)
   assert.ok(subthreadStart > -1 && subthreadEnd > subthreadStart)
   const topLevelPane =
@@ -611,4 +612,34 @@ test('the folded header says when a card is folded in with it', () => {
     'a turn without one must not claim to have one',
   )
   assert.ok(split)
+})
+
+test('a subagent region with dispatch or child errors stays pinned when process folds', () => {
+  const childId = '01a0e2f6-ef37-7031-b97e-fecf618eef5a'
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'delegate' }),
+    makeEvent(2, 'tool_call_started', {
+      tool_call_id: 'spawn-1', name: 'spawnAgent',
+      args: { prompt: 'inspect', receiverThreadIds: [childId] },
+    }, { call_id: 'spawn-1' }),
+    makeEvent(3, 'tool_call_completed', {
+      tool_call_id: 'spawn-1', status: 'failed', result: 'dispatch failed',
+    }, { call_id: 'spawn-1' }),
+    makeEvent(4, 'status', {
+      text: 'child connection failed', provider_status: 'error',
+      subagent_thread: childId,
+    }, { message_id: 'child-error-1' }),
+    makeEvent(5, 'text_delta', { text: 'fallback answer' }),
+    makeEvent(6, 'turn_completed', { status: 'completed' }),
+  ])[0]
+
+  const region = turn.parts.find(part => part.kind === 'subagents')
+  assert.ok(region)
+  assert.equal(subagentRegionErrorCount(region), 2)
+  assert.equal(region.threads[0].lifecycleStatus, 'unknown', 'errors are not lifecycle evidence')
+  assert.deepEqual(splitTurnProcess(turn).pinned.map(part => part.kind), ['subagents'])
+  assert.deepEqual(
+    foldTurnParts(turn, false).map(part => part.kind),
+    ['process', 'subagents', 'text'],
+  )
 })

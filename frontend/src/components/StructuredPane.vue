@@ -408,7 +408,7 @@
                 class="conversation-avatar conversation-avatar--subagent"
                 aria-hidden="true"
               >❯</span>
-              <details class="subagent-card">
+              <details class="subagent-card subagent-card--standalone">
                 <summary
                   class="subagent-header"
                   :class="{ 'subagent-header--running': part.tool.status === 'running' }"
@@ -425,7 +425,7 @@
                   <span
                     class="tool-status"
                     :class="part.tool.status"
-                  >{{ subagentStatusLabel(part.tool.status) }}</span>
+                  >{{ subagentCallStatusLabel(part.tool.status) }}</span>
                 </summary>
                 <div class="subagent-body">
                   <div
@@ -446,7 +446,7 @@
                     v-else-if="part.tool.status === 'running'"
                     class="subagent-running-note"
                   >
-                    子代理运行中…
+                    子代理调用处理中…
                   </div>
                 </div>
                 <button
@@ -459,187 +459,229 @@
               </details>
             </div>
 
-            <!-- Nested sub-agent THREAD (TraeX/Codex collab). The child's own
-                 directives/thinking/text/tools are grouped here so the main
-                 bubble keeps only the main agent's voice. Reuses the subagent
-                 card surface (accent edge/identity/indentation) and expands to
-                 reveal every child row — no information is dropped. -->
+            <!-- One native sub-agent region per parent turn. Correlated spawn
+                 calls and child streams share one row keyed by the complete provider
+                 thread id; expanding a row preserves the child's full process. -->
             <div
-              v-else-if="part.kind === 'subthread'"
+              v-else-if="part.kind === 'subagents'"
               class="conversation-row conversation-row--assistant conversation-row--subagent"
             >
               <span
                 class="conversation-avatar conversation-avatar--subagent"
                 aria-hidden="true"
               >❯</span>
-              <details class="subagent-card subthread-card">
-                <summary
-                  class="subagent-header"
-                  :class="{ 'subagent-header--running': subthreadStatus(part) === 'running' }"
-                >
+              <details
+                class="subagent-card subagent-region"
+                data-testid="subagent-region"
+              >
+                <summary class="subagent-header">
                   <span class="subagent-idline">
-                    <span class="subagent-badge">TraeX 子代理</span>
-                    <span class="subagent-name">{{ subthreadLabel(part) }}</span>
+                    <span class="subagent-badge">原生子代理</span>
                   </span>
-                  <span class="subagent-headline">{{ subthreadHeadline(part) }}</span>
+                  <span class="subagent-headline">{{ subagentRegionHeadline(part) }}</span>
                   <span
-                    class="tool-status"
-                    :class="subthreadStatus(part)"
-                  >{{ subthreadStatusLabel(part) }}</span>
+                    class="tool-status subagent-region-status"
+                    :class="subagentRegionStatusClass(part)"
+                  >{{ subagentRegionStatusLabel(part) }}</span>
                 </summary>
-                <div class="subagent-body subthread-body">
-                  <template
-                    v-for="sub in part.parts"
-                    :key="sub.key"
+                <div class="subagent-body subagent-region-body">
+                  <details
+                    v-for="thread in part.threads"
+                    :key="thread.key"
+                    class="subagent-thread-row"
+                    :data-subagent-thread-id="thread.threadId"
                   >
-                    <!-- A follow-up directive the main agent sent this child
-                         (sendInput): shown as an inbound instruction card.
-                         The original spawn keeps its own launch card above. -->
-                    <div
-                      v-if="sub.kind === 'instruction'"
-                      class="subthread-instruction"
-                    >
-                      <div class="subthread-instruction-head">
-                        <span class="subthread-instruction-arrow">→ 指令</span>
-                        <span
-                          class="tool-status"
-                          :class="sub.tool.status"
-                        >{{ subagentStatusLabel(sub.tool.status) }}</span>
-                      </div>
-                      <pre class="subthread-instruction-prompt">{{ subthreadInstructionText(sub.tool) }}</pre>
-                    </div>
-
-                    <details
-                      v-else-if="sub.kind === 'thinking'"
-                      class="thinking-card subthread-thinking"
-                    >
-                      <summary>
-                        <span
-                          class="thinking-indicator"
-                          aria-hidden="true"
-                        />
-                        Thinking
-                      </summary>
-                      <pre class="thinking-body">{{ sub.text }}</pre>
-                      <button
-                        type="button"
-                        class="details-collapse"
-                        @click="collapseDetails"
-                      >
-                        收起
-                      </button>
-                    </details>
-
-                    <div
-                      v-else-if="sub.kind === 'text'"
-                      class="subthread-message"
-                    >
-                      <MarkdownContent
-                        :text="sub.text"
-                        :tab-id="props.tabId"
-                        compact
-                        :complete="turn.completed"
-                      />
-                    </div>
-
-                    <div
-                      v-else-if="sub.kind === 'status'"
-                      class="event-status subthread-status"
-                    >
-                      <span>{{ sub.text }}</span>
-                    </div>
-
-                    <details
-                      v-else-if="sub.kind === 'tool_group'"
-                      class="tool-card tool-card--group"
-                    >
-                      <summary
-                        class="tool-header"
-                        :class="{ 'tool-header--single': sub.tools.length === 1 }"
-                      >
-                        <span class="tool-name">
-                          {{ sub.tools.length === 1 ? sub.tools[0].name : `${sub.tools.length} tools` }}
-                        </span>
-                        <template v-if="sub.tools.length > 1">
-                          <span class="tool-group-names">
-                            {{ sub.tools.map(t => t.name).join(', ') }}
-                          </span>
-                        </template>
-                        <span
-                          class="tool-status"
-                          :class="toolGroupStatus(sub.tools)"
-                        >{{ toolGroupStatus(sub.tools) }}</span>
-                      </summary>
+                    <summary class="subagent-thread-header">
+                      <span
+                        class="subagent-name"
+                        :title="thread.threadId"
+                      >{{ thread.threadId }}</span>
+                      <span class="subagent-headline">{{ subthreadHeadline(thread) }}</span>
+                      <span
+                        class="tool-status"
+                        :class="subthreadStatusClass(thread)"
+                      >{{ subthreadStatusLabel(thread) }}</span>
+                    </summary>
+                    <div class="subthread-body">
                       <div
-                        v-for="tool in sub.tools"
-                        :key="tool.key"
-                        class="tool-group-item"
+                        v-if="thread.launchTool"
+                        class="subthread-instruction subthread-launch"
                       >
-                        <div class="tool-group-item-header">
-                          <span class="tool-name">{{ tool.name }}</span>
+                        <div class="subthread-instruction-head">
+                          <span class="subthread-instruction-arrow">→ 初始任务</span>
                           <span
                             class="tool-status"
-                            :class="tool.status"
-                          >{{ tool.status }}</span>
+                            :class="thread.launchTool.status"
+                          >{{ subagentDispatchLabel(thread.launchTool.status) }}</span>
                         </div>
-                        <div
-                          v-if="tool.argsText"
-                          class="tool-block"
+                        <pre class="subthread-instruction-prompt">{{ subthreadInstructionText(thread.launchTool) }}</pre>
+                        <details
+                          v-if="thread.launchTool.resultText"
+                          class="subthread-launch-result"
                         >
-                          <span>Input</span>
-                          <pre>{{ tool.argsText }}</pre>
-                        </div>
-                        <div
-                          v-if="tool.resultText"
-                          class="tool-block"
-                        >
-                          <span>Result</span>
-                          <pre>{{ tool.resultText }}</pre>
-                        </div>
+                          <summary>派发返回</summary>
+                          <pre>{{ thread.launchTool.resultText }}</pre>
+                        </details>
                       </div>
-                      <button
-                        type="button"
-                        class="details-collapse"
-                        @click="collapseDetails"
-                      >
-                        收起
-                      </button>
-                    </details>
 
-                    <div
-                      v-else-if="sub.kind === 'agent_image'"
-                      class="agent-image-card"
-                    >
-                      <button
-                        v-if="!erroredAgentImages.has(sub.key)"
-                        type="button"
-                        class="turn-attachment-button agent-image-button"
-                        :aria-label="`Open image ${agentImageBasename(sub.path)}`"
-                        @click="openImageLightbox(agentImageUrl(sub.path), agentImageBasename(sub.path), $event)"
+                      <template
+                        v-for="sub in thread.parts"
+                        :key="sub.key"
                       >
-                        <img
-                          :src="agentImageUrl(sub.path)"
-                          class="turn-attachment-img"
-                          :alt="agentImageBasename(sub.path)"
-                          loading="lazy"
-                          decoding="async"
-                          @error="onAgentImageError($event, sub.key)"
+                        <div
+                          v-if="sub.kind === 'instruction'"
+                          class="subthread-instruction"
                         >
-                      </button>
-                      <div
-                        v-else
-                        class="turn-attachment-placeholder agent-image-missing"
-                      >
-                        图片不可用
-                      </div>
-                      <div
-                        class="agent-image-path"
-                        :title="sub.path"
-                      >
-                        {{ agentImageBasename(sub.path) }}
-                      </div>
+                          <div class="subthread-instruction-head">
+                            <span class="subthread-instruction-arrow">→ 指令</span>
+                            <span
+                              class="tool-status"
+                              :class="sub.tool.status"
+                            >{{ subagentDispatchLabel(sub.tool.status) }}</span>
+                          </div>
+                          <pre class="subthread-instruction-prompt">{{ subthreadInstructionText(sub.tool) }}</pre>
+                        </div>
+
+                        <details
+                          v-else-if="sub.kind === 'thinking'"
+                          class="thinking-card subthread-thinking"
+                        >
+                          <summary>
+                            <span
+                              class="thinking-indicator"
+                              aria-hidden="true"
+                            />
+                            Thinking
+                          </summary>
+                          <pre class="thinking-body">{{ sub.text }}</pre>
+                          <button
+                            type="button"
+                            class="details-collapse"
+                            @click="collapseDetails"
+                          >
+                            收起
+                          </button>
+                        </details>
+
+                        <div
+                          v-else-if="sub.kind === 'text'"
+                          class="subthread-message"
+                        >
+                          <MarkdownContent
+                            :text="sub.text"
+                            :tab-id="props.tabId"
+                            compact
+                            :complete="subthreadTerminal(thread)"
+                          />
+                        </div>
+
+                        <div
+                          v-else-if="sub.kind === 'status'"
+                          class="event-status subthread-status"
+                        >
+                          <span>{{ sub.text }}</span>
+                        </div>
+
+                        <details
+                          v-else-if="sub.kind === 'tool_group'"
+                          class="tool-card tool-card--group"
+                        >
+                          <summary
+                            class="tool-header"
+                            :class="{ 'tool-header--single': sub.tools.length === 1 }"
+                          >
+                            <span class="tool-name">
+                              {{ sub.tools.length === 1 ? sub.tools[0].name : `${sub.tools.length} tools` }}
+                            </span>
+                            <template v-if="sub.tools.length > 1">
+                              <span class="tool-group-names">
+                                {{ sub.tools.map(t => t.name).join(', ') }}
+                              </span>
+                            </template>
+                            <span
+                              class="tool-status"
+                              :class="toolGroupStatus(sub.tools)"
+                            >{{ toolGroupStatus(sub.tools) }}</span>
+                          </summary>
+                          <div
+                            v-for="tool in sub.tools"
+                            :key="tool.key"
+                            class="tool-group-item"
+                          >
+                            <div class="tool-group-item-header">
+                              <span class="tool-name">{{ tool.name }}</span>
+                              <span
+                                class="tool-status"
+                                :class="tool.status"
+                              >{{ tool.status }}</span>
+                            </div>
+                            <div
+                              v-if="tool.argsText"
+                              class="tool-block"
+                            >
+                              <span>Input</span>
+                              <pre>{{ tool.argsText }}</pre>
+                            </div>
+                            <div
+                              v-if="tool.resultText"
+                              class="tool-block"
+                            >
+                              <span>Result</span>
+                              <pre>{{ tool.resultText }}</pre>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            class="details-collapse"
+                            @click="collapseDetails"
+                          >
+                            收起
+                          </button>
+                        </details>
+
+                        <div
+                          v-else-if="sub.kind === 'agent_image'"
+                          class="agent-image-card"
+                        >
+                          <button
+                            v-if="!erroredAgentImages.has(sub.key)"
+                            type="button"
+                            class="turn-attachment-button agent-image-button"
+                            :aria-label="`Open image ${agentImageBasename(sub.path)}`"
+                            @click="openImageLightbox(agentImageUrl(sub.path), agentImageBasename(sub.path), $event)"
+                          >
+                            <img
+                              :src="agentImageUrl(sub.path)"
+                              class="turn-attachment-img"
+                              :alt="agentImageBasename(sub.path)"
+                              loading="lazy"
+                              decoding="async"
+                              @error="onAgentImageError($event, sub.key)"
+                            >
+                          </button>
+                          <div
+                            v-else
+                            class="turn-attachment-placeholder agent-image-missing"
+                          >
+                            图片不可用
+                          </div>
+                          <div
+                            class="agent-image-path"
+                            :title="sub.path"
+                          >
+                            {{ agentImageBasename(sub.path) }}
+                          </div>
+                        </div>
+                      </template>
                     </div>
-                  </template>
+                    <button
+                      type="button"
+                      class="details-collapse"
+                      @click="collapseDetails"
+                    >
+                      收起
+                    </button>
+                  </details>
                 </div>
                 <button
                   type="button"
@@ -1320,8 +1362,8 @@ import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted,
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
-import { subagentProviderLabel, subagentStatusLabel } from '@/utils/subagentTool'
+import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { subagentProviderLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
@@ -2717,47 +2759,98 @@ function subagentPrompt(tool: TimelineTool): string {
   return tool.subagent?.prompt ?? ''
 }
 
-// --- Nested sub-agent thread card projection -------------------------------
-// A ``subthread`` part groups one child thread's directives/thinking/text/
-// tools. These projections keep the template null-safe and centralize labels.
-
-type SubthreadPart = Extract<TimelinePart, { kind: 'subthread' }>
-
-/** Short, stable identity for the child thread (first 8 chars of its id). */
-function subthreadLabel(part: SubthreadPart): string {
-  return `线程 ${part.threadId.slice(0, 8)}`
+function subagentCallStatusLabel(status: TimelineTool['status']): string {
+  return {
+    running: '调用中',
+    completed: '调用已返回',
+    failed: '调用失败',
+    cancelled: '调用取消',
+  }[status]
 }
 
-/** All of the child's own tool calls, flattened across its tool groups. */
-function subthreadTools(part: SubthreadPart): TimelineTool[] {
-  const tools: TimelineTool[] = []
-  for (const sub of part.parts) {
-    if (sub.kind === 'tool_group') tools.push(...sub.tools)
+function subagentDispatchLabel(status: TimelineTool['status']): string {
+  return {
+    running: '派发中',
+    completed: '已派发',
+    failed: '派发失败',
+    cancelled: '派发取消',
+  }[status]
+}
+
+// --- Native sub-agent region projection -----------------------------------
+// Each row is keyed by its complete provider thread id. Lifecycle status comes
+// only from child-scoped provider evidence, never from tools or the parent.
+
+type SubagentRegionPart = Extract<TimelinePart, { kind: 'subagents' }>
+type SubthreadPart = SubagentRegionPart['threads'][number]
+
+function subagentRegionHeadline(part: SubagentRegionPart): string {
+  return `${part.threads.length} 个子代理`
+}
+
+function subagentRegionStatusLabel(part: SubagentRegionPart): string {
+  const counts = new Map<string, number>()
+  for (const thread of part.threads) {
+    counts.set(thread.lifecycleStatus, (counts.get(thread.lifecycleStatus) ?? 0) + 1)
   }
-  return tools
+  const labels: string[] = []
+  const errors = subagentRegionErrorCount(part)
+  if (errors > 0) labels.push(`${errors} 个错误`)
+  const append = (status: string, label: string) => {
+    const count = counts.get(status) ?? 0
+    if (count > 0) labels.push(`${count} 个${label}`)
+  }
+  append('failed', '本轮失败')
+  append('cancelled', '本轮取消')
+  append('active', '本轮活动中')
+  append('unknown', '状态未知')
+  append('completed', '本轮完成')
+  return labels.join(' · ')
 }
 
-/** Aggregate running state across the child's tool calls. */
-function subthreadStatus(part: SubthreadPart): TimelineTool['status'] {
-  return toolGroupStatus(subthreadTools(part))
+function subagentRegionStatusClass(part: SubagentRegionPart): string {
+  if (subagentRegionErrorCount(part) > 0) return 'failed'
+  if (part.threads.some(thread => thread.lifecycleStatus === 'failed')) return 'failed'
+  if (part.threads.some(thread => thread.lifecycleStatus === 'active')) return 'running'
+  if (part.threads.some(thread => thread.lifecycleStatus === 'cancelled')) return 'cancelled'
+  if (part.threads.some(thread => thread.lifecycleStatus === 'unknown')) return 'unknown'
+  return 'completed'
+}
+
+function subthreadStatusClass(part: SubthreadPart): string {
+  return part.lifecycleStatus === 'active' ? 'running' : part.lifecycleStatus
 }
 
 function subthreadStatusLabel(part: SubthreadPart): string {
-  return subagentStatusLabel(subthreadStatus(part))
+  return {
+    unknown: '状态未知',
+    active: '本轮活动中',
+    completed: '本轮完成',
+    failed: '本轮失败',
+    cancelled: '本轮取消',
+  }[part.lifecycleStatus]
 }
 
-/** Collapsed-card headline: the child's own last prose line (its report),
- *  falling back to its first line of thinking, then a neutral label. */
+function subthreadTerminal(part: SubthreadPart): boolean {
+  return part.lifecycleStatus === 'completed' || part.lifecycleStatus === 'failed' ||
+    part.lifecycleStatus === 'cancelled'
+}
+
+/** Collapsed-row headline: the child's latest report or instruction, then the
+ *  original delegated prompt, without using either as lifecycle evidence. */
 function subthreadHeadline(part: SubthreadPart): string {
-  for (let i = part.parts.length - 1; i >= 0; i -= 1) {
-    const sub = part.parts[i]
-    let text = ''
-    if (sub.kind === 'text') text = sub.text
-    else if (sub.kind === 'instruction') text = sub.tool.subagent?.prompt ?? ''
-    const first = text.split('\n').map(line => line.trim()).find(line => line.length > 0)
+  for (let index = part.parts.length - 1; index >= 0; index -= 1) {
+    const child = part.parts[index]
+    const text = child.kind === 'text'
+      ? child.text
+      : child.kind === 'instruction' ? (child.tool.subagent?.prompt ?? '') : ''
+    const first = text.split(String.fromCharCode(10)).map(line => line.trim()).find(Boolean)
     if (first) return first.length > 140 ? `${first.slice(0, 140)}…` : first
   }
-  return '子代理线程'
+  const prompt = part.launchTool?.subagent?.prompt ?? ''
+  const first = prompt.split(String.fromCharCode(10)).map(line => line.trim()).find(Boolean)
+  if (first) return first.length > 140 ? `${first.slice(0, 140)}…` : first
+  return '等待子代理更新'
 }
 
 /** Prompt carried by a spawn/sendInput directive tool. */
@@ -4982,6 +5075,52 @@ onUnmounted(() => {
 /* --- Nested sub-agent THREAD group ----------------------------------------
    Rows inside a child thread are indented one more level and visually
    separated so the expandable body reads as the child's own transcript. */
+.subagent-region-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.subagent-region-status {
+  flex: 0 0 auto;
+  color: var(--ch-color-text-subtle);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.subagent-thread-row {
+  overflow: clip;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-app-bg);
+}
+
+.subagent-thread-row > summary {
+  position: static;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  background: transparent;
+}
+
+.subagent-thread-row > .subthread-body {
+  padding: 8px;
+  border-top: 1px solid var(--ch-color-border-muted);
+}
+
+.subagent-thread-row .subagent-name {
+  flex: 0 1 260px;
+}
+
+.subthread-launch {
+  background: var(--ch-color-surface-muted, rgba(139, 148, 158, 0.08));
+}
+
+.tool-status.unknown {
+  color: var(--ch-color-text-subtle);
+}
+
 .subthread-body {
   display: flex;
   flex-direction: column;
@@ -5145,6 +5284,20 @@ onUnmounted(() => {
   .attachment-chip {
     width: 40px;
     height: 40px;
+  }
+
+  .subagent-thread-row > summary {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .subagent-thread-row .subagent-name {
+    flex-basis: 100%;
+    max-width: 100%;
+  }
+
+  .subagent-thread-row .subagent-headline {
+    flex: 1 1 180px;
   }
 
   .conversation-bubble,

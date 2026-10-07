@@ -27,13 +27,15 @@ F6 = "01a0e2f6-ef37-7031-b97e-fecf618eef5a"
 FEC = "01a0e2ec-54c9-74f3-bcc0-369634ac31de"
 
 
-def _ctx(main_thread_id: str | None = MAIN, session_id: str = "s1") -> NormalizeContext:
+def _ctx(
+    main_thread_id: str | None = MAIN, session_id: str = "s1", turn_id: str | None = "turn-1"
+) -> NormalizeContext:
     return NormalizeContext(
         session_id=session_id,
         tab_id="t1",
         agent_type=AgentType.TRAEX,
         run_epoch=1,
-        turn_id="turn-1",
+        turn_id=turn_id,
         main_thread_id=main_thread_id,
     )
 
@@ -766,7 +768,12 @@ def test_child_turn_lifecycle_cannot_complete_parent(adapter_type, status) -> No
             {"method": method, "params": {"threadId": thread, **params}}, ctx
         )
 
-    assert emit("turn/started", F6, turn={"id": "child-turn"}) == []
+    started = emit("turn/started", F6, turn={"id": "child-turn"})
+    assert len(started) == 1
+    assert started[0].type == AgentStreamEventType.STATUS
+    assert started[0].payload["provider_status"] == "subagent_lifecycle"
+    assert started[0].payload["subagent_status"] == "active"
+    assert started[0].payload["subagent_thread"] == F6
     for thread in (MAIN, F6, FEC):
         emit("item/started", thread, item={"type": "reasoning", "id": f"rs-{thread}"})
     emit(
@@ -789,6 +796,12 @@ def test_child_turn_lifecycle_cannot_complete_parent(adapter_type, status) -> No
     thinking = [e for e in child if e.payload.get("provider_status") == "reasoning"]
     assert len(thinking) == 1
     assert thinking[0].message_id == f"reasoning:rs-{F6}"
+    lifecycle = [e for e in child if e.payload.get("provider_status") == "subagent_lifecycle"]
+    assert len(lifecycle) == 1
+    expected_status = "cancelled" if status == "interrupted" else status
+    assert lifecycle[0].payload["subagent_status"] == expected_status
+    assert lifecycle[0].message_id == f"subagent-lifecycle:{F6}"
+    assert not any(e.type == AgentStreamEventType.TURN_COMPLETED for e in child)
 
     main = emit("turn/completed", MAIN, turn={"id": "parent-turn", "status": "completed"})
     terminal = [e for e in main if e.type == AgentStreamEventType.TURN_COMPLETED]
@@ -798,6 +811,41 @@ def test_child_turn_lifecycle_cannot_complete_parent(adapter_type, status) -> No
         f"reasoning:rs-{MAIN}",
         f"reasoning:rs-{FEC}",
     }
+
+
+@pytest.mark.parametrize("adapter_type", [CodexJsonlAdapter, TraexJsonlAdapter])
+@pytest.mark.parametrize("provider_status", [None, "mystery", "running"])
+def test_child_turn_completion_without_known_terminal_status_stays_unknown(
+    adapter_type, provider_status
+) -> None:
+    adapter = adapter_type()
+    turn = {"id": "child-turn"}
+    if provider_status is not None:
+        turn["status"] = provider_status
+    events = adapter.normalize_line(
+        {
+            "method": "turn/completed",
+            "params": {"threadId": F6, "turn": turn},
+        },
+        _ctx(),
+    )
+    assert not any(event.type == AgentStreamEventType.TURN_COMPLETED for event in events)
+    assert not any(event.payload.get("provider_status") == "subagent_lifecycle" for event in events)
+
+
+@pytest.mark.parametrize("adapter_type", [CodexJsonlAdapter, TraexJsonlAdapter])
+@pytest.mark.parametrize("method", ["turn/started", "turn/completed"])
+def test_late_child_lifecycle_does_not_open_a_legacy_turn(adapter_type, method) -> None:
+    ctx = _ctx()
+    ctx.turn_id = None
+    events = adapter_type().normalize_line(
+        {
+            "method": method,
+            "params": {"threadId": F6, "turn": {"id": "child-turn", "status": "completed"}},
+        },
+        ctx,
+    )
+    assert events == []
 
 
 def test_child_error_and_goal_notifications_cannot_control_parent() -> None:
@@ -815,3 +863,172 @@ def test_child_error_and_goal_notifications_cannot_control_parent() -> None:
         )
         == []
     )
+
+
+def test_spawn_completion_can_supply_receiver_thread_identity() -> None:
+    adapter = TraexJsonlAdapter()
+    ctx = _ctx()
+    started = adapter.normalize_line(
+        {
+            "method": "item/started",
+            "params": {
+                "threadId": MAIN,
+                "item": {
+                    "type": "collabAgentToolCall",
+                    "id": "late-id-spawn",
+                    "tool": "spawnAgent",
+                    "prompt": "inspect",
+                    "receiverThreadIds": [],
+                },
+            },
+        },
+        ctx,
+    )
+    assert started[0].payload["args"]["receiverThreadIds"] == []
+
+    completed = adapter.normalize_line(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": MAIN,
+                "item": {
+                    "type": "collabAgentToolCall",
+                    "id": "late-id-spawn",
+                    "tool": "spawnAgent",
+                    "status": "completed",
+                    "prompt": "inspect",
+                    "receiverThreadIds": [F6],
+                    "agentsStates": {F6: {"status": "running"}},
+                },
+            },
+        },
+        ctx,
+    )
+    assert completed[0].payload["name"] == "spawnAgent"
+    assert completed[0].payload["args"]["receiverThreadIds"] == [F6]
+
+    nested = adapter.normalize_line(
+        {
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "commandExecution",
+                    "id": "code-mode-nested:29:late-host:exec-1",
+                    "command": ["true"],
+                }
+            },
+        },
+        ctx,
+    )
+    assert nested[0].payload["subagent_thread"] == F6
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"method": "error", "params": {"threadId": F6, "error": {"message": "late child error"}}},
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": F6,
+                "turn": {"status": "failed", "error": {"message": "late child failure"}},
+            },
+        },
+        {
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "commandExecution",
+                    "id": "code-mode-nested:29:late:exec-1",
+                    "command": ["false"],
+                }
+            },
+        },
+    ],
+)
+def test_late_native_child_notifications_without_parent_turn_are_dropped(raw) -> None:
+    adapter = TraexJsonlAdapter()
+    _spawn(adapter, F6)
+    assert adapter.normalize_line(raw, _ctx(turn_id=None)) == []
+
+
+def test_no_turn_guard_keeps_main_control_plane_and_legacy_backfill() -> None:
+    adapter = TraexJsonlAdapter()
+    ctx = _ctx(turn_id=None)
+    main = adapter.normalize_line(
+        {"method": "error", "params": {"threadId": MAIN, "error": {"message": "main failed"}}}, ctx
+    )
+    legacy = adapter.normalize_line(
+        {"type": "event_msg", "payload": {"type": "error", "message": "legacy failed"}}, ctx
+    )
+    assert _types(main) == [AgentStreamEventType.ERROR]
+    assert _types(legacy) == [AgentStreamEventType.ERROR]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "reasoning",
+                    "id": "code-mode-nested:29:late-reasoning:reason-1",
+                    "summary": [],
+                }
+            },
+        },
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "reasoning",
+                    "id": "code-mode-nested:29:late-reasoning:reason-1",
+                    "summary": [],
+                }
+            },
+        },
+        {
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "commandExecution",
+                    "id": "ordinary-child-item",
+                    "thread_id": F6,
+                    "command": ["true"],
+                }
+            },
+        },
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": F6, "delta": "late child text"},
+        },
+        {
+            "method": "item/reasoning/textDelta",
+            "params": {"threadId": F6, "delta": "late child thinking"},
+        },
+    ],
+)
+def test_no_turn_drops_every_native_child_notification_shape(raw) -> None:
+    adapter = TraexJsonlAdapter()
+    _spawn(adapter, F6)
+    assert adapter.normalize_line(raw, _ctx(turn_id=None)) == []
+
+
+def test_item_owner_thread_still_routes_during_active_parent_turn() -> None:
+    events = TraexJsonlAdapter().normalize_line(
+        {
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "commandExecution",
+                    "id": "ordinary-child-item",
+                    "thread_id": F6,
+                    "command": ["true"],
+                }
+            },
+        },
+        _ctx(),
+    )
+    assert _types(events) == [AgentStreamEventType.TOOL_CALL_STARTED]
+    assert events[0].payload["subagent_thread"] == F6

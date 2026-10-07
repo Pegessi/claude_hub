@@ -437,6 +437,28 @@ class CodexJsonlAdapter(AgentStreamAdapter):
             return self._code_mode_thread(ctx, nested_id)
         return None
 
+    @staticmethod
+    def _child_lifecycle_event(
+        ctx: NormalizeContext, sub_thread: str, status: str
+    ) -> AgentStreamEvent:
+        labels = {
+            "active": "Sub-agent turn active",
+            "completed": "Sub-agent turn completed",
+            "failed": "Sub-agent turn failed",
+            "cancelled": "Sub-agent turn cancelled",
+        }
+        return ctx.event(
+            AgentStreamEventType.STATUS,
+            {
+                "text": labels[status],
+                "provider_status": "subagent_lifecycle",
+                "subagent_status": status,
+                "snapshot": True,
+            },
+            message_id=f"subagent-lifecycle:{sub_thread}",
+            sub_thread_id=sub_thread,
+        )
+
     def _normalize_notification(
         self, method: str, params: Any, ctx: NormalizeContext
     ) -> List[AgentStreamEvent]:
@@ -444,11 +466,21 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         events: List[AgentStreamEvent] = []
         if not isinstance(params, dict):
             return events
-        sub_thread = self._resolve_sub_thread(params, ctx, params.get("itemId"))
+        item = params.get("item")
+        item_id = params.get("itemId")
+        if not isinstance(item_id, str) or not item_id.strip():
+            item_id = item.get("id") if isinstance(item, dict) else None
+        sub_thread = self._resolve_sub_thread(params, ctx, item_id, item)
+        # Late native child notifications cannot start a legacy Hub turn.
+        # Transcript event_msg/response_item records take a separate path.
+        if sub_thread is not None and not ctx.turn_id:
+            return events
         if method == "turn/started":
             if sub_thread is not None:
-                # Child turns share this app-server stream but cannot open a
-                # top-level Hub turn (including late child continuations).
+                # Child lifecycle evidence must not open or complete a Hub turn.
+                # Ignore late child starts after the parent has ended.
+                if ctx.turn_id:
+                    events.append(self._child_lifecycle_event(ctx, sub_thread, "active"))
                 return events
             turn = params.get("turn")
             provider_turn_id = turn.get("id") if isinstance(turn, dict) else params.get("turnId")
@@ -474,12 +506,14 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         elif method == "turn/completed":
             turn = params.get("turn")
             status = "completed"
+            child_status: Optional[str] = None
             if isinstance(turn, dict):
                 turn_status = turn.get("status")
                 if turn_status == "interrupted":
                     turn_status = "cancelled"
                 if turn_status in ("failed", "cancelled", "completed"):
                     status = turn_status
+                    child_status = turn_status
                 error = turn.get("error")
                 if isinstance(error, dict) and error.get("message"):
                     if sub_thread is not None:
@@ -490,6 +524,8 @@ class CodexJsonlAdapter(AgentStreamAdapter):
                         events.append(
                             ctx.event(AgentStreamEventType.ERROR, {"message": error["message"]})
                         )
+            if sub_thread is not None and ctx.turn_id and child_status is not None:
+                events.append(self._child_lifecycle_event(ctx, sub_thread, child_status))
             if sub_thread is None:
                 completed: Dict[str, Any] = {"status": status}
                 cached_usage = self._latest_usage.pop(ctx.session_id, None)
@@ -707,7 +743,7 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         # receiver threads. Every other item that carries a sub-thread id (or a
         # ``code-mode-nested`` item id) is the child's own work and is nested.
         is_collab = kind == "collabAgentToolCall"
-        if is_collab and method == "item/started":
+        if is_collab:
             self._remember_collab_threads(name, args, ctx)
         sub_thread = None
         if not is_collab:
@@ -733,14 +769,20 @@ class CodexJsonlAdapter(AgentStreamAdapter):
         failed = item.get("status") in {"failed", "declined"} or item.get("success") is False
         if kind == "commandExecution" and item.get("exitCode") not in (None, 0):
             failed = True
+        payload = {
+            "tool_call_id": call_id,
+            "status": "failed" if failed else "completed",
+            "result": _codex_extract_text(result),
+        }
+        if is_collab:
+            # Spawn may receive its thread id only in item/completed. Preserve
+            # the completed item's structured identity so the reducer can
+            # recover the call from its temporary generic-tool presentation.
+            payload.update({"name": name, "args": args})
         return [
             ctx.event(
                 AgentStreamEventType.TOOL_CALL_COMPLETED,
-                {
-                    "tool_call_id": call_id,
-                    "status": "failed" if failed else "completed",
-                    "result": _codex_extract_text(result),
-                },
+                payload,
                 call_id=call_id,
                 sub_thread_id=sub_thread,
             )
