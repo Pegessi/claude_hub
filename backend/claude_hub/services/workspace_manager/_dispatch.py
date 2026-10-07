@@ -15,7 +15,7 @@ _NON_MIGRATABLE_DISPATCH_REASONS = frozenset({"User selected target agent"})
 
 
 class _DispatchMixin:
-    async def start_task(
+    async def _start_task_workspace(
         self,
         task_id: str,
         payload: StartTaskRequest | None = None,
@@ -340,6 +340,7 @@ class _DispatchMixin:
         )
 
     async def _request_dispatch_decision(self, workspace: Workspace, task: WorkspaceTask) -> None:
+        task = self._require_workspace_execution(task)
         dispatcher = await self.ensure_workspace_agent(
             workspace.id,
             EnsureWorkspaceAgentRequest(
@@ -353,7 +354,7 @@ class _DispatchMixin:
             self._build_dispatch_decision_prompt(workspace, task, dispatcher),
         )
 
-    async def apply_dispatch_decision(
+    async def _apply_dispatch_decision_workspace(
         self,
         task_id: str,
         payload: DispatchDecisionRequest,
@@ -386,7 +387,7 @@ class _DispatchMixin:
         await self.dispatch_workspace(task.workspace_id)
         return self.tasks[task.id]
 
-    async def continue_task(
+    async def _continue_task_workspace(
         self,
         task_id: str,
         payload: ContinueTaskRequest | None = None,
@@ -581,7 +582,7 @@ class _DispatchMixin:
                     "wait for that task to finish before requesting changes."
                 )
 
-    async def request_task_review(
+    async def _request_task_review_workspace(
         self,
         task_id: str,
         payload: RequestTaskReviewRequest | None = None,
@@ -753,7 +754,8 @@ class _DispatchMixin:
         tasks = [
             task
             for task in self.tasks.values()
-            if task.session_id == session_id
+            if self._workspace_owns_task(task)
+            and task.session_id == session_id
             and task.status == WorkspaceTaskStatus.QUEUED
             and not task.dispatch_pending
             and not task_dependency_blockers(self.tasks, task)
@@ -769,6 +771,8 @@ class _DispatchMixin:
     ) -> Optional[WorkspaceTask]:
         candidates: list[WorkspaceTask] = []
         for task in self.tasks.values():
+            if not self._workspace_owns_task(task):
+                continue
             if task.workspace_id != workspace_id:
                 continue
             if task.status != WorkspaceTaskStatus.QUEUED or task.dispatch_pending:
@@ -829,7 +833,11 @@ class _DispatchMixin:
             if not task_id:
                 continue
             task = self.tasks.get(task_id)
-            if not task or task.status != WorkspaceTaskStatus.QUEUED:
+            if (
+                not task
+                or not self._workspace_owns_task(task)
+                or task.status != WorkspaceTaskStatus.QUEUED
+            ):
                 continue
             if task_dependency_blockers(self.tasks, task):
                 continue
@@ -928,7 +936,7 @@ class _DispatchMixin:
         # call_id absent: persist the newly built prompt as a fresh delivery.
         await self.send_session_message(session_id, prompt, call_id=dispatch_call_id)
 
-    async def _dispatch_task_to_session(
+    async def _dispatch_task_to_session_workspace(
         self,
         task: WorkspaceTask,
         session: ManagedSession,
@@ -1054,3 +1062,46 @@ class _DispatchMixin:
             task.id,
             session.id,
         )
+
+    async def start_task(
+        self, task_id: str, payload: StartTaskRequest | None = None
+    ) -> WorkspaceTask:
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        async with self._workspace_execution_operation(task):
+            return await self._start_task_workspace(task_id, payload)
+
+    async def apply_dispatch_decision(
+        self, task_id: str, payload: DispatchDecisionRequest
+    ) -> WorkspaceTask:
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        async with self._workspace_execution_operation(task):
+            return await self._apply_dispatch_decision_workspace(task_id, payload)
+
+    async def continue_task(
+        self,
+        task_id: str,
+        payload: ContinueTaskRequest | None = None,
+        call_id: str | None = None,
+    ) -> WorkspaceTask:
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        async with self._workspace_execution_operation(task):
+            return await self._continue_task_workspace(task_id, payload, call_id)
+
+    async def request_task_review(
+        self, task_id: str, payload: RequestTaskReviewRequest | None = None
+    ) -> WorkspaceTask:
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        async with self._workspace_execution_operation(task):
+            return await self._request_task_review_workspace(task_id, payload)
+
+    async def _dispatch_task_to_session(self, task: WorkspaceTask, session: ManagedSession) -> None:
+        async with self._workspace_execution_operation(task) as live:
+            await self._dispatch_task_to_session_workspace(live, session)

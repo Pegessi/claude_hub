@@ -105,75 +105,7 @@ class _ChatWorkMixin:
         )
 
     async def create_chat_work(self, tab_id: str, payload: ChatWorkCreate) -> ChatWorkView:
-        source = ttyd_manager.get_tab(tab_id)
-        if source is None or source.session_kind != SessionKind.CHAT or source.workspace_role:
-            raise ValueError("Linked work requires an existing top-level Chat tab")
-        if source.target != ExecutionTarget.LOCAL:
-            raise ValueError("Chat-linked work currently supports local source Chats only")
-        if payload.kind == "monitor" and payload.task_mode != WorkspaceTaskMode.REVIEWED:
-            raise ValueError("Monitor checks use the existing internal reviewed execution mode")
-        if payload.workspace_id not in self.workspaces:
-            raise ValueError("Workspace not found")
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                payload.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-            ).encode()
-        ).hexdigest()
-        work_id = str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f"claude-hub:chat-work:{tab_id}:{payload.request_key}")
-        )
-        existing = self.scheduled_tasks.get(work_id)
-        if existing:
-            if existing.source_request_fingerprint != fingerprint:
-                raise ValueError("request_key already exists with different input")
-            return self.chat_work_view(self._chat_work_record(tab_id, work_id))
-        agent_type = payload.agent_type or source.agent_type
-        if agent_type == AgentType.TERMINAL:
-            raise ValueError("Linked work requires an AI agent")
-        if payload.model and agent_type not in _MODEL_ENV:
-            raise ValueError("Explicit model selection is supported for Claude and Codex only")
-        cwd = str(
-            Path(payload.cwd or source.cwd or self.workspaces[payload.workspace_id].path).resolve()
-        )
-        if not Path(cwd).is_dir():
-            raise ValueError("Work cwd must be an existing local directory")
-        model = payload.model
-        if not model and not payload.env_preset and agent_type == source.agent_type:
-            model = source.env.get(_MODEL_ENV.get(agent_type, ""))
-        now = _wm._now()
-        work = ScheduledTask(
-            id=work_id,
-            name=payload.title.strip(),
-            kind=ScheduledTaskKind.HUB_TASK,
-            run_at=now if payload.kind == "task" else None,
-            interval_seconds=payload.interval_seconds,
-            next_run_at=now,
-            workspace_id=payload.workspace_id,
-            agent_type=agent_type,
-            task_title=payload.title.strip(),
-            message=payload.prompt.strip(),
-            source_tab_id=tab_id,
-            source_request_key=payload.request_key,
-            source_request_fingerprint=fingerprint,
-            work_kind=payload.kind,
-            work_task_mode=payload.task_mode,
-            work_cwd=cwd,
-            work_model=model,
-            work_env_preset=payload.env_preset,
-            work_inherit_source_env=agent_type == source.agent_type and not payload.env_preset,
-            created_at=now,
-            updated_at=now,
-        )
-        # Save intent before launch; retry returns this same record even if a
-        # transport disconnect occurs while the first worker is starting.
-        self.scheduled_tasks[work.id] = work
-        try:
-            self._save_scheduled_tasks()
-        except Exception:
-            self.scheduled_tasks.pop(work.id, None)
-            raise
-        await self._fire_scheduled_task(work, now, manual=True)
-        return self.chat_work_view(work)
+        raise ValueError("legacy_chat_work_read_only_use_workspace_tasks")
 
     def list_chat_work(self, tab_id: str) -> list[ChatWorkView]:
         records = sorted(
@@ -309,23 +241,18 @@ class _ChatWorkMixin:
     async def update_chat_work(
         self, tab_id: str, work_id: str, payload: ChatWorkUpdate
     ) -> ChatWorkView:
+        if (
+            payload.action not in {"stop", "pause"}
+            or payload.prompt is not None
+            or payload.interval_seconds is not None
+        ):
+            raise ValueError("legacy_chat_work_read_only_use_workspace_tasks")
         lock = self._sched_fire_locks.setdefault(work_id, asyncio.Lock())
         async with lock:
             original = self._chat_work_record(tab_id, work_id)
             work = original.model_copy(deep=True)
             if (work.work_stopped_at or work.work_completed_at) and payload.action != "stop":
                 raise ValueError("Stopped or completed work cannot be resumed or edited")
-            if payload.interval_seconds is not None:
-                if work.work_kind != "monitor":
-                    raise ValueError("Only monitors have an interval")
-                work.interval_seconds = payload.interval_seconds
-                work.next_run_at = (
-                    self._compute_next_run(work, _wm._now()) if work.enabled else None
-                )
-            if payload.prompt is not None:
-                if not payload.prompt.strip():
-                    raise ValueError("prompt must not be blank")
-                work.message = payload.prompt.strip()
             if payload.action == "pause":
                 if work.work_kind != "monitor":
                     raise ValueError(
@@ -334,18 +261,6 @@ class _ChatWorkMixin:
                 work.enabled = False
                 work.work_pause_requested = True
                 work.next_run_at = None
-            elif payload.action == "resume":
-                if self._chat_work_active(work) and work.work_kind != "monitor":
-                    raise ValueError("An execution is still active")
-                if work.work_kind == "task" and any(
-                    t.status == WorkspaceTaskStatus.DONE for t in self._chat_work_executions(work)
-                ):
-                    raise ValueError("Completed work cannot be resumed")
-                work.enabled = True
-                work.work_pause_requested = False
-                work.last_status = "retry_requested"
-                work.last_error = None
-                work.next_run_at = _wm._now()
             elif payload.action == "stop":
                 work.enabled = False
                 work.work_stopped_at = work.work_stopped_at or _wm._now()
@@ -370,6 +285,8 @@ class _ChatWorkMixin:
                 if current_task is None:
                     continue
                 task = current_task
+                if task.legacy_work_detached or not self._workspace_owns_task(task):
+                    continue
                 if task.status in _ACTIVE and not task.manual_aborted_at:
                     if task.status in {
                         WorkspaceTaskStatus.QUEUED,
@@ -406,6 +323,8 @@ class _ChatWorkMixin:
             if current_task is None:
                 return
             task = current_task
+            if task.legacy_work_detached or not self._workspace_owns_task(task):
+                return
             if not task.manual_aborted_at and task.status not in {
                 WorkspaceTaskStatus.DONE,
                 WorkspaceTaskStatus.FAILED,
@@ -449,6 +368,8 @@ class _ChatWorkMixin:
             task = self.tasks.get(payload.task_id)
             if (
                 task is None
+                or task.legacy_work_detached
+                or not self._workspace_owns_task(task)
                 or task.source_work_id != work.id
                 or task.workspace_id != work.workspace_id
             ):
@@ -548,147 +469,9 @@ class _ChatWorkMixin:
         return self.chat_work_view(work)
 
     async def _fire_chat_work_task(self, work: ScheduledTask) -> None:
-        from claude_hub.services.task_dependencies import require_task_dependencies
-
-        session = None
-        task = self._create_task(
-            work.workspace_id,
-            WorkspaceTaskCreate(
-                title=work.task_title or work.name,
-                prompt=work.message or "",
-                agent_type=work.agent_type,
-                task_mode=work.work_task_mode,
-                timeout_seconds=3600,
-            ),
-            system_internal=work.work_kind == "monitor",
-            internal_kind="scheduled" if work.work_kind == "monitor" else None,
-            source_work_id=work.id,
-        )
-        # Ownership is already saved by _create_task. Enrich assignment before
-        # any worker exists, with an explicit source tab (the worker tab differs).
-        protocol = (
-            "\n\nLinked Chat work: "
-            + work.id
-            + "; source Chat: "
-            + (work.source_tab_id or "")
-            + ". Submit progress/final execution reports using one command: claude-hub work report "
-            + work.id
-            + " --tab-id "
-            + (work.source_tab_id or "")
-            + " --task-id "
-            + task.id
-            + " --session-id SESSION_ID --kind OUTCOME --summary 'brief evidence-based result' "
-            "--validation 'checks and evidence'. Use the assigned session ID from this assignment. "
-            "This command writes the normal task report and outcome atomically before terminal cleanup; "
-            "do not send a separate final completion report first. "
-            "OUTCOME is no_change for an unchanged successful check, anomaly for a change requiring attention, "
-            "decision for needed input, progress for a milestone (finishes this monitor check but keeps a "
-            "one-shot task working), completed only when the entire requested objective "
-            "is achieved (ends recurring monitoring). A successful single check is NOT monitor completion. "
-            "Keep work inside the assigned scope and cwd; do not create another recurring schedule."
-        )
-        self.tasks[task.id] = task.model_copy(update={"prompt": task.prompt + protocol})
-        self._save_state()
-        try:
-            session = await self.ensure_workspace_agent(
-                work.workspace_id, self._chat_work_launch_request(work)
-            )
-            task = self.tasks[task.id]
-            if task.status != WorkspaceTaskStatus.TODO or work.work_stopped_at:
-                raise RuntimeError("Linked execution changed before dispatch")
-            require_task_dependencies(self.tasks, task)
-            task = task.model_copy(
-                update={
-                    "status": WorkspaceTaskStatus.QUEUED,
-                    "session_id": session.id,
-                    "chat_work_owned_session_id": session.id,
-                    "chat_work_owned_tab_id": session.tab_id,
-                    "queued_at": _wm._now(),
-                    "dispatch_attempt": task.dispatch_attempt + 1,
-                    "dispatch_reason": "Chat linked work",
-                    "updated_at": _wm._now(),
-                }
-            )
-            self.tasks[task.id] = task
-            self._save_state()
-            await self._dispatch_task_to_session(task, session)
-        except Exception as exc:
-            current = self.tasks[task.id]
-            if current.status in {WorkspaceTaskStatus.TODO, WorkspaceTaskStatus.QUEUED}:
-                self.tasks[task.id] = current.model_copy(
-                    update={
-                        "status": WorkspaceTaskStatus.FAILED,
-                        "failure_reason": str(exc)[:2000],
-                        "failed_at": _wm._now(),
-                        "updated_at": _wm._now(),
-                    }
-                )
-                self._save_state()
-            if session:
-                await self._best_effort_delete_session(session.id)
-            raise
+        raise ValueError("legacy_chat_work_read_only_use_workspace_tasks")
 
     async def _reconcile_chat_work(self) -> None:
-        """Bounded recovery: fail closed for interrupted pre-dispatch launches.
-
-        Active dispatched tasks retain the existing report, timeout and orphan
-        handlers. No model is launched to reconcile an uncertain attempt.
-        """
-        changed = False
-        for work in list(self.scheduled_tasks.values()):
-            if not work.source_tab_id:
-                continue
-            lock = self._sched_fire_locks.setdefault(work.id, asyncio.Lock())
-            if lock.locked():
-                continue
-            async with lock:
-                current_work = self.scheduled_tasks.get(work.id)
-                if current_work is None:
-                    continue
-                work = current_work
-                if work.work_stopped_at:
-                    await self._stop_chat_work_executions(work)
-                    continue
-                executions = self._chat_work_executions(work)
-                if (
-                    work.work_kind == "monitor"
-                    and any(
-                        report.chat_work_outcome == "completed"
-                        and report.state
-                        in {AgentReportState.COMPLETED, AgentReportState.READY_FOR_REVIEW}
-                        and report.task_id in {task.id for task in executions}
-                        for report in self.reports.values()
-                    )
-                    and not work.work_completed_at
-                ):
-                    work.enabled = False
-                    work.work_completed_at = _wm._now()
-                    work.next_run_at = None
-                    changed = True
-                if not executions and work.run_count and not work.enabled:
-                    work.last_status = "error"
-                    work.last_error = "Launch interrupted before task creation; resume explicitly"
-                    changed = True
-                for task in executions[:20]:
-                    current_task = self.tasks.get(task.id)
-                    if current_task is None:
-                        continue
-                    task = current_task
-                    if task.status == WorkspaceTaskStatus.TODO and not task.manual_aborted_at:
-                        self.tasks[task.id] = task.model_copy(
-                            update={
-                                "status": WorkspaceTaskStatus.FAILED,
-                                "failure_reason": "Launch interrupted before dispatch; resume explicitly",
-                                "failed_at": _wm._now(),
-                                "updated_at": _wm._now(),
-                            }
-                        )
-                        work.enabled = False
-                        work.next_run_at = None
-                        work.last_status = "error"
-                        work.last_error = "Launch interrupted before dispatch; resume explicitly"
-                        self._save_state()
-                        changed = True
-                    await self._cleanup_chat_work_session(task)
-        if changed:
-            self._save_scheduled_tasks()
+        # Legacy records remain readable. Recovery must not launch, retry, or
+        # clean up sessions on behalf of a retired ChatWork controller.
+        return

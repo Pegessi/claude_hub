@@ -15,7 +15,7 @@ class _TaskUpdatesMixin:
     ) -> WorkspaceTask:
         return await self.update_task(task_id, WorkspaceTaskUpdate(status=status))
 
-    async def update_task(
+    async def _update_task_workspace_fields(
         self,
         task_id: str,
         payload: WorkspaceTaskUpdate,
@@ -26,6 +26,8 @@ class _TaskUpdatesMixin:
 
         now = _wm._now()
         update: dict[str, Any] = {"updated_at": now}
+        if not self._workspace_owns_task(task):
+            update["progress_revision"] = task.progress_revision + 1
 
         # Determine which fields require todo status
         has_todo_only_fields = any(
@@ -179,7 +181,7 @@ class _TaskUpdatesMixin:
         self.tasks[task.id] = task.model_copy(update=update)
         for task_id, fields in staged_reparent.items():
             self.tasks[task_id] = previous_tasks[task_id].model_copy(update=fields)
-        if status == WorkspaceTaskStatus.DONE:
+        if status == WorkspaceTaskStatus.DONE and self._workspace_owns_task(task):
             self._write_task_record(self.tasks[task.id])
             self._release_task_session(self.tasks[task.id])
             await self._cleanup_reviewer_for_terminal_task(self.tasks[task.id], updated_at=now)
@@ -190,9 +192,17 @@ class _TaskUpdatesMixin:
                     success=True,
                     now=now,
                 )
-        elif status == WorkspaceTaskStatus.WORKING and task.session_id:
+        elif (
+            status == WorkspaceTaskStatus.WORKING
+            and task.session_id
+            and self._workspace_owns_task(task)
+        ):
             self._assign_current_task(task.session_id, task.id)
-        elif status == WorkspaceTaskStatus.REVIEW and task.session_id:
+        elif (
+            status == WorkspaceTaskStatus.REVIEW
+            and task.session_id
+            and self._workspace_owns_task(task)
+        ):
             # Manual REVIEW status transition must still trigger reviewer
             # dispatch so the task does not sit unreviewed.
             if not self._reviewer_is_active(self.tasks[task.id]):
@@ -223,7 +233,7 @@ class _TaskUpdatesMixin:
         except Exception:
             self.tasks.update(previous_tasks)
             raise
-        if status is not None:
+        if status is not None and self._workspace_owns_task(self.tasks[task.id]):
             await self.dispatch_workspace(task.workspace_id)
         return self.tasks[task.id]
 
@@ -239,11 +249,15 @@ class _TaskUpdatesMixin:
             if report.task_id == task.id
         ]
         session = self.sessions.get(task.session_id or "")
+        # Archives must not reuse the state codec's private credential metadata.
+        public_task = task.model_dump(mode="json")
+        if public_task.get("agent_tag") is None:
+            public_task.pop("agent_tag", None)
         payload = {
             "schema_version": 1,
             "archived_at": _wm._now().isoformat(),
             "workspace_id": task.workspace_id,
-            "task": self._task_dump_for_state(task),
+            "task": public_task,
             "session": session.model_dump(mode="json") if session else None,
             "reports": [report.model_dump(mode="json") for report in task_reports],
             "timeline": self._build_task_record_timeline(task, task_reports),
@@ -347,3 +361,30 @@ class _TaskUpdatesMixin:
             if report.task_id == task.id
         ]
         return self._feedback_store().reap_task_feedback(workspace, task, reports, payload)
+
+    async def update_task(self, task_id: str, payload: WorkspaceTaskUpdate) -> WorkspaceTask:
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if self._workspace_owns_task(task):
+            async with self._workspace_execution_operation(task):
+                return await self._update_task_workspace_fields(task_id, payload)
+        async with self.workspace_mutation_lock(task.workspace_id):
+            allowed = {
+                "title",
+                "prompt",
+                "add_attachments",
+                "removed_attachment_ids",
+                "parent_task_id",
+                "depends_on_task_ids",
+                "agent_tag",
+            }
+            if payload.model_fields_set - allowed:
+                from ._task_execution import TaskExecutionConflict
+
+                raise TaskExecutionConflict("initiator_task_requires_progress_endpoint")
+            token = self._report_intake_workspace.set(task.workspace_id)
+            try:
+                return await self._update_task_workspace_fields(task_id, payload)
+            finally:
+                self._report_intake_workspace.reset(token)

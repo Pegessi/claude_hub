@@ -695,6 +695,9 @@ class _SchedulingMixin:
             task = self.scheduled_tasks.get(task_id)
             if task is None or not task.enabled:
                 continue
+            # Retired ChatWork schedules remain readable without recurring empty fire attempts.
+            if task.source_tab_id and task.work_kind:
+                continue
             if task.next_run_at is None or task.next_run_at > now:
                 continue
             try:
@@ -741,6 +744,10 @@ class _SchedulingMixin:
                     raise KeyError(task.id)
                 return None
             task = current
+            if task.source_tab_id and task.work_kind:
+                if manual:
+                    raise ValueError("legacy_chat_work_read_only_use_workspace_tasks")
+                return None
 
             # Re-check eligibility under the lock: a concurrent fire (the 5s
             # tick vs a manual run-now, or two run-now clicks) may have already
@@ -1556,7 +1563,11 @@ class _SchedulingMixin:
             task
             for task in self.tasks.values()
             if task.status == WorkspaceTaskStatus.WORKING
-            and (self._is_scheduled_hub_task(task) or task.source_work_id)
+            and self._workspace_owns_task(task)
+            and (
+                self._is_scheduled_hub_task(task)
+                or (task.source_work_id and not task.legacy_work_detached)
+            )
         ]
         for task in candidates:
             bound_id = task.session_id
@@ -1591,6 +1602,8 @@ class _SchedulingMixin:
         # have already moved the task off WORKING or changed its binding.
         live = self.tasks.get(task.id)
         if live is None or live.status != WorkspaceTaskStatus.WORKING:
+            return
+        if not self._workspace_owns_task(live) or live.legacy_work_detached:
             return
         if not (self._is_scheduled_hub_task(live) or live.source_work_id) or not live.session_id:
             return

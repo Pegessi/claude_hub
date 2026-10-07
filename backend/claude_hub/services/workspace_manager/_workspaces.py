@@ -89,10 +89,11 @@ def build_resident_agent_prompt(
         "do NOT start them and do NOT spawn agents:\n"
         f"   {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
-        '-d \'{"title":"...","prompt":"...","origin":"resident"}\'\n'
-        '   Always include "origin":"resident" so the UI tags the proposal as '
-        "agent-created. "
-        "Newly created tasks stay in TODO; the user chooses whether to start them.\n\n"
+        '-d \'{"title":"...","prompt":"...","origin":"resident","execution_control":"workspace"}\'\n'
+        '   Keep "origin":"resident" for legacy display compatibility and set '
+        '"execution_control":"workspace" explicitly. Source metadata does not select an executor. '
+        "This resident role may propose TODO Tasks but must not start them; a later authorized actor "
+        "chooses whether to dispatch. Do not create or ensure an agent merely to populate source.agent_id.\n\n"
         "Hard constraints: do NOT merge branches, push, force-push, delete files, or take any "
         "destructive action. Do NOT auto-start proposed tasks. Keep changes to lessons and task "
         "proposals only. When this cycle's work is done, stop and wait for the next wake-up."
@@ -112,7 +113,7 @@ def _build_task_graph_block(base_url: str, workspace_id: str) -> str:
         f"Create task: {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
         '-d \'{"title":"...","prompt":"...","parent_task_id":"<PARENT_TASK_ID>",'
-        '"origin":"resident","task_mode":"reviewed"}\'\n'
+        '"origin":"resident","execution_control":"workspace","task_mode":"reviewed"}\'\n'
         f"Start task: {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<TASK_ID>/start "
         "-H 'Content-Type: application/json' "
         '-d \'{"target_session_id":"<ORCHESTRATOR_SESSION_ID>"}\'\n'
@@ -132,6 +133,8 @@ def _build_task_graph_block(base_url: str, workspace_id: str) -> str:
         f"Accept (review passed): {INTERNAL_API_CURL} -X PATCH "
         f"{base_url}/api/workspaces/tasks/<TASK_ID> "
         "-H 'Content-Type: application/json' -d '{\"status\":\"done\"}'\n"
+        'The legacy "origin":"resident" field is display metadata only. Creating a Task '
+        "only records it; starting requires the explicit start/dispatch action allowed for the current role.\n"
         "CLI equivalents: `claude-hub task tree|create|start|events|wait|ack|"
         "followup|continue|accept|review`.\n"
     )
@@ -176,7 +179,7 @@ def _build_resident_master_prompt(
         f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/{ws}/tasks "
         "-H 'Content-Type: application/json' "
         '-d \'{"title":"...","prompt":"detailed instructions","parent_task_id":"<PARENT_TASK_ID>",'
-        '"origin":"resident","task_mode":"reviewed"}\'\n'
+        '"origin":"resident","execution_control":"workspace","task_mode":"reviewed"}\'\n'
         "   Start each task on an existing orchestrator session (mandatory "
         "`target_session_id`; never rely on Hub auto-spawn):\n"
         f"     {INTERNAL_API_CURL} -X POST {base_url}/api/workspaces/tasks/<CHILD_TASK_ID>/start "

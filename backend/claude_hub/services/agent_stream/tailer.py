@@ -412,6 +412,7 @@ class SessionTailer:
         native_transport: Optional[ProviderSession] = None,
         native_error: Optional[str] = None,
         post_persist_observers: Optional[List[PostPersistObserver]] = None,
+        task_activity_observer: Optional[PostPersistObserver] = None,
     ) -> None:
         self.workspace_id = workspace_id
         self.session_id = session_id
@@ -426,6 +427,7 @@ class SessionTailer:
         # real-time source for agent sessions.
         self._native_error = native_error
         self._post_persist_observers = post_persist_observers or []
+        self._task_activity_observer = task_activity_observer
 
         self._offset = 0
         self._inode: Optional[int] = None
@@ -2651,6 +2653,32 @@ class SessionTailer:
         event = await self._store.append(event)
         if self._is_live:
             self._fanout(event)
+        if (
+            self._is_live
+            and self._task_activity_observer is not None
+            and event.type
+            in {
+                AgentStreamEventType.TURN_STARTED,
+                AgentStreamEventType.TURN_COMPLETED,
+                AgentStreamEventType.TOOL_CALL_STARTED,
+                AgentStreamEventType.TOOL_CALL_COMPLETED,
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                AgentStreamEventType.APPROVAL_RESOLVED,
+                AgentStreamEventType.ERROR,
+            }
+        ):
+            main_thread = (
+                self._native_transport.active_thread_id
+                if self._native_transport is not None
+                else None
+            )
+            observation = event.model_copy(
+                update={"payload": {**event.payload, "_hub_main_thread_id": main_thread}}
+            )
+            try:
+                await self._task_activity_observer(observation)
+            except Exception as exc:
+                logger.warning("Task activity observer failed: %s", type(exc).__name__)
 
     async def _publish(self, event: AgentStreamEvent) -> None:
         """Publish an event, coalescing text deltas along the way.
@@ -2747,6 +2775,26 @@ class SessionTailer:
         self._is_live = False
         invalidate_source(self.session_id)
 
+    def peek_task_execution_ref(self, tab_id: str) -> Optional[Dict[str, Any]]:
+        transport = self._native_transport
+        if (
+            transport is None
+            or transport.session.tab_id != tab_id
+            or transport.session.id != self.session_id
+            or not self.is_running()
+            or not transport.turn_in_flight
+            or not self._active_turn_id
+            or self._hard_failed
+        ):
+            return None
+        return {
+            "provider": transport.session.agent_type.value,
+            "session_id": self.session_id,
+            "thread_id": transport.active_thread_id,
+            "turn_id": self._active_turn_id,
+            "run_epoch": self._run_epoch,
+        }
+
 
 class TailerManager:
     """Process-wide registry of per-session tailers (one tailer per session)."""
@@ -2757,6 +2805,7 @@ class TailerManager:
         persist_session_id: Optional[Callable[[str, str], None]] = None,
         persist_mode: Optional[Callable[[str, str], None]] = None,
         post_persist_observers: Optional[List[PostPersistObserver]] = None,
+        task_activity_observer: Optional[PostPersistObserver] = None,
     ) -> None:
         self._session_getter = session_getter
         # Optional durable persistence callback for the provider conversation
@@ -2766,6 +2815,7 @@ class TailerManager:
         self._persist_session_id_cb = persist_session_id
         self._persist_mode_cb = persist_mode
         self._post_persist_observers = post_persist_observers or []
+        self._task_activity_observer = task_activity_observer
         self._tailers: Dict[str, SessionTailer] = {}
         self._lock = asyncio.Lock()
         # Per-session locks that serialize edit-resend attempts.  A second
@@ -2842,6 +2892,7 @@ class TailerManager:
                     native_transport=native_transport,
                     native_error=native_error,
                     post_persist_observers=self._post_persist_observers,
+                    task_activity_observer=self._task_activity_observer,
                 )
                 self._tailers[session.id] = tailer
         if existing is not None:

@@ -2,12 +2,15 @@ import hashlib
 import json
 import logging
 import uuid
-from typing import Any, List
+from typing import Any, Callable, Coroutine, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
+from fastapi.routing import APIRoute
 
 from ..auth.dependencies import get_current_user
+from ..config import settings
 from ..models import (
     AgentReport,
     AgentReportCreate,
@@ -42,6 +45,13 @@ from ..models import (
     WorkspaceUpdate,
     redact_workspace_board_for_public,
 )
+from ..models.schemas import (
+    TaskExecutionCapabilities,
+    TaskExecutionHandoffRequest,
+    TaskExecutionMutationResult,
+    TaskManualProgressRequest,
+    TaskProgressRequest,
+)
 from ..models.task_mailbox import TaskEvent
 from ..services import workspace_manager
 from ..services.task_dependencies import TaskHasDependentsError
@@ -57,8 +67,38 @@ from ..services.workspace_manager._constants import (
     WorkspaceAgentInitializationError,
 )
 from ..services.workspace_manager._reports import ReportCallIdConflict
+from ..services.workspace_manager._task_execution import (
+    TaskExecutionConflict,
+    TaskReporterForbidden,
+)
 
-router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
+
+class _TaskSecretSafeRoute(APIRoute):
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+        protected = self.endpoint.__name__ in {
+            "create_task",
+            "task_progress",
+            "manual_task_progress",
+            "handoff_task_execution",
+        }
+
+        async def handle(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                body = exc.body
+                contains_secret = isinstance(body, dict) and bool(
+                    {"reporter_key", "new_reporter_key"}.intersection(body)
+                )
+                if protected or contains_secret:
+                    raise HTTPException(status_code=422, detail="invalid_task_request") from None
+                raise
+
+        return handle
+
+
+router = APIRouter(prefix="/api/workspaces", tags=["workspaces"], route_class=_TaskSecretSafeRoute)
 logger = logging.getLogger(__name__)
 
 # Per-session timestamps that tick on every status refresh without reflecting any
@@ -97,6 +137,10 @@ def _board_etag(board: WorkspaceBoard) -> str:
 
 
 def _task_public_http(exc: Exception) -> HTTPException:
+    if isinstance(exc, TaskReporterForbidden):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, TaskExecutionConflict):
+        return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, KeyError):
         return HTTPException(status_code=404, detail=str(exc) or "Not found")
     if isinstance(exc, TaskCallIdConflict):
@@ -291,19 +335,36 @@ async def get_task_reports(
         raise HTTPException(status_code=404, detail="Workspace not found") from e
 
 
-@router.post("/{workspace_id}/tasks", response_model=WorkspaceTask, status_code=201)
+@router.post(
+    "/{workspace_id}/tasks",
+    response_model=WorkspaceTask,
+    status_code=201,
+    responses={200: {"model": WorkspaceTask, "description": "Existing registration replayed"}},
+)
 async def create_task(
     workspace_id: str,
     payload: WorkspaceTaskCreate,
+    response: Response,
     current_user: User = Depends(get_current_user),
 ) -> WorkspaceTask:
-    """Create a task in a workspace."""
+    """Register one Task; actor identity comes only from Hub authentication."""
+    actor_key = hashlib.sha256(
+        json.dumps(
+            {"user": current_user.open_id, "oauth_app": settings.feishu_app_id or ""},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     try:
-        return workspace_manager.create_task(workspace_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Workspace not found") from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        task, replayed = await workspace_manager.register_task(workspace_id, payload, actor_key)
+    except TaskExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Workspace not found") from None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid_task_create") from None
+    response.status_code = 200 if replayed else 201
+    response.headers["X-Task-Replayed"] = "true" if replayed else "false"
+    return task
 
 
 @router.get("/{workspace_id}/tasks/tree", response_model=List[WorkspaceTask])
@@ -589,7 +650,7 @@ async def delete_task(
         workspace_manager.delete_task(task_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Task not found") from e
-    except (TaskHasDescendantsError, TaskHasDependentsError) as e:
+    except (TaskHasDescendantsError, TaskHasDependentsError, TaskExecutionConflict) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
 
@@ -809,3 +870,61 @@ async def create_session_report(
         raise HTTPException(status_code=409, detail=str(e)) from e
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/{workspace_id}/task-capabilities", response_model=TaskExecutionCapabilities)
+async def task_execution_capabilities(
+    workspace_id: str,
+    current_user: User = Depends(get_current_user),
+) -> TaskExecutionCapabilities:
+    if workspace_id not in workspace_manager.workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return TaskExecutionCapabilities()
+
+
+@router.post("/{workspace_id}/tasks/{task_id}/progress", response_model=TaskExecutionMutationResult)
+async def task_progress(
+    workspace_id: str,
+    task_id: str,
+    payload: TaskProgressRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> TaskExecutionMutationResult:
+    try:
+        return await workspace_manager.record_task_progress(
+            workspace_id, task_id, payload, request.headers.get("X-Task-Reporter-Key")
+        )
+    except (KeyError, ValueError, RuntimeError, TaskReporterForbidden) as exc:
+        raise _task_public_http(exc) from None
+
+
+@router.post(
+    "/{workspace_id}/tasks/{task_id}/progress/manual", response_model=TaskExecutionMutationResult
+)
+async def manual_task_progress(
+    workspace_id: str,
+    task_id: str,
+    payload: TaskManualProgressRequest,
+    current_user: User = Depends(get_current_user),
+) -> TaskExecutionMutationResult:
+    try:
+        return await workspace_manager.record_manual_task_progress(workspace_id, task_id, payload)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from None
+
+
+@router.post("/{workspace_id}/tasks/{task_id}/handoff", response_model=TaskExecutionMutationResult)
+async def handoff_task_execution(
+    workspace_id: str,
+    task_id: str,
+    payload: TaskExecutionHandoffRequest,
+    current_user: User = Depends(get_current_user),
+) -> TaskExecutionMutationResult:
+    try:
+        return await workspace_manager.handoff_task_execution(workspace_id, task_id, payload)
+    except TaskExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found") from None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid_task_handoff") from None

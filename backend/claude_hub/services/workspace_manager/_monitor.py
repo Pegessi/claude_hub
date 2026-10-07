@@ -47,6 +47,8 @@ class _MonitorMixin:
 
             if current_task_id:
                 task = self.tasks.get(current_task_id)
+                if task is not None and not self._workspace_owns_task(task):
+                    task = None
                 if task and task.status in {
                     WorkspaceTaskStatus.WORKING,
                     WorkspaceTaskStatus.REVIEW,
@@ -129,6 +131,8 @@ class _MonitorMixin:
         # acceptance so the caller can accept/continue.
         now = _wm._now()
         for task in list(self.tasks.values()):
+            if not self._workspace_owns_task(task):
+                continue
             if task.status != WorkspaceTaskStatus.WORKING:
                 continue
             if workspace_id is not None and task.workspace_id != workspace_id:
@@ -174,6 +178,10 @@ class _MonitorMixin:
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
+        live = self.tasks.get(task.id)
+        if live is None or not self._workspace_owns_task(live):
+            return None
+        task = live
         if self._prompt_dispatch_still_in_grace_period(session, task, sampled_at):
             return None
         try:
@@ -425,6 +433,10 @@ class _MonitorMixin:
         #   reviewer as a worker owing a report and endlessly auto-prompt it.
         # - During REVIEW: the reviewer (task.review_session_id). The worker may
         #   also be idle but should not be auto-continued while review is in flight.
+        live = self.tasks.get(task.id)
+        if live is None or not self._workspace_owns_task(live):
+            return None
+        task = live
         is_worker = bool(task.session_id and task.session_id == session.id)
         is_reviewer = bool(task.review_session_id and task.review_session_id == session.id)
         sealed_round_awaiting_continue = False
@@ -800,6 +812,7 @@ class _MonitorMixin:
         window is wiped via /clear so the agent can continue without a corrupt
         error state in its context.
         """
+        task = self._require_workspace_execution(task)
         workspace = self.workspaces.get(task.workspace_id)
         if not workspace:
             logger.warning(
@@ -975,6 +988,7 @@ class _MonitorMixin:
             task = self.tasks.get(task_id)
             if (
                 not task
+                or not self._workspace_owns_task(task)
                 or task.workspace_id != workspace_id
                 or task.status == WorkspaceTaskStatus.DONE
             ):
@@ -1087,6 +1101,8 @@ class _MonitorMixin:
         return task.session_id != session.id and task.review_session_id != session.id
 
     def _release_task_session(self, task: WorkspaceTask) -> None:
+        if not self._workspace_owns_task(task):
+            return
         if not task.session_id:
             return
         session = self.sessions.get(task.session_id)
@@ -1162,6 +1178,8 @@ class _MonitorMixin:
         delete_tabs: bool = True,
     ) -> list[str]:
         """Release persistent reviewers and delete task-scoped temporary reviewers."""
+        if not self._workspace_owns_task(task):
+            return []
 
         ephemeral_tab_ids: list[str] = []
         session_ids: set[str] = set()
@@ -1211,6 +1229,10 @@ class _MonitorMixin:
         return ephemeral_tab_ids
 
     def _assign_current_task(self, session_id: str, task_id: str) -> None:
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        self._require_workspace_execution(task)
         session = self.sessions.get(session_id)
         if not session:
             return

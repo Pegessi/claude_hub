@@ -30,6 +30,7 @@ from ._review import _ReviewMixin
 from ._scheduling import _SchedulingMixin
 from ._sessions import _SessionsMixin
 from ._state import _StateMixin
+from ._task_execution import _TaskExecutionMixin
 from ._task_updates import _TaskUpdatesMixin
 from ._tasks import _TasksMixin
 from ._tmux_queries import _TmuxQueriesMixin
@@ -44,6 +45,7 @@ class WorkspaceManager(
     _TasksMixin,
     _AttachmentsMixin,
     _ArtifactsMixin,
+    _TaskExecutionMixin,
     _TaskUpdatesMixin,
     _FeedbackMixin,
     _SessionsMixin,

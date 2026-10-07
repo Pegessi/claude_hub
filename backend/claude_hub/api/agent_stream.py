@@ -28,7 +28,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NoReturn, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, NoReturn, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
@@ -53,6 +53,7 @@ from ..models import (
     User,
     WorkspaceSessionRole,
 )
+from ..models.schemas import TaskExecutionControl, TaskExecutionReference
 from ..services import ttyd_manager, workspace_manager
 from ..services.agent_stream import (
     StructuredSourceUnavailable,
@@ -149,6 +150,7 @@ def _get_tailer_manager() -> TailerManager:
             session_getter=lambda sid: workspace_manager.sessions.get(sid),
             persist_session_id=_persist_workspace_agent_session_id,
             post_persist_observers=[_notify_goal_turn_completed],
+            task_activity_observer=_notify_task_activity,
         )
     return _tailer_manager
 
@@ -220,6 +222,7 @@ def _get_tab_tailer_manager() -> TailerManager:
             persist_session_id=_persist_tab_agent_session_id,
             persist_mode=_persist_tab_chat_mode,
             post_persist_observers=[_notify_goal_turn_completed],
+            task_activity_observer=_notify_task_activity,
         )
     return _tab_tailer_manager
 
@@ -2033,3 +2036,93 @@ __all__ = [
     "router",
     "_reset_tailer_manager",
 ]
+
+
+async def _notify_task_activity(event: AgentStreamEvent) -> None:
+    await workspace_manager.record_task_stream_event(event)
+
+
+class TaskContextItem(BaseModel):
+    id: str
+    workspace_id: str
+    execution_control: TaskExecutionControl
+    execution_epoch: int
+    progress_revision: int
+
+
+class TabTaskContext(BaseModel):
+    tab_id: str
+    execution_ref: Optional[TaskExecutionReference] = None
+    tasks: list[TaskContextItem] = Field(default_factory=list)
+    workspace_ids: list[str] = Field(default_factory=list)
+    reason: Literal["active", "not_observed", "inactive", "ambiguous"]
+
+
+@router.get("/tabs/{tab_id}/task-context", response_model=TabTaskContext)
+async def tab_task_context(
+    tab_id: str, current_user: User = Depends(get_current_user)
+) -> TabTaskContext:
+    if ttyd_manager.get_tab(tab_id) is None:
+        raise HTTPException(status_code=404, detail="Tab not found")
+    sessions = [item for item in workspace_manager.sessions.values() if item.tab_id == tab_id]
+    tailers = []
+    if _tab_tailer_manager is not None:
+        existing = _tab_tailer_manager._tailers.get(_tab_stream_session_id(tab_id))
+        if existing is not None:
+            tailers.append(existing)
+    if _tailer_manager is not None:
+        for session in sessions:
+            existing = _tailer_manager._tailers.get(session.id)
+            if existing is not None and existing not in tailers:
+                tailers.append(existing)
+    refs = [
+        peeked
+        for tailer in tailers
+        if (peeked := tailer.peek_task_execution_ref(tab_id)) is not None
+    ]
+    if len(refs) > 1:
+        return TabTaskContext(tab_id=tab_id, reason="ambiguous")
+    ref = TaskExecutionReference(**refs[0]) if refs else None
+    workspace_ids = {
+        session.workspace_id
+        for session in sessions
+        if session.workspace_id in workspace_manager.workspaces
+    }
+    linked = []
+    for task in workspace_manager.tasks.values():
+        assigned = any(
+            task.execution_control == TaskExecutionControl.WORKSPACE
+            and task.id in {session.task_id, session.current_task_id}
+            and session.id in {task.session_id, task.review_session_id}
+            for session in sessions
+        )
+        expected = task.execution_ref
+        observed = bool(
+            ref is not None
+            and expected is not None
+            and task.execution_control == TaskExecutionControl.INITIATOR
+            and not task.execution_released
+            and expected.session_id == ref.session_id
+            and expected.run_epoch == ref.run_epoch
+            and expected.turn_id == ref.turn_id
+            and (expected.thread_id is None or expected.thread_id == ref.thread_id)
+            and (expected.provider is None or expected.provider == ref.provider)
+        )
+        if assigned or observed:
+            linked.append(
+                TaskContextItem(
+                    id=task.id,
+                    workspace_id=task.workspace_id,
+                    execution_control=task.execution_control,
+                    execution_epoch=task.execution_epoch,
+                    progress_revision=task.progress_revision,
+                )
+            )
+            workspace_ids.add(task.workspace_id)
+    return TabTaskContext(
+        tab_id=tab_id,
+        execution_ref=ref,
+        tasks=linked,
+        workspace_ids=sorted(workspace_ids),
+        reason="active" if ref is not None else ("inactive" if tailers else "not_observed"),
+    )

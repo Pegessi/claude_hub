@@ -291,6 +291,7 @@ class _ReportsMixin:
         ``task.session_id``. An unassigned Task (``session_id is None``) cannot
         be claimed by a worker report; callers must fail closed.
         """
+        task = self._require_workspace_execution(task)
         if session.workspace_id != task.workspace_id:
             raise RuntimeError("Session belongs to a different workspace")
         if session.role == WorkspaceSessionRole.REVIEWER:
@@ -1328,6 +1329,10 @@ class _ReportsMixin:
         session: ManagedSession,
         report: AgentReport,
     ) -> None:
+        live = self.tasks.get(task.id)
+        if live is None or not self._workspace_owns_task(live):
+            return
+        task = live
         if session.role == WorkspaceSessionRole.REVIEWER:
             await self._handle_review_report(task, session, report)
             return
@@ -1917,6 +1922,7 @@ class _ReportsMixin:
         return bool(stdout.strip())
 
     def _mark_task_review_skipped(self, task: WorkspaceTask, report: AgentReport) -> None:
+        task = self._require_workspace_execution(task)
         now = _wm._now()
         reason = report.review_reason or "Agent completed the task without requesting review."
         self.tasks[task.id] = task.model_copy(
@@ -1936,7 +1942,7 @@ class _ReportsMixin:
         )
         self._save_state()
 
-    async def _request_task_review(
+    async def _request_task_review_workspace_report(
         self,
         task: WorkspaceTask,
         trigger_report: AgentReport,
@@ -2073,3 +2079,7 @@ class _ReportsMixin:
                 report_state=AgentReportState.REVIEW_NEEDS_INPUT,
                 sampled_at=_wm._now(),
             )
+
+    async def _request_task_review(self, task: WorkspaceTask, trigger_report: AgentReport) -> None:
+        async with self._workspace_execution_operation(task) as live:
+            await self._request_task_review_workspace_report(live, trigger_report)
