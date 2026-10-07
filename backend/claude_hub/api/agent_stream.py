@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, NoReturn, Optional, Tuple
@@ -1368,6 +1369,8 @@ async def _send_to_native(
 
 CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
 
+_ChatAdmissionGuard = Callable[[], AbstractAsyncContextManager[None]]
+
 
 def _map_send_exception(exc: Exception) -> HTTPException:
     """Map provider send errors to explicit HTTP status codes.
@@ -1425,6 +1428,7 @@ async def _dispatch_tab_stream_input(
     visible_text: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
     allow_question_answer: bool = True,
+    admission_guard: Optional[_ChatAdmissionGuard] = None,
 ) -> str:
     """Deliver one turn through the existing direct-Chat admission path."""
     from ..services.goal_run import get_goal_admission_lock, get_goal_manager
@@ -1458,13 +1462,17 @@ async def _dispatch_tab_stream_input(
                     detail="Pause or finish the active Goal before sending a manual turn",
                     headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
                 )
-        await _send_to_native(
-            session,
-            payload,
-            manager,
-            visible_text=visible_text,
-            turn_metadata=turn_metadata,
-        )
+        # Internal external-channel guards authorize submission, not the whole
+        # model turn. HTTP request models never carry this callable.
+        guard = admission_guard() if admission_guard is not None else nullcontext()
+        async with guard:
+            await _send_to_native(
+                session,
+                payload,
+                manager,
+                visible_text=visible_text,
+                turn_metadata=turn_metadata,
+            )
         return payload.client_turn_id
 
 
@@ -1476,6 +1484,7 @@ async def dispatch_tab_chat_and_wait(
     visible_text: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
     timeout_seconds: float = 300.0,
+    admission_guard: Optional[_ChatAdmissionGuard] = None,
 ) -> str:
     """Send through an existing Chat tab and return its completed assistant text.
 
@@ -1491,12 +1500,17 @@ async def dispatch_tab_chat_and_wait(
     try:
         try:
             queue = await manager.subscribe(session)
+            dispatch_options: Dict[str, Any] = {
+                "visible_text": visible_text,
+                "turn_metadata": turn_metadata,
+                "allow_question_answer": False,
+            }
+            if admission_guard is not None:
+                dispatch_options["admission_guard"] = admission_guard
             expected_turn_id = await _dispatch_tab_stream_input(
                 tab_id,
                 AgentStreamSendRequest(text=text, client_turn_id=client_turn_id),
-                visible_text=visible_text,
-                turn_metadata=turn_metadata,
-                allow_question_answer=False,
+                **dispatch_options,
             )
         except StructuredSourceUnavailable as exc:
             raise HTTPException(

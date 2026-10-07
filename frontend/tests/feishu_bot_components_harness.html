@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Feishu Bot components harness</title>
+    <style>
+      :root {
+        --ch-color-surface: #fff;
+        --ch-color-surface-control: #f4f5f7;
+        --ch-color-text: #24292f;
+        --ch-color-text-muted: #626971;
+        --ch-color-border: #c9cdd2;
+        --ch-color-border-muted: #d9dce0;
+        --ch-color-accent: #3370ff;
+        --ch-color-success: #087f5b;
+        --ch-color-danger: #c92a2a;
+        --ch-color-warning: #a15c00;
+        --ch-radius-md: 8px;
+        --ch-radius-lg: 12px;
+        --ch-shadow-popover: 0 12px 36px rgb(0 0 0 / 16%);
+      }
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body, #app { min-height: 100%; margin: 0; }
+      body { padding: 24px; color: #24292f; font: 14px/1.45 sans-serif; }
+      button, input, select { font: inherit; }
+      .harness { display: grid; min-height: 70vh; align-content: end; justify-content: end; gap: 16px; }
+      .harness-open-settings { justify-self: end; }
+      @media (max-width: 640px) { body { padding: 8px; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { createApp, h, ref } from 'vue'
+      import { createPinia } from 'pinia'
+      import FeishuBotSettingsDialog from '/src/components/FeishuBotSettingsDialog.vue'
+      import FeishuBindingPanel from '/src/components/FeishuBindingPanel.vue'
+
+      const Root = {
+        setup() {
+          const showSettings = ref(false)
+          return () => h('main', { class: 'harness' }, [
+            h('button', {
+              type: 'button',
+              class: 'harness-open-settings',
+              onClick: () => { showSettings.value = true },
+            }, 'Open Bot settings'),
+            h(FeishuBindingPanel, { tabId: 'tab-1' }),
+            showSettings.value
+              ? h(FeishuBotSettingsDialog, {
+                  onClose: () => { showSettings.value = false },
+                })
+              : null,
+          ])
+        },
+      }
+
+      window.__claudeHub = {}
+      const app = createApp(Root)
+      app.use(createPinia())
+      app.mount('#app')
+      window.__FEISHU_BOT_TEST__ = { app }
+    </script>
+  </body>
+</html>

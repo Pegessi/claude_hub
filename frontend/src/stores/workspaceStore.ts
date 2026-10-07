@@ -20,6 +20,13 @@ import type {
   WorkspaceBoard,
   WorkspaceCreate,
   WorkspaceTask,
+  WorkspaceTaskCapabilities,
+  WorkspaceTaskCapabilitiesStatus,
+  WorkspaceTaskExecutionControl,
+  WorkspaceTaskProgressState,
+  WorkspaceTaskHandoffRequest,
+  WorkspaceTaskManualProgressRequest,
+  WorkspaceTaskMutationResult,
   WorkspaceTaskCreate,
   WorkspaceTaskStatus,
   WorkspaceTaskUpdate,
@@ -52,11 +59,114 @@ async function readError(response: Response): Promise<string> {
   }
 }
 
+function taskMutationMessage(status: number, action: string): string {
+  if (status === 400 || status === 422) return `The Task ${action} was rejected. Review the fields before trying again.`
+  if (status === 401 || status === 403) return `You do not have permission to ${action} this Task.`
+  if (status === 409) return `The Task changed or this request conflicts with an earlier request. Refresh before changing the request.`
+  if (status >= 500) return `The Task ${action} may have been saved, but the response was not confirmed. Retry only with the same request.`
+  return `Failed to ${action} the Task.`
+}
+async function taskMutationError(response: Response, action: string): Promise<Error> {
+  // Deliberately do not parse or log a response body for requests carrying reporter credentials.
+  return new Error(taskMutationMessage(response.status, action))
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function invalidTaskResponse(action: string): Error {
+  return new Error(
+    `The Task ${action} may have succeeded, but the server response was invalid. ` +
+    'Refresh before deciding whether to retry.',
+  )
+}
+
+async function parseTaskCreateResponse(
+  response: Response,
+  workspaceId: string,
+  requireExecutionContract: boolean,
+): Promise<WorkspaceTask> {
+  let value: unknown
+  try {
+    value = await response.json()
+  } catch {
+    throw invalidTaskResponse('create request')
+  }
+  if (
+    !isObject(value) ||
+    typeof value.id !== 'string' ||
+    !value.id ||
+    value.workspace_id !== workspaceId ||
+    (requireExecutionContract && (
+      typeof value.execution_epoch !== 'number' ||
+      !Number.isInteger(value.execution_epoch) || value.execution_epoch < 1 ||
+      typeof value.progress_revision !== 'number' ||
+      !Number.isInteger(value.progress_revision) || value.progress_revision < 0 ||
+      typeof value.execution_control !== 'string' ||
+      !['workspace', 'initiator'].includes(value.execution_control)
+    ))
+  ) {
+    throw invalidTaskResponse('create request')
+  }
+  return value as unknown as WorkspaceTask
+}
+
+async function parseTaskMutationResponse(
+  response: Response,
+  workspaceId: string,
+  taskId: string,
+  requestCallId: string,
+  action: string,
+): Promise<WorkspaceTaskMutationResult> {
+  let value: unknown
+  try {
+    value = await response.json()
+  } catch {
+    throw invalidTaskResponse(action)
+  }
+  if (!isObject(value) || !isObject(value.task) || !isObject(value.event)) {
+    throw invalidTaskResponse(action)
+  }
+  const task = value.task
+  const event = value.event
+  const expectedEventCallId = `task-execution:${taskId}:${requestCallId}`
+  if (
+    typeof task.id !== 'string' ||
+    task.id !== taskId ||
+    task.workspace_id !== workspaceId ||
+    typeof task.execution_epoch !== 'number' ||
+    !Number.isInteger(task.execution_epoch) ||
+    (task.execution_epoch as number) < 1 ||
+    typeof task.progress_revision !== 'number' ||
+    !Number.isInteger(task.progress_revision) ||
+    (task.progress_revision as number) < 0 ||
+    !['workspace', 'initiator'].includes(String(task.execution_control)) ||
+    typeof event.call_id !== 'string' ||
+    event.call_id !== expectedEventCallId ||
+    event.task_id !== taskId ||
+    typeof value.replayed !== 'boolean'
+  ) {
+    throw invalidTaskResponse(action)
+  }
+  return value as unknown as WorkspaceTaskMutationResult
+}
+
 export const useWorkspaceStore = defineStore('workspace', () => {
   const workspaces = ref<Workspace[]>([])
   const activeWorkspaceId = ref<string | null>(localStorage.getItem(STORAGE_KEY_ACTIVE_WORKSPACE))
   const board = ref<WorkspaceBoard | null>(null)
   const feedbackLessons = ref<FeedbackLesson[]>([])
+  let feedbackRequestSequence = 0
+  const taskCapabilities = ref<WorkspaceTaskCapabilities | null>(null)
+  const taskCapabilitiesWorkspaceId = ref<string | null>(null)
+  const taskCapabilitiesStatus = ref<WorkspaceTaskCapabilitiesStatus>('idle')
+  const taskCapabilitiesError = ref<string | null>(null)
+  let taskCapabilitiesGeneration = 0
+  let taskCapabilitiesController: AbortController | null = null
+  const visibleTaskCapabilities = computed(() =>
+    taskCapabilitiesWorkspaceId.value === activeWorkspaceId.value ? taskCapabilities.value : null
+  )
   const isLoading = ref(false)
   // ---- Notification / toast stack (F5: replaces single error string) ----
   const notifications = ref<StoreNotification[]>([])
@@ -188,6 +298,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function setActiveWorkspace(workspaceId: string) {
+    if (activeWorkspaceId.value !== workspaceId) {
+      feedbackRequestSequence += 1
+      feedbackLessons.value = []
+      taskCapabilitiesGeneration += 1
+      taskCapabilitiesController?.abort()
+      taskCapabilitiesController = null
+      taskCapabilities.value = null
+      taskCapabilitiesWorkspaceId.value = null
+      taskCapabilitiesStatus.value = 'idle'
+      taskCapabilitiesError.value = null
+    }
     activeWorkspaceId.value = workspaceId
     localStorage.setItem(STORAGE_KEY_ACTIVE_WORKSPACE, workspaceId)
   }
@@ -395,9 +516,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       feedbackLessons.value = []
       return
     }
+    if (workspaceId !== activeWorkspaceId.value) return
+    const sequence = ++feedbackRequestSequence
     const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/lessons?limit=50`)
     if (!response.ok) throw new Error(await readError(response))
-    feedbackLessons.value = await response.json()
+    const lessons = await response.json()
+    if (workspaceId === activeWorkspaceId.value && sequence === feedbackRequestSequence) {
+      feedbackLessons.value = lessons
+    }
   }
 
   async function createFeedbackLesson(payload: FeedbackLessonCreate) {
@@ -564,22 +690,166 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function createTask(payload: WorkspaceTaskCreate) {
-    if (!activeWorkspaceId.value) return
+  const TASK_EXECUTION_CONTROLS = new Set<WorkspaceTaskExecutionControl>([
+    'workspace',
+    'initiator',
+  ])
+  const TASK_PROGRESS_STATES = new Set<WorkspaceTaskProgressState>([
+    'started',
+    'working',
+    'blocked',
+    'needs_input',
+    'completed',
+    'failed',
+    'released',
+  ])
+
+  function parseTaskCapabilities(value: unknown): WorkspaceTaskCapabilities | null {
+    if (!isObject(value)) return null
+    if (
+      !Array.isArray(value.supported_execution_controls) ||
+      !value.supported_execution_controls.every(item => typeof item === 'string') ||
+      !Array.isArray(value.progress_states) ||
+      !value.progress_states.every(item => typeof item === 'string') ||
+      typeof value.record_only_requires_reporter_key !== 'boolean' ||
+      typeof value.handoff_requires_release !== 'boolean' ||
+      typeof value.legacy_chat_work_create !== 'boolean'
+    ) {
+      return null
+    }
+    const controls = value.supported_execution_controls.filter(
+      (item): item is WorkspaceTaskExecutionControl =>
+        TASK_EXECUTION_CONTROLS.has(item as WorkspaceTaskExecutionControl),
+    )
+    const states = value.progress_states.filter(
+      (item): item is WorkspaceTaskProgressState =>
+        TASK_PROGRESS_STATES.has(item as WorkspaceTaskProgressState),
+    )
+    if (!controls.includes('workspace') || states.length === 0) return null
+    return {
+      supported_execution_controls: controls,
+      progress_states: states,
+      record_only_requires_reporter_key: value.record_only_requires_reporter_key,
+      handoff_requires_release: value.handoff_requires_release,
+      legacy_chat_work_create: value.legacy_chat_work_create,
+    }
+  }
+
+  async function fetchTaskCapabilities(
+    workspaceId: string,
+  ): Promise<WorkspaceTaskCapabilities | null> {
+    // A stale caller must not abort or replace the active Workspace's request.
+    if (activeWorkspaceId.value !== workspaceId) return null
+
+    const generation = ++taskCapabilitiesGeneration
+    taskCapabilitiesController?.abort()
+    const controller = new AbortController()
+    taskCapabilitiesController = controller
+    taskCapabilities.value = null
+    taskCapabilitiesWorkspaceId.value = workspaceId
+    taskCapabilitiesStatus.value = 'loading'
+    taskCapabilitiesError.value = null
+
+    const stillCurrent = () =>
+      generation === taskCapabilitiesGeneration &&
+      !controller.signal.aborted &&
+      activeWorkspaceId.value === workspaceId
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/workspaces/${workspaceId}/task-capabilities`,
+        { signal: controller.signal },
+      )
+      if (!stillCurrent()) return null
+
+      if (response.status === 404) {
+        taskCapabilities.value = null
+        taskCapabilitiesWorkspaceId.value = workspaceId
+        taskCapabilitiesStatus.value = 'unsupported'
+        return null
+      }
+      if (!response.ok) {
+        throw new Error('Task execution options could not be loaded.')
+      }
+
+      let raw: unknown
+      try {
+        raw = await response.json()
+      } catch {
+        throw new Error('Task execution options returned an invalid response.')
+      }
+      // response.json() yields; an old Workspace must be rejected again here.
+      if (!stillCurrent()) return null
+
+      const value = parseTaskCapabilities(raw)
+      if (!value) {
+        throw new Error('Task execution options returned an invalid response.')
+      }
+      if (!stillCurrent()) return null
+
+      taskCapabilities.value = value
+      taskCapabilitiesWorkspaceId.value = workspaceId
+      taskCapabilitiesStatus.value = 'supported'
+      return value
+    } catch (cause) {
+      if (!stillCurrent()) return null
+      const message = cause instanceof Error
+        ? cause.message
+        : 'Task execution options could not be loaded.'
+      taskCapabilities.value = null
+      taskCapabilitiesWorkspaceId.value = workspaceId
+      taskCapabilitiesStatus.value = 'error'
+      taskCapabilitiesError.value = message
+      throw cause
+    } finally {
+      if (
+        generation === taskCapabilitiesGeneration &&
+        taskCapabilitiesController === controller
+      ) {
+        taskCapabilitiesController = null
+      }
+    }
+  }
+
+  async function createTask(payload: WorkspaceTaskCreate, targetWorkspaceId?: string): Promise<WorkspaceTask> {
+    const workspaceId = targetWorkspaceId ?? activeWorkspaceId.value
+    if (!workspaceId) throw new Error('Select a workspace before creating a Task.')
     isLoading.value = true
     try {
-      const response = await fetch(`${API_BASE}/workspaces/${activeWorkspaceId.value}/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/tasks`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       })
-      if (!response.ok) throw new Error(await readError(response))
-      await fetchBoard()
-    } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'Failed to create task')
-    } finally {
-      isLoading.value = false
-    }
+      if (!response.ok) throw await taskMutationError(response, 'create')
+      return await parseTaskCreateResponse(response, workspaceId, typeof payload.request_key === 'string')
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Failed to create the Task.'
+      notifyError(message)
+      throw cause
+    } finally { isLoading.value = false }
+  }
+
+  async function reportTaskProgressManually(
+    workspaceId: string,
+    taskId: string,
+    payload: WorkspaceTaskManualProgressRequest,
+  ): Promise<WorkspaceTaskMutationResult> {
+    const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/tasks/${taskId}/progress/manual`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    })
+    if (!response.ok) throw await taskMutationError(response, 'update progress for')
+    return await parseTaskMutationResponse(response, workspaceId, taskId, payload.call_id, 'progress update')
+  }
+
+  async function handoffTask(
+    workspaceId: string,
+    taskId: string,
+    payload: WorkspaceTaskHandoffRequest,
+  ): Promise<WorkspaceTaskMutationResult> {
+    const response = await fetch(`${API_BASE}/workspaces/${workspaceId}/tasks/${taskId}/handoff`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    })
+    if (!response.ok) throw await taskMutationError(response, 'hand off')
+    return await parseTaskMutationResponse(response, workspaceId, taskId, payload.call_id, 'handoff request')
   }
 
   async function updateTask(taskId: string, payload: WorkspaceTaskUpdate) {
@@ -824,6 +1094,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     updateWorkspace,
     runResidentNow,
     deleteWorkspace,
+    taskCapabilities: visibleTaskCapabilities,
+    taskCapabilitiesWorkspaceId,
+    taskCapabilitiesStatus,
+    taskCapabilitiesError,
+    fetchTaskCapabilities,
+    reportTaskProgressManually,
+    handoffTask,
     createTask,
     updateTask,
     updateTaskStatus,

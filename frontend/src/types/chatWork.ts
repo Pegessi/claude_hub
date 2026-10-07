@@ -1,4 +1,4 @@
-/** A durable work item associated with a Chat, independent of its transcript. */
+/** Legacy Chat work retained for history and explicit stopping. */
 export interface ChatWork {
   id: string
   source_tab_id: string
@@ -34,6 +34,5 @@ export interface ChatWork {
 }
 
 export interface ChatWorkUpdate {
-  action?: 'pause' | 'resume' | 'stop'
-  interval_seconds?: number
+  action: 'stop'
 }

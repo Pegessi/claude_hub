@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Workspace Task create harness</title>
+    <style>
+      :root {
+        --ch-color-app-bg: #f5f6f8;
+        --ch-color-surface-raised: #fff;
+        --ch-color-surface-control: #f3f4f6;
+        --ch-color-surface-control-hover: #eceef1;
+        --ch-color-surface-glass: #fff;
+        --ch-color-border-muted: #d5d7da;
+        --ch-color-border-hover: #aeb3ba;
+        --ch-color-border-strong: #8c929b;
+        --ch-color-text: #24292f;
+        --ch-color-text-strong: #111418;
+        --ch-color-text-muted: #626971;
+        --ch-color-success: #087f5b;
+        --ch-color-danger: #c92a2a;
+        --ch-color-warning: #a15c00;
+        --ch-radius-sm: 5px;
+        --ch-radius-md: 8px;
+        --ch-shadow-soft: 0 8px 24px rgb(0 0 0 / 12%);
+        --ch-motion-fast: 120ms;
+      }
+      html, body, #app { min-height: 100%; margin: 0; }
+      body { font: 14px/1.45 sans-serif; }
+      button, input, select, textarea { font: inherit; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { createApp } from 'vue'
+      import { createPinia } from 'pinia'
+      import AgentWorkspaceView from '/src/components/AgentWorkspaceView.vue'
+
+      window.__claudeHub = {}
+      const app = createApp(AgentWorkspaceView)
+      app.use(createPinia())
+      app.mount('#app')
+      window.__AGENT_WORKSPACE_TEST__ = { app }
+    </script>
+  </body>
+</html>

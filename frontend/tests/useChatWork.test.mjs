@@ -62,19 +62,19 @@ test('switching tabs discards stale reads and never displays another Chat work i
   assert.deepEqual(state.work.value.map(item => item.id), ['work-2'])
 })
 
-test('a stale poll cannot overwrite a successful pause', async t => {
+test('a stale poll cannot overwrite a successful stop', async t => {
   const state = useChatWork(ref('tab-1'))
   t.after(state.dispose)
   t.mock.method(globalThis, 'fetch', async () => response([snapshot()]))
   await state.start()
   const oldRead = deferred()
   globalThis.fetch = async (_url, options) => options.method
-    ? response(snapshot({ status: 'paused' })) : oldRead.promise
+    ? response(snapshot({ status: 'stopped' })) : oldRead.promise
   const read = state.refresh()
-  assert.equal(await state.update('work-1', { action: 'pause' }), true)
+  assert.equal(await state.update('work-1', { action: 'stop' }), true)
   oldRead.resolve(response([snapshot()]))
   await read
-  assert.equal(state.work.value[0].status, 'paused')
+  assert.equal(state.work.value[0].status, 'stopped')
 })
 
 test('a lost mutation response reconciles applied server state', async t => {
@@ -84,10 +84,10 @@ test('a lost mutation response reconciles applied server state', async t => {
   await state.start()
   globalThis.fetch = async (_url, options) => {
     if (options.method) throw new Error('connection lost')
-    return response([snapshot({ status: 'paused' })])
+    return response([snapshot({ status: 'stopped' })])
   }
-  assert.equal(await state.update('work-1', { action: 'pause' }), false)
-  assert.equal(state.work.value[0].status, 'paused')
+  assert.equal(await state.update('work-1', { action: 'stop' }), false)
+  assert.equal(state.work.value[0].status, 'stopped')
   assert.equal(state.stale.value, false)
   assert.equal(state.error.value, 'connection lost')
 })
@@ -102,7 +102,7 @@ test('unreconciled lost response disables further mutations until refresh succee
   assert.equal(await state.update('work-1', { action: 'stop' }), false)
   assert.equal(state.stale.value, true)
   assert.equal(calls, 2)
-  assert.equal(await state.update('work-1', { action: 'resume' }), false)
+  assert.equal(await state.update('work-1', { action: 'stop' }), false)
   assert.equal(calls, 2)
   globalThis.fetch = async () => response([snapshot({ status: 'stopped' })])
   await state.refresh()
@@ -120,15 +120,15 @@ test('changing tabs isolates pending mutations and targets the original request 
   globalThis.fetch = async (url, options) => {
     if (options.method) {
       assert.equal(url, '/api/tabs/tab-1/work/work-1')
-      assert.deepEqual(JSON.parse(options.body), { interval_seconds: 3600 })
+      assert.deepEqual(JSON.parse(options.body), { action: 'stop' })
       return pending.promise
     }
     return response([snapshot({ id: 'work-2', source_tab_id: 'tab-2' })])
   }
-  const update = state.update('work-1', { interval_seconds: 3600 })
+  const update = state.update('work-1', { action: 'stop' })
   tab.value = 'tab-2'
   await tick()
-  pending.resolve(response(snapshot({ interval_seconds: 3600 })))
+  pending.resolve(response(snapshot({ status: 'stopped' })))
   assert.equal(await update, false)
   assert.equal(state.work.value[0].id, 'work-2')
   assert.equal(state.busyId.value, null)
@@ -143,10 +143,10 @@ test('only one mutation can be active and unknown work IDs are rejected locally'
   let writes = 0
   globalThis.fetch = async () => { writes++; return pending.promise }
   assert.equal(await state.update('other', { action: 'stop' }), false)
-  const first = state.update('work-1', { action: 'pause' })
+  const first = state.update('work-1', { action: 'stop' })
   assert.equal(await state.update('work-1', { action: 'stop' }), false)
   assert.equal(writes, 1)
-  pending.resolve(response(snapshot({ status: 'paused' })))
+  pending.resolve(response(snapshot({ status: 'stopped' })))
   await first
 })
 
@@ -165,4 +165,21 @@ test('deactivation aborts reads and activation restores authoritative persisted 
   globalThis.fetch = async () => response([snapshot({ status: 'completed', latest_result: { summary: 'Finished while away' } })])
   await state.start()
   assert.equal(state.work.value[0].latest_result.summary, 'Finished while away')
+})
+
+
+test('retired ChatWork mutations never reach the network',async t=>{
+ const state=useChatWork(ref('tab-1'));t.after(state.dispose);let writes=0
+ t.mock.method(globalThis,'fetch',async(_url,options={})=>{
+  if(options.method)writes++
+  return response(options.method?snapshot({status:'stopped'}):[snapshot()])
+ })
+ await state.start()
+ assert.equal(await state.update('work-1',{action:'resume'}),false)
+ assert.equal(await state.update('work-1',{action:'pause'}),false)
+ assert.equal(await state.update('work-1',{interval_seconds:60}),false)
+ assert.equal(await state.update('work-1',{action:'stop',interval_seconds:60}),false)
+ assert.equal(writes,0)
+ assert.equal(await state.update('work-1',{action:'stop'}),true)
+ assert.equal(writes,1)
 })

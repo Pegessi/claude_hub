@@ -1,4 +1,4 @@
-"""Persistent Feishu Bot binding state and outbound API client."""
+"""Feishu callback verification, outbound API client and persistent deduplication."""
 
 from __future__ import annotations
 
@@ -7,13 +7,12 @@ import binascii
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
-import string
 import threading
 import time
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -22,17 +21,10 @@ import httpx
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from claude_hub.config import settings
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
-_BIND_CODE_ALPHABET = string.ascii_uppercase + string.digits
-_BIND_CODE_PREFIX = "CH-"
-_BIND_CODE_LENGTH = 10
-_DEFAULT_BIND_CODE_TTL_SECONDS = 600
-_BIND_CODE_RATE_WINDOW_SECONDS = 60
-_BIND_CODE_RATE_MAX = 5
-_CONSUMED_CODE_RETENTION_SECONDS = 24 * 60 * 60
 _EVENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
+_LEGACY_CLAIM_RETENTION_SECONDS = 60 * 60
 MAX_FEISHU_EVENT_BYTES = 256 * 1024
 _MAX_INPUT_CHARS = 4_000
 _MAX_REPLY_CHARS = 20_000
@@ -53,18 +45,6 @@ class FeishuEventVerificationError(FeishuBotError):
 
 class FeishuEventPayloadError(FeishuBotError):
     """Raised when an authenticated callback has an unsupported payload."""
-
-
-class BindingCodeError(FeishuBotError):
-    """Raised when a binding code is invalid, expired, replayed, or mismatched."""
-
-
-class BindingOwnerUnauthorizedError(BindingCodeError):
-    """Raised when the pairing owner no longer has permission."""
-
-
-class BindingRateLimitError(FeishuBotError):
-    """Raised when one owner requests too many binding codes."""
 
 
 @dataclass(frozen=True)
@@ -91,11 +71,6 @@ class FeishuBotConfig:
                 "Feishu Bot is not configured; missing explicit environment values: "
                 + ", ".join(missing)
             )
-        oauth_app_id = settings.feishu_app_id
-        if oauth_app_id and values["app_id"] != oauth_app_id:
-            raise FeishuBotConfigurationError(
-                "Feishu Bot and Web login must use the same app_id so open_id identity matches"
-            )
         base_url = env.get("CLAUDE_HUB_FEISHU_API_BASE_URL", "https://open.feishu.cn").rstrip("/")
         encrypt_key = env.get("CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY", "").strip() or None
         return cls(api_base_url=base_url, encrypt_key=encrypt_key, **values)
@@ -117,21 +92,6 @@ class FeishuBinding:
 
 
 @dataclass(frozen=True)
-class PendingBinding:
-    """A single-use browser-issued binding request."""
-
-    owner_open_id: str
-    owner_email: str
-    tab_id: str
-    workspace_id: str | None
-    issued_at: float
-    expires_at: float
-    consumed_at: float | None = None
-    app_id: str = ""
-    binding_generation: int = 0
-
-
-@dataclass(frozen=True)
 class FeishuMessageEvent:
     """Validated text message fields from ``im.message.receive_v1``."""
 
@@ -141,285 +101,7 @@ class FeishuMessageEvent:
     sender_open_id: str
     chat_id: str
     text: str
-
-
-class FeishuBindingStore:
-    """Atomic JSON store for codes, bindings, and inbound message deduplication."""
-
-    def __init__(self, path: Path | None = None, now: Callable[[], float] = time.time) -> None:
-        self.path = path or (resolve_runtime_home() / "feishu_bot.json")
-        self._now = now
-        self._lock = threading.RLock()
-
-    def _empty(self) -> dict[str, Any]:
-        return {"version": 1, "pending": {}, "bindings": {}, "events": {}, "rate_limits": {}}
-
-    def _load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return self._empty()
-        try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise FeishuBotError(f"Cannot read Feishu Bot state at {self.path}") from exc
-        if not isinstance(value, dict) or value.get("version") != 1:
-            raise FeishuBotError(f"Unsupported Feishu Bot state at {self.path}")
-        for key in ("pending", "bindings", "events"):
-            if not isinstance(value.get(key), dict):
-                raise FeishuBotError(f"Invalid Feishu Bot state field {key!r} at {self.path}")
-        if "rate_limits" not in value:
-            value["rate_limits"] = {}
-        if not isinstance(value["rate_limits"], dict):
-            raise FeishuBotError(f"Invalid Feishu Bot state field 'rate_limits' at {self.path}")
-        return value
-
-    def _save(self, state: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(f".{self.path.name}.{secrets.token_hex(6)}.tmp")
-        try:
-            with temporary.open("x", encoding="utf-8") as file_handle:
-                os.chmod(temporary, 0o600)
-                json.dump(state, file_handle, sort_keys=True, separators=(",", ":"))
-                file_handle.flush()
-                os.fsync(file_handle.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-
-    @staticmethod
-    def _code_digest(code: str) -> str:
-        return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _pending_from_dict(value: dict[str, Any]) -> PendingBinding:
-        expires_at = float(value["expires_at"])
-        return PendingBinding(
-            owner_open_id=str(value["owner_open_id"]),
-            owner_email=str(value.get("owner_email", "")),
-            tab_id=str(value["tab_id"]),
-            workspace_id=(
-                str(value["workspace_id"]) if value.get("workspace_id") is not None else None
-            ),
-            issued_at=float(value.get("issued_at", expires_at - _DEFAULT_BIND_CODE_TTL_SECONDS)),
-            expires_at=expires_at,
-            app_id=str(value.get("app_id", "")),
-            binding_generation=int(value.get("binding_generation", 0)),
-            consumed_at=(
-                float(value["consumed_at"]) if value.get("consumed_at") is not None else None
-            ),
-        )
-
-    @staticmethod
-    def _binding_from_dict(value: dict[str, Any]) -> FeishuBinding:
-        return FeishuBinding(
-            owner_open_id=str(value["owner_open_id"]),
-            owner_email=str(value.get("owner_email", "")),
-            sender_open_id=str(value["sender_open_id"]),
-            app_id=str(value["app_id"]),
-            chat_id=str(value["chat_id"]),
-            tab_id=str(value["tab_id"]),
-            workspace_id=(
-                str(value["workspace_id"]) if value.get("workspace_id") is not None else None
-            ),
-            created_at=float(value["created_at"]),
-            binding_generation=int(value.get("binding_generation", 0)),
-        )
-
-    def _prune_code_state(self, state: dict[str, Any], now: float) -> None:
-        consumed_cutoff = now - _CONSUMED_CODE_RETENTION_SECONDS
-        retained_pending: dict[str, Any] = {}
-        for digest, value in state["pending"].items():
-            if not isinstance(value, dict):
-                continue
-            expires_at = float(value.get("expires_at", 0))
-            consumed_at = value.get("consumed_at")
-            consumed_recently = isinstance(consumed_at, (int, float)) and (
-                float(consumed_at) >= consumed_cutoff
-            )
-            if expires_at >= now or consumed_recently:
-                retained_pending[digest] = value
-        state["pending"] = retained_pending
-        rate_cutoff = now - _BIND_CODE_RATE_WINDOW_SECONDS
-        state["rate_limits"] = {
-            owner: [
-                float(issued_at)
-                for issued_at in timestamps
-                if isinstance(issued_at, (int, float)) and float(issued_at) >= rate_cutoff
-            ]
-            for owner, timestamps in state["rate_limits"].items()
-            if isinstance(timestamps, list)
-        }
-        state["rate_limits"] = {
-            owner: timestamps for owner, timestamps in state["rate_limits"].items() if timestamps
-        }
-
-    def create_code(
-        self,
-        owner_open_id: str,
-        owner_email: str,
-        tab_id: str,
-        workspace_id: str | None,
-        ttl_seconds: int = _DEFAULT_BIND_CODE_TTL_SECONDS,
-        *,
-        app_id: str = "",
-        binding_generation: int = 0,
-    ) -> tuple[str, PendingBinding]:
-        now = self._now()
-        with self._lock:
-            state = self._load()
-            self._prune_code_state(state, now)
-            issue_times = state["rate_limits"].setdefault(owner_open_id, [])
-            if len(issue_times) >= _BIND_CODE_RATE_MAX:
-                self._save(state)
-                raise BindingRateLimitError(
-                    f"At most {_BIND_CODE_RATE_MAX} binding codes may be requested per minute"
-                )
-            issue_times.append(now)
-            for digest, value in list(state["pending"].items()):
-                if value.get("owner_open_id") == owner_open_id and value.get("consumed_at") is None:
-                    del state["pending"][digest]
-            code = _BIND_CODE_PREFIX + "".join(
-                secrets.choice(_BIND_CODE_ALPHABET) for _ in range(_BIND_CODE_LENGTH)
-            )
-            pending = PendingBinding(
-                owner_open_id=owner_open_id,
-                owner_email=owner_email,
-                tab_id=tab_id,
-                workspace_id=workspace_id,
-                issued_at=now,
-                expires_at=now + ttl_seconds,
-                app_id=app_id,
-                binding_generation=binding_generation,
-            )
-            state["pending"][self._code_digest(code)] = asdict(pending)
-            self._save(state)
-            return code, pending
-
-    def consume_code(
-        self,
-        code: str,
-        *,
-        sender_open_id: str,
-        app_id: str,
-        chat_id: str,
-        owner_is_authorized: Callable[[str, str], bool],
-        expected_app_id: str | None = None,
-        expected_binding_generation: int | None = None,
-    ) -> FeishuBinding:
-        digest = self._code_digest(code)
-        with self._lock:
-            state = self._load()
-            value = state["pending"].get(digest)
-            if not isinstance(value, dict):
-                raise BindingCodeError("Binding code is invalid")
-            pending = self._pending_from_dict(value)
-            if pending.consumed_at is not None:
-                raise BindingCodeError("Binding code has already been used")
-            if self._now() > pending.expires_at:
-                raise BindingCodeError("Binding code has expired")
-            if expected_app_id is not None and not hmac.compare_digest(
-                pending.app_id, expected_app_id
-            ):
-                raise BindingCodeError("Binding code belongs to a previous Bot application")
-            if (
-                expected_binding_generation is not None
-                and pending.binding_generation != expected_binding_generation
-            ):
-                raise BindingCodeError("Binding code belongs to a previous Bot configuration")
-            if not hmac.compare_digest(pending.owner_open_id, sender_open_id):
-                raise BindingCodeError("Binding code belongs to a different Feishu user")
-            if not owner_is_authorized(pending.owner_open_id, pending.owner_email):
-                raise BindingOwnerUnauthorizedError("Binding owner is no longer authorized")
-            binding = FeishuBinding(
-                owner_open_id=pending.owner_open_id,
-                owner_email=pending.owner_email,
-                sender_open_id=sender_open_id,
-                app_id=app_id,
-                chat_id=chat_id,
-                tab_id=pending.tab_id,
-                workspace_id=pending.workspace_id,
-                created_at=self._now(),
-                binding_generation=pending.binding_generation,
-            )
-            state["pending"][digest]["consumed_at"] = self._now()
-            state["bindings"][binding.owner_open_id] = asdict(binding)
-            self._save(state)
-            return binding
-
-    def get_owner_binding(self, owner_open_id: str) -> FeishuBinding | None:
-        with self._lock:
-            value = self._load()["bindings"].get(owner_open_id)
-        return self._binding_from_dict(value) if isinstance(value, dict) else None
-
-    def get_sender_binding(
-        self, sender_open_id: str, app_id: str, chat_id: str
-    ) -> FeishuBinding | None:
-        binding = self.get_owner_binding(sender_open_id)
-        if binding is None:
-            return None
-        if not hmac.compare_digest(binding.sender_open_id, sender_open_id):
-            return None
-        if not hmac.compare_digest(binding.app_id, app_id):
-            return None
-        if not hmac.compare_digest(binding.chat_id, chat_id):
-            return None
-        return binding
-
-    def delete_owner_binding(self, owner_open_id: str) -> bool:
-        """Remove the owner's binding and every outstanding pairing code."""
-
-        with self._lock:
-            state = self._load()
-            removed = state["bindings"].pop(owner_open_id, None) is not None
-            for digest, value in list(state["pending"].items()):
-                if isinstance(value, dict) and value.get("owner_open_id") == owner_open_id:
-                    del state["pending"][digest]
-                    removed = True
-            if removed:
-                self._save(state)
-            return removed
-
-    def clear_routing_state(self) -> bool:
-        """Revoke all bindings and codes while preserving message deduplication."""
-
-        with self._lock:
-            state = self._load()
-            changed = bool(state["pending"] or state["bindings"])
-            state["pending"] = {}
-            state["bindings"] = {}
-            if changed:
-                self._save(state)
-            return changed
-
-    def claim_message(self, message_id: str) -> bool:
-        """Persist an at-most-once claim, using the official message deduplication key."""
-
-        now = self._now()
-        with self._lock:
-            state = self._load()
-            cutoff = now - _EVENT_RETENTION_SECONDS
-            state["events"] = {
-                key: value
-                for key, value in state["events"].items()
-                if isinstance(value, dict) and float(value.get("claimed_at", 0)) >= cutoff
-            }
-            if message_id in state["events"]:
-                self._save(state)
-                return False
-            state["events"][message_id] = {"claimed_at": now, "status": "processing"}
-            self._save(state)
-            return True
-
-    def finish_message(self, message_id: str, status: str) -> None:
-        with self._lock:
-            state = self._load()
-            value = state["events"].get(message_id)
-            if isinstance(value, dict):
-                value["status"] = status
-                value["finished_at"] = self._now()
-                self._save(state)
+    message_created_at_ms: int
 
 
 class FeishuBotClient:
@@ -583,6 +265,52 @@ def _event_created_seconds(value: Any) -> float:
     return float(timestamp)
 
 
+_MAX_FEISHU_MESSAGE_TIME_MS = 4_102_444_800_000
+
+
+def _message_created_millis(value: Any) -> int:
+    # The event schema defines this field as a decimal string in milliseconds.
+    # Never infer units or replace it with the event header/receipt time.
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 13
+        or not value.isascii()
+        or not value.isdecimal()
+    ):
+        raise FeishuEventPayloadError("Invalid Feishu message create_time")
+    timestamp = int(value)
+    if timestamp > _MAX_FEISHU_MESSAGE_TIME_MS:
+        raise FeishuEventPayloadError("Invalid Feishu message create_time")
+    return timestamp
+
+
+def feishu_message_time_is_valid(created_at_ms: int, *, activated_at: float, now: float) -> bool:
+    """Check exact UTC bounds without rounding activation down to milliseconds.
+
+    Host and Feishu clocks must be normally synchronized. This rejects
+    observable future/inverted times, not every unobserved wall-clock jump.
+    """
+    if (
+        isinstance(created_at_ms, bool)
+        or not isinstance(created_at_ms, int)
+        or not 0 <= created_at_ms <= _MAX_FEISHU_MESSAGE_TIME_MS
+    ):
+        return False
+    ratios: list[tuple[int, int]] = []
+    for value in (activated_at, now):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            seconds = float(value)
+        except OverflowError:
+            return False
+        if not math.isfinite(seconds) or not 0 <= seconds <= _MAX_FEISHU_MESSAGE_TIME_MS / 1000:
+            return False
+        ratios.append(seconds.as_integer_ratio())
+    (lower_n, lower_d), (upper_n, upper_d) = ratios
+    return created_at_ms * lower_d >= lower_n * 1000 and created_at_ms * upper_d <= upper_n * 1000
+
+
 def parse_feishu_callback(
     raw_body: bytes,
     headers: Mapping[str, str],
@@ -636,6 +364,11 @@ def parse_feishu_callback(
     message = event.get("message")
     if not isinstance(sender, dict) or not isinstance(message, dict):
         raise FeishuEventPayloadError("Feishu sender or message is missing")
+    message_created_at_ms = _message_created_millis(message.get("create_time"))
+    if not feishu_message_time_is_valid(message_created_at_ms, activated_at=0.0, now=current_time):
+        raise FeishuEventVerificationError(
+            "Feishu message timestamp is outside the trusted time range"
+        )
     sender_id = sender.get("sender_id")
     if sender.get("sender_type") != "user" or not isinstance(sender_id, dict):
         raise FeishuEventPayloadError("Only Feishu user messages are supported")
@@ -674,14 +407,146 @@ def parse_feishu_callback(
         sender_open_id=sender_open_id,
         chat_id=chat_id,
         text=text,
+        message_created_at_ms=message_created_at_ms,
     )
 
 
+_MAX_DEDUP_TIMESTAMP = 4_102_444_800.0
+
+
+def _dedup_timestamp(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise FeishuBotError("Invalid Feishu message claim timestamp")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise FeishuBotError("Invalid Feishu message claim timestamp") from exc
+    if not math.isfinite(number) or not 0.0 <= number <= _MAX_DEDUP_TIMESTAMP:
+        raise FeishuBotError("Invalid Feishu message claim timestamp")
+    return number
+
+
+def _dedup_message_id(key: str) -> str:
+    if not isinstance(key, str):
+        raise FeishuBotError("Invalid namespaced Feishu message key")
+    bot_id, separator, message_id = key.partition(":")
+    if not separator or not bot_id or not message_id:
+        raise FeishuBotError("Invalid namespaced Feishu message key")
+    return message_id
+
+
+def _validate_dedup_events(value: Any, *, namespaced: bool) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise FeishuBotError("Invalid Feishu message claims")
+    for key, record in value.items():
+        if not isinstance(key, str) or not key or not isinstance(record, dict):
+            raise FeishuBotError("Invalid Feishu message claim record")
+        if namespaced:
+            _dedup_message_id(key)
+        _dedup_timestamp(record.get("claimed_at"))
+        status = record.get("status")
+        if not isinstance(status, str) or not status.strip():
+            raise FeishuBotError("Invalid Feishu message claim status")
+        if "finished_at" in record:
+            _dedup_timestamp(record["finished_at"])
+    return value
+
+
+class FeishuMessageDedupStore:
+    """At-most-once claims for inbound messages, keyed per Bot.
+
+    Deduplication state is separate from credentials because it is written on
+    every inbound message. Invalid authority records are never pruned into a
+    fresh claim, including records whose timestamps appear to have expired.
+    """
+
+    def __init__(self, path: Path | None = None, now: Callable[[], float] = time.time) -> None:
+        self.path = path or (resolve_runtime_home() / "feishu_bot.json")
+        self._now = now
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _empty() -> dict[str, Any]:
+        return {"version": 2, "events": {}, "legacy_events": {}}
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return self._empty()
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # ValueError also covers invalid UTF-8 and JSON integer limits.
+            raise FeishuBotError("Cannot read Feishu message deduplication state") from exc
+        if not isinstance(value, dict):
+            raise FeishuBotError("Unsupported Feishu message deduplication state")
+        version = value.get("version")
+        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
+            raise FeishuBotError("Unsupported Feishu message deduplication state")
+        events = _validate_dedup_events(value.get("events"), namespaced=version == 2)
+        if version == 1:
+            # Legacy IDs have no trustworthy Bot identity. Preserve their
+            # original claim times in the bounded compatibility namespace.
+            return {"version": 2, "events": {}, "legacy_events": events}
+        legacy = _validate_dedup_events(value.get("legacy_events", {}), namespaced=False)
+        return {"version": 2, "events": events, "legacy_events": legacy}
+
+    def _save(self, state: dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8") as file_handle:
+                os.chmod(temporary, 0o600)
+                json.dump(state, file_handle, sort_keys=True, separators=(",", ":"))
+                file_handle.flush()
+                os.fsync(file_handle.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def claim(self, key: str) -> bool:
+        message_id = _dedup_message_id(key)
+        now = _dedup_timestamp(self._now())
+        with self._lock:
+            state = self._load()
+            cutoff = now - _EVENT_RETENTION_SECONDS
+            events = {
+                item: record
+                for item, record in state["events"].items()
+                if record["claimed_at"] >= cutoff
+            }
+            state["events"] = events
+            legacy_cutoff = now - _LEGACY_CLAIM_RETENTION_SECONDS
+            state["legacy_events"] = {
+                item: record
+                for item, record in state["legacy_events"].items()
+                if record["claimed_at"] >= legacy_cutoff
+            }
+            if key in events or message_id in state["legacy_events"]:
+                self._save(state)
+                return False
+            events[key] = {"claimed_at": now, "status": "processing"}
+            self._save(state)
+            return True
+
+    def finish(self, key: str, status: str) -> None:
+        _dedup_message_id(key)
+        if not isinstance(status, str) or not status.strip():
+            raise FeishuBotError("Invalid Feishu message claim status")
+        with self._lock:
+            state = self._load()
+            value = state["events"].get(key)
+            if value is not None:
+                value["status"] = status
+                value["finished_at"] = _dedup_timestamp(self._now())
+                self._save(state)
+
+
 __all__ = [
-    "BindingCodeError",
-    "BindingRateLimitError",
+    "FeishuMessageDedupStore",
     "FeishuBinding",
-    "FeishuBindingStore",
     "FeishuBotClient",
     "FeishuBotConfig",
     "FeishuBotConfigurationError",
@@ -690,5 +555,6 @@ __all__ = [
     "FeishuEventVerificationError",
     "FeishuMessageEvent",
     "MAX_FEISHU_EVENT_BYTES",
+    "feishu_message_time_is_valid",
     "parse_feishu_callback",
 ]

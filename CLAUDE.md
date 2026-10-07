@@ -70,7 +70,8 @@ acceptance evidence. Read the narrowest relevant source; expand only when needed
 ## Task and agent entry points
 
 **Task Graph / TaskMailbox**: [docs/TASK_GRAPH.md](docs/TASK_GRAPH.md)
-(primary: `claude-hub task`). Use task records for dependencies and durable handoff.
+(primary: `claude-hub task`). Registration records work; it does not dispatch it.
+Keep source separate from execution responsibility, and transfer responsibility explicitly.
 
 Main and linked Git worktrees share the same Hub Workspace (canonical Git
 common-dir). Agent execution cwd is separate. Run `workspace ensure --path …`,
@@ -83,21 +84,23 @@ claude-hub agent create WORKSPACE_ID --agent-type claude --cwd . --env-preset NA
 
 `--env-preset` accepts any built-in preset or saved custom preset by name or id.
 Use `--no-reuse-existing` only for deliberate parallelism and `--ephemeral` only
-for task-owned sessions. After a terminal task, `claude-hub task cleanup TASK_ID`
-cleans an ephemeral session; never delete shared/persistent agents.
+for task-owned sessions. For a Workspace-managed task with an owned ephemeral
+session, `claude-hub task cleanup TASK_ID` performs cleanup. Never delete
+shared/persistent agents or apply managed cleanup to initiator-owned records.
 
 Simple work runs directly. Complex work maps dependencies before delegation;
 there is no minimum number of subagents. Every delegate needs inputs, scope,
 owner, budget, stop condition and evidence handoff. Use actual available tools
-and user/configured model choices. Worker self-review does not replace the Hub's
-required independent evaluator or human acceptance.
+and user/configured model choices. Workspace-managed work retains its configured
+independent review and human-acceptance requirements.
 
 ## Focused navigation
 
 - [Architecture and code ownership map](ARCHITECTURE.md)
 - [Detailed workflow, commands, runtime pitfalls and task-specific document index](docs/AGENT_WORKFLOW.md)
-- [Current orchestration/context contract](docs/working-logs/2026-10-05-agent-context-contract.md)
-- [Chat work routing, background tasks and feedback](docs/working-logs/2026-10-05-chat-workflow-integration.md)
+- [Unified Task execution and Agent workflow](docs/working-logs/2026-10-07-agent-workflow-v2.md)
+- [Task UI, Bot pool, pairing and callback safety](docs/working-logs/2026-10-07-bot-pool-and-task-ui.md)
+- [Earlier ChatWork and feedback design](docs/working-logs/2026-10-05-chat-workflow-integration.md)
 - [Recent behavior](CHANGELOG.md), [bug symptom history](WORKLOG.md)
 - [Terminal debugging](docs/terminal-debugging.md), [deployment](docs/DEPLOYMENT.md)
 - [Feedback lessons](docs/working-logs/lessons-catalog.md)

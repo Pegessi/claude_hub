@@ -8,6 +8,101 @@ export type WorkspaceTaskStatus = 'todo' | 'queued' | 'working' | 'review' | 'do
 export type WorkspaceTaskMode = 'direct' | 'reviewed' | 'autonomous' | 'subagent'
 export type WorkspaceTaskExecutionComplexity = 'auto' | 'simple' | 'complex'
 export type WorkspaceTaskOrigin = 'human' | 'resident'
+export type WorkspaceTaskExecutionControl = 'workspace' | 'initiator'
+export type WorkspaceTaskSourceKind = 'human' | 'chat' | 'agent'
+export type WorkspaceTaskProgressState =
+  | 'started' | 'working' | 'blocked' | 'needs_input'
+  | 'completed' | 'failed' | 'released'
+export type WorkspaceTaskRuntimeStatus =
+  | 'active' | 'idle' | 'error' | 'disconnected' | 'unknown'
+
+export interface WorkspaceTaskSource {
+  kind: WorkspaceTaskSourceKind
+  tab_id: string | null
+  agent_id: string | null
+}
+
+export interface WorkspaceTaskExecutionRef {
+  provider: string | null
+  session_id: string | null
+  thread_id: string | null
+  turn_id: string | null
+  run_epoch: number | null
+}
+
+export interface WorkspaceTaskProgress {
+  state: WorkspaceTaskProgressState
+  summary: string
+  validation: string | null
+  risks: string | null
+  artifact_refs: string[]
+  call_id: string
+  execution_epoch: number
+  reported_at: string
+}
+
+export interface WorkspaceTaskRuntimeObservation {
+  execution_epoch: number
+  stream_sequence: number
+  status: WorkspaceTaskRuntimeStatus
+  observed_at: string
+  turn_id: string | null
+  detail: string | null
+}
+
+export type WorkspaceTaskCapabilitiesStatus =
+  | 'idle' | 'loading' | 'supported' | 'unsupported' | 'error'
+
+export interface WorkspaceTaskCapabilities {
+  supported_execution_controls: WorkspaceTaskExecutionControl[]
+  progress_states: WorkspaceTaskProgressState[]
+  record_only_requires_reporter_key: boolean
+  handoff_requires_release: boolean
+  legacy_chat_work_create: boolean
+}
+
+export interface WorkspaceTaskManualProgressRequest {
+  call_id: string
+  expected_execution_epoch: number
+  expected_progress_revision: number
+  state: Exclude<WorkspaceTaskProgressState, 'released'>
+  summary: string
+  validation?: string | null
+  risks?: string | null
+  artifact_refs?: string[]
+}
+
+export interface WorkspaceTaskHandoffRequest {
+  call_id: string
+  expected_execution_epoch: number
+  expected_progress_revision: number
+  execution_control: WorkspaceTaskExecutionControl
+  new_reporter_key?: string
+  execution_ref?: WorkspaceTaskExecutionRef | null
+}
+
+export interface WorkspaceTaskEvent {
+  sequence: number
+  call_id: string
+  fingerprint: string
+  task_id: string
+  actor_session_id: string | null
+  actor_role: string
+  type: string
+  action: string
+  target: string
+  consumer_key: string
+  payload: Record<string, unknown>
+  created_at: string
+  review_cycle: number | null
+  report_id: string | null
+}
+
+export interface WorkspaceTaskMutationResult {
+  task: WorkspaceTask
+  event: WorkspaceTaskEvent
+  replayed: boolean
+}
 export type EvaluationStrictness = 'lenient' | 'balanced' | 'strict'
 export type HumanCheckpointPolicy = 'final_only' | 'after_rubric' | 'every_iteration'
 export type AutonomousRunPhase =
@@ -391,6 +486,19 @@ export interface WorkspaceTask {
   task_mode: WorkspaceTaskMode
   execution_complexity: WorkspaceTaskExecutionComplexity
   origin?: WorkspaceTaskOrigin
+  source?: WorkspaceTaskSource | null
+  execution_control?: WorkspaceTaskExecutionControl
+  execution_ref?: WorkspaceTaskExecutionRef | null
+  execution_epoch?: number
+  progress_revision?: number
+  execution_released?: boolean
+  latest_progress?: WorkspaceTaskProgress | null
+  runtime_observation?: WorkspaceTaskRuntimeObservation | null
+  legacy_work_detached?: boolean
+  source_work_id?: string | null
+  chat_work_outcome?: string | null
+  chat_work_report_id?: string | null
+  chat_work_summary?: string | null
   agent_tag?: string | null
   autonomy_policy?: AutonomyPolicy | null
   autonomous_run?: AutonomousRun | null
@@ -429,6 +537,11 @@ export interface WorkspaceTask {
 }
 
 export interface WorkspaceTaskCreate {
+  execution_control?: WorkspaceTaskExecutionControl
+  reporter_key?: string
+  request_key?: string | null
+  source?: WorkspaceTaskSource | null
+  execution_ref?: WorkspaceTaskExecutionRef | null
   title: string
   prompt: string
   agent_type?: AgentType
