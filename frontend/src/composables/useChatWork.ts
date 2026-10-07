@@ -85,7 +85,11 @@ export function useChatWork(tabId: Ref<string>) {
   }
 
   async function update(id: string, change: ChatWorkUpdate): Promise<boolean> {
-    if (!active || disposed || busyId.value || stale.value || !work.value.some(item => item.id === id)) return false
+    if (!change || typeof change !== 'object' || Array.isArray(change) ||
+        Object.keys(change).length !== 1 || change.action !== 'stop') return false
+    const item = work.value.find(candidate => candidate.id === id)
+    if (!active || disposed || busyId.value || stale.value || !item ||
+        item.status === 'stopped' || item.status === 'completed') return false
     invalidateRead()
     const context = scope
     const tab = tabId.value

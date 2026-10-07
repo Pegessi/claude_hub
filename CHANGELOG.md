@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### feat(workspace): integrate unified Task ownership and recovery controls
+
+- Show one Task record with separate source and execution responsibility. Keep
+  Workspace-managed controls off initiator-managed records and retain explicit,
+  same-ID progress and handoff operations.
+- Persist modern create/progress/handoff requests before sending. Separate
+  confirmed writes from refresh or local credential-save failures; stale views
+  cannot clear another Task's pending request or reporter credential.
+- Distinguish capability loading/errors from an explicitly unsupported server.
+  Never silently drop request idempotency during a slow capability read.
+- Keep legacy Chat work readable and stop-only, with per-record navigation to
+  its Workspace. Add real-component browser and Pinia regression coverage.
+
 ### feat(tasks): separate Task registration from execution responsibility
 
 - Keep one WorkspaceTask record for initiator-managed and Workspace-managed
@@ -19,8 +32,8 @@
 - Retire new legacy ChatWork creation and replay while preserving history,
   stop-only controls, and reports from already-running work.
 - Add offline ownership, recovery, CLI, and managed-execution compatibility
-  regressions. The Task UI and Bot pool integration remain separate work in
-  progress; see [validation notes](docs/working-logs/2026-10-07-agent-workflow-v2.md).
+  regressions. See the [Task/CLI validation](docs/working-logs/2026-10-07-agent-workflow-v2.md)
+  and [integrated UI/Bot notes](docs/working-logs/2026-10-07-bot-pool-and-task-ui.md).
 
 ### feat(chat): group native subagents within each parent turn
 
@@ -34,21 +47,21 @@
   desktop/mobile mocked browser coverage. See the
   [implementation and validation notes](docs/working-logs/2026-10-07-native-subagent-region.md).
 
-### feat(feishu): add administrator-managed Webhook Bot settings
+### feat(feishu): replace single-Bot settings with a shared Bot pool
 
-- Add one instance-wide settings dialog under Extensions, separate from per-Chat
-  binding. Explicit Feishu OAuth administrators can validate, save, rotate, or
-  deactivate a Bot; ordinary users see only safe configuration status.
-- Keep complete environment configurations read-only and reject partial or
-  damaged configuration rather than combining credential sources. Stored
-  credentials use private files; API responses never return secret values.
-- Use revision checks and binding generations to reject stale saves and revoke
-  old routing without deleting Chat history. Recheck outbound authorization
-  under a bounded publication gate and do not retry uncertain reply delivery.
-- Add offline API, client, and desktop/mobile browser regressions. A saved
-  configuration does not claim successful Webhook or provider connectivity.
-- Document administrator setup, credential precedence, and validation limits in
-  [the manual Bot configuration guide](docs/working-logs/2026-10-06-feishu-manual-config.md).
+- Manage instance-shared Bots under existing Hub access control, without a
+  separate Bot-administrator role. Bind one Bot to one Chat through explicit
+  two-step pairing; never silently take over an occupied Bot or Chat.
+- Keep credentials write-only, environment credentials read-only, and App IDs
+  immutable. Use draft revisions, binding generations, and tombstones for safe
+  changes and migration; retire the old configuration/binding routes with 410.
+- Recheck callback admission after asynchronous waits. Reject first-delivered
+  messages created before the current binding, and never replay an old message
+  into a new Chat. Keep bounded per-Bot reply gates and persistent deduplication.
+- Fix UI races between shared pool reads, pairing polling, credential edits,
+  clipboard results, and closed components. Preserve per-message source history.
+- Document migration, API contracts, validation, and live-acceptance boundaries
+  in the [Bot pool and Task UI guide](docs/working-logs/2026-10-07-bot-pool-and-task-ui.md).
 
 ### feat(feishu): preserve per-message source in shared Chat sessions
 

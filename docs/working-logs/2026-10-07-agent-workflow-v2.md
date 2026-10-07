@@ -98,3 +98,10 @@ Initiator-managed dependency ordering remains the initiator's responsibility;
 registration is not an execution scheduler. The pending UI and Bot pool work
 must receive their own validation and review before the integrated candidate
 is reported ready. No main merge, push, deployment, or live acceptance is implied.
+
+
+## Integrated UI and Bot pool continuation
+
+The later Task UI, shared Bot pool, migration, callback admission, and browser
+checks are documented in [the integration log](2026-10-07-bot-pool-and-task-ui.md).
+The validation tables above describe the earlier Task/CLI commit, not the later UI.

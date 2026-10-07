@@ -1,138 +1,177 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
-import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
 import test from 'node:test'
-import ts from 'typescript'
-import { ref } from 'vue'
+import { bindingHarness, bot, claim, code, config, deferred, flush, pool, response } from './feishuBotUiTestHarness.mjs'
 
-const require = createRequire(import.meta.url)
-const source = readFileSync(new URL('../src/composables/useFeishuBinding.ts', import.meta.url), 'utf8')
-  .replace("from 'vue'", `from '${pathToFileURL(require.resolve('vue')).href}'`)
-const js = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
-}).outputText
-const { useFeishuBinding } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
-
-const bindingSnapshot = (overrides = {}) => ({
-  owner_open_id: 'ou-owner',
-  sender_open_id: 'ou-owner',
-  app_id: 'cli-bot',
-  chat_id: 'oc-chat',
-  tab_id: 'tab-1',
-  workspace_id: null,
-  created_at: '2026-10-04T12:00:00Z',
-  ...overrides,
-})
-
-const codeSnapshot = () => ({
-  code: 'CH-ABCDEFGHIJ',
-  expires_at: '2099-10-04T12:10:00Z',
-  event_url: 'https://hub.example.test/api/feishu/bot/events',
-})
-
-const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), {
-  status,
-  headers: { 'Content-Type': 'application/json' },
-})
-
-const deferred = () => {
-  let resolve
-  const promise = new Promise(done => { resolve = done })
-  return { promise, resolve }
+async function claimed(h) {
+  await h.api.resume()
+  await h.api.generateCode()
+  h.setServer(pool(2, [bot('a', { revision: 2, my_claims: [claim()] }), bot('b')]))
+  h.setNow(1500)
+  await h.fire()
+  assert.equal(h.api.viewState.value, 'claimed')
 }
 
-test('pause prevents a late binding-code JSON body from restoring state or polling', async t => {
-  const jsonStarted = deferred()
-  const jsonBody = deferred()
-  let timerCalls = 0
-  t.mock.method(globalThis, 'setTimeout', () => {
-    timerCalls++
-    return 1
-  })
-  t.mock.method(globalThis, 'fetch', async () => ({
-    ok: true,
-    status: 201,
-    json: () => {
-      jsonStarted.resolve()
-      return jsonBody.promise
-    },
-  }))
-  const state = useFeishuBinding(ref('tab-1'))
-
-  const request = state.generateCode()
-  await jsonStarted.promise
-  state.pause()
-  jsonBody.resolve(codeSnapshot())
-
-  assert.equal(await request, false)
-  assert.equal(state.pendingCode.value, null)
-  assert.equal(state.viewState.value, 'unbound')
-  assert.equal(timerCalls, 0)
+test('resume refreshes without a pending attempt and does not duplicate an in-flight initial read', async t => {
+  const h = bindingHarness(t), waiting = deferred()
+  h.setTransport(() => waiting.promise)
+  const first = h.api.resume()
+  await h.api.resume()
+  assert.equal(h.calls.length, 1)
+  waiting.resolve(response(h.server()))
+  await first
 })
 
-test('401 clears previously loaded binding state and requires the existing login flow', async t => {
-  let response = jsonResponse({ binding: bindingSnapshot() })
-  t.mock.method(globalThis, 'fetch', async () => response)
-  const state = useFeishuBinding(ref('tab-1'))
-  t.after(state.pause)
-
-  assert.equal(await state.refresh(), true)
-  assert.equal(state.viewState.value, 'bound-current')
-  response = jsonResponse({ detail: 'Not authenticated' }, 401)
-
-  assert.equal(await state.refresh(), false)
-  assert.equal(state.binding.value, null)
-  assert.equal(state.pendingCode.value, null)
-  assert.equal(state.needsLogin.value, true)
-  assert.equal(state.viewState.value, 'error')
+test('claim polling outlives code TTL and ends at claim expiry', async t => {
+  const h = bindingHarness(t)
+  await claimed(h)
+  assert.equal(h.timers.size, 1)
+  h.setNow(2500); await h.fire()
+  assert.equal(h.api.viewState.value, 'claimed')
+  assert.equal(h.timers.size, 1)
+  h.setNow(4500); await h.fire()
+  assert.match(h.api.error.value, /claimed pairing expired/)
+  assert.equal(h.timers.size, 0)
 })
 
-test('503 configuration errors remain visible without fabricating a binding', async t => {
-  t.mock.method(globalThis, 'fetch', async () => jsonResponse({ detail: 'Feishu Bot is not configured' }, 503))
-  const state = useFeishuBinding(ref('tab-1'))
-  t.after(state.pause)
-
-  assert.equal(await state.refresh(), false)
-  assert.equal(state.binding.value, null)
-  assert.equal(state.viewState.value, 'error')
-  assert.equal(state.error.value, 'Feishu Bot is not configured')
-  assert.equal(state.needsLogin.value, false)
+test('poll and manual refresh cannot abort a pending activation or strand the mutation flag', async t => {
+  const waiting = deferred()
+  let signal
+  const result = pool(3, [bot('a', { revision: 3, binding: {
+    pairing_id: 'bound', state: 'active', tab_id: 'tab-1', workspace_id: null,
+    created_at: new Date(1500).toISOString(), is_mine: true, owner_kind: 'oauth', chat_id: 'chat-a',
+  } }), bot('b')])
+  const h = bindingHarness(t, { activatePairing: (_id, _input, requestSignal) => { signal = requestSignal; return waiting.promise } })
+  t.after(async () => { waiting.resolve(result); await flush() })
+  await claimed(h)
+  const alreadyQueuedCallback = [...h.timers.values()][0]
+  h.api.confirmWord.value = 'ABCDEF'
+  const activating = h.api.activate()
+  assert.equal(h.api.isMutating.value, true)
+  assert.equal(h.timers.size, 0)
+  const readCount = h.calls.length
+  alreadyQueuedCallback()
+  assert.equal(await h.api.refresh(), false)
+  await flush()
+  assert.equal(signal.aborted, false)
+  assert.equal(h.api.isMutating.value, true)
+  assert.equal(h.calls.length, readCount)
+  waiting.resolve(result)
+  assert.equal(await activating, true)
+  assert.equal(h.api.isMutating.value, false)
+  assert.equal(h.api.viewState.value, 'bound-current')
+  assert.equal(h.timers.size, 0)
 })
 
-test('normal disconnect uses authenticated DELETE and clears binding state', async t => {
-  const requests = []
-  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
-    requests.push({ url, options })
-    if (options.method === 'DELETE') return new Response(null, { status: 204 })
-    return jsonResponse({ binding: bindingSnapshot() })
-  })
-  const state = useFeishuBinding(ref('tab-1'))
-  t.after(state.pause)
-
-  assert.equal(await state.refresh(), true)
-  assert.equal(state.viewState.value, 'bound-current')
-  assert.equal(await state.disconnect(), true)
-  assert.equal(state.binding.value, null)
-  assert.equal(state.pendingCode.value, null)
-  assert.equal(state.viewState.value, 'unbound')
-  assert.equal(requests.at(-1).url, '/api/feishu/bot/binding')
-  assert.equal(requests.at(-1).options.method, 'DELETE')
-  assert.equal(requests.at(-1).options.credentials, 'same-origin')
+test('a busy activation keeps the confirmation word and resumes polling without a recovery GET', async t => {
+  const h = bindingHarness(t, { activatePairing: async () => {
+    throw new config.FeishuBotRequestError(503, 'bot_operation_busy', 'Another Bot operation is in progress.')
+  } })
+  await claimed(h)
+  h.api.confirmWord.value = 'ABCDEF'
+  const readCount = h.calls.length
+  assert.equal(await h.api.activate(), false)
+  assert.equal(h.api.confirmWord.value, 'ABCDEF')
+  assert.equal(h.api.isMutating.value, false)
+  assert.equal(h.timers.size, 1)
+  assert.equal(h.calls.length, readCount)
 })
 
-test('normal code generation sends only the concrete Chat tab id', async t => {
-  let requestBody
-  t.mock.method(globalThis, 'fetch', async (_url, options = {}) => {
-    requestBody = JSON.parse(options.body)
-    return jsonResponse(codeSnapshot(), 201)
-  })
-  const state = useFeishuBinding(ref('tab-1'))
-  t.after(state.pause)
+test('a mutation cancelling an old read clears loading and schedules the new code poll', async t => {
+  const h = bindingHarness(t), waiting = deferred()
+  await h.api.resume()
+  h.setTransport(() => waiting.promise)
+  const reading = h.api.refresh()
+  assert.equal(h.api.isLoading.value, true)
+  assert.equal(await h.api.generateCode(), true)
+  assert.equal(h.api.isLoading.value, false)
+  assert.equal(h.api.isMutating.value, false)
+  assert.equal(h.timers.size, 1)
+  waiting.resolve(response(pool(1)))
+  await reading
+  assert.equal(h.api.pendingCode.value.code, 'CH-TEST')
+  assert.equal(h.timers.size, 1)
+})
 
-  assert.equal(await state.generateCode(), true)
-  assert.deepEqual(requestBody, { tab_id: 'tab-1' })
-  assert.equal(state.pendingCode.value.code, 'CH-ABCDEFGHIJ')
-  assert.equal(state.viewState.value, 'pending')
+test('selecting another Bot clears the previous seen claim', async t => {
+  const h = bindingHarness(t)
+  await claimed(h)
+  h.api.selectBot('b')
+  await h.api.resume()
+  assert.equal(h.api.selectedBotId.value, 'b')
+  assert.equal(h.api.viewState.value, 'unbound')
+  assert.equal(h.api.error.value, null)
+  assert.equal(h.timers.size, 0)
+})
+
+test('pause discards late code responses and clears confirmation text', async t => {
+  const waiting = deferred()
+  const h = bindingHarness(t, { startPairing: () => waiting.promise })
+  await h.api.resume()
+  const creating = h.api.generateCode()
+  h.api.confirmWord.value = 'ABCDEF'
+  h.api.pause()
+  waiting.resolve(code())
+  assert.equal(await creating, false)
+  assert.equal(h.api.pendingCode.value, null)
+  assert.equal(h.api.confirmWord.value, '')
+  assert.equal(h.timers.size, 0)
+})
+
+test('a changed Chat ref cannot display the previous Chat code response', async t => {
+  const waiting = deferred()
+  const h = bindingHarness(t, { startPairing: () => waiting.promise })
+  await h.api.resume()
+  const creating = h.api.generateCode()
+  h.tab.value = 'tab-2'
+  await flush()
+  waiting.resolve(code())
+  assert.equal(await creating, false)
+  assert.equal(h.api.pendingCode.value, null)
+  assert.equal(h.api.confirmWord.value, '')
+  assert.equal(h.timers.size, 0)
+})
+
+test('removing the selected Bot never attaches its old code to the next Bot', async t => {
+  const h = bindingHarness(t)
+  await h.api.resume()
+  await h.api.generateCode()
+  h.setServer(pool(2, [bot('b')]))
+  await h.api.refresh()
+  assert.equal(h.api.selectedBotId.value, 'b')
+  assert.equal(h.api.pendingCode.value, null)
+  assert.equal(h.api.confirmWord.value, '')
+  assert.equal(h.api.viewState.value, 'unbound')
+  assert.equal(h.timers.size, 0)
+})
+
+test('a real claim change clears its predecessor word, but a same-claim refresh does not', async t => {
+  const h = bindingHarness(t)
+  await claimed(h)
+  h.api.confirmWord.value = 'ABCDEF'
+  h.store.applyPool(pool(3, [bot('a', { revision: 3, my_claims: [claim()] }), bot('b')]))
+  assert.equal(h.api.confirmWord.value, 'ABCDEF')
+  h.store.applyPool(pool(4, [bot('a', { revision: 4, my_claims: [{ ...claim(), pairing_id: 'claim-new' }] }), bot('b')]))
+  assert.equal(h.api.confirmWord.value, '')
+})
+
+
+test('401 hides a stale binding, clears pairing input and blocks disconnect', async t => {
+  let disconnects = 0
+  const h = bindingHarness(t, { disconnectPairing: async () => { disconnects += 1; return pool(3) } })
+  await h.api.resume()
+  await h.api.generateCode()
+  h.api.confirmWord.value = 'ABCDEF'
+  h.store.applyPool(pool(2, [bot('a', { binding: {
+    pairing_id: 'bound', state: 'active', tab_id: 'tab-1', workspace_id: null,
+    created_at: new Date(1000).toISOString(), is_mine: true, owner_kind: 'oauth', chat_id: 'chat-a',
+  } })]))
+  h.setTransport(async () => response({ detail: 'hub_access_required' }, 401))
+  assert.equal(await h.api.refresh(), false)
+  assert.equal(h.api.needsLogin.value, true)
+  assert.equal(h.api.viewState.value, 'error')
+  assert.equal(h.api.pendingCode.value, null)
+  assert.equal(h.api.confirmWord.value, '')
+  assert.equal(await h.api.disconnect(), false)
+  assert.equal(disconnects, 0)
+  assert.equal(h.timers.size, 0)
 })

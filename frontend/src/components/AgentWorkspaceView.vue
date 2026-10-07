@@ -494,50 +494,44 @@
                   {{ task.prompt }}
                 </p>
                 <div
-                  v-if="task.dispatch_pending"
+                  v-if="canUseManagedTaskActions(task) && task.dispatch_pending"
                   class="latest-report"
                 >
                   Waiting for dispatcher decision
                 </div>
                 <div
-                  v-else-if="task.dispatch_reason"
+                  v-else-if="canUseManagedTaskActions(task) && task.dispatch_reason"
                   class="latest-report"
                 >
                   {{ task.dispatch_reason }}
                 </div>
                 <div
-                  v-if="task.status === 'failed' && task.failure_reason"
+                  v-if="canUseManagedTaskActions(task) && task.status === 'failed' && task.failure_reason"
                   class="latest-report"
                 >
                   <strong>failed</strong>
                   <span>{{ task.failure_reason }}</span>
                 </div>
                 <div
-                  v-if="latestReportForTask(task)"
+                  v-if="task.latest_progress"
+                  class="latest-report"
+                >
+                  <strong>{{ progressStateLabel(task.latest_progress.state) }}</strong>
+                  <span>{{ task.latest_progress.summary }}</span>
+                </div>
+                <div
+                  v-else-if="canUseManagedTaskActions(task) && latestReportForTask(task)"
                   class="latest-report"
                 >
                   <strong>{{ latestReportForTask(task)?.state }}</strong>
                   <span>{{ reportMessageForLang(latestReportForTask(task)!) }}</span>
                 </div>
                 <div class="session-meta">
-                  <span>task {{ task.status }}</span>
-                  <span>agent {{ agentTitle(task.session_id) }}</span>
-                  <span v-if="task.review_session_id">
-                    reviewer {{ reviewerTitle(task.review_session_id) }}
-                  </span>
-                  <span v-if="reviewStatusLabel(task)">{{ reviewStatusLabel(task) }}</span>
-                  <span
-                    v-if="injectedFeedbackLessonIds(task).length > 0"
-                    class="feedback-meta-chip"
-                  >
-                    feedback {{ injectedFeedbackLessonIds(task).length }}
-                  </span>
-                  <span v-if="sessionForTask(task)">
-                    runtime {{ sessionForTask(task)?.runtime_status }}
-                  </span>
+                  <span>{{ taskSourceLabel(task.source) }}</span>
+                  <span>{{ taskExecutionLabel(task) }}</span>
                 </div>
                 <details
-                  v-if="task.status === 'todo'"
+                  v-if="canUseManagedTaskActions(task) && task.status === 'todo'"
                   class="advanced-start"
                   @click.stop
                 >
@@ -577,9 +571,12 @@
                     Clear context
                   </label>
                 </details>
-                <div class="task-actions">
+                <div
+                  v-if="canUseManagedTaskActions(task)"
+                  class="task-actions"
+                >
                   <LoadingButton
-                    v-if="task.status === 'todo'"
+                    v-if="canUseManagedTaskActions(task) && task.status === 'todo'"
                     type="button"
                     :loading="isPending(taskActionKey('start', task.id))"
                     loading-label="Starting task"
@@ -825,27 +822,27 @@
                   <span>Task stage</span>
                   <strong>{{ selectedTask.status }}</strong>
                 </div>
-                <div>
+                <div v-if="canUseManagedTaskActions(selectedTask)">
                   <span>Agent runtime</span>
                   <strong>{{ selectedSession?.runtime_status || 'none' }}</strong>
                 </div>
-                <div>
+                <div v-if="canUseManagedTaskActions(selectedTask)">
                   <span>Agent</span>
                   <strong>{{ selectedSession?.title || 'auto' }}</strong>
                 </div>
-                <div>
+                <div v-if="canUseManagedTaskActions(selectedTask)">
                   <span>Reviewer</span>
                   <strong>{{ selectedTask.review_session_id ? reviewerTitle(selectedTask.review_session_id) : 'none' }}</strong>
                 </div>
-                <div>
+                <div v-if="canUseManagedTaskActions(selectedTask)">
                   <span>Review state</span>
                   <strong>{{ reviewStatusLabel(selectedTask) || 'not requested' }}</strong>
                 </div>
-                <div>
+                <div v-if="canUseManagedTaskActions(selectedTask)">
                   <span>Goal Packet gate</span>
                   <strong>{{ goalPacketGateLabel(selectedTask) }}</strong>
                 </div>
-                <div>
+                <div v-if="canUseManagedTaskActions(selectedTask)">
                   <span>Review profiles</span>
                   <strong>{{ taskReviewProfiles(selectedTask) }}</strong>
                 </div>
@@ -857,11 +854,11 @@
                   <span>Review reason</span>
                   <strong>{{ selectedTask.review_skip_reason }}</strong>
                 </div>
-                <div>
+                <div v-if="canUseManagedTaskActions(selectedTask)">
                   <span>Queued behind</span>
                   <strong>{{ selectedSession?.queued_count || 0 }}</strong>
                 </div>
-                <div>
+                <div v-if="canUseManagedTaskActions(selectedTask)">
                   <span>Clear context</span>
                   <strong>{{ selectedTask.clear_context ? 'yes' : 'no' }}</strong>
                 </div>
@@ -871,6 +868,14 @@
                 </div>
               </div>
             </details>
+
+            <TaskExecutionPanel
+              v-if="activeWorkspaceId"
+              :key="`${activeWorkspaceId}:${selectedTask.id}`"
+              :workspace-id="activeWorkspaceId"
+              :task="selectedTask"
+              :capabilities="taskCapabilities"
+            />
 
             <details
               v-if="selectedTask.task_mode === 'autonomous'"
@@ -1275,7 +1280,10 @@
             </details>
           </div>
 
-          <div class="detail-footer">
+          <div
+            v-if="canUseManagedTaskActions(selectedTask)"
+            class="detail-footer"
+          >
             <button
               type="button"
               class="detail-footer-toggle"
@@ -1963,208 +1971,325 @@
         <h3>Add Task</h3>
         <form
           @submit.prevent="handleCreateTask"
+          @input.capture="handleTaskFormMutation"
+          @change.capture="handleTaskFormMutation"
           @paste="handleAttachmentPaste($event, taskForm.attachments)"
         >
-          <div class="modal-field">
-            <label>Title</label>
-            <input
-              v-model="taskForm.title"
-              placeholder="Implement a focused change"
-              :disabled="!activeWorkspaceId"
-              autofocus
+          <p
+            v-if="taskModalCapabilitiesStatus==='loading'||taskModalCapabilitiesStatus==='idle'"
+            class="modal-hint"
+            role="status"
+          >
+            Loading Task execution options…
+          </p>
+          <div
+            v-else-if="taskModalCapabilitiesStatus==='error'"
+            class="modal-hint"
+            role="alert"
+          >
+            <span>{{ taskCapabilitiesError || 'Task execution options could not be loaded.' }}</span>
+            <button
+              type="button"
+              @click="retryTaskCapabilities"
             >
+              Retry
+            </button>
           </div>
-          <div class="modal-field">
-            <label>Task description</label>
-            <textarea
-              v-model="taskForm.prompt"
-              placeholder="Describe what the workspace agent should implement..."
-              :disabled="!activeWorkspaceId"
-            />
-            <div
-              v-if="taskForm.attachments.length > 0"
-              class="attachment-list"
+          <p
+            v-else-if="taskModalCapabilitiesStatus==='unsupported'"
+            class="modal-hint"
+          >
+            This Hub supports the legacy Workspace-managed Task form only.
+          </p>
+          <p
+            v-if="pendingTaskCreateAttempt&&taskModalCapabilitiesStatus==='unsupported'"
+            class="modal-hint"
+            role="alert"
+          >
+            This saved request uses the newer Task contract and cannot be sent to this Hub. Discard it to use the legacy form.
+          </p>
+          <section
+            v-if="createdReporterRecovery"
+            class="modal-hint"
+            role="status"
+          >
+            <strong>Task created.</strong>
+            <p>The reporter credential could not be saved in session storage. Copy it now or retry local storage. This does not submit the Task again.</p>
+            <code v-if="revealCreatedReporterKey">{{ createdReporterRecovery.key }}</code>
+            <button
+              type="button"
+              @click="revealCreatedReporterKey = !revealCreatedReporterKey"
             >
-              <div
-                v-for="attachment in taskForm.attachments"
-                :key="attachment.id"
-                class="attachment-row"
-              >
-                <div class="attachment-thumb">
-                  <img
-                    :src="attachment.preview_url"
-                    :alt="attachment.filename"
-                  >
-                </div>
-                <div class="attachment-meta">
-                  <strong>{{ attachment.filename }}</strong>
-                  <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
-                </div>
+              {{ revealCreatedReporterKey ? 'Hide' : 'Show' }}
+            </button>
+            <button
+              type="button"
+              @click="copyCreatedReporterCredential"
+            >
+              Copy credential
+            </button>
+            <button
+              type="button"
+              @click="persistCreatedReporterCredential"
+            >
+              Retry local storage
+            </button>
+          </section>
+          <section
+            v-else-if="pendingTaskCreateAttempt"
+            class="modal-hint"
+            role="status"
+          >
+            Saved request: {{ pendingTaskCreateAttempt.payload.title }}. A saved create request needs confirmation. Recover the exact saved request, or
+            <button
+              type="button"
+              @click="discardPendingTaskCreateAttempt"
+            >
+              discard it and edit a new Task
+            </button>.
+          </section>
+          <template v-if="!pendingTaskCreateAttempt && !createdReporterRecovery">
+            <div class="modal-field">
+              <label>Execution responsibility</label>
+              <div class="segmented-control">
                 <button
                   type="button"
-                  class="icon-button"
-                  aria-label="Remove attachment"
-                  @click="removeDraftAttachment(taskForm.attachments, attachment)"
+                  :class="['segment-button',{active:taskForm.execution_control==='workspace'}]"
+                  @click="discardPendingTaskCreateAttempt(); taskForm.execution_control='workspace'"
                 >
-                  x
+                  Workspace dispatches agent
+                </button>
+                <button
+                  type="button"
+                  :disabled="taskModalCapabilitiesStatus !== 'supported' || !taskCapabilities?.supported_execution_controls.includes('initiator')"
+                  :class="['segment-button',{active:taskForm.execution_control==='initiator'}]"
+                  @click="discardPendingTaskCreateAttempt(); taskForm.execution_control='initiator'"
+                >
+                  Initiator reports progress
+                </button>
+              </div>
+              <p class="modal-hint">
+                Source is recorded separately and never grants permission.
+              </p>
+            </div>
+            <div class="modal-field">
+              <label for="task-create-title">Title</label>
+              <input
+                id="task-create-title"
+                v-model="taskForm.title"
+                placeholder="Implement a focused change"
+                :disabled="!activeWorkspaceId"
+                autofocus
+              >
+            </div>
+            <div class="modal-field">
+              <label for="task-create-description">Task description</label>
+              <textarea
+                id="task-create-description"
+                v-model="taskForm.prompt"
+                placeholder="Describe what the workspace agent should implement..."
+                :disabled="!activeWorkspaceId"
+              />
+              <div
+                v-if="taskForm.attachments.length > 0"
+                class="attachment-list"
+              >
+                <div
+                  v-for="attachment in taskForm.attachments"
+                  :key="attachment.id"
+                  class="attachment-row"
+                >
+                  <div class="attachment-thumb">
+                    <img
+                      :src="attachment.preview_url"
+                      :alt="attachment.filename"
+                    >
+                  </div>
+                  <div class="attachment-meta">
+                    <strong>{{ attachment.filename }}</strong>
+                    <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
+                  </div>
+                  <button
+                    type="button"
+                    class="icon-button"
+                    aria-label="Remove attachment"
+                    @click="removeDraftAttachment(taskForm.attachments, attachment)"
+                  >
+                    x
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p
+              v-if="taskForm.execution_control === 'initiator'"
+              class="modal-hint"
+            >
+              These review and autonomy policies are retained for a future Workspace handoff, but do not run while the initiator controls execution.
+            </p>
+            <div class="modal-field">
+              <label>Mode</label>
+              <div class="segmented-control segmented-control--three">
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.task_mode === 'direct' }]"
+                  @click="taskForm.task_mode = 'direct'"
+                >
+                  Direct
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.task_mode === 'reviewed' }]"
+                  @click="taskForm.task_mode = 'reviewed'"
+                >
+                  Reviewed
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.task_mode === 'autonomous' }]"
+                  @click="taskForm.task_mode = 'autonomous'"
+                >
+                  Autonomous
                 </button>
               </div>
             </div>
-          </div>
-          <div class="modal-field">
-            <label>Mode</label>
-            <div class="segmented-control segmented-control--three">
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.task_mode === 'direct' }]"
-                @click="taskForm.task_mode = 'direct'"
-              >
-                Direct
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.task_mode === 'reviewed' }]"
-                @click="taskForm.task_mode = 'reviewed'"
-              >
-                Reviewed
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.task_mode === 'autonomous' }]"
-                @click="taskForm.task_mode = 'autonomous'"
-              >
-                Autonomous
-              </button>
-            </div>
-          </div>
-          <div class="modal-field">
-            <label>Execution</label>
-            <div class="segmented-control segmented-control--three">
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.execution_complexity === 'auto' }]"
-                title="Agent self-judges. If it picks orchestrator mode, expect roughly 10–15× the token cost of a single-agent run (Anthropic multi-agent research system; Cognition “Don't Build Multi-Agents”)."
-                @click="taskForm.execution_complexity = 'auto'"
-              >
-                Auto
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.execution_complexity === 'simple' }]"
-                title="Single linear agent; no sub-agent fan-out, no extra cost beyond a normal task."
-                @click="taskForm.execution_complexity = 'simple'"
-              >
-                Simple
-              </button>
-              <button
-                type="button"
-                :class="['segment-button', { active: taskForm.execution_complexity === 'complex' }]"
-                title="Forces orchestrator mode with sub-agent delegation. Expect roughly 10–15× the token cost of a single-agent run; pick this only when the task is breadth-parallel, exceeds one context window, or splits into cleanly isolated subtasks."
-                @click="taskForm.execution_complexity = 'complex'"
-              >
-                Complex
-              </button>
-            </div>
-          </div>
-          <div
-            v-if="taskForm.task_mode === 'autonomous'"
-            class="autonomy-form"
-          >
-            <div class="form-row">
-              <div class="modal-field">
-                <label>Max iterations</label>
-                <input
-                  v-model.number="taskForm.max_iterations"
-                  type="number"
-                  min="1"
-                  max="10"
+            <div class="modal-field">
+              <label>Execution</label>
+              <div class="segmented-control segmented-control--three">
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.execution_complexity === 'auto' }]"
+                  title="Let the agent decide whether independent parts of this task benefit from delegation."
+                  @click="taskForm.execution_complexity = 'auto'"
                 >
-              </div>
-              <div class="modal-field">
-                <label>Strictness</label>
-                <select v-model="taskForm.evaluation_strictness">
-                  <option value="lenient">
-                    Lenient
-                  </option>
-                  <option value="balanced">
-                    Balanced
-                  </option>
-                  <option value="strict">
-                    Strict
-                  </option>
-                </select>
-              </div>
-            </div>
-            <div class="form-row">
-              <div class="modal-field">
-                <label class="checkbox-label">
-                  <input
-                    v-model="taskForm.allow_web_research"
-                    type="checkbox"
-                  >
-                  Web research
-                </label>
-              </div>
-              <div class="modal-field">
-                <label class="checkbox-label">
-                  <input
-                    v-model="taskForm.require_artifact_review"
-                    type="checkbox"
-                  >
-                  Artifact review
-                </label>
+                  Auto
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.execution_complexity === 'simple' }]"
+                  title="Use a single execution agent without requesting subagent delegation."
+                  @click="taskForm.execution_complexity = 'simple'"
+                >
+                  Simple
+                </button>
+                <button
+                  type="button"
+                  :class="['segment-button', { active: taskForm.execution_complexity === 'complex' }]"
+                  title="Use orchestration for work with independent subtasks. Additional agents can increase token usage."
+                  @click="taskForm.execution_complexity = 'complex'"
+                >
+                  Complex
+                </button>
               </div>
             </div>
-          </div>
-          <div class="modal-field">
-            <label>Dispatch agent</label>
-            <select
-              v-model="taskForm.session_id"
-              :disabled="!activeWorkspaceId"
+            <div
+              v-if="taskForm.task_mode === 'autonomous'"
+              class="autonomy-form"
             >
-              <option value="">
-                Auto
-              </option>
-              <option
-                v-for="agent in workspaceAgents"
-                :key="agent.id"
-                :value="agent.id"
-              >
-                {{ agent.title }}
-              </option>
-            </select>
-          </div>
-          <div class="modal-field">
-            <label class="checkbox-label">
-              <input
-                v-model="taskForm.clear_context"
-                type="checkbox"
-              >
-              Clear context
-            </label>
-          </div>
-          <div class="modal-field">
-            <label>Related task</label>
-            <p class="modal-hint">
-              Session/context reuse hint — not a Task parent (<code>parent_task_id</code>).
-              Task Graph tree UI is follow-up <code>487c630c</code>; not implemented here.
-            </p>
-            <select
-              v-model="taskForm.related_task_id"
-              :disabled="!activeWorkspaceId"
+              <div class="form-row">
+                <div class="modal-field">
+                  <label>Max iterations</label>
+                  <input
+                    v-model.number="taskForm.max_iterations"
+                    type="number"
+                    min="1"
+                    max="10"
+                  >
+                </div>
+                <div class="modal-field">
+                  <label>Strictness</label>
+                  <select v-model="taskForm.evaluation_strictness">
+                    <option value="lenient">
+                      Lenient
+                    </option>
+                    <option value="balanced">
+                      Balanced
+                    </option>
+                    <option value="strict">
+                      Strict
+                    </option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="modal-field">
+                  <label class="checkbox-label">
+                    <input
+                      v-model="taskForm.allow_web_research"
+                      type="checkbox"
+                    >
+                    Web research
+                  </label>
+                </div>
+                <div class="modal-field">
+                  <label class="checkbox-label">
+                    <input
+                      v-model="taskForm.require_artifact_review"
+                      type="checkbox"
+                    >
+                    Artifact review
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div
+              v-if="taskForm.execution_control === 'workspace'"
+              class="modal-field"
             >
-              <option value="">
-                None
-              </option>
-              <option
-                v-for="task in tasks"
-                :key="task.id"
-                :value="task.id"
+              <label>Dispatch agent</label>
+              <select
+                v-model="taskForm.session_id"
+                :disabled="!activeWorkspaceId"
               >
-                {{ task.title }}
-              </option>
-            </select>
-          </div>
+                <option value="">
+                  Auto
+                </option>
+                <option
+                  v-for="agent in workspaceAgents"
+                  :key="agent.id"
+                  :value="agent.id"
+                >
+                  {{ agent.title }}
+                </option>
+              </select>
+            </div>
+            <div
+              v-if="taskForm.execution_control === 'workspace'"
+              class="modal-field"
+            >
+              <label class="checkbox-label">
+                <input
+                  v-model="taskForm.clear_context"
+                  type="checkbox"
+                >
+                Clear context
+              </label>
+            </div>
+            <div
+              v-if="taskForm.execution_control === 'workspace'"
+              class="modal-field"
+            >
+              <label>Related task</label>
+              <p class="modal-hint">
+                Session/context reuse hint — not a Task parent (<code>parent_task_id</code>).
+                Task Graph tree UI is follow-up <code>487c630c</code>; not implemented here.
+              </p>
+              <select
+                v-model="taskForm.related_task_id"
+                :disabled="!activeWorkspaceId"
+              >
+                <option value="">
+                  None
+                </option>
+                <option
+                  v-for="task in tasks"
+                  :key="task.id"
+                  :value="task.id"
+                >
+                  {{ task.title }}
+                </option>
+              </select>
+            </div>
+          </template>
           <div class="modal-actions">
             <button
               type="button"
@@ -2174,13 +2299,14 @@
               Cancel
             </button>
             <LoadingButton
+              v-if="!createdReporterRecovery"
               type="submit"
               class="primary-button"
-              :disabled="!activeWorkspaceId || isLoading || !taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)"
-              :loading="isPending('task:create')"
+              :disabled="taskCreateSubmitBlocked || !activeWorkspaceId || isLoading || (!pendingTaskCreateAttempt && (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)))"
+              :loading="isPending(taskCreateActionKey())"
               loading-label="Adding task"
             >
-              Add task
+              {{ pendingTaskCreateAttempt ? 'Recover saved create request' : 'Create Task' }}
             </LoadingButton>
           </div>
         </form>
@@ -2985,6 +3111,15 @@
 </template>
 
 <script setup lang="ts">
+import TaskExecutionPanel from '@/components/TaskExecutionPanel.vue'
+import {
+  createReporterKeyApplies, progressStateLabel,
+  generateTaskCallId, generateTaskReporterKey, isWorkspaceControlledTask,
+  loadTaskCreateAttempt, removeTaskCreateAttempt, saveTaskCreateAttempt,
+  saveTaskReporterKey, taskExecutionLabel, taskSourceLabel,
+  type StoredTaskCreateAttempt,
+} from '@/utils/taskExecution'
+import { writeClipboard } from '@/utils/clipboard'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentAvatar from '@/components/AgentAvatar.vue'
@@ -3038,6 +3173,9 @@ import type {
   WorkspaceTaskExecutionComplexity,
   WorkspaceTaskMode,
   WorkspaceTaskStatus,
+  WorkspaceTaskExecutionControl,
+  WorkspaceTaskCreate,
+  WorkspaceTaskCapabilitiesStatus,
   WorkspaceTaskUpdate,
   WorkspaceUpdate,
 } from '@/types'
@@ -3101,6 +3239,10 @@ const {
   isLoading,
   error,
   notifications: wsNotifications,
+  taskCapabilities,
+  taskCapabilitiesWorkspaceId,
+  taskCapabilitiesStatus,
+  taskCapabilitiesError,
 } = storeToRefs(workspaceStore)
 
 // Combine workspace and terminal store notifications so toasts fire regardless
@@ -3241,7 +3383,44 @@ const agentOptionsForm = reactive({
   env_text: defaultPresetTextForAgent('codex'),
 })
 
+const taskModalWorkspaceId = ref<string | null>(null)
+const pendingTaskCreateAttempt = ref<StoredTaskCreateAttempt | null>(null)
+const createdReporterRecovery = ref<{
+  workspaceId: string
+  task: WorkspaceTask
+  key: string
+  attempt: StoredTaskCreateAttempt
+} | null>(null)
+const revealCreatedReporterKey = ref(false)
+let taskCreateUiGeneration = 0
+
+const taskModalCapabilitiesStatus = computed<WorkspaceTaskCapabilitiesStatus>(() => {
+  const workspaceId = taskModalWorkspaceId.value
+  if (!workspaceId || taskCapabilitiesWorkspaceId.value !== workspaceId) return 'idle'
+  return taskCapabilitiesStatus.value
+})
+const taskCreateCapabilitiesReady = computed(() =>
+  taskModalCapabilitiesStatus.value === 'supported' ||
+  taskModalCapabilitiesStatus.value === 'unsupported',
+)
+const taskCreateSubmitBlocked = computed(() =>
+  !taskCreateCapabilitiesReady.value ||
+  (Boolean(pendingTaskCreateAttempt.value) &&
+    taskModalCapabilitiesStatus.value !== 'supported'),
+)
+
+async function retryTaskCapabilities(): Promise<void> {
+  const workspaceId = taskModalWorkspaceId.value ?? activeWorkspaceId.value
+  if (!workspaceId || workspaceId !== activeWorkspaceId.value) return
+  try {
+    await workspaceStore.fetchTaskCapabilities(workspaceId)
+  } catch {
+    // Store owns the fixed error shown in this modal.
+  }
+}
+
 const taskForm = reactive({
+  execution_control: 'workspace' as WorkspaceTaskExecutionControl,
   title: '',
   prompt: '',
   task_mode: 'reviewed' as WorkspaceTaskMode,
@@ -3333,10 +3512,6 @@ function matchingFeedbackLessons(task: WorkspaceTask | null): FeedbackLesson[] {
     .sort((a, b) => b.score - a.score)
     .map(item => item.lesson)
     .slice(0, 6)
-}
-
-function injectedFeedbackLessonIds(task: WorkspaceTask | null): string[] {
-  return Array.isArray(task?.feedback_lesson_ids) ? task.feedback_lesson_ids : []
 }
 
 function lessonTitle(lesson: FeedbackLesson): string {
@@ -3984,6 +4159,7 @@ function reviewStatusLabel(task: WorkspaceTask) {
 function activeReviewBadge(
   task: WorkspaceTask,
 ): { kind: 'active' | 'pending' | 'attention'; label: string; title: string } | null {
+  if (!canUseManagedTaskActions(task)) return null
   const latestReviewReport = latestReviewReportForTask(task)
   if (
     task.goal_packet?.status === 'pending_review' &&
@@ -4066,6 +4242,7 @@ function awaitingHumanAcceptance(task: WorkspaceTask) {
 }
 
 function canMarkDoneTask(task: WorkspaceTask) {
+  if (!canUseManagedTaskActions(task)) return false
   return taskAcceptanceCanMarkDone(
     task,
     workspaceStore.latestReportForTask(task),
@@ -4074,7 +4251,7 @@ function canMarkDoneTask(task: WorkspaceTask) {
 }
 
 function canRequestReviewTask(task: WorkspaceTask) {
-  if (task.status !== 'review') return false
+  if (!canUseManagedTaskActions(task) || task.status !== 'review') return false
   const latestReviewReport = latestReviewReportForTask(task)
   return awaitingHumanAcceptance(task) ||
     task.review_skipped_at ||
@@ -4083,6 +4260,7 @@ function canRequestReviewTask(task: WorkspaceTask) {
 }
 
 function canAbortTask(task: WorkspaceTask) {
+  if (!canUseManagedTaskActions(task)) return false
   return (
     task.status === 'queued' ||
     task.status === 'working' ||
@@ -4092,6 +4270,7 @@ function canAbortTask(task: WorkspaceTask) {
 }
 
 function canEditTask(task: WorkspaceTask) {
+  if (!canUseManagedTaskActions(task)) return false
   return task.status === 'todo'
 }
 
@@ -4109,11 +4288,6 @@ function primaryExpandedReportId(): string | null {
 
 function isLatestSelectedReport(report: AgentReport) {
   return primaryExpandedReportId() === report.id
-}
-
-function agentTitle(sessionId?: string | null) {
-  if (!sessionId) return 'auto'
-  return managedWorkspaceSessions.value.find(agent => agent.id === sessionId)?.title || sessionId
 }
 
 function reviewerTitle(sessionId?: string | null) {
@@ -5244,7 +5418,299 @@ function selectAgentCurrentDirectory() {
   showAgentFileBrowser.value = false
 }
 
+function canUseManagedTaskActions(task: WorkspaceTask): boolean {
+  return isWorkspaceControlledTask(task)
+}
+
+function removeFrozenCreateAttempt(attempt: StoredTaskCreateAttempt): boolean {
+  const requestKey = attempt.payload.request_key
+  return typeof requestKey === 'string' && removeTaskCreateAttempt(
+    attempt.workspace_id, { expectedRequestKey: requestKey },
+  )
+}
+
+function taskCreateActionKey(workspaceId = taskModalWorkspaceId.value): string {
+  return `task:create:${workspaceId || 'none'}`
+}
+
+function sameCreateUi(workspaceId: string, generation: number): boolean {
+  return showTaskModal.value &&
+    taskModalWorkspaceId.value === workspaceId &&
+    taskCreateUiGeneration === generation
+}
+
+function samePendingCreate(attempt: StoredTaskCreateAttempt): boolean {
+  return pendingTaskCreateAttempt.value?.workspace_id === attempt.workspace_id &&
+    pendingTaskCreateAttempt.value.payload.request_key === attempt.payload.request_key
+}
+
+function openTaskModal() {
+  const workspaceId = activeWorkspaceId.value
+  if (!workspaceId) return
+  taskCreateUiGeneration += 1
+  taskModalWorkspaceId.value = workspaceId
+  if (
+    taskCapabilitiesWorkspaceId.value !== workspaceId ||
+    taskModalCapabilitiesStatus.value === 'idle' ||
+    taskModalCapabilitiesStatus.value === 'error'
+  ) {
+    void retryTaskCapabilities()
+  }
+  revealCreatedReporterKey.value = false
+
+  if (createdReporterRecovery.value?.workspaceId === workspaceId) {
+    pendingTaskCreateAttempt.value = loadTaskCreateAttempt(workspaceId)
+  } else {
+    createdReporterRecovery.value = null
+    pendingTaskCreateAttempt.value = loadTaskCreateAttempt(workspaceId)
+    if (!pendingTaskCreateAttempt.value) resetTaskForm()
+  }
+  showTaskModal.value = true
+}
+
+function closeTaskModal() {
+  showTaskModal.value = false
+  taskCreateUiGeneration += 1
+  resetDraftAttachments(taskForm.attachments)
+  // Persisted attempts and a same-page credential recovery deliberately remain.
+}
+
+function discardPendingTaskCreateAttempt() {
+  const workspaceId = taskModalWorkspaceId.value
+  if (!workspaceId || isPending(taskCreateActionKey(workspaceId))) return
+  const attempt = pendingTaskCreateAttempt.value
+  if (attempt && attempt.workspace_id === workspaceId) removeFrozenCreateAttempt(attempt)
+  pendingTaskCreateAttempt.value = null
+  createdReporterRecovery.value = null
+  revealCreatedReporterKey.value = false
+}
+
+function handleTaskFormMutation() {
+  if (pendingTaskCreateAttempt.value) discardPendingTaskCreateAttempt()
+}
+
+async function refreshCreatedTaskBoard(
+  workspaceId: string,
+  notify: boolean,
+): Promise<void> {
+  try {
+    await workspaceStore.fetchBoard(workspaceId)
+  } catch {
+    if (notify) {
+      workspaceStore.pushNotification({
+        type: 'error',
+        message: 'The Task was created, but the board could not be refreshed.',
+        autoDismissMs: 10_000,
+      })
+    }
+  }
+}
+
+async function copyCreatedReporterCredential() {
+  const recovery = createdReporterRecovery.value
+  if (!recovery) return
+  try {
+    await writeClipboard(recovery.key)
+  } catch {
+    workspaceStore.pushNotification({
+      type: 'error',
+      message: 'Could not copy the reporter credential. Show it and copy it manually.',
+      autoDismissMs: 10_000,
+    })
+  }
+}
+
+function persistCreatedReporterCredential() {
+  const recovery = createdReporterRecovery.value
+  if (!recovery || !createReporterKeyApplies(recovery.workspaceId, recovery.task)) return
+  if (!saveTaskReporterKey(recovery.workspaceId, recovery.task, recovery.key)) return
+
+  removeFrozenCreateAttempt(recovery.attempt)
+  if (taskModalWorkspaceId.value === recovery.workspaceId) {
+    pendingTaskCreateAttempt.value = null
+    createdReporterRecovery.value = null
+    revealCreatedReporterKey.value = false
+    resetTaskForm()
+    showTaskModal.value = false
+    taskCreateUiGeneration += 1
+  }
+}
+
+async function handleCreateTask() {
+  const workspaceId = taskModalWorkspaceId.value
+  if (!workspaceId || workspaceId !== activeWorkspaceId.value) return
+  if (createdReporterRecovery.value) return
+  if (taskCreateSubmitBlocked.value) return
+  if (
+    !pendingTaskCreateAttempt.value &&
+    (!taskForm.title.trim() ||
+      (!taskForm.prompt.trim() && taskForm.attachments.length === 0))
+  ) {
+    return
+  }
+
+  const generation = taskCreateUiGeneration
+  await runPending(taskCreateActionKey(workspaceId), async () => {
+    let attempt = pendingTaskCreateAttempt.value
+    if (attempt && attempt.workspace_id !== workspaceId) {
+      workspaceStore.pushNotification({
+        type: 'error',
+        message: 'The saved Task request belongs to another Workspace.',
+        autoDismissMs: 10_000,
+      })
+      return
+    }
+
+    if (!attempt) {
+      const autonomyPolicy: AutonomyPolicy | null = taskForm.task_mode === 'autonomous'
+        ? {
+            max_iterations: Math.max(1, Number(taskForm.max_iterations) || 3),
+            evaluation_strictness: taskForm.evaluation_strictness,
+            allow_web_research: taskForm.allow_web_research,
+            require_artifact_review: taskForm.require_artifact_review,
+            human_checkpoint_policy: 'final_only',
+            allowed_agent_types: [],
+            stop_on_repeated_failure: true,
+          }
+        : null
+      const hasTaskContract = taskModalCapabilitiesStatus.value === 'supported'
+      const recordOnly = hasTaskContract && taskForm.execution_control === 'initiator'
+      if (
+        recordOnly &&
+        !taskCapabilities.value?.supported_execution_controls.includes('initiator')
+      ) {
+        workspaceStore.pushNotification({
+          type: 'error',
+          message: 'This Hub does not support initiator-managed Tasks.',
+          autoDismissMs: 10_000,
+        })
+        return
+      }
+
+      const payload: WorkspaceTaskCreate = {
+        ...(hasTaskContract
+          ? {
+              request_key: generateTaskCallId(),
+              execution_control: taskForm.execution_control,
+              source: { kind: 'human', tab_id: null, agent_id: null },
+            }
+          : {}),
+        ...(recordOnly ? { reporter_key: generateTaskReporterKey() } : {}),
+        title: taskForm.title.trim(),
+        prompt: taskForm.prompt.trim(),
+        task_mode: taskForm.task_mode,
+        execution_complexity: taskForm.execution_complexity,
+        autonomy_policy: autonomyPolicy,
+        ...(recordOnly
+          ? {}
+          : {
+              session_id: taskForm.session_id || null,
+              clear_context: taskForm.clear_context || null,
+              related_task_id: taskForm.related_task_id || null,
+            }),
+        attachments: serializeDraftAttachments(taskForm.attachments),
+      }
+
+      if (hasTaskContract) {
+        attempt = { workspace_id: workspaceId, payload }
+        try {
+          saveTaskCreateAttempt(attempt)
+        } catch {
+          workspaceStore.pushNotification({
+            type: 'error',
+            message: 'This Task could not be staged safely for retry. Reduce large attachments and try again.',
+            autoDismissMs: 10_000,
+          })
+          return
+        }
+        if (sameCreateUi(workspaceId, generation)) {
+          pendingTaskCreateAttempt.value = attempt
+        }
+      } else {
+        // The compatibility path is intentionally not retryable: the old API has
+        // no request_key contract.
+        attempt = { workspace_id: workspaceId, payload }
+      }
+    }
+
+    const frozenAttempt = attempt
+    let created: WorkspaceTask
+    try {
+      created = await workspaceStore.createTask(
+        frozenAttempt.payload,
+        frozenAttempt.workspace_id,
+      )
+    } catch {
+      // A new-contract attempt stays frozen for an explicit identical recovery.
+      return
+    }
+
+    const reporterKey = frozenAttempt.payload.execution_control === 'initiator'
+      ? frozenAttempt.payload.reporter_key
+      : undefined
+
+    if (reporterKey) {
+      if (!createReporterKeyApplies(frozenAttempt.workspace_id, created)) {
+        removeFrozenCreateAttempt(frozenAttempt)
+        if (sameCreateUi(workspaceId, generation) && samePendingCreate(frozenAttempt)) {
+          pendingTaskCreateAttempt.value = null
+          resetTaskForm()
+          showTaskModal.value = false
+          taskCreateUiGeneration += 1
+        }
+        await refreshCreatedTaskBoard(
+          frozenAttempt.workspace_id,
+          sameCreateUi(workspaceId, generation),
+        )
+        workspaceStore.pushNotification({
+          type: 'warning',
+          message: 'The recovered Task had already moved to another execution epoch. The original reporter credential was not saved.',
+          autoDismissMs: 10_000,
+        })
+        return
+      }
+
+      const persisted = saveTaskReporterKey(
+        frozenAttempt.workspace_id,
+        created,
+        reporterKey,
+      )
+      if (!persisted) {
+        if (sameCreateUi(workspaceId, generation) && samePendingCreate(frozenAttempt)) {
+          createdReporterRecovery.value = {
+            workspaceId: frozenAttempt.workspace_id,
+            task: created,
+            key: reporterKey,
+            attempt: frozenAttempt,
+          }
+          revealCreatedReporterKey.value = false
+        }
+        await refreshCreatedTaskBoard(
+          frozenAttempt.workspace_id,
+          sameCreateUi(workspaceId, generation),
+        )
+        return
+      }
+    }
+
+    removeFrozenCreateAttempt(frozenAttempt)
+    await refreshCreatedTaskBoard(
+      frozenAttempt.workspace_id,
+      sameCreateUi(workspaceId, generation),
+    )
+
+    if (!sameCreateUi(workspaceId, generation)) return
+    if (samePendingCreate(frozenAttempt)) pendingTaskCreateAttempt.value = null
+    createdReporterRecovery.value = null
+    revealCreatedReporterKey.value = false
+    resetTaskForm()
+    showTaskModal.value = false
+    taskCreateUiGeneration += 1
+  })
+}
+
 function resetTaskForm() {
+  taskForm.execution_control = 'workspace'
   taskForm.title = ''
   taskForm.prompt = ''
   taskForm.task_mode = 'reviewed'
@@ -5259,15 +5725,9 @@ function resetTaskForm() {
   resetDraftAttachments(taskForm.attachments)
 }
 
-function openTaskModal() {
-  resetTaskForm()
-  showTaskModal.value = true
-}
 
-function closeTaskModal() {
-  showTaskModal.value = false
-  resetDraftAttachments(taskForm.attachments)
-}
+
+
 
 function openEditTaskModal(task: WorkspaceTask) {
   if (!canEditTask(task)) return
@@ -5356,37 +5816,7 @@ async function handleSummarizeLessons(force: boolean) {
   })
 }
 
-async function handleCreateTask() {
-  if (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)) {
-    return
-  }
-  await runPending('task:create', async () => {
-    const autonomyPolicy: AutonomyPolicy | null = taskForm.task_mode === 'autonomous'
-      ? {
-          max_iterations: Math.max(1, Number(taskForm.max_iterations) || 3),
-          evaluation_strictness: taskForm.evaluation_strictness,
-          allow_web_research: taskForm.allow_web_research,
-          require_artifact_review: taskForm.require_artifact_review,
-          human_checkpoint_policy: 'final_only',
-          allowed_agent_types: [],
-          stop_on_repeated_failure: true,
-        }
-      : null
-    await workspaceStore.createTask({
-      title: taskForm.title.trim(),
-      prompt: taskForm.prompt.trim(),
-      task_mode: taskForm.task_mode,
-      execution_complexity: taskForm.execution_complexity,
-      autonomy_policy: autonomyPolicy,
-      session_id: taskForm.session_id || null,
-      clear_context: taskForm.clear_context || null,
-      related_task_id: taskForm.related_task_id || null,
-      attachments: serializeDraftAttachments(taskForm.attachments),
-    })
-    resetTaskForm()
-    showTaskModal.value = false
-  })
-}
+
 
 async function handleUpdateTask() {
   const taskId = editingTaskId.value
@@ -5484,6 +5914,7 @@ async function refreshFeedbackLessons() {
 }
 
 async function startTask(task: WorkspaceTask) {
+  if (!canUseManagedTaskActions(task)) return
   await runPending(taskActionKey('start', task.id), async () => {
     const options = startOptionsFor(task)
     await workspaceStore.startTask(task.id, {
@@ -5504,6 +5935,7 @@ async function openSession(session: ManagedSession) {
 }
 
 async function sendDetailMessage() {
+  if (!selectedTask.value || !canUseManagedTaskActions(selectedTask.value)) return
   if (
     !selectedTask.value ||
     !selectedSession.value ||
@@ -5560,6 +5992,7 @@ async function abortTask(task: WorkspaceTask) {
 }
 
 async function deleteTask(task: WorkspaceTask) {
+  if (!canUseManagedTaskActions(task)) return
   const confirmed = window.confirm(`Delete task "${task.title}"?`)
   if (!confirmed) return
   await runPending(taskActionKey('delete', task.id), async () => {
@@ -5665,8 +6098,21 @@ watch(selectedTaskId, (taskId, prevTaskId) => {
 })
 
 watch(activeWorkspaceId, value => {
+  if (value) void workspaceStore.fetchTaskCapabilities(value).catch(() => {})
+}, { immediate: true })
+
+watch(activeWorkspaceId, value => {
   selectedWorkspaceId.value = value || ''
   workspaceSessionView.value = 'agents'
+  if (showTaskModal.value && taskModalWorkspaceId.value !== value) {
+    showTaskModal.value = false
+    taskModalWorkspaceId.value = null
+    pendingTaskCreateAttempt.value = null
+    createdReporterRecovery.value = null
+    revealCreatedReporterKey.value = false
+    taskCreateUiGeneration += 1
+    resetTaskForm()
+  }
   workspaceStore.clearTaskReports()
   closeTaskDetail()
 })

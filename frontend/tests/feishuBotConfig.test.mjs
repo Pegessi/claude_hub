@@ -4,157 +4,61 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import ts from 'typescript'
 
-const source = readFileSync(new URL('../src/utils/feishuBotConfig.ts', import.meta.url), 'utf8')
-const js = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
-}).outputText
-const {
-  FeishuBotConfigRequestError,
-  deactivateFeishuBotConfiguration,
-  loadFeishuBotConfiguration,
-  saveFeishuBotConfiguration,
-} = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
+const source=readFileSync(new URL('../src/utils/feishuBotConfig.ts',import.meta.url),'utf8')
+const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ES2022,target:ts.ScriptTarget.ES2020}}).outputText
+const api=await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
+const pool={pool_revision:0,bots:[],pool_editable:true,deprecated_env:[],focus_bot_id:null}
+const response=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}})
 
-const statusSnapshot = (overrides = {}) => ({
-  configured: false, source: 'none', can_manage: false, editable: false,
-  event_url: null, revision: 0, ...overrides,
-})
-const adminSnapshot = (overrides = {}) => ({
-  ...statusSnapshot({ configured: true, source: 'stored', can_manage: true, editable: true, revision: 7 }),
-  app_id: 'cli-bot', app_secret_configured: true, verification_token_configured: true,
-  encrypt_key_configured: true, ...overrides,
-})
-const input = {
-  app_id: 'cli-bot', app_secret: 'app-secret-value', verification_token: 'verification-value',
-  encrypt_key: 'encrypt-value', expected_revision: 7,
+const cases=[
+  ['loadFeishuBotPool',[], 'GET','/api/feishu/bot/bots',undefined,pool],
+  ['createFeishuBot',[{name:'A',app_id:'id',app_secret:'s',verification_token:'v',encrypt_key:'e'}], 'POST','/api/feishu/bot/bots',{name:'A',app_id:'id',app_secret:'s',verification_token:'v',encrypt_key:'e'},pool],
+  ['replaceFeishuBotSecrets',['bot/1',{app_secret:'s2',verification_token:'v2',encrypt_key:'e2',expected_revision:3}], 'PUT','/api/feishu/bot/bots/bot%2F1/secrets',{app_secret:'s2',verification_token:'v2',encrypt_key:'e2',expected_revision:3},pool],
+  ['updateFeishuBot',['b',{name:'B',enabled:false,expected_revision:4}], 'PATCH','/api/feishu/bot/bots/b',{name:'B',enabled:false,expected_revision:4},pool],
+  ['deleteFeishuBot',['b',5], 'DELETE','/api/feishu/bot/bots/b',{expected_revision:5},pool],
+  ['startFeishuPairing',['b',{tab_id:'t',expected_revision:6}], 'POST','/api/feishu/bot/bots/b/pair/start',{tab_id:'t',expected_revision:6},{bot_id:'b',revision:7,code:'123456',expires_at:'2026-01-01T00:00:00Z',event_url:'https://h/events/b'}],
+  ['activateFeishuPairing',['b',{pairing_id:'p',confirm_word:'654321',expected_revision:7}], 'POST','/api/feishu/bot/bots/b/pair/activate',{pairing_id:'p',confirm_word:'654321',expected_revision:7},pool],
+  ['disconnectFeishuPairing',['b',8], 'DELETE','/api/feishu/bot/bots/b/pairing',{expected_revision:8},pool],
+]
+for(const [name,args,method,url,body,result] of cases){
+  test(`${name} uses the frozen pool contract`,async t=>{
+    let request
+    t.mock.method(globalThis,'fetch',async(u,o={})=>{request={u,o};return response(result,name==='createFeishuBot'||name==='startFeishuPairing'?201:200)})
+    assert.deepEqual(await api[name](...args),result)
+    assert.equal(request.u,url)
+    assert.equal(request.o.credentials,'same-origin')
+    assert.equal(request.o.method??'GET',method)
+    if(body===undefined) assert.equal(request.o.body,undefined)
+    else assert.deepEqual(JSON.parse(request.o.body),body)
+    assert.equal(JSON.stringify(body??{}).includes('force'),false)
+  })
 }
-const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), {
-  status, headers: { 'Content-Type': 'application/json' },
+
+test('known errors use fixed messages and unknown details never leak',async t=>{
+  let body={detail:'pairing_confirmation_mismatch'}
+  t.mock.method(globalThis,'fetch',async()=>response(body,409))
+  await assert.rejects(()=>api.loadFeishuBotPool(),e=>e.code==='pairing_confirmation_mismatch'&&!e.message.includes('654321'))
+  body={detail:'secret-app-secret-value'}
+  await assert.rejects(()=>api.loadFeishuBotPool(),e=>e.code===null&&!e.message.includes('app-secret-value'))
 })
 
-test('ordinary users load only the safe status endpoint', async t => {
-  const requests = []
-  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
-    requests.push({ url, options })
-    return jsonResponse(statusSnapshot())
-  })
-  const result = await loadFeishuBotConfiguration()
-  assert.deepEqual(result, { status: statusSnapshot(), adminConfig: null })
-  assert.deepEqual(requests.map(request => request.url), ['/api/feishu/bot/config/status'])
-  assert.equal(requests[0].options.credentials, 'same-origin')
+test('removed single-Bot routes and force are absent',()=>{
+  assert.doesNotMatch(source,/\/config(?:\/status)?|\/bind\/start|\/binding(?:['"`])/)
+  assert.doesNotMatch(source,/\/pairings/)
+  assert.doesNotMatch(source,/\bforce\b/)
 })
 
-test('administrators load safe status before the secret-free admin view', async t => {
-  const requests = []
-  const safe = statusSnapshot({
-    configured: true, source: 'environment', can_manage: true, editable: false,
-    event_url: 'https://hub.example.test/api/feishu/bot/events', revision: null,
-  })
-  const admin = adminSnapshot({ ...safe, app_id: 'cli-env' })
-  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
-    requests.push({ url, options })
-    return jsonResponse(url.endsWith('/status') ? safe : admin)
-  })
-  const result = await loadFeishuBotConfiguration()
-  assert.deepEqual(result, { status: safe, adminConfig: admin })
-  assert.deepEqual(requests.map(request => request.url), ['/api/feishu/bot/config/status', '/api/feishu/bot/config'])
-  assert.equal('app_secret' in result.adminConfig, false)
-  assert.equal(result.adminConfig.app_secret_configured, true)
-})
 
-test('save submits all credentials, revision, and explicit App ID change decision', async t => {
-  const requests = []
-  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
-    requests.push({ url, options })
-    return jsonResponse(adminSnapshot({ revision: 8 }))
+for (const [status, code, fragment] of [
+  [409, 'pool_capacity_reached', 'capacity has been reached'],
+  [409, 'chat_tab_workspace_changed', 'This Chat changed workspace'],
+  [409, 'bot_credentials_read_only', 'environment credentials'],
+  [404, 'chat_tab_not_found', 'This Chat no longer exists'],
+]) {
+  test(`${code} keeps its specific recovery guidance`, async t => {
+    t.mock.method(globalThis, 'fetch', async () => response({ detail: code }, status))
+    await assert.rejects(api.loadFeishuBotPool(), error => (
+      error.status === status && error.code === code && error.message.includes(fragment)
+    ))
   })
-  const saved = await saveFeishuBotConfiguration(input, false)
-  await saveFeishuBotConfiguration(input, true)
-  assert.equal(saved.revision, 8)
-  assert.equal(requests.length, 2)
-  assert.equal(requests[0].url, '/api/feishu/bot/config')
-  assert.equal(requests[0].options.method, 'PUT')
-  assert.equal(requests[0].options.credentials, 'same-origin')
-  assert.deepEqual(JSON.parse(requests[0].options.body), { ...input, allow_app_id_change: false })
-  assert.equal(JSON.parse(requests[1].options.body).allow_app_id_change, true)
-})
-
-test('only known conflict codes are retained for explicit UI handling', async t => {
-  let detail = 'app_id_change_confirmation_required'
-  t.mock.method(globalThis, 'fetch', async () => jsonResponse({ detail }, 409))
-  await assert.rejects(() => saveFeishuBotConfiguration(input, false), error => {
-    assert.ok(error instanceof FeishuBotConfigRequestError)
-    assert.equal(error.status, 409)
-    assert.equal(error.code, 'app_id_change_confirmation_required')
-    return true
-  })
-  detail = 'unexpected-secret-app-secret-value'
-  await assert.rejects(() => saveFeishuBotConfiguration(input, false), error => {
-    assert.ok(error instanceof FeishuBotConfigRequestError)
-    assert.equal(error.code, null)
-    assert.equal(error.message, 'The Bot configuration changed. Refresh and try again.')
-    assert.doesNotMatch(error.message, /app-secret-value/)
-    return true
-  })
-})
-
-test('validation and damaged-state failures use fixed messages without response details', async t => {
-  let response = jsonResponse({ detail: 'upstream echoed app-secret-value' }, 502)
-  t.mock.method(globalThis, 'fetch', async () => response)
-  await assert.rejects(() => saveFeishuBotConfiguration(input, false), error => {
-    assert.equal(error.message, 'Feishu could not validate this configuration. Check the credentials and network, then try again.')
-    assert.doesNotMatch(error.message, /app-secret-value/)
-    return true
-  })
-  response = jsonResponse({ detail: 'corrupt record contents' }, 503)
-  await assert.rejects(() => loadFeishuBotConfiguration(), error => {
-    assert.equal(error.message, 'The Bot configuration is unavailable or damaged. Contact an administrator.')
-    assert.doesNotMatch(error.message, /corrupt record contents/)
-    return true
-  })
-})
-
-test('deactivation sends only the expected revision and returns the safe admin view', async t => {
-  let request
-  const disabled = adminSnapshot({
-    configured: false, source: 'none', revision: 8, app_id: null,
-    app_secret_configured: false, verification_token_configured: false, encrypt_key_configured: false,
-  })
-  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
-    request = { url, options }
-    return jsonResponse(disabled)
-  })
-  const result = await deactivateFeishuBotConfiguration(7)
-  assert.deepEqual(result, disabled)
-  assert.equal(request.url, '/api/feishu/bot/config')
-  assert.equal(request.options.method, 'DELETE')
-  assert.deepEqual(JSON.parse(request.options.body), { expected_revision: 7 })
-})
-
-test('post-commit and busy failures retain only whitelisted fixed meanings', async t => {
-  let response
-  t.mock.method(globalThis, 'fetch', async () => response)
-  const cases = [
-    [500, 'routing_cleanup_failed', 'The configuration may have changed, but binding cleanup failed. Check the latest configuration before taking another action.'],
-    [503, 'public_url_invalid', 'The instance public URL is invalid. Ask an administrator to fix it. A submitted configuration change may already have taken effect.'],
-    [503, 'config_operation_busy', 'Another Bot configuration operation is in progress. Wait and try again.'],
-    [503, 'bot_config_unavailable', 'The Bot configuration is unavailable or damaged. Contact an administrator.'],
-  ]
-  for (const [status, code, message] of cases) {
-    response = jsonResponse({ detail: code }, status)
-    await assert.rejects(() => saveFeishuBotConfiguration(input, false), error => {
-      assert.ok(error instanceof FeishuBotConfigRequestError)
-      assert.equal(error.status, status)
-      assert.equal(error.code, code)
-      assert.equal(error.message, message)
-      return true
-    })
-  }
-  response = jsonResponse({ detail: 'unexpected-secret-app-secret-value' }, 500)
-  await assert.rejects(() => saveFeishuBotConfiguration(input, false), error => {
-    assert.equal(error.code, null)
-    assert.equal(error.message, 'The configuration may have changed. Reload configuration to check the latest state before trying again.')
-    assert.doesNotMatch(error.message, /app-secret-value/)
-    return true
-  })
-})
+}

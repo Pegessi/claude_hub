@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Task execution panel harness</title>
+    <style>
+      :root {
+        --ch-color-border-muted: #d5d7da;
+        --ch-color-text-muted: #62656a;
+        --ch-color-surface-control: #f5f6f7;
+        --ch-color-success: #087f5b;
+        --ch-color-danger: #c92a2a;
+        --ch-color-warning: #a15c00;
+        --ch-radius-md: 8px;
+      }
+      body { margin: 0; padding: 24px; color: #1f2328; font: 14px/1.45 sans-serif; }
+      button, input, select, textarea { font: inherit; }
+      #app { max-width: 760px; margin: 0 auto; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { createApp, h, reactive } from 'vue'
+      import { createPinia } from 'pinia'
+      import TaskExecutionPanel from '/src/components/TaskExecutionPanel.vue'
+      import { useWorkspaceStore } from '/src/stores/workspaceStore.ts'
+
+      const NOW = '2026-10-07T00:00:00Z'
+      const baseTask = {
+        workspace_id: 'ws-a',
+        title: 'Fixture task',
+        prompt: 'Verify Task execution UI',
+        attachments: [],
+        agent_type: 'codex',
+        task_mode: 'reviewed',
+        execution_complexity: 'auto',
+        status: 'working',
+        dispatch_pending: false,
+        review_attempts: 0,
+        created_at: NOW,
+        updated_at: NOW,
+        execution_epoch: 7,
+        progress_revision: 3,
+        latest_progress: null,
+        runtime_observation: null,
+        execution_ref: null,
+        source_work_id: null,
+        legacy_work_detached: false,
+        chat_work_outcome: null,
+        chat_work_report_id: null,
+        chat_work_summary: null,
+      }
+      const fixtures = {
+        'task-a': {
+          ...baseTask,
+          id: 'task-a',
+          source: { kind: 'agent', tab_id: null, agent_id: 'agent-a' },
+          execution_control: 'initiator',
+          execution_released: true,
+        },
+        'task-b': {
+          ...baseTask,
+          id: 'task-b',
+          title: 'Other fixture task',
+          execution_epoch: 2,
+          progress_revision: 8,
+          source: { kind: 'chat', tab_id: 'tab-b', agent_id: null },
+          execution_control: 'initiator',
+          execution_released: true,
+        },
+        'task-workspace': {
+          ...baseTask,
+          id: 'task-workspace',
+          title: 'Workspace-controlled fixture task',
+          execution_epoch: 4,
+          progress_revision: 1,
+          source: { kind: 'human', tab_id: null, agent_id: null },
+          execution_control: 'workspace',
+          execution_released: false,
+        },
+      }
+      const clone = value => JSON.parse(JSON.stringify(value))
+      const state = reactive({
+        workspaceId: 'ws-a',
+        task: clone(fixtures['task-a']),
+        capabilities: {
+          progress_states: ['started', 'working', 'blocked', 'needs_input', 'completed', 'failed'],
+          supported_execution_controls: ['workspace', 'initiator'],
+          record_only_requires_reporter_key: true,
+          handoff_requires_release: true,
+          legacy_chat_work_create: false,
+        },
+      })
+      let app = null
+
+      const Root = {
+        setup() {
+          return () => h(TaskExecutionPanel, {
+            workspaceId: state.workspaceId,
+            task: state.task,
+            capabilities: state.capabilities,
+          })
+        },
+      }
+
+      function mount() {
+        if (app) return
+        const pinia = createPinia()
+        useWorkspaceStore(pinia).setActiveWorkspace('ws-a')
+        app = createApp(Root)
+        app.use(pinia)
+        app.mount('#app')
+      }
+      function unmount() {
+        if (!app) return
+        app.unmount()
+        app = null
+        document.querySelector('#app').replaceChildren()
+      }
+      function remount() {
+        unmount()
+        mount()
+      }
+      function switchTask(taskId) {
+        if (!fixtures[taskId]) throw new Error(`unknown fixture task: ${taskId}`)
+        state.task = clone(fixtures[taskId])
+      }
+      function patchTask(changes) {
+        state.task = { ...state.task, ...clone(changes) }
+      }
+
+      window.__TASK_EXECUTION_TEST__ = {
+        fixtures,
+        state,
+        mount,
+        unmount,
+        remount,
+        switchTask,
+        patchTask,
+      }
+      mount()
+    </script>
+  </body>
+</html>
