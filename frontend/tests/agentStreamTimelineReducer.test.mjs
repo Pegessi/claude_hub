@@ -709,7 +709,7 @@ test('sub-agent spawn becomes its own part and splits surrounding tool groups', 
   assert.equal(turn.tools.length, 3)
 })
 
-test('Cursor Task and TraeX spawnAgent render as sub-agents; failed status flows through', () => {
+test('Cursor keeps its fallback card while a correlated native spawn uses the region', () => {
   const reducer = new IncrementalTimelineReducer()
   const turns = reducer.reduce([
     makeEvent(0, 'turn_started', { summary: 'multi' }, { turn_id: 't1' }),
@@ -729,15 +729,17 @@ test('Cursor Task and TraeX spawnAgent render as sub-agents; failed status flows
     makeEvent(4, 'turn_completed', { status: 'completed' }, { turn_id: 't1' }),
   ])
 
-  const parts = turns[0].parts.filter(part => part.kind === 'subagent')
-  assert.equal(parts.length, 2)
-  assert.equal(parts[0].tool.subagent.provider, 'cursor')
-  assert.equal(parts[0].tool.status, 'failed')
-  assert.equal(parts[1].tool.subagent.provider, 'traex')
-  assert.deepEqual(parts[1].tool.subagent.threadIds, ['thread-1'])
-  // A sub-agent without its own completed event is finalized when the turn
-  // completes, matching ordinary-tool behavior.
-  assert.equal(parts[1].tool.status, 'completed')
+  const standalone = turns[0].parts.filter(part => part.kind === 'subagent')
+  assert.equal(standalone.length, 1)
+  assert.equal(standalone[0].tool.subagent.provider, 'cursor')
+  assert.equal(standalone[0].tool.status, 'failed')
+
+  const regions = turns[0].parts.filter(part => part.kind === 'subagents')
+  assert.equal(regions.length, 1)
+  assert.equal(regions[0].threads.length, 1)
+  assert.equal(regions[0].threads[0].threadId, 'thread-1')
+  assert.equal(regions[0].threads[0].launchTool.name, 'spawnAgent')
+  assert.equal(regions[0].threads[0].lifecycleStatus, 'unknown')
 })
 
 test('a sub-agent mid-turn (before completion) reads as running', () => {

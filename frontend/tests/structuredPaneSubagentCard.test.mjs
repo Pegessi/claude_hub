@@ -7,74 +7,53 @@ const source = readFileSync(
   'utf8',
 )
 
-// The v-if/v-else-if kind markers only ever appear in the template, so they
-// locate the render branches in the full SFC source directly (the template
-// also nests <template v-if> tags, so slicing on the first close tag is
-// unreliable).
-const subStart = source.indexOf(`v-else-if="part.kind === 'subagent'"`)
-const approvalStart = source.indexOf(`v-else-if="part.kind === 'approval'"`)
-// The nested sub-thread branch legitimately renders its child tool inputs
-// (argsText), so the standalone spawn card's block must be sliced before it
-// rather than all the way to the approval branch.
-const subthreadStart = source.indexOf(`v-else-if="part.kind === 'subthread'"`)
-assert.ok(subStart > -1, 'pane must render a dedicated sub-agent part branch')
-assert.ok(subthreadStart > subStart, 'sub-thread branch must follow the sub-agent branch')
-assert.ok(approvalStart > subthreadStart, 'approval branch must follow the sub-thread branch')
-const subBlock = source.slice(subStart, subthreadStart)
+const standaloneStart = source.indexOf(`v-else-if="part.kind === 'subagent'"`)
+const regionStart = source.indexOf(`v-else-if="part.kind === 'subagents'"`)
+const approvalStart = source.indexOf(`v-else-if="part.kind === 'approval'"`, regionStart)
+assert.ok(standaloneStart > -1, 'pane keeps the uncorrelated sub-agent fallback')
+assert.ok(regionStart > standaloneStart, 'native region follows the standalone fallback')
+assert.ok(approvalStart > regionStart, 'approval branch follows the complete native region')
+const standaloneBlock = source.slice(standaloneStart, regionStart)
+const regionBlock = source.slice(regionStart, approvalStart)
 
-test('sub-agent calls render a dedicated card, not the generic tool block', () => {
-  assert.match(subBlock, /class="subagent-card"/, 'must render a .subagent-card')
-  assert.match(
-    subBlock,
-    /class="conversation-avatar conversation-avatar--subagent"/,
-    'card must carry its own sub-agent identity avatar',
-  )
+test('uncorrelated Agent and Task calls retain a clearly scoped fallback card', () => {
+  assert.match(standaloneBlock, /subagent-card--standalone/)
+  assert.match(standaloneBlock, /subagentChip\(part\.tool\)/)
+  assert.match(standaloneBlock, /subagentCallStatusLabel\(part\.tool\.status\)/)
+  assert.doesNotMatch(standaloneBlock, /subagentStatusLabel\(part\.tool\.status\)/)
+  assert.match(standaloneBlock, /子代理调用处理中…/)
 })
 
-test('sub-agent card projects identity, description and lifecycle status', () => {
-  assert.match(subBlock, /subagentChip\(part\.tool\)/, 'must show the provider identity chip')
-  assert.match(subBlock, /subagentName\(part\.tool\)/, 'must show the sub-agent type/name')
-  assert.match(subBlock, /subagentHeadline\(part\.tool\)/, 'must show the description headline')
-  assert.match(
-    subBlock,
-    /subagentStatusLabel\(part\.tool\.status\)/,
-    'must show a localized running/done/failed status',
-  )
-  // Status badge keeps the shared tool-status color modifiers.
-  assert.match(subBlock, /class="tool-status"/)
-  assert.match(subBlock, /:class="part\.tool\.status"/)
+test('one turn-level region renders one keyed row per complete provider id', () => {
+  assert.match(regionBlock, /data-testid="subagent-region"/)
+  assert.match(regionBlock, /v-for="thread in part\.threads"/)
+  assert.match(regionBlock, /:key="thread\.key"/)
+  assert.match(regionBlock, /:data-subagent-thread-id="thread\.threadId"/)
+  assert.match(regionBlock, /\{\{ thread\.threadId \}\}/)
+  assert.match(regionBlock, /:title="thread\.threadId"/)
+  assert.doesNotMatch(regionBlock, /threadId\.slice/)
 })
 
-test('sub-agent card expands to the delegated prompt and result, not raw args JSON', () => {
-  assert.match(subBlock, /subagentPrompt\(part\.tool\)/, 'expanded body shows the prompt')
-  assert.match(subBlock, /part\.tool\.resultText/, 'expanded body shows the result')
-  // The internal JSON (receiverThreadIds, raw args object) must never be dumped
-  // into the card; only the curated prompt/result projections are rendered.
-  assert.doesNotMatch(subBlock, /argsText/, 'card must not render the raw args blob')
-  assert.doesNotMatch(subBlock, /receiverThreadIds/, 'card must not leak provider-internal fields')
+test('dispatch status and child-turn lifecycle are rendered separately', () => {
+  assert.match(regionBlock, /subagentDispatchLabel\(thread\.launchTool\.status\)/)
+  assert.match(regionBlock, /subthreadStatusLabel\(thread\)/)
+  assert.match(source, /completed: '本轮完成'/)
+  assert.match(source, /failed: '本轮失败'/)
+  assert.match(source, /unknown: '状态未知'/)
+  assert.match(source, /completed: '已派发'/)
 })
 
-test('ordinary tools still render through the grouped tool-card', () => {
-  const toolGroupIdx = source.indexOf(`v-else-if="part.kind === 'tool_group'"`)
-  assert.ok(toolGroupIdx > -1, 'ordinary tool_group branch must remain')
-  const toolGroupBlock = source.slice(toolGroupIdx, subStart)
-  assert.match(toolGroupBlock, /class="tool-card tool-card--group"/)
-  assert.match(toolGroupBlock, /v-for="tool in part\.tools"/)
-})
-
-test('script wires the shared sub-agent classifier util and projections', () => {
-  assert.match(
-    source,
-    /from '@\/utils\/subagentTool'/,
-    'must import labels from the central classifier util',
-  )
-  for (const fn of ['subagentChip', 'subagentName', 'subagentHeadline', 'subagentPrompt']) {
-    assert.match(source, new RegExp(`function ${fn}\\(`), `must define projection helper ${fn}`)
+test('expanding a child retains prompt, prose, thinking, tools and images', () => {
+  assert.match(regionBlock, /subthreadInstructionText\(thread\.launchTool\)/)
+  assert.match(regionBlock, /v-for="sub in thread\.parts"/)
+  for (const kind of ['instruction', 'thinking', 'text', 'status', 'tool_group', 'agent_image']) {
+    assert.match(regionBlock, new RegExp(`sub\\.kind === '${kind}'`))
   }
+  assert.match(regionBlock, /:complete="subthreadTerminal\(thread\)"/)
 })
 
-test('sub-agent card reuses existing theme tokens rather than introducing colors', () => {
-  assert.match(source, /\.subagent-card \{[\s\S]*?--ch-color-surface/)
-  assert.match(source, /\.subagent-card \{[\s\S]*?--ch-radius-md/)
-  assert.match(source, /\.subagent-card \{[\s\S]*?border-left: 2px solid var\(--ch-color-accent\)/)
+test('native region uses theme tokens and keeps narrow viewport rules', () => {
+  assert.match(source, /\.subagent-region-body \{[\s\S]*?gap: 8px/)
+  assert.match(source, /\.subagent-thread-row \{[\s\S]*?--ch-color-border-muted/)
+  assert.match(source, /@media \(max-width: 640px\) \{[\s\S]*?\.subagent-thread-row > summary/)
 })

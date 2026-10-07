@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+### feat(chat): group native subagents within each parent turn
+
+- Replace repeated native spawn/thread cards with one collapsible region per
+  parent turn, using full provider thread IDs to keep distinct children apart.
+- Separate dispatch outcomes, observed child lifecycle, and child errors. Keep
+  failed regions visible when historical process details are folded.
+- Reject late child events without an active parent turn and ignore unsupported
+  empty events without creating phantom regions or changing the parent lifecycle.
+- Preserve original child prompts, tool results, and reports on expansion, with
+  desktop/mobile mocked browser coverage. See the
+  [implementation and validation notes](docs/working-logs/2026-10-07-native-subagent-region.md).
+
 ### feat(feishu): add administrator-managed Webhook Bot settings
 
 - Add one instance-wide settings dialog under Extensions, separate from per-Chat
