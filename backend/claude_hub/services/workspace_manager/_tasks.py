@@ -37,9 +37,21 @@ class _TasksMixin:
         system_internal: bool = False,
         internal_kind: str | None = None,
         source_work_id: str | None = None,
+        creation_request_key: str | None = None,
+        creation_actor_key: str | None = None,
+        creation_fingerprint: str | None = None,
     ) -> WorkspaceTask:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
+        key_hash = self._validate_task_execution_create(
+            payload,
+            system_internal=system_internal,
+            internal_kind=internal_kind,
+            source_work_id=source_work_id,
+        )
+        initiator_owned = payload.execution_control.value == "initiator"
+        if initiator_owned and not creation_actor_key:
+            raise ValueError("initiator_task_requires_authenticated_registration")
         if payload.related_task_id and payload.related_task_id not in self.tasks:
             raise KeyError(payload.related_task_id)
         if payload.session_id:
@@ -72,6 +84,13 @@ class _TasksMixin:
             else None
         )
         task = WorkspaceTask(
+            execution_control=payload.execution_control,
+            source=payload.source,
+            execution_ref=payload.execution_ref,
+            reporter_key_hash=key_hash,
+            creation_request_key=creation_request_key,
+            creation_actor_key=creation_actor_key,
+            creation_fingerprint=creation_fingerprint,
             id=task_id,
             workspace_id=workspace_id,
             title=title,
@@ -88,7 +107,7 @@ class _TasksMixin:
             autonomy_policy=autonomy_policy,
             autonomous_run=(
                 self._default_autonomous_run(task_id, autonomy_policy.max_iterations)
-                if autonomy_policy
+                if autonomy_policy and not initiator_owned
                 else None
             ),
             status=WorkspaceTaskStatus.TODO,
@@ -685,6 +704,7 @@ class _TasksMixin:
             task = self.tasks.get(task_id)
             if task is None or task.workspace_id != workspace_id:
                 raise KeyError(task_id)
+            task = self._require_workspace_execution(task)
             if task.status == WorkspaceTaskStatus.DONE:
                 raise RuntimeError("Done tasks cannot receive followup")
 
@@ -894,7 +914,7 @@ class _TasksMixin:
         self.tasks[task.id] = updated
         return updated
 
-    async def abort_task(
+    async def _abort_task_workspace(
         self,
         task_id: str,
         payload: ManualTaskControlRequest,
@@ -1067,3 +1087,28 @@ class _TasksMixin:
                     )
             await self.dispatch_workspace(live.workspace_id)
             return self.tasks[live.id]
+
+    async def abort_task(
+        self,
+        task_id: str,
+        payload: ManualTaskControlRequest,
+        *,
+        workspace_id: Optional[str] = None,
+        call_id: Optional[str] = None,
+        actor_session_id: Optional[str] = None,
+        actor_role: TaskActorRole = TaskActorRole.HUMAN,
+        compat_author_run_id: Optional[str] = None,
+    ) -> WorkspaceTask:
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        async with self._workspace_execution_operation(task):
+            return await self._abort_task_workspace(
+                task_id,
+                payload,
+                workspace_id=workspace_id,
+                call_id=call_id,
+                actor_session_id=actor_session_id,
+                actor_role=actor_role,
+                compat_author_run_id=compat_author_run_id,
+            )

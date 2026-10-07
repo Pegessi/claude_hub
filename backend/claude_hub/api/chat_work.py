@@ -11,6 +11,10 @@ router = APIRouter(prefix="/api/tabs/{tab_id}/work", tags=["chat-work"])
 
 
 def _error(exc: Exception) -> HTTPException:
+    if isinstance(exc, ValueError) and str(exc) == "legacy_chat_work_read_only_use_workspace_tasks":
+        return HTTPException(
+            status_code=410, detail="legacy_chat_work_read_only_use_workspace_tasks"
+        )
     return HTTPException(
         status_code=404 if isinstance(exc, KeyError) else 400,
         detail="Linked work not found" if isinstance(exc, KeyError) else str(exc),

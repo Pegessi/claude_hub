@@ -117,8 +117,10 @@ def test_task_create_body(monkeypatch):
         "agent_type",
         "task_mode",
         "execution_complexity",
+        "execution_control",
         "review_profiles",
     }
+    assert body["execution_control"] == "workspace"
     assert body["review_profiles"] == ["code", "ui"]
     assert body["agent_type"] == "codex"
     assert body["task_mode"] == "reviewed"

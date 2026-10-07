@@ -607,6 +607,9 @@ class _PromptsMixin:
             "of truth. Confirm current Task/report records and Git status/base/head before acting; "
             "read only relevant files and evidence. Resolve conflicts against those records, not old "
             "conversation summaries, and never edit generated state to change task status.\n\n"
+            "This is an already assigned workspace-controlled Task. Keep its Task ID, report through "
+            "the managed report endpoint shown in this prompt, and do not switch to initiator progress "
+            "or manual progress. Use Hub CLI/API controls rather than operating agent tmux sessions.\n\n"
         )
 
     def _execution_complexity_assignment_block(self, task: WorkspaceTask) -> str:

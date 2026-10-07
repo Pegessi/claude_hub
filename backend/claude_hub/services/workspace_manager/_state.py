@@ -23,6 +23,8 @@ class _StateMixin:
         self._feedback_started_at = _wm._now()
         self.workspaces: dict[str, Workspace] = {}
         self.tasks: dict[str, WorkspaceTask] = {}
+        self._task_activity_cursors: dict[str, tuple[int, int]] = {}
+        self._task_execution_operations: dict[str, int] = {}
         self.sessions: dict[str, ManagedSession] = {}
         self.reports: dict[str, AgentReport] = {}
         self.scheduled_tasks: dict[str, ScheduledTask] = {}
@@ -148,6 +150,10 @@ class _StateMixin:
             self._load_legacy_state()
 
         for session_id, session in list(self.sessions.items()):
+            for task_id in (session.task_id, session.current_task_id):
+                linked = self.tasks.get(task_id or "")
+                if linked is not None and not self._workspace_owns_task(linked):
+                    raise ValueError("managed session references an initiator task")
             if session.current_task_id is None and session.task_id is not None:
                 self.sessions[session_id] = session.model_copy(
                     update={"current_task_id": session.task_id}

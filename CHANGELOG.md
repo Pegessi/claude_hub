@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat(tasks): separate Task registration from execution responsibility
+
+- Keep one WorkspaceTask record for initiator-managed and Workspace-managed
+  work. Registration, sparse progress reports, and explicit handoff do not start
+  workers, reviewers, or cleanup implicitly.
+- Add scoped reporter credentials, execution epochs, revision checks, and
+  idempotent operations. Handoff preserves the Task ID and history; initiators
+  must explicitly release execution before Workspace control can take over.
+- Record matching runtime activity without treating a completed turn or plan as
+  completion of the whole Task. Expose read-only Chat context and concise,
+  capability-aware CLI guidance.
+- Retire new legacy ChatWork creation and replay while preserving history,
+  stop-only controls, and reports from already-running work.
+- Add offline ownership, recovery, CLI, and managed-execution compatibility
+  regressions. The Task UI and Bot pool integration remain separate work in
+  progress; see [validation notes](docs/working-logs/2026-10-07-agent-workflow-v2.md).
+
 ### feat(chat): group native subagents within each parent turn
 
 - Replace repeated native spawn/thread cards with one collapsible region per

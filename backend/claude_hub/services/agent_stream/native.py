@@ -257,11 +257,16 @@ HUB_RUNTIME_GUIDANCE = (
     "by the env var `$CLAUDE_HUB_TAB_ID` — read it from the environment; never "
     "hardcode the value.\n"
     + EXECUTION_POLICY
-    + "For linked background work, inspect `claude-hub work --help` and the selected "
-    "subcommand's help only when needed. Reuse the same request key when retrying creation; "
-    "query existing work before creating a replacement. Report a verified work ID after creation. "
-    "Keep routine check results in the work card, and surface completion, anomalies or required "
-    "decisions with concise evidence. Read current work state when the user asks to change or stop it.\n"
+    + "For Task work, inspect `claude-hub task context --help` and only the selected command's "
+    "help when needed. `task register` creates an initiator-controlled record without dispatch; "
+    "`task progress` only records progress. `task handoff` preserves the Task ID and changes execution "
+    "control without starting it; `task dispatch` explicitly starts workspace-controlled execution. "
+    "Query current context before creating a replacement, and never infer execution control from Task "
+    "source, an empty session id, cwd, or a provider turn. A reporter key authorizes progress, "
+    "whole-Task completion, and release reports for that Task; it does not grant other Task-management "
+    "operations. A subagent that receives the key must not report the whole Task completed when only "
+    "its own substep is done. Keep keys only in an explicit protected key file, never in chat, logs, reports, "
+    "or command output. Do not fall back to manual progress when a key is lost.\n"
     "For unfamiliar or repeated workspace problems, fetch a compact relevant lesson index with "
     "`claude-hub feedback context <workspace-id> --query <topic>`; fetch an applicable lesson's "
     "details with `claude-hub lessons get`. Do not load unrelated lessons or query on every turn. "
@@ -270,8 +275,8 @@ HUB_RUNTIME_GUIDANCE = (
     "Do not manufacture user corrections or promote your own guess to a rule. Automatic feedback "
     "controls are available through `claude-hub feedback status` and `feedback configure`.\n"
     "Only when the user explicitly asks you to schedule a recurring self-check "
-    "or follow-up, schedule it. For an independent background monitor use `claude-hub work create` "
-    "with its interval option; for a follow-up that needs this conversation's context use "
+    "or follow-up, schedule it. For an independent workspace task inspect `schedule create --kind "
+    "hub_task --help`; for a follow-up that needs this conversation's context use "
     "the Chat-native kind:\n"
     '  claude-hub schedule create --name "<short name>" --kind chat_turn '
     '--tab-id "$CLAUDE_HUB_TAB_ID" --interval <seconds> --message '
@@ -281,7 +286,8 @@ HUB_RUNTIME_GUIDANCE = (
     "busy or running a Goal and never interrupts the active turn.\n"
     "A plain Terminal (non-Chat) session schedules with `--kind tab_message`; "
     "do NOT use `tab_message` in this Chat.\n"
-    "Do not create any schedule unless the user asked for one."
+    "Do not create any schedule unless the user asked for one. "
+    "Use Claude Hub CLI/API surfaces for agents and Tasks; do not send commands to agent tmux sessions."
 )
 
 _HUB_RUNTIME_START = "<<<HUB_RUNTIME_V1>>>"

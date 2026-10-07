@@ -127,6 +127,7 @@ class HubClient:
         files: Any = None,
         params: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> Any:
         resp = self.request_response(
             method,
@@ -136,6 +137,7 @@ class HubClient:
             files=files,
             params=params,
             timeout=timeout,
+            headers=headers,
         )
 
         if resp.status_code == 204 or not resp.content:
@@ -155,17 +157,21 @@ class HubClient:
         files: Any = None,
         params: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> httpx.Response:
         # Build the request up front so verbose logging reflects the REAL
         # outgoing URL (httpx's own base_url+path joining), and so the URL is
         # available to log even when sending raises.
         # httpx 0.28 Client.send has no timeout kwarg. Per-request timeout
         # belongs on build_request, which stores it in request.extensions.
+        if headers and {name.lower() for name in headers} & {"authorization", "cookie"}:
+            raise ValueError("request headers cannot override Hub authentication")
         build_kwargs: Dict[str, Any] = {
             "json": json,
             "data": data,
             "files": files,
             "params": params,
+            "headers": headers,
         }
         if timeout is not None:
             build_kwargs["timeout"] = timeout
@@ -558,3 +564,42 @@ class HubClient:
     def clear_scheduled_task_backlog(self, task_id: str) -> Any:
         """POST /api/scheduled-tasks/{task_id}/runs/clear."""
         return self._request("POST", f"/api/scheduled-tasks/{task_id}/runs/clear")
+
+    def get_task_capabilities(self, workspace_id: str) -> Any:
+        """GET the record/dispatch capabilities for a workspace."""
+        return self._request("GET", f"/api/workspaces/{workspace_id}/task-capabilities")
+
+    def record_task_progress(
+        self,
+        workspace_id: str,
+        task_id: str,
+        body: Dict[str, Any],
+        reporter_key: str,
+    ) -> Any:
+        """Record initiator-managed Task progress without dispatching it."""
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/progress",
+            json=body,
+            headers={"X-Task-Reporter-Key": reporter_key},
+        )
+
+    def handoff_task_execution(self, workspace_id: str, task_id: str, body: Dict[str, Any]) -> Any:
+        """Transfer Task execution control without starting execution."""
+        return self._request(
+            "POST",
+            f"/api/workspaces/{workspace_id}/tasks/{task_id}/handoff",
+            json=body,
+        )
+
+    def register_task(self, workspace_id: str, body: Dict[str, Any]) -> Any:
+        """Create or replay one initiator-controlled Task registration."""
+        response = self.request_response("POST", f"/api/workspaces/{workspace_id}/tasks", json=body)
+        data = response.json()
+        return {
+            "task": data,
+            "replayed": response.headers.get("X-Task-Replayed", "false").lower() == "true",
+        }
+
+    def get_tab_task_context(self, tab_id: str) -> Any:
+        return self._request("GET", f"/api/workspaces/tabs/{tab_id}/task-context")

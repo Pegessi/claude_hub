@@ -906,6 +906,8 @@ class _TmuxQueriesMixin:
             if not candidate_id:
                 continue
             task = self.tasks.get(candidate_id)
+            if task is not None and not self._workspace_owns_task(task):
+                continue
             should_reset = False
             if not task or task.workspace_id != workspace_id:
                 should_reset = True
@@ -1085,6 +1087,8 @@ class _TmuxQueriesMixin:
         Returns the number of tasks that were re-dispatched."""
         reaped = 0
         for task in list(self.tasks.values()):
+            if not self._workspace_owns_task(task):
+                continue
             if task.workspace_id != workspace_id:
                 continue
             if task.status == WorkspaceTaskStatus.DONE:

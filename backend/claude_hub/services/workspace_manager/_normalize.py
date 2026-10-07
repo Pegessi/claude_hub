@@ -113,6 +113,39 @@ class _NormalizeMixin:
             task_mode=normalized["task_mode"],
             policy=normalized["autonomy_policy"],
         )
+        normalized.setdefault("execution_control", "workspace")
+        if normalized["execution_control"] == "initiator":
+            forbidden = (
+                "session_id",
+                "review_session_id",
+                "chat_work_owned_session_id",
+                "chat_work_owned_tab_id",
+                "dispatch_pending",
+                "pending_call_ids",
+                "processing_call_ids",
+                "uncertain_call_ids",
+                "system_internal",
+                "internal_kind",
+            )
+            if any(normalized.get(key) for key in forbidden):
+                raise ValueError("initiator task contains managed execution state")
+            if normalized.get("status") in {"queued", "review"}:
+                raise ValueError("initiator task contains managed lifecycle status")
+            digest = normalized.get("reporter_key_hash")
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)
+            ):
+                raise ValueError("initiator task has no valid reporter credential")
+            normalized["autonomous_run"] = None
+            activity = normalized.get("runtime_observation")
+            if isinstance(activity, dict) and activity.get("status") == "active":
+                normalized["runtime_observation"] = {
+                    **activity,
+                    "status": "unknown",
+                    "detail": "observation predates server restart",
+                }
         return normalized
 
     def _normalize_report_item(self, item: dict[str, Any]) -> dict[str, Any]:

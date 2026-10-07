@@ -28,6 +28,13 @@ class _SessionsMixin:
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
+        if not self._workspace_owns_task(task) and any(
+            session.task_id == task_id or session.current_task_id == task_id
+            for session in self.sessions.values()
+        ):
+            from ._task_execution import TaskExecutionConflict
+
+            raise TaskExecutionConflict("initiator_task_has_managed_session_reference")
         if task_has_descendants(self.tasks, task.workspace_id, task):
             raise TaskHasDescendantsError(
                 f"Cannot delete task {task_id}: it has child tasks. "
@@ -71,7 +78,9 @@ class _SessionsMixin:
             if report.task_id != task_id
         }
         for session_id, session in list(self.sessions.items()):
-            if session.task_id == task_id or session.current_task_id == task_id:
+            if self._workspace_owns_task(task) and (
+                session.task_id == task_id or session.current_task_id == task_id
+            ):
                 self.sessions[session_id] = session.model_copy(
                     update={
                         "task_id": None,
@@ -93,6 +102,7 @@ class _SessionsMixin:
         except Exception:
             self._restore_report_intake_workspace(workspace_id, snapshot)
             raise
+        self._task_activity_cursors.pop(task_id, None)
 
     async def ensure_workspace_agent(
         self,
@@ -498,6 +508,14 @@ class _SessionsMixin:
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
+
+        if not self._workspace_owns_task(task):
+            return TaskCleanupResult(
+                task_id=task.id,
+                session_id=None,
+                action="skipped",
+                reason="initiator task does not own managed sessions",
+            )
 
         if task.system_internal or task.internal_kind:
             return TaskCleanupResult(

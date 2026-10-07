@@ -20,6 +20,8 @@ class TaskActorRole(str, Enum):
     REVIEWER = "reviewer"
     SUPERVISOR = "supervisor"
     HUMAN = "human"
+    INITIATOR = "initiator"
+    RUNTIME = "runtime"
 
 
 class TaskEventType(str, Enum):

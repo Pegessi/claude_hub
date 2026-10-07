@@ -14,6 +14,14 @@ class _PersistenceMixin:
         """Serialize a task for durable state without null optional metadata keys."""
 
         payload = task.model_dump(mode="json")
+        if task.reporter_key_hash is not None:
+            payload["reporter_key_hash"] = task.reporter_key_hash
+        if task.execution_call_fingerprints:
+            payload["execution_call_fingerprints"] = dict(task.execution_call_fingerprints)
+        for name in ("creation_request_key", "creation_actor_key", "creation_fingerprint"):
+            value = getattr(task, name)
+            if value is not None:
+                payload[name] = value
         if payload.get("agent_tag") is None:
             payload.pop("agent_tag", None)
         return payload

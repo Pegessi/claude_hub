@@ -63,6 +63,7 @@ class _ReviewMixin:
         workspace: Workspace,
         task: WorkspaceTask,
     ) -> ManagedSession:
+        task = self._require_workspace_execution(task)
         if task.review_session_id:
             reviewer = self.sessions.get(task.review_session_id)
             if (
