@@ -10,7 +10,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -343,13 +343,34 @@ async def test_cursor_send_text_prepends_question_protocol_guidance() -> None:
 # ── Hub Chat runtime / self-scheduling guidance (first turn, native only) ────
 
 
+_RUNTIME_MARKER_PAIRS = (
+    ("<claude_hub_instructions>", "</claude_hub_instructions>"),
+    ("<<<HUB_RUNTIME_V1>>>", "<<<END_HUB_RUNTIME_V1>>>"),
+)
+
+
+def _wrap_legacy_runtime_guidance(text: str) -> str:
+    return f"<<<HUB_RUNTIME_V1>>>\nHistorical runtime advice.\n<<<END_HUB_RUNTIME_V1>>>\n\n{text}"
+
+
+@pytest.fixture(params=["current", "legacy"])
+def runtime_wrap(request: pytest.FixtureRequest) -> Callable[[str], str]:
+    return (
+        wrap_hub_runtime_guidance if request.param == "current" else _wrap_legacy_runtime_guidance
+    )
+
+
 def test_hub_runtime_guidance_wrap_and_strip_round_trip() -> None:
     """wrap() prepends a sentinel block; strip() removes it exactly, leaving
     the original user text."""
     clean = "帮我每 5 分钟自查一次进度"
     wrapped = wrap_hub_runtime_guidance(clean)
-    assert wrapped.startswith("<<<HUB_RUNTIME_V1>>>")
+    assert wrapped.startswith("<claude_hub_instructions>")
     assert HUB_RUNTIME_GUIDANCE in wrapped
+    assert wrapped.startswith("<claude_hub_instructions>\nYou are running inside Claude Hub.")
+    assert "</claude_hub_instructions>\n\n" in wrapped
+    assert "<<<HUB_RUNTIME_V1>>>" not in wrapped
+    assert "<<<END_HUB_RUNTIME_V1>>>" not in wrapped
     assert wrapped.endswith(clean)
     assert strip_hub_runtime_guidance(wrapped) == clean
 
@@ -360,10 +381,37 @@ def test_strip_hub_runtime_guidance_is_noop_without_block() -> None:
     assert strip_hub_runtime_guidance("") == ""
 
 
-def test_strip_hub_runtime_guidance_leaves_malformed_block_untouched() -> None:
-    """An open sentinel without its close marker is left as-is (fail-safe)."""
-    malformed = "<<<HUB_RUNTIME_V1>>> some user text"
+@pytest.mark.parametrize("opening,closing", _RUNTIME_MARKER_PAIRS)
+def test_strip_hub_runtime_guidance_leaves_malformed_block_untouched(opening, closing) -> None:
+    """An open marker without its matching close leaves user text intact."""
+    malformed = f"{opening} some user text"
     assert strip_hub_runtime_guidance(malformed) == malformed
+    assert strip_hub_runtime_guidance(f"text {closing}") == f"text {closing}"
+
+
+@pytest.mark.parametrize("opening,closing", _RUNTIME_MARKER_PAIRS)
+def test_strip_hub_runtime_guidance_preserves_prefix_and_user_whitespace(opening, closing) -> None:
+    text = f"prefix\n{opening}\nold or new advice\n{closing}\n\n  user text\n"
+    assert strip_hub_runtime_guidance(text) == "prefix\n  user text\n"
+
+
+@pytest.mark.parametrize("first", [0, 1])
+def test_strip_hub_runtime_guidance_removes_earliest_block_only(first) -> None:
+    opening, closing = _RUNTIME_MARKER_PAIRS[first]
+    other_open, other_close = _RUNTIME_MARKER_PAIRS[1 - first]
+    later = f"{other_open}later instructions{other_close}\n\nuser text"
+    text = f"before {opening}first instructions{closing}\n\n{later}"
+    assert strip_hub_runtime_guidance(text) == "before " + later
+
+
+@pytest.mark.parametrize("first", [0, 1])
+def test_strip_hub_runtime_guidance_never_pairs_different_formats(first) -> None:
+    opening, _ = _RUNTIME_MARKER_PAIRS[first]
+    other_open, other_close = _RUNTIME_MARKER_PAIRS[1 - first]
+    mismatch = f"{opening}advice{other_close}\nuser text"
+    assert strip_hub_runtime_guidance(mismatch) == mismatch
+    later_complete = f"{opening}unclosed\n{other_open}complete{other_close}\nuser text"
+    assert strip_hub_runtime_guidance(later_complete) == later_complete
 
 
 def test_hub_runtime_guidance_content_uses_literal_env_and_chat_kind() -> None:
@@ -382,10 +430,11 @@ async def test_first_turn_hub_guidance_helper_injects_once() -> None:
     native = ClaudeNativeSession(_session(AgentType.CLAUDE))
     first, first_seed = await native._with_first_turn_prefixes("first")
     second, second_seed = await native._with_first_turn_prefixes("second")
-    assert first.startswith("<<<HUB_RUNTIME_V1>>>")
+    assert first.startswith("<claude_hub_instructions>")
     assert first.endswith("first")
     assert second == "second"
-    assert "HUB_RUNTIME" not in second
+    assert "<claude_hub_instructions>" not in second
+    assert "<<<HUB_RUNTIME_V1>>>" not in second
     assert first_seed is False and second_seed is False
 
 
@@ -406,11 +455,12 @@ async def test_claude_send_message_injects_hub_guidance_once() -> None:
 
     first = envelope_text(mock_spawn.await_args_list[0].args[1])
     second = envelope_text(mock_spawn.await_args_list[1].args[1])
-    assert first.startswith("<<<HUB_RUNTIME_V1>>>")
+    assert first.startswith("<claude_hub_instructions>")
     assert HUB_RUNTIME_GUIDANCE in first
     assert first.endswith("first")
     assert second == "second"
-    assert "HUB_RUNTIME" not in second
+    assert "<claude_hub_instructions>" not in second
+    assert "<<<HUB_RUNTIME_V1>>>" not in second
 
 
 @pytest.mark.asyncio
@@ -427,10 +477,10 @@ async def test_cursor_send_message_injects_hub_guidance_once() -> None:
 
     first = mock_spawn.await_args_list[0].args[1]
     second = mock_spawn.await_args_list[1].args[1]
-    assert "<<<HUB_RUNTIME_V1>>>" in first
+    assert "<claude_hub_instructions>" in first
     assert "<<<HUB_QUESTION_PROTOCOL_V1>>>" in first
     assert first.endswith("first")
-    assert "<<<HUB_RUNTIME_V1>>>" not in second
+    assert "<claude_hub_instructions>" not in second
     assert "<<<HUB_QUESTION_PROTOCOL_V1>>>" in second
     assert second.endswith("second")
 
@@ -450,11 +500,12 @@ async def test_codex_send_message_injects_hub_guidance_once() -> None:
 
     first = mock_request.await_args_list[0].args[1]["input"][0]["text"]
     second = mock_request.await_args_list[1].args[1]["input"][0]["text"]
-    assert first.startswith("<<<HUB_RUNTIME_V1>>>")
+    assert first.startswith("<claude_hub_instructions>")
     assert HUB_RUNTIME_GUIDANCE in first
     assert first.endswith("first")
     assert second == "second"
-    assert "HUB_RUNTIME" not in second
+    assert "<claude_hub_instructions>" not in second
+    assert "<<<HUB_RUNTIME_V1>>>" not in second
 
 
 def test_terminal_session_never_gets_native_guidance_injection() -> None:
@@ -755,14 +806,16 @@ async def test_claude_tab_without_endpoint_does_not_promote_parent_endpoint(
     assert list(launch_dir.glob("*.network-*.settings.json")) == []
 
 
-def test_claude_transcript_strips_hub_runtime_guidance_string_content() -> None:
+def test_claude_transcript_strips_hub_runtime_guidance_string_content(
+    runtime_wrap: Callable[[str], str],
+) -> None:
     """A string-content Claude user message carrying the first-turn block
     normalizes back to the clean text (never reaches the timeline/UI)."""
     adapter = ClaudeJsonlAdapter()
     clean = "请帮我清理这个目录"
     raw = {
         "type": "user",
-        "message": {"role": "user", "content": wrap_hub_runtime_guidance(clean)},
+        "message": {"role": "user", "content": runtime_wrap(clean)},
     }
     events = adapter.normalize_line(raw, _ctx())
     assert len(events) == 1
@@ -772,7 +825,9 @@ def test_claude_transcript_strips_hub_runtime_guidance_string_content() -> None:
     assert "HUB_RUNTIME" not in events[0].payload["summary"]
 
 
-def test_claude_transcript_list_text_block_never_surfaces_hub_guidance() -> None:
+def test_claude_transcript_list_text_block_never_surfaces_hub_guidance(
+    runtime_wrap: Callable[[str], str],
+) -> None:
     """The SDK envelope (list content) the first turn actually uses emits no
     user-text turn_started, so the block cannot surface in the UI."""
     adapter = ClaudeJsonlAdapter()
@@ -780,14 +835,19 @@ def test_claude_transcript_list_text_block_never_surfaces_hub_guidance() -> None
         "type": "user",
         "message": {
             "role": "user",
-            "content": [{"type": "text", "text": wrap_hub_runtime_guidance("hi")}],
+            "content": [{"type": "text", "text": runtime_wrap("hi")}],
         },
     }
     events = adapter.normalize_line(raw, _ctx())
-    assert all("HUB_RUNTIME" not in str(e.payload) for e in events)
+    for event in events:
+        for opening, closing in _RUNTIME_MARKER_PAIRS:
+            assert opening not in str(event.payload)
+            assert closing not in str(event.payload)
+        assert HUB_RUNTIME_GUIDANCE not in str(event.payload)
+        assert "Historical runtime advice." not in str(event.payload)
 
 
-def test_codex_transcript_strips_hub_runtime_guidance() -> None:
+def test_codex_transcript_strips_hub_runtime_guidance(runtime_wrap: Callable[[str], str]) -> None:
     """A Codex ``user_message`` carrying the first-turn block normalizes to the
     clean text (never reaches the timeline/UI)."""
     adapter = CodexJsonlAdapter()
@@ -800,7 +860,7 @@ def test_codex_transcript_strips_hub_runtime_guidance() -> None:
     clean = "check back in a few minutes"
     raw = {
         "type": "event_msg",
-        "payload": {"type": "user_message", "message": wrap_hub_runtime_guidance(clean)},
+        "payload": {"type": "user_message", "message": runtime_wrap(clean)},
     }
     events = adapter.normalize_line(raw, ctx)
     assert len(events) == 1
@@ -809,7 +869,7 @@ def test_codex_transcript_strips_hub_runtime_guidance() -> None:
     assert "HUB_RUNTIME" not in events[0].payload["summary"]
 
 
-def test_cursor_transcript_strips_hub_runtime_guidance() -> None:
+def test_cursor_transcript_strips_hub_runtime_guidance(runtime_wrap: Callable[[str], str]) -> None:
     """A Cursor user row carrying the first-turn block normalizes to the clean
     text (never reaches the timeline/UI)."""
     adapter = CursorCliTranscriptAdapter()
@@ -824,7 +884,7 @@ def test_cursor_transcript_strips_hub_runtime_guidance() -> None:
         "role": "user",
         "message": {
             "role": "user",
-            "content": [{"type": "text", "text": wrap_hub_runtime_guidance(clean)}],
+            "content": [{"type": "text", "text": runtime_wrap(clean)}],
         },
     }
     events = adapter.normalize_line(raw, ctx)
@@ -834,7 +894,9 @@ def test_cursor_transcript_strips_hub_runtime_guidance() -> None:
     assert "HUB_RUNTIME" not in events[0].payload["summary"]
 
 
-def test_first_turn_blocks_strip_in_normalizer_order(tmp_path: Path) -> None:
+def test_first_turn_blocks_strip_in_normalizer_order(
+    tmp_path: Path, runtime_wrap: Callable[[str], str]
+) -> None:
     """A Cursor first turn can carry image + question + Hub runtime blocks
     together; stripping in the normalizer's order (question, image, hub)
     recovers exactly the original text."""
@@ -842,7 +904,7 @@ def test_first_turn_blocks_strip_in_normalizer_order(tmp_path: Path) -> None:
     img.write_bytes(_VALID_PNG)
     clean = "请描述这张图并稍后自查"
     wrapped = wrap_image_attachment_guidance(
-        wrap_question_protocol_guidance(wrap_hub_runtime_guidance(clean)), [img]
+        wrap_question_protocol_guidance(runtime_wrap(clean)), [img]
     )
     recovered = strip_hub_runtime_guidance(
         strip_image_attachment_guidance(strip_question_protocol_guidance(wrapped))
@@ -850,18 +912,24 @@ def test_first_turn_blocks_strip_in_normalizer_order(tmp_path: Path) -> None:
     assert recovered == clean
 
 
-def test_fork_extract_user_text_strips_hub_runtime_guidance() -> None:
+@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR])
+def test_fork_extract_user_text_strips_hub_runtime_guidance(
+    runtime_wrap: Callable[[str], str], agent_type: AgentType
+) -> None:
     """edit-resend matches an edited turn to a provider user message by exact
     clean text; the first-turn wrapped block must be stripped or the first
     turn would be unmappable."""
     from claude_hub.services.agent_stream.transcript_fork import _extract_user_text
 
     clean = "edit this first turn"
-    obj = {
-        "type": "user",
-        "message": {"role": "user", "content": wrap_hub_runtime_guidance(clean)},
-    }
-    assert _extract_user_text(obj, AgentType.CLAUDE) == clean
+    if agent_type == AgentType.CODEX:
+        obj = {
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": runtime_wrap(clean)},
+        }
+    else:
+        obj = {"type": "user", "message": {"role": "user", "content": runtime_wrap(clean)}}
+    assert _extract_user_text(obj, agent_type) == clean
 
 
 # ── Claude stream_event normalization ───────────────────────────────────────

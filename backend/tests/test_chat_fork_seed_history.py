@@ -241,7 +241,8 @@ async def test_claude_seed_prepended_to_first_turn_only() -> None:
     assert "prior q" in first and "prior a" in first
     assert first.endswith("continue please")
     # The hub-runtime guidance still coexists on the first turn.
-    assert "<<<HUB_RUNTIME_V1>>>" in first
+    assert "<claude_hub_instructions>" in first
+    assert "<<<HUB_RUNTIME_V1>>>" not in first
     assert "FORK_SEED" not in second
     assert second == "second turn"
     assert consumed == [True]
