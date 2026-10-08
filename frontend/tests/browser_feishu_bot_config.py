@@ -250,8 +250,6 @@ async def main():
                         raise AssertionError("Unexpected config request method")
                 elif path.endswith("/goal/current"):
                     body = None
-                elif path.endswith("/work"):
-                    body = []
                 elif path.endswith("/capabilities"):
                     body = {
                         "structured": True,

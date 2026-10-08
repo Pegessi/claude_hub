@@ -118,8 +118,6 @@ class _NormalizeMixin:
             forbidden = (
                 "session_id",
                 "review_session_id",
-                "chat_work_owned_session_id",
-                "chat_work_owned_tab_id",
                 "dispatch_pending",
                 "pending_call_ids",
                 "processing_call_ids",

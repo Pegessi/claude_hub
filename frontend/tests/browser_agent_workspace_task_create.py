@@ -29,7 +29,6 @@ CAPABILITIES = {
     ],
     "record_only_requires_reporter_key": True,
     "handoff_requires_release": True,
-    "legacy_chat_work_create": False,
 }
 WORKSPACES = [
     {
@@ -81,11 +80,6 @@ def task_fixture(
         "execution_released": False,
         "latest_progress": None,
         "runtime_observation": None,
-        "source_work_id": None,
-        "legacy_work_detached": False,
-        "chat_work_outcome": None,
-        "chat_work_report_id": None,
-        "chat_work_summary": None,
         "status": "todo",
         "session_id": None,
         "related_task_id": None,

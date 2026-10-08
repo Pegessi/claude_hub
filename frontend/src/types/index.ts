@@ -58,7 +58,6 @@ export interface WorkspaceTaskCapabilities {
   progress_states: WorkspaceTaskProgressState[]
   record_only_requires_reporter_key: boolean
   handoff_requires_release: boolean
-  legacy_chat_work_create: boolean
 }
 
 export interface WorkspaceTaskManualProgressRequest {
@@ -494,11 +493,6 @@ export interface WorkspaceTask {
   execution_released?: boolean
   latest_progress?: WorkspaceTaskProgress | null
   runtime_observation?: WorkspaceTaskRuntimeObservation | null
-  legacy_work_detached?: boolean
-  source_work_id?: string | null
-  chat_work_outcome?: string | null
-  chat_work_report_id?: string | null
-  chat_work_summary?: string | null
   agent_tag?: string | null
   autonomy_policy?: AutonomyPolicy | null
   autonomous_run?: AutonomousRun | null

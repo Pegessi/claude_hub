@@ -1,5 +1,10 @@
 # Chat-owned durable work and bounded feedback
 
+> Historical candidate only. The unpublished ChatWork API, UI, compatibility
+> controls, and dedicated smoke harness were removed in the
+> [2026-10-08 cleanup](2026-10-08-remove-chatwork.md). Commands and validation
+> results below describe that earlier revision, not current functionality.
+
 ## Outcome and baseline
 
 Chat remains the user's main interface. Small work stays in the current agent;

@@ -188,13 +188,23 @@ async def main():
                         }
                     ]
                 elif (
-                    path in {"/api/tabs/status", "/api/env-presets", "/api/tabs/archived"}
+                    path in {"/api/tabs/status", "/api/tabs/archived"}
                     and request.method == "GET"
+                    and not parsed.query
                 ):
                     body = []
-                elif path == "/api/feishu/bot/binding" and request.method == "GET":
-                    # The native-region change is tested against the current Bot UI.
-                    body = {"binding": None}
+                elif path == "/api/env-presets" and request.method == "GET" and not parsed.query:
+                    body = {"custom_presets": [], "hidden_builtin_ids": []}
+                elif (
+                    path == "/api/feishu/bot/bots" and request.method == "GET" and not parsed.query
+                ):
+                    body = {
+                        "pool_revision": 0,
+                        "bots": [],
+                        "pool_editable": True,
+                        "deprecated_env": [],
+                        "focus_bot_id": None,
+                    }
                 elif path.endswith("/capabilities"):
                     body = {
                         "structured": True,
@@ -225,8 +235,6 @@ async def main():
                     return
                 elif path.endswith("/goal/current"):
                     body = None
-                elif path.endswith("/work"):
-                    body = []
                 elif path.endswith("/view"):
                     body = {"ok": True}
                 elif "network" in path:

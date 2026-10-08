@@ -1515,7 +1515,6 @@ def _context_summary(
         "progress_states": caps.get("progress_states", []),
         "record_only_requires_reporter_key": caps.get("record_only_requires_reporter_key"),
         "handoff_requires_release": caps.get("handoff_requires_release"),
-        "legacy_chat_work_create": caps.get("legacy_chat_work_create"),
     }
 
 

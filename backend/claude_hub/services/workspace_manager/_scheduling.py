@@ -22,13 +22,15 @@ next-run time arrives. Four kinds are supported:
   reviewer resources are held.
 
 Schedules are persisted to ``STATE_ROOT/scheduled_tasks.json`` (atomic
-write) and hydrated at startup after the core workspace state. The tick is
+write) and validated at startup before the core workspace state. The tick is
 driven by the 5-second background monitor loop.
 
 Crash idempotency: before firing, the task's ``last_run_at`` / ``run_count``
 / ``next_run_at`` are stamped and persisted. Chat turns additionally create a
 durable run with a deterministic turn id in that same atomic write.
 """
+
+from pydantic import ValidationError
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
@@ -108,6 +110,10 @@ class _SchedulingMixin:
                 task = ScheduledTask(**item)
                 self.scheduled_tasks[task.id] = task
             except Exception as exc:
+                if isinstance(exc, ValidationError) and any(
+                    error["type"] == "extra_forbidden" for error in exc.errors()
+                ):
+                    raise
                 logger.warning("Skipping invalid scheduled task entry: %s", exc)
         runs = raw.get("scheduled_task_runs", [])
         if isinstance(runs, list):
@@ -688,15 +694,11 @@ class _SchedulingMixin:
             await self._recover_scheduled_chat_runs()
             self._scheduled_chat_recovery_pending = False
         now = _wm._now()
-        await self._reconcile_chat_work()
         self._disable_deleted_chat_targets(now)
         await self._reap_stale_scheduled_chat_runs(now)
         for task_id in list(self.scheduled_tasks.keys()):
             task = self.scheduled_tasks.get(task_id)
             if task is None or not task.enabled:
-                continue
-            # Retired ChatWork schedules remain readable without recurring empty fire attempts.
-            if task.source_tab_id and task.work_kind:
                 continue
             if task.next_run_at is None or task.next_run_at > now:
                 continue
@@ -744,10 +746,6 @@ class _SchedulingMixin:
                     raise KeyError(task.id)
                 return None
             task = current
-            if task.source_tab_id and task.work_kind:
-                if manual:
-                    raise ValueError("legacy_chat_work_read_only_use_workspace_tasks")
-                return None
 
             # Re-check eligibility under the lock: a concurrent fire (the 5s
             # tick vs a manual run-now, or two run-now clicks) may have already
@@ -775,29 +773,6 @@ class _SchedulingMixin:
                 # Already advanced by a concurrent manual fire.
                 return None
 
-            if task.source_tab_id and task.work_kind:
-                if self._chat_work_active(task):
-                    # Coalesce missed checks; never build a replay backlog.
-                    task.next_run_at = self._compute_next_run(task, now)
-                    self._save_scheduled_tasks()
-                    return None
-                executions = self._chat_work_executions(task)
-                if (
-                    executions
-                    and executions[0].status == WorkspaceTaskStatus.FAILED
-                    and task.last_status != "retry_requested"
-                ):
-                    task.enabled = False
-                    task.last_status = "error"
-                    task.last_error = (
-                        executions[0].failure_reason
-                        or "Previous execution failed; resume explicitly"
-                    )
-                    task.next_run_at = None
-                    self._save_scheduled_tasks()
-                    return None
-
-            before_stamp = task.model_copy(deep=True) if task.source_tab_id else None
             scheduled_for = now if manual else (task.next_run_at or now)
             # Stamp BEFORE the side effect (crash-idempotent, same pattern as
             # resident agents): persist last_run_at / run_count / next_run_at
@@ -814,12 +789,7 @@ class _SchedulingMixin:
             chat_run: Optional[ScheduledTaskRun] = None
             if task.kind == ScheduledTaskKind.CHAT_TURN:
                 chat_run = self._queue_scheduled_chat_run(task, scheduled_for, now)
-            try:
-                self._save_scheduled_tasks()
-            except Exception:
-                if before_stamp is not None:
-                    self.scheduled_tasks[task.id] = before_stamp
-                raise
+            self._save_scheduled_tasks()
 
             try:
                 if task.kind == ScheduledTaskKind.CHAT_TURN:
@@ -838,9 +808,6 @@ class _SchedulingMixin:
                 logger.exception("Scheduled task %s failed to fire", task.id)
                 task.last_status = "error"
                 task.last_error = str(exc)
-                if task.source_tab_id:
-                    task.enabled = False
-                    task.next_run_at = None
 
             task.updated_at = _wm._now()
             self._save_scheduled_tasks()
@@ -1435,9 +1402,6 @@ class _SchedulingMixin:
         (skipping human review) and the auto-cleanup hook deletes the ephemeral
         session so no agent / reviewer resources are held.
         """
-        if task.source_tab_id and task.work_kind:
-            await self._fire_chat_work_task(task)
-            return
         now = _wm._now()
         # Validation at create/update time guarantees task_title and message are
         # set for hub_task; assert so the type checker sees non-Optional str.
@@ -1564,10 +1528,7 @@ class _SchedulingMixin:
             for task in self.tasks.values()
             if task.status == WorkspaceTaskStatus.WORKING
             and self._workspace_owns_task(task)
-            and (
-                self._is_scheduled_hub_task(task)
-                or (task.source_work_id and not task.legacy_work_detached)
-            )
+            and self._is_scheduled_hub_task(task)
         ]
         for task in candidates:
             bound_id = task.session_id
@@ -1603,9 +1564,9 @@ class _SchedulingMixin:
         live = self.tasks.get(task.id)
         if live is None or live.status != WorkspaceTaskStatus.WORKING:
             return
-        if not self._workspace_owns_task(live) or live.legacy_work_detached:
+        if not self._workspace_owns_task(live):
             return
-        if not (self._is_scheduled_hub_task(live) or live.source_work_id) or not live.session_id:
+        if not self._is_scheduled_hub_task(live) or not live.session_id:
             return
         dead_session = self.sessions.get(live.session_id)
         if not self._hub_task_worker_is_dead(live, dead_session):
@@ -1613,17 +1574,6 @@ class _SchedulingMixin:
         # Re-evaluate the grace against the authoritative live task under the
         # lock; the outer sweep's snapshot may predate a fresh progress update.
         if (now - live.updated_at).total_seconds() < HUBTASK_ORPHAN_GRACE_SECONDS:
-            return
-
-        if live.source_work_id:
-            # A linked worker may already have made external changes. Preserve
-            # delivery uncertainty instead of silently replaying on a new model.
-            await self._fail_orphaned_hub_task(
-                live,
-                dead_session,
-                reason="Linked work worker became unavailable; inspect evidence and resume explicitly",
-                now=now,
-            )
             return
 
         if live.dispatch_attempt >= HUBTASK_ORPHAN_MAX_ATTEMPTS:
@@ -1776,7 +1726,5 @@ class _SchedulingMixin:
             task.id,
             reason,
         )
-        if task.source_work_id:
-            await self._cleanup_chat_work_session(failed)
-        elif dead_session is not None:
+        if dead_session is not None:
             await self._best_effort_delete_session(dead_session.id)

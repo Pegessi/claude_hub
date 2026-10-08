@@ -28,8 +28,6 @@ from claude_hub.models import (
     RequestTaskReviewRequest,
     ReviewDecision,
     ReviewProfile,
-    ScheduledTask,
-    ScheduledTaskKind,
     User,
     WorkspaceCreate,
     WorkspaceSessionRole,
@@ -40,7 +38,6 @@ from claude_hub.models import (
 )
 from claude_hub.models.agent_stream import AgentStreamEvent, AgentStreamEventType
 from claude_hub.models.schemas import (
-    ChatWorkUpdate,
     TaskExecutionControl,
     TaskExecutionHandoffRequest,
     TaskExecutionReference,
@@ -794,111 +791,6 @@ def test_tab_context_uses_existing_runtime_only(manager, workspace, monkeypatch)
         assert client.get(url).status_code == 404
 
 
-def _legacy_work(manager, workspace):
-    now = _wm._now()
-    work = ScheduledTask(
-        id="legacy-work",
-        name="legacy",
-        kind=ScheduledTaskKind.HUB_TASK,
-        workspace_id=workspace.id,
-        source_tab_id="caller-tab",
-        work_kind="task",
-        work_cwd=workspace.path,
-        message="legacy objective",
-        task_title="legacy",
-        run_at=now,
-        next_run_at=now,
-        created_at=now,
-        updated_at=now,
-    )
-    manager.scheduled_tasks[work.id] = work
-    manager._save_scheduled_tasks()
-    return work
-
-
-@pytest.mark.asyncio
-async def test_legacy_enabled_record_loads_without_replay(manager, workspace, monkeypatch):
-    work = _legacy_work(manager, workspace)
-    monkeypatch.setattr(
-        WorkspaceManager, "ensure_workspace_agent", AsyncMock(side_effect=forbidden)
-    )
-    monkeypatch.setattr(WorkspaceManager, "_fire_hub_task", AsyncMock(side_effect=forbidden))
-    fresh = WorkspaceManager()
-    saved = fresh.scheduled_tasks[work.id]
-    before = saved.model_dump(mode="json")
-    assert await fresh._fire_scheduled_task(saved, _wm._now()) is None
-    await fresh._reconcile_chat_work()
-    assert fresh.scheduled_tasks[work.id].model_dump(mode="json") == before
-    assert not fresh.tasks and not fresh.sessions
-    with pytest.raises(ValueError, match="legacy_chat_work_read_only"):
-        await fresh._fire_scheduled_task(saved, _wm._now(), manual=True)
-
-
-def test_legacy_api_is_read_only_except_explicit_stop(manager, workspace, monkeypatch):
-    legacy_api = import_module("claude_hub.api.chat_work")
-    work = _legacy_work(manager, workspace)
-    monkeypatch.setattr(legacy_api, "workspace_manager", manager)
-    api = FastAPI()
-    api.include_router(legacy_api.router)
-    api.dependency_overrides[get_current_user] = lambda: User(
-        open_id="test-user", name="test", email="test@example.invalid"
-    )
-    with TestClient(api) as client:
-        base = "/api/tabs/caller-tab/work"
-        assert client.get(base).status_code == 200
-        detail = client.get(f"{base}/{work.id}")
-        assert detail.status_code == 200 and detail.json()["id"] == work.id
-        created = client.post(
-            base,
-            json={
-                "request_key": "obsolete-create",
-                "workspace_id": workspace.id,
-                "title": "old create",
-                "prompt": "do not run",
-                "kind": "task",
-            },
-        )
-        assert created.status_code == 410
-        resumed = client.patch(f"{base}/{work.id}", json={"action": "resume"})
-        assert resumed.status_code == 410
-        stopped = client.patch(f"{base}/{work.id}", json={"action": "stop"})
-        assert stopped.status_code == 200
-        assert stopped.json()["status"] == "stopped"
-        assert manager.scheduled_tasks[work.id].enabled is False
-        assert manager.scheduled_tasks[work.id].work_stopped_at is not None
-        assert not manager.tasks and not manager.sessions
-
-
-@pytest.mark.asyncio
-async def test_legacy_stop_cannot_touch_task_after_handoff(manager, workspace, monkeypatch):
-    work = _legacy_work(manager, workspace)
-    work.enabled = False
-    manager._save_scheduled_tasks()
-    task = manager._create_task(
-        workspace.id,
-        WorkspaceTaskCreate(title="old task", prompt="old goal"),
-        source_work_id=work.id,
-    )
-    moved = await manager.handoff_task_execution(
-        workspace.id, task.id, handoff(task, "initiator", "first-handoff")
-    )
-    released = await manager.record_task_progress(
-        workspace.id, task.id, progress(moved.task, "released", "release-new-owner"), NEW_KEY
-    )
-    returned = await manager.handoff_task_execution(
-        workspace.id, task.id, handoff(released.task, "workspace", "second-handoff")
-    )
-    assert returned.task.legacy_work_detached
-    current = returned.task.model_copy(update={"status": WorkspaceTaskStatus.WORKING})
-    manager.tasks[task.id] = current
-    before = current.model_dump(mode="json")
-    monkeypatch.setattr(manager, "abort_task", AsyncMock(side_effect=forbidden))
-    monkeypatch.setattr(manager, "_cleanup_chat_work_session", AsyncMock(side_effect=forbidden))
-    result = await manager.update_chat_work("caller-tab", work.id, ChatWorkUpdate(action="stop"))
-    assert result.status == "stopped"
-    assert manager.tasks[task.id].model_dump(mode="json") == before
-
-
 def test_tab_context_rejects_multiple_live_runtime_candidates(manager, workspace, monkeypatch):
     stream_api = import_module("claude_hub.api.agent_stream")
     now = _wm._now()
@@ -1038,18 +930,6 @@ async def test_private_review_preserves_reports_body_and_does_not_hit_dispatch_h
     assert manager.tasks[task.id].model_dump(mode="json") == before
     assert not manager.reports
     assert not manager._task_execution_operations
-
-
-@pytest.mark.asyncio
-async def test_due_legacy_schedule_is_not_selected_for_fire(manager, workspace, monkeypatch):
-    work = _legacy_work(manager, workspace)
-    work.next_run_at = _wm._now() - timedelta(seconds=1)
-    before = work.model_dump(mode="json")
-    fire = AsyncMock(side_effect=forbidden)
-    monkeypatch.setattr(manager, "_fire_scheduled_task", fire)
-    await manager._tick_scheduled_tasks()
-    fire.assert_not_awaited()
-    assert work.model_dump(mode="json") == before
 
 
 @pytest.mark.asyncio

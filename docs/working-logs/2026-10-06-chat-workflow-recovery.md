@@ -1,5 +1,10 @@
 # Chat workflow integration: recovery boundaries
 
+> Historical candidate only. The unpublished ChatWork API, UI, compatibility
+> controls, and dedicated smoke harness were removed in the
+> [2026-10-08 cleanup](2026-10-08-remove-chatwork.md). Commands and validation
+> results below describe that earlier revision, not current functionality.
+
 ## Scope
 
 This follow-up applies to the workflow candidate after integration with main

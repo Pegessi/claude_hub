@@ -36,7 +36,6 @@ class _TasksMixin:
         *,
         system_internal: bool = False,
         internal_kind: str | None = None,
-        source_work_id: str | None = None,
         creation_request_key: str | None = None,
         creation_actor_key: str | None = None,
         creation_fingerprint: str | None = None,
@@ -47,7 +46,6 @@ class _TasksMixin:
             payload,
             system_internal=system_internal,
             internal_kind=internal_kind,
-            source_work_id=source_work_id,
         )
         initiator_owned = payload.execution_control.value == "initiator"
         if initiator_owned and not creation_actor_key:
@@ -95,7 +93,6 @@ class _TasksMixin:
             workspace_id=workspace_id,
             title=title,
             prompt=prompt,
-            source_work_id=source_work_id,
             attachments=attachments,
             goal_packet=payload.goal_packet,
             review_profiles=payload.review_profiles,
