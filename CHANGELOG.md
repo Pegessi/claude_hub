@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### refactor(agents): condense guidance and clarify optional progress tracking
+
+- Condense the combined Chat runtime guidance without changing transport
+  injection, Task permissions, dispatch, or scheduling.
+- Suggest a progress-tracking subagent for complex, long-running work when its
+  coordination benefit warrants the overhead. Keep one Task and an explicit
+  reporting role; the owner remains responsible for decisions and delivery.
+- Require explicit reporting access, preserve completion/release boundaries,
+  and discourage repeated model wakeups or reports without new evidence.
+- See the [guidance and validation notes](docs/working-logs/2026-10-08-concise-runtime-guidance.md).
+
 ### refactor(tasks): remove the unpublished ChatWork layer
 
 - Remove ChatWork routes, Chat cards, polling/notifications, dedicated models,
