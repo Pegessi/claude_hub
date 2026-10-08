@@ -252,8 +252,8 @@ def strip_image_attachment_guidance(text: str) -> str:
 # timeline nor the Chat UI; the authoritative Hub echo persists the clean
 # user text before the transport ever wraps it.
 HUB_RUNTIME_GUIDANCE = (
-    "HUB RUNTIME (Claude Hub Chat): `claude-hub` is on PATH. Read this Chat's ID from "
-    "$CLAUDE_HUB_TAB_ID; never hardcode it.\n"
+    "You are running inside Claude Hub. The `claude-hub` CLI is available on PATH. "
+    "Read this Chat's ID from $CLAUDE_HUB_TAB_ID; never hardcode it.\n"
     + EXECUTION_POLICY
     + "Task tools: use `claude-hub task context` to inspect current context; consult only the selected "
     "command's help. `task register` creates an initiator-controlled record without dispatch; "
@@ -279,8 +279,13 @@ HUB_RUNTIME_GUIDANCE = (
 )
 
 
-_HUB_RUNTIME_START = "<<<HUB_RUNTIME_V1>>>"
-_HUB_RUNTIME_END = "<<<END_HUB_RUNTIME_V1>>>"
+_HUB_RUNTIME_START = "<claude_hub_instructions>"
+_HUB_RUNTIME_END = "</claude_hub_instructions>"
+# Provider transcripts can outlive the version that injected their first turn.
+_HUB_RUNTIME_MARKERS = (
+    (_HUB_RUNTIME_START, _HUB_RUNTIME_END),
+    ("<<<HUB_RUNTIME_V1>>>", "<<<END_HUB_RUNTIME_V1>>>"),
+)
 
 
 def wrap_hub_runtime_guidance(text: str) -> str:
@@ -297,7 +302,7 @@ def wrap_hub_runtime_guidance(text: str) -> str:
 
 
 def strip_hub_runtime_guidance(text: str) -> str:
-    """Remove the sentinel-wrapped Hub runtime guidance from a user message.
+    """Remove the first current or legacy Hub guidance block from a user message.
 
     Applied when normalizing provider user messages (transcript/snapshot read)
     and when matching an edited turn to a provider user message, so the
@@ -308,13 +313,20 @@ def strip_hub_runtime_guidance(text: str) -> str:
     """
     if not text:
         return text
-    start = text.find(_HUB_RUNTIME_START)
-    if start == -1:
+    start = len(text)
+    markers: Optional[Tuple[str, str]] = None
+    for opening, closing in _HUB_RUNTIME_MARKERS:
+        candidate = text.find(opening)
+        if 0 <= candidate < start:
+            start = candidate
+            markers = (opening, closing)
+    if markers is None:
         return text
-    end = text.find(_HUB_RUNTIME_END, start + len(_HUB_RUNTIME_START))
+    opening, closing = markers
+    end = text.find(closing, start + len(opening))
     if end == -1:
         return text  # malformed (open block); leave untouched
-    end += len(_HUB_RUNTIME_END)
+    end += len(closing)
     return text[:start] + text[end:].lstrip("\n")
 
 

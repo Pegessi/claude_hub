@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### refactor(chat): use descriptive runtime instruction markers
+
+- Send Hub guidance inside `<claude_hub_instructions>` tags with a plain-language
+  introduction instead of exposing the internal `HUB_RUNTIME_V1` label.
+- Continue reading old markers in provider history, using the shared stripping
+  path for timeline normalization and edit/fork matching. Keep unmatched blocks
+  untouched and remove only the earliest supported block per call.
+- See the [compatibility and verification notes](docs/working-logs/2026-10-08-runtime-instruction-markers.md).
+
 ### refactor(agents): condense guidance and clarify optional progress tracking
 
 - Condense the combined Chat runtime guidance without changing transport
