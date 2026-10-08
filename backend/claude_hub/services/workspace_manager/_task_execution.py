@@ -82,13 +82,12 @@ class _TaskExecutionMixin:
         *,
         system_internal: bool,
         internal_kind: str | None,
-        source_work_id: str | None,
     ) -> str | None:
         if payload.execution_control == TaskExecutionControl.WORKSPACE:
             if payload.reporter_key is not None:
                 raise ValueError("workspace_task_cannot_have_reporter_key")
             return None
-        if payload.session_id or system_internal or internal_kind or source_work_id:
+        if payload.session_id or system_internal or internal_kind:
             raise ValueError("initiator_task_cannot_have_managed_assignment")
         if not payload.request_key:
             raise ValueError("initiator_task_requires_request_key")
@@ -100,7 +99,7 @@ class _TaskExecutionMixin:
         if not actor_key:
             raise ValueError("authenticated_task_creator_required")
         key_hash = self._validate_task_execution_create(
-            payload, system_internal=False, internal_kind=None, source_work_id=None
+            payload, system_internal=False, internal_kind=None
         )
         canonical = payload.model_dump(mode="json")
         canonical.update(title=payload.title.strip(), prompt=payload.prompt.strip())
@@ -339,10 +338,6 @@ class _TaskExecutionMixin:
         for session in self.sessions.values():
             if task.id in {session.task_id, session.current_task_id}:
                 raise TaskExecutionConflict("workspace_task_execution_not_released")
-        if task.source_work_id:
-            work = self.scheduled_tasks.get(task.source_work_id)
-            if work is not None and work.enabled:
-                raise TaskExecutionConflict("legacy_chat_work_must_be_stopped")
 
     async def handoff_task_execution(
         self,
@@ -393,8 +388,6 @@ class _TaskExecutionMixin:
                 "status": WorkspaceTaskStatus.TODO,
                 "session_id": None,
                 "review_session_id": None,
-                "chat_work_owned_session_id": None,
-                "chat_work_owned_tab_id": None,
                 "related_task_id": None,
                 "clear_context": None,
                 "dispatch_pending": False,
@@ -402,7 +395,6 @@ class _TaskExecutionMixin:
                 "autonomous_run": None,
                 "review_cycle": task.review_cycle + 1,
                 "reviewed_cycle": 0,
-                "legacy_work_detached": bool(task.source_work_id) or task.legacy_work_detached,
                 "updated_at": now,
             }
             for field in (

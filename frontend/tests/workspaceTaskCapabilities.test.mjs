@@ -44,7 +44,6 @@ const VALID_CAPABILITIES = {
   progress_states: ['started', 'working', 'blocked', 'needs_input', 'completed', 'failed', 'released'],
   record_only_requires_reporter_key: true,
   handoff_requires_release: true,
-  legacy_chat_work_create: false,
 }
 
 function jsonResponse(value, status = 200) {

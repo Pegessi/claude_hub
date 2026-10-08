@@ -46,11 +46,6 @@
         latest_progress: null,
         runtime_observation: null,
         execution_ref: null,
-        source_work_id: null,
-        legacy_work_detached: false,
-        chat_work_outcome: null,
-        chat_work_report_id: null,
-        chat_work_summary: null,
       }
       const fixtures = {
         'task-a': {
@@ -90,7 +85,6 @@
           supported_execution_controls: ['workspace', 'initiator'],
           record_only_requires_reporter_key: true,
           handoff_requires_release: true,
-          legacy_chat_work_create: false,
         },
       })
       let app = null

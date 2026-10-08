@@ -75,26 +75,6 @@
       </dl>
     </details>
 
-    <details
-      v-if="task.source_work_id"
-      class="task-execution-block"
-    >
-      <summary>Legacy Chat work</summary>
-      <dl class="task-execution-facts">
-        <div><dt>Work ID</dt><dd><code>{{ task.source_work_id }}</code></dd></div>
-        <div><dt>Detached</dt><dd>{{ task.legacy_work_detached ? 'Yes' : 'No' }}</dd></div>
-        <div v-if="task.chat_work_outcome">
-          <dt>Outcome</dt><dd>{{ task.chat_work_outcome }}</dd>
-        </div>
-        <div v-if="task.chat_work_report_id">
-          <dt>Report</dt><dd><code>{{ task.chat_work_report_id }}</code></dd>
-        </div>
-      </dl>
-      <p v-if="task.chat_work_summary">
-        {{ task.chat_work_summary }}
-      </p>
-    </details>
-
     <p
       v-if="recordOnly && !hasMutationVersion"
       class="task-execution-muted"

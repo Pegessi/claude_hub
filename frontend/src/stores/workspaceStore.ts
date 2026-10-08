@@ -712,8 +712,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       !Array.isArray(value.progress_states) ||
       !value.progress_states.every(item => typeof item === 'string') ||
       typeof value.record_only_requires_reporter_key !== 'boolean' ||
-      typeof value.handoff_requires_release !== 'boolean' ||
-      typeof value.legacy_chat_work_create !== 'boolean'
+      typeof value.handoff_requires_release !== 'boolean'
     ) {
       return null
     }
@@ -731,7 +730,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       progress_states: states,
       record_only_requires_reporter_key: value.record_only_requires_reporter_key,
       handoff_requires_release: value.handoff_requires_release,
-      legacy_chat_work_create: value.legacy_chat_work_create,
     }
   }
 

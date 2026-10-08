@@ -67,8 +67,10 @@ included in this implementation authorization.
 Implemented the explicit execution-control model, authorized reporter/manual
 progress, same-ID handoff, ownership guards on managed operations, passive
 runtime observations, read-only tab context, and concise CLI/runtime guidance.
-Legacy ChatWork is limited to history, stop-only controls, and in-flight reports;
-creation, restart, and periodic replay cannot silently start legacy work again.
+The original Task/CLI commit temporarily retained read-only ChatWork history and
+in-flight reports. That unpublished compatibility layer was subsequently removed;
+see the [cleanup log](2026-10-08-remove-chatwork.md). The validation table below
+remains evidence for the earlier commit, not a claim about the later cleanup.
 
 Validation was performed in the canonical candidate with private process-level
 HOME/XDG/runtime/tmp directories and the existing verification interpreter. No

@@ -26,7 +26,6 @@ CAPABILITIES = {
     ],
     "record_only_requires_reporter_key": True,
     "handoff_requires_release": True,
-    "legacy_chat_work_create": False,
 }
 TASK = {
     "id": "task-1",
@@ -650,7 +649,6 @@ def test_context_nonactive_observation_does_not_claim_ref(monkeypatch, reason):
     assert data["observation_reason"] == reason
     assert data["record_only_requires_reporter_key"] is True
     assert data["handoff_requires_release"] is True
-    assert data["legacy_chat_work_create"] is False
     assert all(r.method == "GET" for r in captured)
 
 

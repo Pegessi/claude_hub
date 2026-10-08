@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### refactor(tasks): remove the unpublished ChatWork layer
+
+- Remove ChatWork routes, Chat cards, polling/notifications, dedicated models,
+  capability flags, and scheduler/report/cleanup hooks rather than shipping a
+  read-only compatibility layer for an unpublished feature.
+- Keep unified WorkspaceTask execution ownership and all ordinary ScheduledTask
+  modes, including scheduled Chat recovery and independent feedback automation.
+- Remove the old ChatWork-only live harness and its unused process guard; retain
+  production provider-network and terminal isolation tests.
+- See the [cleanup scope and verification](docs/working-logs/2026-10-08-remove-chatwork.md).
+
 ### feat(workspace): integrate unified Task ownership and recovery controls
 
 - Show one Task record with separate source and execution responsibility. Keep
@@ -15,8 +26,7 @@
   cannot clear another Task's pending request or reporter credential.
 - Distinguish capability loading/errors from an explicitly unsupported server.
   Never silently drop request idempotency during a slow capability read.
-- Keep legacy Chat work readable and stop-only, with per-record navigation to
-  its Workspace. Add real-component browser and Pinia regression coverage.
+- Add real-component browser and Pinia regression coverage for unified Tasks.
 
 ### feat(tasks): separate Task registration from execution responsibility
 
@@ -29,8 +39,8 @@
 - Record matching runtime activity without treating a completed turn or plan as
   completion of the whole Task. Expose read-only Chat context and concise,
   capability-aware CLI guidance.
-- Retire new legacy ChatWork creation and replay while preserving history,
-  stop-only controls, and reports from already-running work.
+- Use unified Task registration and reporting instead of a separate ChatWork
+  lifecycle. The unpublished compatibility layer has been removed.
 - Add offline ownership, recovery, CLI, and managed-execution compatibility
   regressions. See the [Task/CLI validation](docs/working-logs/2026-10-07-agent-workflow-v2.md)
   and [integrated UI/Bot notes](docs/working-logs/2026-10-07-bot-pool-and-task-ui.md).
@@ -131,22 +141,11 @@
   semantics, and Chat send/queue/recovery behavior now fail safely across
   cancellation, disconnect, and retry boundaries.
 
-### feat(chat): link durable work and bounded feedback to the conversation
+### feat(chat): share execution guidance and bounded feedback
 
 - Share a small execution policy between Chat and Task prompts: direct work,
   available native subagents, and Hub delegation are separate from whether
   work needs a durable Task. Existing review modes remain available.
-- Add source-Chat-scoped `claude-hub work` and API commands for idempotent
-  one-shot tasks and grouped monitoring checks using the existing scheduler
-  and task/report lifecycle. Preserve configured provider/environment/cwd;
-  explicit unsupported model overrides and remote source Chats fail clearly.
-- Show compact work cards, meaningful results, review state, interval controls
-  and pause/stop actions in Chat. Routine unchanged checks stay out of the
-  transcript. Visible/reopened Chats notify once per meaningful result;
-  inactive views do not run a new application-wide polling loop.
-- Converge one-shot Chat-linked tasks with unavailable workers to an explicit
-  failed state without automatic replay, preserving normal review eligibility
-  and recorded worker ownership during cleanup.
 - Reload schedules after acquiring the dispatch lock and skip records deleted
   during cleanup, so Pause/Stop/deletion cannot launch stale work or restore
   deleted tasks.
@@ -160,15 +159,6 @@
   staged summarization, exclude internal tasks, and record explicit Chat
   corrections only against exact persisted user-message evidence. Empty or
   unrelated lesson queries now return no injected lesson index.
-
-### test(smoke): isolate manual workflow acceptance
-
-- Require explicit account, model, network, browser, and task-owned runtime inputs
-  for the opt-in workflow smoke; never target an existing Hub or download a browser.
-- Retain the loopback listener across restart, verify owned descendant cleanup,
-  and defer repeated interruption signals through cleanup and result recording.
-- Keep source-stream and Feishu UI fixtures separate from real work API checks.
-  Deterministic tests do not constitute real-provider or Bot acceptance.
 
 ### chore(worktrees): add a conservative read-only inventory
 

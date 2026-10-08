@@ -100,7 +100,7 @@ independent review and human-acceptance requirements.
 - [Detailed workflow, commands, runtime pitfalls and task-specific document index](docs/AGENT_WORKFLOW.md)
 - [Unified Task execution and Agent workflow](docs/working-logs/2026-10-07-agent-workflow-v2.md)
 - [Task UI, Bot pool, pairing and callback safety](docs/working-logs/2026-10-07-bot-pool-and-task-ui.md)
-- [Earlier ChatWork and feedback design](docs/working-logs/2026-10-05-chat-workflow-integration.md)
+- [Removal of the unpublished ChatWork layer](docs/working-logs/2026-10-08-remove-chatwork.md)
 - [Recent behavior](CHANGELOG.md), [bug symptom history](WORKLOG.md)
 - [Terminal debugging](docs/terminal-debugging.md), [deployment](docs/DEPLOYMENT.md)
 - [Feedback lessons](docs/working-logs/lessons-catalog.md)

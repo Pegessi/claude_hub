@@ -4,15 +4,22 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
+from pydantic import ValidationError
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ..legacy_state_migration import (
+    LEGACY_TASK_KEYS,
     index_has_legacy_keys,
     migrate_raw_workspace_state,
     state_has_legacy_orchestration_keys,
 )
 from ..task_mailbox import TaskMailbox
 from ._constants import *  # noqa: F401,F403
+
+
+class _UnknownTaskFieldsError(ValueError):
+    """A persisted task contains fields this build cannot interpret."""
 
 
 class _StateMixin:
@@ -94,10 +101,10 @@ class _StateMixin:
         # Used by artifact preview to resolve markdown produced inside a worktree.
         self._worktree_root_cache: dict[str, tuple[float, list[Path]]] = {}
         self.task_mailbox = TaskMailbox(self)
-        self._load_state()
-        # Scheduled tasks reference sessions (Type A) and workspaces (Types B/C),
-        # so load them after the core state has been hydrated.
+        # Schedule loading only parses records; reference resolution and firing
+        # happen later. Reject unknown fields before core recovery can save.
         self._load_scheduled_tasks()
+        self._load_state()
 
     def _workspace_dir(self, workspace_id: str) -> Path:
         return _wm.STATE_ROOT / workspace_id
@@ -204,6 +211,15 @@ class _StateMixin:
                 continue
             self._mark_processing_as_uncertain(session_id, list(session.processing_call_ids))
 
+    @staticmethod
+    def _validate_task_record_fields(items: Any, *, allow_legacy: bool = False) -> None:
+        known = set(WorkspaceTask.model_fields)
+        if allow_legacy:
+            known.update(LEGACY_TASK_KEYS)
+        for item in items:
+            if isinstance(item, dict) and item.keys() - known:
+                raise _UnknownTaskFieldsError("Workspace task record contains unknown fields")
+
     def _maybe_migrate_workspace_state_file(
         self,
         workspace_id: str,
@@ -214,12 +230,9 @@ class _StateMixin:
         needs_migration = state_has_legacy_orchestration_keys(raw) or (
             index_item is not None and index_has_legacy_keys(index_item)
         )
+        self._validate_task_record_fields(raw.get("tasks", []), allow_legacy=needs_migration)
         if not needs_migration:
             return raw
-
-        backup = state_file.with_suffix(".json.pre-migration-backup")
-        if not backup.exists():
-            backup.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
         index_copy = dict(index_item) if index_item is not None else None
         result = migrate_raw_workspace_state(
@@ -228,6 +241,12 @@ class _StateMixin:
             index_item=index_copy,
         )
         migrated = result.state
+        # Validate before either the backup or the migrated source is written.
+        for item in migrated.get("tasks", []):
+            WorkspaceTask(**self._normalize_task_item(item))
+        backup = state_file.with_suffix(".json.pre-migration-backup")
+        if not backup.exists():
+            backup.write_text(json.dumps(raw, indent=2), encoding="utf-8")
         self._atomic_write_text(state_file, json.dumps(migrated, indent=2))
         if index_copy is not None and index_item is not None:
             index_item.clear()
@@ -308,6 +327,7 @@ class _StateMixin:
     def _load_legacy_state(self) -> None:
         try:
             data = json.loads(LEGACY_STATE_FILE.read_text(encoding="utf-8"))
+            self._validate_task_record_fields(data.get("tasks", []))
             self.workspaces = {
                 item["id"]: Workspace(**self._normalize_workspace_item(item))
                 for item in data.get("workspaces", [])
@@ -330,4 +350,9 @@ class _StateMixin:
                 materialize_loaded_task_graph(self.tasks, workspace_id)
             self._save_state()
         except Exception as e:
+            if isinstance(e, _UnknownTaskFieldsError) or (
+                isinstance(e, ValidationError)
+                and any(error["type"] == "extra_forbidden" for error in e.errors())
+            ):
+                raise
             logger.error(f"Failed to load legacy workspace state: {e}")

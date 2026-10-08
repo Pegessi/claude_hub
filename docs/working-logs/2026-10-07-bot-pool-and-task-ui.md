@@ -54,14 +54,12 @@ the active Workspace's request. Modern create receipts must contain valid
 execution-control, epoch, and progress-revision fields; old-server receipts keep
 their older compatibility contract.
 
-### Legacy Chat work
+### Removal of the earlier Chat work controls
 
-Legacy Chat work remains readable and can be explicitly stopped. Its UI and
-runtime guard reject pause, resume, interval edits, extra mutation fields, and
-writes to already-terminal records. Each history card opens its own Workspace;
-it does not guess from the first card or the last selected Workspace. Existing
-history fields and result notifications are retained. New Tasks belong in the
-unified Workspace view.
+The temporary history/stop/navigation controls described by the original v2
+candidate were removed before main integration. New work uses the unified Task
+view. The existing scheduler and independent feedback remain separate capabilities;
+see the [cleanup scope](2026-10-08-remove-chatwork.md).
 
 ## Shared Feishu Bot pool
 
@@ -195,6 +193,6 @@ asynchronous-state fixes. Reviewer reports are not additional test executions.
 Real model execution on this v2 candidate and real authorized OAuth/Bot round
 trips remain unverified. They require their own approved account/model and
 complete callback/authentication configuration. The existing production Bot
-consumer must not be repurposed. The old ChatWork live harness cannot establish
-acceptance of the new unified Task contract without adaptation. No token-cost,
+consumer must not be repurposed. The obsolete ChatWork live harness has been removed. A future live acceptance
+check must exercise the unified Task contract. No token-cost,
 latency, or free-form Agent delegation improvement is claimed from these tests.

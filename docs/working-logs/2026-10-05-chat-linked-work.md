@@ -1,5 +1,10 @@
 # Chat-linked durable work
 
+> Historical candidate only. The unpublished ChatWork API, UI, compatibility
+> controls, and dedicated smoke harness were removed in the
+> [2026-10-08 cleanup](2026-10-08-remove-chatwork.md). Commands and validation
+> results below describe that earlier revision, not current functionality.
+
 ## System overview
 
 The Chat UI remains the entry point. `claude-hub work` exposes a compact create,
