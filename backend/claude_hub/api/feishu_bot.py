@@ -930,8 +930,9 @@ async def _handle_sdk_event(bot_id: str, data: Any) -> None:
         await _handle_message_event(bot_id, event, effective)
     except ExternalDispatchRetired:
         # Final shutdown cancels only after its bounded drain. The Chat bridge
-        # has stopped (or found no) matching native turn, so releasing the claim
-        # lets a same-ID replay recover instead of remaining suppressed for a week.
+        # proved the matching turn was stopped or never started, so releasing
+        # the claim lets a same-ID replay recover without duplicating a
+        # completed or superseded turn.
         _dedup.release(key)
         raise
 

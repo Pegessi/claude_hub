@@ -1374,7 +1374,7 @@ _ChatAdmissionGuard = Callable[[], AbstractAsyncContextManager[None]]
 
 
 class ExternalDispatchRetired(asyncio.CancelledError):
-    """Cancellation after the matching native turn is stopped or absent."""
+    """Cancellation after the matching turn is stopped or never started."""
 
 
 def _map_send_exception(exc: Exception) -> HTTPException:
@@ -1503,7 +1503,8 @@ async def dispatch_tab_chat_and_wait(
     queue: Optional[asyncio.Queue[AgentStreamEvent]] = None
     # The client-provided id is the authoritative Hub turn id. Set it before
     # dispatch so cancellation racing the native send can still target only
-    # this turn; the manager treats a not-yet-active id as a safe no-op.
+    # this turn and distinguish a proven not-yet-started delivery from a
+    # completed or superseded one.
     expected_turn_id: Optional[str] = client_turn_id
     last_error = ""
     try:
@@ -1570,8 +1571,8 @@ async def dispatch_tab_chat_and_wait(
             # before their dedup claim is released; never leave it executing
             # against tailers that lifespan teardown is about to stop.
             try:
-                await asyncio.wait_for(
-                    manager.cancel_turn(session, expected_turn_id=expected_turn_id),
+                retirement = await asyncio.wait_for(
+                    manager.retire_external_turn(session, expected_turn_id=expected_turn_id),
                     timeout=_EXTERNAL_CANCEL_TIMEOUT_SECONDS,
                 )
             except Exception:
@@ -1580,7 +1581,13 @@ async def dispatch_tab_chat_and_wait(
                     expected_turn_id,
                 )
             else:
-                raise ExternalDispatchRetired(expected_turn_id) from None
+                if retirement.safe_to_retry:
+                    raise ExternalDispatchRetired(expected_turn_id) from None
+                logger.warning(
+                    "Preserving external delivery claim for Chat turn %s after cancellation: %s",
+                    expected_turn_id,
+                    retirement.value,
+                )
         raise
     finally:
         if queue is not None:

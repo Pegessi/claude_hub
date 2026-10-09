@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from claude_hub.api import agent_stream as stream_api
 from claude_hub.models import AgentStreamEvent, AgentStreamEventType, AgentType
 from claude_hub.services import goal_run
+from claude_hub.services.agent_stream import ExternalTurnRetirement
 from claude_hub.services.agent_stream.turn_source import (
     FEISHU_PROVIDER_TEXT_FORMAT_V1,
     format_feishu_provider_text_v1,
@@ -355,9 +356,9 @@ async def test_external_chat_bridge_cancellation_stops_the_matching_native_turn(
             assert session_arg is session
             return queue
 
-        async def cancel_turn(self, session_arg, expected_turn_id=None):
+        async def retire_external_turn(self, session_arg, expected_turn_id=None):
             cancelled.append((session_arg, expected_turn_id))
-            return True
+            return ExternalTurnRetirement.CANCELLED_MATCHING
 
         def unsubscribe(self, session_id, queue_arg) -> None:
             unsubscribed.append((session_id, queue_arg))
@@ -387,7 +388,7 @@ async def test_external_chat_bridge_cancellation_stops_the_matching_native_turn(
 
 
 @pytest.mark.asyncio
-async def test_external_chat_bridge_cancellation_is_bounded_when_turn_is_already_gone(
+async def test_external_chat_bridge_cancellation_releases_when_turn_never_started(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = SimpleNamespace(id="terminal-tab-tab-1")
@@ -398,9 +399,9 @@ async def test_external_chat_bridge_cancellation_is_bounded_when_turn_is_already
         async def subscribe(self, _session_arg):
             return queue
 
-        async def cancel_turn(self, _session_arg, expected_turn_id=None):
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
             assert expected_turn_id == "feishu-turn"
-            return False
+            return ExternalTurnRetirement.NOT_STARTED
 
         def unsubscribe(self, _session_id, _queue_arg) -> None:
             pass
@@ -426,6 +427,55 @@ async def test_external_chat_bridge_cancellation_is_bounded_when_turn_is_already
         await task
 
 
+@pytest.mark.parametrize(
+    "retirement",
+    [
+        ExternalTurnRetirement.ALREADY_TERMINAL,
+        ExternalTurnRetirement.DIFFERENT_TURN,
+        ExternalTurnRetirement.UNKNOWN,
+    ],
+)
+@pytest.mark.asyncio
+async def test_external_chat_bridge_cancellation_preserves_non_retryable_turns(
+    monkeypatch: pytest.MonkeyPatch, retirement: ExternalTurnRetirement
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    dispatched = asyncio.Event()
+
+    class FakeManager:
+        async def subscribe(self, _session_arg):
+            return queue
+
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-turn"
+            return retirement
+
+        def unsubscribe(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(_tab_id, payload, **_kwargs) -> str:
+        dispatched.set()
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=60
+        )
+    )
+    await dispatched.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await task
+    assert not isinstance(raised.value, stream_api.ExternalDispatchRetired)
+
+
 @pytest.mark.asyncio
 async def test_external_chat_bridge_cancellation_times_out_a_stalled_native_stop(
     monkeypatch: pytest.MonkeyPatch,
@@ -438,7 +488,7 @@ async def test_external_chat_bridge_cancellation_times_out_a_stalled_native_stop
         async def subscribe(self, _session_arg):
             return queue
 
-        async def cancel_turn(self, _session_arg, expected_turn_id=None):
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
             assert expected_turn_id == "feishu-turn"
             await asyncio.Future()
 
