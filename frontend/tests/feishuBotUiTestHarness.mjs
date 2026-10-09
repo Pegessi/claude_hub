@@ -58,8 +58,7 @@ export const response = (body, status = 200) => new Response(JSON.stringify(body
 export const bot = (id = 'a', overrides = {}) => ({
   bot_id: id, name: `Bot ${id}`, app_id: `app-${id}`, source: 'stored', enabled: true,
   credentials_editable: true, deletable: true, revision: 1, generation: 1, configured: true,
-  app_secret_configured: true, verification_token_configured: true, encrypt_key_configured: true,
-  event_url: `https://hub.example.test/events/${id}`, updated_at: null,
+  app_secret_configured: true, connection_status: 'connected', updated_at: null,
   binding: null, my_claims: [], ...overrides,
 })
 export const pool = (revision, bots = [bot(), bot('b')], focus = null) => ({
@@ -71,7 +70,7 @@ export const claim = () => ({
   expires_at: new Date(4000).toISOString(),
 })
 export const code = () => ({
-  bot_id: 'a', revision: 2, code: 'CH-TEST', expires_at: new Date(2000).toISOString(), event_url: 'https://hub.example.test/events/a',
+  bot_id: 'a', revision: 2, code: 'CH-TEST', expires_at: new Date(2000).toISOString(),
 })
 export function harness(t) {
   const originalPinia = getActivePinia()

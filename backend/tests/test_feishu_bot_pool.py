@@ -1,10 +1,8 @@
-"""Bot pool invariants, pairing, environment sync, gates, and callbacks."""
+"""Bot pool invariants, pairing, environment sync, gates, and events."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 import math
 import re
@@ -13,8 +11,6 @@ from typing import Any
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -23,7 +19,14 @@ from claude_hub.auth import session as session_store
 from claude_hub.auth.dependencies import get_current_user_from_cookie
 from claude_hub.config import settings
 from claude_hub.main import app
-from claude_hub.models import User
+from claude_hub.models import (
+    AgentStreamEventType,
+    AgentType,
+    ChatMode,
+    User,
+)
+from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+from claude_hub.services.agent_stream.tailer import SessionTailer
 from claude_hub.services.feishu_bot import FeishuBotClient, FeishuBotConfig
 from claude_hub.services.feishu_bot_pool import (
     ENV_BOT_ID,
@@ -107,8 +110,6 @@ def _config(app_id: str = "app-1") -> FeishuBotConfig:
     return FeishuBotConfig(
         app_id=app_id,
         app_secret=f"secret-{app_id}",
-        verification_token=f"verify-{app_id}",
-        encrypt_key=f"encrypt-{app_id}",
     )
 
 
@@ -231,8 +232,6 @@ def test_rotating_secrets_keeps_the_active_binding(pool: FeishuBotPoolStore) -> 
     pool.rotate_secrets(
         bot_id,
         app_secret="next-secret",
-        verification_token="next-verify",
-        encrypt_key="next-encrypt",
         expected_revision=entry.revision,
         environ={},
     )
@@ -718,52 +717,28 @@ async def test_reply_path_does_not_reacquire_the_gate(monkeypatch, wire) -> None
     assert "bot-1" not in bot_api._bot_gates
 
 
-# ------------------------------------------------- G. callback integration
+# ------------------------------------------------ WebSocket event integration
 
 
-def _encrypted_event(payload: dict[str, Any], encrypt_key: str) -> bytes:
-    plaintext = json.dumps(payload).encode("utf-8")
-    key = hashlib.sha256(encrypt_key.encode("utf-8")).digest()
-    iv = b"0123456789abcdef"
-    padder = padding.PKCS7(algorithms.AES.block_size).padder()
-    padded = padder.update(plaintext) + padder.finalize()
-    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
-    ciphertext = encryptor.update(padded) + encryptor.finalize()
-    return json.dumps({"encrypt": base64.b64encode(iv + ciphertext).decode()}).encode()
+def _message(app_id: str, text: str, now: float, *, message_id: str = "om-1") -> Any:
+    from types import SimpleNamespace
 
-
-def _signed_headers(body: bytes, timestamp: int, encrypt_key: str) -> dict[str, str]:
-    nonce = "nonce-1"
-    signed = str(timestamp).encode() + nonce.encode() + encrypt_key.encode() + body
-    return {
-        "content-type": "application/json",
-        "x-lark-request-timestamp": str(timestamp),
-        "x-lark-request-nonce": nonce,
-        "x-lark-signature": hashlib.sha256(signed).hexdigest(),
-    }
-
-
-def _message(app_id: str, text: str, now: float, *, message_id: str = "om-1") -> dict[str, Any]:
-    return {
-        "header": {
-            "event_id": f"ev-{message_id}",
-            "token": f"verify-{app_id}",
-            "event_type": "im.message.receive_v1",
-            "app_id": app_id,
-            "create_time": str(int(now * 1000)),
-        },
-        "event": {
-            "sender": {"sender_type": "user", "sender_id": {"open_id": "ou-sender"}},
-            "message": {
-                "chat_type": "p2p",
-                "message_type": "text",
-                "message_id": message_id,
-                "create_time": str(int(now * 1000)),
-                "chat_id": "oc-1",
-                "content": json.dumps({"text": text}),
-            },
-        },
-    }
+    return SimpleNamespace(
+        header=SimpleNamespace(event_id=f"ev-{message_id}", app_id=app_id),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user", sender_id=SimpleNamespace(open_id="ou-sender")
+            ),
+            message=SimpleNamespace(
+                chat_type="p2p",
+                message_type="text",
+                message_id=message_id,
+                create_time=str(int(now * 1000)),
+                chat_id="oc-1",
+                content=json.dumps({"text": text}),
+            ),
+        ),
+    )
 
 
 class _Wire:
@@ -822,9 +797,8 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: Clock, wire: _Wi
     )
     monkeypatch.setattr(bot_api, "_bot_gates", {})
     # Chat target validation has its own tests; stubbing it here keeps these
-    # cases about the pool and the callback path.
+    # cases about the pool and the WebSocket event path.
     monkeypatch.setattr(bot_api, "_validate_bind_target", lambda tab_id, workspace_id: None)
-    monkeypatch.setenv("CLAUDE_HUB_PUBLIC_BASE_URL", "https://hub.example.test")
     monkeypatch.setattr(bot_api, "_now", clock)
     monkeypatch.setattr(bot_api, "_create_gate", asyncio.Lock())
     client = TestClient(app)
@@ -849,13 +823,7 @@ def test_pairing_code_reply_carries_the_confirmation_word(api, clock: Clock) -> 
         expected_revision=entry.revision,
         environ={},
     )
-    body = _encrypted_event(_message("app-1", code, clock.value), "encrypt-app-1")
-    response = api.client.post(
-        f"/api/feishu/bot/events/{bot_id}",
-        content=body,
-        headers=_signed_headers(body, int(clock.value), "encrypt-app-1"),
-    )
-    assert response.status_code == 200
+    asyncio.run(bot_api._handle_sdk_event(bot_id, _message("app-1", code, clock.value)))
     texts = api.wire.reply_texts()
     assert texts, "the confirmation word was never delivered"
     found = CONFIRM_RE.search(texts[0])
@@ -878,48 +846,31 @@ def test_pairing_code_reply_carries_the_confirmation_word(api, clock: Clock) -> 
 
 def test_unpaired_conversation_is_told_how_to_pair(api, clock: Clock) -> None:
     bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
-    body = _encrypted_event(_message("app-1", "hello", clock.value), "encrypt-app-1")
-    api.client.post(
-        f"/api/feishu/bot/events/{bot_id}",
-        content=body,
-        headers=_signed_headers(body, int(clock.value), "encrypt-app-1"),
-    )
+    asyncio.run(bot_api._handle_sdk_event(bot_id, _message("app-1", "hello", clock.value)))
     assert any("尚未连接" in text for text in api.wire.reply_texts())
 
 
-def test_callback_for_a_deleted_bot_is_dropped_silently(api, clock: Clock) -> None:
+def test_websocket_event_for_a_deleted_bot_is_dropped_silently(api, clock: Clock) -> None:
     bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
     entry = api.pool.snapshot({}).get(bot_id)
     api.pool.delete_bot(bot_id, expected_revision=entry.revision, environ={})
-    body = _encrypted_event(_message("app-1", "hello", clock.value), "encrypt-app-1")
-    response = api.client.post(
-        f"/api/feishu/bot/events/{bot_id}",
-        content=body,
-        headers=_signed_headers(body, int(clock.value), "encrypt-app-1"),
-    )
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "ignored": True}
+    asyncio.run(bot_api._handle_sdk_event(bot_id, _message("app-1", "hello", clock.value)))
     assert api.wire.replies == []
 
 
-def test_callback_for_an_unknown_bot_is_a_configuration_error(api, clock: Clock) -> None:
-    body = _encrypted_event(_message("app-1", "hello", clock.value), "encrypt-app-1")
-    response = api.client.post(
-        "/api/feishu/bot/events/does-not-exist",
-        content=body,
-        headers=_signed_headers(body, int(clock.value), "encrypt-app-1"),
+def test_websocket_event_for_an_unknown_bot_is_dropped(api, clock: Clock) -> None:
+    asyncio.run(
+        bot_api._handle_sdk_event("does-not-exist", _message("app-1", "hello", clock.value))
     )
-    assert response.status_code == 404
-    assert response.json()["detail"] == "bot_not_found"
+    assert api.wire.replies == []
 
 
 def test_duplicate_message_is_claimed_once(api, clock: Clock) -> None:
     bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
-    body = _encrypted_event(_message("app-1", "hello", clock.value), "encrypt-app-1")
-    headers = _signed_headers(body, int(clock.value), "encrypt-app-1")
-    api.client.post(f"/api/feishu/bot/events/{bot_id}", content=body, headers=headers)
-    repeat = api.client.post(f"/api/feishu/bot/events/{bot_id}", content=body, headers=headers)
-    assert repeat.json() == {"ok": True, "duplicate": True}
+    message = _message("app-1", "hello", clock.value)
+    asyncio.run(bot_api._handle_sdk_event(bot_id, message))
+    asyncio.run(bot_api._handle_sdk_event(bot_id, message))
+    assert len(api.wire.replies) == 1
 
 
 def test_replaced_single_bot_interfaces_return_410(api) -> None:
@@ -948,8 +899,6 @@ def test_local_identity_can_manage_the_pool_without_oauth(api) -> None:
             "name": "One",
             "app_id": "app-1",
             "app_secret": "s",
-            "verification_token": "v",
-            "encrypt_key": "e",
         },
     )
     assert created.status_code == 201
@@ -964,8 +913,6 @@ def test_pool_response_carries_a_monotonic_pool_revision(api) -> None:
             "name": "One",
             "app_id": "app-1",
             "app_secret": "s",
-            "verification_token": "v",
-            "encrypt_key": "e",
         },
     ).json()
     assert created["pool_revision"] > first
@@ -1072,7 +1019,7 @@ def clean_bot_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.param(True, 1000, 15, False, id="fresh-header-does-not-refresh-old-message"),
     ],
 )
-def test_callback_message_time_respects_latest_binding_activation(
+def test_websocket_message_time_respects_latest_binding_activation(
     api,
     clock: Clock,
     monkeypatch: pytest.MonkeyPatch,
@@ -1105,18 +1052,185 @@ def test_callback_message_time_respects_latest_binding_activation(
     payload = _message(
         "app-1", "ordinary message", base + header_offset_seconds, message_id="om-time"
     )
-    payload["event"]["message"]["create_time"] = str(int(base * 1000) + message_offset_ms)
-    body = _encrypted_event(payload, "encrypt-app-1")
-    headers = _signed_headers(body, int(clock.value), "encrypt-app-1")
-    response = api.client.post(f"/api/feishu/bot/events/{bot_id}", content=body, headers=headers)
-    assert response.status_code == 200
+    payload.event.message.create_time = str(int(base * 1000) + message_offset_ms)
+    asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
     assert submitted == (["tab-new"] if should_dispatch else [])
     assert api.wire.reply_texts() == (["clock-checked answer"] if should_dispatch else [])
 
-    repeated = api.client.post(f"/api/feishu/bot/events/{bot_id}", content=body, headers=headers)
-    assert repeated.json() == {"ok": True, "duplicate": True}
+    asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
     assert submitted == (["tab-new"] if should_dispatch else [])
     assert api.wire.reply_texts() == (["clock-checked answer"] if should_dispatch else [])
+
+
+def test_cancelled_websocket_route_releases_dedup_for_retry(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    payload = _message("app-1", "hello", clock.value, message_id="om-cancelled")
+    attempts = 0
+
+    async def cancelled(*_args, **_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise bot_api.ExternalDispatchRetired("feishu-turn")
+
+    monkeypatch.setattr(bot_api, "_handle_message_event", cancelled)
+
+    with pytest.raises(bot_api.ExternalDispatchRetired):
+        asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
+    with pytest.raises(bot_api.ExternalDispatchRetired):
+        asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
+
+    assert attempts == 2
+
+
+def test_non_retryable_websocket_cancellation_preserves_dedup(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    payload = _message("app-1", "hello", clock.value, message_id="om-completed")
+    attempts = 0
+
+    async def cancelled(*_args, **_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(bot_api, "_handle_message_event", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
+    asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
+
+    assert attempts == 1
+
+
+def test_completed_native_turn_is_not_replayed_after_route_cancellation(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the full completion race with the real SessionTailer classifier."""
+    from types import SimpleNamespace
+
+    from claude_hub.api import agent_stream as stream_api
+
+    class NativeTransport:
+        def __init__(self) -> None:
+            self._started = True
+            self._records: asyncio.Queue[Any] = asyncio.Queue()
+            self._turn_in_flight = False
+            self.eof_is_fatal = False
+            self.exit_error = None
+            self.last_error = None
+            self.sent_messages: list[str] = []
+
+        async def start(self) -> None:
+            self._started = True
+
+        async def stop(self) -> None:
+            self._started = False
+            self._turn_in_flight = False
+
+        async def cancel_active_turn(self) -> None:
+            self._turn_in_flight = False
+
+        async def read_line(self) -> Any:
+            return await self._records.get()
+
+        async def send_message(self, text: str, _images: list[bytes]) -> None:
+            self.sent_messages.append(text)
+            self._turn_in_flight = True
+
+        async def answer_pending_question(self, _answers: Any) -> bool:
+            return False
+
+        @property
+        def turn_in_flight(self) -> bool:
+            return self._turn_in_flight
+
+        def acknowledge_turn_complete(self) -> None:
+            self._turn_in_flight = False
+
+        def maybe_capture_conversation_id(self, _record: Any) -> None:
+            pass
+
+        def accepts_notification(self, _record: Any) -> bool:
+            return True
+
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        payload = _message("app-1", "run once", clock.value, message_id="om-race")
+        session = SimpleNamespace(
+            id="terminal-tab-tab-1",
+            workspace_id="terminal-tabs",
+            tab_id="tab-1",
+            agent_type=AgentType.CLAUDE,
+            chat_mode=ChatMode.DEFAULT,
+        )
+        transport = NativeTransport()
+        completed = asyncio.Event()
+
+        async def observe(event) -> None:
+            if event.type == AgentStreamEventType.TURN_COMPLETED:
+                completed.set()
+
+        tailer = SessionTailer(
+            workspace_id=session.workspace_id,
+            session_id=session.id,
+            adapter=ClaudeJsonlAdapter(),
+            session_getter=lambda: session,
+            native_transport=transport,
+            post_persist_observers=[observe],
+        )
+        bridge_queue: asyncio.Queue[Any] = asyncio.Queue()
+
+        class Manager:
+            async def subscribe(self, _session) -> asyncio.Queue[Any]:
+                await tailer.start()
+                return bridge_queue
+
+            async def retire_external_turn(self, _session, expected_turn_id: str):
+                return await tailer.retire_external_turn(expected_turn_id)
+
+            def unsubscribe(self, _session_id: str, _queue: asyncio.Queue[Any]) -> None:
+                pass
+
+        async def dispatch(_tab_id, request, **kwargs) -> str:
+            async with kwargs["admission_guard"]():
+                await tailer.send_message(
+                    request.text,
+                    [],
+                    request.client_turn_id,
+                    visible_text=kwargs["visible_text"],
+                    turn_metadata=kwargs["turn_metadata"],
+                )
+            transport._records.put_nowait({"type": "result", "subtype": "success"})
+            return request.client_turn_id
+
+        monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+        monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: Manager())
+        monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", dispatch)
+        monkeypatch.setattr(
+            bot_api, "dispatch_tab_chat_and_wait", stream_api.dispatch_tab_chat_and_wait
+        )
+
+        task = asyncio.create_task(bot_api._handle_sdk_event(bot_id, payload))
+        await asyncio.wait_for(completed.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        await bot_api._handle_sdk_event(bot_id, payload)
+        assert len(transport.sent_messages) == 1
+        started = [
+            event
+            for event in (await tailer.store.read_since(-1, limit=20)).events
+            if event.type == AgentStreamEventType.TURN_STARTED
+        ]
+        assert len(started) == 1
+        await tailer.stop()
+
+    asyncio.run(scenario())
 
 
 def test_pair_code_rate_limit_is_per_identity_and_expires(
