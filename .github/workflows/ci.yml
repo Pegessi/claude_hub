@@ -125,14 +125,12 @@ jobs:
   terminal-e2e:
     name: Terminal E2E (Playwright)
     runs-on: ubuntu-latest
-    # Non-blocking: these browser-driven xterm.js/tmux/ttyd tests pass locally
-    # (~14s) but have never been green on shared GitHub runners — under CI CPU
-    # contention the ttyd WebSocket frequently fails to create the backing tmux
-    # session ("tmux session ... was not created after connecting"), even with
-    # CLAUDE_HUB_E2E_TIMEOUT_SCALE=3 and one rerun. Until the runner-side
-    # flakiness is solved, keep the job running for signal but don't let it gate
-    # merges to main (cf. the informational security-audit job).
-    continue-on-error: true
+    # These were long treated as runner flakiness and left non-blocking. They
+    # were in fact failing deterministically for two reasons, both fixed:
+    # the tmux pane was re-wrapped at a different width than the one the
+    # browser rendered, so history could never match; and four tabs asked for
+    # /bin/zsh, which no runner has. The suite now passes locally at
+    # CLAUDE_HUB_E2E_TIMEOUT_SCALE=1, so it gates main again.
     defaults:
       run:
         working-directory: ./backend
@@ -170,14 +168,10 @@ jobs:
           chmod +x ttyd
           sudo mv ttyd /usr/local/bin/
       - name: Run terminal replay tests
-        # Heavy browser-driven e2e tests are sensitive to CI resource
-        # contention: on shared runners, CPU starvation slows xterm.js
-        # rendering and tmux/ttyd startup enough to blow past the fixed
-        # wait deadlines (mostly 12s) that pass comfortably on a laptop.
-        # CLAUDE_HUB_E2E_TIMEOUT_SCALE multiplies every Playwright deadline
-        # and tmux setup poll budget so the slowness is tolerated instead of
-        # failing deterministically. One rerun still absorbs a rare transient
-        # flake without ballooning the job into reruns-of-everything.
+        # Shared runners are slower than a developer machine, so every
+        # Playwright deadline and tmux poll budget is still scaled up. One
+        # rerun absorbs a rare transient flake; it is no longer compensating
+        # for a deterministic failure.
         env:
           CLAUDE_HUB_E2E_TIMEOUT_SCALE: "3"
         run: uv run pytest tests/test_terminal_replay.py -v --reruns 1 --reruns-delay 5
