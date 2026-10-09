@@ -366,7 +366,9 @@ async def test_external_chat_bridge_cancellation_stops_the_matching_native_turn(
         def unsubscribe(self, session_id, queue_arg) -> None:
             unsubscribed.append((session_id, queue_arg))
 
-    async def fake_dispatch(_tab_id, payload, **_kwargs) -> str:
+    async def fake_dispatch(
+        _tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
         dispatched.set()
         return payload.client_turn_id
 
@@ -409,7 +411,9 @@ async def test_external_chat_bridge_cancellation_releases_when_turn_never_starte
         def unsubscribe(self, _session_id, _queue_arg) -> None:
             pass
 
-    async def fake_dispatch(_tab_id, payload, **_kwargs) -> str:
+    async def fake_dispatch(
+        _tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
         dispatched.set()
         return payload.client_turn_id
 
@@ -457,7 +461,9 @@ async def test_external_chat_bridge_cancellation_preserves_non_retryable_turns(
         def unsubscribe(self, _session_id, _queue_arg) -> None:
             pass
 
-    async def fake_dispatch(_tab_id, payload, **_kwargs) -> str:
+    async def fake_dispatch(
+        _tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
         dispatched.set()
         return payload.client_turn_id
 
@@ -498,7 +504,9 @@ async def test_external_chat_bridge_cancellation_times_out_a_stalled_native_stop
         def unsubscribe(self, _session_id, _queue_arg) -> None:
             pass
 
-    async def fake_dispatch(_tab_id, payload, **_kwargs) -> str:
+    async def fake_dispatch(
+        _tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
         dispatched.set()
         return payload.client_turn_id
 

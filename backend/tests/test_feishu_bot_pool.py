@@ -7,7 +7,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -23,9 +23,11 @@ from claude_hub.models import (
     AgentStreamEventType,
     AgentType,
     ChatMode,
+    ManagedSession,
     User,
 )
 from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+from claude_hub.services.agent_stream.native import ProviderSession
 from claude_hub.services.agent_stream.tailer import SessionTailer
 from claude_hub.services.feishu_bot import FeishuBotClient, FeishuBotConfig
 from claude_hub.services.feishu_bot_pool import (
@@ -1178,8 +1180,8 @@ def test_completed_native_turn_is_not_replayed_after_route_cancellation(
             workspace_id=session.workspace_id,
             session_id=session.id,
             adapter=ClaudeJsonlAdapter(),
-            session_getter=lambda: session,
-            native_transport=transport,
+            session_getter=lambda: cast(ManagedSession, session),
+            native_transport=cast(ProviderSession, transport),
             post_persist_observers=[observe],
         )
         bridge_queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -1195,7 +1197,9 @@ def test_completed_native_turn_is_not_replayed_after_route_cancellation(
             def unsubscribe(self, _session_id: str, _queue: asyncio.Queue[Any]) -> None:
                 pass
 
-        async def dispatch(_tab_id, request, **kwargs) -> str:
+        async def dispatch(
+            _tab_id: str, request: stream_api.AgentStreamSendRequest, **kwargs: Any
+        ) -> str:
             async with kwargs["admission_guard"]():
                 await tailer.send_message(
                     request.text,
