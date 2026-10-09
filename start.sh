@@ -151,7 +151,7 @@ else
     # The launcher survives a backend restart requested from the UI. Exec
     # preserves Ctrl+C / service-manager ownership instead of leaving orphans.
     exec env SERVE_FRONTEND=true uv run python -m claude_hub.service_launcher \
-        --host "${CLAUDE_HUB_HOST:-::}" --port "${CLAUDE_HUB_PORT:-8173}"
+        --host "${CLAUDE_HUB_HOST:-0.0.0.0}" --port "${CLAUDE_HUB_PORT:-8173}"
 fi
 
 echo ""
