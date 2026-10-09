@@ -178,16 +178,16 @@ def test_delete_leaf_task_save_failure_rolls_back(
     manager._save_state()
     before = manager._snapshot_report_intake_workspace(ws_id)
 
-    original_save = manager._save_state
+    original_save = manager._save_workspace_state
     calls = {"n": 0}
 
-    def flaky_save() -> None:
+    def flaky_save(target_workspace_id: str) -> None:
         calls["n"] += 1
         if calls["n"] == 1:
             raise OSError("delete save failed")
-        return original_save()
+        return original_save(target_workspace_id)
 
-    monkeypatch.setattr(manager, "_save_state", flaky_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", flaky_save)
 
     with pytest.raises(OSError, match="delete save failed"):
         manager.delete_task(leaf.id)
@@ -198,8 +198,7 @@ def test_delete_leaf_task_save_failure_rolls_back(
     after = manager._snapshot_report_intake_workspace(ws_id)
     assert after["tasks"] == before["tasks"]
     assert after["reports"] == before["reports"]
-    assert after["task_events"] == before["task_events"]
-    assert after["task_call_index"] == before["task_call_index"]
+    assert after["mailbox"] == before["mailbox"]
 
 
 def test_delete_leaf_task_does_not_affect_other_workspace(

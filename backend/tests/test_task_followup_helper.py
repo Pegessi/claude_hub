@@ -235,7 +235,7 @@ async def test_followup_task_working_persist_rollback_and_conflict(
     monkeypatch.setattr(manager, "send_session_message", _fake_send)
     monkeypatch.setattr(
         manager,
-        "_save_state",
+        "_save_workspace_state",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
 
@@ -304,21 +304,21 @@ async def test_followup_task_first_save_has_event_and_task_pending(
     task = _ordinary_working_task(manager, workspace_id)
     call_id = "fu-working-same-txn"
     observed: list[tuple[list[str], list[str]]] = []
-    real_save = manager._save_state
+    real_save = manager._save_workspace_state
 
-    def _recording_save() -> None:
+    def _recording_save(target_workspace_id: str) -> None:
         observed.append(
             (
                 [item.call_id for item in _mailbox_events(manager, workspace_id)],
                 list(manager.tasks[task.id].pending_call_ids),
             )
         )
-        real_save()
+        real_save(target_workspace_id)
 
     async def _fake_send(session_id: str, message: str, call_id: str | None = None) -> None:
         return None
 
-    monkeypatch.setattr(manager, "_save_state", _recording_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", _recording_save)
     monkeypatch.setattr(manager, "send_session_message", _fake_send)
 
     await manager.followup_task(
@@ -348,7 +348,7 @@ async def test_followup_task_intent_save_failure_rolls_back_event_and_pending(
     observed: list[tuple[list[str], list[str]]] = []
     sent: list[tuple[str, str, str | None]] = []
 
-    def _failing_save() -> None:
+    def _failing_save(target_workspace_id: str) -> None:
         observed.append(
             (
                 [item.call_id for item in _mailbox_events(manager, workspace_id)],
@@ -360,7 +360,7 @@ async def test_followup_task_intent_save_failure_rolls_back_event_and_pending(
     async def _fake_send(session_id: str, message: str, call_id: str | None = None) -> None:
         sent.append((session_id, message, call_id))
 
-    monkeypatch.setattr(manager, "_save_state", _failing_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", _failing_save)
     monkeypatch.setattr(manager, "send_session_message", _fake_send)
 
     with pytest.raises(OSError, match="disk full"):
@@ -487,9 +487,9 @@ async def test_followup_task_todo_and_queued_marker_persists_before_retry(
     _set_task_status(manager, queued.id, WorkspaceTaskStatus.QUEUED, session_id=None)
     started: list[str] = []
     first_save: list[tuple[str, list[str], list[str]]] = []
-    real_save = manager._save_state
+    real_save = manager._save_workspace_state
 
-    def _recording_save() -> None:
+    def _recording_save(target_workspace_id: str) -> None:
         first_save.append(
             (
                 manager.tasks[todo.id].prompt,
@@ -497,12 +497,12 @@ async def test_followup_task_todo_and_queued_marker_persists_before_retry(
                 [item.call_id for item in _mailbox_events(manager, workspace_id)],
             )
         )
-        real_save()
+        real_save(target_workspace_id)
 
     async def _fake_start(task_id: str, payload: object = None) -> None:
         started.append(task_id)
 
-    monkeypatch.setattr(manager, "_save_state", _recording_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", _recording_save)
     monkeypatch.setattr(manager, "start_task", _fake_start)
     monkeypatch.setattr(manager, "send_session_message", AsyncMock())
     monkeypatch.setattr(manager, "continue_task", AsyncMock())
@@ -564,7 +564,7 @@ async def test_followup_task_todo_precommit_save_fault_rolls_back_prompt(
 
     monkeypatch.setattr(
         manager,
-        "_save_state",
+        "_save_workspace_state",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
     monkeypatch.setattr(manager, "start_task", _fake_start)

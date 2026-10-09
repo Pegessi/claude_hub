@@ -50,6 +50,16 @@ remaining acceptance items and the next bounded action. Snapshots and conversati
 summaries are navigation caches. Reload source records if they conflict or omit
 needed details; do not edit generated state or infer acceptance from prose.
 
+## Choosing a change boundary
+
+Before splitting a stateful module, identify who owns the data, mutation lock,
+request identity and cleanup. Move a complete responsibility with its tests;
+separating a template from the state that must outlive it can change behavior.
+Use the current [Task state/UI boundaries](../ARCHITECTURE.md#task-state-and-ui-ownership)
+as a concrete example. Prefer an existing owner and explicit inputs over another
+store or orchestration layer. Keep the current contract here or in the architecture
+map; record the implementation history and measured results in a dated log.
+
 ## Validation and review
 
 Run checks appropriate to the change: syntax/lint/type/target tests first, then

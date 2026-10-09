@@ -1962,356 +1962,7 @@
       </div>
     </div>
 
-    <div
-      v-if="showTaskModal"
-      class="workspace-modal-overlay"
-      @click.self="closeTaskModal"
-    >
-      <div class="workspace-modal">
-        <h3>Add Task</h3>
-        <form
-          @submit.prevent="handleCreateTask"
-          @input.capture="handleTaskFormMutation"
-          @change.capture="handleTaskFormMutation"
-          @paste="handleAttachmentPaste($event, taskForm.attachments)"
-        >
-          <p
-            v-if="taskModalCapabilitiesStatus==='loading'||taskModalCapabilitiesStatus==='idle'"
-            class="modal-hint"
-            role="status"
-          >
-            Loading Task execution options…
-          </p>
-          <div
-            v-else-if="taskModalCapabilitiesStatus==='error'"
-            class="modal-hint"
-            role="alert"
-          >
-            <span>{{ taskCapabilitiesError || 'Task execution options could not be loaded.' }}</span>
-            <button
-              type="button"
-              @click="retryTaskCapabilities"
-            >
-              Retry
-            </button>
-          </div>
-          <p
-            v-else-if="taskModalCapabilitiesStatus==='unsupported'"
-            class="modal-hint"
-          >
-            This Hub supports the legacy Workspace-managed Task form only.
-          </p>
-          <p
-            v-if="pendingTaskCreateAttempt&&taskModalCapabilitiesStatus==='unsupported'"
-            class="modal-hint"
-            role="alert"
-          >
-            This saved request uses the newer Task contract and cannot be sent to this Hub. Discard it to use the legacy form.
-          </p>
-          <section
-            v-if="createdReporterRecovery"
-            class="modal-hint"
-            role="status"
-          >
-            <strong>Task created.</strong>
-            <p>The reporter credential could not be saved in session storage. Copy it now or retry local storage. This does not submit the Task again.</p>
-            <code v-if="revealCreatedReporterKey">{{ createdReporterRecovery.key }}</code>
-            <button
-              type="button"
-              @click="revealCreatedReporterKey = !revealCreatedReporterKey"
-            >
-              {{ revealCreatedReporterKey ? 'Hide' : 'Show' }}
-            </button>
-            <button
-              type="button"
-              @click="copyCreatedReporterCredential"
-            >
-              Copy credential
-            </button>
-            <button
-              type="button"
-              @click="persistCreatedReporterCredential"
-            >
-              Retry local storage
-            </button>
-          </section>
-          <section
-            v-else-if="pendingTaskCreateAttempt"
-            class="modal-hint"
-            role="status"
-          >
-            Saved request: {{ pendingTaskCreateAttempt.payload.title }}. A saved create request needs confirmation. Recover the exact saved request, or
-            <button
-              type="button"
-              @click="discardPendingTaskCreateAttempt"
-            >
-              discard it and edit a new Task
-            </button>.
-          </section>
-          <template v-if="!pendingTaskCreateAttempt && !createdReporterRecovery">
-            <div class="modal-field">
-              <label>Execution responsibility</label>
-              <div class="segmented-control">
-                <button
-                  type="button"
-                  :class="['segment-button',{active:taskForm.execution_control==='workspace'}]"
-                  @click="discardPendingTaskCreateAttempt(); taskForm.execution_control='workspace'"
-                >
-                  Workspace dispatches agent
-                </button>
-                <button
-                  type="button"
-                  :disabled="taskModalCapabilitiesStatus !== 'supported' || !taskCapabilities?.supported_execution_controls.includes('initiator')"
-                  :class="['segment-button',{active:taskForm.execution_control==='initiator'}]"
-                  @click="discardPendingTaskCreateAttempt(); taskForm.execution_control='initiator'"
-                >
-                  Initiator reports progress
-                </button>
-              </div>
-              <p class="modal-hint">
-                Source is recorded separately and never grants permission.
-              </p>
-            </div>
-            <div class="modal-field">
-              <label for="task-create-title">Title</label>
-              <input
-                id="task-create-title"
-                v-model="taskForm.title"
-                placeholder="Implement a focused change"
-                :disabled="!activeWorkspaceId"
-                autofocus
-              >
-            </div>
-            <div class="modal-field">
-              <label for="task-create-description">Task description</label>
-              <textarea
-                id="task-create-description"
-                v-model="taskForm.prompt"
-                placeholder="Describe what the workspace agent should implement..."
-                :disabled="!activeWorkspaceId"
-              />
-              <div
-                v-if="taskForm.attachments.length > 0"
-                class="attachment-list"
-              >
-                <div
-                  v-for="attachment in taskForm.attachments"
-                  :key="attachment.id"
-                  class="attachment-row"
-                >
-                  <div class="attachment-thumb">
-                    <img
-                      :src="attachment.preview_url"
-                      :alt="attachment.filename"
-                    >
-                  </div>
-                  <div class="attachment-meta">
-                    <strong>{{ attachment.filename }}</strong>
-                    <span>{{ attachment.mime_type }} · {{ formatAttachmentSize(attachment.size_bytes) }}</span>
-                  </div>
-                  <button
-                    type="button"
-                    class="icon-button"
-                    aria-label="Remove attachment"
-                    @click="removeDraftAttachment(taskForm.attachments, attachment)"
-                  >
-                    x
-                  </button>
-                </div>
-              </div>
-            </div>
-            <p
-              v-if="taskForm.execution_control === 'initiator'"
-              class="modal-hint"
-            >
-              These review and autonomy policies are retained for a future Workspace handoff, but do not run while the initiator controls execution.
-            </p>
-            <div class="modal-field">
-              <label>Mode</label>
-              <div class="segmented-control segmented-control--three">
-                <button
-                  type="button"
-                  :class="['segment-button', { active: taskForm.task_mode === 'direct' }]"
-                  @click="taskForm.task_mode = 'direct'"
-                >
-                  Direct
-                </button>
-                <button
-                  type="button"
-                  :class="['segment-button', { active: taskForm.task_mode === 'reviewed' }]"
-                  @click="taskForm.task_mode = 'reviewed'"
-                >
-                  Reviewed
-                </button>
-                <button
-                  type="button"
-                  :class="['segment-button', { active: taskForm.task_mode === 'autonomous' }]"
-                  @click="taskForm.task_mode = 'autonomous'"
-                >
-                  Autonomous
-                </button>
-              </div>
-            </div>
-            <div class="modal-field">
-              <label>Execution</label>
-              <div class="segmented-control segmented-control--three">
-                <button
-                  type="button"
-                  :class="['segment-button', { active: taskForm.execution_complexity === 'auto' }]"
-                  title="Let the agent decide whether independent parts of this task benefit from delegation."
-                  @click="taskForm.execution_complexity = 'auto'"
-                >
-                  Auto
-                </button>
-                <button
-                  type="button"
-                  :class="['segment-button', { active: taskForm.execution_complexity === 'simple' }]"
-                  title="Use a single execution agent without requesting subagent delegation."
-                  @click="taskForm.execution_complexity = 'simple'"
-                >
-                  Simple
-                </button>
-                <button
-                  type="button"
-                  :class="['segment-button', { active: taskForm.execution_complexity === 'complex' }]"
-                  title="Use orchestration for work with independent subtasks. Additional agents can increase token usage."
-                  @click="taskForm.execution_complexity = 'complex'"
-                >
-                  Complex
-                </button>
-              </div>
-            </div>
-            <div
-              v-if="taskForm.task_mode === 'autonomous'"
-              class="autonomy-form"
-            >
-              <div class="form-row">
-                <div class="modal-field">
-                  <label>Max iterations</label>
-                  <input
-                    v-model.number="taskForm.max_iterations"
-                    type="number"
-                    min="1"
-                    max="10"
-                  >
-                </div>
-                <div class="modal-field">
-                  <label>Strictness</label>
-                  <select v-model="taskForm.evaluation_strictness">
-                    <option value="lenient">
-                      Lenient
-                    </option>
-                    <option value="balanced">
-                      Balanced
-                    </option>
-                    <option value="strict">
-                      Strict
-                    </option>
-                  </select>
-                </div>
-              </div>
-              <div class="form-row">
-                <div class="modal-field">
-                  <label class="checkbox-label">
-                    <input
-                      v-model="taskForm.allow_web_research"
-                      type="checkbox"
-                    >
-                    Web research
-                  </label>
-                </div>
-                <div class="modal-field">
-                  <label class="checkbox-label">
-                    <input
-                      v-model="taskForm.require_artifact_review"
-                      type="checkbox"
-                    >
-                    Artifact review
-                  </label>
-                </div>
-              </div>
-            </div>
-            <div
-              v-if="taskForm.execution_control === 'workspace'"
-              class="modal-field"
-            >
-              <label>Dispatch agent</label>
-              <select
-                v-model="taskForm.session_id"
-                :disabled="!activeWorkspaceId"
-              >
-                <option value="">
-                  Auto
-                </option>
-                <option
-                  v-for="agent in workspaceAgents"
-                  :key="agent.id"
-                  :value="agent.id"
-                >
-                  {{ agent.title }}
-                </option>
-              </select>
-            </div>
-            <div
-              v-if="taskForm.execution_control === 'workspace'"
-              class="modal-field"
-            >
-              <label class="checkbox-label">
-                <input
-                  v-model="taskForm.clear_context"
-                  type="checkbox"
-                >
-                Clear context
-              </label>
-            </div>
-            <div
-              v-if="taskForm.execution_control === 'workspace'"
-              class="modal-field"
-            >
-              <label>Related task</label>
-              <p class="modal-hint">
-                Session/context reuse hint — not a Task parent (<code>parent_task_id</code>).
-                Task Graph tree UI is follow-up <code>487c630c</code>; not implemented here.
-              </p>
-              <select
-                v-model="taskForm.related_task_id"
-                :disabled="!activeWorkspaceId"
-              >
-                <option value="">
-                  None
-                </option>
-                <option
-                  v-for="task in tasks"
-                  :key="task.id"
-                  :value="task.id"
-                >
-                  {{ task.title }}
-                </option>
-              </select>
-            </div>
-          </template>
-          <div class="modal-actions">
-            <button
-              type="button"
-              class="tool-button"
-              @click="closeTaskModal"
-            >
-              Cancel
-            </button>
-            <LoadingButton
-              v-if="!createdReporterRecovery"
-              type="submit"
-              class="primary-button"
-              :disabled="taskCreateSubmitBlocked || !activeWorkspaceId || isLoading || (!pendingTaskCreateAttempt && (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)))"
-              :loading="isPending(taskCreateActionKey())"
-              loading-label="Adding task"
-            >
-              {{ pendingTaskCreateAttempt ? 'Recover saved create request' : 'Create Task' }}
-            </LoadingButton>
-          </div>
-        </form>
-      </div>
-    </div>
+    <TaskCreateDialog :flow="taskCreateFlow" />
 
     <div
       v-if="showEditTaskModal"
@@ -3111,15 +2762,21 @@
 </template>
 
 <script setup lang="ts">
+import TaskCreateDialog from '@/components/TaskCreateDialog.vue'
+import { useTaskCreateFlow } from '@/composables/useTaskCreateFlow'
+import {
+  formatAttachmentSize, handleAttachmentPaste, removeDraftAttachment,
+  resetDraftAttachments, serializeDraftAttachments, type DraftAttachment,
+} from '@/utils/draftAttachments'
+
 import TaskExecutionPanel from '@/components/TaskExecutionPanel.vue'
 import {
-  createReporterKeyApplies, progressStateLabel,
-  generateTaskCallId, generateTaskReporterKey, isWorkspaceControlledTask,
-  loadTaskCreateAttempt, removeTaskCreateAttempt, saveTaskCreateAttempt,
-  saveTaskReporterKey, taskExecutionLabel, taskSourceLabel,
-  type StoredTaskCreateAttempt,
+  progressStateLabel,
+  isWorkspaceControlledTask,
+  taskExecutionLabel,
+  taskSourceLabel,
 } from '@/utils/taskExecution'
-import { writeClipboard } from '@/utils/clipboard'
+
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentAvatar from '@/components/AgentAvatar.vue'
@@ -3155,7 +2812,6 @@ import type {
   AcceptanceCheck,
   AcceptanceCheckStatus,
   AgentReportState,
-  AutonomyPolicy,
   ExecutionTarget,
   FeedbackLesson,
   FeedbackSummaryRun,
@@ -3167,15 +2823,11 @@ import type {
   ReviewProfileResult,
   TerminalAgentStatus,
   WorkspaceAttachment,
-  WorkspaceAttachmentCreate,
   WorkspaceSessionRole,
   WorkspaceTask,
   WorkspaceTaskExecutionComplexity,
   WorkspaceTaskMode,
   WorkspaceTaskStatus,
-  WorkspaceTaskExecutionControl,
-  WorkspaceTaskCreate,
-  WorkspaceTaskCapabilitiesStatus,
   WorkspaceTaskUpdate,
   WorkspaceUpdate,
 } from '@/types'
@@ -3198,11 +2850,7 @@ interface DirectoryListing {
   items: FileInfo[]
 }
 
-interface DraftAttachment extends WorkspaceAttachmentCreate {
-  id: string
-  preview_url: string
-  size_bytes: number
-}
+
 
 type WorkspaceSessionView = 'agents' | 'reviewers'
 
@@ -3220,6 +2868,7 @@ function dismissWorkspaceErrors() {
 
 const { envPresets, getPresetText, defaultPresetTextForAgent } = useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
+const taskCreateFlow = useTaskCreateFlow()
 const { colorScheme } = storeToRefs(appStore)
 const {
   workspaces,
@@ -3240,9 +2889,6 @@ const {
   error,
   notifications: wsNotifications,
   taskCapabilities,
-  taskCapabilitiesWorkspaceId,
-  taskCapabilitiesStatus,
-  taskCapabilitiesError,
 } = storeToRefs(workspaceStore)
 
 // Combine workspace and terminal store notifications so toasts fire regardless
@@ -3286,7 +2932,7 @@ const switchEnvForm = reactive({
   env_text: '',
   solo_mode: false,
 })
-const showTaskModal = ref(false)
+
 const showEditTaskModal = ref(false)
 const editingTaskId = ref<string | null>(null)
 const workspaceSessionView = ref<WorkspaceSessionView>('agents')
@@ -3383,57 +3029,19 @@ const agentOptionsForm = reactive({
   env_text: defaultPresetTextForAgent('codex'),
 })
 
-const taskModalWorkspaceId = ref<string | null>(null)
-const pendingTaskCreateAttempt = ref<StoredTaskCreateAttempt | null>(null)
-const createdReporterRecovery = ref<{
-  workspaceId: string
-  task: WorkspaceTask
-  key: string
-  attempt: StoredTaskCreateAttempt
-} | null>(null)
-const revealCreatedReporterKey = ref(false)
-let taskCreateUiGeneration = 0
 
-const taskModalCapabilitiesStatus = computed<WorkspaceTaskCapabilitiesStatus>(() => {
-  const workspaceId = taskModalWorkspaceId.value
-  if (!workspaceId || taskCapabilitiesWorkspaceId.value !== workspaceId) return 'idle'
-  return taskCapabilitiesStatus.value
-})
-const taskCreateCapabilitiesReady = computed(() =>
-  taskModalCapabilitiesStatus.value === 'supported' ||
-  taskModalCapabilitiesStatus.value === 'unsupported',
-)
-const taskCreateSubmitBlocked = computed(() =>
-  !taskCreateCapabilitiesReady.value ||
-  (Boolean(pendingTaskCreateAttempt.value) &&
-    taskModalCapabilitiesStatus.value !== 'supported'),
-)
 
-async function retryTaskCapabilities(): Promise<void> {
-  const workspaceId = taskModalWorkspaceId.value ?? activeWorkspaceId.value
-  if (!workspaceId || workspaceId !== activeWorkspaceId.value) return
-  try {
-    await workspaceStore.fetchTaskCapabilities(workspaceId)
-  } catch {
-    // Store owns the fixed error shown in this modal.
-  }
-}
 
-const taskForm = reactive({
-  execution_control: 'workspace' as WorkspaceTaskExecutionControl,
-  title: '',
-  prompt: '',
-  task_mode: 'reviewed' as WorkspaceTaskMode,
-  execution_complexity: 'auto' as WorkspaceTaskExecutionComplexity,
-  max_iterations: 3,
-  evaluation_strictness: 'balanced' as AutonomyPolicy['evaluation_strictness'],
-  allow_web_research: false,
-  require_artifact_review: false,
-  session_id: '',
-  clear_context: false,
-  related_task_id: '',
-  attachments: [] as DraftAttachment[],
-})
+
+
+
+
+
+
+
+
+
+
 
 const editTaskForm = reactive({
   title: '',
@@ -4307,212 +3915,13 @@ function taskTitle(taskId?: string | null) {
   return tasks.value.find(task => task.id === taskId)?.title || taskId
 }
 
-function formatAttachmentSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
+
 
 function persistedAttachmentMeta(attachment: WorkspaceAttachment) {
   return `${attachment.filename} (${attachment.mime_type}, ${formatAttachmentSize(attachment.size_bytes)})`
 }
 
-function draftAttachmentId() {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID()
-  }
-  return `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-}
 
-function arrayBufferToBase64(buffer: ArrayBuffer) {
-  const bytes = new Uint8Array(buffer)
-  const chunkSize = 0x8000
-  let binary = ''
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize))
-  }
-  return btoa(binary)
-}
-
-async function fileToImageDataUrl(file: File, mimeType: string): Promise<string> {
-  const base64 = arrayBufferToBase64(await file.arrayBuffer())
-  return `data:${mimeType};base64,${base64}`
-}
-
-function imageFilename(file: File) {
-  if (file.name) return file.name
-  if (file.type === 'image/jpeg') return 'clipboard.jpg'
-  if (file.type === 'image/gif') return 'clipboard.gif'
-  if (file.type === 'image/webp') return 'clipboard.webp'
-  return 'clipboard.png'
-}
-
-function imageMimeType(file: File): string | null {
-  const mimeType = file.type.trim().toLowerCase()
-  if (mimeType.startsWith('image/')) {
-    return mimeType === 'image/jpg' ? 'image/jpeg' : mimeType
-  }
-
-  const extension = file.name.split('.').pop()?.toLowerCase()
-  if (extension === 'png') return 'image/png'
-  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'
-  if (extension === 'gif') return 'image/gif'
-  if (extension === 'webp') return 'image/webp'
-  return null
-}
-
-function normalizeImageDataUrl(dataUrl: string, mimeType: string) {
-  if (dataUrl.startsWith(`data:${mimeType};base64,`)) return dataUrl
-  return dataUrl.replace(/^data:[^;,]*(;base64,)/i, `data:${mimeType}$1`)
-}
-
-function clipboardImageFiles(event: ClipboardEvent): File[] {
-  const clipboard = event.clipboardData
-  if (!clipboard) return []
-
-  const files: File[] = []
-  const seen = new Set<string>()
-
-  const addFile = (file: File | null) => {
-    if (!file || !imageMimeType(file)) return
-    const key = `${file.name}:${file.type}:${file.size}:${file.lastModified}`
-    if (seen.has(key)) return
-    seen.add(key)
-    files.push(file)
-  }
-
-  for (const item of Array.from(clipboard.items || [])) {
-    if (item.kind === 'file') {
-      addFile(item.getAsFile())
-    }
-  }
-
-  for (const file of Array.from(clipboard.files || [])) {
-    addFile(file)
-  }
-
-  return files
-}
-
-function dataUrlFilename(mimeType: string, index: number) {
-  if (mimeType === 'image/jpeg') return `clipboard-${index}.jpg`
-  if (mimeType === 'image/gif') return `clipboard-${index}.gif`
-  if (mimeType === 'image/webp') return `clipboard-${index}.webp`
-  return `clipboard-${index}.png`
-}
-
-function imageDataUrlsFromText(value: string): string[] {
-  const matches = value.match(/data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=]+/gi)
-  return matches || []
-}
-
-function imageDataUrlKey(dataUrl: string): string | null {
-  const match = dataUrl.match(/^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,([A-Za-z0-9+/=]+)$/i)
-  if (!match) return null
-  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
-  return `${mimeType}:${match[2]}`
-}
-
-function clipboardImageDataUrls(event: ClipboardEvent): string[] {
-  const clipboard = event.clipboardData
-  if (!clipboard) return []
-
-  const urls = new Set<string>()
-  const html = clipboard.getData('text/html')
-  if (html) {
-    const document = new DOMParser().parseFromString(html, 'text/html')
-    for (const image of Array.from(document.images)) {
-      if (image.src.startsWith('data:image/')) {
-        urls.add(image.src)
-      }
-    }
-    for (const url of imageDataUrlsFromText(html)) {
-      urls.add(url)
-    }
-  }
-
-  for (const url of imageDataUrlsFromText(clipboard.getData('text/plain'))) {
-    urls.add(url)
-  }
-
-  return Array.from(urls)
-}
-
-function addDataUrlAttachments(
-  target: DraftAttachment[],
-  dataUrls: string[],
-  seenDataUrlKeys: Set<string>
-) {
-  dataUrls.forEach((dataUrl, index) => {
-    const match = dataUrl.match(/^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,/i)
-    if (!match) return
-    const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase()
-    const normalizedDataUrl = dataUrl.replace(/^data:image\/jpg;/i, 'data:image/jpeg;')
-    const key = imageDataUrlKey(normalizedDataUrl)
-    if (key && seenDataUrlKeys.has(key)) return
-    if (key) seenDataUrlKeys.add(key)
-    target.push({
-      id: draftAttachmentId(),
-      filename: dataUrlFilename(mimeType, index + 1),
-      mime_type: mimeType,
-      data_url: normalizedDataUrl,
-      preview_url: dataUrl,
-      size_bytes: Math.floor((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75),
-    })
-  })
-}
-
-async function addImageAttachments(
-  target: DraftAttachment[],
-  files: File[],
-  seenDataUrlKeys: Set<string>
-) {
-  for (const file of files) {
-    const mimeType = imageMimeType(file)
-    if (!mimeType) continue
-    const dataUrl = normalizeImageDataUrl(await fileToImageDataUrl(file, mimeType), mimeType)
-    const key = imageDataUrlKey(dataUrl)
-    if (key && seenDataUrlKeys.has(key)) continue
-    if (key) seenDataUrlKeys.add(key)
-    target.push({
-      id: draftAttachmentId(),
-      filename: imageFilename(file),
-      mime_type: mimeType,
-      data_url: dataUrl,
-      preview_url: dataUrl,
-      size_bytes: file.size,
-    })
-  }
-}
-
-async function handleAttachmentPaste(event: ClipboardEvent, target: DraftAttachment[]) {
-  const files = clipboardImageFiles(event)
-  const dataUrls = clipboardImageDataUrls(event)
-  if (files.length === 0 && dataUrls.length === 0) return
-  event.preventDefault()
-  const seenDataUrlKeys = new Set<string>()
-  await addImageAttachments(target, files, seenDataUrlKeys)
-  addDataUrlAttachments(target, dataUrls, seenDataUrlKeys)
-}
-
-function removeDraftAttachment(target: DraftAttachment[], attachment: DraftAttachment) {
-  const index = target.findIndex(item => item.id === attachment.id)
-  if (index >= 0) {
-    URL.revokeObjectURL(target[index].preview_url)
-    target.splice(index, 1)
-  }
-}
-
-function resetDraftAttachments(target: DraftAttachment[]) {
-  for (const attachment of target) {
-    URL.revokeObjectURL(attachment.preview_url)
-  }
-  target.splice(0)
-}
-
-function serializeDraftAttachments(target: DraftAttachment[]): WorkspaceAttachmentCreate[] {
-  return target.map(({ filename, mime_type, data_url }) => ({ filename, mime_type, data_url }))
-}
 
 function terminalStatusForAgent(agent: ManagedSession) {
   return terminalStatusByTabId.value[agent.tab_id] || null
@@ -5422,308 +4831,31 @@ function canUseManagedTaskActions(task: WorkspaceTask): boolean {
   return isWorkspaceControlledTask(task)
 }
 
-function removeFrozenCreateAttempt(attempt: StoredTaskCreateAttempt): boolean {
-  const requestKey = attempt.payload.request_key
-  return typeof requestKey === 'string' && removeTaskCreateAttempt(
-    attempt.workspace_id, { expectedRequestKey: requestKey },
-  )
-}
 
-function taskCreateActionKey(workspaceId = taskModalWorkspaceId.value): string {
-  return `task:create:${workspaceId || 'none'}`
-}
 
-function sameCreateUi(workspaceId: string, generation: number): boolean {
-  return showTaskModal.value &&
-    taskModalWorkspaceId.value === workspaceId &&
-    taskCreateUiGeneration === generation
-}
 
-function samePendingCreate(attempt: StoredTaskCreateAttempt): boolean {
-  return pendingTaskCreateAttempt.value?.workspace_id === attempt.workspace_id &&
-    pendingTaskCreateAttempt.value.payload.request_key === attempt.payload.request_key
-}
 
-function openTaskModal() {
-  const workspaceId = activeWorkspaceId.value
-  if (!workspaceId) return
-  taskCreateUiGeneration += 1
-  taskModalWorkspaceId.value = workspaceId
-  if (
-    taskCapabilitiesWorkspaceId.value !== workspaceId ||
-    taskModalCapabilitiesStatus.value === 'idle' ||
-    taskModalCapabilitiesStatus.value === 'error'
-  ) {
-    void retryTaskCapabilities()
-  }
-  revealCreatedReporterKey.value = false
 
-  if (createdReporterRecovery.value?.workspaceId === workspaceId) {
-    pendingTaskCreateAttempt.value = loadTaskCreateAttempt(workspaceId)
-  } else {
-    createdReporterRecovery.value = null
-    pendingTaskCreateAttempt.value = loadTaskCreateAttempt(workspaceId)
-    if (!pendingTaskCreateAttempt.value) resetTaskForm()
-  }
-  showTaskModal.value = true
-}
 
-function closeTaskModal() {
-  showTaskModal.value = false
-  taskCreateUiGeneration += 1
-  resetDraftAttachments(taskForm.attachments)
-  // Persisted attempts and a same-page credential recovery deliberately remain.
-}
 
-function discardPendingTaskCreateAttempt() {
-  const workspaceId = taskModalWorkspaceId.value
-  if (!workspaceId || isPending(taskCreateActionKey(workspaceId))) return
-  const attempt = pendingTaskCreateAttempt.value
-  if (attempt && attempt.workspace_id === workspaceId) removeFrozenCreateAttempt(attempt)
-  pendingTaskCreateAttempt.value = null
-  createdReporterRecovery.value = null
-  revealCreatedReporterKey.value = false
-}
 
-function handleTaskFormMutation() {
-  if (pendingTaskCreateAttempt.value) discardPendingTaskCreateAttempt()
-}
 
-async function refreshCreatedTaskBoard(
-  workspaceId: string,
-  notify: boolean,
-): Promise<void> {
-  try {
-    await workspaceStore.fetchBoard(workspaceId)
-  } catch {
-    if (notify) {
-      workspaceStore.pushNotification({
-        type: 'error',
-        message: 'The Task was created, but the board could not be refreshed.',
-        autoDismissMs: 10_000,
-      })
-    }
-  }
-}
 
-async function copyCreatedReporterCredential() {
-  const recovery = createdReporterRecovery.value
-  if (!recovery) return
-  try {
-    await writeClipboard(recovery.key)
-  } catch {
-    workspaceStore.pushNotification({
-      type: 'error',
-      message: 'Could not copy the reporter credential. Show it and copy it manually.',
-      autoDismissMs: 10_000,
-    })
-  }
-}
 
-function persistCreatedReporterCredential() {
-  const recovery = createdReporterRecovery.value
-  if (!recovery || !createReporterKeyApplies(recovery.workspaceId, recovery.task)) return
-  if (!saveTaskReporterKey(recovery.workspaceId, recovery.task, recovery.key)) return
 
-  removeFrozenCreateAttempt(recovery.attempt)
-  if (taskModalWorkspaceId.value === recovery.workspaceId) {
-    pendingTaskCreateAttempt.value = null
-    createdReporterRecovery.value = null
-    revealCreatedReporterKey.value = false
-    resetTaskForm()
-    showTaskModal.value = false
-    taskCreateUiGeneration += 1
-  }
-}
 
-async function handleCreateTask() {
-  const workspaceId = taskModalWorkspaceId.value
-  if (!workspaceId || workspaceId !== activeWorkspaceId.value) return
-  if (createdReporterRecovery.value) return
-  if (taskCreateSubmitBlocked.value) return
-  if (
-    !pendingTaskCreateAttempt.value &&
-    (!taskForm.title.trim() ||
-      (!taskForm.prompt.trim() && taskForm.attachments.length === 0))
-  ) {
-    return
-  }
 
-  const generation = taskCreateUiGeneration
-  await runPending(taskCreateActionKey(workspaceId), async () => {
-    let attempt = pendingTaskCreateAttempt.value
-    if (attempt && attempt.workspace_id !== workspaceId) {
-      workspaceStore.pushNotification({
-        type: 'error',
-        message: 'The saved Task request belongs to another Workspace.',
-        autoDismissMs: 10_000,
-      })
-      return
-    }
 
-    if (!attempt) {
-      const autonomyPolicy: AutonomyPolicy | null = taskForm.task_mode === 'autonomous'
-        ? {
-            max_iterations: Math.max(1, Number(taskForm.max_iterations) || 3),
-            evaluation_strictness: taskForm.evaluation_strictness,
-            allow_web_research: taskForm.allow_web_research,
-            require_artifact_review: taskForm.require_artifact_review,
-            human_checkpoint_policy: 'final_only',
-            allowed_agent_types: [],
-            stop_on_repeated_failure: true,
-          }
-        : null
-      const hasTaskContract = taskModalCapabilitiesStatus.value === 'supported'
-      const recordOnly = hasTaskContract && taskForm.execution_control === 'initiator'
-      if (
-        recordOnly &&
-        !taskCapabilities.value?.supported_execution_controls.includes('initiator')
-      ) {
-        workspaceStore.pushNotification({
-          type: 'error',
-          message: 'This Hub does not support initiator-managed Tasks.',
-          autoDismissMs: 10_000,
-        })
-        return
-      }
 
-      const payload: WorkspaceTaskCreate = {
-        ...(hasTaskContract
-          ? {
-              request_key: generateTaskCallId(),
-              execution_control: taskForm.execution_control,
-              source: { kind: 'human', tab_id: null, agent_id: null },
-            }
-          : {}),
-        ...(recordOnly ? { reporter_key: generateTaskReporterKey() } : {}),
-        title: taskForm.title.trim(),
-        prompt: taskForm.prompt.trim(),
-        task_mode: taskForm.task_mode,
-        execution_complexity: taskForm.execution_complexity,
-        autonomy_policy: autonomyPolicy,
-        ...(recordOnly
-          ? {}
-          : {
-              session_id: taskForm.session_id || null,
-              clear_context: taskForm.clear_context || null,
-              related_task_id: taskForm.related_task_id || null,
-            }),
-        attachments: serializeDraftAttachments(taskForm.attachments),
-      }
 
-      if (hasTaskContract) {
-        attempt = { workspace_id: workspaceId, payload }
-        try {
-          saveTaskCreateAttempt(attempt)
-        } catch {
-          workspaceStore.pushNotification({
-            type: 'error',
-            message: 'This Task could not be staged safely for retry. Reduce large attachments and try again.',
-            autoDismissMs: 10_000,
-          })
-          return
-        }
-        if (sameCreateUi(workspaceId, generation)) {
-          pendingTaskCreateAttempt.value = attempt
-        }
-      } else {
-        // The compatibility path is intentionally not retryable: the old API has
-        // no request_key contract.
-        attempt = { workspace_id: workspaceId, payload }
-      }
-    }
 
-    const frozenAttempt = attempt
-    let created: WorkspaceTask
-    try {
-      created = await workspaceStore.createTask(
-        frozenAttempt.payload,
-        frozenAttempt.workspace_id,
-      )
-    } catch {
-      // A new-contract attempt stays frozen for an explicit identical recovery.
-      return
-    }
 
-    const reporterKey = frozenAttempt.payload.execution_control === 'initiator'
-      ? frozenAttempt.payload.reporter_key
-      : undefined
 
-    if (reporterKey) {
-      if (!createReporterKeyApplies(frozenAttempt.workspace_id, created)) {
-        removeFrozenCreateAttempt(frozenAttempt)
-        if (sameCreateUi(workspaceId, generation) && samePendingCreate(frozenAttempt)) {
-          pendingTaskCreateAttempt.value = null
-          resetTaskForm()
-          showTaskModal.value = false
-          taskCreateUiGeneration += 1
-        }
-        await refreshCreatedTaskBoard(
-          frozenAttempt.workspace_id,
-          sameCreateUi(workspaceId, generation),
-        )
-        workspaceStore.pushNotification({
-          type: 'warning',
-          message: 'The recovered Task had already moved to another execution epoch. The original reporter credential was not saved.',
-          autoDismissMs: 10_000,
-        })
-        return
-      }
 
-      const persisted = saveTaskReporterKey(
-        frozenAttempt.workspace_id,
-        created,
-        reporterKey,
-      )
-      if (!persisted) {
-        if (sameCreateUi(workspaceId, generation) && samePendingCreate(frozenAttempt)) {
-          createdReporterRecovery.value = {
-            workspaceId: frozenAttempt.workspace_id,
-            task: created,
-            key: reporterKey,
-            attempt: frozenAttempt,
-          }
-          revealCreatedReporterKey.value = false
-        }
-        await refreshCreatedTaskBoard(
-          frozenAttempt.workspace_id,
-          sameCreateUi(workspaceId, generation),
-        )
-        return
-      }
-    }
 
-    removeFrozenCreateAttempt(frozenAttempt)
-    await refreshCreatedTaskBoard(
-      frozenAttempt.workspace_id,
-      sameCreateUi(workspaceId, generation),
-    )
 
-    if (!sameCreateUi(workspaceId, generation)) return
-    if (samePendingCreate(frozenAttempt)) pendingTaskCreateAttempt.value = null
-    createdReporterRecovery.value = null
-    revealCreatedReporterKey.value = false
-    resetTaskForm()
-    showTaskModal.value = false
-    taskCreateUiGeneration += 1
-  })
-}
 
-function resetTaskForm() {
-  taskForm.execution_control = 'workspace'
-  taskForm.title = ''
-  taskForm.prompt = ''
-  taskForm.task_mode = 'reviewed'
-  taskForm.execution_complexity = 'auto'
-  taskForm.max_iterations = 3
-  taskForm.evaluation_strictness = 'balanced'
-  taskForm.allow_web_research = false
-  taskForm.require_artifact_review = false
-  taskForm.session_id = ''
-  taskForm.clear_context = false
-  taskForm.related_task_id = ''
-  resetDraftAttachments(taskForm.attachments)
-}
+
 
 
 
@@ -6104,15 +5236,7 @@ watch(activeWorkspaceId, value => {
 watch(activeWorkspaceId, value => {
   selectedWorkspaceId.value = value || ''
   workspaceSessionView.value = 'agents'
-  if (showTaskModal.value && taskModalWorkspaceId.value !== value) {
-    showTaskModal.value = false
-    taskModalWorkspaceId.value = null
-    pendingTaskCreateAttempt.value = null
-    createdReporterRecovery.value = null
-    revealCreatedReporterKey.value = false
-    taskCreateUiGeneration += 1
-    resetTaskForm()
-  }
+  taskCreateFlow.onWorkspaceChanged(value)
   workspaceStore.clearTaskReports()
   closeTaskDetail()
 })
@@ -6190,10 +5314,15 @@ onUnmounted(() => {
     window.clearInterval(elapsedClockTimer)
     elapsedClockTimer = null
   }
-  resetDraftAttachments(taskForm.attachments)
+  taskCreateFlow.dispose()
   resetDraftAttachments(detailAttachments.value)
   terminalStore.stopAgentStatusPolling()
 })
+
+function openTaskModal(): void {
+  const workspaceId = activeWorkspaceId.value
+  if (workspaceId) taskCreateFlow.open(workspaceId)
+}
 </script>
 
 <style scoped>

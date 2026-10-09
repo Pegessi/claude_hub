@@ -120,7 +120,6 @@ class _TaskExecutionMixin:
                             raise TaskExecutionConflict("task_create_request_key_conflict")
                         return task, True
             snapshot = self._snapshot_report_intake_workspace(workspace_id)
-            token = self._report_intake_workspace.set(workspace_id)
             try:
                 task = self._create_task(
                     workspace_id,
@@ -132,8 +131,6 @@ class _TaskExecutionMixin:
             except Exception:
                 self._restore_report_intake_workspace(workspace_id, snapshot)
                 raise
-            finally:
-                self._report_intake_workspace.reset(token)
             return task, False
 
     def _execution_task(self, workspace_id: str, task_id: str) -> WorkspaceTask:
@@ -190,7 +187,6 @@ class _TaskExecutionMixin:
             fingerprints.pop(next(iter(fingerprints)))
         changes = {**changes, "execution_call_fingerprints": fingerprints}
         self.tasks[task.id] = task.model_copy(update=changes)
-        token = self._report_intake_workspace.set(task.workspace_id)
         try:
             event, _created = self.task_mailbox.append_event(
                 workspace_id=task.workspace_id,
@@ -205,12 +201,10 @@ class _TaskExecutionMixin:
                 persist=False,
                 wake=False,
             )
-            self._save_state()
+            self._save_workspace_state(task.workspace_id)
         except Exception:
             self._restore_report_intake_workspace(task.workspace_id, snapshot)
             raise
-        finally:
-            self._report_intake_workspace.reset(token)
         # No managed report bridge, prompt, reviewer, or session cleanup here.
         return TaskExecutionMutationResult(task=self.tasks[task.id], event=event, replayed=False)
 
@@ -468,9 +462,8 @@ class _TaskExecutionMixin:
                 return False
             snapshot = self._snapshot_report_intake_workspace(workspace_id)
             self.tasks[task.id] = task.model_copy(update={"runtime_observation": observation})
-            token = self._report_intake_workspace.set(workspace_id)
             try:
-                self._save_state()
+                self._save_workspace_state(workspace_id)
             except Exception:
                 self._restore_report_intake_workspace(workspace_id, snapshot)
                 if previous_cursor is None:
@@ -478,8 +471,6 @@ class _TaskExecutionMixin:
                 else:
                     self._task_activity_cursors[task_id] = previous_cursor
                 raise
-            finally:
-                self._report_intake_workspace.reset(token)
             return True
 
     async def record_task_stream_event(self, event: AgentStreamEvent) -> None:

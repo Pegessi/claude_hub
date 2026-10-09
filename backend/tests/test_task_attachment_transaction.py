@@ -232,7 +232,9 @@ async def test_precommit_failure_restores_record_and_only_cleans_new_images(
     before_state = state_path.read_bytes()
     before_files = files(task)
     if failure == "save":
-        monkeypatch.setattr(manager, "_save_state", Mock(side_effect=OSError("before commit")))
+        monkeypatch.setattr(
+            manager, "_save_workspace_state", Mock(side_effect=OSError("before commit"))
+        )
     else:
         original = manager._atomic_write_text
 
@@ -264,13 +266,13 @@ async def test_confirmed_commit_survives_late_save_and_snapshot_errors(
 
         monkeypatch.setattr(manager, "_atomic_write_text", replace_then_fail)
     elif failure == "after-save":
-        original_save = manager._save_state
+        original_save = manager._save_workspace_state
 
-        def save_then_fail() -> None:
-            original_save()
+        def save_then_fail(target_workspace_id: str) -> None:
+            original_save(target_workspace_id)
             raise OSError("after save")
 
-        monkeypatch.setattr(manager, "_save_state", save_then_fail)
+        monkeypatch.setattr(manager, "_save_workspace_state", save_then_fail)
     else:
         monkeypatch.setattr(
             manager, "_write_snapshot", Mock(side_effect=OSError("snapshot failed"))
@@ -293,21 +295,20 @@ async def test_interrupt_preserves_its_type_and_respects_commit_boundary(
     task = await make_task(manager, workspace)
     before_state = manager._workspace_state_file(workspace.id).read_bytes()
     before_files = files(task)
-    original_save = manager._save_state
+    original_save = manager._save_workspace_state
 
-    def interrupt_save() -> None:
+    def interrupt_save(target_workspace_id: str) -> None:
         if after_commit:
-            original_save()
+            original_save(target_workspace_id)
         raise error_type("interrupted")
 
-    monkeypatch.setattr(manager, "_save_state", interrupt_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", interrupt_save)
     with pytest.raises(error_type):
         await edit(task)
     if after_commit:
         assert_committed(manager, workspace, task)
     else:
         assert_original(manager, workspace, task, before_state, before_files)
-    assert manager._report_intake_workspace.get() is None
     assert manager._workspace_mutation_held.get() is None
 
 
@@ -332,15 +333,17 @@ async def test_unknown_commit_keeps_candidate_and_both_sets_of_files(
             return original_read(workspace_id)
 
         monkeypatch.setattr(manager, "_read_task_edit_state", read_once)
-        monkeypatch.setattr(manager, "_save_state", Mock(side_effect=OSError("save interrupted")))
+        monkeypatch.setattr(
+            manager, "_save_workspace_state", Mock(side_effect=OSError("save interrupted"))
+        )
     else:
         expected_disk = before + b"\n"
 
-        def write_other_version() -> None:
+        def write_other_version(target_workspace_id: str) -> None:
             state_path.write_bytes(expected_disk)
             raise OSError("different version")
 
-        monkeypatch.setattr(manager, "_save_state", write_other_version)
+        monkeypatch.setattr(manager, "_save_workspace_state", write_other_version)
     with pytest.raises(OSError):
         await edit(task)
     current = manager.tasks[task.id]
@@ -385,7 +388,9 @@ async def test_reparent_and_attachments_rollback_together_before_commit(
     before_tasks = {key: value.model_dump() for key, value in manager.tasks.items()}
     before_state = manager._workspace_state_file(workspace.id).read_bytes()
     before_files = files(task)
-    monkeypatch.setattr(manager, "_save_state", Mock(side_effect=OSError("before tree commit")))
+    monkeypatch.setattr(
+        manager, "_save_workspace_state", Mock(side_effect=OSError("before tree commit"))
+    )
     with pytest.raises(OSError, match="before tree commit"):
         await edit(task, parent_task_id=target.id)
     assert {key: value.model_dump() for key, value in manager.tasks.items()} == before_tasks
@@ -486,7 +491,7 @@ async def test_precommit_failure_restores_authoritative_session_and_report_maps(
     monkeypatch.setattr(manager, "_write_task_record", archive)
     monkeypatch.setattr(manager, "_request_task_review", review)
 
-    def inspect_then_fail() -> None:
+    def inspect_then_fail(target_workspace_id: str) -> None:
         assert manager.tasks[task.id].status == status
         if status == WorkspaceTaskStatus.WORKING:
             assert manager.sessions[worker.id].current_task_id == task.id
@@ -501,7 +506,7 @@ async def test_precommit_failure_restores_authoritative_session_and_report_maps(
             assert report.review_cycle == 7 and report.session_id == worker.id
         raise OSError("before mapping commit")
 
-    monkeypatch.setattr(manager, "_save_state", inspect_then_fail)
+    monkeypatch.setattr(manager, "_save_workspace_state", inspect_then_fail)
     with pytest.raises(OSError, match="before mapping commit"):
         await edit(task, status=status)
     assert_original(manager, workspace, task, before_state, before_files)
@@ -552,10 +557,10 @@ async def test_real_review_request_keeps_current_session_cycle_and_dispatch_sequ
     reviewer = add_session(manager, workspace, task, "new-reviewer", WorkspaceSessionRole.REVIEWER)
     manager._save_state()
     saved: list[dict[str, Any]] = []
-    original_save = manager._save_state
+    original_save = manager._save_workspace_state
 
-    def capture_save() -> None:
-        original_save()
+    def capture_save(target_workspace_id: str) -> None:
+        original_save(target_workspace_id)
         saved.append(persisted(manager, workspace))
 
     async def no_rename(
@@ -572,7 +577,7 @@ async def test_real_review_request_keeps_current_session_cycle_and_dispatch_sequ
         assert manager._workspace_mutation_held.get() is None
         assert session_id == reviewer.id and message == "bounded review prompt"
 
-    monkeypatch.setattr(manager, "_save_state", capture_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", capture_save)
     monkeypatch.setattr(manager, "_select_or_create_reviewer", AsyncMock(return_value=reviewer))
     monkeypatch.setattr(manager, "_rename_session_for_task", no_rename)
     monkeypatch.setattr(manager, "_lesson_context_payload", Mock(return_value={}))
@@ -729,7 +734,7 @@ async def test_failed_readback_cannot_downgrade_an_interrupt(
         return original_read(workspace_id)
 
     monkeypatch.setattr(manager, "_read_task_edit_state", fail_readback)
-    monkeypatch.setattr(manager, "_save_state", Mock(side_effect=saved_error))
+    monkeypatch.setattr(manager, "_save_workspace_state", Mock(side_effect=saved_error))
     expected = saved_error if not isinstance(saved_error, Exception) else read_error
     with pytest.raises(type(expected)) as caught:
         await edit(task)
@@ -740,4 +745,3 @@ async def test_failed_readback_cannot_downgrade_an_interrupt(
     assert Path(current.attachments[0].path).read_bytes() == PNG
     assert Path(task.attachments[0].path).read_bytes() == PNG
     assert not manager._task_execution_operations
-    assert manager._report_intake_workspace.get() is None

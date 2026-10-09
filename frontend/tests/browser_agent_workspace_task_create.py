@@ -749,6 +749,54 @@ async def main(browser_run: BrowserRun) -> None:
             path=str(output / "agent-workspace-task-create.png"),
             full_page=True,
         )
+        # The extracted dialog must retain its own responsive scoped styles.
+        capability_modes["ws-1"] = "supported"
+        await switch_workspace("ws-1")
+        await page.set_viewport_size({"width": 390, "height": 844})
+        mobile_create_count = await browser_create_count()
+        modal = await open_add_task()
+        three_column_controls = modal.locator(".segmented-control--three")
+        await expect(three_column_controls).to_have_count(2)
+        grid_column_counts = await three_column_controls.evaluate_all(
+            r"""controls => controls.map(control =>
+              getComputedStyle(control).gridTemplateColumns
+                .split(/\s+/).filter(Boolean).length
+            )"""
+        )
+        assert grid_column_counts == [3, 3], grid_column_counts
+        await modal.get_by_role("button", name="Autonomous", exact=True).click()
+        autonomy_rows = modal.locator(".autonomy-form .form-row")
+        await expect(autonomy_rows).to_have_count(2)
+        row_directions = await autonomy_rows.evaluate_all(
+            "rows => rows.map(row => getComputedStyle(row).flexDirection)"
+        )
+        assert row_directions == ["column", "column"], row_directions
+        modal_geometry = await modal.evaluate("""element => {
+              const rect = element.getBoundingClientRect()
+              return {
+                viewportWidth: window.innerWidth,
+                left: rect.left, right: rect.right,
+                clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+                clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+              }
+            }""")
+        assert modal_geometry["left"] >= -0.5, modal_geometry
+        assert modal_geometry["right"] <= modal_geometry["viewportWidth"] + 0.5, modal_geometry
+        assert modal_geometry["scrollWidth"] <= modal_geometry["clientWidth"] + 1, modal_geometry
+        assert modal_geometry["scrollHeight"] > modal_geometry["clientHeight"] + 1, modal_geometry
+        await modal.evaluate("element => { element.scrollTop = element.scrollHeight }")
+        await page.evaluate("""() => new Promise(resolve =>
+              requestAnimationFrame(() => requestAnimationFrame(resolve)))""")
+        cancel = modal.get_by_role("button", name="Cancel", exact=True)
+        await expect(cancel).to_be_enabled()
+        cancel_box = await cancel.bounding_box()
+        assert cancel_box is not None
+        assert cancel_box["y"] >= 0, cancel_box
+        assert cancel_box["y"] + cancel_box["height"] <= 844, cancel_box
+        await page.screenshot(path=str(output / "task-create-mobile.png"))
+        await cancel.click()
+        await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)
+        assert await browser_create_count() == mobile_create_count
         assert not blocked_requests, blocked_requests
         assert not unknown_requests, unknown_requests
         assert not page_errors, page_errors

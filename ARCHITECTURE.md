@@ -22,6 +22,63 @@ The independent Hub evaluator remains the autonomous gate even when a simple
 worker runs without native subagents. See [agent workflow](docs/AGENT_WORKFLOW.md)
 for delegation, recovery, review evidence and safe directory hygiene.
 
+## Task state and UI ownership
+
+### Backend commits
+
+```text
+Task / report transaction using the existing mutation lock
+  → validate
+  → stage Task, session, report and Mailbox changes
+  → _save_workspace_state(workspace_id)
+      → replace that workspace's state.json (authoritative)
+      → refresh its Markdown snapshot (derived)
+  → existing post-commit wake / review / dispatch behavior
+```
+
+| Owner | Contract |
+| --- | --- |
+| `workspace_manager/_persistence.py` | `_save_workspace_state(id)` writes one workspace, not the index or other workspaces. `_save_state()` explicitly writes the index and every workspace. Neither entry acquires mutation locks or provides a multi-file transaction. |
+| Task/report callers | Own validation, locks, staged changes and rollback policy. A save exception alone does not establish whether the state file was replaced. Task attachment edits retain their committed/uncommitted/unknown readback handling. |
+| `services/task_mailbox.py` | Owns event lists, sequence allocation and call indexes. `snapshot_workspace` / `restore_workspace` preserve missing entries and internal event references without loading, persisting or waking. `lookup_call` exposes a shallow read-only record; nested events remain mutable. |
+| Outer Task snapshot | Owns Task consumer cursors. Mailbox snapshots do not include runtime waiters; consumers are woken after the relevant commit. |
+
+Scoped Task/report transactions and Mailbox append/replay/ACK pass the workspace
+explicitly; no ContextVar selects persistence scope. Existing review, dispatch and
+other lifecycle operations can still use full-state saves. This is not a claim
+that every operation or its entire asynchronous continuation writes one workspace.
+The existing lock-reentrancy ContextVar remains independent of persistence.
+
+### Task creation UI
+
+```text
+AgentWorkspaceView (page lifetime)
+  ├─ useTaskCreateFlow (form, request identity, recovery and async guards)
+  │    ├─ workspaceStore (API calls and capability state)
+  │    └─ taskExecution utilities (saved attempt and reporter credential)
+  └─ TaskCreateDialog (presentation, controls and scoped responsive styles)
+```
+
+Closing the dialog hides it and releases draft attachment previews; it does not
+throw away an uncertain request or an in-memory credential recovery. A workspace
+change clears the visible state but retains that workspace's saved attempt.
+The parent calls the flow's workspace-change and disposal hooks. Workspace,
+generation and request identity checks keep late responses out of a newer form.
+Credential-storage retries do not create another Task.
+
+`utils/draftAttachments.ts` shares attachment conversion and preview cleanup with
+the remaining parent forms; callers own their draft lists. Task detail, editing,
+agent setup and the board remain in the parent and are not part of this extraction.
+When moving another form, identify its state lifetime and async owners before
+moving its template; include its scoped styles in browser acceptance.
+
+Boundary regressions live in `test_task_mailbox.py`,
+`test_task_execution_control.py`, `test_report_intake_atomicity.py` and
+`test_task_attachment_transaction.py`. The real Vue/Pinia browser harness
+`browser_agent_workspace_task_create.py` checks request recovery, workspace
+switches, credential storage and mobile layout with mocked APIs; it does not
+prove live provider or Bot behavior.
+
 ## System Overview
 
 ```
@@ -71,7 +128,7 @@ for delegation, recovery, review evidence and safe directory hygiene.
 │  │  TTYDManager ──────────────────── N x TTYDProcess (ttyd+tmux) │    │
 │  │  ConnectionManager                WS connection tracking      │    │
 │  │  ┌─────────────────────────────────────────────────────────┐  │    │
-│  │  │ WorkspaceManager (mixin package: 19 submodules)         │  │    │
+│  │  │ WorkspaceManager (state and lifecycle mixins)          │  │    │
 │  │  │   _tasks, _sessions, _dispatch, _reports, _review,      │  │    │
 │  │  │   _state, _persistence, _messaging, _monitor,          │  │    │
 │  │  │   _normalize, _task_updates, _workspaces, _artifacts,  │  │    │
@@ -203,11 +260,13 @@ Subsequent requests:
 | `services/session_manager.py` | `ConnectionManager` — active WS connection tracking (subscribe/broadcast patterns) | — |
 | `services/workspace_state_policy.py` | Pure stateless policy module: status transitions, review routing, auto-continue, review-profile inference, goal packet | workspace_manager models |
 | `services/remote_profiles.py` | `RemoteProfileManager` — CRUD + `~/.ssh/config` Host auto-discovery | pydantic |
+| `services/task_mailbox.py` | Task event/index ownership, detached rollback snapshots, scoped persistence and consumer wakes | WorkspaceManager |
 | `services/feedback_lessons.py` | `FeedbackLessonStore` — workspace-scored lesson catalog, persistence, retrieval prompts | models |
-| **WorkspaceManager mixin package** (19 files, one logical class) | See table below | cross-mixin via `self.*` |
+| **WorkspaceManager mixin package** (one logical class) | See table below | cross-mixin via `self.*` |
 | | `__init__.py` — Composes all mixins into `WorkspaceManager`, public `initialize()` / `shutdown()` | all mixins |
 | | `_workspaces.py` — Workspace CRUD + listing | _persistence, _state |
 | | `_tasks.py` — Task CRUD, ordering, status mutation helpers | _persistence, _state |
+| | `_task_execution.py` — Registration, execution ownership, progress, handoff and runtime observations | _tasks, _persistence, task_mailbox |
 | | `_task_updates.py` — User-initiated task edits, Todo→Queued dispatch, attachment add/remove | _tasks, _attachments, _dispatch |
 | | `_sessions.py` — Resident agent session lifecycle (spawn/stop/attach-to-task) + managed tabs | _tasks, ttyd_manager |
 | | `_dispatch.py` — Dispatch policies: manual → specific agent, workspace auto-assign, goal packet reviewers | _sessions, _messaging, workspace_state_policy |
@@ -246,7 +305,10 @@ Subsequent requests:
 | `components/TerminalView.vue` | Terminal interaction glue: postMessage key dispatch, clipboard-image upload, context-menu, mobile controls bridge |
 | `components/MobileControls.vue` | Mobile-specific soft-buttons (Ctrl, Alt, Esc, arrow keys, paste, etc.) |
 | **Workspace components** | |
-| `components/AgentWorkspaceView.vue` | Task board (5-column drag-drop), task detail panel, report/review rendering, modals for workspace/task/agent/env/lessons management, file browser, clipboard attachments |
+| `components/AgentWorkspaceView.vue` | Task board/detail, report/review rendering, workspace/agent/edit forms; owns the Task creation flow lifetime |
+| `components/TaskCreateDialog.vue` | Task creation presentation and responsive styles; no independent request/recovery state |
+| `composables/useTaskCreateFlow.ts` | Task creation form, frozen requests, capability gating, credential recovery and late-response guards |
+| `utils/draftAttachments.ts` | Shared draft attachment conversion and preview cleanup, with caller-owned lists |
 | `components/AgentAvatar.vue` | Small agent/caller badge: type icon + name |
 | `components/AgentStatusFloatingPanel.vue` | Per-agent floating status chip grid: idle/working/attention/offline |
 | `components/LoadingButton.vue` | Generic button with loading + success/error state |

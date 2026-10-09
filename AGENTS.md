@@ -96,7 +96,7 @@ independent review and human-acceptance requirements.
 
 ## Focused navigation
 
-- [Architecture and code ownership map](ARCHITECTURE.md)
+- [Architecture and code ownership map](ARCHITECTURE.md), [Task state/UI boundaries](ARCHITECTURE.md#task-state-and-ui-ownership)
 - [UI acceptance, browser checks and evidence boundaries](docs/UI_ACCEPTANCE.md)
 - [Detailed workflow, commands, runtime pitfalls and task-specific document index](docs/AGENT_WORKFLOW.md)
 - [Unified Task execution and Agent workflow](docs/working-logs/2026-10-07-agent-workflow-v2.md)

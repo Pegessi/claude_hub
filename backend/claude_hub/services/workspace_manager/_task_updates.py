@@ -183,32 +183,28 @@ class _TaskUpdatesMixin:
     def _save_task_edit_state(
         self, workspace_id: str, before: bytes | None, expected: bytes
     ) -> tuple[Literal["committed", "uncommitted", "unknown"], BaseException | None]:
-        token = self._report_intake_workspace.set(workspace_id)
         try:
+            self._save_workspace_state(workspace_id)
+        except BaseException as error:
             try:
-                self._save_state()
-            except BaseException as error:
-                try:
-                    actual = self._read_task_edit_state(workspace_id)
-                except BaseException as read_error:
-                    logger.error(
-                        "Task edit readback failed workspace_id=%s save_error=%s read_error=%s",
-                        workspace_id,
-                        type(error).__name__,
-                        type(read_error).__name__,
-                    )
-                    # Failure classification must not turn an interrupt into an I/O error.
-                    if not isinstance(error, Exception):
-                        return "unknown", error
-                    return "unknown", read_error
-                if actual == expected:
-                    return "committed", error
-                if actual == before:
-                    return "uncommitted", error
-                return "unknown", error
-            return "committed", None
-        finally:
-            self._report_intake_workspace.reset(token)
+                actual = self._read_task_edit_state(workspace_id)
+            except BaseException as read_error:
+                logger.error(
+                    "Task edit readback failed workspace_id=%s save_error=%s read_error=%s",
+                    workspace_id,
+                    type(error).__name__,
+                    type(read_error).__name__,
+                )
+                # Failure classification must not turn an interrupt into an I/O error.
+                if not isinstance(error, Exception):
+                    return "unknown", error
+                return "unknown", read_error
+            if actual == expected:
+                return "committed", error
+            if actual == before:
+                return "uncommitted", error
+            return "unknown", error
+        return "committed", None
 
     def _cleanup_removed_task_attachments(self, attachments: list[WorkspaceAttachment]) -> None:
         # Another Task or a later edit may still reference a removed path.
@@ -510,8 +506,4 @@ class _TaskUpdatesMixin:
                 from ._task_execution import TaskExecutionConflict
 
                 raise TaskExecutionConflict("initiator_task_requires_progress_endpoint")
-            token = self._report_intake_workspace.set(task.workspace_id)
-            try:
-                return await self._update_task_workspace_fields(task_id, payload)
-            finally:
-                self._report_intake_workspace.reset(token)
+            return await self._update_task_workspace_fields(task_id, payload)
