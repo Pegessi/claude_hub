@@ -16,7 +16,8 @@ test('settings list defaults to name and occupancy',()=>{
   const dialog=files[2]
   assert.match(dialog,/occupancy\(bot\)/)
   assert.match(dialog,/In use by Chat/)
-  assert.match(dialog,/Callback URL|callback/i)
+  assert.match(dialog,/WebSocket|long connection/i)
   assert.match(dialog,/Existing active pairing is preserved/)
+  assert.doesNotMatch(dialog,/Verification Token|Encrypt Key|Callback URL/)
 })
 test('destructive operations have no force path',()=>assert.doesNotMatch(source,/\bforce\b/))

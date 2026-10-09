@@ -49,7 +49,11 @@ from claude_hub.services.agent_stream.base import (
 )
 from claude_hub.services.agent_stream.native import ProviderSession
 from claude_hub.services.agent_stream.store import AgentStreamStore
-from claude_hub.services.agent_stream.tailer import SessionTailer, TailerManager
+from claude_hub.services.agent_stream.tailer import (
+    ExternalTurnRetirement,
+    SessionTailer,
+    TailerManager,
+)
 
 # ── redaction ────────────────────────────────────────────────────────────────
 
@@ -2839,6 +2843,151 @@ async def test_cancel_turn_rejects_stale_expected_turn_id(store: AgentStreamStor
     ]
 
     assert await tailer.cancel_turn(expected_turn_id="turn-new") is True
+
+
+@pytest.mark.asyncio
+async def test_external_retirement_distinguishes_not_started_and_matching_active(
+    store: AgentStreamStore,
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    transport = _FakeNativeTransport()
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+
+    assert (
+        await tailer.retire_external_turn("turn-not-started") == ExternalTurnRetirement.NOT_STARTED
+    )
+
+    await tailer.send_message("hello", [], client_turn_id="turn-active")
+    assert (
+        await tailer.retire_external_turn("turn-active")
+        == ExternalTurnRetirement.CANCELLED_MATCHING
+    )
+    assert transport.turn_in_flight is False
+    assert transport.sent_messages == [("hello", [])]
+
+
+@pytest.mark.asyncio
+async def test_external_retirement_preserves_different_active_turn(
+    store: AgentStreamStore,
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    transport = _FakeNativeTransport()
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+    await tailer.send_message("new turn", [], client_turn_id="turn-new")
+
+    assert await tailer.retire_external_turn("turn-old") == ExternalTurnRetirement.DIFFERENT_TURN
+    assert transport.turn_in_flight is True
+    assert tailer._active_turn_id == "turn-new"
+
+    assert (
+        await tailer.retire_external_turn("turn-new") == ExternalTurnRetirement.CANCELLED_MATCHING
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_retirement_preserves_completed_turn(
+    store: AgentStreamStore,
+) -> None:
+    """A shutdown race after completion must not authorize same-id replay."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=transport,
+    )
+    queue = await tailer.subscribe()
+    await tailer.send_message("hello", [], client_turn_id="turn-completed")
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
+        AgentStreamEventType.TURN_STARTED
+    )
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+    assert (await asyncio.wait_for(queue.get(), timeout=0.5)).type == (
+        AgentStreamEventType.TURN_COMPLETED
+    )
+
+    assert (
+        await tailer.retire_external_turn("turn-completed")
+        == ExternalTurnRetirement.ALREADY_TERMINAL
+    )
+    assert transport.sent_messages == [("hello", [])]
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_external_retirement_cancels_matching_orphan_but_not_a_different_one(
+    store: AgentStreamStore,
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=9,
+        turn_id="turn-orphan",
+    )
+    await store.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": "old"}))
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=_FakeNativeTransport(),
+    )
+
+    assert await tailer.retire_external_turn("turn-other") == ExternalTurnRetirement.DIFFERENT_TURN
+    assert (
+        await tailer.retire_external_turn("turn-orphan")
+        == ExternalTurnRetirement.CANCELLED_MATCHING
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_retirement_fails_closed_on_corrupt_history(
+    store: AgentStreamStore,
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("not-json\n")
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=_FakeNativeTransport(),
+    )
+
+    with pytest.raises(RuntimeError, match="corrupt agent stream"):
+        await tailer.retire_external_turn("turn-maybe-ran")
 
 
 @pytest.mark.asyncio

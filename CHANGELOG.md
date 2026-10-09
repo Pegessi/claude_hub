@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### feat(feishu): receive Bot events over WebSocket long connections
+
+- Fix connection reconciliation so pairing and other business-state revisions
+  no longer invalidate unchanged transports, and bound/drain accepted message
+  routes during final backend shutdown with retry-safe dedup release that
+  preserves claims for completed, superseded, or unknown Chat turns.
+- Replace public HTTP event callbacks with one supervised Feishu WebSocket
+  connection per enabled Bot, with bounded endpoint discovery and reconciliation
+  on startup and after pool changes.
+- Reduce Bot credentials and management forms to name, App ID, and App Secret;
+  expose connected, connecting, failed, and stopped states in the existing UI.
+- Remove callback URLs, Verification Token, Encrypt Key, and the callback-only
+  public URL resolver. Read version 2 pool files safely, then rewrite them as
+  version 3 without retired callback secrets on the next mutation.
+- Preserve pairing, admission checks, deduplication, Chat routing, and outbound
+  replies. See the [WebSocket migration notes](docs/working-logs/2026-10-09-feishu-websocket.md).
+
 ### style(feishu): align Chat header controls
 
 - Place the Chat-scoped Feishu status action in the existing pane chrome beside

@@ -209,30 +209,7 @@
               Copy code
             </button>
           </div>
-          <div class="callback-box">
-            <div>
-              <span>Callback URL</span>
-              <code>{{ pendingCode.event_url }}</code>
-            </div>
-            <button
-              type="button"
-              class="ch-btn ch-btn--icon ch-btn--sm ch-btn--ghost"
-              aria-label="Copy callback URL"
-              @click="copy(pendingCode.event_url, 'Callback URL copied.')"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                aria-hidden="true"
-              ><rect
-                x="5.25"
-                y="5.25"
-                width="7.5"
-                height="7.5"
-                rx="1.5"
-              /><path d="M10.75 5.25v-2h-7.5v7.5h2" /></svg>
-            </button>
-          </div>
-          <small class="expiry">Expires {{ formatTime(pendingCode.expires_at) }} · Waiting for the Bot conversation</small>
+          <small class="expiry">Expires {{ formatTime(pendingCode.expires_at) }} · Waiting over the Bot's WebSocket connection</small>
         </template>
 
         <template v-else-if="viewState === 'claimed' && claim">
@@ -426,7 +403,6 @@ watch(() => props.tabId, close, { flush: 'sync' })
 .panel-heading,
 .panel-actions,
 .code-box,
-.callback-box,
 .step-copy,
 .connected-card { display: flex; }
 .panel-header { align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
@@ -446,8 +422,7 @@ watch(() => props.tabId, close, { flush: 'sync' })
   font-size: 14px;
   font-weight: 700;
 }
-.close-button svg,
-.callback-box button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.close-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 
 .connection-status {
   display: inline-flex;
@@ -502,10 +477,6 @@ watch(() => props.tabId, close, { flush: 'sync' })
 }
 .code-box { align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; padding: 12px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-sunken); }
 .code-box output { color: var(--ch-color-text-strong); font: 700 19px/1 var(--ch-font-mono); letter-spacing: .08em; }
-.callback-box { align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding: 8px 9px 8px 11px; border-radius: var(--ch-radius-md); background: var(--ch-color-chip-bg-muted); }
-.callback-box > div { min-width: 0; }
-.callback-box span { display: block; margin-bottom: 2px; color: var(--ch-color-text-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
-.callback-box code { display: block; overflow: hidden; color: var(--ch-color-text-muted); font: 10px/1.35 var(--ch-font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .expiry { display: block; margin-bottom: 14px; color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); }
 .confirmation-input { text-transform: uppercase; font-family: var(--ch-font-mono); font-weight: 700; letter-spacing: .14em; }
 

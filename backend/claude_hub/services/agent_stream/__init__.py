@@ -14,6 +14,7 @@ from .redaction import redact_event
 from .registry import get_adapter, get_adapter_for_session, supports_structured
 from .store import AgentStreamStore
 from .tailer import (
+    ExternalTurnRetirement,
     SessionTailer,
     StructuredSourceUnavailable,
     TailerManager,
@@ -27,6 +28,7 @@ __all__ = [
     "AgentStreamAdapter",
     "NormalizeContext",
     "AgentStreamStore",
+    "ExternalTurnRetirement",
     "SessionTailer",
     "StructuredSourceUnavailable",
     "TailerManager",

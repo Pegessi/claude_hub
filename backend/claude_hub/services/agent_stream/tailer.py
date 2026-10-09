@@ -38,6 +38,7 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -66,7 +67,7 @@ from .native import (
 )
 from .redaction import redact_event
 from .registry import get_adapter_for_session
-from .store import AgentStreamStore
+from .store import AgentStreamStore, TurnLifecycleState
 from .transcript_fork import (
     TranscriptForkError,
     discard_snapshot,
@@ -312,6 +313,20 @@ class NativeRuntimeSnapshot:
 
     status: AgentRuntimeStatus
     detail: str
+
+
+class ExternalTurnRetirement(str, Enum):
+    """Outcome of atomically retiring an external-channel turn."""
+
+    CANCELLED_MATCHING = "cancelled_matching"
+    NOT_STARTED = "not_started"
+    ALREADY_TERMINAL = "already_terminal"
+    DIFFERENT_TURN = "different_turn"
+    UNKNOWN = "unknown"
+
+    @property
+    def safe_to_retry(self) -> bool:
+        return self in {self.CANCELLED_MATCHING, self.NOT_STARTED}
 
 
 @dataclass(frozen=True)
@@ -951,6 +966,50 @@ class SessionTailer:
 
             return await self._recover_orphaned_turn_locked(expected_turn_id)
 
+    async def retire_external_turn(self, expected_turn_id: str) -> ExternalTurnRetirement:
+        """Retire one external turn and classify whether retry is safe.
+
+        The normal Stop API intentionally returns only a boolean. External
+        delivery deduplication needs a stronger contract: an absent active turn
+        might never have started, might already have completed, or might have
+        been superseded by another turn. Inspect and act under the send lock so
+        completion and a newer send cannot change that answer between steps.
+        """
+        transport = self._native_transport
+        async with self._send_lock:
+            active_turn_id = self._active_turn_id
+            turn_in_flight = bool(transport is not None and transport.turn_in_flight)
+            if active_turn_id is not None:
+                if active_turn_id != expected_turn_id:
+                    return ExternalTurnRetirement.DIFFERENT_TURN
+                if not turn_in_flight or transport is None:
+                    return ExternalTurnRetirement.UNKNOWN
+                await self._cancel_active_turn_locked(
+                    transport,
+                    await_teardown=True,
+                    require_teardown=True,
+                )
+                return ExternalTurnRetirement.CANCELLED_MATCHING
+            if turn_in_flight:
+                return ExternalTurnRetirement.UNKNOWN
+
+            snapshot = await self._store.inspect_turn_lifecycle(expected_turn_id)
+            if snapshot.state == TurnLifecycleState.TERMINAL:
+                return ExternalTurnRetirement.ALREADY_TERMINAL
+
+            orphan = snapshot.latest_unfinished
+            if orphan is not None:
+                if orphan.turn_id != expected_turn_id:
+                    return ExternalTurnRetirement.DIFFERENT_TURN
+                if snapshot.state != TurnLifecycleState.UNFINISHED:
+                    return ExternalTurnRetirement.UNKNOWN
+                await self._terminalize_orphaned_turn_locked(orphan)
+                return ExternalTurnRetirement.CANCELLED_MATCHING
+
+            if snapshot.state == TurnLifecycleState.NOT_STARTED:
+                return ExternalTurnRetirement.NOT_STARTED
+            return ExternalTurnRetirement.UNKNOWN
+
     async def _recover_orphaned_turn_locked(self, expected_turn_id: Optional[str] = None) -> bool:
         """Explain and terminalize a turn owned by an earlier backend."""
         orphan = await self._store.latest_unfinished_turn()
@@ -958,6 +1017,11 @@ class SessionTailer:
             return False
         if expected_turn_id is not None and orphan.turn_id != expected_turn_id:
             return False
+        await self._terminalize_orphaned_turn_locked(orphan)
+        return True
+
+    async def _terminalize_orphaned_turn_locked(self, orphan: AgentStreamEvent) -> None:
+        """Persist one already-identified orphan's interrupted terminal edge."""
         # The terminal edges are persisted by ``_publish_turn_completion``, but
         # persistence alone does not wake completion owners: Goal admission and
         # scheduled Chat runs only advance through the post-persist observers.
@@ -971,7 +1035,6 @@ class SessionTailer:
             error_message=_RUNTIME_INTERRUPTED_MESSAGE,
         )
         self._notify_post_persist(completed)
-        return True
 
     async def _publish_turn_completion(
         self,
@@ -1261,6 +1324,7 @@ class SessionTailer:
         *,
         error_message: Optional[str] = None,
         await_teardown: bool = False,
+        require_teardown: bool = False,
     ) -> None:
         """Cancel the in-flight turn while ``_send_lock`` is held.
 
@@ -1278,7 +1342,9 @@ class SessionTailer:
         exit. Sends and the watchdog are serialized behind the teardown via the
         ``_turn_teardown_task`` barrier. ``await_teardown=True`` (steer,
         watchdog reap, shutdown) keeps the previous inline behavior because the
-        caller immediately needs the torn-down transport.
+        caller immediately needs the torn-down transport. ``require_teardown``
+        additionally propagates a provider stop failure when an external
+        delivery claim must not be released without that confirmation.
         """
         turn_id = self._active_turn_id
         publish_error: Optional[Exception] = None
@@ -1320,12 +1386,15 @@ class SessionTailer:
         if await_teardown:
             try:
                 await transport.cancel_active_turn()
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "native provider cancel after terminalizing turn failed for session %s",
                     self.session_id,
                 )
-            self._turn_teardown_pending = False
+                if require_teardown:
+                    raise RuntimeError("native provider turn cancellation failed") from exc
+            finally:
+                self._turn_teardown_pending = False
         else:
             self._spawn_turn_teardown(transport)
         if publish_error is not None:
@@ -2956,6 +3025,13 @@ class TailerManager:
         """Cancel the active native turn for ``session``, if any."""
         tailer = await self._get_or_create(session)
         return await tailer.cancel_turn(expected_turn_id)
+
+    async def retire_external_turn(
+        self, session: ManagedSession, expected_turn_id: str
+    ) -> ExternalTurnRetirement:
+        """Retire an external-channel turn with retry-safe classification."""
+        tailer = await self._get_or_create(session)
+        return await tailer.retire_external_turn(expected_turn_id)
 
     async def answer_pending_question(
         self, session: ManagedSession, text: str, expected_turn_id: str

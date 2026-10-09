@@ -1,10 +1,10 @@
 """The environment Bot must never share an app_id with a stored Bot.
 
 The environment is outside Hub's control, so an operator can point it at an app
-a stored Bot already owns. Both entries would then hold the same credentials,
-so one signed callback would verify at both callback URLs, and the per-Bot
-deduplication namespace would not stop a single inbound message from reaching
-two Chats. The conflicting identity is refused and stored as an empty app_id.
+a stored Bot already owns. Both entries would then open long connections for
+the same identity, and the per-Bot deduplication namespace would not stop one
+inbound message from reaching two Chats. The conflicting identity is refused
+and stored as an empty app_id.
 """
 
 from __future__ import annotations
@@ -67,8 +67,6 @@ def _config(app_id: str) -> FeishuBotConfig:
     return FeishuBotConfig(
         app_id=app_id,
         app_secret=f"{app_id}-secret",
-        verification_token=f"{app_id}-token",
-        encrypt_key=f"{app_id}-encrypt",
         api_base_url=OFFICIAL_FEISHU_API,
     )
 
