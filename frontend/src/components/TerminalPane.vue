@@ -106,6 +106,10 @@
         class="pane-session-name"
         :title="tabName"
       >{{ tabName }}</span>
+      <FeishuBindingPanel
+        v-if="isChatSession"
+        :tab-id="pane.tabId"
+      />
     </div>
 
     <!-- 空状态 -->
@@ -156,6 +160,7 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
+import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import TerminalView from '@/components/TerminalView.vue'
 import StructuredPane from '@/components/StructuredPane.vue'
 import type { Pane, TerminalTab } from '@/types'
@@ -299,10 +304,12 @@ onUnmounted(() => {
   background-color: var(--ch-color-success-bg);
 }
 
-/* Floating top-right chrome cluster: manual reconnect icon + session name.
-   Sits in the same spot the session-name pill used to occupy; the cluster
-   never takes a full row and never blocks the terminal surface below. */
+/* Floating top-right chrome cluster: session name plus its contextual action.
+   Keeping every control in this one flex row prevents independently positioned
+   Chat actions from stacking on the name pill. */
 .pane-chrome {
+  --pane-chrome-control-size: 24px;
+
   position: absolute;
   top: 6px;
   right: 8px;
@@ -322,8 +329,8 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 21px;
-  height: 21px;
+  width: var(--pane-chrome-control-size);
+  height: var(--pane-chrome-control-size);
   padding: 0;
   border-radius: 999px;
   background: var(--ch-color-surface-raised);
@@ -402,8 +409,11 @@ onUnmounted(() => {
 }
 
 .pane-session-name {
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
-  padding: 2px 9px;
+  height: var(--pane-chrome-control-size);
+  padding: 0 9px;
   border-radius: 999px;
   background: var(--ch-color-surface-raised);
   border: 1px solid var(--ch-color-border-muted);

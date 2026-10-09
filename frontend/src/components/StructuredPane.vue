@@ -6,8 +6,6 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
-    <FeishuBindingPanel :tab-id="props.tabId" />
-
     <!-- Chat sessions fail closed on this surface. A stream failure never
          mounts a hidden raw terminal; users can retry or create a Terminal. -->
     <div
@@ -1380,7 +1378,6 @@ import {
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'

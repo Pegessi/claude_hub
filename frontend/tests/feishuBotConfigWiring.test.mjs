@@ -14,11 +14,11 @@ test('global Extensions retains one app-level Bot pool dialog', () => {
   assert.ok(dialog.includes('Feishu Bots'))
   assert.ok(dialog.includes('data-testid="feishu-bot-settings-dialog"'))
 })
-test('Bot UI follows the shared design language and keeps the Chat control top-right', () => {
+test('Bot UI follows the shared design language and fits the shared pane chrome', () => {
   for (const marker of ['ch-btn', 'ch-input', 'bot-sidebar', 'empty-state', 'settings-section']) {
     assert.ok(dialog.includes(marker), marker)
   }
-  assert.match(panel, /\.feishu-binding\s*\{[\s\S]*position:\s*absolute;[\s\S]*right:\s*14px;/)
+  assert.match(panel, /\.feishu-binding\s*\{[\s\S]*position:\s*relative;[\s\S]*--pane-chrome-control-size, 24px/)
   assert.ok(panel.includes('trigger-icon'))
   assert.ok(panel.includes('status-dot'))
   assert.ok(panel.includes('Feishu connection settings · ${statusText}'))
