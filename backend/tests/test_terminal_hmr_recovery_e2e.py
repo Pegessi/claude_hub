@@ -514,9 +514,11 @@ def _restart_hmr_stack(ctx: dict[str, Any], tmp_path: Path) -> None:
     _stop_harness_vite(ctx)
     _stop_backend(ctx)
     backend = _start_isolated_backend(tmp_path)
-    vite = _start_harness_vite(backend["base_url"], tmp_path)
+    # Publish the new backend before starting Vite so the fixture's finally
+    # block can stop it even if the Vite restart raises.
     ctx.clear()
-    ctx.update({**backend, **vite})
+    ctx.update(backend)
+    ctx.update(_start_harness_vite(backend["base_url"], tmp_path))
 
 
 def _install_harness_content_pending_observer(page: Page) -> None:
@@ -884,10 +886,13 @@ def _trigger_harness_iframe_reload(page: Page) -> None:
 
 @pytest.fixture
 def isolated_hmr_stack(tmp_path: Path) -> Generator[dict[str, Any], None, None]:
+    # The backend must be inside the cleanup scope the moment it exists: Vite
+    # startup can fail or time out, and a backend started outside try/finally
+    # would survive the failure still holding its port.
     backend = _start_isolated_backend(tmp_path)
-    vite = _start_harness_vite(backend["base_url"], tmp_path)
-    ctx: dict[str, Any] = {**backend, **vite}
+    ctx: dict[str, Any] = {**backend}
     try:
+        ctx.update(_start_harness_vite(backend["base_url"], tmp_path))
         yield ctx
     finally:
         _stop_harness_vite(ctx)
