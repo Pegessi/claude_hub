@@ -3,24 +3,23 @@
 Usage:
   python tests/browser_task_execution_panel.py \
     http://127.0.0.1:5291/tests/task_execution_panel_harness.html \
-    /tmp/task-execution-panel [chromium]
+    /tmp/task-execution-panel EXISTING_BROWSER
 """
 
-import asyncio
 import json
 import re
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from playwright.async_api import async_playwright, expect
+from browser_lifecycle import BrowserRun, run_browser_main
+from playwright.async_api import expect
 
 
-async def main() -> None:
-    if len(sys.argv) not in (3, 4):
+async def main(browser_run: BrowserRun) -> None:
+    if len(sys.argv) != 4:
         raise SystemExit(__doc__)
     url, output_arg = sys.argv[1:3]
-    executable = sys.argv[3] if len(sys.argv) == 4 else None
     parsed_base = urlparse(url)
     if (
         parsed_base.scheme != "http"
@@ -77,17 +76,8 @@ async def main() -> None:
             "replayed": False,
         }
 
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=True,
-            executable_path=executable,
-        )
-        try:
-            context = await browser.new_context(
-                viewport={"width": 1100, "height": 900},
-                service_workers="block",
-            )
-            await context.add_init_script("""
+    async with browser_run.context(viewport={"width": 1100, "height": 900}) as context:
+        await context.add_init_script("""
                 (() => {
                   const original = Storage.prototype.setItem
                   Storage.prototype.setItem = function(key, value) {
@@ -100,297 +90,294 @@ async def main() -> None:
                 })()
                 """)
 
-            async def block_websocket(socket) -> None:
-                await socket.close(code=1000, reason="mocked Task panel smoke")
+        async def block_websocket(socket) -> None:
+            await socket.close(code=1000, reason="mocked Task panel smoke")
 
-            async def api(route) -> None:
-                request = route.request
-                parsed = urlparse(request.url)
-                if (parsed.scheme, parsed.hostname, parsed.port) != (
-                    parsed_base.scheme,
-                    parsed_base.hostname,
-                    parsed_base.port,
-                ):
-                    blocked_requests.append((request.method, request.url))
-                    await route.abort("blockedbyclient")
-                    return
+        async def api(route) -> None:
+            request = route.request
+            parsed = urlparse(request.url)
+            if (parsed.scheme, parsed.hostname, parsed.port) != (
+                parsed_base.scheme,
+                parsed_base.hostname,
+                parsed_base.port,
+            ):
+                blocked_requests.append((request.method, request.url))
+                await route.abort("blockedbyclient")
+                return
 
-                method = request.method
-                path = parsed.path
-                if not path.startswith("/api/"):
-                    if method in {"GET", "HEAD"}:
-                        await route.continue_()
-                    else:
-                        unknown_requests.append((method, path))
-                        await route.fulfill(
-                            status=405,
-                            content_type="application/json",
-                            body=json.dumps({"detail": f"blocked static method: {method} {path}"}),
-                        )
-                    return
-
-                progress_match = re.fullmatch(
-                    r"/api/workspaces/ws-a/tasks/(task-a|task-b|task-workspace)/progress/manual",
-                    path,
-                )
-                handoff_match = re.fullmatch(
-                    r"/api/workspaces/ws-a/tasks/(task-a|task-b|task-workspace)/handoff",
-                    path,
-                )
-                if method == "POST" and progress_match:
-                    action = "progress"
-                    task_id = progress_match.group(1)
-                elif method == "POST" and handoff_match:
-                    action = "handoff"
-                    task_id = handoff_match.group(1)
+            method = request.method
+            path = parsed.path
+            if not path.startswith("/api/"):
+                if method in {"GET", "HEAD"}:
+                    await route.continue_()
                 else:
-                    action = ""
-
-                if action:
-                    workspace_id = "ws-a"
-                    body = json.loads(request.post_data or "{}")
-                    api_requests.append(
-                        {"method": method, "path": path, "action": action, "body": body}
-                    )
-
-                    if not mutation_plans[action]:
-                        unexpected_mutations.append((method, path))
-                        await route.fulfill(
-                            status=500,
-                            content_type="application/json",
-                            body=json.dumps({"detail": "unexpected mutation"}),
-                        )
-                        return
-                    outcome = mutation_plans[action].pop(0)
-                    if outcome == "409":
-                        await route.fulfill(
-                            status=409,
-                            content_type="application/json",
-                            body=json.dumps({"detail": "secret server conflict detail"}),
-                        )
-                        return
-                    if outcome == "malformed":
-                        await route.fulfill(
-                            status=200,
-                            content_type="application/json",
-                            body=json.dumps(
-                                {"task": {"id": "wrong-task"}, "event": {}, "replayed": False}
-                            ),
-                        )
-                        return
-                    if outcome != "ok":
-                        raise AssertionError(f"unknown planned outcome: {outcome}")
+                    unknown_requests.append((method, path))
                     await route.fulfill(
-                        status=200,
+                        status=405,
                         content_type="application/json",
-                        body=json.dumps(mutation_response(action, workspace_id, task_id, body)),
+                        body=json.dumps({"detail": f"blocked static method: {method} {path}"}),
+                    )
+                return
+
+            progress_match = re.fullmatch(
+                r"/api/workspaces/ws-a/tasks/(task-a|task-b|task-workspace)/progress/manual",
+                path,
+            )
+            handoff_match = re.fullmatch(
+                r"/api/workspaces/ws-a/tasks/(task-a|task-b|task-workspace)/handoff",
+                path,
+            )
+            if method == "POST" and progress_match:
+                action = "progress"
+                task_id = progress_match.group(1)
+            elif method == "POST" and handoff_match:
+                action = "handoff"
+                task_id = handoff_match.group(1)
+            else:
+                action = ""
+
+            if action:
+                workspace_id = "ws-a"
+                body = json.loads(request.post_data or "{}")
+                api_requests.append(
+                    {"method": method, "path": path, "action": action, "body": body}
+                )
+
+                if not mutation_plans[action]:
+                    unexpected_mutations.append((method, path))
+                    await route.fulfill(
+                        status=500,
+                        content_type="application/json",
+                        body=json.dumps({"detail": "unexpected mutation"}),
                     )
                     return
-
-                if method == "GET" and path == "/api/workspaces/ws-a/board":
-                    refresh_requests.append((method, path))
+                outcome = mutation_plans[action].pop(0)
+                if outcome == "409":
+                    await route.fulfill(
+                        status=409,
+                        content_type="application/json",
+                        body=json.dumps({"detail": "secret server conflict detail"}),
+                    )
+                    return
+                if outcome == "malformed":
                     await route.fulfill(
                         status=200,
                         content_type="application/json",
                         body=json.dumps(
-                            {
-                                "workspace": {"id": "ws-a", "name": "Fixture workspace"},
-                                "tasks": [],
-                                "sessions": [],
-                                "reports": [],
-                                "tasks_pagination": None,
-                            }
+                            {"task": {"id": "wrong-task"}, "event": {}, "replayed": False}
                         ),
                     )
                     return
-                if method == "GET" and path == "/api/workspaces/ws-a/lessons":
-                    refresh_requests.append((method, path))
-                    await route.fulfill(status=200, content_type="application/json", body="[]")
-                    return
-                unknown_requests.append((method, path))
+                if outcome != "ok":
+                    raise AssertionError(f"unknown planned outcome: {outcome}")
                 await route.fulfill(
-                    status=501,
+                    status=200,
                     content_type="application/json",
-                    body=json.dumps({"detail": f"unmocked API: {method} {path}"}),
+                    body=json.dumps(mutation_response(action, workspace_id, task_id, body)),
                 )
+                return
 
-            await context.route_web_socket("**/*", block_websocket)
-            await context.route("**/*", api)
-            page = await context.new_page()
-            page.on("pageerror", lambda error: page_errors.append(str(error)))
-            await page.goto(url)
-            panel = page.get_by_role("region", name="Task execution and progress")
+            if method == "GET" and path == "/api/workspaces/ws-a/board":
+                refresh_requests.append((method, path))
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "workspace": {"id": "ws-a", "name": "Fixture workspace"},
+                            "tasks": [],
+                            "sessions": [],
+                            "reports": [],
+                            "tasks_pagination": None,
+                        }
+                    ),
+                )
+                return
+            if method == "GET" and path == "/api/workspaces/ws-a/lessons":
+                refresh_requests.append((method, path))
+                await route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            unknown_requests.append((method, path))
+            await route.fulfill(
+                status=501,
+                content_type="application/json",
+                body=json.dumps({"detail": f"unmocked API: {method} {path}"}),
+            )
+
+        await context.route_web_socket("**/*", block_websocket)
+        await context.route("**/*", api)
+        page = await context.new_page()
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        await page.goto(url)
+        panel = page.get_by_role("region", name="Task execution and progress")
+        await expect(panel).to_be_visible()
+
+        async def switch_task(task_id: str, source_label: str) -> None:
+            await page.evaluate(
+                "taskId => window.__TASK_EXECUTION_TEST__.switchTask(taskId)",
+                task_id,
+            )
+            await expect(panel).to_contain_text(source_label)
+
+        async def remount() -> None:
+            await page.evaluate("window.__TASK_EXECUTION_TEST__.remount()")
             await expect(panel).to_be_visible()
 
-            async def switch_task(task_id: str, source_label: str) -> None:
-                await page.evaluate(
-                    "taskId => window.__TASK_EXECUTION_TEST__.switchTask(taskId)",
-                    task_id,
-                )
-                await expect(panel).to_contain_text(source_label)
+        async def assert_no_automatic_mutation(previous_count: int) -> None:
+            await page.wait_for_timeout(100)
+            assert len(api_requests) == previous_count
 
-            async def remount() -> None:
-                await page.evaluate("window.__TASK_EXECUTION_TEST__.remount()")
-                await expect(panel).to_be_visible()
+        # Progress: a 409 stages one exact request. Task switches and a real
+        # unmount/remount restore it, but never send it without a click.
+        summary = panel.get_by_label("Summary", exact=True)
+        await summary.fill("checkpoint one")
+        plan("progress", "409")
+        await panel.get_by_role("button", name="Save progress", exact=True).click()
+        await expect(panel.get_by_role("alert")).to_contain_text("Progress was not confirmed")
+        await expect(
+            panel.get_by_role("button", name="Confirm prior update", exact=True)
+        ).to_be_visible()
+        assert "secret server conflict detail" not in await panel.inner_text()
+        progress_body = mutation_requests("progress")[0]["body"]
 
-            async def assert_no_automatic_mutation(previous_count: int) -> None:
-                await page.wait_for_timeout(100)
-                assert len(api_requests) == previous_count
+        before = len(api_requests)
+        await switch_task("task-b", "From Chat")
+        await expect(
+            panel.get_by_role("button", name="Confirm prior update", exact=True)
+        ).to_have_count(0)
+        await switch_task("task-a", "From Agent")
+        await expect(
+            panel.get_by_role("button", name="Confirm prior update", exact=True)
+        ).to_be_visible()
+        await assert_no_automatic_mutation(before)
 
-            # Progress: a 409 stages one exact request. Task switches and a real
-            # unmount/remount restore it, but never send it without a click.
-            summary = panel.get_by_label("Summary", exact=True)
-            await summary.fill("checkpoint one")
-            plan("progress", "409")
-            await panel.get_by_role("button", name="Save progress", exact=True).click()
-            await expect(panel.get_by_role("alert")).to_contain_text("Progress was not confirmed")
-            await expect(
-                panel.get_by_role("button", name="Confirm prior update", exact=True)
-            ).to_be_visible()
-            assert "secret server conflict detail" not in await panel.inner_text()
-            progress_body = mutation_requests("progress")[0]["body"]
+        await remount()
+        await expect(
+            panel.get_by_role("button", name="Confirm prior update", exact=True)
+        ).to_be_visible()
+        await assert_no_automatic_mutation(before)
 
-            before = len(api_requests)
-            await switch_task("task-b", "From Chat")
-            await expect(
-                panel.get_by_role("button", name="Confirm prior update", exact=True)
-            ).to_have_count(0)
-            await switch_task("task-a", "From Agent")
-            await expect(
-                panel.get_by_role("button", name="Confirm prior update", exact=True)
-            ).to_be_visible()
-            await assert_no_automatic_mutation(before)
+        plan("progress", "malformed")
+        await panel.get_by_role("button", name="Confirm prior update", exact=True).click()
+        await expect(panel.get_by_role("alert")).to_contain_text(
+            "prior progress update could not be confirmed"
+        )
+        assert mutation_requests("progress")[-1]["body"] == progress_body
 
-            await remount()
-            await expect(
-                panel.get_by_role("button", name="Confirm prior update", exact=True)
-            ).to_be_visible()
-            await assert_no_automatic_mutation(before)
+        before = len(api_requests)
+        await remount()
+        await expect(
+            panel.get_by_role("button", name="Confirm prior update", exact=True)
+        ).to_be_visible()
+        await assert_no_automatic_mutation(before)
 
-            plan("progress", "malformed")
-            await panel.get_by_role("button", name="Confirm prior update", exact=True).click()
-            await expect(panel.get_by_role("alert")).to_contain_text(
-                "prior progress update could not be confirmed"
-            )
-            assert mutation_requests("progress")[-1]["body"] == progress_body
+        plan("progress", "ok")
+        await panel.get_by_role("button", name="Confirm prior update", exact=True).click()
+        await expect(panel.get_by_role("status")).to_contain_text("Progress saved")
+        assert [entry["body"] for entry in mutation_requests("progress")] == [
+            progress_body,
+            progress_body,
+            progress_body,
+        ]
+        await remount()
+        await expect(
+            panel.get_by_role("button", name="Confirm prior update", exact=True)
+        ).to_have_count(0)
 
-            before = len(api_requests)
-            await remount()
-            await expect(
-                panel.get_by_role("button", name="Confirm prior update", exact=True)
-            ).to_be_visible()
-            await assert_no_automatic_mutation(before)
+        # Handoff follows the same 409 -> malformed -> accepted sequence.
+        # The saved attempt changes to confirmation wording after recovery,
+        # while its body and call_id remain byte-for-byte stable.
+        await switch_task("task-workspace", "Created manually")
+        plan("handoff", "409")
+        await panel.get_by_role("button", name="Hand off to initiator", exact=True).click()
+        await expect(panel.get_by_role("alert")).to_contain_text("handoff was not confirmed")
+        handoff_body = mutation_requests("handoff")[0]["body"]
 
-            plan("progress", "ok")
-            await panel.get_by_role("button", name="Confirm prior update", exact=True).click()
-            await expect(panel.get_by_role("status")).to_contain_text("Progress saved")
-            assert [entry["body"] for entry in mutation_requests("progress")] == [
-                progress_body,
-                progress_body,
-                progress_body,
-            ]
-            await remount()
-            await expect(
-                panel.get_by_role("button", name="Confirm prior update", exact=True)
-            ).to_have_count(0)
+        before = len(api_requests)
+        await switch_task("task-b", "From Chat")
+        await expect(
+            panel.get_by_role("button", name="Confirm prior handoff", exact=True)
+        ).to_have_count(0)
+        await switch_task("task-workspace", "Created manually")
+        await expect(
+            panel.get_by_role("button", name="Confirm prior handoff", exact=True)
+        ).to_be_visible()
+        await assert_no_automatic_mutation(before)
 
-            # Handoff follows the same 409 -> malformed -> accepted sequence.
-            # The saved attempt changes to confirmation wording after recovery,
-            # while its body and call_id remain byte-for-byte stable.
-            await switch_task("task-workspace", "Created manually")
-            plan("handoff", "409")
-            await panel.get_by_role("button", name="Hand off to initiator", exact=True).click()
-            await expect(panel.get_by_role("alert")).to_contain_text("handoff was not confirmed")
-            handoff_body = mutation_requests("handoff")[0]["body"]
+        await remount()
+        await expect(
+            panel.get_by_role("button", name="Confirm prior handoff", exact=True)
+        ).to_be_visible()
+        await assert_no_automatic_mutation(before)
 
-            before = len(api_requests)
-            await switch_task("task-b", "From Chat")
-            await expect(
-                panel.get_by_role("button", name="Confirm prior handoff", exact=True)
-            ).to_have_count(0)
-            await switch_task("task-workspace", "Created manually")
-            await expect(
-                panel.get_by_role("button", name="Confirm prior handoff", exact=True)
-            ).to_be_visible()
-            await assert_no_automatic_mutation(before)
+        plan("handoff", "malformed")
+        await panel.get_by_role("button", name="Confirm prior handoff", exact=True).click()
+        await expect(panel.get_by_role("alert")).to_contain_text(
+            "prior handoff could not be confirmed"
+        )
+        assert mutation_requests("handoff")[-1]["body"] == handoff_body
 
-            await remount()
-            await expect(
-                panel.get_by_role("button", name="Confirm prior handoff", exact=True)
-            ).to_be_visible()
-            await assert_no_automatic_mutation(before)
+        before = len(api_requests)
+        await remount()
+        await expect(
+            panel.get_by_role("button", name="Confirm prior handoff", exact=True)
+        ).to_be_visible()
+        await assert_no_automatic_mutation(before)
 
-            plan("handoff", "malformed")
-            await panel.get_by_role("button", name="Confirm prior handoff", exact=True).click()
-            await expect(panel.get_by_role("alert")).to_contain_text(
-                "prior handoff could not be confirmed"
-            )
-            assert mutation_requests("handoff")[-1]["body"] == handoff_body
+        plan("handoff", "ok")
+        await panel.get_by_role("button", name="Confirm prior handoff", exact=True).click()
+        await expect(panel.get_by_role("status")).to_contain_text(
+            "Execution responsibility updated"
+        )
+        assert [entry["body"] for entry in mutation_requests("handoff")] == [
+            handoff_body,
+            handoff_body,
+            handoff_body,
+        ]
+        await expect(panel).to_contain_text("External reporter credential · epoch 5")
+        await page.evaluate(
+            "window.__TASK_EXECUTION_TEST__.patchTask({execution_control:'initiator',execution_epoch:5,progress_revision:2})"
+        )
+        await remount()
+        await expect(panel).to_contain_text("External reporter credential · epoch 5")
+        await expect(
+            panel.get_by_role("button", name="Confirm prior handoff", exact=True)
+        ).to_have_count(0)
 
-            before = len(api_requests)
-            await remount()
-            await expect(
-                panel.get_by_role("button", name="Confirm prior handoff", exact=True)
-            ).to_be_visible()
-            await assert_no_automatic_mutation(before)
+        # Persistence failure must stop before fetch. Exercise both request
+        # kinds on distinct Tasks so no prior volatile attempt can interfere.
+        await page.evaluate("globalThis.__FAIL_TASK_STORAGE__ = true")
+        await switch_task("task-b", "From Chat")
+        await panel.get_by_label("Summary", exact=True).fill("must not send")
+        before = len(api_requests)
+        await panel.get_by_role("button", name="Save progress", exact=True).click()
+        await expect(
+            panel.get_by_role("alert").filter(has_text="No request was sent")
+        ).to_be_visible()
+        assert len(api_requests) == before
 
-            plan("handoff", "ok")
-            await panel.get_by_role("button", name="Confirm prior handoff", exact=True).click()
-            await expect(panel.get_by_role("status")).to_contain_text(
-                "Execution responsibility updated"
-            )
-            assert [entry["body"] for entry in mutation_requests("handoff")] == [
-                handoff_body,
-                handoff_body,
-                handoff_body,
-            ]
-            await expect(panel).to_contain_text("External reporter credential · epoch 5")
-            await page.evaluate(
-                "window.__TASK_EXECUTION_TEST__.patchTask({execution_control:'initiator',execution_epoch:5,progress_revision:2})"
-            )
-            await remount()
-            await expect(panel).to_contain_text("External reporter credential · epoch 5")
-            await expect(
-                panel.get_by_role("button", name="Confirm prior handoff", exact=True)
-            ).to_have_count(0)
+        await switch_task("task-a", "From Agent")
+        before = len(api_requests)
+        await panel.get_by_role("button", name="Hand off to Workspace", exact=True).click()
+        await expect(
+            panel.get_by_role("alert").filter(has_text="No request was sent")
+        ).to_be_visible()
+        assert len(api_requests) == before
+        await page.evaluate("globalThis.__FAIL_TASK_STORAGE__ = false")
 
-            # Persistence failure must stop before fetch. Exercise both request
-            # kinds on distinct Tasks so no prior volatile attempt can interfere.
-            await page.evaluate("globalThis.__FAIL_TASK_STORAGE__ = true")
-            await switch_task("task-b", "From Chat")
-            await panel.get_by_label("Summary", exact=True).fill("must not send")
-            before = len(api_requests)
-            await panel.get_by_role("button", name="Save progress", exact=True).click()
-            await expect(
-                panel.get_by_role("alert").filter(has_text="No request was sent")
-            ).to_be_visible()
-            assert len(api_requests) == before
-
-            await switch_task("task-a", "From Agent")
-            before = len(api_requests)
-            await panel.get_by_role("button", name="Hand off to Workspace", exact=True).click()
-            await expect(
-                panel.get_by_role("alert").filter(has_text="No request was sent")
-            ).to_be_visible()
-            assert len(api_requests) == before
-            await page.evaluate("globalThis.__FAIL_TASK_STORAGE__ = false")
-
-            await page.screenshot(path=str(output / "task-execution-panel.png"), full_page=True)
-            assert not mutation_plans["progress"], mutation_plans
-            assert not mutation_plans["handoff"], mutation_plans
-            assert not unexpected_mutations, unexpected_mutations
-            assert not unknown_requests, unknown_requests
-            assert not page_errors, page_errors
-            assert refresh_requests == [
-                ("GET", "/api/workspaces/ws-a/board"),
-                ("GET", "/api/workspaces/ws-a/lessons"),
-                ("GET", "/api/workspaces/ws-a/board"),
-                ("GET", "/api/workspaces/ws-a/lessons"),
-            ]
-            assert not blocked_requests, blocked_requests
-            await context.close()
-        finally:
-            await browser.close()
+        await page.screenshot(path=str(output / "task-execution-panel.png"), full_page=True)
+        assert not mutation_plans["progress"], mutation_plans
+        assert not mutation_plans["handoff"], mutation_plans
+        assert not unexpected_mutations, unexpected_mutations
+        assert not unknown_requests, unknown_requests
+        assert not page_errors, page_errors
+        assert refresh_requests == [
+            ("GET", "/api/workspaces/ws-a/board"),
+            ("GET", "/api/workspaces/ws-a/lessons"),
+            ("GET", "/api/workspaces/ws-a/board"),
+            ("GET", "/api/workspaces/ws-a/lessons"),
+        ]
+        assert not blocked_requests, blocked_requests
 
     report = {
         "result": "PASS",
@@ -407,4 +394,5 @@ async def main() -> None:
     print(json.dumps(report, indent=2))
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    run_browser_main(main)

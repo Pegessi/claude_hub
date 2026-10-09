@@ -419,7 +419,7 @@
                     <span
                       v-if="part.tool.subagent?.background"
                       class="subagent-bg-tag"
-                    >后台</span>
+                    >Background</span>
                   </span>
                   <span class="subagent-headline">{{ subagentHeadline(part.tool) }}</span>
                   <span
@@ -446,7 +446,7 @@
                     v-else-if="part.tool.status === 'running'"
                     class="subagent-running-note"
                   >
-                    子代理调用处理中…
+                    Sub-agent call in progress…
                   </div>
                 </div>
                 <button
@@ -454,7 +454,7 @@
                   class="details-collapse"
                   @click="collapseDetails"
                 >
-                  收起
+                  Collapse
                 </button>
               </details>
             </div>
@@ -476,7 +476,7 @@
               >
                 <summary class="subagent-header">
                   <span class="subagent-idline">
-                    <span class="subagent-badge">原生子代理</span>
+                    <span class="subagent-badge">Native sub-agents</span>
                   </span>
                   <span class="subagent-headline">{{ subagentRegionHeadline(part) }}</span>
                   <span
@@ -508,7 +508,7 @@
                         class="subthread-instruction subthread-launch"
                       >
                         <div class="subthread-instruction-head">
-                          <span class="subthread-instruction-arrow">→ 初始任务</span>
+                          <span class="subthread-instruction-arrow">→ Original task</span>
                           <span
                             class="tool-status"
                             :class="thread.launchTool.status"
@@ -519,7 +519,7 @@
                           v-if="thread.launchTool.resultText"
                           class="subthread-launch-result"
                         >
-                          <summary>派发返回</summary>
+                          <summary>Dispatch result</summary>
                           <pre>{{ thread.launchTool.resultText }}</pre>
                         </details>
                       </div>
@@ -533,7 +533,7 @@
                           class="subthread-instruction"
                         >
                           <div class="subthread-instruction-head">
-                            <span class="subthread-instruction-arrow">→ 指令</span>
+                            <span class="subthread-instruction-arrow">→ Instruction</span>
                             <span
                               class="tool-status"
                               :class="sub.tool.status"
@@ -559,7 +559,7 @@
                             class="details-collapse"
                             @click="collapseDetails"
                           >
-                            收起
+                            Collapse
                           </button>
                         </details>
 
@@ -635,7 +635,7 @@
                             class="details-collapse"
                             @click="collapseDetails"
                           >
-                            收起
+                            Collapse
                           </button>
                         </details>
 
@@ -663,7 +663,7 @@
                             v-else
                             class="turn-attachment-placeholder agent-image-missing"
                           >
-                            图片不可用
+                            Image unavailable
                           </div>
                           <div
                             class="agent-image-path"
@@ -679,7 +679,7 @@
                       class="details-collapse"
                       @click="collapseDetails"
                     >
-                      收起
+                      Collapse
                     </button>
                   </details>
                 </div>
@@ -688,7 +688,7 @@
                   class="details-collapse"
                   @click="collapseDetails"
                 >
-                  收起
+                  Collapse
                 </button>
               </details>
             </div>
@@ -727,7 +727,7 @@
                   v-else
                   class="turn-attachment-placeholder agent-image-missing"
                 >
-                  图片不可用
+                  Image unavailable
                 </div>
                 <div
                   class="agent-image-path"
@@ -2717,20 +2717,20 @@ function toolGroupStatus(
 // all fallback copy in one place.
 
 function subagentChip(tool: TimelineTool): string {
-  return tool.subagent ? subagentProviderLabel(tool.subagent.provider) : '子代理'
+  return tool.subagent ? subagentProviderLabel(tool.subagent.provider) : 'Sub-agent'
 }
 
 /** Sub-agent identity: its type when present, else a provider-local target
  *  (TraeX addresses children by thread id), else a neutral label. */
 function subagentName(tool: TimelineTool): string {
   const view = tool.subagent
-  if (!view) return '子代理'
+  if (!view) return 'Sub-agent'
   if (view.agentType) return view.agentType
   if (view.provider === 'traex') {
     const thread = view.threadIds[0]
-    return thread ? `线程 ${thread.slice(0, 8)}` : 'TraeX 子代理'
+    return thread ? `Thread ${thread.slice(0, 8)}` : 'TraeX sub-agent'
   }
-  return '子代理'
+  return 'Sub-agent'
 }
 
 /** One-line description of what the child is doing. Providers without a
@@ -2745,7 +2745,7 @@ function subagentHeadline(tool: TimelineTool): string {
     .map(line => line.trim())
     .find(line => line.length > 0)
   if (firstLine) return firstLine.length > 140 ? `${firstLine.slice(0, 140)}…` : firstLine
-  return '已派发子代理任务'
+  return 'Sub-agent task dispatched'
 }
 
 function subagentPrompt(tool: TimelineTool): string {
@@ -2754,19 +2754,19 @@ function subagentPrompt(tool: TimelineTool): string {
 
 function subagentCallStatusLabel(status: TimelineTool['status']): string {
   return {
-    running: '调用中',
-    completed: '调用已返回',
-    failed: '调用失败',
-    cancelled: '调用取消',
+    running: 'Running',
+    completed: 'Returned',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
   }[status]
 }
 
 function subagentDispatchLabel(status: TimelineTool['status']): string {
   return {
-    running: '派发中',
-    completed: '已派发',
-    failed: '派发失败',
-    cancelled: '派发取消',
+    running: 'Dispatching',
+    completed: 'Dispatched',
+    failed: 'Dispatch failed',
+    cancelled: 'Dispatch cancelled',
   }[status]
 }
 
@@ -2778,7 +2778,8 @@ type SubagentRegionPart = Extract<TimelinePart, { kind: 'subagents' }>
 type SubthreadPart = SubagentRegionPart['threads'][number]
 
 function subagentRegionHeadline(part: SubagentRegionPart): string {
-  return `${part.threads.length} 个子代理`
+  const count = part.threads.length
+  return `${count} sub-agent${count === 1 ? '' : 's'}`
 }
 
 function subagentRegionStatusLabel(part: SubagentRegionPart): string {
@@ -2788,16 +2789,16 @@ function subagentRegionStatusLabel(part: SubagentRegionPart): string {
   }
   const labels: string[] = []
   const errors = subagentRegionErrorCount(part)
-  if (errors > 0) labels.push(`${errors} 个错误`)
+  if (errors > 0) labels.push(`${errors} ${errors === 1 ? 'error' : 'errors'}`)
   const append = (status: string, label: string) => {
     const count = counts.get(status) ?? 0
-    if (count > 0) labels.push(`${count} 个${label}`)
+    if (count > 0) labels.push(`${count} ${label}`)
   }
-  append('failed', '本轮失败')
-  append('cancelled', '本轮取消')
-  append('active', '本轮活动中')
-  append('unknown', '状态未知')
-  append('completed', '本轮完成')
+  append('failed', 'failed')
+  append('cancelled', 'cancelled')
+  append('active', 'active')
+  append('unknown', 'unknown')
+  append('completed', 'completed')
   return labels.join(' · ')
 }
 
@@ -2816,11 +2817,11 @@ function subthreadStatusClass(part: SubthreadPart): string {
 
 function subthreadStatusLabel(part: SubthreadPart): string {
   return {
-    unknown: '状态未知',
-    active: '本轮活动中',
-    completed: '本轮完成',
-    failed: '本轮失败',
-    cancelled: '本轮取消',
+    unknown: 'Unknown',
+    active: 'Active',
+    completed: 'Completed',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
   }[part.lifecycleStatus]
 }
 
@@ -2843,7 +2844,7 @@ function subthreadHeadline(part: SubthreadPart): string {
   const prompt = part.launchTool?.subagent?.prompt ?? ''
   const first = prompt.split(String.fromCharCode(10)).map(line => line.trim()).find(Boolean)
   if (first) return first.length > 140 ? `${first.slice(0, 140)}…` : first
-  return '等待子代理更新'
+  return 'Waiting for sub-agent activity'
 }
 
 /** Prompt carried by a spawn/sendInput directive tool. */
@@ -5221,7 +5222,8 @@ onUnmounted(() => {
 /* Narrow viewport: tighten composer and timeline padding */
 @media (max-width: 640px) {
   .structured-timeline {
-    padding: 18px 12px;
+    /* The first message must clear the floating Chat controls at scrollTop=0. */
+    padding: 40px 12px 18px;
   }
 
   .structured-composer {

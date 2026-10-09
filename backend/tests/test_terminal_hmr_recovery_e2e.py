@@ -38,6 +38,23 @@ _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 _HARNESS_HTML = "/test/harness/terminal-hmr-harness.html"
 
 
+@pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args: dict[str, Any]) -> dict[str, Any]:
+    """Use the explicitly selected browser without restoring a user's cache/home."""
+    options = dict(browser_type_launch_args)
+    selected = os.environ.get("CLAUDE_HUB_BROWSER_EXECUTABLE")
+    if selected:
+        executable = Path(selected)
+        if (
+            not executable.is_absolute()
+            or not executable.is_file()
+            or not os.access(executable, os.X_OK)
+        ):
+            pytest.fail("CLAUDE_HUB_BROWSER_EXECUTABLE must name an existing absolute executable")
+        options["executable_path"] = str(executable.resolve(strict=True))
+    return options
+
+
 def _free_port() -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))

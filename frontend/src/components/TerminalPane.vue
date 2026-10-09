@@ -19,6 +19,7 @@
     <div
       v-if="pane.tabId"
       class="pane-chrome"
+      :class="{ 'pane-chrome--chat': isChatSession }"
     >
       <button
         v-if="!isChatSession"
@@ -311,6 +312,13 @@ onUnmounted(() => {
   align-items: center;
   gap: 5px;
   max-width: 55%;
+}
+
+/* Chat owns a separate top-right Feishu control. Leave room for it without
+   changing the terminal reconnect control or the stacking order. */
+.pane-chrome--chat {
+  right: 56px;
+  max-width: min(55%, calc(100% - 64px));
 }
 
 /* Tiny icon-only reconnect control, styled to match the floating name pill:

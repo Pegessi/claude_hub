@@ -5,6 +5,20 @@
 
 ## Unreleased
 
+### test(ui): add isolated behavioral acceptance and fix Chat control overlap
+
+- Run five real Vue/Pinia browser scenarios through a shared local/CI entrypoint,
+  with mocked APIs, explicit browser selection and recorded resource cleanup.
+- Check Task retry/credential recovery, native child lifecycle display, current
+  Bot-pool contracts and message provenance after binding changes.
+- Give isolated terminal HMR its own blocking target/CI job; require actual
+  nonempty, zero-skip JUnit results. Record default/focused scope and explicit
+  E2E timing scale, and pin recovery stand-ins to the test interpreter.
+- Keep subagent controls consistently English. Separate the Chat name from its
+  Feishu button and keep long mobile first-message text clear of both controls.
+- Define [UI acceptance](docs/UI_ACCEPTANCE.md), including language, interaction,
+  layout and evidence requirements. See the [stage-two record](docs/working-logs/2026-10-09-ui-acceptance.md).
+
 ### fix(quality): make validation reproducible and preserve Task attachments
 
 - Share local and CI checks through `scripts/verify.sh`, with declared tool
