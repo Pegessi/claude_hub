@@ -69,10 +69,12 @@
 不会自动获得 launcher。直接运行 uvicorn 或 `./start.sh --dev` 时该功能禁用。
 `CLAUDE_HUB_HOST`、`CLAUDE_HUB_PORT` 可覆盖生产启动的监听地址和端口。
 
-页面重启复用已安装的依赖和 `frontend/dist`，不拉取代码、不安装依赖、不重新
-构建前端。发布新前端仍走构建/部署流程。操作状态保存在当前 runtime home 下
-`restart/state.json`，后端日志在 `logs/backend.log`；启动失败还应查看启动终端
-的输出。页面等待超过 3 分钟只提示未确认恢复，不会重复重启。
+页面重启不拉取代码、不重新构建前端；发布新前端仍走构建/部署流程。停止旧后端
+前，launcher 会在 `backend/` 运行 `uv sync --locked --inexact`，按已提交的
+`uv.lock` 补齐后端依赖且不删除额外工具。同步失败或超过 20 秒时，旧后端继续
+运行，页面显示失败原因；不会进入中断服务的阶段。操作状态保存在当前 runtime
+home 下 `restart/state.json`，后端日志在 `logs/backend.log`；同步/启动失败还应
+查看启动终端的输出。页面等待超过 3 分钟只提示未确认恢复，不会重复重启。
 
 ---
 
