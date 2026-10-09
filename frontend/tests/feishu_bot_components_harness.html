@@ -6,27 +6,123 @@
     <title>Feishu Bot components harness</title>
     <style>
       :root {
-        --ch-color-surface: #fff;
-        --ch-color-surface-control: #f4f5f7;
-        --ch-color-text: #24292f;
-        --ch-color-text-muted: #626971;
-        --ch-color-border: #c9cdd2;
-        --ch-color-border-muted: #d9dce0;
-        --ch-color-accent: #3370ff;
-        --ch-color-success: #087f5b;
-        --ch-color-danger: #c92a2a;
-        --ch-color-warning: #a15c00;
-        --ch-radius-md: 8px;
-        --ch-radius-lg: 12px;
-        --ch-shadow-popover: 0 12px 36px rgb(0 0 0 / 16%);
+        color-scheme: dark;
+        --ch-color-app-bg: #1b1b1b;
+        --ch-color-surface: #1f1f1f;
+        --ch-color-surface-raised: #222;
+        --ch-color-surface-control: #272727;
+        --ch-color-surface-control-hover: #2e2e2e;
+        --ch-color-surface-pressed: #333;
+        --ch-color-surface-selected: #2a2f36;
+        --ch-color-surface-sunken: #171717;
+        --ch-color-surface-glass: rgb(25 25 25 / 96%);
+        --ch-color-overlay: rgb(0 0 0 / 60%);
+        --ch-color-border: #2a2a2a;
+        --ch-color-border-muted: #262626;
+        --ch-color-border-strong: #333;
+        --ch-color-border-hover: #3f3f3f;
+        --ch-color-text: #e8e8e8;
+        --ch-color-text-strong: #f5f5f5;
+        --ch-color-text-muted: #9a9a9a;
+        --ch-color-text-subtle: #6e6e6e;
+        --ch-color-text-inverse: #fff;
+        --ch-color-text-code: #e0e0e0;
+        --ch-color-accent: #7cb7ff;
+        --ch-color-accent-strong: #5a9cf0;
+        --ch-color-accent-hover: #4a8ce0;
+        --ch-color-accent-soft: rgb(90 156 240 / 16%);
+        --ch-color-accent-ring: rgb(124 183 255 / 18%);
+        --ch-color-accent-ring-strong: rgb(124 183 255 / 50%);
+        --ch-color-success: #4ade80;
+        --ch-color-success-bg: rgb(74 222 128 / 14%);
+        --ch-color-warning: #fbbf24;
+        --ch-color-warning-strong: #f59e0b;
+        --ch-color-warning-bg: rgb(251 191 36 / 14%);
+        --ch-color-danger: #f87171;
+        --ch-color-danger-strong: #ef4444;
+        --ch-color-danger-hover: #dc2626;
+        --ch-color-danger-bg: rgb(239 68 68 / 15%);
+        --ch-color-danger-border: rgb(239 68 68 / 40%);
+        --ch-color-danger-text: #fca5a5;
+        --ch-color-chip-bg: rgb(255 255 255 / 6%);
+        --ch-color-chip-bg-muted: rgb(255 255 255 / 4%);
+        --ch-color-row-hover: rgb(255 255 255 / 4%);
+        --ch-radius-sm: 4px;
+        --ch-radius-md: 6px;
+        --ch-radius-lg: 8px;
+        --ch-radius-xl: 10px;
+        --ch-shadow-popover: 0 12px 32px rgb(0 0 0 / 36%);
+        --ch-shadow-dialog: 0 20px 60px rgb(0 0 0 / 40%);
+        --ch-shadow-soft: 0 2px 12px rgb(0 0 0 / 30%);
+        --ch-shadow-color-soft: rgb(0 0 0 / 25%);
+        --ch-shadow-button: 0 1px 2px rgb(0 0 0 / 15%);
+        --ch-shadow-button-primary: 0 1px 4px rgb(90 156 240 / 30%);
+        --ch-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --ch-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        --ch-font-size-xs: 11px;
+        --ch-font-size-sm: 12px;
+        --ch-font-size-base: 13px;
+        --ch-font-size-md: 13px;
+        --ch-font-size-lg: 14px;
+        --ch-motion-fast: 120ms cubic-bezier(.2, 0, 0, 1);
       }
       *, *::before, *::after { box-sizing: border-box; }
-      html, body, #app { min-height: 100%; margin: 0; }
-      body { padding: 24px; color: #24292f; font: 14px/1.45 sans-serif; }
+      html, body, #app { height: 100%; margin: 0; overflow: hidden; }
+      body { background: var(--ch-color-app-bg); color: var(--ch-color-text); font: 14px/1.45 var(--ch-font-sans); }
       button, input, select { font: inherit; }
-      .harness { display: grid; min-height: 70vh; align-content: end; justify-content: end; gap: 16px; }
-      .harness-open-settings { justify-self: end; }
-      @media (max-width: 640px) { body { padding: 8px; } }
+      .ch-input, .ch-select {
+        width: 100%;
+        height: 36px;
+        padding: 0 12px;
+        border: 1px solid var(--ch-color-border-strong);
+        border-radius: var(--ch-radius-md);
+        background: var(--ch-color-surface-control);
+        color: var(--ch-color-text);
+        font-size: var(--ch-font-size-md);
+        transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), background var(--ch-motion-fast);
+      }
+      .ch-input:hover, .ch-select:hover { border-color: var(--ch-color-border-hover); }
+      .ch-input:focus, .ch-select:focus {
+        outline: none;
+        border-color: var(--ch-color-accent);
+        box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+      }
+      .ch-input:disabled, .ch-select:disabled { opacity: .55; cursor: not-allowed; }
+      .ch-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        height: 32px;
+        padding: 0 14px;
+        border: 1px solid var(--ch-color-border-strong);
+        border-radius: var(--ch-radius-md);
+        background: var(--ch-color-surface-control);
+        color: var(--ch-color-text);
+        font-size: var(--ch-font-size-base);
+        font-weight: 500;
+        line-height: 1;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), transform var(--ch-motion-fast);
+      }
+      .ch-btn:hover:not(:disabled) { background: var(--ch-color-surface-control-hover); border-color: var(--ch-color-border-hover); }
+      .ch-btn:active:not(:disabled) { background: var(--ch-color-surface-pressed); transform: translateY(1px); }
+      .ch-btn:focus-visible { outline: none; border-color: var(--ch-color-accent); box-shadow: 0 0 0 3px var(--ch-color-accent-ring); }
+      .ch-btn:disabled { opacity: .5; cursor: not-allowed; }
+      .ch-btn--primary { background: var(--ch-color-accent-strong); border-color: var(--ch-color-accent-strong); color: var(--ch-color-text-inverse); font-weight: 600; box-shadow: var(--ch-shadow-button); }
+      .ch-btn--primary:hover:not(:disabled) { background: var(--ch-color-accent-hover); border-color: var(--ch-color-accent-hover); box-shadow: var(--ch-shadow-button-primary); }
+      .ch-btn--danger { background: var(--ch-color-danger-bg); border-color: var(--ch-color-danger-border); color: var(--ch-color-danger-text); }
+      .ch-btn--danger:hover:not(:disabled) { background: var(--ch-color-danger-strong); border-color: var(--ch-color-danger-hover); color: var(--ch-color-text-inverse); }
+      .ch-btn--ghost { background: transparent; border-color: transparent; color: var(--ch-color-text-muted); }
+      .ch-btn--ghost:hover:not(:disabled) { background: var(--ch-color-chip-bg); border-color: transparent; color: var(--ch-color-text); }
+      .ch-btn--sm { height: 28px; padding: 0 10px; border-radius: var(--ch-radius-sm); font-size: var(--ch-font-size-sm); }
+      .ch-btn--icon { width: 32px; height: 32px; padding: 0; }
+      .ch-btn--icon.ch-btn--sm { width: 28px; height: 28px; }
+      .harness { position: relative; height: 100%; background: linear-gradient(145deg, var(--ch-color-app-bg), var(--ch-color-surface)); }
+      .harness::before { content: "Structured Chat preview"; position: absolute; top: 18px; left: 20px; color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); letter-spacing: .05em; text-transform: uppercase; }
+      .harness-open-settings { position: absolute; right: 24px; bottom: 24px; }
+      @media (max-width: 640px) { .harness-open-settings { right: 12px; bottom: 12px; min-height: 44px; } }
     </style>
   </head>
   <body>
@@ -43,7 +139,7 @@
           return () => h('main', { class: 'harness' }, [
             h('button', {
               type: 'button',
-              class: 'harness-open-settings',
+              class: 'ch-btn harness-open-settings',
               onClick: () => { showSettings.value = true },
             }, 'Open Bot settings'),
             h(FeishuBindingPanel, { tabId: 'tab-1' }),

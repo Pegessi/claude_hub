@@ -6,252 +6,482 @@
     aria-labelledby="bot-pool-title"
     @cancel.prevent="close"
   >
-    <header>
-      <div>
-        <h2 id="bot-pool-title">
-          Feishu Bot pool
-        </h2><p>Shared by this Hub instance. Pair a Bot from an individual Chat.</p>
-      </div><button
-        aria-label="Close"
+    <header class="bot-pool__header">
+      <div class="bot-pool__heading">
+        <div
+          class="bot-pool__mark"
+          aria-hidden="true"
+        >
+          飞
+        </div>
+        <div>
+          <h2 id="bot-pool-title">
+            Feishu Bots
+          </h2>
+          <p>Manage the shared Bot pool for this Hub instance.</p>
+        </div>
+      </div>
+      <button
+        type="button"
+        class="ch-btn ch-btn--icon ch-btn--ghost bot-pool__close"
+        aria-label="Close Feishu Bot settings"
         @click="close"
       >
-        ×
+        <svg
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+        ><path d="m4 4 8 8m0-8-8 8" /></svg>
       </button>
     </header>
-    <p
-      v-if="store.loading"
-      role="status"
+
+    <div
+      v-if="store.loading || busy || error || store.error || success || clipboardError || clipboardStatus || store.deprecatedEnv.length"
+      class="bot-pool__notifications"
     >
-      Loading Bot pool…
-    </p>
-    <p
-      v-if="busy"
-      role="status"
-    >
-      Closing this dialog does not cancel the submitted change.
-    </p>
-    <p
-      v-if="error || store.error"
-      class="error"
-      role="alert"
-    >
-      {{ error || store.error }}
-    </p>
-    <p
-      v-if="success"
-      class="success"
-      role="status"
-    >
-      {{ success }}
-    </p>
-    <p
-      v-if="clipboardError"
-      class="error"
-      role="alert"
-    >
-      {{ clipboardError }}
-    </p>
-    <p
-      v-if="clipboardStatus"
-      class="success"
-      role="status"
-    >
-      {{ clipboardStatus }}
-    </p>
-    <p
-      v-if="store.deprecatedEnv.length"
-      class="notice"
-    >
-      Deprecated environment entries: {{ store.deprecatedEnv.join(', ') }}. Migrate them to the Bot pool.
-    </p>
+      <p
+        v-if="store.loading"
+        class="notification"
+        role="status"
+      >
+        <span
+          class="notification__spinner"
+          aria-hidden="true"
+        />
+        Loading Bot pool…
+      </p>
+      <p
+        v-if="busy"
+        class="notification"
+        role="status"
+      >
+        A change is being saved. Closing this dialog will not cancel it.
+      </p>
+      <p
+        v-if="error || store.error"
+        class="notification notification--error"
+        role="alert"
+      >
+        {{ error || store.error }}
+      </p>
+      <p
+        v-if="success"
+        class="notification notification--success"
+        role="status"
+      >
+        {{ success }}
+      </p>
+      <p
+        v-if="clipboardError"
+        class="notification notification--error"
+        role="alert"
+      >
+        {{ clipboardError }}
+      </p>
+      <p
+        v-if="clipboardStatus"
+        class="notification notification--success"
+        role="status"
+      >
+        {{ clipboardStatus }}
+      </p>
+      <p
+        v-if="store.deprecatedEnv.length"
+        class="notification notification--warning"
+      >
+        Deprecated environment entries: {{ store.deprecatedEnv.join(', ') }}. Migrate them to the Bot pool.
+      </p>
+    </div>
 
     <section
       v-if="store.pool"
       class="layout"
     >
-      <div
-        class="list"
-        aria-label="Bots"
-      >
-        <button
-          v-for="bot in store.bots"
-          :key="bot.bot_id"
-          :disabled="busy"
-          type="button"
-          :class="{selected:bot.bot_id===selectedId}"
-          @click="select(bot)"
+      <aside class="bot-sidebar">
+        <div class="bot-sidebar__title">
+          <span>Bots</span>
+          <span class="bot-sidebar__count">{{ store.bots.length }}</span>
+        </div>
+        <div
+          class="list"
+          aria-label="Bots"
         >
-          <strong>{{ bot.name }}</strong><span>{{ occupancy(bot) }}</span>
-        </button>
-        <p v-if="!store.bots.length">
-          No Bots configured.
-        </p>
-      </div>
+          <button
+            v-for="bot in store.bots"
+            :key="bot.bot_id"
+            :disabled="busy"
+            type="button"
+            class="bot-row"
+            :class="{ selected: bot.bot_id === selectedId }"
+            :aria-pressed="bot.bot_id === selectedId"
+            @click="select(bot)"
+          >
+            <span
+              class="bot-row__mark"
+              aria-hidden="true"
+            >飞</span>
+            <span class="bot-row__content">
+              <span class="bot-row__name">
+                <strong>{{ bot.name }}</strong>
+                <span
+                  class="bot-row__status"
+                  :class="{ 'is-disabled': !bot.enabled || !bot.configured }"
+                  aria-hidden="true"
+                />
+              </span>
+              <span class="bot-row__meta">{{ occupancy(bot) }}</span>
+            </span>
+            <svg
+              class="bot-row__chevron"
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+            ><path d="m6 3 5 5-5 5" /></svg>
+          </button>
+          <div
+            v-if="!store.bots.length"
+            class="bot-sidebar__empty"
+          >
+            No Bots yet
+          </div>
+        </div>
+        <div class="bot-sidebar__hint">
+          One Bot can connect to one Chat at a time.
+        </div>
+      </aside>
 
       <section
         v-if="selected"
         class="detail"
       >
-        <h3>{{ selected.name }}</h3>
-        <dl>
-          <div><dt>App ID</dt><dd>{{ selected.app_id }}</dd></div><div><dt>Source</dt><dd>{{ selected.source }}</dd></div>
-          <div><dt>Status</dt><dd>{{ selected.enabled ? 'Enabled' : 'Disabled' }}</dd></div><div><dt>Draft revision</dt><dd>{{ selectedRevision }}</dd></div>
-          <div><dt>App Secret</dt><dd>{{ configured(selected.app_secret_configured) }}</dd></div>
-          <div><dt>Verification Token</dt><dd>{{ configured(selected.verification_token_configured) }}</dd></div>
-          <div><dt>Encrypt Key</dt><dd>{{ configured(selected.encrypt_key_configured) }}</dd></div>
-        </dl>
-        <div class="callback">
-          <code>{{ selected.event_url || 'Public URL required' }}</code><button
+        <div class="detail-header">
+          <div>
+            <div class="detail-title-row">
+              <h3>{{ selected.name }}</h3>
+              <span
+                class="status-chip"
+                :class="selected.enabled ? 'is-enabled' : 'is-disabled'"
+              >{{ selected.enabled ? 'Enabled' : 'Disabled' }}</span>
+              <span class="source-chip">{{ selected.source }}</span>
+            </div>
+            <code class="app-id">{{ selected.app_id }}</code>
+          </div>
+          <span
+            v-if="selected.binding"
+            class="occupancy-chip"
+          >Connected</span>
+        </div>
+
+        <div class="callback-card">
+          <div>
+            <span class="section-eyebrow">Event callback</span>
+            <code>{{ selected.event_url || 'Public URL required' }}</code>
+          </div>
+          <button
             v-if="selected.event_url"
+            type="button"
+            class="ch-btn ch-btn--sm"
             @click="copyUrl"
           >
-            Copy callback
+            Copy URL
           </button>
         </div>
-        <p v-if="selected.binding">
-          In use by Chat <code>{{ selected.binding.tab_id }}</code><span v-if="selected.binding.owner_kind==='local'"> · Trusted local operator</span>
+        <p
+          v-if="selected.binding"
+          class="binding-card"
+        >
+          <span
+            class="binding-card__dot"
+            aria-hidden="true"
+          />
+          <span>In use by Chat <code>{{ selected.binding.tab_id }}</code><span v-if="selected.binding.owner_kind === 'local'"> · Trusted local operator</span></span>
         </p>
 
         <form
           v-if="store.poolEditable"
+          class="settings-section"
           @submit.prevent="saveMetadata"
         >
-          <label>Name<input
-            v-model="editName"
-            :disabled="busy"
-            required
-          ></label>
-          <label class="checkbox-row"><input
-            v-model="editEnabled"
-            :disabled="busy"
-            type="checkbox"
-          > Enabled</label>
+          <div class="section-heading">
+            <div>
+              <h4>Bot details</h4>
+              <p>Update the display name and availability.</p>
+            </div>
+          </div>
+          <label class="field">
+            <span class="field-label">Name</span>
+            <input
+              v-model="editName"
+              class="ch-input"
+              :disabled="busy"
+              required
+            >
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>Enabled</strong>
+              <small>Accept callbacks and allow new Chat pairings.</small>
+            </span>
+            <input
+              v-model="editEnabled"
+              :disabled="busy"
+              type="checkbox"
+            >
+          </label>
           <p
             v-if="selected.enabled && !editEnabled"
-            class="notice"
+            class="inline-notice inline-notice--warning"
           >
             Disabling releases this Bot's Chat and invalidates pending pairings. Save details to confirm.
           </p>
-          <button :disabled="busy">
-            {{ busy ? 'Saving…' : 'Save details' }}
-          </button>
+          <div class="section-actions">
+            <span>Revision {{ selectedRevision }}</span>
+            <button
+              class="ch-btn ch-btn--primary"
+              :disabled="busy"
+            >
+              {{ busy ? 'Saving…' : 'Save details' }}
+            </button>
+          </div>
         </form>
 
         <form
           v-if="selected.credentials_editable"
+          class="settings-section"
           @submit.prevent="saveSecrets"
         >
-          <h4>Replace credentials</h4><p>App ID is immutable. Existing active pairing is preserved.</p>
-          <label>App Secret<input
-            v-model="appSecret"
-            :disabled="busy"
-            type="password"
-            required
-            autocomplete="new-password"
-          ></label>
-          <label>Verification Token<input
-            v-model="verificationToken"
-            :disabled="busy"
-            type="password"
-            required
-            autocomplete="new-password"
-          ></label>
-          <label>Encrypt Key<input
-            v-model="encryptKey"
-            :disabled="busy"
-            type="password"
-            required
-            autocomplete="new-password"
-          ></label>
-          <button :disabled="busy || !secretComplete">
-            Validate and replace
-          </button>
+          <div class="section-heading">
+            <div>
+              <h4>Replace credentials</h4>
+              <p>App ID is immutable. Existing active pairing is preserved.</p>
+            </div>
+            <div
+              class="credential-state"
+              aria-label="Credential configuration"
+            >
+              <span :class="{ configured: selected.app_secret_configured }">Secret {{ selected.app_secret_configured ? 'set' : 'missing' }}</span>
+              <span :class="{ configured: selected.verification_token_configured }">Token {{ selected.verification_token_configured ? 'set' : 'missing' }}</span>
+              <span :class="{ configured: selected.encrypt_key_configured }">Key {{ selected.encrypt_key_configured ? 'set' : 'missing' }}</span>
+            </div>
+          </div>
+          <div class="secret-grid">
+            <label class="field">
+              <span class="field-label">App Secret</span>
+              <input
+                v-model="appSecret"
+                class="ch-input"
+                :disabled="busy"
+                type="password"
+                required
+                autocomplete="new-password"
+              >
+            </label>
+            <label class="field">
+              <span class="field-label">Verification Token</span>
+              <input
+                v-model="verificationToken"
+                class="ch-input"
+                :disabled="busy"
+                type="password"
+                required
+                autocomplete="new-password"
+              >
+            </label>
+            <label class="field field--wide">
+              <span class="field-label">Encrypt Key</span>
+              <input
+                v-model="encryptKey"
+                class="ch-input"
+                :disabled="busy"
+                type="password"
+                required
+                autocomplete="new-password"
+              >
+            </label>
+          </div>
+          <div class="section-actions section-actions--end">
+            <button
+              class="ch-btn"
+              :disabled="busy || !secretComplete"
+            >
+              Validate and replace
+            </button>
+          </div>
         </form>
 
-        <div
+        <section
           v-if="selected.deletable"
-          class="danger"
+          class="danger-zone"
         >
+          <div>
+            <h4>Delete Bot</h4>
+            <p v-if="!confirmDelete">
+              Remove stored credentials and release its Chat.
+            </p>
+            <p v-else>
+              Deleting stops this Bot, releases its Chat, and invalidates pending pairing attempts. Historical source labels remain.
+            </p>
+          </div>
           <button
             v-if="!confirmDelete"
+            type="button"
+            class="ch-btn ch-btn--danger"
             :disabled="busy"
-            @click="confirmDelete=true"
+            @click="confirmDelete = true"
           >
             Delete Bot
           </button>
           <template v-else>
-            <p>Deleting stops this Bot, releases its Chat, and invalidates pending pairing attempts. Historical source labels remain.</p><button
-              :disabled="busy"
-              @click="removeBot"
-            >
-              Confirm delete
-            </button><button
-              :disabled="busy"
-              @click="confirmDelete=false"
-            >
-              Cancel
-            </button>
+            <div class="danger-zone__actions">
+              <button
+                type="button"
+                class="ch-btn ch-btn--danger"
+                :disabled="busy"
+                @click="removeBot"
+              >
+                Confirm delete
+              </button>
+              <button
+                type="button"
+                class="ch-btn"
+                :disabled="busy"
+                @click="confirmDelete = false"
+              >
+                Cancel
+              </button>
+            </div>
           </template>
-        </div>
+        </section>
       </section>
 
       <form
         v-else-if="store.poolEditable"
-        class="detail"
+        class="detail create-view"
         @submit.prevent="createBot"
       >
-        <h3>Add Bot</h3>
-        <label>Name<input
-          v-model="create.name"
-          :disabled="busy"
-          required
-        ></label><label>App ID<input
-          v-model="create.app_id"
-          :disabled="busy"
-          required
-          autocomplete="off"
-        ></label>
-        <label>App Secret<input
-          v-model="create.app_secret"
-          :disabled="busy"
-          type="password"
-          required
-          autocomplete="new-password"
-        ></label>
-        <label>Verification Token<input
-          v-model="create.verification_token"
-          :disabled="busy"
-          type="password"
-          required
-          autocomplete="new-password"
-        ></label>
-        <label>Encrypt Key<input
-          v-model="create.encrypt_key"
-          :disabled="busy"
-          type="password"
-          required
-          autocomplete="new-password"
-        ></label>
-        <button :disabled="busy || !createComplete">
-          Validate and add
-        </button>
+        <div
+          v-if="!store.bots.length"
+          class="empty-state"
+        >
+          <div
+            class="empty-state__icon"
+            aria-hidden="true"
+          >
+            飞
+          </div>
+          <div>
+            <strong>No Bots configured</strong>
+            <p>Add a Feishu custom Bot to connect private messages with a Hub Chat.</p>
+          </div>
+        </div>
+        <div class="create-heading">
+          <span class="section-eyebrow">{{ store.bots.length ? 'New Bot' : 'Get started' }}</span>
+          <h3>Add Bot</h3>
+          <p>Credentials are validated with Feishu, then stored write-only by this Hub instance.</p>
+        </div>
+        <div class="create-grid">
+          <label class="field">
+            <span class="field-label">Name</span>
+            <input
+              v-model="create.name"
+              class="ch-input"
+              :disabled="busy"
+              required
+              placeholder="e.g. Team assistant"
+            >
+          </label>
+          <label class="field">
+            <span class="field-label">App ID</span>
+            <input
+              v-model="create.app_id"
+              class="ch-input"
+              :disabled="busy"
+              required
+              autocomplete="off"
+              placeholder="cli_…"
+            >
+          </label>
+          <label class="field">
+            <span class="field-label">App Secret</span>
+            <input
+              v-model="create.app_secret"
+              class="ch-input"
+              :disabled="busy"
+              type="password"
+              required
+              autocomplete="new-password"
+            >
+          </label>
+          <label class="field">
+            <span class="field-label">Verification Token</span>
+            <input
+              v-model="create.verification_token"
+              class="ch-input"
+              :disabled="busy"
+              type="password"
+              required
+              autocomplete="new-password"
+            >
+          </label>
+          <label class="field field--wide">
+            <span class="field-label">Encrypt Key</span>
+            <input
+              v-model="create.encrypt_key"
+              class="ch-input"
+              :disabled="busy"
+              type="password"
+              required
+              autocomplete="new-password"
+              aria-label="Encrypt Key"
+              aria-describedby="create-encrypt-key-hint"
+            >
+            <small id="create-encrypt-key-hint">Recommended for signed, encrypted event callbacks.</small>
+          </label>
+        </div>
+        <div class="create-actions">
+          <span>App ID cannot be changed after creation.</span>
+          <button
+            class="ch-btn ch-btn--primary"
+            :disabled="busy || !createComplete"
+          >
+            Validate and add
+          </button>
+        </div>
       </form>
     </section>
-    <footer>
-      <button
-        v-if="store.poolEditable"
-        :disabled="busy"
-        @click="beginCreate"
-      >
-        Add Bot
-      </button><button
-        :disabled="busy"
-        @click="refresh"
-      >
-        Reload
-      </button><button @click="close">
-        Close
-      </button>
+
+    <footer class="bot-pool__footer">
+      <div>
+        <button
+          v-if="store.poolEditable"
+          type="button"
+          class="ch-btn"
+          :disabled="busy"
+          @click="beginCreate"
+        >
+          <svg
+            class="button-icon"
+            viewBox="0 0 16 16"
+            aria-hidden="true"
+          ><path d="M8 3v10M3 8h10" /></svg>
+          Add Bot
+        </button>
+      </div>
+      <div class="bot-pool__footer-actions">
+        <button
+          type="button"
+          class="ch-btn ch-btn--ghost"
+          :disabled="busy"
+          @click="refresh"
+        >
+          Reload
+        </button>
+        <button
+          type="button"
+          class="ch-btn"
+          @click="close"
+        >
+          Close
+        </button>
+      </div>
     </footer>
   </dialog>
 </template>
@@ -290,8 +520,12 @@ function clearClipboardState() {
 let viewEpoch = 0
 let closed = false
 
-function configured(value: boolean) { return value ? 'Configured' : 'Not configured' }
-function occupancy(bot: FeishuBotSummary) { return bot.binding ? `In use by Chat ${bot.binding.tab_id}` : 'Available' }
+function occupancy(bot: FeishuBotSummary) {
+  if (bot.binding) return `In use by Chat ${bot.binding.tab_id}`
+  if (!bot.enabled) return 'Disabled'
+  if (!bot.configured) return 'Needs configuration'
+  return 'Available'
+}
 function clearSecrets() { appSecret.value = ''; verificationToken.value = ''; encryptKey.value = '' }
 function clearCreate() { Object.assign(create, { name: '', app_id: '', app_secret: '', verification_token: '', encrypt_key: '' }) }
 function fillSelection(bot: FeishuBotSummary | null, clear = true) {
@@ -413,5 +647,266 @@ onMounted(async () => { dialog.value?.showModal(); await refresh() })
 onUnmounted(() => { clearLocalState(); dialog.value?.close() })
 </script>
 <style scoped>
-.bot-pool{width:min(860px,calc(100vw - 32px));max-height:calc(100dvh - 32px);padding:20px;overflow:auto;background:var(--ch-color-surface);color:var(--ch-color-text);border:1px solid var(--ch-color-border);border-radius:var(--ch-radius-lg)}header,footer,.callback{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.layout{display:grid;grid-template-columns:260px 1fr;gap:16px;align-items:start}.list,.detail,form{display:grid;gap:10px;align-content:start}.list>button{display:flex;justify-content:space-between;align-items:center;gap:8px;min-height:40px;padding:8px 10px;text-align:left}.checkbox-row{display:flex;align-items:center;gap:8px}.checkbox-row input{width:auto;margin:0}.selected{border-color:var(--ch-color-accent)}dl{display:grid;gap:6px}dl div{display:grid;grid-template-columns:150px 1fr}dd{margin:0;overflow-wrap:anywhere}label{display:grid;gap:4px}.error{color:var(--ch-color-danger)}.success{color:var(--ch-color-success)}.notice{color:var(--ch-color-text-muted)}.danger{margin-top:12px;padding-top:12px;border-top:1px solid var(--ch-color-border-muted)}footer{margin-top:16px;justify-content:flex-end}@media(max-width:640px){.layout{grid-template-columns:1fr}.bot-pool{width:calc(100vw - 16px)}}
+.bot-pool {
+  width: min(940px, calc(100vw - 32px));
+  height: min(720px, calc(100dvh - 32px));
+  max-width: none;
+  max-height: none;
+  box-sizing: border-box;
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-xl);
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text);
+  box-shadow: var(--ch-shadow-dialog);
+}
+
+.bot-pool::backdrop { background: var(--ch-color-overlay); }
+
+.bot-pool__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 72px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--ch-color-border);
+  background: var(--ch-color-surface-raised);
+}
+
+.bot-pool__heading { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.bot-pool__heading h2 { margin: 0; color: var(--ch-color-text-strong); font-size: 17px; font-weight: 600; letter-spacing: -.015em; }
+.bot-pool__heading p { margin: 3px 0 0; color: var(--ch-color-text-muted); font-size: var(--ch-font-size-sm); }
+.bot-pool__mark,
+.empty-state__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border: 1px solid color-mix(in srgb, var(--ch-color-accent) 25%, var(--ch-color-border));
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+  font-size: 16px;
+  font-weight: 700;
+}
+.bot-pool__close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
+
+.bot-pool__notifications {
+  position: absolute;
+  top: 78px;
+  right: 18px;
+  z-index: 3;
+  display: grid;
+  width: min(440px, calc(100% - 36px));
+  gap: 6px;
+  pointer-events: none;
+}
+.notification {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-text-muted);
+  box-shadow: var(--ch-shadow-soft);
+  font-size: var(--ch-font-size-sm);
+  line-height: 1.4;
+}
+.notification--error { border-color: var(--ch-color-danger-border); background: var(--ch-color-danger-bg); color: var(--ch-color-danger-text); }
+.notification--success { border-color: color-mix(in srgb, var(--ch-color-success) 35%, var(--ch-color-border)); background: var(--ch-color-success-bg); color: var(--ch-color-success); }
+.notification--warning { border-color: color-mix(in srgb, var(--ch-color-warning) 35%, var(--ch-color-border)); background: var(--ch-color-warning-bg); color: var(--ch-color-warning); }
+.notification__spinner { width: 13px; height: 13px; border: 2px solid var(--ch-color-border); border-top-color: var(--ch-color-accent); border-radius: 50%; animation: settings-spin .8s linear infinite; }
+@keyframes settings-spin { to { transform: rotate(360deg); } }
+
+.layout {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  height: calc(100% - 129px);
+  min-height: 0;
+}
+
+.bot-sidebar {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--ch-color-border);
+  background: var(--ch-color-surface-sunken);
+}
+.bot-sidebar__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 14px 9px;
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.bot-sidebar__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg);
+  color: var(--ch-color-text-subtle);
+  font-size: 10px;
+}
+.list { display: grid; width: 100%; min-width: 0; min-height: 0; gap: 3px; padding: 0 8px 10px; overflow-y: auto; }
+.bot-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 54px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-md);
+  background: transparent;
+  color: var(--ch-color-text);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
+}
+.bot-row:hover:not(:disabled) { background: var(--ch-color-row-hover); }
+.bot-row.selected { border-color: var(--ch-color-accent-ring-strong); background: var(--ch-color-surface-selected); }
+.bot-row:focus-visible { outline: none; border-color: var(--ch-color-accent); box-shadow: 0 0 0 2px var(--ch-color-accent-ring); }
+.bot-row:disabled { opacity: .6; cursor: not-allowed; }
+.bot-row__mark { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: var(--ch-radius-md); background: var(--ch-color-chip-bg); color: var(--ch-color-text-muted); font-size: 12px; font-weight: 700; }
+.bot-row.selected .bot-row__mark { background: var(--ch-color-accent-soft); color: var(--ch-color-accent); }
+.bot-row__content,
+.bot-row__name { min-width: 0; }
+.bot-row__name { display: flex; align-items: center; gap: 7px; }
+.bot-row__name strong { overflow: hidden; color: var(--ch-color-text); font-size: var(--ch-font-size-sm); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.bot-row__meta { display: block; margin-top: 2px; overflow: hidden; color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+.bot-row__status { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--ch-color-success); }
+.bot-row__status.is-disabled { background: var(--ch-color-text-subtle); }
+.bot-row__chevron { width: 14px; height: 14px; fill: none; stroke: var(--ch-color-text-subtle); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.bot-sidebar__empty { padding: 28px 8px; text-align: center; color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-sm); }
+.bot-sidebar__hint { margin-top: auto; padding: 12px 14px 14px; border-top: 1px solid var(--ch-color-border-muted); color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); line-height: 1.45; }
+
+.detail { min-width: 0; min-height: 0; padding: 22px 24px 28px; overflow-y: auto; }
+.detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.detail-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.detail-title-row h3,
+.create-heading h3 { margin: 0; color: var(--ch-color-text-strong); font-size: 18px; font-weight: 600; letter-spacing: -.015em; }
+.app-id { display: block; margin-top: 5px; color: var(--ch-color-text-subtle); font: 11px/1.4 var(--ch-font-mono); }
+.status-chip,
+.source-chip,
+.occupancy-chip { display: inline-flex; align-items: center; min-height: 21px; padding: 0 7px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+.status-chip.is-enabled { background: var(--ch-color-success-bg); color: var(--ch-color-success); }
+.status-chip.is-disabled { background: var(--ch-color-chip-bg); color: var(--ch-color-text-muted); }
+.source-chip { background: var(--ch-color-chip-bg-muted); color: var(--ch-color-text-subtle); text-transform: capitalize; }
+.occupancy-chip { background: var(--ch-color-accent-soft); color: var(--ch-color-accent); }
+
+.callback-card,
+.binding-card { border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-sunken); }
+.callback-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; }
+.callback-card > div { min-width: 0; }
+.section-eyebrow { display: block; margin-bottom: 4px; color: var(--ch-color-text-subtle); font-size: 10px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+.callback-card code { display: block; overflow: hidden; color: var(--ch-color-text-muted); font: 11px/1.4 var(--ch-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.binding-card { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; padding: 9px 11px; color: var(--ch-color-text-muted); font-size: var(--ch-font-size-xs); }
+.binding-card__dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--ch-color-success); }
+.binding-card code { color: var(--ch-color-text-code); font-family: var(--ch-font-mono); }
+
+.settings-section { display: grid; gap: 13px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--ch-color-border-muted); }
+.section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.section-heading h4,
+.danger-zone h4 { margin: 0; color: var(--ch-color-text-strong); font-size: var(--ch-font-size-base); font-weight: 600; }
+.section-heading p,
+.danger-zone p { margin: 3px 0 0; color: var(--ch-color-text-muted); font-size: var(--ch-font-size-xs); line-height: 1.45; }
+.field { display: grid; min-width: 0; gap: 6px; }
+.field-label { color: var(--ch-color-text-muted); font-size: var(--ch-font-size-sm); font-weight: 500; }
+.field small { color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 12px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-sunken); }
+.toggle-row > span { display: grid; gap: 2px; }
+.toggle-row strong { color: var(--ch-color-text); font-size: var(--ch-font-size-sm); font-weight: 500; }
+.toggle-row small { color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); }
+.toggle-row input { width: 16px; height: 16px; accent-color: var(--ch-color-accent-strong); }
+.inline-notice { margin: 0; padding: 9px 11px; border-radius: var(--ch-radius-md); font-size: var(--ch-font-size-xs); line-height: 1.45; }
+.inline-notice--warning { border: 1px solid color-mix(in srgb, var(--ch-color-warning) 35%, var(--ch-color-border)); background: var(--ch-color-warning-bg); color: var(--ch-color-warning); }
+.section-actions,
+.create-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.section-actions > span,
+.create-actions > span { color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); }
+.section-actions--end { justify-content: flex-end; }
+.secret-grid,
+.create-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.field--wide { grid-column: 1 / -1; }
+.credential-state { display: flex; align-items: center; gap: 5px; }
+.credential-state span { padding: 3px 6px; border-radius: 999px; background: var(--ch-color-chip-bg-muted); color: var(--ch-color-text-subtle); font-size: 9px; font-weight: 600; text-transform: uppercase; }
+.credential-state span.configured { background: var(--ch-color-success-bg); color: var(--ch-color-success); }
+
+.danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--ch-color-border-muted); }
+.danger-zone__actions { display: flex; gap: 8px; flex: 0 0 auto; }
+
+.create-view { max-width: 650px; margin: 0 auto; }
+.empty-state { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; padding: 13px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-lg); background: var(--ch-color-surface-sunken); }
+.empty-state__icon { width: 32px; height: 32px; flex-basis: 32px; border-radius: var(--ch-radius-md); font-size: 13px; }
+.empty-state strong { display: block; margin-bottom: 2px; color: var(--ch-color-text); font-size: var(--ch-font-size-sm); }
+.empty-state p,
+.create-heading p { margin: 0; color: var(--ch-color-text-muted); font-size: var(--ch-font-size-xs); line-height: 1.5; }
+.create-heading { margin-bottom: 20px; }
+.create-heading p { margin-top: 5px; }
+.create-grid { gap: 15px; }
+.create-actions { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--ch-color-border-muted); }
+
+.bot-pool__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 57px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--ch-color-border);
+  background: var(--ch-color-surface-raised);
+}
+.bot-pool__footer-actions { display: flex; align-items: center; gap: 6px; }
+.button-icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
+
+@media (max-width: 700px) {
+  .bot-pool { width: calc(100vw - 16px); height: calc(100dvh - 16px); }
+  .bot-pool__header { min-height: 64px; padding: 10px 12px; }
+  .bot-pool__heading p { display: none; }
+  .bot-pool__mark { width: 32px; height: 32px; flex-basis: 32px; }
+  .layout { grid-template-columns: 1fr; height: calc(100% - 121px); overflow-y: auto; }
+  .bot-sidebar { min-height: auto; border-right: 0; border-bottom: 1px solid var(--ch-color-border); }
+  .list { grid-auto-flow: column; grid-auto-columns: minmax(180px, 72vw); overflow-x: auto; overflow-y: hidden; }
+  .bot-sidebar__hint { display: none; }
+  .detail { min-height: auto; padding: 18px 14px 24px; overflow: visible; }
+  .secret-grid,
+  .create-grid { grid-template-columns: 1fr; }
+  .field--wide { grid-column: auto; }
+  .section-heading,
+  .danger-zone,
+  .create-actions { align-items: stretch; flex-direction: column; }
+  .credential-state { align-self: flex-start; }
+  .danger-zone .ch-btn,
+  .danger-zone__actions,
+  .danger-zone__actions .ch-btn,
+  .create-actions .ch-btn { width: 100%; }
+  .bot-pool .ch-btn,
+  .bot-pool .ch-input { min-height: 44px; }
+  .bot-pool .ch-btn--icon { width: 44px; padding: 0; }
+  .bot-pool__notifications { top: 70px; right: 10px; width: calc(100% - 20px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bot-row { transition: none; }
+  .notification__spinner { animation: none; }
+}
 </style>
