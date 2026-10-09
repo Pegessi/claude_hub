@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+### feat(runtime): rebuild frontend during supervised restart
+
+- Make the production menu restart run the committed frontend build after
+  backend dependency synchronization and before interrupting the current
+  backend.
+- Build into a launcher-owned staging directory and promote only a complete
+  asset tree, keeping the current backend and SPA available when preparation
+  fails or times out.
+- Rename the action to **Build and restart** and explain its preparation and
+  interruption phases in the confirmation dialog. See the
+  [frontend-aware restart notes](docs/working-logs/2026-10-09-frontend-aware-restart.md).
+
 ### feat(feishu): receive Bot events over WebSocket long connections
 
 - Fix connection reconciliation so pairing and other business-state revisions

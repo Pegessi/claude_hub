@@ -71,7 +71,7 @@
       <path d="M20 4v6h-6" />
       <path d="M20 10a8 8 0 1 0-2 7.3" />
     </svg>
-    <span>Restart service</span>
+    <span>Build and restart</span>
   </button>
 </template>
 
