@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### style(feishu): align Bot controls with the Hub interface
+
+- Replace the persistent Chat-side Feishu status block with a compact
+  top-right icon and state dot; keep pairing controls in a focused popover.
+- Rework Feishu Bot management into a responsive sidebar/detail dialog using
+  the shared Hub controls, tokens, status chips, empty states, and danger zone.
+- Extend real-component browser coverage for desktop/mobile geometry, including
+  the top-right entry and bounded horizontal Bot navigation. See the
+  [UI polish validation notes](docs/working-logs/2026-10-09-feishu-ui-polish.md).
+
 ### refactor(chat): use descriptive runtime instruction markers
 
 - Send Hub guidance inside `<claude_hub_instructions>` tags with a plain-language

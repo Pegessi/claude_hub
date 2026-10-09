@@ -19,7 +19,7 @@ test('message source is rendered from each durable turn instead of binding state
 })
 
 test('pool binding retains accessible status and explicit pairing controls', () => {
-  for (const marker of ['aria-label="Feishu connection settings"', 'data-testid="feishu-binding-trigger"', 'data-testid="feishu-binding-status"', ':data-state="viewState"', 'Generate pairing code', 'Activate pairing', 'Confirm disconnect']) {
+  for (const marker of [':aria-label="`Feishu connection settings · ${statusText}`"', 'data-testid="feishu-binding-trigger"', 'data-testid="feishu-binding-status"', ':data-state="viewState"', 'Generate pairing code', 'Activate pairing', 'Confirm disconnect']) {
     assert.ok(panel.includes(marker), marker)
   }
   assert.ok(panel.includes('href="/api/auth/login"'))

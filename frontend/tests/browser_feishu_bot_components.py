@@ -320,6 +320,16 @@ async def main() -> None:
             trigger = page.get_by_test_id("feishu-binding-trigger")
             await expect(trigger).to_be_visible()
             await expect(page.get_by_test_id("feishu-binding-status")).to_have_count(0)
+            await expect(trigger).to_have_attribute("title", re.compile(r"^Feishu · "))
+            await expect(trigger).to_have_attribute(
+                "aria-label", re.compile(r"^Feishu connection settings · "),
+            )
+            trigger_box = await trigger.bounding_box()
+            assert trigger_box is not None
+            assert 8 <= trigger_box["y"] <= 16
+            assert 8 <= 1280 - trigger_box["x"] - trigger_box["width"] <= 18
+            assert await trigger.locator("svg").count() == 1
+            await page.screenshot(path=str(output / "feishu-status-entry-desktop.png"))
 
             # Pool create: response is summary-only; submitted credentials clear.
             await page.get_by_role("button", name="Open Bot settings", exact=True).click()
@@ -338,6 +348,18 @@ async def main() -> None:
             await expect(
                 settings.get_by_role("heading", name="Primary Bot", exact=True)
             ).to_be_visible()
+            settings_box = await settings.bounding_box()
+            sidebar_box = await settings.locator(".bot-sidebar").bounding_box()
+            detail_box = await settings.locator(".detail").bounding_box()
+            assert settings_box is not None and settings_box["width"] >= 900
+            assert sidebar_box is not None and detail_box is not None
+            assert sidebar_box["x"] < detail_box["x"]
+            assert 230 <= sidebar_box["width"] <= 270
+            assert detail_box["width"] > sidebar_box["width"]
+            await expect(
+                settings.locator('[aria-label="Bots"] button').filter(has_text="Primary Bot")
+            ).to_have_attribute("aria-pressed", "true")
+            await expect(settings.locator(".credential-state")).to_contain_text("Secret set")
             await expect(
                 settings.get_by_role("status").filter(has_text="Bot added.")
             ).to_be_visible()
@@ -503,6 +525,10 @@ async def main() -> None:
             # Both real components remain operable at mobile width.
             await binding_panel.get_by_role("button", name="Close", exact=True).click()
             await page.set_viewport_size({"width": 390, "height": 844})
+            trigger_box = await trigger.bounding_box()
+            assert trigger_box is not None
+            assert trigger_box["y"] == 8
+            assert 7 <= 390 - trigger_box["x"] - trigger_box["width"] <= 9
             await page.get_by_role("button", name="Open Bot settings", exact=True).click()
             settings = page.get_by_test_id("feishu-bot-settings-dialog")
             await expect(settings).to_be_visible()
@@ -511,7 +537,22 @@ async def main() -> None:
             assert settings_box is not None
             assert settings_box["x"] >= 0
             assert settings_box["x"] + settings_box["width"] <= 391
+            assert settings_box["y"] >= 0
+            assert settings_box["y"] + settings_box["height"] <= 845
+            mobile_sidebar_box = await settings.locator(".bot-sidebar").bounding_box()
+            mobile_detail_box = await settings.locator(".detail").bounding_box()
+            assert mobile_sidebar_box is not None and mobile_detail_box is not None
             await page.screenshot(path=str(output / "feishu-bot-pool-mobile.png"), full_page=True)
+            assert mobile_sidebar_box["y"] < mobile_detail_box["y"]
+            for region_box in (mobile_sidebar_box, mobile_detail_box):
+                assert region_box["x"] >= settings_box["x"]
+                assert (
+                    region_box["x"] + region_box["width"]
+                    <= settings_box["x"] + settings_box["width"] + 1
+                ), {"dialog": settings_box, "region": region_box}
+            assert await settings.locator(".layout").evaluate(
+                "element => getComputedStyle(element).overflowY === 'auto'"
+            )
             await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
             await expect(settings).to_have_count(0)
 
