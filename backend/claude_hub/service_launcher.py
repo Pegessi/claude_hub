@@ -234,33 +234,38 @@ class ServiceLauncher:
 
         backup_directory = self.frontend_build_cwd / f".claude-hub-dist-{uuid4()}"
         promoted = False
-        backup_created = False
         try:
             # Promotion happens only after the old backend stops, keeping the
             # old SPA/API pair intact throughout preparation. Adjacent renames
             # keep rollback on the same filesystem.
             if self.frontend_dist_directory.exists():
                 self.frontend_dist_directory.replace(backup_directory)
-                backup_created = True
-            try:
-                build_directory.replace(self.frontend_dist_directory)
-                promoted = True
-            except OSError as promote_error:
-                if backup_created:
-                    try:
-                        backup_directory.replace(self.frontend_dist_directory)
-                        backup_created = False
-                    except OSError as restore_error:
-                        raise RuntimeError(
-                            "Frontend build promotion failed and the previous frontend "
-                            f"could not be restored from {backup_directory}."
-                        ) from restore_error
+            build_directory.replace(self.frontend_dist_directory)
+            promoted = True
+        except BaseException as promote_error:
+            # Derive ownership from actual paths instead of process-local flags:
+            # SIGTERM/KeyboardInterrupt can arrive between a successful rename
+            # and the next Python assignment. Restore the old tree before
+            # propagating either an ordinary filesystem failure or cancellation.
+            if backup_directory.exists():
+                if self.frontend_dist_directory.exists():
+                    shutil.rmtree(self.frontend_dist_directory, ignore_errors=True)
+                try:
+                    backup_directory.replace(self.frontend_dist_directory)
+                except OSError as restore_error:
+                    raise RuntimeError(
+                        "Frontend build promotion failed and the previous frontend "
+                        f"could not be restored from {backup_directory}."
+                    ) from restore_error
+            if isinstance(promote_error, OSError):
+                if self.frontend_dist_directory.exists():
                     raise RuntimeError(
                         "Frontend build promotion failed. The previous frontend was restored."
                     ) from promote_error
                 raise RuntimeError("Frontend build promotion failed.") from promote_error
+            raise
         finally:
-            if not promoted and not backup_created and build_directory.exists():
+            if not promoted and build_directory.exists():
                 shutil.rmtree(build_directory, ignore_errors=True)
             if promoted and backup_directory.exists():
                 shutil.rmtree(backup_directory, ignore_errors=True)
@@ -293,9 +298,9 @@ class ServiceLauncher:
             stopped = time.monotonic()
             print(f"Restart: backend stopped in {stopped - started:.2f}s", flush=True)
             candidate = build_directory
-            build_directory = None
             try:
                 self.promote_frontend(candidate)
+                build_directory = None
             except RuntimeError as promotion_error:
                 # Promotion restores the previous dist whenever possible. Bring
                 # the API/status endpoint back before reporting the failure.

@@ -413,6 +413,113 @@ out_dir = Path(os.environ["CLAUDE_HUB_FRONTEND_OUT_DIR"])
         launcher.stop_backend()
 
 
+def test_frontend_backup_rename_failure_restores_backend(tmp_path, monkeypatch):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    frontend = tmp_path / "frontend"
+    dist = frontend / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("old frontend")
+    build = tmp_path / "build_frontend.py"
+    build.write_text("""
+import os
+from pathlib import Path
+out_dir = Path(os.environ["CLAUDE_HUB_FRONTEND_OUT_DIR"])
+(out_dir / "index.html").write_text("new frontend")
+""")
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={**os.environ, "TEST_PORT": str(port)},
+        startup_timeout=5,
+        frontend_build_command=[sys.executable, str(build)],
+        frontend_build_cwd=frontend,
+        frontend_dist_directory=dist,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        original_replace = type(dist).replace
+
+        def fail_backup_rename(path, target):
+            if path == dist and target.name.startswith(".claude-hub-dist-"):
+                raise OSError("simulated backup rename failure")
+            return original_replace(path, target)
+
+        monkeypatch.setattr(type(dist), "replace", fail_backup_rename)
+        with store.locked() as state:
+            state["operation"] = {
+                "id": "frontend-backup-failure",
+                "instance_id": old_id,
+                "status": "preparing",
+            }
+
+        launcher.restart()
+
+        operation = store.read()["operation"]
+        assert operation["status"] == "failed"
+        assert operation["message"].startswith("Frontend build promotion failed.")
+        assert old_child.poll() is not None
+        assert launcher.child.poll() is None
+        assert launcher.instance_id != old_id
+        assert launcher.is_healthy() is True
+        assert (dist / "index.html").read_text() == "old frontend"
+        assert not list(frontend.glob(".claude-hub-build-*"))
+        assert not list(frontend.glob(".claude-hub-dist-*"))
+    finally:
+        launcher.stop_backend()
+
+
+@pytest.mark.parametrize("interrupt_point", ["after-backup", "before-candidate"])
+def test_frontend_promotion_interrupt_restores_dist_and_cleans_candidate(
+    tmp_path, monkeypatch, interrupt_point
+):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    frontend = tmp_path / "frontend"
+    dist = frontend / "dist"
+    candidate = frontend / ".claude-hub-build-test"
+    dist.mkdir(parents=True)
+    candidate.mkdir()
+    (dist / "index.html").write_text("old frontend")
+    (candidate / "index.html").write_text("new frontend")
+    launcher = ServiceLauncher(
+        RestartStore(tmp_path),
+        [sys.executable, "-c", "raise SystemExit"],
+        "http://127.0.0.1:1/health",
+        frontend_build_command=[sys.executable, "-c", "raise SystemExit"],
+        frontend_build_cwd=frontend,
+        frontend_dist_directory=dist,
+    )
+    original_replace = type(dist).replace
+
+    def interrupt_promotion(path, target):
+        if interrupt_point == "after-backup" and path == dist:
+            original_replace(path, target)
+            raise KeyboardInterrupt
+        if interrupt_point == "before-candidate" and path == candidate:
+            raise KeyboardInterrupt
+        return original_replace(path, target)
+
+    monkeypatch.setattr(type(dist), "replace", interrupt_promotion)
+
+    with pytest.raises(KeyboardInterrupt):
+        launcher.promote_frontend(candidate)
+
+    assert (dist / "index.html").read_text() == "old frontend"
+    assert not candidate.exists()
+    assert not list(frontend.glob(".claude-hub-dist-*"))
+
+
 def test_frontend_build_timeout_keeps_current_backend_and_dist(tmp_path):
     from claude_hub.service_launcher import ServiceLauncher
     from claude_hub.services.service_restart import RestartStore
