@@ -36,9 +36,11 @@ menus, without adding a second overflow trigger.
 
 The old live process cannot bootstrap its own launcher. Activate this feature
 with a separately authorized external-terminal `./start.sh` start. Menu restart
-does not pull code, rebuild frontend assets, or install dependencies. Frontend
-updates continue through the normal deployment build. An unsupervised service
-reports restart unavailable.
+does not pull code or rebuild frontend assets. The launcher now synchronizes the
+committed backend lockfile before stopping the healthy child; see the
+[dependency-safe restart follow-up](2026-10-09-restart-dependency-sync.md).
+Frontend updates continue through the normal deployment build. An unsupervised
+service reports restart unavailable.
 
 ## Validation
 

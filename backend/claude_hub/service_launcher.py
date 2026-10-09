@@ -7,12 +7,14 @@ child is stopped; an occupied port or a different instance is not a target.
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -30,12 +32,18 @@ class ServiceLauncher:
         *,
         env: dict[str, str] | None = None,
         startup_timeout: float = 120,
+        dependency_sync_command: list[str] | None = None,
+        dependency_sync_cwd: Path | None = None,
+        dependency_sync_timeout: float = 120,
     ) -> None:
         self.store = store
         self.command = command
         self.health_url = health_url
         self.env = dict(os.environ if env is None else env)
         self.startup_timeout = startup_timeout
+        self.dependency_sync_command = dependency_sync_command
+        self.dependency_sync_cwd = dependency_sync_cwd
+        self.dependency_sync_timeout = dependency_sync_timeout
         self.launcher_id = str(uuid4())
         self.instance_id = ""
         self.child: subprocess.Popen[bytes] | None = None
@@ -91,12 +99,35 @@ class ServiceLauncher:
             self.child.kill()
             self.child.wait()
 
+    def synchronize_dependencies(self) -> None:
+        if self.dependency_sync_command is None:
+            return
+        try:
+            result = subprocess.run(
+                self.dependency_sync_command,
+                cwd=self.dependency_sync_cwd,
+                env=self.env,
+                timeout=self.dependency_sync_timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "Backend dependency synchronization timed out. "
+                "Run `uv sync --locked --inexact` from backend and try again."
+            ) from exc
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Backend dependency synchronization failed (exit {result.returncode}). "
+                "Run `uv sync --locked --inexact` from backend and try again."
+            )
+
     def restart(self) -> None:
-        self.store.update_operation(
-            "restarting", "Restarting the service. Waiting for it to reconnect…"
-        )
         started = time.monotonic()
         try:
+            self.synchronize_dependencies()
+            self.store.update_operation(
+                "restarting", "Restarting the service. Waiting for it to reconnect…"
+            )
             self.stop_backend()
             stopped = time.monotonic()
             print(f"Restart: backend stopped in {stopped - started:.2f}s", flush=True)
@@ -146,6 +177,11 @@ def main() -> int:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8173)
     args = parser.parse_args()
+    backend_directory = Path(__file__).resolve().parents[1]
+    uv = shutil.which("uv")
+    if uv is None:
+        print("Error: uv is required to run the supervised backend.", file=sys.stderr)
+        return 1
     launcher = ServiceLauncher(
         RestartStore(resolve_runtime_home()),
         [
@@ -159,6 +195,9 @@ def main() -> int:
             str(args.port),
         ],
         health_url(args.host, args.port),
+        dependency_sync_command=[uv, "sync", "--locked", "--inexact"],
+        dependency_sync_cwd=backend_directory,
+        dependency_sync_timeout=20,
     )
 
     def stop(signum: int, frame: Any) -> None:

@@ -11,6 +11,27 @@ import pytest
 from httpx import AsyncClient
 
 
+def _free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _write_health_server(tmp_path):
+    server = tmp_path / "server.py"
+    server.write_text("""
+import http.server, json, os
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "healthy", "instance_id": os.environ["CLAUDE_HUB_INSTANCE_ID"]}).encode())
+    def log_message(self, *args): pass
+http.server.HTTPServer(("127.0.0.1", int(os.environ["TEST_PORT"])), Handler).serve_forever()
+""")
+    return server
+
+
 @pytest.mark.asyncio
 async def test_unmanaged_server_reports_restart_unavailable(client: AsyncClient, monkeypatch):
     monkeypatch.delenv("CLAUDE_HUB_LAUNCHER_ID", raising=False)
@@ -65,22 +86,10 @@ def test_launcher_replaces_only_its_child_and_checks_new_identity(tmp_path):
     from claude_hub.service_launcher import ServiceLauncher
     from claude_hub.services.service_restart import RestartStore
 
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
+    port = _free_port()
     # A tiny real HTTP child makes shutdown, port release, and instance
     # identity observable without booting tmux or workspace orchestration.
-    server = tmp_path / "server.py"
-    server.write_text("""
-import http.server, json, os
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(json.dumps({"status": "healthy", "instance_id": os.environ["CLAUDE_HUB_INSTANCE_ID"]}).encode())
-    def log_message(self, *args): pass
-http.server.HTTPServer(("127.0.0.1", int(os.environ["TEST_PORT"])), Handler).serve_forever()
-""")
+    server = _write_health_server(tmp_path)
     store = RestartStore(tmp_path)
     launcher = ServiceLauncher(
         store,
@@ -146,6 +155,177 @@ def test_launcher_start_failure_is_recorded_without_retry(tmp_path):
     launcher.restart()
     assert store.read()["operation"]["status"] == "failed"
     assert launcher.child is None
+
+
+def test_launcher_synchronizes_dependencies_before_replacing_child(tmp_path):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    marker = tmp_path / "dependencies-synchronized"
+    synchronize = tmp_path / "synchronize.py"
+    synchronize.write_text("""
+import json, os, urllib.request
+from pathlib import Path
+with urllib.request.urlopen(os.environ["TEST_HEALTH_URL"], timeout=1) as response:
+    health = json.load(response)
+assert health["instance_id"] == os.environ["EXPECTED_INSTANCE_ID"]
+Path("dependencies-synchronized").write_text("ready")
+""")
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={
+            **os.environ,
+            "TEST_PORT": str(port),
+            "TEST_HEALTH_URL": f"http://127.0.0.1:{port}/health",
+        },
+        startup_timeout=5,
+        dependency_sync_command=[sys.executable, str(synchronize)],
+        dependency_sync_cwd=tmp_path,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        launcher.env["EXPECTED_INSTANCE_ID"] = old_id
+        with store.locked() as state:
+            state["operation"] = {"id": "sync", "instance_id": old_id, "status": "preparing"}
+
+        launcher.restart()
+
+        assert marker.read_text() == "ready"
+        assert old_child.poll() is not None
+        assert launcher.child.poll() is None
+        assert launcher.instance_id != old_id
+        assert store.read()["operation"]["status"] == "succeeded"
+    finally:
+        launcher.stop_backend()
+
+
+def test_dependency_sync_failure_keeps_current_backend_running(tmp_path):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    fail_sync = tmp_path / "fail_sync.py"
+    fail_sync.write_text("import sys; print('lock mismatch', file=sys.stderr); raise SystemExit(7)")
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={**os.environ, "TEST_PORT": str(port)},
+        startup_timeout=5,
+        dependency_sync_command=[sys.executable, str(fail_sync)],
+        dependency_sync_cwd=tmp_path,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        with store.locked() as state:
+            state["operation"] = {
+                "id": "sync-failure",
+                "instance_id": old_id,
+                "status": "preparing",
+            }
+
+        launcher.restart()
+
+        operation = store.read()["operation"]
+        assert operation["status"] == "failed"
+        assert operation["message"] == (
+            "Backend dependency synchronization failed (exit 7). "
+            "Run `uv sync --locked --inexact` from backend and try again."
+        )
+        assert launcher.child is old_child
+        assert launcher.child.poll() is None
+        assert launcher.instance_id == old_id
+        assert launcher.is_healthy() is True
+    finally:
+        launcher.stop_backend()
+
+
+def test_dependency_sync_timeout_keeps_current_backend_running(tmp_path):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={**os.environ, "TEST_PORT": str(port)},
+        startup_timeout=5,
+        dependency_sync_command=[sys.executable, "-c", "import time; time.sleep(60)"],
+        dependency_sync_cwd=tmp_path,
+        dependency_sync_timeout=0.01,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        with store.locked() as state:
+            state["operation"] = {"id": "sync-timeout", "status": "preparing"}
+
+        launcher.restart()
+
+        operation = store.read()["operation"]
+        assert operation["status"] == "failed"
+        assert operation["message"] == (
+            "Backend dependency synchronization timed out. "
+            "Run `uv sync --locked --inexact` from backend and try again."
+        )
+        assert launcher.child is old_child
+        assert launcher.child.poll() is None
+        assert launcher.instance_id == old_id
+        assert launcher.is_healthy() is True
+    finally:
+        launcher.stop_backend()
+
+
+def test_launcher_main_uses_locked_inexact_dependency_sync(monkeypatch):
+    from claude_hub import service_launcher as launcher_module
+
+    captured = {}
+
+    class FakeLauncher:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            return 0
+
+    monkeypatch.setattr(launcher_module, "ServiceLauncher", FakeLauncher)
+    monkeypatch.setattr(launcher_module.shutil, "which", lambda command: "/opt/bin/uv")
+    monkeypatch.setattr(launcher_module.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(sys, "argv", ["service-launcher"])
+
+    assert launcher_module.main() == 0
+    assert captured["dependency_sync_command"] == [
+        "/opt/bin/uv",
+        "sync",
+        "--locked",
+        "--inexact",
+    ]
+    assert captured["dependency_sync_timeout"] == 20
+    assert captured["dependency_sync_cwd"] == (
+        tmp_path := launcher_module.Path(launcher_module.__file__).resolve().parents[1]
+    )
+    assert tmp_path.name == "backend"
 
 
 def test_new_launcher_marks_unfinished_operation_failed(tmp_path):

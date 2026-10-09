@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### fix(runtime): synchronize backend dependencies before supervised restart
+
+- Run the committed backend lockfile sync while the current backend remains
+  healthy, then replace the child only after synchronization succeeds.
+- Keep the existing backend online and surface an actionable failed operation
+  when dependency synchronization fails or exceeds its bounded timeout.
+- Use locked, inexact synchronization so a menu restart cannot rewrite the
+  lockfile or remove unrelated tools from the environment. See the
+  [dependency-safe restart notes](docs/working-logs/2026-10-09-restart-dependency-sync.md).
+
 ### style(feishu): align Bot controls with the Hub interface
 
 - Replace the persistent Chat-side Feishu status block with a compact
