@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### style(feishu): align Chat header controls
+
+- Place the Chat-scoped Feishu status action in the existing pane chrome beside
+  the session-name pill instead of positioning both controls over the same
+  top-right coordinates.
+- Give the name and Feishu controls one 24 px geometry and the same raised pill
+  surface, border, radius, shadow, spacing, and vertical alignment. Preserve the
+  accessible connection state and the existing pairing popover.
+- Pin the parallel layout with real-component desktop/mobile geometry checks.
+  See the [header control validation notes](docs/working-logs/2026-10-09-feishu-header-controls.md).
+
 ### fix(quality): make validation reproducible and preserve Task attachments
 
 - Share local and CI checks through `scripts/verify.sh`, with declared tool
