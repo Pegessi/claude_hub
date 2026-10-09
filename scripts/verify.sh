@@ -20,6 +20,8 @@ Targets:
   frontend-types   Run vue-tsc
   frontend-tests   Run the Node unit tests
   frontend-build   Build the Vite bundle
+  terminal-replay  Run the ttyd/tmux replay E2E suite (needs ttyd, tmux and a
+                   Playwright browser; excluded from the default scope and all)
   all              Run all targets and report each result independently
 
 Only backend-tests accepts focused pytest arguments after --. The default and
@@ -68,7 +70,11 @@ run_backend_tests() {
     "the default test target must not use an external backend"
   local parent evidence status scope
   local -a pytest_args
-  if [[ $# -eq 0 ]]; then
+  if [[ "${1:-}" == "--terminal-replay" ]]; then
+    shift
+    scope=terminal-replay
+    pytest_args=(tests/test_terminal_replay.py -v --reruns 1 --reruns-delay 5)
+  elif [[ $# -eq 0 ]]; then
     scope=full
     pytest_args=(-xvs
       --ignore=tests/test_terminal_replay.py
@@ -136,6 +142,9 @@ run_one() {
         frontend-build) script=build:bundle ;;
       esac
       (cd "$ROOT/frontend" && pnpm run "$script")
+      ;;
+    terminal-replay)
+      run_backend_tests --terminal-replay
       ;;
     *) usage; fail "unknown target: $1" ;;
   esac

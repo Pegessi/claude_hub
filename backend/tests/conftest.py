@@ -104,6 +104,21 @@ def capture_pane_sync(session_name: str, start: str = "-100000", end: str = "") 
     return result.stdout
 
 
+def tmux_pane_width(session_name: str) -> int:
+    """Return the tmux pane width, or 0 when the session is unavailable."""
+    import subprocess
+
+    result = subprocess.run(
+        _test_tmux_command("display-message", "-p", "-t", session_name, "#{pane_width}"),
+        capture_output=True,
+        text=True,
+    )
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return 0
+
+
 def send_keys_sync(session_name: str, *keys: str) -> None:
     """Send keys to a tmux session synchronously."""
     import subprocess

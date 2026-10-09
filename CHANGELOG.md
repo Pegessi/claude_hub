@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### fix(test): make the terminal replay E2E suite pass deterministically
+
+- Pin the tmux pane and the browser terminal to the same width before
+  producing or reading history. ttyd resizes the pane to each client, and
+  tmux re-wraps existing lines on resize, so a capture taken at 80 columns
+  could never match a buffer rendered at 156 — a mismatch no timeout could
+  resolve.
+- Stop requesting `/bin/zsh` for the four agent-TUI tabs. It is installed
+  neither on CI runners nor on a stock developer machine, so those tests
+  failed before reaching their assertions.
+- Add an explicit `terminal-replay` verification target so the suite can be
+  run locally; it was previously excluded from every local entrypoint and
+  could only fail in CI.
+- The suite now passes at `CLAUDE_HUB_E2E_TIMEOUT_SCALE=1`, so the CI job
+  gates `main` again instead of being permanently non-blocking.
+
 ### feat(feishu): receive Bot events over WebSocket long connections
 
 - Fix connection reconciliation so pairing and other business-state revisions
