@@ -208,6 +208,385 @@ Path("dependencies-synchronized").write_text("ready")
         launcher.stop_backend()
 
 
+def test_launcher_builds_and_promotes_frontend_before_replacing_child(tmp_path):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    frontend = tmp_path / "frontend"
+    dist = frontend / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("old frontend")
+    build = tmp_path / "build_frontend.py"
+    build.write_text("""
+import json, os, urllib.request
+from pathlib import Path
+with urllib.request.urlopen(os.environ["TEST_HEALTH_URL"], timeout=1) as response:
+    health = json.load(response)
+assert health["instance_id"] == os.environ["EXPECTED_INSTANCE_ID"]
+out_dir = Path(os.environ["CLAUDE_HUB_FRONTEND_OUT_DIR"])
+out_dir.mkdir(parents=True, exist_ok=True)
+(out_dir / "index.html").write_text("new frontend")
+(out_dir / "asset.js").write_text("new asset")
+""")
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={
+            **os.environ,
+            "TEST_PORT": str(port),
+            "TEST_HEALTH_URL": f"http://127.0.0.1:{port}/health",
+        },
+        startup_timeout=5,
+        frontend_build_command=[sys.executable, str(build)],
+        frontend_build_cwd=frontend,
+        frontend_dist_directory=dist,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        launcher.env["EXPECTED_INSTANCE_ID"] = old_id
+        original_stop_backend = launcher.stop_backend
+        first_stop = True
+
+        def stop_backend():
+            nonlocal first_stop
+            if first_stop:
+                first_stop = False
+                assert (dist / "index.html").read_text() == "old frontend"
+                assert launcher.is_healthy() is True
+            original_stop_backend()
+
+        launcher.stop_backend = stop_backend
+        with store.locked() as state:
+            state["operation"] = {
+                "id": "frontend-build",
+                "instance_id": old_id,
+                "status": "preparing",
+            }
+
+        launcher.restart()
+
+        assert (dist / "index.html").read_text() == "new frontend"
+        assert (dist / "asset.js").read_text() == "new asset"
+        assert old_child.poll() is not None
+        assert launcher.child.poll() is None
+        assert launcher.instance_id != old_id
+        assert store.read()["operation"]["status"] == "succeeded"
+        assert not list(frontend.glob(".claude-hub-build-*"))
+        assert not list(frontend.glob(".claude-hub-dist-*"))
+    finally:
+        launcher.stop_backend()
+
+
+def test_frontend_build_failure_keeps_current_backend_and_dist(tmp_path):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    frontend = tmp_path / "frontend"
+    dist = frontend / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("old frontend")
+    fail_build = tmp_path / "fail_build.py"
+    fail_build.write_text("""
+import os, sys
+from pathlib import Path
+out_dir = Path(os.environ["CLAUDE_HUB_FRONTEND_OUT_DIR"])
+out_dir.mkdir(parents=True, exist_ok=True)
+(out_dir / "partial.js").write_text("partial")
+print("type check failed", file=sys.stderr)
+raise SystemExit(9)
+""")
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={**os.environ, "TEST_PORT": str(port)},
+        startup_timeout=5,
+        frontend_build_command=[sys.executable, str(fail_build)],
+        frontend_build_cwd=frontend,
+        frontend_dist_directory=dist,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        with store.locked() as state:
+            state["operation"] = {
+                "id": "frontend-build-failure",
+                "instance_id": old_id,
+                "status": "preparing",
+            }
+
+        launcher.restart()
+
+        operation = store.read()["operation"]
+        assert operation["status"] == "failed"
+        assert operation["message"] == (
+            "Frontend build failed (exit 9). Run `pnpm build` from frontend and try again."
+        )
+        assert launcher.child is old_child
+        assert launcher.child.poll() is None
+        assert launcher.instance_id == old_id
+        assert launcher.is_healthy() is True
+        assert (dist / "index.html").read_text() == "old frontend"
+        assert not list(frontend.glob(".claude-hub-build-*"))
+    finally:
+        launcher.stop_backend()
+
+
+def test_frontend_promotion_failure_restores_dist_and_backend(tmp_path, monkeypatch):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    frontend = tmp_path / "frontend"
+    dist = frontend / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("old frontend")
+    build = tmp_path / "build_frontend.py"
+    build.write_text("""
+import os
+from pathlib import Path
+out_dir = Path(os.environ["CLAUDE_HUB_FRONTEND_OUT_DIR"])
+(out_dir / "index.html").write_text("new frontend")
+""")
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={**os.environ, "TEST_PORT": str(port)},
+        startup_timeout=5,
+        frontend_build_command=[sys.executable, str(build)],
+        frontend_build_cwd=frontend,
+        frontend_dist_directory=dist,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        original_replace = type(dist).replace
+
+        def fail_candidate_promotion(path, target):
+            if path.name.startswith(".claude-hub-build-"):
+                raise OSError("simulated promotion failure")
+            return original_replace(path, target)
+
+        monkeypatch.setattr(type(dist), "replace", fail_candidate_promotion)
+        with store.locked() as state:
+            state["operation"] = {
+                "id": "frontend-promotion-failure",
+                "instance_id": old_id,
+                "status": "preparing",
+            }
+
+        launcher.restart()
+
+        operation = store.read()["operation"]
+        assert operation["status"] == "failed"
+        assert operation["message"] == (
+            "Frontend build promotion failed. The previous frontend was restored."
+        )
+        assert old_child.poll() is not None
+        assert launcher.child.poll() is None
+        assert launcher.instance_id != old_id
+        assert launcher.is_healthy() is True
+        assert (dist / "index.html").read_text() == "old frontend"
+        assert not list(frontend.glob(".claude-hub-build-*"))
+        assert not list(frontend.glob(".claude-hub-dist-*"))
+    finally:
+        launcher.stop_backend()
+
+
+def test_frontend_backup_rename_failure_restores_backend(tmp_path, monkeypatch):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    frontend = tmp_path / "frontend"
+    dist = frontend / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("old frontend")
+    build = tmp_path / "build_frontend.py"
+    build.write_text("""
+import os
+from pathlib import Path
+out_dir = Path(os.environ["CLAUDE_HUB_FRONTEND_OUT_DIR"])
+(out_dir / "index.html").write_text("new frontend")
+""")
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={**os.environ, "TEST_PORT": str(port)},
+        startup_timeout=5,
+        frontend_build_command=[sys.executable, str(build)],
+        frontend_build_cwd=frontend,
+        frontend_dist_directory=dist,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        original_replace = type(dist).replace
+
+        def fail_backup_rename(path, target):
+            if path == dist and target.name.startswith(".claude-hub-dist-"):
+                raise OSError("simulated backup rename failure")
+            return original_replace(path, target)
+
+        monkeypatch.setattr(type(dist), "replace", fail_backup_rename)
+        with store.locked() as state:
+            state["operation"] = {
+                "id": "frontend-backup-failure",
+                "instance_id": old_id,
+                "status": "preparing",
+            }
+
+        launcher.restart()
+
+        operation = store.read()["operation"]
+        assert operation["status"] == "failed"
+        assert operation["message"].startswith("Frontend build promotion failed.")
+        assert old_child.poll() is not None
+        assert launcher.child.poll() is None
+        assert launcher.instance_id != old_id
+        assert launcher.is_healthy() is True
+        assert (dist / "index.html").read_text() == "old frontend"
+        assert not list(frontend.glob(".claude-hub-build-*"))
+        assert not list(frontend.glob(".claude-hub-dist-*"))
+    finally:
+        launcher.stop_backend()
+
+
+@pytest.mark.parametrize("interrupt_point", ["after-backup", "before-candidate"])
+def test_frontend_promotion_interrupt_restores_dist_and_cleans_candidate(
+    tmp_path, monkeypatch, interrupt_point
+):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    frontend = tmp_path / "frontend"
+    dist = frontend / "dist"
+    candidate = frontend / ".claude-hub-build-test"
+    dist.mkdir(parents=True)
+    candidate.mkdir()
+    (dist / "index.html").write_text("old frontend")
+    (candidate / "index.html").write_text("new frontend")
+    launcher = ServiceLauncher(
+        RestartStore(tmp_path),
+        [sys.executable, "-c", "raise SystemExit"],
+        "http://127.0.0.1:1/health",
+        frontend_build_command=[sys.executable, "-c", "raise SystemExit"],
+        frontend_build_cwd=frontend,
+        frontend_dist_directory=dist,
+    )
+    original_replace = type(dist).replace
+
+    def interrupt_promotion(path, target):
+        if interrupt_point == "after-backup" and path == dist:
+            original_replace(path, target)
+            raise KeyboardInterrupt
+        if interrupt_point == "before-candidate" and path == candidate:
+            raise KeyboardInterrupt
+        return original_replace(path, target)
+
+    monkeypatch.setattr(type(dist), "replace", interrupt_promotion)
+
+    with pytest.raises(KeyboardInterrupt):
+        launcher.promote_frontend(candidate)
+
+    assert (dist / "index.html").read_text() == "old frontend"
+    assert not candidate.exists()
+    assert not list(frontend.glob(".claude-hub-dist-*"))
+
+
+def test_frontend_build_timeout_keeps_current_backend_and_dist(tmp_path):
+    from claude_hub.service_launcher import ServiceLauncher
+    from claude_hub.services.service_restart import RestartStore
+
+    port = _free_port()
+    server = _write_health_server(tmp_path)
+    frontend = tmp_path / "frontend"
+    dist = frontend / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("old frontend")
+    late_marker = tmp_path / "orphaned-build-child"
+    timeout_build = tmp_path / "timeout_build.py"
+    timeout_build.write_text("""
+import os, subprocess, sys, time
+subprocess.Popen([
+    sys.executable, "-c",
+    "import pathlib, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "time.sleep(1.5); pathlib.Path(r'"
+    + os.environ["LATE_MARKER"]
+    + "').write_text('orphaned')",
+])
+time.sleep(60)
+""")
+    store = RestartStore(tmp_path)
+    launcher = ServiceLauncher(
+        store,
+        [sys.executable, str(server)],
+        f"http://127.0.0.1:{port}/health",
+        env={**os.environ, "TEST_PORT": str(port), "LATE_MARKER": str(late_marker)},
+        startup_timeout=5,
+        frontend_build_command=[sys.executable, str(timeout_build)],
+        frontend_build_cwd=frontend,
+        frontend_dist_directory=dist,
+        frontend_build_timeout=0.1,
+    )
+    store.initialize(launcher.launcher_id)
+    try:
+        launcher.start_backend()
+        launcher.wait_healthy()
+        old_child = launcher.child
+        old_id = launcher.instance_id
+        with store.locked() as state:
+            state["operation"] = {
+                "id": "frontend-build-timeout",
+                "instance_id": old_id,
+                "status": "preparing",
+            }
+
+        launcher.restart()
+
+        operation = store.read()["operation"]
+        assert operation["status"] == "failed"
+        assert operation["message"] == (
+            "Frontend build timed out. Run `pnpm build` from frontend and try again."
+        )
+        assert launcher.child is old_child
+        assert launcher.child.poll() is None
+        assert launcher.instance_id == old_id
+        assert launcher.is_healthy() is True
+        assert (dist / "index.html").read_text() == "old frontend"
+        assert not list(frontend.glob(".claude-hub-build-*"))
+        time.sleep(1.7)
+        assert not late_marker.exists(), "timed-out build left a child process running"
+    finally:
+        launcher.stop_backend()
+
+
 def test_dependency_sync_failure_keeps_current_backend_running(tmp_path):
     from claude_hub.service_launcher import ServiceLauncher
     from claude_hub.services.service_restart import RestartStore
@@ -297,7 +676,7 @@ def test_dependency_sync_timeout_keeps_current_backend_running(tmp_path):
         launcher.stop_backend()
 
 
-def test_launcher_main_uses_locked_inexact_dependency_sync(monkeypatch):
+def test_launcher_main_wires_backend_sync_and_frontend_build(monkeypatch):
     from claude_hub import service_launcher as launcher_module
 
     captured = {}
@@ -310,7 +689,8 @@ def test_launcher_main_uses_locked_inexact_dependency_sync(monkeypatch):
             return 0
 
     monkeypatch.setattr(launcher_module, "ServiceLauncher", FakeLauncher)
-    monkeypatch.setattr(launcher_module.shutil, "which", lambda command: "/opt/bin/uv")
+    binaries = {"uv": "/opt/bin/uv", "pnpm": "/opt/bin/pnpm"}
+    monkeypatch.setattr(launcher_module.shutil, "which", binaries.get)
     monkeypatch.setattr(launcher_module.signal, "signal", lambda *args: None)
     monkeypatch.setattr(sys, "argv", ["service-launcher"])
 
@@ -326,6 +706,11 @@ def test_launcher_main_uses_locked_inexact_dependency_sync(monkeypatch):
         tmp_path := launcher_module.Path(launcher_module.__file__).resolve().parents[1]
     )
     assert tmp_path.name == "backend"
+    frontend = tmp_path.parent / "frontend"
+    assert captured["frontend_build_command"] == ["/opt/bin/pnpm", "build"]
+    assert captured["frontend_build_timeout"] == 90
+    assert captured["frontend_build_cwd"] == frontend
+    assert captured["frontend_dist_directory"] == frontend / "dist"
 
 
 def test_new_launcher_marks_unfinished_operation_failed(tmp_path):

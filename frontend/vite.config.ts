@@ -5,6 +5,7 @@ import path from 'path'
 const apiTarget = process.env.VITE_API_TARGET || 'http://localhost:8173'
 const systemApiTarget = process.env.VITE_SYSTEM_API_TARGET || apiTarget
 const devPort = Number(process.env.VITE_PORT || process.env.PORT || 5173)
+const buildOutDir = process.env.CLAUDE_HUB_FRONTEND_OUT_DIR || 'dist'
 
 /**
  * SharedArrayBuffer (used by the terminal input fast path) requires the
@@ -36,6 +37,10 @@ function coopCoepHeadersPlugin(): import('vite').Plugin {
 
 export default defineConfig({
   plugins: [vue(), coopCoepHeadersPlugin()],
+  build: {
+    outDir: buildOutDir,
+    emptyOutDir: true,
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
