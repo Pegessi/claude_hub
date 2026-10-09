@@ -336,6 +336,15 @@ class FeishuMessageDedupStore:
                 value["finished_at"] = _dedup_timestamp(self._now())
                 self._save(state)
 
+    def release(self, key: str) -> None:
+        """Release a cancelled claim after its native Chat turn is stopped."""
+
+        _dedup_message_id(key)
+        with self._lock:
+            state = self._load()
+            if state["events"].pop(key, None) is not None:
+                self._save(state)
+
 
 __all__ = [
     "FeishuMessageDedupStore",

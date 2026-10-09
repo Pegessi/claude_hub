@@ -14,13 +14,19 @@ from typing import Any, Awaitable, Callable, Protocol
 import httpx
 
 from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuMessageEvent
-from claude_hub.services.feishu_bot_pool import EffectiveBot, FeishuBotPoolStore
+from claude_hub.services.feishu_bot_pool import (
+    EffectiveBot,
+    FeishuBotPoolError,
+    FeishuBotPoolStore,
+)
 
 logger = logging.getLogger(__name__)
 
 _RECONCILE_SECONDS = 5.0
 _CLOSE_TIMEOUT_SECONDS = 3.0
 _DISCOVERY_TIMEOUT_SECONDS = 15.0
+_MAX_ROUTE_TASKS = 32
+_SHUTDOWN_DRAIN_SECONDS = 30.0
 _MAX_INPUT_CHARS = 4_000
 _MAX_MESSAGE_TIME_MS = 4_102_444_800_000
 
@@ -36,6 +42,68 @@ class _Connection(Protocol):
 
 ConnectionFactory = Callable[[FeishuBotConfig, Callable[[Any], Awaitable[None]]], _Connection]
 EventHandler = Callable[[str, Any], Awaitable[None]]
+
+
+class _RouteCapacityExceeded(RuntimeError):
+    """Raised synchronously so the SDK returns a retryable failure response."""
+
+
+class _BoundedRouteTasks:
+    """Own accepted message tasks across individual transport lifetimes."""
+
+    def __init__(self, max_tasks: int = _MAX_ROUTE_TASKS) -> None:
+        if max_tasks < 1:
+            raise ValueError("max_tasks must be positive")
+        self._max_tasks = max_tasks
+        self._tasks: set[asyncio.Future[Any]] = set()
+        self._accepting = True
+
+    def start_accepting(self) -> None:
+        if self._accepting:
+            return
+        if self._tasks:
+            raise RuntimeError("cannot reopen Feishu routing while tasks are still active")
+        self._accepting = True
+
+    def stop_accepting(self) -> None:
+        self._accepting = False
+
+    def submit(self, callback: Callable[[Any], Awaitable[None]], data: Any) -> None:
+        if not self._accepting or len(self._tasks) >= self._max_tasks:
+            raise _RouteCapacityExceeded("Feishu message routing is at capacity")
+        task: asyncio.Future[None] = asyncio.ensure_future(callback(data))
+        self._tasks.add(task)
+        task.add_done_callback(self._finished)
+
+    def _finished(self, task: asyncio.Future[Any]) -> None:
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Feishu WebSocket message routing failed")
+
+    async def drain(self, timeout_seconds: float) -> bool:
+        """Stop intake and wait for accepted work, cancelling only at the deadline."""
+
+        self.stop_accepting()
+        tasks = set(self._tasks)
+        if not tasks:
+            return True
+        _done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout_seconds))
+        if not pending:
+            return True
+        logger.warning(
+            "Cancelling %d Feishu message route(s) after %.1fs shutdown drain",
+            len(pending),
+            timeout_seconds,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        self._tasks.difference_update(tasks)
+        return False
 
 
 def _required_text(value: Any, name: str) -> str:
@@ -149,13 +217,19 @@ async def _discover_connection_url(
 class _LarkConnection:
     """A bounded, stoppable adapter around lark-oapi 1.5.3's private async core."""
 
-    def __init__(self, config: FeishuBotConfig, callback: Callable[[Any], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        config: FeishuBotConfig,
+        callback: Callable[[Any], Awaitable[None]],
+        *,
+        route_tasks: _BoundedRouteTasks,
+    ) -> None:
         self._config = config
         self._callback = callback
+        self._route_tasks = route_tasks
         self._client: Any = None
         self._receive_task: asyncio.Task[Any] | None = None
         self._ping_task: asyncio.Task[Any] | None = None
-        self._route_tasks: set[asyncio.Task[Any]] = set()
         self._stop = asyncio.Event()
 
     @property
@@ -171,20 +245,9 @@ class _LarkConnection:
         loop = asyncio.get_running_loop()
         setattr(lark_ws_client, "loop", loop)
 
-        def on_message(data: Any) -> None:
-            if self._stop.is_set():
-                return
-
-            async def route() -> None:
-                await self._callback(data)
-
-            task: asyncio.Task[None] = loop.create_task(route())
-            self._route_tasks.add(task)
-            task.add_done_callback(self._route_finished)
-
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
-            .register_p2_im_message_receive_v1(on_message)
+            .register_p2_im_message_receive_v1(self._accept_message)
             .build()
         )
         client = lark.ws.Client(
@@ -226,14 +289,13 @@ class _LarkConnection:
         finally:
             await self.close()
 
-    def _route_finished(self, task: asyncio.Task[Any]) -> None:
-        self._route_tasks.discard(task)
-        if task.cancelled():
-            return
-        try:
-            task.result()
-        except Exception:
-            logger.exception("Feishu WebSocket message routing failed")
+    def _accept_message(self, data: Any) -> None:
+        if self._stop.is_set():
+            raise _RouteCapacityExceeded("Feishu message routing is stopping")
+        # This callback runs synchronously inside the SDK's data-frame handler.
+        # Raising makes lark-oapi answer with a non-2xx code, allowing Feishu to
+        # retry instead of ACKing work we cannot retain.
+        self._route_tasks.submit(self._callback, data)
 
     async def close(self) -> None:
         self._stop.set()
@@ -258,7 +320,7 @@ class _LarkConnection:
 
 @dataclass
 class _ManagedConnection:
-    effective: EffectiveBot
+    transport: tuple[str, str, FeishuBotConfig]
     connection: _Connection
     task: asyncio.Task[None]
 
@@ -273,16 +335,20 @@ class FeishuBotWebSocketSupervisor:
         *,
         connection_factory: ConnectionFactory | None = None,
         reconcile_seconds: float = _RECONCILE_SECONDS,
+        route_tasks: _BoundedRouteTasks | None = None,
+        shutdown_drain_seconds: float = _SHUTDOWN_DRAIN_SECONDS,
     ) -> None:
         self._pool = pool
         self._handler = handler
+        self._route_tasks = route_tasks or _BoundedRouteTasks()
         if connection_factory is None:
             self._connection_factory: ConnectionFactory = lambda config, callback: _LarkConnection(
-                config, callback
+                config, callback, route_tasks=self._route_tasks
             )
         else:
             self._connection_factory = connection_factory
         self._reconcile_seconds = reconcile_seconds
+        self._shutdown_drain_seconds = shutdown_drain_seconds
         self._connections: dict[str, _ManagedConnection] = {}
         self._failures: set[str] = set()
         self._lock = asyncio.Lock()
@@ -291,6 +357,7 @@ class FeishuBotWebSocketSupervisor:
         self._stopping = False
 
     async def start(self) -> None:
+        self._route_tasks.start_accepting()
         self._stopping = False
         self._started = True
         await self.reconcile()
@@ -300,6 +367,7 @@ class FeishuBotWebSocketSupervisor:
     async def stop(self) -> None:
         self._stopping = True
         self._started = False
+        self._route_tasks.stop_accepting()
         if self._monitor is not None:
             self._monitor.cancel()
             await asyncio.gather(self._monitor, return_exceptions=True)
@@ -308,6 +376,7 @@ class FeishuBotWebSocketSupervisor:
             for bot_id in list(self._connections):
                 await self._stop_one(bot_id)
             self._failures.clear()
+        await self._route_tasks.drain(self._shutdown_drain_seconds)
 
     async def _monitor_loop(self) -> None:
         while True:
@@ -327,7 +396,11 @@ class FeishuBotWebSocketSupervisor:
                     desired[entry.bot_id] = self._pool.effective(entry.bot_id)
             for bot_id, managed in list(self._connections.items()):
                 effective = desired.get(bot_id)
-                if effective != managed.effective or managed.task.done():
+                if (
+                    effective is None
+                    or self._transport(effective) != managed.transport
+                    or managed.task.done()
+                ):
                     await self._stop_one(bot_id)
             self._failures.intersection_update(desired)
             if self._stopping:
@@ -337,13 +410,23 @@ class FeishuBotWebSocketSupervisor:
                     self._start_one(bot_id, effective)
 
     def _start_one(self, bot_id: str, effective: EffectiveBot) -> None:
-        async def callback(data: Any) -> None:
-            if self._pool.is_current(effective):
-                await self._handler(bot_id, data)
+        transport = self._transport(effective)
+
+        def callback(data: Any) -> Awaitable[None]:
+            # A connection remains authoritative across pairing/name/revision
+            # mutations. Only transport-affecting changes invalidate accepted
+            # work; the handler re-reads current business state before routing.
+            try:
+                current = self._pool.effective(bot_id)
+            except FeishuBotPoolError as exc:
+                raise _RouteCapacityExceeded("Feishu Bot transport is no longer active") from exc
+            if self._transport(current) != transport:
+                raise _RouteCapacityExceeded("Feishu Bot transport has been replaced")
+            return self._handler(bot_id, data)
 
         connection = self._connection_factory(effective.config, callback)
         task = asyncio.create_task(connection.run())
-        self._connections[bot_id] = _ManagedConnection(effective, connection, task)
+        self._connections[bot_id] = _ManagedConnection(transport, connection, task)
         self._failures.discard(bot_id)
 
         def finished(done: asyncio.Task[None]) -> None:
@@ -356,6 +439,10 @@ class FeishuBotWebSocketSupervisor:
                 )
 
         task.add_done_callback(finished)
+
+    @staticmethod
+    def _transport(effective: EffectiveBot) -> tuple[str, str, FeishuBotConfig]:
+        return (effective.bot_id, effective.app_id, effective.config)
 
     async def _stop_one(self, bot_id: str) -> None:
         managed = self._connections.pop(bot_id, None)

@@ -340,6 +340,133 @@ async def test_external_chat_bridge_preserves_unknown_conflict(
     assert unsubscribed == [(session.id, queue)]
 
 
+@pytest.mark.asyncio
+async def test_external_chat_bridge_cancellation_stops_the_matching_native_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    dispatched = asyncio.Event()
+    cancelled: list[tuple[object, str | None]] = []
+    unsubscribed: list[tuple[str, object]] = []
+
+    class FakeManager:
+        async def subscribe(self, session_arg):
+            assert session_arg is session
+            return queue
+
+        async def cancel_turn(self, session_arg, expected_turn_id=None):
+            cancelled.append((session_arg, expected_turn_id))
+            return True
+
+        def unsubscribe(self, session_id, queue_arg) -> None:
+            unsubscribed.append((session_id, queue_arg))
+
+    async def fake_dispatch(_tab_id, payload, **_kwargs) -> str:
+        dispatched.set()
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    manager = FakeManager()
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=60
+        )
+    )
+    await dispatched.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(stream_api.ExternalDispatchRetired):
+        await task
+    assert cancelled == [(session, "feishu-turn")]
+    assert unsubscribed == [(session.id, queue)]
+
+
+@pytest.mark.asyncio
+async def test_external_chat_bridge_cancellation_is_bounded_when_turn_is_already_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    dispatched = asyncio.Event()
+
+    class FakeManager:
+        async def subscribe(self, _session_arg):
+            return queue
+
+        async def cancel_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-turn"
+            return False
+
+        def unsubscribe(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(_tab_id, payload, **_kwargs) -> str:
+        dispatched.set()
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=60
+        )
+    )
+    await dispatched.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(stream_api.ExternalDispatchRetired):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_external_chat_bridge_cancellation_times_out_a_stalled_native_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    dispatched = asyncio.Event()
+
+    class FakeManager:
+        async def subscribe(self, _session_arg):
+            return queue
+
+        async def cancel_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-turn"
+            await asyncio.Future()
+
+        def unsubscribe(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(_tab_id, payload, **_kwargs) -> str:
+        dispatched.set()
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_EXTERNAL_CANCEL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=60
+        )
+    )
+    await dispatched.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
+
+
 def test_activation_boundary_does_not_round_down_or_add_grace():
     assert feishu_message_time_is_valid(1125, activated_at=1.125, now=1.125)
     assert not feishu_message_time_is_valid(1125, activated_at=1.1259765625, now=2.0)

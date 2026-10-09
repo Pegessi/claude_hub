@@ -16,7 +16,11 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from claude_hub.api.agent_stream import CHAT_ERROR_REASON_HEADER, dispatch_tab_chat_and_wait
+from claude_hub.api.agent_stream import (
+    CHAT_ERROR_REASON_HEADER,
+    ExternalDispatchRetired,
+    dispatch_tab_chat_and_wait,
+)
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
@@ -921,7 +925,15 @@ async def _handle_sdk_event(bot_id: str, data: Any) -> None:
         return
     if not _dedup.claim(dedup_key(bot_id, event.message_id)):
         return
-    await _handle_message_event(bot_id, event, effective)
+    key = dedup_key(bot_id, event.message_id)
+    try:
+        await _handle_message_event(bot_id, event, effective)
+    except ExternalDispatchRetired:
+        # Final shutdown cancels only after its bounded drain. The Chat bridge
+        # has stopped (or found no) matching native turn, so releasing the claim
+        # lets a same-ID replay recover instead of remaining suppressed for a week.
+        _dedup.release(key)
+        raise
 
 
 _ws_supervisor = FeishuBotWebSocketSupervisor(_pool, _handle_sdk_event)
