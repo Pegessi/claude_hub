@@ -252,6 +252,7 @@ def test_auto_continue_messages_carry_endpoint_when_sent(monkeypatch):
     monkeypatch.setattr(workspace_manager, "_auto_continue_output_looks_busy", lambda _o: False)
     monkeypatch.setattr(workspace_manager, "_latest_report_state", lambda _t: None)
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_save_workspace_state", lambda _workspace_id: None)
 
     sampled = datetime.utcnow()
 
@@ -309,6 +310,7 @@ def test_auto_continue_reminder_call_id_stable_per_attempt_then_advances(monkeyp
     monkeypatch.setattr(workspace_manager, "_auto_continue_output_looks_busy", lambda _o: False)
     monkeypatch.setattr(workspace_manager, "_latest_report_state", lambda _t: None)
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(
         workspace_manager,
         "_auto_continue_interruption_reason",

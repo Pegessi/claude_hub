@@ -1,8 +1,8 @@
 """Report intake, autonomous run, and review-request handling."""
 
-import copy
 import hashlib
 import json
+from collections.abc import Mapping
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
@@ -40,9 +40,7 @@ class ReportCallIdConflict(ValueError):
 
 class _ReportsMixin:
     def _snapshot_report_intake_workspace(self, workspace_id: str) -> dict[str, Any]:
-        """Deep snapshot every durable domain mutated by report intake."""
-
-        mailbox = self.task_mailbox
+        """Snapshot the domains mutated by report and Task transactions."""
         workspace = self.workspaces.get(workspace_id)
         return {
             "sessions": {
@@ -61,47 +59,27 @@ class _ReportsMixin:
                 if value.workspace_id == workspace_id
             },
             "workspace": workspace.model_copy(deep=True) if workspace is not None else None,
-            "task_events_present": workspace_id in mailbox._events,
-            "task_events": copy.deepcopy(mailbox._events.get(workspace_id, [])),
-            "task_call_index_present": workspace_id in mailbox._call_index,
-            "task_call_index": copy.deepcopy(mailbox._call_index.get(workspace_id, {})),
-            "task_next_seq_present": workspace_id in mailbox._next_seq,
-            "task_next_seq": mailbox._next_seq.get(workspace_id),
+            "mailbox": self.task_mailbox.snapshot_workspace(workspace_id),
         }
 
     def _restore_report_intake_workspace(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
         """Restore a snapshot made by :meth:`_snapshot_report_intake_workspace`."""
-
         for collection_name in ("sessions", "tasks", "reports"):
             collection = getattr(self, collection_name)
             for key, value in list(collection.items()):
                 if value.workspace_id == workspace_id:
                     collection.pop(key, None)
             collection.update(snapshot[collection_name])
-
         if snapshot.get("workspace") is not None:
             self.workspaces[workspace_id] = snapshot["workspace"]
-
-        mailbox = self.task_mailbox
-        if snapshot.get("task_events_present"):
-            mailbox._events[workspace_id] = snapshot["task_events"]
-        else:
-            mailbox._events.pop(workspace_id, None)
-        if snapshot.get("task_call_index_present"):
-            mailbox._call_index[workspace_id] = snapshot["task_call_index"]
-        else:
-            mailbox._call_index.pop(workspace_id, None)
-        if snapshot.get("task_next_seq_present"):
-            mailbox._next_seq[workspace_id] = snapshot["task_next_seq"]
-        else:
-            mailbox._next_seq.pop(workspace_id, None)
+        self.task_mailbox.restore_workspace(workspace_id, snapshot["mailbox"])
 
     def _wake_report_intake_runs(self, wake_targets: set[tuple[str, str]]) -> None:
         """Wake TaskMailbox consumers after the outer commit succeeds."""
 
         for consumer_key, _author in wake_targets:
             if consumer_key.startswith("task:"):
-                self.task_mailbox._waiters.wake(consumer_key)
+                self.task_mailbox.wake_consumer(consumer_key)
 
     def _should_route_goal_packet_for_approval(
         self,
@@ -321,7 +299,7 @@ class _ReportsMixin:
             bridge_wake_target = self._bridge_report_to_agent_event(existing, existing_session)
             if bridge_wake_target is not None:
                 retry_wake_targets.add(bridge_wake_target)
-        self._save_state()
+        self._save_workspace_state(session.workspace_id)
         self._report_intake_committed.add(
             self._report_intake_commit_token(session.workspace_id, session.id, existing.call_id)
         )
@@ -404,7 +382,6 @@ class _ReportsMixin:
                         live.workspace_id, session_id, call_id
                     )
                     self._report_intake_committed.discard(commit_token)
-                    persistence_token = self._report_intake_workspace.set(live.workspace_id)
                     try:
                         report = await self._create_report_under_lock(session_id, payload)
                     except Exception:
@@ -412,7 +389,6 @@ class _ReportsMixin:
                             self._restore_report_intake_workspace(live.workspace_id, snapshot)
                         raise
                     finally:
-                        self._report_intake_workspace.reset(persistence_token)
                         self._report_intake_committed.discard(commit_token)
 
         # Post-commit task/reviewer effects deliberately run after both locks
@@ -440,7 +416,7 @@ class _ReportsMixin:
         # Report intake idempotency (call_id + payload fingerprint).
         #
         # create_report durably persists the report and TaskMailbox bridge
-        # together (via _save_state) BEFORE running message-sending
+        # together (via _save_workspace_state) BEFORE running message-sending
         # post-commit effects. If one of those effects raises AFTER the
         # durable commit, the client receives an error and retries. Without
         # an idempotency key the retry creates a SECOND report and task
@@ -708,7 +684,7 @@ class _ReportsMixin:
             # ------------------------------------------------------------------
             # REVIEWER terminal-review states: write all review fields and
             # release the reviewer binding BEFORE the first (and now only)
-            # _save_state call. The previous pattern wrote the report in one
+            # _save_workspace_state call. The previous pattern wrote the report in one
             # save, then relied on _after_report_recorded → _handle_review_report
             # to do a SECOND save with review_completed_at / human_acceptance_requested_at
             # set. That two-phase gap meant every board poll between them saw
@@ -876,11 +852,10 @@ class _ReportsMixin:
         if bridge_wake_target is not None:
             wake_targets.add(bridge_wake_target)
 
-        # Single durable commit for report/session/task plus mailbox ACK and
-        # TaskMailbox cursor reconciliation. The ACK helpers above only mutate
-        # in-memory state (persist=False); if this save fails the workspace
-        # workspace snapshot owned by create_report restores every domain.
-        self._save_state()
+        # Commit report/session/task and mailbox reconciliation together.
+        # ACK helpers only stage memory (persist=False); create_report owns
+        # rollback. The marker preserves committed state if a later wake fails.
+        self._save_workspace_state(session.workspace_id)
         self._report_intake_committed.add(
             self._report_intake_commit_token(session.workspace_id, session_id, call_id)
         )
@@ -940,7 +915,7 @@ class _ReportsMixin:
         verified_acked: list[str] = []
         for call_id in acked:
             mailbox_record = (
-                self.task_mailbox._call_record(task.workspace_id, call_id)
+                self.task_mailbox.lookup_call(task.workspace_id, call_id)
                 if task is not None
                 else None
             )
@@ -986,33 +961,16 @@ class _ReportsMixin:
             else task.workspace_id if task is not None else None
         )
 
-        # ---- TaskMailbox followup reconciliation (BEFORE delivered mutation) ----
-        #
-        # reconcile_followup_outcome and the followup:delivered event append
-        # each TaskMailbox persist -> self._save_state(), which writes
-        # the FULL workspace state (sessions/tasks) to disk. If we ran these
-        # AFTER moving the call_id to delivered (and clearing pending_messages),
-        # a failure in the delivered-event append would leave disk committed
-        # to delivered + no payload while memory rolls back to processing —
-        # unrecoverable after restart.
-        #
-        # Therefore we run the lifecycle reconciliation FIRST, while the
-        # call_id is still in processing and pending_messages still holds
-        # the payload. Any persist failure here raises before the
-        # session/task delivered mutation, so disk stays processing+payload
-        # and the ACK can be retried.
+        # ACK reconciliation stays in memory. The caller owns the workspace
+        # commit and wakes consumers only after that commit returns.
         for call_id in verified_acked:
             # followup: reconcile outcome + emit delivered event.
             wake_target = self._emit_followup_delivered_if_followup(workspace_id, call_id)
             if wake_target is not None:
                 wake_targets.add(wake_target)
 
-        # ---- Session/task delivered mutation (in-memory only) ----
-        #
-        # The lifecycle is now durably reconciled. Commit the delivery
-        # state machine: move call_ids to delivered and clear their
-        # payload from the durable inbox. This is in-memory only; the
-        # caller (create_report) persists via _save_state.
+        # Stage delivery bookkeeping in the same workspace transaction.
+        # create_report persists it with the report and mailbox.
         if task is not None:
             to_ack_pending = [c for c in task.pending_call_ids if c in verified_set]
             to_ack_processing = [c for c in task.processing_call_ids if c in verified_set]
@@ -1083,7 +1041,7 @@ class _ReportsMixin:
         call_id: str,
         task: Optional[WorkspaceTask],
         session: Optional[ManagedSession],
-        record: dict[str, Any],
+        record: Mapping[str, Any],
     ) -> bool:
         """Allow ACK for a TaskMailbox-tracked call_id on the assigned worker."""
         if task is None or session is None:
@@ -1134,7 +1092,7 @@ class _ReportsMixin:
         if workspace_id is None:
             return False
 
-        record = self.task_mailbox._call_record(workspace_id, call_id)
+        record = self.task_mailbox.lookup_call(workspace_id, call_id)
         if record is None:
             # No call record — legacy untracked call (dispatch/internal).
             return True
@@ -1291,7 +1249,7 @@ class _ReportsMixin:
 
         All task-linked reports write a TaskEvent. Run-tree status, cursor, and
         context are not written here. Persist is deferred to the outer
-        report-intake ``_save_state``.
+        report-intake ``_save_workspace_state``.
         """
         if not report.task_id:
             return None

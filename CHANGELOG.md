@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### refactor(quality): make Task persistence scope and creation flow explicit
+
+- Commit Task, report and Mailbox transactions through an explicit single-workspace
+  entry; remove the hidden context variable that selected persistence scope. The
+  full-state entry still writes the index and every workspace.
+- Give TaskMailbox its own snapshot, restore, read-only call lookup and consumer
+  wake. Snapshots keep missing entries distinct from empty ones, preserve internal
+  event references, and stay detached from later changes.
+- Keep the Task creation form, frozen requests and credential recovery in a
+  parent-owned composable, with presentation and responsive styles in a dedicated
+  dialog. Closing it or switching workspace no longer discards an uncertain request.
+- Share draft attachment handling, add mobile layout acceptance for the dialog and
+  align the browser harness with the application's global styles.
+- Record the current Task state/UI boundaries in the architecture guide. See the
+  [stage-three record](docs/working-logs/2026-10-09-task-boundaries.md).
+
 ### test(ui): add isolated behavioral acceptance and fix Chat control overlap
 
 - Run five real Vue/Pinia browser scenarios through a shared local/CI entrypoint,

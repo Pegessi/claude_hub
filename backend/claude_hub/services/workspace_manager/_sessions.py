@@ -98,7 +98,7 @@ class _SessionsMixin:
                 )
 
         try:
-            self._save_state()
+            self._save_workspace_state(workspace_id)
         except Exception:
             self._restore_report_intake_workspace(workspace_id, snapshot)
             raise

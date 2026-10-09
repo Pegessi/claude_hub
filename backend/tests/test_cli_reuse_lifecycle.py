@@ -329,6 +329,7 @@ async def test_ensure_workspace_create_derives_name_from_canonical_basename(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "my-repo"
     repo.mkdir()
     workspace = manager.ensure_workspace(WorkspaceEnsure(path=str(repo)))
@@ -341,6 +342,7 @@ async def test_ensure_workspace_create_from_worktree_uses_primary_basename(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, wt = _init_git_repo_with_worktree(tmp_path)
     workspace = manager.ensure_workspace(WorkspaceEnsure(path=str(wt)))
     assert workspace.name == repo.name
@@ -351,6 +353,7 @@ async def test_ensure_workspace_create_from_worktree_uses_primary_basename(
 async def test_create_workspace_duplicate_refused(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     first = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -363,6 +366,7 @@ async def test_create_workspace_duplicate_refused(tmp_path: Path, monkeypatch: M
 async def test_ensure_workspace_reuses_existing(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     created = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -376,6 +380,7 @@ async def test_compatible_agent_reuse_strict_match(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -467,6 +472,7 @@ def test_find_compatible_same_repo_different_cwd_no_reuse(
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, wt = _init_git_repo_with_worktree(tmp_path)
     assert same_local_repo(repo, wt)
     assert effective_local_agent_cwd(repo) != effective_local_agent_cwd(wt)
@@ -522,6 +528,7 @@ async def test_ensure_workspace_agent_rejects_foreign_repo_cwd(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo_a, _ = _init_git_repo_with_worktree(tmp_path / "a")
     repo_b = tmp_path / "b" / "repo"
     _init_git_repo(repo_b)
@@ -544,6 +551,7 @@ async def test_ensure_workspace_agent_accepts_linked_worktree_cwd_without_reusin
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, wt = _init_git_repo_with_worktree(tmp_path)
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
     now = datetime.now(timezone.utc)
@@ -606,6 +614,7 @@ async def test_ensure_workspace_agent_accepts_non_git_descendant_cwd(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     plain = tmp_path / "plain"
     plain.mkdir()
     sub = plain / "sub"
@@ -653,6 +662,7 @@ def test_find_compatible_dispatcher_requires_strict_compatibility(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -696,6 +706,7 @@ def test_find_compatible_reviewer_requires_strict_compatibility(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -808,6 +819,7 @@ async def test_task_cleanup_deletes_caller_owned_ephemeral_session(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, ws = _cleanup_workspace(tmp_path, manager)
     session = _caller_owned_ephemeral_session(ws=ws, repo=repo, role=role)
     task = _done_task_for_session(ws=ws, session_id=session.id)
@@ -833,6 +845,7 @@ async def test_delete_session_allows_failed_task_binding(
     """A timed-out subagent must not permanently consume an idle agent seat."""
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, ws = _cleanup_workspace(tmp_path, manager)
     session = _caller_owned_ephemeral_session(ws=ws, repo=repo)
     now = datetime.now(timezone.utc)
@@ -886,6 +899,7 @@ async def test_task_cleanup_skips_non_done_task(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, ws = _cleanup_workspace(tmp_path, manager)
     session = _caller_owned_ephemeral_session(ws=ws, repo=repo)
     now = datetime.now(timezone.utc)
@@ -915,6 +929,7 @@ async def test_task_cleanup_skips_non_idle_runtime(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, ws = _cleanup_workspace(tmp_path, manager)
     session = _caller_owned_ephemeral_session(
         ws=ws,
@@ -936,6 +951,7 @@ async def test_task_cleanup_skips_other_task_session_id_reference(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, ws = _cleanup_workspace(tmp_path, manager)
     session = _caller_owned_ephemeral_session(ws=ws, repo=repo)
     task = _done_task_for_session(ws=ws, session_id=session.id, task_id="task-done")
@@ -967,6 +983,7 @@ async def test_task_cleanup_skips_other_task_review_session_reference(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, ws = _cleanup_workspace(tmp_path, manager)
     session = _caller_owned_ephemeral_session(ws=ws, repo=repo)
     task = _done_task_for_session(ws=ws, session_id=session.id, task_id="task-done")
@@ -999,6 +1016,7 @@ async def test_task_cleanup_skips_workspace_mismatch(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo_a = tmp_path / "repo-a"
     repo_b = tmp_path / "repo-b"
     repo_a.mkdir()
@@ -1029,6 +1047,7 @@ async def test_task_cleanup_skips_active_raw_session_binding_unset_canonical(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, ws = _cleanup_workspace(tmp_path, manager)
     now = datetime.now(timezone.utc)
     session = _caller_owned_ephemeral_session(
@@ -1063,6 +1082,7 @@ async def test_task_cleanup_skips_active_raw_session_binding_unset_canonical(
 async def test_cleanup_skips_non_ephemeral(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1114,6 +1134,7 @@ async def test_cleanup_skips_internal_ephemeral_without_caller_owned(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1166,6 +1187,7 @@ async def test_caller_owned_ephemeral_requires_ephemeral_flag(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1186,6 +1208,7 @@ async def test_ephemeral_without_caller_owned_provenance_on_create(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1223,6 +1246,7 @@ async def test_internal_ephemeral_reviewer_not_caller_owned(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1263,6 +1287,7 @@ def test_session_blocks_reuse_ignores_stale_task_id_fields_only(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1313,6 +1338,7 @@ async def test_create_workspace_stores_normalized_remote_cwd(
     workspace_module = import_module("claude_hub.services.workspace_manager")
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
@@ -1342,6 +1368,7 @@ async def test_ensure_workspace_agent_omitted_target_on_remote_workspace_creates
     workspace_module = import_module("claude_hub.services.workspace_manager")
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_a, **_k: None)
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
@@ -1398,6 +1425,7 @@ async def test_ensure_workspace_agent_explicit_remote_target_creates_remote(
     workspace_module = import_module("claude_hub.services.workspace_manager")
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_a, **_k: None)
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
@@ -1455,6 +1483,7 @@ def test_find_compatible_on_remote_workspace_omitted_target_matches_local_only(
     workspace_module = import_module("claude_hub.services.workspace_manager")
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
@@ -1518,6 +1547,7 @@ def test_reconcile_workspace_session_pointers_clears_stale_ids(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1539,6 +1569,7 @@ async def test_find_compatible_ignores_stale_task_id_when_task_done(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1594,6 +1625,7 @@ async def test_find_compatible_blocked_by_active_canonical_ownership(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1647,6 +1679,7 @@ async def test_find_compatible_reuses_after_canonical_session_id_mismatch_orphan
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: saves.append(None))
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: saves.append(None))
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1725,6 +1758,7 @@ async def test_find_compatible_clears_terminal_task_orphan_under_save(
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: saves.append(None))
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: saves.append(None))
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1783,6 +1817,7 @@ async def test_ensure_workspace_agent_reconciles_stale_binding_under_lock(
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: saves.append(None))
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: saves.append(None))
     monkeypatch.setattr(manager, "_sync_session_tab_metadata", lambda _s: None)
     monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_a, **_k: None)
     repo = tmp_path / "repo"
@@ -1846,6 +1881,7 @@ async def test_concurrent_reuse_existing_is_best_effort_and_creates_distinct_ses
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_a, **_k: None)
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1895,6 +1931,7 @@ async def test_reuse_existing_failed_create_tab_leaves_no_phantom_session(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_a, **_k: None)
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1924,6 +1961,7 @@ def test_cleanup_stale_orchestrator_assignments_preserves_active_owner(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -1973,6 +2011,7 @@ def test_cleanup_preserves_working_task_with_unset_canonical_session_id(
     """Dispatch window: WORKING task with session_id=None must not clear bindings."""
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2022,6 +2061,7 @@ def test_cleanup_preserves_working_task_with_missing_or_stopped_canonical_sessio
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2118,6 +2158,7 @@ async def test_cleanup_rejects_non_orchestrator_role(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2172,6 +2213,7 @@ async def test_cleanup_rejects_resident_role_even_if_caller_owned(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2226,6 +2268,7 @@ async def test_cleanup_rejects_resident_session_even_if_caller_owned(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2277,6 +2320,7 @@ async def test_cleanup_rejects_resident_session_even_if_caller_owned(
 async def test_cleanup_rejects_internal_task(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2417,6 +2461,7 @@ async def test_agent_create_env_preset_redacts_api_and_cli_json(
     )
     monkeypatch.setattr(resolver_module, "env_preset_manager", preset_manager)
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_save_workspace_state", lambda _workspace_id: None)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -2555,6 +2600,7 @@ def test_legacy_session_normalizes_caller_owned_ephemeral() -> None:
 def test_find_compatible_same_env_reuses(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2593,6 +2639,7 @@ def test_find_compatible_same_env_reuses(tmp_path: Path, monkeypatch: MonkeyPatc
 def test_find_compatible_different_env_no_reuse(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2631,6 +2678,7 @@ def test_find_compatible_empty_env_vs_nonempty_no_reuse(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2685,6 +2733,7 @@ async def test_env_preset_merged_before_reuse_match(
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     preset_manager = EnvPresetManager(path=tmp_path / "env_presets.json")
     preset_manager.create_preset(
         name="proxy",
@@ -2757,6 +2806,7 @@ def test_update_workspace_rejects_relative_path(tmp_path: Path, monkeypatch: Mon
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2773,6 +2823,7 @@ def test_update_workspace_canonicalizes_worktree_to_primary(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo, wt = _init_git_repo_with_worktree(tmp_path)
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
 
@@ -2786,6 +2837,7 @@ def test_update_workspace_rejects_identity_collision(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo_a = tmp_path / "repo-a"
     repo_b = tmp_path / "repo-b"
     _init_git_repo(repo_a)
@@ -2809,6 +2861,7 @@ def test_update_workspace_failed_path_does_not_mutate_name(
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="Original", path=str(repo)))
@@ -2833,6 +2886,7 @@ def test_update_workspace_combined_path_remote_cwd_uses_effective_identity(
     workspace_module = import_module("claude_hub.services.workspace_manager")
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
@@ -2883,6 +2937,7 @@ def test_update_workspace_remote_cwd_only_collision_fails_closed(
     workspace_module = import_module("claude_hub.services.workspace_manager")
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(
         workspace_module.remote_profile_manager,
         "get_profile",
@@ -2921,6 +2976,7 @@ def test_find_compatible_internal_dispatcher_empty_env_reuses(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -2966,6 +3022,7 @@ async def test_api_update_workspace_rejects_relative_path(
     from claude_hub.models import User
 
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = workspace_manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))

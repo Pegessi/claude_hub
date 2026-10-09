@@ -261,6 +261,7 @@ async def test_invalid_preset_secret_not_in_api_json(
 ) -> None:
     _install_bad_day1_preset(tmp_path, monkeypatch)
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = workspace_manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))
@@ -296,6 +297,7 @@ async def test_invalid_preset_secret_not_in_ensure_workspace_agent_value_error(
     _install_bad_day1_preset(tmp_path, monkeypatch)
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="A", path=str(repo)))

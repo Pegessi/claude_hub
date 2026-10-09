@@ -56,6 +56,7 @@ def isolated_workspace_manager(monkeypatch: MonkeyPatch) -> Generator[None, None
     workspace_manager.reports.clear()
     workspace_manager._dispatch_locks.clear()
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_save_workspace_state", lambda _workspace_id: None)
     monkeypatch.setattr(workspace_manager, "_write_task_record", lambda _task: None)
 
     async def fake_current_user() -> User:

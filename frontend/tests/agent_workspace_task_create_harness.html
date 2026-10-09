@@ -22,11 +22,41 @@
         --ch-color-warning: #a15c00;
         --ch-radius-sm: 5px;
         --ch-radius-md: 8px;
+        --ch-radius-lg: 8px;
+        --ch-color-surface: #fbfbfa;
+        --ch-color-surface-soft: #f0f0ee;
+        --ch-color-surface-sunken: #eeeeec;
+        --ch-color-surface-pressed: #d6d6d2;
+        --ch-color-border: #e0e0dc;
+        --ch-color-overlay: rgba(24, 24, 24, 0.4);
+        --ch-color-text-soft: #787872;
+        --ch-color-text-inverse: #ffffff;
+        --ch-color-accent: #4a8ce0;
+        --ch-color-accent-hover: #2a6cc0;
+        --ch-color-accent-strong: #3a7cd0;
+        --ch-color-accent-ring: rgba(74, 140, 224, 0.16);
+        --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.06);
+        --ch-shadow-button-primary: 0 1px 4px rgba(74, 140, 224, 0.25);
+        --ch-shadow-dialog: 0 20px 60px rgba(24, 24, 24, 0.12);
+        --ch-font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --ch-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        --ch-font-size-xs: 11px;
+        --ch-font-size-sm: 12px;
+        --ch-font-size-base: 13px;
+        --ch-font-size-md: 13px;
         --ch-shadow-soft: 0 8px 24px rgb(0 0 0 / 12%);
         --ch-motion-fast: 120ms;
       }
-      html, body, #app { min-height: 100%; margin: 0; }
-      body { font: 14px/1.45 sans-serif; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body, #app { height: 100%; overflow: hidden; }
+      body {
+        background: var(--ch-color-app-bg);
+        color: var(--ch-color-text);
+        font-family: var(--ch-font-sans);
+        font-size: var(--ch-font-size-base);
+        line-height: 1.45;
+        letter-spacing: -0.01em;
+      }
       button, input, select, textarea { font: inherit; }
     </style>
   </head>

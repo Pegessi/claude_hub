@@ -229,10 +229,10 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
     # nested ACK persist remains inside the transaction.
     original_persist = manager.task_mailbox._persist
 
-    def reject_nested_persist() -> None:
-        if manager._report_intake_workspace.get() is not None:
+    def reject_nested_persist(target_workspace_id: str) -> None:
+        if manager._workspace_mutation_held.get() == target_workspace_id:
             raise AssertionError("nested TaskMailbox persist")
-        original_persist()
+        original_persist(target_workspace_id)
 
     monkeypatch.setattr(manager.task_mailbox, "_persist", reject_nested_persist)
     committed = await manager.create_report(session.id, payload)
@@ -1010,3 +1010,95 @@ async def test_resident_root_context_ref_does_not_authorize_taskless_ack(
     assert call_id in session.processing_call_ids
     assert call_id not in session.delivered_call_ids
     assert manager._verify_call_target(call_id, None, session_id) is False
+
+
+@pytest.mark.asyncio
+async def test_report_and_bound_replay_commit_only_their_workspace(
+    manager_and_workspace: tuple[WorkspaceManager, str],
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    manager, workspace_id = manager_and_workspace
+    task, session = _task_session(manager, workspace_id)
+    other_dir = tmp_path / "other-report-workspace"
+    other_dir.mkdir()
+    other = manager.create_workspace(
+        WorkspaceCreate(name="Other reports", path=str(other_dir), target=ExecutionTarget.LOCAL)
+    )
+    other_task, _ = _task_session(
+        manager, other.id, task_id="other-task-report", session_id="other-session-report"
+    )
+    manager._save_state()
+    untouched = {
+        path: path.read_bytes()
+        for path in (
+            _wm.INDEX_FILE,
+            manager._workspace_state_file(other.id),
+            manager.snapshot_path(other.id),
+        )
+    }
+    manager.tasks[other_task.id] = other_task.model_copy(
+        update={"prompt": "uncommitted other prompt"}
+    )
+    manager.workspaces[other.id] = other.model_copy(update={"name": "uncommitted other name"})
+    original_save = manager._save_workspace_state
+    original_write = manager._atomic_write_text
+    saves: list[str] = []
+    writes: list[Path] = []
+
+    def save_one(target_workspace_id: str) -> None:
+        saves.append(target_workspace_id)
+        original_save(target_workspace_id)
+
+    def record_write(path: Path, text: str) -> None:
+        writes.append(path)
+        original_write(path, text)
+
+    def reject_bulk() -> None:
+        pytest.fail("report intake must not use full-state save")
+
+    monkeypatch.setattr(manager, "_save_workspace_state", save_one)
+    monkeypatch.setattr(manager, "_atomic_write_text", record_write)
+    monkeypatch.setattr(manager, "_save_state", reject_bulk)
+    payload = AgentReportCreate(
+        task_id=task.id,
+        state=AgentReportState.WORKING,
+        message="scoped report",
+        call_id="scoped-report",
+    )
+    report = await manager.create_report(session.id, payload)
+    replay = await manager.create_report(session.id, payload)
+    assert replay.id == report.id
+    assert saves == [workspace_id, workspace_id]
+    assert (
+        writes
+        == [
+            manager._workspace_state_file(workspace_id),
+            manager.snapshot_path(workspace_id),
+        ]
+        * 2
+    )
+    for path, before in untouched.items():
+        assert path.read_bytes() == before
+    assert manager.tasks[other_task.id].prompt == "uncommitted other prompt"
+    assert manager.workspaces[other.id].name == "uncommitted other name"
+    assert (
+        len([item for item in manager.reports.values() if item.workspace_id == workspace_id]) == 1
+    )
+    assert (
+        len(
+            [
+                event
+                for event in manager.task_mailbox._events[workspace_id]
+                if event.report_id == report.id
+            ]
+        )
+        == 1
+    )
+    assert not manager._report_intake_committed
+    assert manager._workspace_mutation_held.get() is None
+    fresh = WorkspaceManager()
+    assert fresh.reports[report.id].call_id == "scoped-report"
+    assert fresh.sessions[session.id].report_call_ids["scoped-report"] == report.id
+    assert fresh.tasks[other_task.id].prompt == other_task.prompt
+    assert fresh.workspaces[other.id].name == other.name

@@ -83,13 +83,6 @@ class _StateMixin:
         # post-commit side-effect exception (leave durable state intact so an
         # idempotent retry can finish the side effects).
         self._report_intake_committed: set[str] = set()
-        # Keep report-intake persistence routing task-local. Reports for two
-        # different workspaces may run concurrently; a plain manager attribute
-        # could make one coroutine persist the other's workspace.
-        self._report_intake_workspace: ContextVar[str | None] = ContextVar(
-            f"report_intake_workspace_{id(self)}",
-            default=None,
-        )
         # Re-entrancy for workspace_mutation_lock: create_report already holds
         # the lock when it ACKs mailbox state.
         self._workspace_mutation_held: ContextVar[str | None] = ContextVar(

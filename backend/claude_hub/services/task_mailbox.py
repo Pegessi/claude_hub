@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..models import WorkspaceTask
@@ -30,6 +34,20 @@ class TaskCallIdConflict(ValueError):
     """
 
 
+@dataclass(frozen=True)
+class TaskMailboxWorkspaceSnapshot:
+    """Detached rollback state, not a storage or export format.
+
+    None records a missing key, distinct from an empty collection. The
+    collections are opaque; freezing this holder does not freeze nested values.
+    """
+
+    workspace_id: str
+    events: Optional[List[TaskEvent]]
+    call_index: Optional[Dict[str, dict[str, Any]]]
+    next_sequence: Optional[int]
+
+
 class TaskMailbox:
     """Workspace-scoped Task event stream and ``task:<task_id>`` consumer cursors."""
 
@@ -40,8 +58,56 @@ class TaskMailbox:
         self._call_index: Dict[str, Dict[str, dict[str, Any]]] = {}
         self._waiters = DirectedWaitCoordinator()
 
-    def _persist(self) -> None:
-        self._wm._save_state()
+    def _persist(self, workspace_id: str) -> None:
+        self._wm._save_workspace_state(workspace_id)
+
+    def snapshot_workspace(self, workspace_id: str) -> TaskMailboxWorkspaceSnapshot:
+        """Capture one workspace without rebuilding indexes or waking consumers.
+
+        Consumer cursors live in WorkspaceTask and remain the manager's
+        responsibility. Waiters are runtime state and are not copied.
+        """
+        # Copy the bundle once so index aliases retain their event references.
+        return copy.deepcopy(
+            TaskMailboxWorkspaceSnapshot(
+                workspace_id=workspace_id,
+                events=self._events.get(workspace_id),
+                call_index=self._call_index.get(workspace_id),
+                next_sequence=self._next_seq.get(workspace_id),
+            )
+        )
+
+    def restore_workspace(self, workspace_id: str, snapshot: TaskMailboxWorkspaceSnapshot) -> None:
+        """Restore only the captured workspace; do not persist, load, or wake."""
+        if snapshot.workspace_id != workspace_id:
+            raise ValueError("Mailbox snapshot belongs to another workspace")
+        # Later mutations must not change the detached snapshot.
+        restored = copy.deepcopy(snapshot)
+        if restored.events is None:
+            self._events.pop(workspace_id, None)
+        else:
+            self._events[workspace_id] = restored.events
+        if restored.call_index is None:
+            self._call_index.pop(workspace_id, None)
+        else:
+            self._call_index[workspace_id] = restored.call_index
+        if restored.next_sequence is None:
+            self._next_seq.pop(workspace_id, None)
+        else:
+            self._next_seq[workspace_id] = restored.next_sequence
+
+    def lookup_call(self, workspace_id: str, call_id: str) -> Optional[Mapping[str, Any]]:
+        """Return a shallow read-only view of the existing call-index record.
+
+        Nested values, including the event, are not deeply immutable. Fields
+        are not reconstructed or rewritten for legacy aliases.
+        """
+        record = self._call_record(workspace_id, call_id)
+        return MappingProxyType(record) if record is not None else None
+
+    def wake_consumer(self, consumer_key: str) -> None:
+        """Wake a named consumer after the caller has committed its state."""
+        self._waiters.wake(consumer_key)
 
     def _workspace_max_sequence(self, workspace_id: str) -> int:
         task_max = max((item.sequence for item in self._events.get(workspace_id, [])), default=0)
@@ -328,12 +394,16 @@ class TaskMailbox:
             payload=payload,
         )
         if alias is not None:
-            return self._finish_append(alias, persist=persist, wake=wake, created=False)
+            return self._finish_append(
+                workspace_id, alias, persist=persist, wake=wake, created=False
+            )
         reused = self._reject_or_reuse_foreign_call_id(
             workspace_id, call_id, action, resolved_target, fingerprint
         )
         if reused is not None:
-            return self._finish_append(reused, persist=persist, wake=wake, created=False)
+            return self._finish_append(
+                workspace_id, reused, persist=persist, wake=wake, created=False
+            )
 
         existing = self._call_record(workspace_id, call_id)
         if existing is not None:
@@ -348,7 +418,9 @@ class TaskMailbox:
                     f"in workspace {workspace_id}; cannot reuse for "
                     f"action={action!r} target={resolved_target!r}"
                 )
-            return self._finish_append(existing["event"], persist=persist, wake=wake, created=False)
+            return self._finish_append(
+                workspace_id, existing["event"], persist=persist, wake=wake, created=False
+            )
 
         seq = self._next_sequence(workspace_id)
         event = TaskEvent(
@@ -374,7 +446,7 @@ class TaskMailbox:
         if not persist:
             return event, True
         try:
-            self._persist()
+            self._persist(workspace_id)
         except Exception:
             ws_events.pop()
             self._call_index.get(workspace_id, {}).pop(call_id, None)
@@ -386,6 +458,7 @@ class TaskMailbox:
 
     def _finish_append(
         self,
+        workspace_id: str,
         event: TaskEvent,
         *,
         persist: bool,
@@ -393,7 +466,7 @@ class TaskMailbox:
         created: bool,
     ) -> Tuple[TaskEvent, bool]:
         if persist:
-            self._persist()
+            self._persist(workspace_id)
             if wake:
                 self._wake_compat_waiters(event)
         return event, created
@@ -503,7 +576,7 @@ class TaskMailbox:
         if not persist:
             return sequence
         try:
-            self._persist()
+            self._persist(workspace_id)
         except Exception:
             self._set_consumer_cursor(workspace_id, consumer_key, previous)
             raise

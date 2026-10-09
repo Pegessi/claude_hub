@@ -252,15 +252,15 @@ async def test_reparent_save_failure_rolls_back_current_and_descendants(
     pre = {task_id: manager.tasks[task_id].model_dump() for task_id in tracked_ids}
 
     calls = {"n": 0}
-    original_save = manager._save_state
+    original_save = manager._save_workspace_state
 
-    def flaky_save() -> None:
+    def flaky_save(target_workspace_id: str) -> None:
         calls["n"] += 1
         if calls["n"] == 1:
             raise OSError("reparent save failed")
-        return original_save()
+        return original_save(target_workspace_id)
 
-    monkeypatch.setattr(manager, "_save_state", flaky_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", flaky_save)
 
     with pytest.raises(OSError, match="reparent save failed"):
         await manager.update_task(child.id, WorkspaceTaskUpdate(parent_task_id=b.id))

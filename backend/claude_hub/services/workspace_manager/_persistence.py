@@ -75,16 +75,17 @@ class _PersistenceMixin:
         payload.update(self.task_mailbox.to_dict(workspace_id))
         return payload
 
-    def _save_report_intake_workspace_state(self, workspace_id: str) -> None:
-        """Commit one report-intake transaction at its workspace state file.
+    def _save_workspace_state(self, workspace_id: str) -> None:
+        """Write one workspace without rewriting the index or other workspaces.
 
-        Report intake never mutates the workspace index or any other
-        workspace.  Its sole durable commit point is therefore the atomic
-        replacement of ``<workspace>/state.json``.  The Markdown snapshot is
-        derived operator output: a failure writing it after the state commit
-        must not turn a committed report into an apparent rollback.
+        The state.json replacement is authoritative; its Markdown snapshot
+        remains derived output. Callers own mutation locks and rollback policy.
+        An exception alone does not identify whether replacement occurred.
+
+        The Workspace row itself lives only in the index, which this entry does
+        not write. A transaction that also edits ``self.workspaces[...]`` needs
+        the full-state entry, even though the rollback snapshot restores it.
         """
-
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
         payload = self._workspace_state_payload(workspace_id)
@@ -105,29 +106,16 @@ class _PersistenceMixin:
             )
 
     def _save_state(self) -> None:
-        # ``create_report`` deliberately retains this public/internal save
-        # call so existing failure injection hooks still exercise the report
-        # transaction.  Task-local routing makes the production operation a
-        # one-workspace commit instead of rewriting the index and unrelated
-        # workspaces.
-        report_workspace_id = self._report_intake_workspace.get()
-        if report_workspace_id is not None:
-            self._save_report_intake_workspace_state(report_workspace_id)
-            return
-
+        """Write the index and all workspaces, without cross-workspace atomicity."""
         _wm.STATE_ROOT.mkdir(parents=True, exist_ok=True)
         index_payload = {
             "workspaces": [self._workspace_index_item(item) for item in self.workspaces.values()]
         }
         self._atomic_write_text(INDEX_FILE, json.dumps(index_payload, indent=2))
-
         for workspace in self.workspaces.values():
             workspace_dir = self._workspace_dir(workspace.id)
             workspace_dir.mkdir(parents=True, exist_ok=True)
-            payload = self._workspace_state_payload(workspace.id)
-            state_text = json.dumps(payload, indent=2)
-            self._atomic_write_text(self._workspace_state_file(workspace.id), state_text)
-            self._refresh_snapshot_best_effort(workspace.id, state_text=state_text)
+            self._save_workspace_state(workspace.id)
 
     def _write_snapshot(self, workspace_id: str, *, state_text: str | None = None) -> None:
         """Render a committed payload; direct/cold-start calls read the authoritative file."""

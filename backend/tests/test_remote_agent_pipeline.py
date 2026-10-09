@@ -133,6 +133,7 @@ def _local_workspace_with_remote_worker(
 ) -> tuple[WorkspaceManager, Workspace, WorkspaceTask, ManagedSession]:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     workspace = manager.create_workspace(
@@ -248,6 +249,7 @@ def _local_workspace_with_worker_env_preset(
     """
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / f"repo-preset-{env_preset or 'none'}"
     repo.mkdir()
     workspace = manager.create_workspace(
@@ -405,6 +407,7 @@ async def test_wait_for_agent_prompt_skips_codex_update_dialog(
 ) -> None:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     messaging = __import__(
         "claude_hub.services.workspace_manager._messaging", fromlist=["AGENT_PROMPT_WAIT_SECONDS"]
     )
@@ -448,6 +451,7 @@ async def test_wait_for_agent_prompt_fails_closed_if_update_dialog_stays(
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     messaging = __import__(
         "claude_hub.services.workspace_manager._messaging", fromlist=["AGENT_PROMPT_WAIT_SECONDS"]
     )
@@ -486,6 +490,7 @@ def test_next_remote_forward_port_uses_hub_port_plus_offset(
     monkeypatch.setattr(settings, "port", 18273)
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     assert manager._next_remote_forward_port() == 18273 + REMOTE_FORWARD_PORT_OFFSET
     occupied = _session(
         session_id="ws-agent-1",
@@ -540,6 +545,7 @@ async def test_ensure_workspace_agent_rejects_browse_only(
     )
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_workspace_state", lambda _workspace_id: None)
     repo = tmp_path / "repo"
     repo.mkdir()
     workspace = manager.create_workspace(

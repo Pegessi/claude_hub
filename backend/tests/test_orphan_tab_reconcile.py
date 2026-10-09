@@ -42,6 +42,7 @@ workspace_module = import_module("claude_hub.services.workspace_manager")
 def isolated_manager(monkeypatch: MonkeyPatch) -> Generator[None, None, None]:
     workspace_manager.sessions.clear()
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_save_workspace_state", lambda _workspace_id: None)
     yield
     workspace_manager.sessions.clear()
 

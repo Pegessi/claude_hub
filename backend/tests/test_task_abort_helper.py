@@ -209,13 +209,13 @@ async def test_abort_task_working_writes_one_event_and_clears_assignment(
     task = _working_task(manager, workspace_id)
     spies = _install_side_effect_spies(manager, monkeypatch)
     saves: list[int] = []
-    real_save = manager._save_state
+    real_save = manager._save_workspace_state
 
-    def _counting_save() -> None:
+    def _counting_save(target_workspace_id: str) -> None:
         saves.append(len(_mailbox_events(manager, workspace_id)))
-        real_save()
+        real_save(target_workspace_id)
 
-    monkeypatch.setattr(manager, "_save_state", _counting_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", _counting_save)
 
     aborted = await manager.abort_task(
         task.id,
@@ -432,7 +432,7 @@ async def test_abort_task_persist_fault_zero_write_then_cold_retry(
     before = _workspace_fact_snapshot(manager, workspace_id)
     monkeypatch.setattr(
         manager,
-        "_save_state",
+        "_save_workspace_state",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
 

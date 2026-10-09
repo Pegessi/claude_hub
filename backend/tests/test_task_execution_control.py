@@ -7,6 +7,7 @@ import hashlib
 import json
 from datetime import timedelta
 from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -29,6 +30,7 @@ from claude_hub.models import (
     ReviewDecision,
     ReviewProfile,
     User,
+    Workspace,
     WorkspaceCreate,
     WorkspaceSessionRole,
     WorkspaceTaskCreate,
@@ -258,14 +260,18 @@ async def test_restarted_initiator_epoch_rejects_old_writer(manager, workspace):
 async def test_save_failure_rolls_back_task_and_event(manager, workspace, monkeypatch):
     task = await register(manager, workspace)
     before = manager._workspace_state_file(workspace.id).read_bytes()
-    original_save = manager._save_state
-    monkeypatch.setattr(manager, "_save_state", lambda: (_ for _ in ()).throw(OSError("offline")))
+    original_save = manager._save_workspace_state
+    monkeypatch.setattr(
+        manager,
+        "_save_workspace_state",
+        lambda workspace_id: (_ for _ in ()).throw(OSError("offline")),
+    )
     with pytest.raises(OSError):
         await manager.record_task_progress(workspace.id, task.id, progress(task), KEY)
     assert manager.tasks[task.id].progress_revision == 0
     assert not manager.task_mailbox._events.get(workspace.id)
     assert manager._workspace_state_file(workspace.id).read_bytes() == before
-    monkeypatch.setattr(manager, "_save_state", original_save)
+    monkeypatch.setattr(manager, "_save_workspace_state", original_save)
     result = await manager.record_task_progress(workspace.id, task.id, progress(task), KEY)
     assert result.task.progress_revision == 1
 
@@ -966,3 +972,66 @@ async def test_delete_rejects_illegal_initiator_backref_before_any_mutation(
         event.model_dump(mode="json") for event in manager.task_mailbox._events[workspace.id]
     ] == before
     assert manager._workspace_state_file(workspace.id).read_bytes() == disk
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_first", [False, True])
+async def test_register_nested_create_uses_one_explicit_workspace_commit(
+    manager: WorkspaceManager,
+    workspace: Workspace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_first: bool,
+) -> None:
+    other_dir = tmp_path / "other-register-workspace"
+    other_dir.mkdir()
+    other = manager.create_workspace(WorkspaceCreate(name="Other register", path=str(other_dir)))
+    other_task = await register(manager, other, request_key="other-create")
+    state_a = manager._workspace_state_file(workspace.id)
+    before_state_a = state_a.read_bytes()
+    untouched = {
+        path: path.read_bytes()
+        for path in (
+            _wm.INDEX_FILE,
+            manager._workspace_state_file(other.id),
+            manager.snapshot_path(other.id),
+        )
+    }
+    manager.tasks[other_task.id] = other_task.model_copy(update={"title": "other pending title"})
+    manager.workspaces[other.id] = other.model_copy(update={"name": "other pending name"})
+    before_task_ids = set(manager.tasks)
+    original_save = manager._save_workspace_state
+    saves: list[str] = []
+
+    def save_one(workspace_id: str) -> None:
+        saves.append(workspace_id)
+        assert workspace_id == workspace.id
+        if fail_first and len(saves) == 1:
+            raise OSError("register precommit failure")
+        original_save(workspace_id)
+
+    def reject_bulk() -> None:
+        pytest.fail("register -> _create_task must not use full-state save")
+
+    monkeypatch.setattr(manager, "_save_workspace_state", save_one)
+    monkeypatch.setattr(manager, "_save_state", reject_bulk)
+    payload = creation(request_key="scoped-create")
+    if fail_first:
+        with pytest.raises(OSError, match="register precommit"):
+            await manager.register_task(workspace.id, payload, "actor-a")
+        assert set(manager.tasks) == before_task_ids
+        assert state_a.read_bytes() == before_state_a
+    created, replayed = await manager.register_task(workspace.id, payload, "actor-a")
+    assert replayed is False
+    again, replayed = await manager.register_task(workspace.id, payload, "actor-a")
+    assert replayed is True and again.id == created.id
+    assert saves == [workspace.id] * (2 if fail_first else 1)
+    assert len([task for task in manager.tasks.values() if task.workspace_id == workspace.id]) == 1
+    for path, before in untouched.items():
+        assert path.read_bytes() == before
+    assert manager.tasks[other_task.id].title == "other pending title"
+    assert manager.workspaces[other.id].name == "other pending name"
+    assert manager._workspace_mutation_held.get() is None
+    fresh = WorkspaceManager()
+    loaded, replayed = await fresh.register_task(workspace.id, payload, "actor-a")
+    assert replayed is True and loaded.id == created.id

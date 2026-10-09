@@ -123,7 +123,7 @@ class _TasksMixin:
             updated_at=now,
         )
         self.tasks[task_id] = task
-        self._save_state()
+        self._save_workspace_state(workspace_id)
         logger.info(
             "Created workspace task id=%s workspace_id=%s title=%r related_task_id=%s agent_type=%s",
             task.id,
@@ -742,7 +742,7 @@ class _TasksMixin:
             self._stage_task_followup_pending(task.id, call_id)
             self._stage_task_followup_prompt(task.id, message, call_id)
             try:
-                self._save_state()
+                self._save_workspace_state(workspace_id)
             except Exception:
                 self._restore_report_intake_workspace(workspace_id, snapshot)
                 raise
@@ -1041,7 +1041,7 @@ class _TasksMixin:
                 ephemeral_tab_ids = await self._cleanup_reviewer_for_terminal_task(
                     live, updated_at=now, delete_tabs=False
                 )
-                self._save_state()
+                self._save_workspace_state(resolved_workspace_id)
             except Exception:
                 self._restore_report_intake_workspace(resolved_workspace_id, snapshot)
                 raise
