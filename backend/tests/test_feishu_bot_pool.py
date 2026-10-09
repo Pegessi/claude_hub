@@ -19,7 +19,14 @@ from claude_hub.auth import session as session_store
 from claude_hub.auth.dependencies import get_current_user_from_cookie
 from claude_hub.config import settings
 from claude_hub.main import app
-from claude_hub.models import User
+from claude_hub.models import (
+    AgentStreamEventType,
+    AgentType,
+    ChatMode,
+    User,
+)
+from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+from claude_hub.services.agent_stream.tailer import SessionTailer
 from claude_hub.services.feishu_bot import FeishuBotClient, FeishuBotConfig
 from claude_hub.services.feishu_bot_pool import (
     ENV_BOT_ID,
@@ -1035,6 +1042,155 @@ def test_cancelled_websocket_route_releases_dedup_for_retry(
         asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
 
     assert attempts == 2
+
+
+def test_non_retryable_websocket_cancellation_preserves_dedup(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    payload = _message("app-1", "hello", clock.value, message_id="om-completed")
+    attempts = 0
+
+    async def cancelled(*_args, **_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(bot_api, "_handle_message_event", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
+    asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
+
+    assert attempts == 1
+
+
+def test_completed_native_turn_is_not_replayed_after_route_cancellation(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the full completion race with the real SessionTailer classifier."""
+    from types import SimpleNamespace
+
+    from claude_hub.api import agent_stream as stream_api
+
+    class NativeTransport:
+        def __init__(self) -> None:
+            self._started = True
+            self._records: asyncio.Queue[Any] = asyncio.Queue()
+            self._turn_in_flight = False
+            self.eof_is_fatal = False
+            self.exit_error = None
+            self.last_error = None
+            self.sent_messages: list[str] = []
+
+        async def start(self) -> None:
+            self._started = True
+
+        async def stop(self) -> None:
+            self._started = False
+            self._turn_in_flight = False
+
+        async def cancel_active_turn(self) -> None:
+            self._turn_in_flight = False
+
+        async def read_line(self) -> Any:
+            return await self._records.get()
+
+        async def send_message(self, text: str, _images: list[bytes]) -> None:
+            self.sent_messages.append(text)
+            self._turn_in_flight = True
+
+        async def answer_pending_question(self, _answers: Any) -> bool:
+            return False
+
+        @property
+        def turn_in_flight(self) -> bool:
+            return self._turn_in_flight
+
+        def acknowledge_turn_complete(self) -> None:
+            self._turn_in_flight = False
+
+        def maybe_capture_conversation_id(self, _record: Any) -> None:
+            pass
+
+        def accepts_notification(self, _record: Any) -> bool:
+            return True
+
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        payload = _message("app-1", "run once", clock.value, message_id="om-race")
+        session = SimpleNamespace(
+            id="terminal-tab-tab-1",
+            workspace_id="terminal-tabs",
+            tab_id="tab-1",
+            agent_type=AgentType.CLAUDE,
+            chat_mode=ChatMode.DEFAULT,
+        )
+        transport = NativeTransport()
+        completed = asyncio.Event()
+
+        async def observe(event) -> None:
+            if event.type == AgentStreamEventType.TURN_COMPLETED:
+                completed.set()
+
+        tailer = SessionTailer(
+            workspace_id=session.workspace_id,
+            session_id=session.id,
+            adapter=ClaudeJsonlAdapter(),
+            session_getter=lambda: session,
+            native_transport=transport,
+            post_persist_observers=[observe],
+        )
+        bridge_queue: asyncio.Queue[Any] = asyncio.Queue()
+
+        class Manager:
+            async def subscribe(self, _session) -> asyncio.Queue[Any]:
+                await tailer.start()
+                return bridge_queue
+
+            async def retire_external_turn(self, _session, expected_turn_id: str):
+                return await tailer.retire_external_turn(expected_turn_id)
+
+            def unsubscribe(self, _session_id: str, _queue: asyncio.Queue[Any]) -> None:
+                pass
+
+        async def dispatch(_tab_id, request, **kwargs) -> str:
+            async with kwargs["admission_guard"]():
+                await tailer.send_message(
+                    request.text,
+                    [],
+                    request.client_turn_id,
+                    visible_text=kwargs["visible_text"],
+                    turn_metadata=kwargs["turn_metadata"],
+                )
+            transport._records.put_nowait({"type": "result", "subtype": "success"})
+            return request.client_turn_id
+
+        monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+        monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: Manager())
+        monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", dispatch)
+        monkeypatch.setattr(
+            bot_api, "dispatch_tab_chat_and_wait", stream_api.dispatch_tab_chat_and_wait
+        )
+
+        task = asyncio.create_task(bot_api._handle_sdk_event(bot_id, payload))
+        await asyncio.wait_for(completed.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        await bot_api._handle_sdk_event(bot_id, payload)
+        assert len(transport.sent_messages) == 1
+        started = [
+            event
+            for event in (await tailer.store.read_since(-1, limit=20)).events
+            if event.type == AgentStreamEventType.TURN_STARTED
+        ]
+        assert len(started) == 1
+        await tailer.stop()
+
+    asyncio.run(scenario())
 
 
 def test_pair_code_rate_limit_is_per_identity_and_expires(

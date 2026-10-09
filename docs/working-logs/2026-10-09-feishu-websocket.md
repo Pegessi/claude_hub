@@ -43,9 +43,11 @@ instead of a success acknowledgement. Transport replacement leaves accepted
 routes running. Final process shutdown stops intake, closes transports, and
 drains routes for a bounded interval before cancelling the remainder. A
 cancelled external dispatch first retires its matching native Chat turn; only
-after that bounded cancellation completes (including an already-absent matching
-turn) is its message dedup claim released for a Feishu retry, before the
-remaining Chat runtime is torn down.
+after that bounded cancellation confirms the matching turn was stopped, or
+proves it never started, is its message dedup claim released for a Feishu
+retry. A completed turn, a different active/orphaned turn, or an unknown/error
+state retains the claim so a same-ID replay cannot repeat model or tool side
+effects.
 
 The SDK-authenticated `im.message.receive_v1` object is normalized into the
 existing `FeishuMessageEvent`. App identity, user sender, one-to-one Chat, text
@@ -80,10 +82,13 @@ longer ask operators to copy or enter callback configuration.
   cancellation, pairing-revision transport stability, bounded endpoint
   discovery and route capacity, disconnect-safe in-flight routing, final
   shutdown drain/cancellation, retry-safe dedup release, SDK event
-  normalization, and rejected payloads.
+  normalization, and rejected payloads. The shutdown regression coverage uses
+  the real `SessionTailer` to prove a completed message replay leaves both the
+  provider send count and durable `turn_started` count at one.
 - The complete frontend Node suite passes 700 tests. `pnpm lint:check` and
   `pnpm exec vue-tsc --noEmit` pass.
-- The full backend suite was run once. Its only failure was
+- The full backend suite was rerun after lifecycle hardening: 2,719 tests
+  passed, 7 skipped, and its only failure was
   `test_goal_question_followup_pauses_before_manual_send`, where a pre-existing
   test double rejects the current `visible_text` keyword. The same node fails
   identically in an isolated worktree at the unchanged base SHA `fd3edac`; no

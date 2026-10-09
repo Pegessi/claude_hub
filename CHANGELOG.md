@@ -9,7 +9,8 @@
 
 - Fix connection reconciliation so pairing and other business-state revisions
   no longer invalidate unchanged transports, and bound/drain accepted message
-  routes during final backend shutdown with retry-safe dedup release.
+  routes during final backend shutdown with retry-safe dedup release that
+  preserves claims for completed, superseded, or unknown Chat turns.
 - Replace public HTTP event callbacks with one supervised Feishu WebSocket
   connection per enabled Bot, with bounded endpoint discovery and reconciliation
   on startup and after pool changes.
