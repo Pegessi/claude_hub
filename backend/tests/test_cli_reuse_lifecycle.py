@@ -2716,7 +2716,7 @@ async def test_env_preset_merged_before_reuse_match(
     manager.sessions[session.id] = session
 
     async def fake_create_tab(**kwargs: Any) -> TerminalTab:
-        return TerminalTab(id="new-tab", name="Agent", port=9000)
+        return TerminalTab(id="new-tab", name="Agent", port=9000, created_at=now, is_active=True)
 
     monkeypatch.setattr(ttyd_manager, "create_tab", fake_create_tab)
 

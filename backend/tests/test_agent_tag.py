@@ -78,7 +78,9 @@ def _create_workspace(client: TestClient, tmp_path: Path) -> str:
         json={"name": "Agent Tag", "path": str(repo), "session_prefix": "at"},
     )
     assert response.status_code == 201, response.text
-    return response.json()["id"]
+    workspace_id = response.json()["id"]
+    assert isinstance(workspace_id, str)
+    return workspace_id
 
 
 def test_normalize_agent_tag_trims_and_bounds() -> None:

@@ -1228,7 +1228,20 @@ class _MonitorMixin:
             )
         return ephemeral_tab_ids
 
-    def _assign_current_task(self, session_id: str, task_id: str) -> None:
+    def _rename_task_assignment_tab(self, task: WorkspaceTask, session: ManagedSession) -> None:
+        title = task.title.strip() or session.title
+        renamed = ttyd_manager.rename_tab(session.tab_id, title)
+        if not renamed:
+            logger.warning(
+                "Could not rename workspace session tab for task session_id=%s tab_id=%s task_id=%s",
+                session.id,
+                session.tab_id,
+                task.id,
+            )
+
+    def _assign_current_task(
+        self, session_id: str, task_id: str, *, rename_tab: bool = True
+    ) -> None:
         task = self.tasks.get(task_id)
         if task is None:
             raise KeyError(task_id)
@@ -1238,15 +1251,8 @@ class _MonitorMixin:
             return
         task = self.tasks.get(task_id)
         title = task.title.strip() if task and task.title.strip() else session.title
-        if task:
-            renamed = ttyd_manager.rename_tab(session.tab_id, title)
-            if not renamed:
-                logger.warning(
-                    "Could not rename workspace session tab for task session_id=%s tab_id=%s task_id=%s",
-                    session.id,
-                    session.tab_id,
-                    task.id,
-                )
+        if task and rename_tab:
+            self._rename_task_assignment_tab(task, session)
         self.sessions[session_id] = session.model_copy(
             update={
                 "task_id": task_id,

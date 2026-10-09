@@ -29,7 +29,7 @@ import struct
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -621,7 +621,7 @@ async def test_edit_resend_rejected_while_turn_running(
     assert session.id in manager._tailers, "tailer was not restored after rejection"
     # The tailer's stop was NOT called (the in-flight turn was not killed).
     restored = manager._tailers[session.id]
-    restored.stop.assert_not_called()
+    cast(AsyncMock, restored.stop).assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -653,7 +653,7 @@ async def test_edit_resend_succeeds_when_idle(
     await manager.edit_resend(session, "edited msg1", "c-new", "t1")
 
     # The idle tailer was stopped (its stop was called once).
-    idle_tailer.stop.assert_awaited_once()
+    cast(AsyncMock, idle_tailer.stop).assert_awaited_once()
 
     # The edited text was delivered via the (mocked) fresh tailer.
     mock_tailer.send_message.assert_called_once_with("edited msg1", [], "c-new")

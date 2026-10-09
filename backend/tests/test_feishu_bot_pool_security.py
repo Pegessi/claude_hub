@@ -13,6 +13,7 @@ import asyncio
 import json
 import stat
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -22,7 +23,7 @@ from claude_hub.auth import session as session_store
 from claude_hub.config import settings
 from claude_hub.main import app
 from claude_hub.models import User
-from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuMessageDedupStore
+from claude_hub.services.feishu_bot import FeishuBotClient, FeishuBotConfig, FeishuMessageDedupStore
 from claude_hub.services.feishu_bot_pool import (
     BOT_ENV_KEYS,
     FeishuBotPoolStore,
@@ -412,7 +413,9 @@ async def test_delete_waits_for_a_started_reply_and_blocks_the_late_one(pool, mo
             sent.append(message_id)
 
     reply = asyncio.create_task(
-        bot_api._reply_if_current(Blocking(), _event("om-old"), effective, "answer")
+        bot_api._reply_if_current(
+            cast(FeishuBotClient, Blocking()), _event("om-old"), effective, "answer"
+        )
     )
     await asyncio.wait_for(entered.wait(), timeout=2)
 
@@ -441,7 +444,7 @@ async def test_delete_waits_for_a_started_reply_and_blocks_the_late_one(pool, mo
 
     # The same snapshot must not produce a second delivery afterwards.
     assert not await bot_api._reply_if_current(
-        Blocking(), _event("om-old"), effective, "late answer"
+        cast(FeishuBotClient, Blocking()), _event("om-old"), effective, "late answer"
     )
     assert sent == ["om-old"]
 
@@ -473,7 +476,9 @@ async def test_reply_timeout_releases_the_gate_and_never_posts_twice(pool, monke
                 cancelled.set()
 
     reply = asyncio.create_task(
-        bot_api._reply_if_current(Hanging(), _event("om-timeout"), effective, "answer")
+        bot_api._reply_if_current(
+            cast(FeishuBotClient, Hanging()), _event("om-timeout"), effective, "answer"
+        )
     )
     await asyncio.wait_for(entered.wait(), timeout=2)
 
@@ -517,7 +522,7 @@ async def test_rotation_invalidates_an_in_flight_reply_snapshot(pool) -> None:
     )
 
     assert not await bot_api._reply_if_current(
-        Counting(), _event("om-rotated"), effective, "answer"
+        cast(FeishuBotClient, Counting()), _event("om-rotated"), effective, "answer"
     )
     assert attempts == []
 

@@ -216,7 +216,9 @@ def test_read_seed_sidecar_ignores_corrupt_file(monkeypatch: MonkeyPatch, tmp_pa
 
 def _claude_envelope_text(stdin_json: str) -> str:
     content = json.loads(stdin_json)["message"]["content"]
-    return next(b["text"] for b in content if b.get("type") == "text")
+    text = next(b["text"] for b in content if b.get("type") == "text")
+    assert isinstance(text, str)
+    return text
 
 
 @pytest.mark.asyncio

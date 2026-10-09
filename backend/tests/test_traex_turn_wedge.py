@@ -43,6 +43,7 @@ from claude_hub.services.agent_stream import tailer as tailer_module
 from claude_hub.services.agent_stream.codex_jsonl import TraexJsonlAdapter
 from claude_hub.services.agent_stream.native import (
     CodexNativeSession,
+    ProviderSession,
     TraexNativeSession,
 )
 from claude_hub.services.agent_stream.store import AgentStreamStore
@@ -222,24 +223,187 @@ class _FakeAppServer:
         return [msg.get("params") or {} for msg in self.requests if msg["method"] == method]
 
 
+class _HarnessTraexSession(TraexNativeSession):
+    def __init__(self, harness: _AppServerHarness, session: ManagedSession, command: Path) -> None:
+        self._harness = harness
+        self._test_command = str(command)
+        super().__init__(session)
+
+    def _build_command(self) -> List[str]:
+        # Remains safe after monkeypatch.undo(), including a leaked restart.
+        return [self._test_command, "app-server"]
+
+    async def _initialize_protocol(self) -> None:
+        await super()._initialize_protocol()
+        index = self._harness.hold_initialize_at
+        if (
+            index is not None
+            and len(self._harness.servers) > index
+            and self._process is self._harness.servers[index].proc
+        ):
+            self._harness.initialize_blocked.set()
+            await self._harness.release_initialize.wait()
+
+    async def _drain_stdout(self) -> None:
+        self._harness.remember_current_task()
+        await super()._drain_stdout()
+
+    async def _drain_stderr(self) -> None:
+        self._harness.remember_current_task()
+        await super()._drain_stderr()
+
+
+class _HarnessCodexSession(CodexNativeSession):
+    def __init__(self, session: ManagedSession, command: Path) -> None:
+        self._test_command = str(command)
+        super().__init__(session)
+
+    def _build_command(self) -> List[str]:
+        return [self._test_command, "app-server", "--stdio"]
+
+
+class _HarnessTailer(SessionTailer):
+    def __init__(
+        self,
+        harness: _AppServerHarness,
+        session: ManagedSession,
+        transport: TraexNativeSession,
+        store: AgentStreamStore,
+    ) -> None:
+        self._harness = harness
+        super().__init__(
+            workspace_id=session.workspace_id,
+            session_id=session.id,
+            adapter=TraexJsonlAdapter(),
+            session_getter=lambda: session,
+            store=store,
+            native_transport=transport,
+        )
+
+    async def _run(self) -> None:
+        self._harness.remember_current_task()
+        await super()._run()
+
+    async def _run_turn_teardown(self, transport: ProviderSession) -> None:
+        self._harness.remember_current_task()
+        await super()._run_turn_teardown(transport)
+
+
 class _AppServerHarness:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, interrupt_modes: List[str]) -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        interrupt_modes: List[str],
+        *,
+        hold_initialize_at: Optional[int] = None,
+    ) -> None:
         self.servers: List[_FakeAppServer] = []
         self._interrupt_modes = list(interrupt_modes)
+        self.hold_initialize_at = hold_initialize_at
+        self.initialize_blocked = asyncio.Event()
+        self.release_initialize = asyncio.Event()
+        self.closed = False
+        self.tasks: set[asyncio.Task[Any]] = set()
+        self._aux_tasks: set[asyncio.Task[Any]] = set()
+        self.transports: List[CodexNativeSession] = []
+        self.tailers: List[SessionTailer] = []
+        self._command_dir: Optional[tempfile.TemporaryDirectory[str]] = None
+        self._commands: set[tuple[str, ...]] = set()
+        self._boundary_errors: List[str] = []
 
-        async def fake_exec(*_args: Any, **_kwargs: Any) -> _FakeAppProc:
+        async def fake_exec(*args: Any, **_kwargs: Any) -> _FakeAppProc:
+            if self.closed:
+                raise RuntimeError("fake app-server harness is closed")
+            if not all(isinstance(arg, str) for arg in args) or tuple(args) not in self._commands:
+                if not self._boundary_errors:
+                    self._boundary_errors.append("unexpected command in fake app-server test")
+                raise AssertionError(self._boundary_errors[0])
             mode = self._interrupt_modes[min(len(self.servers), len(self._interrupt_modes) - 1)]
             server = _FakeAppServer(THREAD_ID, interrupt_mode=mode)
             self.servers.append(server)
             return server.proc
 
-        monkeypatch.setattr(
-            native_module.asyncio, "create_subprocess_exec", fake_exec, raising=True
-        )
+        monkeypatch.setattr(native_module.asyncio, "create_subprocess_exec", fake_exec)
 
     @property
     def current(self) -> _FakeAppServer:
         return self.servers[-1]
+
+    def remember_current_task(self) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        self.tasks.add(task)
+
+    def own_task(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        self.tasks.add(task)
+        self._aux_tasks.add(task)
+        return task
+
+    def create_transport(
+        self, session: ManagedSession, root: Optional[Path] = None
+    ) -> CodexNativeSession:
+        if session.agent_type not in {AgentType.TRAEX, AgentType.CODEX}:
+            raise AssertionError("unsupported provider for fake app-server harness")
+        if root is None:
+            if self._command_dir is None:
+                self._command_dir = tempfile.TemporaryDirectory(prefix="fake-app-server-")
+            root = Path(self._command_dir.name)
+        command = root / "never-created-provider" / session.agent_type.value
+        assert command.is_absolute() and not command.parent.exists()
+        transport: CodexNativeSession
+        if session.agent_type == AgentType.TRAEX:
+            transport = _HarnessTraexSession(self, session, command)
+        else:
+            transport = _HarnessCodexSession(session, command)
+        self._commands.add(tuple(transport._build_command()))
+        self.transports.append(transport)
+        return transport
+
+    def create_tailer(
+        self, session: ManagedSession, transport: TraexNativeSession, store: AgentStreamStore
+    ) -> SessionTailer:
+        tailer = _HarnessTailer(self, session, transport, store)
+        self.tailers.append(tailer)
+        return tailer
+
+    async def aclose(self) -> None:
+        self.closed = True
+        self.release_initialize.set()
+        for task in self._aux_tasks:
+            task.cancel()
+
+        async def stop_owned() -> None:
+            for tailer in self.tailers:
+                await tailer.stop()
+            for transport in self.transports:
+                await transport.stop()
+
+        stopper = asyncio.create_task(stop_owned(), name="fake-app-server-cleanup")
+        self.tasks.add(stopper)
+        _, slow = await asyncio.wait({stopper}, timeout=2.0)
+        for server in self.servers:
+            server.proc.kill()
+        observed = set(self.tasks)
+        for task in observed:
+            if not task.done():
+                task.cancel()
+        _, pending = await asyncio.wait(observed, timeout=2.0)
+        pending.update(task for task in self.tasks if not task.done())
+        errors = list(self._boundary_errors)
+        if slow:
+            errors.append("graceful cleanup deadline exceeded")
+        for task in pending:
+            stack = " -> ".join(
+                f"{frame.f_code.co_name}:{frame.f_lineno}" for frame in task.get_stack(limit=3)
+            )
+            errors.append(f"unfinished {task.get_name()}: {stack}")
+        for task in self.tasks - pending:
+            if not task.cancelled() and task.exception() is not None:
+                errors.append(f"{task.get_name()}: {task.exception()!r}")
+        if errors:
+            raise AssertionError("fake app-server cleanup failed: " + "; ".join(errors))
+        if self._command_dir is not None:
+            self._command_dir.cleanup()
 
 
 # ── fixtures / helpers ──────────────────────────────────────────────────────
@@ -328,7 +492,7 @@ async def test_traex_unconfirmed_interrupt_kills_restarts_and_resumes_thread(
     _patch_timings(monkeypatch)
     harness = _AppServerHarness(monkeypatch, ["timeout", "confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     transport._conversation_id = THREAD_ID
 
     with patch.object(native_module.shutil, "which", lambda _name: "/usr/bin/fake-traex"):
@@ -359,7 +523,7 @@ async def test_codex_cancel_rpc_failure_restarts_and_resumes(
     _patch_timings(monkeypatch)
     harness = _AppServerHarness(monkeypatch, ["error", "confirm"])
     session = _session(AgentType.CODEX)
-    transport = CodexNativeSession(session)
+    transport = harness.create_transport(session)
     transport._conversation_id = THREAD_ID
 
     with patch.object(native_module.shutil, "which", lambda _name: "/usr/bin/fake-codex"):
@@ -392,7 +556,7 @@ async def test_silent_tool_completion_then_no_turn_end_stop_restarts_and_resends
     monkeypatch.setattr(tailer_module, "ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S", 3600.0)
     harness = _AppServerHarness(monkeypatch, ["timeout", "confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     tailer = _tailer(session, transport, store)
 
     queue = await tailer.subscribe()
@@ -459,7 +623,7 @@ async def test_explicit_stop_with_confirmed_interrupt_keeps_server_and_resends(
     _patch_timings(monkeypatch)
     harness = _AppServerHarness(monkeypatch, ["confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     tailer = _tailer(session, transport, store)
 
     queue = await tailer.subscribe()
@@ -500,7 +664,7 @@ async def test_explicit_stop_frozen_turn_restarts_and_resends(
     _patch_timings(monkeypatch)
     harness = _AppServerHarness(monkeypatch, ["timeout", "confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     tailer = _tailer(session, transport, store)
 
     queue = await tailer.subscribe()
@@ -535,7 +699,7 @@ async def test_hard_liveness_reaps_silent_turn_with_outstanding_tool(
     monkeypatch.setattr(tailer_module, "ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S", 0.0)
     harness = _AppServerHarness(monkeypatch, ["timeout", "confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     tailer = _tailer(session, transport, store)
 
     queue = await tailer.subscribe()
@@ -570,7 +734,7 @@ async def test_actively_emitting_turn_is_not_hard_reaped(
     monkeypatch.setattr(tailer_module, "ACTIVE_TURN_HARD_LIVENESS_TIMEOUT_S", 0.05)
     harness = _AppServerHarness(monkeypatch, ["confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     tailer = _tailer(session, transport, store)
 
     queue = await tailer.subscribe()
@@ -605,7 +769,7 @@ async def test_unattributed_replay_and_null_goal_update_do_not_wedge(
     _patch_timings(monkeypatch)
     harness = _AppServerHarness(monkeypatch, ["confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     tailer = _tailer(session, transport, store)
 
     queue = await tailer.subscribe()

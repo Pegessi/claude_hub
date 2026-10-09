@@ -1,5 +1,8 @@
 """Task attachment persistence and prompt blocks."""
 
+import os
+from dataclasses import dataclass
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ._constants import *  # noqa: F401,F403
@@ -24,19 +27,21 @@ def _validate_image_signature(mime_type: str, content: bytes) -> None:
             raise ValueError("Attachment bytes do not match declared image type image/webp")
 
 
+@dataclass(frozen=True)
+class _PreparedWorkspaceAttachment:
+    attachment: WorkspaceAttachment
+    content: bytes
+
+
 class _AttachmentsMixin:
-    def _persist_attachments(
+    def _prepare_attachments(
         self,
         workspace_id: str,
         owner_id: str,
         attachments: list[WorkspaceAttachmentCreate],
-    ) -> list[WorkspaceAttachment]:
-        persisted: list[WorkspaceAttachment] = []
-        if not attachments:
-            return persisted
-
+    ) -> list[_PreparedWorkspaceAttachment]:
+        prepared: list[_PreparedWorkspaceAttachment] = []
         owner_dir = self._workspace_attachments_dir(workspace_id) / owner_id
-        owner_dir.mkdir(parents=True, exist_ok=True)
         for item in attachments:
             mime_type = item.mime_type.strip().lower()
             suffix = IMAGE_ATTACHMENT_TYPES.get(mime_type)
@@ -54,21 +59,59 @@ class _AttachmentsMixin:
             if len(content) > ATTACHMENT_MAX_BYTES:
                 raise ValueError("Attachment exceeds the 8 MB limit")
             _validate_image_signature(mime_type, content)
-
             attachment_id = uuid.uuid4().hex
             filename = _safe_attachment_filename(item.filename, suffix)
             path = owner_dir / f"{attachment_id}-{filename}"
-            path.write_bytes(content)
-            persisted.append(
-                WorkspaceAttachment(
-                    id=attachment_id,
-                    filename=filename,
-                    mime_type=mime_type,
-                    path=str(path),
-                    size_bytes=len(content),
+            prepared.append(
+                _PreparedWorkspaceAttachment(
+                    attachment=WorkspaceAttachment(
+                        id=attachment_id,
+                        filename=filename,
+                        mime_type=mime_type,
+                        path=str(path),
+                        size_bytes=len(content),
+                    ),
+                    content=content,
                 )
             )
-        return persisted
+        return prepared
+
+    def _write_prepared_attachments(
+        self,
+        prepared: list[_PreparedWorkspaceAttachment],
+        created_paths: list[Path],
+    ) -> None:
+        for item in prepared:
+            path = Path(item.attachment.path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # A collision never authorizes overwriting or deleting an old file.
+            with path.open("xb") as output:
+                created_paths.append(path)
+                output.write(item.content)
+                output.flush()
+                os.fsync(output.fileno())
+
+    def _delete_created_attachment_paths(self, paths: list[Path]) -> None:
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to delete attachment file: %s", path, exc_info=True)
+
+    def _persist_attachments(
+        self,
+        workspace_id: str,
+        owner_id: str,
+        attachments: list[WorkspaceAttachmentCreate],
+    ) -> list[WorkspaceAttachment]:
+        prepared = self._prepare_attachments(workspace_id, owner_id, attachments)
+        created_paths: list[Path] = []
+        try:
+            self._write_prepared_attachments(prepared, created_paths)
+        except BaseException:
+            self._delete_created_attachment_paths(created_paths)
+            raise
+        return [item.attachment for item in prepared]
 
     def _attachment_prompt_block(self, attachments: list[WorkspaceAttachment]) -> str:
         if not attachments:

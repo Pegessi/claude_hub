@@ -19,14 +19,15 @@ Follow this flow for every change — even small doc updates and one-line fixes.
 ```bash
 cd <your-main-worktree>
 git fetch origin
-git pull --rebase origin main
+git pull --ff-only origin main
 ```
 
 ### 2. Create an isolated worktree + feature branch
 
 ```bash
 cd <your-main-worktree>
-git worktree add ../claude_hub-<slug> -b <type>/<short-description> main
+mkdir -p ~/claude_hub_worktree
+git worktree add ~/claude_hub_worktree/<slug> -b <type>/<short-description> origin/main
 ```
 
 Branch naming convention: use conventional-commit types as the prefix.
@@ -63,34 +64,49 @@ ci: add AGENTS.md <> CLAUDE.md sync check
 
 ### 5. Run validation
 
-Run the checks relevant to the files you touched:
+Use the shared local/CI entry point from the feature worktree:
 
-**Backend (any Python change):**
 ```bash
-cd backend
-uv run black --check .
-uv run isort --check .
-uv run mypy .
-uv run pytest -xvs --ignore=tests/test_terminal_replay.py
+./scripts/verify.sh all
 ```
 
-If you changed terminal rendering / ttyd / tmux glue:
+Individual targets are available for iteration (`./scripts/verify.sh --help`).
+For a single backend regression, keep the same isolation and evidence handling:
+
 ```bash
-uv run pytest tests/test_terminal_replay.py -v
+./scripts/verify.sh backend-tests -- tests/test_task_attachment_transaction.py -q
 ```
 
-**Frontend (any Vue/TS/CSS change):**
+Focused runs record their selected arguments and do not count as a full pass.
+The full backend type target checks both product code and tests. Formatting,
+types, backend behavior, frontend lint, frontend behavior, and frontend build
+report independently; passing one is not evidence that another passed.
+
+Tool versions are declared in `.python-test-version`, `.node-test-version`, `.uv-version`,
+and `frontend/package.json` (`packageManager`). The Python/Node pins are verification-only;
+they are not auto-discovered runtime-version files. Install those tools explicitly
+using the environment's approved download/cache locations, then install locked
+dependencies from the feature checkout:
+
 ```bash
-cd frontend
-pnpm run lint:check
-pnpm run build
-pnpm run test:unit
+(cd backend && uv sync --frozen --extra dev --python "$(cat ../.python-test-version)")
+(cd frontend && pnpm install --frozen-lockfile)
 ```
 
-**Docs-only / .github changes:** at minimum, run the docs integrity check:
-```bash
-diff -q AGENTS.md CLAUDE.md
-```
+Do not change the lockfiles or use a different interpreter merely to make a
+check pass. The verification script does not install dependencies, download a
+browser, or restart a service. Backend tests get private HOME/XDG/Hub paths and
+retain their evidence directory. Tests may start their own helper processes;
+inspect failed or interrupted runs before removing their runtime directories.
+Never point the default check at a running developer or production backend.
+
+UI checks must state whether they inspected real rendering, mocked APIs, or live
+external integration. A screenshot is evidence of the inspected state, not proof
+of every visual or interaction requirement. Requirements determine the expected
+behavior; existing implementation strings must not be the only test oracle.
+
+For docs-only changes, run `./scripts/verify.sh docs` and verify that the changed
+instructions match the current commands, paths, and module responsibilities.
 
 ### 6. Update `CHANGELOG.md`
 
@@ -106,19 +122,21 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `ci`.
 
 ### 7. Open a PR, review, merge to `main`, push
 
-Wait for CI to pass and for a reviewer to approve. After squash/merge,
-remember to clean up the worktree (see [Cleanup](#cleanup) below).
+Wait for the required checks and independent review before merging. Record the
+exact candidate SHA, check results and unverified criteria. Developing a branch
+does not authorize merge, push, deployment, or production restart; follow the
+user's delivery boundary. A staged program may deliver branches for later merge.
 
 ## Cleanup
 
-Once your branch is merged:
+A merged branch is not evidence that its worktree is disposable. First inspect
+Git status and all untracked/needed ignored files, and verify that no process,
+tmux session, dev server or browser test still uses it. Unknown ownership means
+keep it. Preserve needed evidence and stop only task-owned resources.
 
-```bash
-cd <your-main-worktree>
-git worktree remove ../claude_hub-<slug>
-git branch -d <type>/<short-description>
-git pull --rebase origin main
-```
+Only after those checks, remove the exact disposable checkout with
+`git worktree remove ~/claude_hub_worktree/<slug>`. Do not use recursive deletion
+or remove a shared/persistent agent session as incidental cleanup.
 
 ## AGENTS.md and CLAUDE.md
 

@@ -10,7 +10,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -334,6 +334,7 @@ async def test_cursor_send_text_prepends_question_protocol_guidance() -> None:
     with patch.object(native, "_spawn_oneshot", new_callable=AsyncMock) as mock_spawn:
         await native._send_text("hello")
     mock_spawn.assert_awaited_once()
+    assert mock_spawn.await_args is not None
     prompt = mock_spawn.await_args.args[1]
     assert prompt.startswith("<<<HUB_QUESTION_PROTOCOL_V1>>>")
     assert QUESTION_PROTOCOL_GUIDANCE in prompt
@@ -1123,6 +1124,7 @@ async def test_codex_start_passes_selected_environment_to_app_server(
 
     await native.start()
 
+    assert spawn.await_args is not None
     assert spawn.await_args.kwargs["env"]["SELECTED_ROUTE"] == "direct"
 
 
@@ -1706,7 +1708,7 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
 )
 async def test_persistent_network_change_restarts_before_accepting_next_turn(
     monkeypatch: MonkeyPatch,
-    session_cls: Any,
+    session_cls: type[CodexNativeSession],
     agent_type: AgentType,
     changed_key: str,
 ) -> None:
@@ -1717,7 +1719,7 @@ async def test_persistent_network_change_restarts_before_accepting_next_turn(
     }
     native = session_cls(session)
     native._started = True
-    native._process = _FakeProcess([])
+    native._process = cast(asyncio.subprocess.Process, _FakeProcess([]))
     native._network_config_fingerprint = native._provider_network_fingerprint()
     events: List[str] = []
 
@@ -1763,7 +1765,7 @@ async def test_persistent_network_change_failure_keeps_old_process_and_rejects_p
     native = CodexNativeSession(session)
     old_process = _FakeProcess([])
     native._started = True
-    native._process = old_process
+    native._process = cast(asyncio.subprocess.Process, old_process)
     native._network_config_fingerprint = native._provider_network_fingerprint()
     restart = AsyncMock()
     send = AsyncMock()
@@ -1798,7 +1800,7 @@ async def test_persistent_model_only_change_does_not_restart_network(
     session.env = {"CLAUDE_HUB_PROVIDER_NETWORK_MODE": "inherit"}
     native = CodexNativeSession(session)
     native._started = True
-    native._process = _FakeProcess([])
+    native._process = cast(asyncio.subprocess.Process, _FakeProcess([]))
     native._network_config_fingerprint = native._provider_network_fingerprint()
     restart = AsyncMock()
 
@@ -2276,7 +2278,9 @@ async def test_cursor_send_message_stages_images_and_cleans_up_on_eof(
         # the in-flight images and deletes the temp files.
         proc.stdout.push(b"")
         assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
-        await asyncio.wait_for(native._reader_task, timeout=1.0)
+        reader_task = native._reader_task
+        assert reader_task is not None
+        await asyncio.wait_for(reader_task, timeout=1.0)
 
     # The drain's finally popped its generation, so the dict is empty and the
     # temp files are deleted.
@@ -2364,7 +2368,9 @@ async def test_cursor_lingering_turn_does_not_delete_next_turn_images(
         # Turn N+1's process exits: its drain cleans its own files.
         proc_n1.stdout.push(b"")
         assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
-        await asyncio.wait_for(native._reader_task, timeout=1.0)
+        reader_task = native._reader_task
+        assert reader_task is not None
+        await asyncio.wait_for(reader_task, timeout=1.0)
 
     assert native._inflight_images_by_gen == {}
     assert all(not p.exists() for p in paths_n1)
@@ -2706,7 +2712,7 @@ async def test_codex_all_skipped_question_auto_dismisses() -> None:
     a notification (there is no card to resolve)."""
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     # Every question lacks an id -> zero actionable questions.
     request = _codex_question_request()
     request["params"]["questions"] = [{"question": "Pick?", "options": []}]
@@ -2726,7 +2732,7 @@ async def test_codex_missing_questions_auto_dismisses() -> None:
     and must be auto-dismissed rather than blocking the turn."""
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     request = _codex_question_request()
     del request["params"]["questions"]
     await sess._handle_server_request(request)
@@ -2742,7 +2748,7 @@ async def test_codex_answer_pending_question_sends_jsonrpc_response() -> None:
     app-server's ``{answers: {questionId: {answers: [labels]}}}`` shape."""
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     sess._pending_questions[42] = _codex_question_request()["params"]
     answers = [{"questionId": "q1", "selected": ["red", "blue"]}]
     handled = await sess.answer_pending_question(answers)
@@ -2760,7 +2766,7 @@ async def test_codex_answer_pending_question_dismissal_empty_answers() -> None:
     """An empty answers list (dismissal) yields ``{"answers": {}}``."""
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     sess._pending_questions[42] = _codex_question_request()["params"]
     handled = await sess.answer_pending_question([])
     assert handled is True
@@ -2774,7 +2780,7 @@ async def test_codex_answer_pending_question_returns_false_when_none_pending() -
     written — the caller falls through to normal delivery."""
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     handled = await sess.answer_pending_question([{"questionId": "q1", "selected": ["red"]}])
     assert handled is False
     assert _written_requests(proc) == []
@@ -2784,7 +2790,7 @@ async def test_codex_answer_pending_question_returns_false_when_none_pending() -
 async def test_codex_answer_does_not_dismiss_unrelated_pending_question() -> None:
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     sess._pending_questions[42] = _codex_question_request()["params"]
     assert not await sess.answer_pending_question([{"questionId": "old", "selected": ["red"]}])
     assert 42 in sess._pending_questions
@@ -2797,7 +2803,7 @@ async def test_codex_unknown_server_request_gets_method_not_found() -> None:
     so the app-server does not hang waiting for a response we never send."""
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     await sess._handle_server_request(
         {"jsonrpc": "2.0", "id": 99, "method": "some/unknown", "params": {}}
     )
@@ -2823,7 +2829,7 @@ async def test_codex_concurrent_answer_calls_do_not_double_answer() -> None:
     map and no req_id receives more than one response."""
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
 
     # The real StreamWriter.drain yields to the event loop mid-write; the fake's
     # ``pass`` coroutine does not, which would let one call finish before the
@@ -2857,7 +2863,7 @@ async def test_codex_cancel_active_turn_clears_pending_questions() -> None:
     longer waiting on."""
     sess = _codex_session()
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     sess._pending_questions[42] = _codex_question_request()["params"]
     sess._turn_in_flight = True
     sess._thread_id = "thread-real"
@@ -2890,7 +2896,7 @@ async def test_codex_cancel_filters_late_records_until_completion() -> None:
     sess._thread_id = "thread-active"
     sess._provider_turn_id = "turn-active"
     proc = _FakeProcess(stdout_lines=[])
-    sess._process = proc
+    sess._process = cast(asyncio.subprocess.Process, proc)
     sess._send_request = AsyncMock(return_value={})  # type: ignore[method-assign]
 
     cancellation = asyncio.create_task(sess.cancel_active_turn())
@@ -3236,7 +3242,7 @@ def test_codex_reasoning_effort_overrides_mode_preset() -> None:
 @pytest.mark.asyncio
 async def test_codex_discovers_model_specific_reasoning_efforts() -> None:
     native = _codex_session()
-    native._send_request = AsyncMock(
+    send_request = AsyncMock(
         return_value={
             "data": [
                 {
@@ -3252,6 +3258,7 @@ async def test_codex_discovers_model_specific_reasoning_efforts() -> None:
             ]
         }
     )
+    setattr(native, "_send_request", send_request)
 
     await native._discover_models()
 
@@ -3267,7 +3274,7 @@ async def test_codex_discovers_model_specific_reasoning_efforts() -> None:
 @pytest.mark.asyncio
 async def test_codex_model_discovery_follows_pagination() -> None:
     native = _codex_session()
-    native._send_request = AsyncMock(
+    send_request = AsyncMock(
         side_effect=[
             {
                 "data": [{"model": "gpt-first", "displayName": "First"}],
@@ -3279,11 +3286,12 @@ async def test_codex_model_discovery_follows_pagination() -> None:
             },
         ]
     )
+    setattr(native, "_send_request", send_request)
 
     await native._discover_models()
 
     assert [model.id for model in native._available_models] == ["gpt-first", "gpt-second"]
-    assert native._send_request.await_args_list == [
+    assert send_request.await_args_list == [
         call("model/list", {}),
         call("model/list", {"cursor": "page-2"}),
     ]
@@ -3292,18 +3300,19 @@ async def test_codex_model_discovery_follows_pagination() -> None:
 @pytest.mark.asyncio
 async def test_codex_model_discovery_retries_after_temporary_failure() -> None:
     native = _codex_session()
-    native._send_request = AsyncMock(
+    send_request = AsyncMock(
         side_effect=[
             RuntimeError("temporary"),
             {"data": [{"model": "gpt-recovered", "displayName": "Recovered"}]},
         ]
     )
+    setattr(native, "_send_request", send_request)
 
     await native._discover_models()
     await native._discover_models()
 
     assert [model.id for model in native._available_models] == ["gpt-recovered"]
-    assert native._send_request.await_count == 2
+    assert send_request.await_count == 2
 
 
 @pytest.mark.asyncio

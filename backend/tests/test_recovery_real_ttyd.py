@@ -61,12 +61,15 @@ import pytest
 def _free_port() -> int:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
+    address = s.getsockname()
     s.close()
+    assert isinstance(address, tuple)
+    port = address[1]
+    assert isinstance(port, int)
     return port
 
 
-def _tmux(*args: str, check: bool = True, timeout: int = 10) -> subprocess.CompletedProcess:
+def _tmux(*args: str, check: bool = True, timeout: int = 10) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     for v in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
         env.pop(v, None)

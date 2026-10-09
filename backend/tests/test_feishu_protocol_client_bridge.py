@@ -9,6 +9,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Mapping
 from unittest.mock import AsyncMock
 
 import httpx
@@ -30,6 +31,7 @@ from claude_hub.services.feishu_bot import (
     FeishuBotError,
     FeishuEventPayloadError,
     FeishuEventVerificationError,
+    FeishuMessageEvent,
     feishu_message_time_is_valid,
     parse_feishu_callback,
 )
@@ -89,7 +91,7 @@ def _callback_headers(
 
 
 def _encrypted_callback(
-    payload: dict[str, object],
+    payload: Mapping[str, object],
     request_time: int,
     *,
     encrypt_key: str = "encrypt-key",
@@ -180,6 +182,7 @@ def test_encrypted_callback_signature_token_and_time_windows(
     )
     kind, parsed = parse_feishu_callback(event_body, event_headers, bot_config, now=_NOW)
     assert kind == "message"
+    assert isinstance(parsed, FeishuMessageEvent)
     assert parsed.text == "hello"
     assert parsed.message_id == "om-1"
     assert parsed.message_created_at_ms == _NOW * 1000
@@ -287,6 +290,7 @@ def test_plaintext_mode_checks_token_without_request_signature(
         now=_NOW,
     )
     assert kind == "message"
+    assert isinstance(parsed, FeishuMessageEvent)
     assert parsed.text == "plain event"
 
 
@@ -388,7 +392,9 @@ async def test_external_chat_bridge_preserves_feishu_source_metadata(
 
     dispatched: list[tuple[str, str, str, dict[str, object]]] = []
 
-    async def fake_dispatch(tab_id, payload, **kwargs) -> str:
+    async def fake_dispatch(
+        tab_id: str, payload: stream_api.AgentStreamSendRequest, **kwargs: object
+    ) -> str:
         dispatched.append((tab_id, payload.text, payload.client_turn_id, kwargs))
         await queue.put(
             AgentStreamEvent(

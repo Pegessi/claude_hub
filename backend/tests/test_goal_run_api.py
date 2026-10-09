@@ -108,7 +108,7 @@ def test_goal_api_rejects_create_while_chat_turn_is_running(
 
 @pytest.mark.asyncio
 async def test_goal_runtime_callbacks_use_direct_chat_transport(monkeypatch, tmp_path) -> None:
-    sent: list[tuple[object, object, object]] = []
+    sent: list[tuple[object, stream_api.AgentStreamSendRequest, object, dict[str, object]]] = []
     cancelled: list[object] = []
     session = SimpleNamespace(id="terminal-tab-tab-1")
     manager = SimpleNamespace(
@@ -249,7 +249,7 @@ def test_goal_question_followup_pauses_before_manual_send(goal_client, monkeypat
     )
     sent = []
 
-    async def send(session, payload, manager):
+    async def send(session, payload, manager, *, visible_text=None, turn_metadata=None):
         current = goal_api.get_goal_manager().get(goal["id"])
         assert current.status == GoalRunStatus.PAUSED
         assert current.current_turn_id is None

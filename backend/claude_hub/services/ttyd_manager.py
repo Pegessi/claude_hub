@@ -17,9 +17,10 @@ import sys
 import time
 import uuid
 from collections import namedtuple
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict
+from typing import Any, AsyncIterator, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict
 
 from ..config import settings
 from ..models import (
@@ -3734,18 +3735,27 @@ class TTYDManager:
 
         return process.to_schema()
 
+    @asynccontextmanager
+    async def _locked_current_tab(self, tab_id: str) -> AsyncIterator[Optional[TTYDProcess]]:
+        # Missing ids must not grow the lock map; queued callers must re-read the owner.
+        if tab_id not in self.processes:
+            yield None
+            return
+        lock = self._start_locks.setdefault(tab_id, asyncio.Lock())
+        async with lock:
+            yield self.processes.get(tab_id)
+
     async def ensure_tab_tmux_session(self, tab_id: str) -> bool:
-        process = self.processes.get(tab_id)
-        if not process:
-            raise KeyError(tab_id)
-        created = await process.ensure_tmux_session()
-        if created:
-            # If ensure_tmux_session launched codex (fresh session), schedule
-            # discovery to pin its real session UUID. process.start() will
-            # later reattach rather than re-launch codex, so this is our only
-            # hook for pinning this launch.
-            self._schedule_codex_discovery(process)
-        return created
+        async with self._locked_current_tab(tab_id) as process:
+            if process is None:
+                raise KeyError(tab_id)
+            if process.archived:
+                return False
+            created = await process.ensure_tmux_session()
+            if created:
+                # Fresh Codex launches need discovery; later ttyd startup only reattaches.
+                self._schedule_codex_discovery(process)
+            return created
 
     async def duplicate_tab(self, tab_id: str) -> Optional[TerminalTab]:
         """Create a new tab by copying the source tab's launch configuration."""
@@ -3921,29 +3931,22 @@ class TTYDManager:
             raise
 
     async def delete_tab(self, tab_id: str) -> bool:
-        """Delete a tab and explicitly kill its tmux session (user requested deletion)."""
-        if tab_id not in self.processes:
-            return False
+        """Delete a tab and explicitly kill its tmux session."""
+        async with self._locked_current_tab(tab_id) as process:
+            if process is None:
+                return False
+            logger.warning(
+                f"User requested deletion of tab {tab_id}, killing tmux session {process.tmux_session}"
+            )
+            # Keep the registered owner on failure or cancellation so teardown can retry.
+            await process.stop(kill_tmux=True)
+            self.processes.pop(tab_id, None)
+            if tab_id in self._tab_order:
+                self._tab_order.remove(tab_id)
+                self._save_order()
+            self._save_state()
 
-        process = self.processes[tab_id]
-        logger.warning(
-            f"User requested deletion of tab {tab_id}, killing tmux session {process.tmux_session}"
-        )
-        # Keep the process registered until teardown is proven.  If tmux
-        # refuses to die, the workspace orphan reconciler can still see this
-        # tab and retry instead of losing its final durable owner reference.
-        await process.stop(kill_tmux=True)
-        self.processes.pop(tab_id, None)
-        if tab_id in self._tab_order:
-            self._tab_order.remove(tab_id)
-            self._save_order()
-        self._save_state()
-        # Purge the tab's structured stream: forget the in-process tailer
-        # (so an in-flight send cannot rewrite previews/events after clear),
-        # then clear the event log and the bounded preview cache. Using
-        # discard_session_stream (rather than clearing the attachment store
-        # directly) guarantees the tailer is stopped before any state is
-        # wiped, so a concurrent send cannot resurrect deleted previews.
+        # The id is no longer discoverable. Do not add tailer/send locks to the tab lock.
         try:
             from .agent_stream.tailer import discard_session_stream
 
@@ -3953,64 +3956,49 @@ class TTYDManager:
         return True
 
     async def archive_tab(self, tab_id: str) -> Optional[TerminalTab]:
-        """Soft-delete a tab: release runtime resources but keep its history.
+        """Release a tab's runtime while retaining its record and structured history."""
+        async with self._locked_current_tab(tab_id) as process:
+            if process is None:
+                return None
+            if not process.archived:
+                process.archived = True
+                process.archived_at = datetime.now()
+            logger.warning(
+                "Archiving tab %s (%s); releasing runtime, keeping history", tab_id, process.name
+            )
+            await process.stop(kill_tmux=True)
+            # Serialize restore with the complete stop, including the native transport.
+            try:
+                from .agent_stream.tailer import stop_session_stream
 
-        Sets the archived flag, then stops the ttyd process, kills the tmux
-        session, and stops the agent stream tailer (which terminates any
-        persistent provider transport like the Codex app-server). The JSONL
-        event log and attachments are NOT cleared, so the tab can later be
-        restored via ``unarchive_tab``. The tab id stays in the order list so
-        restore preserves its position.
-        """
-        process = self.processes.get(tab_id)
-        if not process:
-            return None
-        if not process.archived:
-            process.archived = True
-            process.archived_at = datetime.now()
-        logger.warning(
-            "Archiving tab %s (%s); releasing runtime, keeping history",
-            tab_id,
-            process.name,
-        )
-        await process.stop(kill_tmux=True)
-        # Stop the tailer + provider transport without discarding the JSONL.
-        # ``stop_session_stream`` (unlike ``discard_session_stream``) leaves
-        # the on-disk event log and attachment store intact for restore.
-        try:
-            from .agent_stream.tailer import stop_session_stream
-
-            await stop_session_stream(f"terminal-tab-{tab_id}")
-        except Exception:
-            logger.exception("Failed to stop stream tailer for archived tab %s", tab_id)
-        process.is_active = False
-        self._save_state()
-        return process.to_schema()
+                await stop_session_stream(f"terminal-tab-{tab_id}")
+            except Exception:
+                logger.exception("Failed to stop stream tailer for archived tab %s", tab_id)
+            process.is_active = False
+            self._save_state()
+            return process.to_schema()
 
     async def unarchive_tab(self, tab_id: str) -> Optional[TerminalTab]:
-        """Restore an archived tab: clear the flag and best-effort restart it.
+        """Restore an archived record, then best-effort start its runtime."""
+        async with self._locked_current_tab(tab_id) as process:
+            if process is None:
+                return None
+            if process.archived:
+                process.archived = False
+                process.archived_at = None
+            logger.info("Unarchiving tab %s (%s)", tab_id, process.name)
+            self._save_state()
 
-        The runtime is brought back lazily — ``ensure_tab_running`` is tried
-        once but failures are swallowed, since opening the tab will retry the
-        cold-recovery path anyway.
-        """
-        process = self.processes.get(tab_id)
-        if not process:
-            return None
-        if process.archived:
-            process.archived = False
-            process.archived_at = None
-        logger.info("Unarchiving tab %s (%s)", tab_id, process.name)
-        self._save_state()
+        # ensure_tab_running acquires this same lock; do not recursively hold it.
         try:
             await self.ensure_tab_running(tab_id)
         except Exception:
             logger.exception(
-                "Best-effort restart after unarchive failed for tab %s; "
-                "cold recovery will retry on open",
+                "Best-effort restart after unarchive failed for tab %s; cold recovery will retry on open",
                 tab_id,
             )
-        return process.to_schema()
+        # Deletion may have won while the best-effort restart was waiting.
+        return self.get_tab(tab_id)
 
     def list_archived_tabs(self) -> list[TerminalTab]:
         """List archived tabs, most recently archived first."""
@@ -4027,24 +4015,13 @@ class TTYDManager:
         return self.processes[tab_id].to_schema()
 
     async def ensure_tab_running(self, tab_id: str) -> Optional[TerminalTab]:
-        """Ensure the tab has a live ttyd listener while preserving tmux state."""
-        process = self.processes.get(tab_id)
-        if not process:
-            return None
-        if process.archived:
-            # Archived tabs must not be silently restarted by terminal access
-            # (WebSocket / proxy iframe / reconnect) — that would undo the
-            # archive and leave a hidden live process still flagged archived.
-            # Deep-link restore goes through unarchive_tab, which clears the
-            # flag before calling this method.
-            return None
-
-        lock = self._start_locks.setdefault(tab_id, asyncio.Lock())
-        async with lock:
+        """Ensure the current, non-archived tab has a live ttyd listener."""
+        async with self._locked_current_tab(tab_id) as process:
+            if process is None or process.archived:
+                return None
             if _is_local_port_listening(process.port):
                 process.is_active = True
                 return process.to_schema()
-
             if process.process and process.process.returncode is None:
                 logger.warning(
                     "Tab %s has a live ttyd process object but port %s is not listening; restarting ttyd",
@@ -4052,19 +4029,13 @@ class TTYDManager:
                     process.port,
                 )
                 await process.stop(kill_tmux=False)
-
             logger.info(
-                "Starting missing ttyd listener for tab %s on port %s",
-                tab_id,
-                process.port,
+                "Starting missing ttyd listener for tab %s on port %s", tab_id, process.port
             )
             try:
                 await self._start_missing_tab_identity_safe(process)
             except Exception:
-                # During uvicorn --reload an old backend may still own the
-                # port briefly. If the listener exists now, let the proxy use
-                # it; a later request will restart ttyd if that old listener is
-                # cleaned up.
+                # A backend from an earlier reload can still own the listener briefly.
                 if _is_local_port_listening(process.port):
                     logger.warning(
                         "Tab %s start failed but port %s is already listening; treating it as available",
@@ -4075,7 +4046,6 @@ class TTYDManager:
                     return process.to_schema()
                 process.is_active = False
                 raise
-
             return process.to_schema()
 
     async def _start_missing_tab_identity_safe(self, process: TTYDProcess) -> None:
@@ -4561,108 +4531,109 @@ class TTYDManager:
         """Update tab settings. Note: Changing shell/cwd/solo_mode/agent_type requires restarting
         the ttyd process, but the tmux session will be PRESERVED.
         """
-        if tab_id not in self.processes:
-            return None
+        async with self._locked_current_tab(tab_id) as process:
+            if process is None:
+                return None
+            needs_restart = False
 
-        process = self.processes[tab_id]
-        needs_restart = False
+            if name:
+                process.name = name
+            if shell is not None:
+                process.shell = shell
+                needs_restart = True
+            if cwd is not None:
+                process.cwd = cwd
+                needs_restart = True
+            if solo_mode is not None:
+                process.solo_mode = solo_mode
+                needs_restart = True
+            if agent_type is not None:
+                if process.agent_type != agent_type:
+                    # Reset agent_session_id when switching agent types: ids are
+                    # agent-specific (claude uuids vs codex ULID-uuid hybrids vs
+                    # cursor opaque hashes) and a stale id from the wrong agent
+                    # will corrupt resume. The new agent's launch path will
+                    # generate/pin a fresh id.
+                    process.agent_session_id = None
+                    if agent_type in (AgentType.CLAUDE, AgentType.CODEX):
+                        process.agent_session_id = str(uuid.uuid4())
+                    process.cursor_transport = "terminal"
+                    process.cursor_data_dir = None
+                    process.cursor_cli_version = None
+                    process.cursor_transcript_path = None
+                    process.cursor_transcript_schema = None
+                    logger.info(f"reset agent_session_id for tab {tab_id} due to agent_type change")
+                process.agent_type = agent_type
+                needs_restart = True
+            next_target = target if target is not None else process.target
+            if process.session_kind == SessionKind.CHAT and next_target == ExecutionTarget.REMOTE:
+                raise ValueError(CHAT_REMOTE_UNSUPPORTED)
+            if next_target == ExecutionTarget.REMOTE:
+                next_profile_id = (
+                    remote_profile_id
+                    if remote_profile_id is not None
+                    else process.remote_profile_id
+                )
+                reject_unsupported_interactive(
+                    remote_profile_manager.get_profile(next_profile_id or "")
+                )
+            if target is not None:
+                process.target = target
+                needs_restart = True
+            if remote_profile_id is not None:
+                process.remote_profile_id = remote_profile_id
+                needs_restart = True
+            if remote_cwd is not None:
+                process.remote_cwd = remote_cwd
+                needs_restart = True
+            if remote_reconnect is not None:
+                process.remote_reconnect = remote_reconnect
+                needs_restart = True
+            if env is not None:
+                process.env = TTYDProcess._clean_env(env)
+                process._prepare_agent_env()
+                if process.agent_type != AgentType.CLAUDE:
+                    process._setup_tunnel_env()
+                needs_restart = True
 
-        if name:
-            process.name = name
-        if shell is not None:
-            process.shell = shell
-            needs_restart = True
-        if cwd is not None:
-            process.cwd = cwd
-            needs_restart = True
-        if solo_mode is not None:
-            process.solo_mode = solo_mode
-            needs_restart = True
-        if agent_type is not None:
-            if process.agent_type != agent_type:
-                # Reset agent_session_id when switching agent types: ids are
-                # agent-specific (claude uuids vs codex ULID-uuid hybrids vs
-                # cursor opaque hashes) and a stale id from the wrong agent
-                # will corrupt resume. The new agent's launch path will
-                # generate/pin a fresh id.
-                process.agent_session_id = None
-                if agent_type in (AgentType.CLAUDE, AgentType.CODEX):
-                    process.agent_session_id = str(uuid.uuid4())
+            if process.cursor_transport == "terminal_transcript" and not (
+                process.target == ExecutionTarget.LOCAL
+                and cursor_terminal_transcript_provenance_valid(
+                    cwd=process.cwd,
+                    session_id=process.agent_session_id,
+                    cli_version=process.cursor_cli_version,
+                    transcript_path=process.cursor_transcript_path,
+                    transcript_schema=process.cursor_transcript_schema,
+                    data_dir=process.cursor_data_dir,
+                    env=process.env,
+                )
+            ):
                 process.cursor_transport = "terminal"
                 process.cursor_data_dir = None
                 process.cursor_cli_version = None
                 process.cursor_transcript_path = None
                 process.cursor_transcript_schema = None
-                logger.info(f"reset agent_session_id for tab {tab_id} due to agent_type change")
-            process.agent_type = agent_type
-            needs_restart = True
-        next_target = target if target is not None else process.target
-        if process.session_kind == SessionKind.CHAT and next_target == ExecutionTarget.REMOTE:
-            raise ValueError(CHAT_REMOTE_UNSUPPORTED)
-        if next_target == ExecutionTarget.REMOTE:
-            next_profile_id = (
-                remote_profile_id if remote_profile_id is not None else process.remote_profile_id
-            )
-            reject_unsupported_interactive(
-                remote_profile_manager.get_profile(next_profile_id or "")
-            )
-        if target is not None:
-            process.target = target
-            needs_restart = True
-        if remote_profile_id is not None:
-            process.remote_profile_id = remote_profile_id
-            needs_restart = True
-        if remote_cwd is not None:
-            process.remote_cwd = remote_cwd
-            needs_restart = True
-        if remote_reconnect is not None:
-            process.remote_reconnect = remote_reconnect
-            needs_restart = True
-        if env is not None:
-            process.env = TTYDProcess._clean_env(env)
-            process._prepare_agent_env()
-            if process.agent_type != AgentType.CLAUDE:
-                process._setup_tunnel_env()
-            needs_restart = True
 
-        if process.cursor_transport == "terminal_transcript" and not (
-            process.target == ExecutionTarget.LOCAL
-            and cursor_terminal_transcript_provenance_valid(
-                cwd=process.cwd,
-                session_id=process.agent_session_id,
-                cli_version=process.cursor_cli_version,
-                transcript_path=process.cursor_transcript_path,
-                transcript_schema=process.cursor_transcript_schema,
-                data_dir=process.cursor_data_dir,
-                env=process.env,
+            # Enforce the "Chat = native structured" invariant after every field
+            # update. An agent_type switch (above) resets cursor_transport to
+            # "terminal"; re-promote a local Cursor Chat tab so it does not fail
+            # closed in the adapter registry.
+            process.cursor_transport = _promote_cursor_chat_transport(
+                process.session_kind,
+                process.agent_type,
+                process.target,
+                process.cursor_transport,
             )
-        ):
-            process.cursor_transport = "terminal"
-            process.cursor_data_dir = None
-            process.cursor_cli_version = None
-            process.cursor_transcript_path = None
-            process.cursor_transcript_schema = None
 
-        # Enforce the "Chat = native structured" invariant after every field
-        # update. An agent_type switch (above) resets cursor_transport to
-        # "terminal"; re-promote a local Cursor Chat tab so it does not fail
-        # closed in the adapter registry.
-        process.cursor_transport = _promote_cursor_chat_transport(
-            process.session_kind,
-            process.agent_type,
-            process.target,
-            process.cursor_transport,
-        )
+            if needs_restart and not process.archived:
+                logger.info(
+                    f"Updating tab {tab_id}, restarting ttyd but preserving tmux session {process.tmux_session}"
+                )
+                await process.stop(kill_tmux=False)
+                await process.start()
 
-        if needs_restart:
-            logger.info(
-                f"Updating tab {tab_id}, restarting ttyd but preserving tmux session {process.tmux_session}"
-            )
-            await process.stop(kill_tmux=False)
-            await process.start()
-
-        self._save_state()
-        return process.to_schema()
+            self._save_state()
+            return process.to_schema()
 
     async def switch_env(
         self,
@@ -4670,23 +4641,18 @@ class TTYDManager:
         env: Dict[str, str],
         solo_mode: Optional[bool] = None,
     ) -> TerminalTab:
-        """Hot-swap env/solo_mode on a live local Claude/Codex tab via tmux respawn-pane.
-
-        Unlike ``update_tab`` this does NOT restart ttyd; it rewrites the launch
-        files and respawns the foreground process in-place so the WebSocket
-        connection, pane scrollback, and conversation (via resume flags) survive.
-        connection, pane scrollback, and conversation (via --resume) survive.
-        """
-        process = self.processes.get(tab_id)
-        if not process:
-            raise KeyError(tab_id)
-
-        await process.switch_env(env, solo_mode=solo_mode)
-
-        self._save_state()
-        # Invalidate any cached agent status so the next poll re-samples.
-        self._status_cache.pop(tab_id, None)
-        return process.to_schema()
+        """Hot-swap a live tab's environment while preserving its conversation."""
+        async with self._locked_current_tab(tab_id) as process:
+            if process is None:
+                raise KeyError(tab_id)
+            if process.archived and process.session_kind != SessionKind.CHAT:
+                raise RuntimeError(
+                    "tmux session is not running; cannot switch env on a stopped tab"
+                )
+            await process.switch_env(env, solo_mode=solo_mode)
+            self._save_state()
+            self._status_cache.pop(tab_id, None)
+            return process.to_schema()
 
     def _backfill_agent_session_ids(self) -> None:
         """Conservatively pin ``agent_session_id`` for pre-feature claude tabs.

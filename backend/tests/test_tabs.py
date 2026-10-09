@@ -13,10 +13,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 from pytest import MonkeyPatch
+from starlette.types import Message, Scope
 
 from claude_hub.api.tabs import router as tabs_router
 from claude_hub.auth.dependencies import get_current_user
-from claude_hub.models import AgentType, ExecutionTarget, TerminalTab, User
+from claude_hub.models import AgentType, ExecutionTarget, SessionKind, TerminalTab, User
 from claude_hub.services.ttyd_manager import TabStartupTimeoutError, TTYDManager
 
 api_tabs_module = importlib.import_module("claude_hub.api.tabs")
@@ -28,7 +29,7 @@ async def _post_tab_then_disconnect(
     *,
     on_disconnect: Callable[[], None] | None = None,
     wait_before_disconnect_delivery: asyncio.Event | None = None,
-) -> list[dict]:
+) -> list[Message]:
     """Invoke the tabs router with a real ASGI http.disconnect message."""
     app = FastAPI()
     app.include_router(tabs_router)
@@ -44,11 +45,11 @@ async def _post_tab_then_disconnect(
             "env": {"CODEX_MODEL": "gpt-6.1-sol"},
         }
     ).encode()
-    incoming: asyncio.Queue[dict] = asyncio.Queue()
+    incoming: asyncio.Queue[Message] = asyncio.Queue()
     await incoming.put({"type": "http.request", "body": payload, "more_body": False})
-    sent: list[dict] = []
+    sent: list[Message] = []
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         message = await incoming.get()
         if message["type"] == "http.disconnect":
             if on_disconnect is not None:
@@ -57,10 +58,10 @@ async def _post_tab_then_disconnect(
                 await wait_before_disconnect_delivery.wait()
         return message
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
-    scope = {
+    scope: Scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
@@ -139,6 +140,7 @@ async def test_create_tab_asgi_disconnect_cancels_and_waits_for_rollback(
             await asyncio.Event().wait()
         finally:
             rollback_completed.set()
+        raise AssertionError("unreachable after cancellation")
 
     monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.create_tab", fake_create_tab)
 
@@ -146,7 +148,9 @@ async def test_create_tab_asgi_disconnect_cancels_and_waits_for_rollback(
 
     assert rollback_completed.is_set()
     assert captured["agent_type"] == AgentType.CODEX
-    assert captured["session_kind"].value == "chat"
+    session_kind = captured["session_kind"]
+    assert isinstance(session_kind, SessionKind)
+    assert session_kind.value == "chat"
     assert captured["cwd"] == "/tmp/proxy-ab-controlled"
     assert captured["env"] == {"CODEX_MODEL": "gpt-6.1-sol"}
     response_start = next(message for message in sent if message["type"] == "http.response.start")
@@ -242,16 +246,16 @@ async def test_create_tab_handler_cancellation_rolls_back_real_owned_resources(
     payload = json.dumps(
         {"name": "cancelled-handler", "agent_type": "terminal", "cwd": str(tmp_path)}
     ).encode()
-    incoming: asyncio.Queue[dict] = asyncio.Queue()
+    incoming: asyncio.Queue[Message] = asyncio.Queue()
     await incoming.put({"type": "http.request", "body": payload, "more_body": False})
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         return await incoming.get()
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         pytest.fail(f"cancelled handler must not commit a response: {message}")
 
-    scope = {
+    scope: Scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",

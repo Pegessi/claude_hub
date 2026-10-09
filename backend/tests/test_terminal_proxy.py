@@ -135,7 +135,9 @@ async def test_terminal_websocket_connects_to_loopback_with_invalid_proxy_enviro
 
     server = await terminal_api.websockets.serve(handler, "127.0.0.1", 0)
     try:
-        socket_address = server.sockets[0].getsockname()
+        sockets = list(server.sockets)
+        assert sockets
+        socket_address = sockets[0].getsockname()
         client = FakeClientWebSocket([{"type": "websocket.receive", "text": "direct"}])
         await proxy_websocket(
             cast(WebSocket, client),

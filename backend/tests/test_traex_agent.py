@@ -12,6 +12,7 @@ import importlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -461,7 +462,7 @@ async def test_traex_selected_reasoning_effort_reaches_collaboration_mode(
     session.env = {"TRAEX_REASONING_EFFORT": "high"}
     transport = TraexNativeSession(session)
     transport._started = True
-    transport._process = _FakeProcess([])
+    transport._process = cast(asyncio.subprocess.Process, _FakeProcess([]))
     transport._thread_id = "thread-1"
     transport._thread_model = "GPT-5.6-Sol"
     transport._mode_presets[mode.value] = {
@@ -522,7 +523,7 @@ async def test_traex_interrupt_uses_provider_ids_and_retires_old_output(
 ) -> None:
     transport = TraexNativeSession(_managed_session())
     transport._started = True
-    transport._process = _FakeProcess([])
+    transport._process = cast(asyncio.subprocess.Process, _FakeProcess([]))
     transport._thread_id = "thread-real"
     seen = []
 
@@ -568,13 +569,15 @@ async def test_traex_interrupt_uses_provider_ids_and_retires_old_output(
     await transport._handle_notification(
         {"method": "item/agentMessage/delta", "params": {"turnId": "next-turn", "delta": "new"}}
     )
-    assert (await transport.read_line())["params"]["delta"] == "new"
+    record = await transport.read_line()
+    assert record is not None
+    assert record["params"]["delta"] == "new"
 
 
 async def test_traex_interrupt_failure_restarts_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = TraexNativeSession(_managed_session())
     proc = _FakeProcess([])
-    transport._process = proc
+    transport._process = cast(asyncio.subprocess.Process, proc)
     transport._started = True
     transport._thread_id, transport._provider_turn_id = "thread", "turn"
     transport._begin_turn()
@@ -601,7 +604,7 @@ async def test_traex_interrupt_failure_restarts_provider(monkeypatch: pytest.Mon
 async def test_traex_permission_card_roundtrip(method: str, selected: str, decision: str) -> None:
     transport = TraexNativeSession(_managed_session())
     proc = _FakeProcess([])
-    transport._process = proc
+    transport._process = cast(asyncio.subprocess.Process, proc)
     await transport._handle_server_request(
         {
             "id": "approval-id",
@@ -614,7 +617,9 @@ async def test_traex_permission_card_roundtrip(method: str, selected: str, decis
             },
         }
     )
-    events = TraexJsonlAdapter().normalize_line(await transport.read_line(), _ctx())
+    record = await transport.read_line()
+    assert record is not None
+    events = TraexJsonlAdapter().normalize_line(record, _ctx())
     card = next(e for e in events if e.type == AgentStreamEventType.APPROVAL_REQUIRED)
     assert "touch example.txt" in card.payload["questions"][0]["prompt"]
     assert await transport.answer_pending_question(
@@ -628,7 +633,7 @@ async def test_traex_permission_card_roundtrip(method: str, selected: str, decis
 
 def test_traex_command_timeline_and_terminal_errors() -> None:
     adapter = TraexJsonlAdapter()
-    item = {
+    item: dict[str, Any] = {
         "id": "call-1",
         "type": "commandExecution",
         "command": "false",
@@ -666,7 +671,7 @@ def test_traex_command_timeline_and_terminal_errors() -> None:
 async def test_traex_parallel_approval_answers_do_not_resolve_other_requests() -> None:
     transport = TraexNativeSession(_managed_session())
     proc = _FakeProcess([])
-    transport._process = proc
+    transport._process = cast(asyncio.subprocess.Process, proc)
     for req_id in ["first", "second"]:
         await transport._handle_server_request(
             {
@@ -710,12 +715,14 @@ async def test_traex_approval_persistence_only_resolves_answered_card() -> None:
                 call_id=req_id,
             )
         )
-    tailer._publish = AsyncMock()
+    publish = AsyncMock()
+    setattr(tailer, "_publish", publish)
     await tailer._emit_approval_resolved(
         [{"questionId": "permission:first", "selected": ["Allow once"]}]
     )
     assert set(tailer._pending_approvals) == {"second"}
-    assert tailer._publish.await_args.args[0].call_id == "first"
+    assert publish.await_args is not None
+    assert publish.await_args.args[0].call_id == "first"
 
 
 async def test_traex_permission_changes_apply_on_next_turn(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -723,11 +730,12 @@ async def test_traex_permission_changes_apply_on_next_turn(monkeypatch: pytest.M
     session.solo_mode = True
     transport = TraexNativeSession(session)
     transport._started = True
-    transport._process = _FakeProcess([])
+    transport._process = cast(asyncio.subprocess.Process, _FakeProcess([]))
     transport._thread_id = "thread"
     send = AsyncMock(return_value={"turn": {"id": "turn"}})
     monkeypatch.setattr(transport, "_send_request", send)
     await transport.send_message("run", [])
+    assert send.await_args is not None
     assert send.await_args.args[1]["approvalPolicy"] == "never"
     assert send.await_args.args[1]["sandboxPolicy"] == {"type": "dangerFullAccess"}
     transport.acknowledge_turn_complete()
@@ -736,5 +744,6 @@ async def test_traex_permission_changes_apply_on_next_turn(monkeypatch: pytest.M
     transport._thread_model = "Seed-Evolving"
     transport._mode_presets = {"plan": {"mode": "plan"}}
     await transport.send_message("plan only", [])
+    assert send.await_args is not None
     assert send.await_args.args[1]["approvalPolicy"] == "on-request"
     assert send.await_args.args[1]["sandboxPolicy"] == {"type": "readOnly"}

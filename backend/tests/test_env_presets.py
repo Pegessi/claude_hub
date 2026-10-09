@@ -11,6 +11,7 @@ from httpx import AsyncClient
 from pytest import MonkeyPatch
 
 from claude_hub.models import (
+    EnvPreset,
     EnvPresetBulkImport,
     EnvPresetCreate,
     EnvPresetHiddenRequest,
@@ -86,8 +87,10 @@ class TestEnvPresetManager:
         assert updated.text == "NEW=2"
         # Partial update
         manager.update_preset("p1", text="NEW=3")
-        assert manager.get_preset("p1").name == "New Name"
-        assert manager.get_preset("p1").text == "NEW=3"
+        partial = manager.get_preset("p1")
+        assert partial is not None
+        assert partial.name == "New Name"
+        assert partial.text == "NEW=3"
 
     def test_update_nonexistent_returns_none(self, manager: EnvPresetManager) -> None:
         assert manager.update_preset("nope", name="x", text="y") is None
@@ -167,13 +170,11 @@ class TestEnvPresetManager:
 
         payload = EnvPresetBulkImport(
             custom_presets=[
-                {
-                    "id": "existing",
-                    "name": "Client Overwrite",
-                    "text": "C=999",
-                },  # conflict - server wins
-                {"id": "migrated-1", "name": "Client Preset", "text": "C=2"},
-                {"id": "", "name": "", "text": ""},  # invalid - skipped
+                EnvPreset(
+                    id="existing", name="Client Overwrite", text="C=999"
+                ),  # conflict - server wins
+                EnvPreset(id="migrated-1", name="Client Preset", text="C=2"),
+                EnvPreset(id="", name="", text=""),  # invalid - skipped
             ],
             hidden_builtin_ids=["local-proxy-7890", "nonexistent"],
         )
@@ -192,7 +193,7 @@ class TestEnvPresetManager:
 
     def test_bulk_import_when_backend_empty(self, manager: EnvPresetManager) -> None:
         payload = EnvPresetBulkImport(
-            custom_presets=[{"id": "ls-1", "name": "From LS", "text": "LS=1"}],
+            custom_presets=[EnvPreset(id="ls-1", name="From LS", text="LS=1")],
             hidden_builtin_ids=["socks-proxy-1080"],
         )
         result = manager.bulk_import(payload)

@@ -43,6 +43,7 @@ def _free_port() -> int:
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
+    assert isinstance(port, int)
     return port
 
 
@@ -1143,7 +1144,7 @@ def test_buffered_capture_coordinator_preserves_write_identity_and_finalizes(
             gate["errors"].append(f"held route fulfill: {exc}")
 
     def _coord_edge_live_result(page: Page, request_id: str) -> dict[str, Any]:
-        return page.evaluate(
+        result = page.evaluate(
             """(requestId) => {
                 const edge = window.__coordEdge || {};
                 const obs = (window.__coordEdgeObs && window.__coordEdgeObs[requestId]) || { events: [] };
@@ -1162,6 +1163,8 @@ def test_buffered_capture_coordinator_preserves_write_identity_and_finalizes(
             }""",
             arg=request_id,
         )
+        assert isinstance(result, dict)
+        return result
 
     def _coord_restore_inner(page: Page) -> None:
         page.evaluate(
@@ -1562,7 +1565,7 @@ def test_buffered_capture_coordinator_preserves_write_identity_and_finalizes(
     }"""
 
     def _pre_apply_read(page: Page, marker: str) -> dict[str, Any]:
-        return page.evaluate(
+        result = page.evaluate(
             """(marker) => {
                 const term = window.term;
                 const obs = window.__coordPreApply || {};
@@ -1580,6 +1583,8 @@ def test_buffered_capture_coordinator_preserves_write_identity_and_finalizes(
             }""",
             arg=marker,
         )
+        assert isinstance(result, dict)
+        return result
 
     def _wait_fetch_count(gate: dict[str, Any], page: Page, minimum: int, timeout_s: float) -> None:
         deadline = time.time() + timeout_s

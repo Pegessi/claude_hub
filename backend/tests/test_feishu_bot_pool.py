@@ -137,6 +137,7 @@ def _pair(
     environ: dict[str, str] | None = None,
 ):
     entry = pool.snapshot(environ).get(bot_id)
+    assert entry is not None
     code, _expires, _revision = pool.issue_code(
         bot_id,
         owner=owner,
@@ -149,6 +150,7 @@ def _pair(
         bot_id, code=code, sender_open_id=sender, chat_id=chat_id, environ=environ
     )
     entry = pool.snapshot(environ).get(bot_id)
+    assert entry is not None
     return pool.activate_claim(
         bot_id,
         pairing_id=claim.pairing_id,
@@ -172,6 +174,7 @@ def test_one_bot_holds_at_most_one_binding(pool: FeishuBotPoolStore) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     _pair(pool, bot_id, environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     with pytest.raises(FeishuBotOccupied):
         pool.issue_code(
             bot_id,
@@ -188,6 +191,7 @@ def test_one_chat_tab_is_bound_at_most_once_across_the_pool(pool: FeishuBotPoolS
     second = pool.create_bot(name="Two", config=_config("app-2"), environ={})
     _pair(pool, first, tab_id="tab-1", environ={})
     entry = pool.snapshot({}).get(second)
+    assert entry is not None
     with pytest.raises(FeishuChatOccupied):
         pool.issue_code(
             second,
@@ -204,6 +208,7 @@ def test_occupied_bot_is_never_preempted_silently(pool: FeishuBotPoolStore) -> N
     binding = _pair(pool, bot_id, environ={})
     with pytest.raises(FeishuBotOccupied):
         entry = pool.snapshot({}).get(bot_id)
+        assert entry is not None
         pool.issue_code(
             bot_id,
             owner=OTHER,
@@ -212,13 +217,17 @@ def test_occupied_bot_is_never_preempted_silently(pool: FeishuBotPoolStore) -> N
             expected_revision=entry.revision,
             environ={},
         )
-    assert pool.snapshot({}).get(bot_id).binding.pairing_id == binding.pairing_id
+    current = pool.snapshot({}).get(bot_id)
+    assert current is not None
+    assert current.binding is not None
+    assert current.binding.pairing_id == binding.pairing_id
 
 
 def test_rotating_secrets_keeps_the_active_binding(pool: FeishuBotPoolStore) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     binding = _pair(pool, bot_id, environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     pool.rotate_secrets(
         bot_id,
         app_secret="next-secret",
@@ -228,10 +237,12 @@ def test_rotating_secrets_keeps_the_active_binding(pool: FeishuBotPoolStore) -> 
         environ={},
     )
     after = pool.snapshot({}).get(bot_id)
+    assert after is not None
     assert after.binding is not None
     assert after.binding.pairing_id == binding.pairing_id
     assert after.generation == entry.generation
     assert after.revision == entry.revision + 1
+    assert after.config is not None
     assert after.config.app_secret == "next-secret"
 
 
@@ -270,6 +281,7 @@ def test_environment_app_change_revokes_binding_and_allows_repairing(
     _pair(pool, ENV_BOT_ID, environ=environ)
     moved = _env("env-app-next")
     entry = pool.snapshot(moved).get(ENV_BOT_ID)
+    assert entry is not None
     assert entry.binding is None
     # The raw record must really be cleared, not merely hidden: otherwise
     # issue_code keeps reporting an occupied Bot and re-pairing is impossible.
@@ -289,12 +301,17 @@ def test_environment_app_restore_does_not_resurrect_the_old_binding(
 ) -> None:
     environ = _env("env-app")
     _pair(pool, ENV_BOT_ID, environ=environ)
-    before = pool.snapshot(environ).get(ENV_BOT_ID).generation
+    before_entry = pool.snapshot(environ).get(ENV_BOT_ID)
+    assert before_entry is not None
+    before = before_entry.generation
     moved = _env("env-app-next")
     # Only a read happens while the app is different; the read path must still
     # persist the revocation.
-    assert pool.snapshot(moved).get(ENV_BOT_ID).binding is None
+    moved_entry = pool.snapshot(moved).get(ENV_BOT_ID)
+    assert moved_entry is not None
+    assert moved_entry.binding is None
     restored = pool.snapshot(environ).get(ENV_BOT_ID)
+    assert restored is not None
     assert restored.binding is None
     assert restored.generation == before + 2
 
@@ -323,6 +340,7 @@ def test_environment_sync_is_idempotent(pool: FeishuBotPoolStore) -> None:
 def test_pairing_requires_the_confirmation_word(pool: FeishuBotPoolStore) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     code, _expires, _revision = pool.issue_code(
         bot_id,
         owner=OWNER,
@@ -333,8 +351,11 @@ def test_pairing_requires_the_confirmation_word(pool: FeishuBotPoolStore) -> Non
     )
     claim, word = pool.claim_code(bot_id, code=code, sender_open_id="ou-s", chat_id="oc-1")
     # A claim alone routes nothing.
-    assert pool.snapshot({}).get(bot_id).binding is None
+    pending = pool.snapshot({}).get(bot_id)
+    assert pending is not None
+    assert pending.binding is None
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     with pytest.raises(FeishuPairingMismatch):
         pool.activate_claim(
             bot_id,
@@ -344,6 +365,7 @@ def test_pairing_requires_the_confirmation_word(pool: FeishuBotPoolStore) -> Non
             expected_revision=entry.revision,
         )
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     binding = pool.activate_claim(
         bot_id,
         pairing_id=claim.pairing_id,
@@ -359,6 +381,7 @@ def test_wrong_confirmation_word_destroys_the_claim_after_five_tries(
 ) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     code, _e, _r = pool.issue_code(
         bot_id,
         owner=OWNER,
@@ -370,6 +393,7 @@ def test_wrong_confirmation_word_destroys_the_claim_after_five_tries(
     claim, word = pool.claim_code(bot_id, code=code, sender_open_id="ou-s", chat_id="oc-1")
     for _ in range(5):
         entry = pool.snapshot({}).get(bot_id)
+        assert entry is not None
         with pytest.raises(FeishuPairingMismatch):
             pool.activate_claim(
                 bot_id,
@@ -378,7 +402,9 @@ def test_wrong_confirmation_word_destroys_the_claim_after_five_tries(
                 actor=OWNER,
                 expected_revision=entry.revision,
             )
-    assert pool.snapshot({}).get(bot_id).claims == ()
+    current = pool.snapshot({}).get(bot_id)
+    assert current is not None
+    assert current.claims == ()
 
 
 def test_another_hub_identity_cannot_activate_someone_elses_claim(
@@ -386,6 +412,7 @@ def test_another_hub_identity_cannot_activate_someone_elses_claim(
 ) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     code, _e, _r = pool.issue_code(
         bot_id,
         owner=OWNER,
@@ -396,6 +423,7 @@ def test_another_hub_identity_cannot_activate_someone_elses_claim(
     )
     claim, word = pool.claim_code(bot_id, code=code, sender_open_id="ou-s", chat_id="oc-1")
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     with pytest.raises(FeishuPairingNotOwned):
         pool.activate_claim(
             bot_id,
@@ -409,6 +437,7 @@ def test_another_hub_identity_cannot_activate_someone_elses_claim(
 def test_expired_code_cannot_be_claimed(pool: FeishuBotPoolStore, clock: Clock) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     code, _e, _r = pool.issue_code(
         bot_id,
         owner=OWNER,
@@ -437,22 +466,31 @@ def test_stale_release_cannot_delete_a_newer_binding(pool: FeishuBotPoolStore) -
 
     environ = _env("env-app")
     _pair(pool, ENV_BOT_ID, environ=environ)
-    stale = pool.snapshot(environ).get(ENV_BOT_ID).revision
+    stale_entry = pool.snapshot(environ).get(ENV_BOT_ID)
+    assert stale_entry is not None
+    stale = stale_entry.revision
     pool.release_binding(ENV_BOT_ID, expected_revision=stale, environ=environ)
     fresh = _pair(pool, ENV_BOT_ID, environ=environ)
     with pytest.raises(FeishuBotRevisionConflict):
         pool.release_binding(ENV_BOT_ID, expected_revision=stale, environ=environ)
-    assert pool.snapshot(environ).get(ENV_BOT_ID).binding.pairing_id == fresh.pairing_id
+    current = pool.snapshot(environ).get(ENV_BOT_ID)
+    assert current is not None
+    assert current.binding is not None
+    assert current.binding.pairing_id == fresh.pairing_id
 
 
 def test_drop_binding_ignores_a_superseded_pairing_id(pool: FeishuBotPoolStore) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     first = _pair(pool, bot_id, environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     pool.release_binding(bot_id, expected_revision=entry.revision, environ={})
     second = _pair(pool, bot_id, environ={})
     assert pool.drop_binding(bot_id, first.pairing_id) is False
-    assert pool.snapshot({}).get(bot_id).binding.pairing_id == second.pairing_id
+    current = pool.snapshot({}).get(bot_id)
+    assert current is not None
+    assert current.binding is not None
+    assert current.binding.pairing_id == second.pairing_id
 
 
 # -------------------------------------------------------- I. hardening
@@ -483,6 +521,7 @@ def test_infinite_claim_expiry_does_not_make_a_claim_immortal(
 ) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     code, _e, _r = pool.issue_code(
         bot_id,
         owner=OWNER,
@@ -531,6 +570,7 @@ def test_legacy_configuration_migrates_without_its_bindings(
         )
     )
     entry = pool.snapshot({}).get(LEGACY_BOT_ID)
+    assert entry is not None
     assert entry.app_id == "old-app"
     assert entry.revision == 3
     assert entry.binding is None
@@ -1094,6 +1134,7 @@ def test_pair_code_rate_limit_is_per_identity_and_expires(
 
     def issue(bot_id: str, owner: OwnerIdentity = OWNER, tab_id: str = "tab-1"):
         entry = pool.snapshot({}).get(bot_id)
+        assert entry is not None
         return pool.issue_code(
             bot_id,
             owner=owner,
@@ -1121,6 +1162,7 @@ def test_pair_code_rate_limit_is_per_identity_and_expires(
 def test_a_code_cannot_be_claimed_twice(pool: FeishuBotPoolStore) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     code, _expires, _revision = pool.issue_code(
         bot_id,
         owner=OWNER,
@@ -1133,7 +1175,9 @@ def test_a_code_cannot_be_claimed_twice(pool: FeishuBotPoolStore) -> None:
 
     with pytest.raises(FeishuBindingCodeError):
         pool.claim_code(bot_id, code=code, sender_open_id="ou-sender", chat_id="oc-1", environ={})
-    assert len(pool.snapshot({}).get(bot_id).claims) == 1
+    current = pool.snapshot({}).get(bot_id)
+    assert current is not None
+    assert len(current.claims) == 1
 
 
 def test_unbinding_revokes_outstanding_codes(pool: FeishuBotPoolStore) -> None:
@@ -1147,6 +1191,7 @@ def test_unbinding_revokes_outstanding_codes(pool: FeishuBotPoolStore) -> None:
     codes = []
     for _ in range(2):
         entry = pool.snapshot({}).get(bot_id)
+        assert entry is not None
         code, _expires, _revision = pool.issue_code(
             bot_id,
             owner=OWNER,
@@ -1158,6 +1203,7 @@ def test_unbinding_revokes_outstanding_codes(pool: FeishuBotPoolStore) -> None:
         codes.append(code)
 
     entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
     assert pool.release_binding(bot_id, expected_revision=entry.revision, environ={}) is None
 
     for code in codes:

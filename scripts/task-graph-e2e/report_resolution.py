@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-VERDICT_EVENT_TYPES = frozenset(
-    {"review_passed", "review_failed", "review_needs_input"}
-)
+VERDICT_EVENT_TYPES = frozenset({"review_passed", "review_failed", "review_needs_input"})
 
 
 def event_report_id(event: dict[str, Any]) -> str:
     """Return the report_id carried by a TaskEvent payload."""
 
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    raw_payload = event.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
     report_id = event.get("report_id") or payload.get("report_id")
     if not report_id:
         raise AssertionError(f"TaskEvent missing report_id: {event!r}")
@@ -23,10 +22,9 @@ def expected_agent_report_state(event: dict[str, Any]) -> str:
     """Map a target TaskEvent to the persisted AgentReport.state expectation."""
 
     event_type = str(event.get("type") or "").lower()
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    payload_state = str(
-        payload.get("state") or payload.get("report_state") or ""
-    ).lower()
+    raw_payload = event.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    payload_state = str(payload.get("state") or payload.get("report_state") or "").lower()
     if event_type == "report":
         return payload_state or "ready_for_review"
     if event_type == "review_started":
@@ -35,9 +33,7 @@ def expected_agent_report_state(event: dict[str, Any]) -> str:
         return event_type
     if payload_state in VERDICT_EVENT_TYPES:
         return payload_state
-    raise AssertionError(
-        f"unsupported target event type for report resolution: {event!r}"
-    )
+    raise AssertionError(f"unsupported target event type for report resolution: {event!r}")
 
 
 def expected_actor_session_id(
@@ -54,9 +50,7 @@ def expected_actor_session_id(
     raise AssertionError(f"unsupported actor_role for report resolution: {event!r}")
 
 
-def find_agent_report_by_id(
-    reports: list[dict[str, Any]], report_id: str
-) -> dict[str, Any] | None:
+def find_agent_report_by_id(reports: list[dict[str, Any]], report_id: str) -> dict[str, Any] | None:
     for report in reports:
         if str(report.get("id") or "") == report_id:
             return report
@@ -95,19 +89,14 @@ def resolve_target_event_report(
 
     mismatches: list[str] = []
     if actual_task_id != expected_task_id:
-        mismatches.append(
-            f"task_id expected {expected_task_id!r} got {actual_task_id!r}"
-        )
+        mismatches.append(f"task_id expected {expected_task_id!r} got {actual_task_id!r}")
     if actual_session_id != expected_session_id:
-        mismatches.append(
-            f"session_id expected {expected_session_id!r} got {actual_session_id!r}"
-        )
+        mismatches.append(f"session_id expected {expected_session_id!r} got {actual_session_id!r}")
     if actual_state != expected_state:
         mismatches.append(f"state expected {expected_state!r} got {actual_state!r}")
     if mismatches:
         raise AssertionError(
-            f"seq {event.get('sequence')} report {report_id!r} mismatch: "
-            + "; ".join(mismatches)
+            f"seq {event.get('sequence')} report {report_id!r} mismatch: " + "; ".join(mismatches)
         )
 
     return {
