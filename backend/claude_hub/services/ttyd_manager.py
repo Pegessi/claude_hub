@@ -4154,7 +4154,7 @@ class TTYDManager:
 
     def list_tabs(self) -> list[TerminalTab]:
         # Return tabs in saved order
-        logger.info(
+        logger.debug(
             f"list_tabs called, _tab_order={self._tab_order}, processes={list(self.processes.keys())}"
         )
         ordered_tabs: list[TerminalTab] = []
@@ -4166,7 +4166,7 @@ class TTYDManager:
         for process in self.processes.values():
             if process.tab_id not in self._tab_order and not process.archived:
                 ordered_tabs.append(process.to_schema())
-        logger.info(f"list_tabs returning: {[t.name for t in ordered_tabs]}")
+        logger.debug(f"list_tabs returning: {[t.name for t in ordered_tabs]}")
         return ordered_tabs
 
     async def get_tab_history(self, tab_id: str, lines: int = 100000) -> Optional[str]:

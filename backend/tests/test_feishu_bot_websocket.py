@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
+import claude_hub.services.feishu_bot_websocket as websocket_runtime
 from claude_hub.services.feishu_bot import FeishuBotConfig
 from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore, OwnerIdentity
 from claude_hub.services.feishu_bot_websocket import (
@@ -398,6 +402,137 @@ async def test_connection_discovery_is_bounded_and_applies_sdk_config() -> None:
         "AppID": "cli-a",
         "AppSecret": "secret-a",
     }
+
+
+@pytest.mark.asyncio
+async def test_sdk_loader_import_is_single_flight() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    imports: list[str] = []
+    modules = {
+        "lark_oapi": SimpleNamespace(name="lark"),
+        "lark_oapi.ws.client": SimpleNamespace(name="websocket"),
+    }
+
+    def import_module(name: str) -> Any:
+        imports.append(name)
+        if name == "lark_oapi":
+            entered.set()
+            assert release.wait(timeout=1)
+        return modules[name]
+
+    loader = websocket_runtime._LarkSdkLoader(import_module=import_module)
+    first = asyncio.create_task(loader.load())
+    second = asyncio.create_task(loader.load())
+
+    assert await asyncio.to_thread(entered.wait, 1) is True
+    await asyncio.sleep(0)
+    assert first.done() is False
+    assert second.done() is False
+    release.set()
+
+    assert await first == (modules["lark_oapi"], modules["lark_oapi.ws.client"])
+    assert await second == (modules["lark_oapi"], modules["lark_oapi.ws.client"])
+    assert imports == ["lark_oapi", "lark_oapi.ws.client"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_loader_reuses_the_process_cache() -> None:
+    imports: list[str] = []
+    modules = {
+        "lark_oapi": SimpleNamespace(name="lark"),
+        "lark_oapi.ws.client": SimpleNamespace(name="websocket"),
+    }
+
+    def import_module(name: str) -> Any:
+        imports.append(name)
+        return modules[name]
+
+    loader = websocket_runtime._LarkSdkLoader(import_module=import_module)
+
+    await loader.load()
+    await loader.load()
+
+    assert imports == ["lark_oapi", "lark_oapi.ws.client"]
+
+
+@pytest.mark.asyncio
+async def test_connection_stage_logs_are_timed_without_credentials(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connected = asyncio.Event()
+
+    class FakeClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            self._conn: object | None = None
+
+        async def _receive_message_loop(self) -> None:
+            await asyncio.Future()
+
+        async def _connect(self) -> None:
+            self._conn = object()
+            asyncio.create_task(self._receive_message_loop())
+            connected.set()
+
+        async def _ping_loop(self) -> None:
+            await asyncio.Future()
+
+        async def _disconnect(self) -> None:
+            self._conn = None
+
+    class FakeBuilder:
+        def register_p2_im_message_receive_v1(self, _callback: Any) -> FakeBuilder:
+            return self
+
+        def build(self) -> object:
+            return object()
+
+    class FakeDispatcher:
+        @staticmethod
+        def builder(_token: str, _encrypt_key: str) -> FakeBuilder:
+            return FakeBuilder()
+
+    lark = SimpleNamespace(
+        EventDispatcherHandler=FakeDispatcher,
+        LogLevel=SimpleNamespace(WARNING="warning"),
+        ws=SimpleNamespace(Client=FakeClient),
+    )
+    ws_client = SimpleNamespace()
+
+    class FakeLoader:
+        async def load(self) -> tuple[Any, Any]:
+            return lark, ws_client
+
+    async def discover(*_args: Any, **_kwargs: Any) -> str:
+        return "wss://secret.example/ws?credential=do-not-log"
+
+    monkeypatch.setattr(websocket_runtime, "_discover_connection_url", discover)
+    caplog.set_level(logging.INFO, logger=websocket_runtime.__name__)
+    connection = _LarkConnection(
+        _config(secret="app-secret-do-not-log"),
+        lambda _data: asyncio.sleep(0),
+        route_tasks=_BoundedRouteTasks(),
+        sdk_loader=FakeLoader(),
+    )
+
+    running = asyncio.create_task(connection.run())
+    await connected.wait()
+    await connection.close()
+    await running
+
+    assert "stage=endpoint_discovery outcome=completed duration_ms=" in caplog.text
+    assert "stage=websocket_handshake outcome=completed duration_ms=" in caplog.text
+    assert "app-secret-do-not-log" not in caplog.text
+    assert "secret.example" not in caplog.text
+
+
+def test_backend_file_logging_is_bounded_and_rotating() -> None:
+    source = (Path(__file__).parents[1] / "claude_hub" / "main.py").read_text()
+
+    assert "RotatingFileHandler" in source
+    assert "maxBytes=10 * 1024 * 1024" in source
+    assert "backupCount=5" in source
+    assert "logging.FileHandler(log_file" not in source
 
 
 @pytest.mark.asyncio

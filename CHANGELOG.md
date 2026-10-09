@@ -5,6 +5,21 @@
 
 ## Unreleased
 
+### feat(feishu): make Bot conversations responsive and richly formatted
+
+- Prewarm the Feishu SDK once per backend process, time connection stages without
+  exposing credentials, and keep the Bot settings view refreshed while a connection
+  is starting or retrying.
+- Serialize bounded bursts of messages per paired Chat instead of rejecting the
+  second Feishu message as busy, with a best-effort typing reaction while each
+  message is queued or running.
+- Deliver assistant Markdown as Feishu rich-text posts with code-block support and
+  versioned provider guidance, while preserving historical `feishu-v1` turns and
+  preventing model-authored mention tags from notifying users implicitly.
+- Bound backend file logs with rotation and stop INFO-level tab-list dumps from
+  obscuring connection diagnostics. See the
+  [Feishu interaction v2 notes](docs/working-logs/2026-10-10-feishu-interaction-v2.md).
+
 ### feat(runtime): rebuild frontend during supervised restart
 
 - Make the production menu restart run the committed frontend build after
