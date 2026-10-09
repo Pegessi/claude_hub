@@ -121,6 +121,28 @@
       .ch-btn--icon.ch-btn--sm { width: 28px; height: 28px; }
       .harness { position: relative; height: 100%; background: linear-gradient(145deg, var(--ch-color-app-bg), var(--ch-color-surface)); }
       .harness::before { content: "Structured Chat preview"; position: absolute; top: 18px; left: 20px; color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); letter-spacing: .05em; text-transform: uppercase; }
+      .pane-chrome {
+        --pane-chrome-control-size: 24px;
+        position: absolute;
+        top: 6px;
+        right: 8px;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .pane-session-name {
+        display: inline-flex;
+        align-items: center;
+        height: var(--pane-chrome-control-size);
+        padding: 0 9px;
+        border: 1px solid var(--ch-color-border-muted);
+        border-radius: 999px;
+        background: var(--ch-color-surface-raised);
+        box-shadow: 0 1px 4px var(--ch-shadow-color-soft);
+        color: var(--ch-color-text-muted);
+        font-size: 11px;
+      }
       .harness-open-settings { position: absolute; right: 24px; bottom: 24px; }
       @media (max-width: 640px) { .harness-open-settings { right: 12px; bottom: 12px; min-height: 44px; } }
     </style>
@@ -142,7 +164,10 @@
               class: 'ch-btn harness-open-settings',
               onClick: () => { showSettings.value = true },
             }, 'Open Bot settings'),
-            h(FeishuBindingPanel, { tabId: 'tab-1' }),
+            h('div', { class: 'pane-chrome' }, [
+              h('span', { class: 'pane-session-name' }, 'ch'),
+              h(FeishuBindingPanel, { tabId: 'tab-1' }),
+            ]),
             showSettings.value
               ? h(FeishuBotSettingsDialog, {
                   onClose: () => { showSettings.value = false },
