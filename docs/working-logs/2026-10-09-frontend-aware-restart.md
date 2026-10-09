@@ -42,7 +42,7 @@ perform the staged build automatically.
 ## Validation
 
 - `tests/test_service_restart.py`, `tests/test_runtime_isolation.py`, and
-  `tests/test_backend_instance_lock.py`: 27 passed. Focused launcher regressions
+  `tests/test_backend_instance_lock.py`: 30 passed. Focused launcher regressions
   cover successful staged promotion while the old backend is healthy, non-zero
   build failure, promotion rollback/backend recovery, timeout, whole-process-
   group cleanup (including a child that ignores `SIGTERM`), preservation of the
@@ -55,7 +55,9 @@ perform the staged build automatically.
   there; the probe directory was removed afterward.
 - Black, isort, scoped mypy, shell syntax, `git diff --check`, and the
   `AGENTS.md`/`CLAUDE.md` byte-identity check passed. Independent candidate
-  review found and fixed three lifecycle issues before this final run: build
+  review found and fixed five lifecycle issues before this final run: build
   timeout orphaning child processes, staged assets becoming visible before the
-  backend switch, and missing rollback/backend recovery on promotion failure.
+  backend switch, missing rollback/backend recovery on promotion failure, first-
+  rename failures bypassing backend recovery, and termination between renames
+  leaving no live `dist`.
 - The shared service on `:8173` was not restarted during implementation.
