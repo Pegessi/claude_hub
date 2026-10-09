@@ -2859,7 +2859,7 @@ async def test_external_retirement_distinguishes_not_started_and_matching_active
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=cast(ProviderSession, transport),
     )
 
     assert (
@@ -2889,7 +2889,7 @@ async def test_external_retirement_preserves_different_active_turn(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=cast(ProviderSession, transport),
     )
     await tailer.send_message("new turn", [], client_turn_id="turn-new")
 
@@ -2917,7 +2917,7 @@ async def test_external_retirement_preserves_completed_turn(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=cast(ProviderSession, transport),
     )
     queue = await tailer.subscribe()
     await tailer.send_message("hello", [], client_turn_id="turn-completed")
@@ -2958,7 +2958,7 @@ async def test_external_retirement_cancels_matching_orphan_but_not_a_different_o
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=_FakeNativeTransport(),
+        native_transport=cast(ProviderSession, _FakeNativeTransport()),
     )
 
     assert await tailer.retire_external_turn("turn-other") == ExternalTurnRetirement.DIFFERENT_TURN
@@ -2983,7 +2983,7 @@ async def test_external_retirement_fails_closed_on_corrupt_history(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=_FakeNativeTransport(),
+        native_transport=cast(ProviderSession, _FakeNativeTransport()),
     )
 
     with pytest.raises(RuntimeError, match="corrupt agent stream"):
