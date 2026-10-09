@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
-from typing import Generator
+from typing import Generator, TypedDict, Unpack
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -157,8 +157,15 @@ def _workspace_fact_snapshot(manager: WorkspaceManager, workspace_id: str) -> di
     }
 
 
-def _abort_kwargs(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {"actor_role": TaskActorRole.HUMAN}
+class _AbortKwargs(TypedDict, total=False):
+    call_id: str | None
+    actor_session_id: str | None
+    actor_role: TaskActorRole
+    compat_author_run_id: str | None
+
+
+def _abort_kwargs(**overrides: Unpack[_AbortKwargs]) -> _AbortKwargs:
+    payload: _AbortKwargs = {"actor_role": TaskActorRole.HUMAN}
     payload.update(overrides)
     return payload
 

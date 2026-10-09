@@ -12,11 +12,37 @@ from claude_hub.models import (
     FeedbackLessonScope,
     FeedbackSummaryMode,
     ReviewDecision,
+    Workspace,
 )
 from claude_hub.services.feedback_lessons import (
     FeedbackLessonStore,
     FeedbackLessonValidationError,
 )
+from claude_hub.services.workspace_manager._feedback import _FeedbackMixin
+
+
+class _FeedbackHarness(_FeedbackMixin):
+    workspaces: dict[str, Workspace]
+
+    def __init__(self, workspace: Workspace, store: FeedbackLessonStore) -> None:
+        self.workspaces = {workspace.id: workspace}
+        self._store = store
+
+    def _feedback_store(self) -> FeedbackLessonStore:
+        return self._store
+
+
+def _workspace(workspace_id: str, root: Path) -> Workspace:
+    now = datetime.now()
+    return Workspace(
+        id=workspace_id,
+        name="Test",
+        path=str(root),
+        default_branch="main",
+        session_prefix="test",
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def _write_iteration_record(
@@ -611,11 +637,6 @@ def test_budget_loop_drops_oldest_and_carry_over_works(
     records are NOT marked processed and are picked up on the next run
     (carry-over). Also asserts the strict budget loop can drop all the way
     to zero digests."""
-    import types
-
-    from claude_hub.models import FeedbackSummaryMode
-    from claude_hub.services.workspace_manager._feedback import _FeedbackMixin
-
     workspace_id = "ws-budget"
     records_dir = tmp_path / "task_records"
 
@@ -647,12 +668,8 @@ def test_budget_loop_drops_oldest_and_carry_over_works(
             encoding="utf-8",
         )
 
-    ws_stub = types.SimpleNamespace(id=workspace_id)
-    mixin = _FeedbackMixin()
-    mixin._feedback_store = lambda: store  # type: ignore[attr-defined]
-    mixin.feedback_lessons = (  # type: ignore[attr-defined]
-        lambda _wid, *, query="", limit=20, include_inactive=False: []
-    )
+    workspace = _workspace(workspace_id, tmp_path)
+    mixin = _FeedbackHarness(workspace, store)
 
     # Tight budget to force dropping.
     store.REAPER_PROMPT_HARD_CHAR_LIMIT = 5_000
@@ -666,7 +683,7 @@ def test_budget_loop_drops_oldest_and_carry_over_works(
     )
     assert len(result["input_records"]) == n_tasks
     prompt, committed_ids, committed_paths = mixin._build_workspace_feedback_summary_prompt(
-        ws_stub, result
+        workspace, result
     )
     assert len(prompt) <= 5_000, f"prompt {len(prompt)} exceeds 5000"
     assert len(committed_ids) < n_tasks, "budget did not drop any digests"
@@ -723,7 +740,7 @@ def test_budget_loop_drops_oldest_and_carry_over_works(
         force=False,
     )
     assert len(result3["input_records"]) == 3
-    prompt3, ids3, paths3 = mixin._build_workspace_feedback_summary_prompt(ws_stub, result3)
+    prompt3, ids3, paths3 = mixin._build_workspace_feedback_summary_prompt(workspace, result3)
     assert ids3 == []
     assert paths3 == []
     pkg = json.loads(prompt3.split("Input package JSON:\n", 1)[1])
@@ -752,16 +769,12 @@ def test_legacy_oversized_fingerprints_are_sanitized_in_prompt(
     (b) preserving canonical workspace:16hex fingerprints verbatim for
     legitimate echo-merge. Budget stays under 100K even with adversarial
     legacy data."""
-    import types
-    from datetime import datetime
-
     from claude_hub.models import (
         FeedbackLesson,
         FeedbackLessonScope,
         FeedbackLessonStatus,
         FeedbackSummaryMode,
     )
-    from claude_hub.services.workspace_manager._feedback import _FeedbackMixin
 
     workspace_id = "ws-legacy-fp"
     records_dir = tmp_path / "task_records"
@@ -866,16 +879,8 @@ def test_legacy_oversized_fingerprints_are_sanitized_in_prompt(
     # Write lesson index directly via the store's method.
     store._write_lesson_index(workspace_id, lessons)
 
-    ws_stub = types.SimpleNamespace(id=workspace_id)
-    mixin = _FeedbackMixin()
-    mixin._feedback_store = lambda: store  # type: ignore[attr-defined]
-    # feedback_lessons() is provided by the manager; mimic it by returning
-    # all the lessons we just wrote.
-    mixin.feedback_lessons = (  # type: ignore[attr-defined]
-        lambda _wid, *, query="", limit=20, include_inactive=False: store.list_lessons(
-            _wid, include_inactive=include_inactive
-        )[:limit]
-    )
+    workspace = _workspace(workspace_id, tmp_path)
+    mixin = _FeedbackHarness(workspace, store)
 
     result = store.prepare_summary_input(
         workspace_id,
@@ -885,7 +890,7 @@ def test_legacy_oversized_fingerprints_are_sanitized_in_prompt(
         force=False,
     )
     prompt, committed_ids, committed_paths = mixin._build_workspace_feedback_summary_prompt(
-        ws_stub, result
+        workspace, result
     )
     # Hard budget honored even with adversarial legacy fingerprints.
     assert (

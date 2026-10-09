@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
+from claude_hub.models import Workspace
 from claude_hub.services.task_graph import (
     LEGACY_RESIDENT_CONSUMER_TEMPLATE,
     legacy_resident_consumer_key,
@@ -317,6 +318,18 @@ def test_readmes_and_agent_entry_link_the_guide() -> None:
     assert agents == claude
 
 
+def _workspace_stub() -> Workspace:
+    return Workspace(
+        id="ws-1",
+        name="docs contract",
+        path="/tmp/docs-contract",
+        default_branch="main",
+        session_prefix="docs-contract",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
 def test_resident_task_graph_block_teaches_current_boundaries() -> None:
     block = _build_task_graph_block("http://localhost:8173", "ws-1")
     for needle in (
@@ -347,7 +360,7 @@ def test_pinned_session_and_status_codes_are_source_accurate() -> None:
 
     block = _build_task_graph_block("http://localhost:8173", "ws-1")
     master = _build_resident_master_prompt(
-        SimpleNamespace(id="ws-1"),
+        _workspace_stub(),
         "http://localhost:8173",
         "sid",
         "",
@@ -362,7 +375,7 @@ def test_pinned_session_and_status_codes_are_source_accurate() -> None:
 def test_negative_422_is_unavailable_executor_not_adapter_rejection() -> None:
     block = _build_task_graph_block("http://localhost:8173", "ws-1")
     master = _build_resident_master_prompt(
-        SimpleNamespace(id="ws-1"),
+        _workspace_stub(),
         "http://localhost:8173",
         "sid",
         "",

@@ -202,6 +202,7 @@ async def test_codex_turn_start_includes_network_when_enabled(
     send = AsyncMock(return_value={"turn": {"id": "turn"}})
     monkeypatch.setattr(native, "_send_request", send)
     await native.send_message("run", [])
+    assert send.await_args is not None
     params = send.await_args.args[1]
     assert params["sandboxPolicy"] == {"type": "workspaceWrite", "networkAccess": True}
     assert params["approvalPolicy"] == "on-request"
@@ -217,6 +218,7 @@ async def test_codex_turn_start_omits_network_by_default(
     send = AsyncMock(return_value={"turn": {"id": "turn"}})
     monkeypatch.setattr(native, "_send_request", send)
     await native.send_message("run", [])
+    assert send.await_args is not None
     assert send.await_args.args[1]["sandboxPolicy"] == {"type": "workspaceWrite"}
 
 

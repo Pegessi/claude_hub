@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import IO, BinaryIO, Iterator, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,8 +20,11 @@ from claude_hub.models import (
     AgentType,
     FeedbackLessonCreate,
     FeedbackSummaryMode,
+    ManagedSession,
     ManagedSessionStatus,
     Workspace,
+    WorkspaceSessionRole,
+    WorkspaceTask,
     WorkspaceTaskStatus,
 )
 from claude_hub.services.agent_stream.redaction import redact_event
@@ -104,7 +108,7 @@ def _event(
 ) -> None:
     directory = root / "terminal-tabs/agent_streams"
     directory.mkdir(parents=True, exist_ok=True)
-    payload = {"summary": text}
+    payload: dict[str, object] = {"summary": text}
     if metadata is not _MISSING:
         payload["metadata"] = metadata
     event = {
@@ -182,20 +186,35 @@ async def test_disabled_busy_native_and_manual_reaper_suppress_auto(
     monkeypatch.setattr(wm, "_now", lambda: now + timedelta(minutes=2))
     manager._feedback_chat_busy = lambda: False
     manager.sessions = {
-        "worker": SimpleNamespace(workspace_id="ws", status=ManagedSessionStatus.WORKING)
+        "worker": ManagedSession(
+            id="worker",
+            workspace_id="ws",
+            tab_id="tab-worker",
+            role=WorkspaceSessionRole.WORKER,
+            agent_type=AgentType.CLAUDE,
+            status=ManagedSessionStatus.WORKING,
+            title="Worker",
+            workspace_path=str(tmp_path),
+            tmux_session="worker",
+            created_at=now,
+            updated_at=now,
+        )
     }
     await manager._tick_feedback_automation()
     dispatch.assert_not_awaited()
     manager.sessions = {}
     manager.tasks = {
-        "manual": SimpleNamespace(
+        "manual": WorkspaceTask(
+            id="manual",
             workspace_id="ws",
+            title="Manual reaper",
+            prompt="Summarize feedback",
+            agent_type=AgentType.CLAUDE,
             system_internal=True,
             internal_kind="feedback_reaper",
             status=WorkspaceTaskStatus.WORKING,
-            manual_aborted_at=None,
             created_at=now,
-            id="manual",
+            updated_at=now,
         )
     }
     await manager._tick_feedback_automation()
@@ -211,17 +230,31 @@ async def test_waiting_human_review_does_not_starve_feedback(
     manager.feedback_automation_status("ws")
     _record(tmp_path, "fresh", now + timedelta(seconds=1))
     manager.tasks = {
-        "waiting": SimpleNamespace(
-            workspace_id="ws", system_internal=False, status=WorkspaceTaskStatus.REVIEW
+        "waiting": WorkspaceTask(
+            id="waiting",
+            workspace_id="ws",
+            title="Waiting for review",
+            prompt="Review this task",
+            agent_type=AgentType.CLAUDE,
+            status=WorkspaceTaskStatus.REVIEW,
+            created_at=now,
+            updated_at=now,
         )
     }
     manager.sessions = {
-        "idle": SimpleNamespace(
+        "idle": ManagedSession(
+            id="idle",
             workspace_id="ws",
+            tab_id="tab-idle",
+            role=WorkspaceSessionRole.WORKER,
+            agent_type=AgentType.CLAUDE,
             status=ManagedSessionStatus.IDLE,
             runtime_status=AgentRuntimeStatus.IDLE,
-            pending_call_ids=[],
-            processing_call_ids=[],
+            title="Idle worker",
+            workspace_path=str(tmp_path),
+            tmux_session="idle",
+            created_at=now,
+            updated_at=now,
         )
     }
     dispatch = AsyncMock(return_value=SimpleNamespace(id="run-1", task_id="reaper"))
@@ -493,22 +526,31 @@ def test_automatic_scan_read_budget_skips_oversized_files_without_starvation(
     read_bytes = 0
 
     @contextmanager
-    def counted_open(path: Path, mode: str = "r", *args: object, **kwargs: object):
+    def counted_open(
+        path: Path,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> Iterator[IO[str] | IO[bytes]]:
         nonlocal read_bytes
-        with real_open(path, mode, *args, **kwargs) as stream:
+        with real_open(path, mode, buffering, encoding, errors, newline) as stream:
             if path.parent != directory or mode != "rb":
                 yield stream
                 return
+
+            binary_stream = cast(BinaryIO, stream)
 
             class CountedRead:
                 def read(self, size: int = -1) -> bytes:
                     nonlocal read_bytes
                     assert size > 0, "automatic scans must never read an unbounded file"
-                    data = stream.read(size)
+                    data = binary_stream.read(size)
                     read_bytes += len(data)
                     return data
 
-            yield CountedRead()
+            yield cast(BinaryIO, CountedRead())
 
     monkeypatch.setattr(Path, "open", counted_open)
     store = FeedbackLessonStore(tmp_path)

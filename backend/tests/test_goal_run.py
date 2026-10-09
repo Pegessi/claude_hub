@@ -231,15 +231,21 @@ async def test_goal_continues_past_legacy_limits_with_bounded_recent_ids(tmp_pat
     manager = GoalRunController(GoalRunStore(tmp_path / "goal_runs.json"), dispatch)
     goal = manager.create("tab-1", request(token_budget=10, max_turns=1))
     result = await manager.dispatch_next(goal.id)
+    assert result is not None
     first_turn = result.current_turn_id
+    assert first_turn is not None
     for _ in range(125):
-        result = await manager.on_turn_completed(
+        current_turn_id = result.current_turn_id
+        assert current_turn_id is not None
+        updated = await manager.on_turn_completed(
             "tab-1",
-            result.current_turn_id,
+            current_turn_id,
             "success",
             response_with_checkpoint(),
             {"total_tokens": 1000},
         )
+        assert updated is not None
+        result = updated
     assert result.status == GoalRunStatus.ACTIVE
     assert result.turns_completed == 125
     assert result.token_usage == 125000
@@ -487,6 +493,7 @@ async def test_pause_waits_for_pending_dispatch_acceptance_before_cancel(tmp_pat
     await dispatch_entered.wait()
     goal = manager.current("tab-1")
     assert goal is not None
+    assert goal is not None
 
     pause_task = asyncio.create_task(manager.pause(goal.id, "pause-race"))
     await asyncio.sleep(0)
@@ -587,6 +594,7 @@ async def test_duplicate_dispatch_and_unrelated_completion_do_not_resend(tmp_pat
     start = asyncio.create_task(manager.create_and_start("tab-1", request()))
     await entered.wait()
     goal = manager.current("tab-1")
+    assert goal is not None
     duplicates = [
         asyncio.create_task(manager.create_and_start("tab-1", request())),
         asyncio.create_task(manager.dispatch_next(goal.id)),
@@ -672,11 +680,17 @@ async def test_legacy_limited_goal_migrates_without_autostart_and_can_resume(
 
     cold = GoalRunController(GoalRunStore(path), dispatch)
     migrated = cold.get(goal.id)
+    assert migrated is not None
     assert migrated.status == GoalRunStatus.PAUSED
+    assert migrated.status_message is not None
     assert "resume" in migrated.status_message
     assert not dispatched
-    assert cold.replay_create("tab-1", request(token_budget=10, max_turns=20)).id == goal.id
-    assert cold.replay_create("tab-1", request()).id == goal.id
+    replayed_legacy = cold.replay_create("tab-1", request(token_budget=10, max_turns=20))
+    assert replayed_legacy is not None
+    assert replayed_legacy.id == goal.id
+    replayed_current = cold.replay_create("tab-1", request())
+    assert replayed_current is not None
+    assert replayed_current.id == goal.id
     with pytest.raises(ValueError, match="another create"):
         cold.replay_create("tab-2", request())
     resumed = await cold.resume(goal.id, "resume")
@@ -700,6 +714,7 @@ async def test_goal_usage_is_accounting_only(tmp_path: Path) -> None:
     result = await manager.on_turn_completed(
         "tab-1", "running", "complete", response_with_checkpoint(), {"total": 5}
     )
+    assert result is not None
     assert result.token_usage == 25
     assert result.status == GoalRunStatus.PAUSED  # No connected dispatcher.
     assert result.current_turn_id is None
@@ -760,6 +775,7 @@ async def test_pause_waits_only_for_acceptance_not_dispatch_callers_lifetime(
     task = asyncio.create_task(caller())
     await entered.wait()
     goal = manager.current("tab-1")
+    assert goal is not None
     pause = asyncio.create_task(manager.pause(goal.id, "pause"))
     await asyncio.sleep(0)
     release.set()

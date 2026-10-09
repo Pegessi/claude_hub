@@ -57,9 +57,9 @@ def _fake_scan(entries):
     tm = importlib.import_module("claude_hub.services.ttyd_manager")
 
     # Invalidate the sessions cache so the mocked scan is used.
-    tm._CODEX_SESSIONS_CACHE = None
+    setattr(tm, "_CODEX_SESSIONS_CACHE", None)
 
-    def _scan(with_title: bool = False, skip_title_sids: set = None):
+    def _scan(with_title: bool = False, skip_title_sids: set | None = None):
         out = {}
         for entry in entries:
             if len(entry) == 5:
@@ -208,9 +208,9 @@ async def test_list_codex_sessions_dedupes_by_session_id(
     # we produce two entries with the same sid and rely on the "keep most
     # recent" logic. Note: _codex_scan_sessions itself dedups per root, but
     # the endpoint handles duplicates defensively.
-    tm._CODEX_SESSIONS_CACHE = None
+    setattr(tm, "_CODEX_SESSIONS_CACHE", None)
 
-    def _fake(with_title: bool = False, skip_title_sids: set = None):
+    def _fake(with_title: bool = False, skip_title_sids: set | None = None):
         out = {}
         for sid, cwd, epoch, path in [
             ("00000005-0000-0000-0000-000000000005", "/tmp/proj-d", 1000.0, older),

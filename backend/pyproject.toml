@@ -36,7 +36,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.black]
@@ -48,6 +48,8 @@ profile = "black"
 line_length = 100
 
 [tool.mypy]
+plugins = ["pydantic.mypy"]
+mypy_path = "$MYPY_CONFIG_FILE_DIR/../scripts/task-graph-e2e"
 python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
@@ -66,7 +68,15 @@ disallow_untyped_defs = false
 module = "claude_hub.services.workspace_manager.*"
 disable_error_code = ["attr-defined", "no-any-return"]
 
+[tool.pydantic-mypy]
+# Recognize runtime defaults without weakening constructor type/field checks.
+init_typed = true
+init_forbid_extra = true
+warn_required_dynamic_aliases = true
+
 [tool.pytest.ini_options]
+# Emit actionable stacks for stalled tests without bypassing fixture cleanup.
+faulthandler_timeout = 60
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"

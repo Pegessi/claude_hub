@@ -59,7 +59,10 @@ def _mock_hub(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        host, port = server.server_address
+        host = server.server_address[0]
+        port = server.server_address[1]
+        assert isinstance(host, str)
+        assert isinstance(port, int)
         yield f"http://{host}:{port}", requests
     finally:
         server.shutdown()

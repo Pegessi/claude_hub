@@ -10,7 +10,7 @@ from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Generator
+from typing import Generator, cast
 
 import pytest
 
@@ -24,7 +24,7 @@ from claude_hub.models import (
 )
 from claude_hub.services.runtime_isolation import tmux_command
 from claude_hub.services.session_seat import SessionSeatMismatch
-from claude_hub.services.ttyd_manager import ttyd_manager
+from claude_hub.services.ttyd_manager import TTYDProcess, ttyd_manager
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 _wm = import_module("claude_hub.services.workspace_manager")
@@ -118,7 +118,9 @@ async def test_clear_goes_to_matching_seat_not_victim(
         updated_at=now,
     )
     isolated_manager.sessions[session.id] = session
-    ttyd_manager.processes[reviewer_tab] = SimpleNamespace(tmux_session=reviewer_tmux)
+    ttyd_manager.processes[reviewer_tab] = cast(
+        TTYDProcess, SimpleNamespace(tmux_session=reviewer_tmux)
+    )
     try:
         await isolated_manager.send_session_message(session.id, "/clear")
         time.sleep(0.3)
@@ -168,7 +170,7 @@ async def test_missing_pane_is_not_recreated_before_clear(
         updated_at=now,
     )
     isolated_manager.sessions[session.id] = session
-    ttyd_manager.processes[tab_id] = SimpleNamespace(tmux_session=tmux_name)
+    ttyd_manager.processes[tab_id] = cast(TTYDProcess, SimpleNamespace(tmux_session=tmux_name))
     try:
         with pytest.raises(SessionSeatMismatch, match="gone"):
             await isolated_manager.send_session_message(session.id, "/clear")

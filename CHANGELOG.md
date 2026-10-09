@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### fix(quality): make validation reproducible and preserve Task attachments
+
+- Share local and CI checks through `scripts/verify.sh`, with declared tool
+  versions, independent typing/test/build results, and mypy checks that include
+  backend tests.
+- Use the Pydantic type plugin and correct test fixtures without excluding tests
+  or relaxing constructor checks. Keep test runtimes separate from user state.
+- Validate Task edits before changing files; preserve records and existing images
+  on failed commits, and keep both file sets when the commit result is unknown.
+  Run external actions and old-image cleanup only after confirmed commit.
+- Serialize terminal deletion, archiving and runtime recovery per tab. Recheck
+  the current record after waiting so late requests cannot restart a deleted or
+  archived terminal; keep failed teardown records available for retry.
+- Correct worktree, validation, cleanup and native Chat guidance. See the
+  [staged quality program](docs/working-logs/2026-10-09-quality-program.md).
+
 ### fix(runtime): synchronize backend dependencies before supervised restart
 
 - Run the committed backend lockfile sync while the current backend remains

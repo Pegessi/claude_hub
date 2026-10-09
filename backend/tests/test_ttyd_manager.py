@@ -14,6 +14,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from pytest import MonkeyPatch
@@ -26,11 +27,13 @@ from claude_hub.models import (
     ExecutionTarget,
     RemoteProfile,
     SessionKind,
+    TerminalTab,
     TerminalTabCreate,
     WorkspaceSessionRole,
 )
 from claude_hub.services.ttyd_manager import (
     DEFAULT_CLAUDE_LAUNCH_ENV,
+    ScanEntry,
     TabLimitExceededError,
     TabStartupTimeoutError,
     TTYDManager,
@@ -95,11 +98,14 @@ def test_set_tab_order_preserves_position_of_tab_omitted_by_stale_payload(
     monkeypatch: MonkeyPatch,
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
-    manager.processes = {
-        "new": object(),
-        "manual-b": object(),
-        "manual-a": object(),
-    }
+    manager.processes = cast(
+        dict[str, TTYDProcess],
+        {
+            "new": object(),
+            "manual-b": object(),
+            "manual-a": object(),
+        },
+    )
     manager._tab_order = ["new", "manual-b", "manual-a"]
     saved_orders: list[list[str]] = []
     monkeypatch.setattr(
@@ -137,7 +143,7 @@ def test_set_tab_order_keeps_full_payload_and_filters_partial_payload(
     expected_order: list[str],
 ) -> None:
     manager = TTYDManager.__new__(TTYDManager)
-    manager.processes = {tab_id: object() for tab_id in process_ids}
+    manager.processes = cast(dict[str, TTYDProcess], {tab_id: object() for tab_id in process_ids})
     manager._tab_order = current_order
     saved_orders: list[list[str]] = []
     monkeypatch.setattr(
@@ -192,7 +198,9 @@ def test_tmux_server_probe_uses_server_scoped_command(monkeypatch: MonkeyPatch) 
 
     def fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append(cmd)
-        timeouts.append(float(kwargs["timeout"]))
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, (int, float))
+        timeouts.append(float(timeout))
         return SimpleNamespace(returncode=1)
 
     monkeypatch.setattr(ttyd_manager_module.subprocess, "run", fake_run)
@@ -276,7 +284,9 @@ def test_ensure_tmux_server_refreshes_launch_environment(monkeypatch: MonkeyPatc
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        timeouts.append(float(kwargs["timeout"]))
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, (int, float))
+        timeouts.append(float(timeout))
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(ttyd_manager_module.subprocess, "run", fake_run)
@@ -305,33 +315,52 @@ async def test_cancelled_tmux_ensure_reaps_launcher_before_owned_session_cleanup
 ) -> None:
     """A cancelled ensure cannot create its owned tmux session after rollback."""
     started = tmp_path / "launcher-started"
+    release = tmp_path / "launcher-release"
     late_effect = tmp_path / "launcher-late-effect"
     launcher = tmp_path / "delayed_launcher.py"
     launcher.write_text(
         "import os, pathlib, sys, time\n"
-        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
-        "time.sleep(0.5)\n"
-        "pathlib.Path(sys.argv[2]).write_text('late')\n"
+        "started = pathlib.Path(sys.argv[1])\n"
+        "release = pathlib.Path(sys.argv[2])\n"
+        "late_effect = pathlib.Path(sys.argv[3])\n"
+        "temporary = started.with_name(started.name + '.tmp')\n"
+        "temporary.write_text(str(os.getpid()))\n"
+        "os.replace(temporary, started)\n"
+        "while not release.exists():\n"
+        "    time.sleep(0.02)\n"
+        "late_effect.write_text('late')\n"
     )
+    toy_command = (sys.executable, str(launcher), str(started), str(release), str(late_effect))
     killed_sessions: list[str] = []
+    launcher_process: asyncio.subprocess.Process | None = None
+    spawn_started = False
+    real_create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def tracked_create_subprocess_exec(*args, **kwargs):
+        nonlocal launcher_process, spawn_started
+        assert tuple(args) == expected_command, "unexpected subprocess in toy launcher test"
+        assert not spawn_started, "the test toy launcher was spawned more than once"
+        spawn_started = True
+        launcher_process = await real_create_subprocess_exec(*args, **kwargs)
+        return launcher_process
 
     async def fake_session_exists(session_name: str) -> bool:
         return False
 
     async def fake_kill_session(session_name: str) -> None:
-        launcher_pid = int(started.read_text())
+        assert launcher_process is not None
+        assert launcher_process.returncode is not None
         with pytest.raises(ProcessLookupError):
-            os.kill(launcher_pid, 0)
+            os.kill(launcher_process.pid, 0)
         killed_sessions.append(session_name)
 
     monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", fake_session_exists)
     monkeypatch.setattr(ttyd_manager_module, "_tmux_kill_session", fake_kill_session)
     monkeypatch.setattr(ttyd_manager_module, "_ensure_tmux_server", lambda: None)
     monkeypatch.setattr(
-        ttyd_manager_module,
-        "tmux_command",
-        lambda *args: [sys.executable, str(launcher), str(started), str(late_effect)],
+        ttyd_manager_module.asyncio, "create_subprocess_exec", tracked_create_subprocess_exec
     )
+    monkeypatch.setattr(ttyd_manager_module, "tmux_command", lambda *args: list(toy_command))
     process = TTYDProcess(
         tab_id="owned-launcher",
         port=12009,
@@ -340,21 +369,74 @@ async def test_cancelled_tmux_ensure_reaps_launcher_before_owned_session_cleanup
         cwd=str(tmp_path),
         agent_type=AgentType.TERMINAL,
     )
-
+    expected_command = toy_command + ("-c", str(tmp_path), "--", process._with_env(process.shell))
     ensure_task = asyncio.create_task(process.ensure_tmux_session())
-    for _ in range(100):
-        if started.exists():
-            break
-        await asyncio.sleep(0.01)
-    assert started.exists()
-
-    ensure_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await ensure_task
-    await asyncio.sleep(0.6)
-
-    assert late_effect.exists() is False
-    assert killed_sessions == [process.tmux_session]
+    try:
+        async with asyncio.timeout(15.0):
+            while not started.exists() or launcher_process is None:
+                if ensure_task.done():
+                    await ensure_task
+                    raise AssertionError("ensure finished before the toy launcher became ready")
+                await asyncio.sleep(0.02)
+        assert launcher_process is not None
+        assert int(started.read_text()) == launcher_process.pid
+        ensure_task.cancel()
+        done, _ = await asyncio.wait({ensure_task}, timeout=8.0)
+        assert ensure_task in done, "cancelled tmux ensure did not finish bounded rollback"
+        with pytest.raises(asyncio.CancelledError):
+            ensure_task.result()
+        # The launcher is reaped before this release can permit a late effect.
+        release.write_text("release")
+        assert late_effect.exists() is False
+        assert killed_sessions == [process.tmux_session]
+    finally:
+        primary_error = sys.exc_info()[1]
+        cleanup_errors: list[str] = []
+        if not ensure_task.done():
+            ensure_task.cancel()
+        await asyncio.wait({ensure_task}, timeout=8.0)
+        # Never release a live toy during failure cleanup.
+        if launcher_process is not None and launcher_process.returncode is None:
+            with suppress(ProcessLookupError):
+                launcher_process.terminate()
+            launcher_wait = asyncio.create_task(launcher_process.wait())
+            launcher_done, _ = await asyncio.wait({launcher_wait}, timeout=2.0)
+            if launcher_wait not in launcher_done:
+                with suppress(ProcessLookupError):
+                    launcher_process.kill()
+                launcher_done, _ = await asyncio.wait({launcher_wait}, timeout=2.0)
+            if launcher_wait not in launcher_done:
+                launcher_wait.cancel()
+                cancelled, _ = await asyncio.wait({launcher_wait}, timeout=1.0)
+                cleanup_errors.append("toy launcher was not reaped after SIGKILL")
+                if launcher_wait not in cancelled:
+                    cleanup_errors.append("toy launcher wait task remained pending")
+            else:
+                try:
+                    launcher_wait.result()
+                except BaseException as error:
+                    cleanup_errors.append(f"toy launcher wait failed: {error!r}")
+        if not ensure_task.done():
+            ensure_task.cancel()
+            await asyncio.wait({ensure_task}, timeout=2.0)
+        if not ensure_task.done():
+            cleanup_errors.append("ensure task remained pending after toy cleanup")
+        else:
+            try:
+                ensure_task.result()
+            except asyncio.CancelledError:
+                pass
+            except BaseException as error:
+                if error is not primary_error:
+                    cleanup_errors.append(f"ensure task cleanup failed: {error!r}")
+        if launcher_process is not None and launcher_process.returncode is None:
+            cleanup_errors.append("toy launcher remained live after cleanup")
+        if cleanup_errors:
+            detail = "test-owned cleanup failed: " + "; ".join(cleanup_errors)
+            if primary_error is not None:
+                primary_error.add_note(detail)
+            else:
+                pytest.fail(detail)
 
 
 @pytest.mark.asyncio
@@ -518,6 +600,7 @@ async def test_create_tab_tmux_ensure_timeout_rolls_back_owned_resources(
             await asyncio.Event().wait()
         finally:
             ensure_cancelled.set()
+        raise AssertionError("unreachable after cancellation")
 
     async def fake_start(self: TTYDProcess) -> None:
         pytest.fail("ttyd must not start after tmux creation times out")
@@ -1062,7 +1145,7 @@ def test_new_session_contract_rejects_retired_agent_kind() -> None:
         TerminalTabCreate(
             name="Retired kind",
             agent_type=AgentType.CLAUDE,
-            session_kind="agent",
+            session_kind=cast(SessionKind, "agent"),
         )
 
 
@@ -4157,10 +4240,8 @@ def test_diff_scans_classifies_new_appended_attr() -> None:
     'attr_changed' otherwise."""
     import time as _time
 
-    def _entry(
-        sid: str, size: int, mtime_ns: int, cwd: str = "/x"
-    ) -> "ttyd_manager_module.ScanEntry":
-        return ttyd_manager_module.ScanEntry(
+    def _entry(sid: str, size: int, mtime_ns: int, cwd: str = "/x") -> ScanEntry:
+        return ScanEntry(
             path=f"/{sid}.jsonl",
             mtime_ns=mtime_ns,
             size=size,
@@ -4508,6 +4589,7 @@ def test_delete_tab_keeps_process_registered_when_teardown_fails(
 ) -> None:
     """A failed tmux teardown must remain visible so reconciliation can retry it."""
     manager = TTYDManager.__new__(TTYDManager)
+    manager._start_locks = {}
     process = SimpleNamespace(tmux_session="claude-hub-deadbeef")
 
     async def _failed_stop(*, kill_tmux: bool = False) -> None:
@@ -4515,7 +4597,7 @@ def test_delete_tab_keeps_process_registered_when_teardown_fails(
         raise RuntimeError("tmux still alive")
 
     process.stop = _failed_stop
-    manager.processes = {"deadbeef-tab": process}
+    manager.processes = {"deadbeef-tab": cast(TTYDProcess, process)}
     manager._tab_order = ["deadbeef-tab"]
 
     async def _exercise() -> None:
@@ -4542,13 +4624,14 @@ def test_delete_tab_discards_structured_stream_via_tailer(
     forget-then-clear ordering; ``delete_tab`` must delegate to it.
     """
     manager = TTYDManager.__new__(TTYDManager)
+    manager._start_locks = {}
     process = SimpleNamespace(tmux_session="claude-hub-deadbeef")
 
     async def _ok_stop(*, kill_tmux: bool = False) -> None:
         assert kill_tmux is True
 
     process.stop = _ok_stop
-    manager.processes = {"deadbeef-tab": process}
+    manager.processes = {"deadbeef-tab": cast(TTYDProcess, process)}
     manager._tab_order = ["deadbeef-tab"]
 
     discard_calls: list[tuple[str, str]] = []
@@ -4593,7 +4676,7 @@ def test_startup_prunes_only_old_unpersisted_managed_tmux(
     """Cold start removes old managed-prefix tmux sessions with no tabs.json owner."""
     manager = TTYDManager.__new__(TTYDManager)
     manager.processes = {
-        "owned-tab": SimpleNamespace(tmux_session="claude-hub-a1b2c3d4"),
+        "owned-tab": cast(TTYDProcess, SimpleNamespace(tmux_session="claude-hub-a1b2c3d4")),
     }
     now = 10_000.0
 
@@ -4663,7 +4746,8 @@ def test_hot_restart_reattaches_only_tabs_with_surviving_tmux(
     stopped_terminal = FakeProcess("cold0003", AgentType.TERMINAL)
     stopped_remote = FakeProcess("cold0004", AgentType.CLAUDE, ExecutionTarget.REMOTE)
     manager.processes = {
-        p.tab_id: p for p in (live, stopped_cursor, stopped_codex, stopped_terminal, stopped_remote)
+        p.tab_id: cast(TTYDProcess, p)
+        for p in (live, stopped_cursor, stopped_codex, stopped_terminal, stopped_remote)
     }
 
     async def fake_prune() -> list[str]:
@@ -4818,7 +4902,7 @@ def test_cold_restart_recovers_all_saved_non_codex_tabs(monkeypatch: MonkeyPatch
 
     claude = FakeProcess("cold1001", AgentType.CLAUDE)
     terminal = FakeProcess("cold1002", AgentType.TERMINAL)
-    manager.processes = {p.tab_id: p for p in (claude, terminal)}
+    manager.processes = {p.tab_id: cast(TTYDProcess, p) for p in (claude, terminal)}
 
     async def fake_prune() -> list[str]:
         return []
@@ -5417,6 +5501,7 @@ def _make_fork_test_manager(
     monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
 
     manager = TTYDManager.__new__(TTYDManager)
+    manager._start_locks = {}
     manager._next_port = start_port
     manager.processes = {}
     manager._tab_order = []
@@ -5757,3 +5842,337 @@ def test_list_archived_tabs_sorted_newest_first(monkeypatch: MonkeyPatch, tmp_pa
     manager.processes[newer.tab_id] = newer
 
     assert [t.id for t in manager.list_archived_tabs()] == ["newer-tab", "older-tab"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_operation", ["delete", "ensure"])
+async def test_delete_and_listener_recovery_share_tab_lifecycle_lock(
+    monkeypatch: MonkeyPatch,
+    first_operation: str,
+) -> None:
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._start_locks = {}
+    process = TTYDProcess(
+        tab_id="delete-reconnect-race",
+        port=12358,
+        name="Delete reconnect race",
+        agent_type=AgentType.TERMINAL,
+    )
+    manager.processes = {process.tab_id: process}
+    manager._tab_order = [process.tab_id]
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+    listener = {"alive": first_operation == "delete"}
+    starts: list[str] = []
+    stops: list[str] = []
+    saved_states: list[list[str]] = []
+    discards: list[tuple[str, str]] = []
+
+    async def fake_start(record: TTYDProcess) -> None:
+        assert record is process
+        starts.append(record.tab_id)
+        if first_operation == "ensure":
+            first_entered.set()
+            await release_first.wait()
+        listener["alive"] = True
+        process.is_active = True
+
+    async def fake_stop(*, kill_tmux: bool = False) -> None:
+        assert kill_tmux is True
+        stops.append(process.tab_id)
+        listener["alive"] = False
+        process.is_active = False
+        if first_operation == "delete":
+            first_entered.set()
+            await release_first.wait()
+
+    async def fake_discard(workspace_id: str, session_id: str) -> None:
+        assert process.tab_id not in manager.processes
+        assert not manager._start_locks[process.tab_id].locked()
+        discards.append((workspace_id, session_id))
+
+    monkeypatch.setattr(process, "stop", fake_stop)
+    monkeypatch.setattr(manager, "_start_missing_tab_identity_safe", fake_start)
+    monkeypatch.setattr(
+        ttyd_manager_module, "_is_local_port_listening", lambda _port: listener["alive"]
+    )
+    monkeypatch.setattr(manager, "_save_order", lambda: None)
+    monkeypatch.setattr(
+        manager, "_save_state", lambda: saved_states.append(list(manager.processes))
+    )
+    stream_module = importlib.import_module("claude_hub.services.agent_stream.tailer")
+    monkeypatch.setattr(stream_module, "discard_session_stream", fake_discard)
+
+    async def run_operation(operation: str, *, second: bool = False) -> object:
+        if second:
+            second_entered.set()
+        if operation == "delete":
+            return await manager.delete_tab(process.tab_id)
+        return await manager.ensure_tab_running(process.tab_id)
+
+    tasks: list[asyncio.Task[object]] = []
+    try:
+        first = asyncio.create_task(run_operation(first_operation))
+        tasks.append(first)
+        await asyncio.wait_for(first_entered.wait(), timeout=2.0)
+        other = "ensure" if first_operation == "delete" else "delete"
+        second = asyncio.create_task(run_operation(other, second=True))
+        tasks.append(second)
+        await asyncio.wait_for(second_entered.wait(), timeout=2.0)
+        if first_operation == "delete":
+            assert starts == [], "reconnect started a listener during deletion"
+        else:
+            assert stops == [], "deletion overtook an in-progress listener start"
+        assert not second.done()
+        release_first.set()
+        _, pending = await asyncio.wait(tasks, timeout=2.0)
+        assert not pending
+        results = {first_operation: first.result(), other: second.result()}
+        assert results["delete"] is True
+        if first_operation == "delete":
+            assert results["ensure"] is None
+            assert starts == []
+        else:
+            assert isinstance(results["ensure"], TerminalTab)
+            assert starts == [process.tab_id]
+        assert stops == [process.tab_id]
+        assert listener["alive"] is False
+        assert manager.processes == {} and manager._tab_order == []
+        assert saved_states and saved_states[-1] == []
+        assert discards == [("terminal-tabs", f"terminal-tab-{process.tab_id}")]
+    finally:
+        release_first.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=2.0)
+            for task in tasks:
+                if task.done() and not task.cancelled():
+                    task.exception()
+            assert not pending, "test-owned lifecycle operations did not finish"
+
+
+def _make_lifecycle_subject(
+    monkeypatch: MonkeyPatch,
+) -> tuple[TTYDManager, TTYDProcess, list[str]]:
+    manager = TTYDManager.__new__(TTYDManager)
+    process = TTYDProcess(
+        tab_id="lifecycle-current-tab", port=12359, name="Lifecycle", agent_type=AgentType.TERMINAL
+    )
+    manager.processes = {process.tab_id: process}
+    manager._tab_order = [process.tab_id]
+    manager._start_locks = {process.tab_id: asyncio.Lock()}
+    manager._status_cache = {}
+    calls: list[str] = []
+
+    async def start() -> None:
+        calls.append("start")
+        process.is_active = True
+
+    async def stop(*, kill_tmux: bool = False) -> None:
+        calls.append("stop")
+        process.is_active = False
+
+    async def ensure_tmux() -> bool:
+        calls.append("tmux")
+        return True
+
+    async def switch(env: dict[str, str], solo_mode: bool | None = None) -> None:
+        calls.append("switch")
+        process.env = dict(env)
+
+    async def start_missing(current: TTYDProcess) -> None:
+        assert current is process
+        await current.start()
+
+    async def discard(_workspace_id: str, _session_id: str) -> None:
+        pass
+
+    async def stop_stream(_session_id: str) -> None:
+        pass
+
+    monkeypatch.setattr(process, "start", start)
+    monkeypatch.setattr(process, "stop", stop)
+    monkeypatch.setattr(process, "ensure_tmux_session", ensure_tmux)
+    monkeypatch.setattr(process, "switch_env", switch)
+    monkeypatch.setattr(manager, "_start_missing_tab_identity_safe", start_missing)
+    monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda _process: None)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_save_order", lambda: None)
+    monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda _port: False)
+    stream = importlib.import_module("claude_hub.services.agent_stream.tailer")
+    monkeypatch.setattr(stream, "discard_session_stream", discard)
+    monkeypatch.setattr(stream, "stop_session_stream", stop_stream)
+    return manager, process, calls
+
+
+async def _lifecycle_call(
+    manager: TTYDManager, tab_id: str, operation: str, entered: asyncio.Event | None = None
+) -> object:
+    if entered is not None:
+        entered.set()
+    if operation == "delete":
+        return await manager.delete_tab(tab_id)
+    if operation == "archive":
+        return await manager.archive_tab(tab_id)
+    if operation == "unarchive":
+        return await manager.unarchive_tab(tab_id)
+    if operation == "ensure":
+        return await manager.ensure_tab_running(tab_id)
+    if operation == "tmux":
+        return await manager.ensure_tab_tmux_session(tab_id)
+    if operation == "update":
+        return await manager.update_tab(tab_id, shell="changed-shell")
+    if operation == "switch":
+        return await manager.switch_env(tab_id, {"TEST_LIFECYCLE": "changed"})
+    raise AssertionError(f"unexpected test operation: {operation}")
+
+
+async def _finish_lifecycle_calls(tasks: list[asyncio.Task[object]]) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        _, pending = await asyncio.wait(tasks, timeout=2.0)
+        for task in tasks:
+            if task.done() and not task.cancelled():
+                task.exception()
+        assert not pending, "test-owned lifecycle operation did not finish"
+
+
+@pytest.mark.asyncio
+async def test_queued_ensure_rechecks_archive_after_acquiring_lock(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    manager, process, calls = _make_lifecycle_subject(monkeypatch)
+    archive_entered, ensure_entered = asyncio.Event(), asyncio.Event()
+    tasks: list[asyncio.Task[object]] = []
+    try:
+        async with manager._start_locks[process.tab_id]:
+            archive = asyncio.create_task(
+                _lifecycle_call(manager, process.tab_id, "archive", archive_entered)
+            )
+            tasks.append(archive)
+            await asyncio.wait_for(archive_entered.wait(), timeout=2.0)
+            assert not process.archived, "archive changed state outside the lifecycle lock"
+            ensure = asyncio.create_task(
+                _lifecycle_call(manager, process.tab_id, "ensure", ensure_entered)
+            )
+            tasks.append(ensure)
+            await asyncio.wait_for(ensure_entered.wait(), timeout=2.0)
+            assert not ensure.done()
+        _, pending = await asyncio.wait(tasks, timeout=2.0)
+        assert not pending
+        archived = archive.result()
+        assert isinstance(archived, TerminalTab) and archived.archived
+        assert ensure.result() is None
+        assert calls == ["stop"]
+        assert await manager.ensure_tab_tmux_session(process.tab_id) is False
+        assert calls == ["stop"], "archived tab recreated its tmux session"
+    finally:
+        await _finish_lifecycle_calls(tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["tmux", "update", "switch"])
+async def test_queued_runtime_writer_reloads_tab_after_delete(
+    monkeypatch: MonkeyPatch, operation: str
+) -> None:
+    manager, process, calls = _make_lifecycle_subject(monkeypatch)
+    original_shell, original_env = process.shell, dict(process.env)
+    delete_entered, writer_entered = asyncio.Event(), asyncio.Event()
+    tasks: list[asyncio.Task[object]] = []
+    try:
+        async with manager._start_locks[process.tab_id]:
+            delete = asyncio.create_task(
+                _lifecycle_call(manager, process.tab_id, "delete", delete_entered)
+            )
+            tasks.append(delete)
+            await asyncio.wait_for(delete_entered.wait(), timeout=2.0)
+            assert not delete.done()
+            writer = asyncio.create_task(
+                _lifecycle_call(manager, process.tab_id, operation, writer_entered)
+            )
+            tasks.append(writer)
+            await asyncio.wait_for(writer_entered.wait(), timeout=2.0)
+            assert not writer.done(), "writer bypassed the lifecycle lock"
+            assert calls == []
+        _, pending = await asyncio.wait(tasks, timeout=2.0)
+        assert not pending
+        assert delete.result() is True
+        if operation == "update":
+            assert writer.result() is None
+        else:
+            error = writer.exception()
+            assert isinstance(error, KeyError) and error.args == (process.tab_id,)
+        assert calls == ["stop"]
+        assert process.shell == original_shell and process.env == original_env
+        assert manager.processes == {} and manager._tab_order == []
+    finally:
+        await _finish_lifecycle_calls(tasks)
+
+
+@pytest.mark.asyncio
+async def test_archived_shell_update_does_not_restart_terminal_runtime(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    manager, process, calls = _make_lifecycle_subject(monkeypatch)
+    process.archived = True
+    result = await manager.update_tab(process.tab_id, shell="new-archived-shell")
+    assert result is not None and result.archived
+    assert process.shell == "new-archived-shell"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_unarchive_does_not_reenter_its_own_lifecycle_lock(monkeypatch: MonkeyPatch) -> None:
+    manager, process, calls = _make_lifecycle_subject(monkeypatch)
+    process.archived = True
+    task = asyncio.create_task(_lifecycle_call(manager, process.tab_id, "unarchive"))
+    try:
+        _, pending = await asyncio.wait({task}, timeout=2.0)
+        assert not pending, "unarchive deadlocked by calling ensure while holding the tab lock"
+        result = task.result()
+        assert isinstance(result, TerminalTab) and not result.archived and result.is_active
+        assert calls == ["start"]
+        assert not manager._start_locks[process.tab_id].locked()
+    finally:
+        await _finish_lifecycle_calls([task])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failure", "cancel"])
+async def test_delete_failure_or_cancellation_preserves_owner_and_releases_lock(
+    monkeypatch: MonkeyPatch, outcome: str
+) -> None:
+    manager, process, _calls = _make_lifecycle_subject(monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def incomplete_stop(*, kill_tmux: bool = False) -> None:
+        assert kill_tmux is True
+        entered.set()
+        if outcome == "failure":
+            raise RuntimeError("incomplete teardown")
+        await release.wait()
+
+    monkeypatch.setattr(process, "stop", incomplete_stop)
+    task = asyncio.create_task(_lifecycle_call(manager, process.tab_id, "delete"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+        if outcome == "cancel":
+            task.cancel()
+        _, pending = await asyncio.wait({task}, timeout=2.0)
+        assert not pending
+        if outcome == "cancel":
+            assert task.cancelled()
+        else:
+            error = task.exception()
+            assert isinstance(error, RuntimeError) and str(error) == "incomplete teardown"
+        assert manager.processes.get(process.tab_id) is process
+        assert manager._tab_order == [process.tab_id]
+        assert not manager._start_locks[process.tab_id].locked()
+    finally:
+        release.set()
+        await _finish_lifecycle_calls([task])

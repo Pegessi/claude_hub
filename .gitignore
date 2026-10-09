@@ -44,6 +44,10 @@ ENV/
 .dmypy.json
 dmypy.json
 
+# Backend verification reports (retained locally, never source changes)
+/backend/.coverage
+/backend/coverage.xml
+
 # Environment variables
 .env
 .env.local

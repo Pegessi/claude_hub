@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
-from typing import Generator
+from typing import Generator, TypedDict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,6 +16,7 @@ from claude_hub.models import (
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
+    ContinueTaskRequest,
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
@@ -282,7 +283,12 @@ async def test_followup_task_working_persist_rollback_and_conflict(
         )
 
 
-def _followup_kwargs() -> dict[str, object]:
+class _FollowupKwargs(TypedDict):
+    actor_session_id: str | None
+    actor_role: TaskActorRole
+
+
+def _followup_kwargs() -> _FollowupKwargs:
     return {
         "actor_session_id": "session-supervisor",
         "actor_role": TaskActorRole.SUPERVISOR,
@@ -602,7 +608,7 @@ async def test_followup_task_done_is_rejected_with_zero_writes(
         started.append(task_id)
 
     async def _fake_continue(
-        task_id: str, payload: object = None, call_id: str | None = None
+        task_id: str, payload: ContinueTaskRequest | None = None, call_id: str | None = None
     ) -> None:
         continued.append(task_id)
 
@@ -644,8 +650,8 @@ async def test_followup_task_review_real_continue_and_cold_retry(
     real_continue = manager.continue_task
 
     async def _spy_continue(
-        task_id: str, payload: object = None, call_id: str | None = None
-    ) -> object:
+        task_id: str, payload: ContinueTaskRequest | None = None, call_id: str | None = None
+    ) -> WorkspaceTask:
         continue_calls.append(task_id)
         return await real_continue(task_id, payload, call_id=call_id)
 
@@ -673,8 +679,8 @@ async def test_followup_task_review_real_continue_and_cold_retry(
     real_fresh_continue = fresh.continue_task
 
     async def _spy_fresh_continue(
-        task_id: str, payload: object = None, call_id: str | None = None
-    ) -> object:
+        task_id: str, payload: ContinueTaskRequest | None = None, call_id: str | None = None
+    ) -> WorkspaceTask:
         continue_calls.append(task_id)
         return await real_fresh_continue(task_id, payload, call_id=call_id)
 

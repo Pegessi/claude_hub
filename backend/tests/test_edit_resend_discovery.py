@@ -16,19 +16,24 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
+from claude_hub.models import ManagedSession
 from claude_hub.services.agent_stream.base import resolve_cwd
 
 
-def _make_session(*, cwd: str, tab_id: str = "tab-1") -> SimpleNamespace:
+def _make_session(*, cwd: str, tab_id: str = "tab-1") -> ManagedSession:
     """A minimal session shape: resolve_process_hint reads tab_id + workspace_path.
 
     No live ttyd process is registered in the test, so resolve_process_hint
     falls back to ``workspace_path`` (the value under test).
     """
-    return SimpleNamespace(tab_id=tab_id, workspace_path=cwd, agent_session_id=None)
+    # Deliberately omit creation time to exercise legacy discovery.
+    return cast(
+        ManagedSession, SimpleNamespace(tab_id=tab_id, workspace_path=cwd, agent_session_id=None)
+    )
 
 
 def test_resolve_cwd_resolves_symlinks(tmp_path: Path) -> None:
@@ -95,11 +100,14 @@ def test_discover_source_finds_transcript_through_symlink(
     transcript = project_dir / f"{agent_session_id}.jsonl"
     transcript.write_text(json.dumps({"type": "user", "timestamp": "2026-09-15T00:00:00Z"}) + "\n")
 
-    session = SimpleNamespace(
-        tab_id="tab-1",
-        workspace_path=str(link_dir),  # the UNRESOLVED (symlink) cwd
-        agent_session_id=agent_session_id,
-        created_at=None,
+    session = cast(
+        ManagedSession,
+        SimpleNamespace(
+            tab_id="tab-1",
+            workspace_path=str(link_dir),  # the UNRESOLVED (symlink) cwd
+            agent_session_id=agent_session_id,
+            created_at=None,
+        ),
     )
 
     adapter = ClaudeJsonlAdapter()

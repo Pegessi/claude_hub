@@ -63,19 +63,23 @@ Explicitly list checks not run and remaining risks. A missing test result is unk
 
 Commands (run in the task worktree):
 
-- Backend setup/test: `cd backend && uv sync --extra dev`, then `uv run pytest`.
-- Backend checks: `uv run black --check …`, `uv run isort --check-only …`, `uv run mypy …`.
-- Frontend: `cd frontend && pnpm lint:check`, `pnpm exec vue-tsc --noEmit`, `pnpm build`.
-  `pnpm lint` fixes files and is not a read-only review command.
-- Prompt measurement: `python scripts/measure_prompts.py` with a backend-capable
-  interpreter. It imports this checkout and uses an automatically removed temporary
-  runtime; printed token counts use the configured tokenizer or a rough fallback.
-- Development servers need dedicated ports and an isolated `CLAUDE_HUB_HOME`,
-  `CLAUDE_HUB_STATE_ROOT` and `CLAUDE_HUB_TMUX_SOCKET` set **before imports**.
-  Verify the package path when borrowing another checkout's Python environment.
+- Use `./scripts/verify.sh all` for final validation and `--help` for focused
+  targets. The backend type check includes tests; each target reports separately.
+- Use the declared tool versions and locked setup from
+  [CONTRIBUTING](../CONTRIBUTING.md#5-run-validation). Verification does not
+  install dependencies or silently select a different runtime.
+- Backend tests use private HOME/XDG/Hub paths and retain evidence. Existing
+  fixtures own helper-process cleanup. Inspect interrupted runs before deleting
+  their directories; do not target the main service.
+- Development servers require dedicated ports and isolated `CLAUDE_HUB_HOME`,
+  `CLAUDE_HUB_STATE_ROOT`, and `CLAUDE_HUB_TMUX_SOCKET` before imports.
+- Prompt measurement remains `python scripts/measure_prompts.py` with a
+  backend-capable interpreter; token estimates state their tokenizer/fallback.
 
-CI runs backend black/isort/mypy/pytest, frontend ESLint/type/build, and ttyd/tmux
-checks. Keep `AGENTS.md` and `CLAUDE.md` byte-identical; CI verifies this too.
+CI invokes the same checks. Required job results, browser/manual acceptance and
+live-provider evidence are distinct. A check not run is unknown; a worker report
+or historical pass does not prove the final candidate. Keep current contracts in
+current guides and use dated working logs only as historical evidence.
 
 ## Directory hygiene
 

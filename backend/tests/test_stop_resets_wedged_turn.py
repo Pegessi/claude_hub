@@ -96,7 +96,7 @@ async def test_live_never_closing_turn_survives_watchdogs_but_stop_releases_now(
     # …and the TraeX interrupt will never confirm, forcing the restart path.
     harness = _AppServerHarness(monkeypatch, ["timeout", "confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     store = _make_store(monkeypatch)
     tailer = _tailer(session, transport, store)
 
@@ -338,7 +338,7 @@ async def test_no_watchdog_reaps_while_stop_teardown_is_pending(
 
     harness = _AppServerHarness(monkeypatch, ["timeout", "confirm"])
     session = _session()
-    transport = TraexNativeSession(session)
+    transport = harness.create_transport(session)
     store = _make_store(monkeypatch)
     tailer = _tailer(session, transport, store)
     queue = await tailer.subscribe()

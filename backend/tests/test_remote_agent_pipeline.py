@@ -130,7 +130,7 @@ def _session(
 
 def _local_workspace_with_remote_worker(
     tmp_path: Path, monkeypatch: MonkeyPatch
-) -> tuple[WorkspaceManager, object, WorkspaceTask, ManagedSession]:
+) -> tuple[WorkspaceManager, Workspace, WorkspaceTask, ManagedSession]:
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_save_state", lambda: None)
     repo = tmp_path / "repo"

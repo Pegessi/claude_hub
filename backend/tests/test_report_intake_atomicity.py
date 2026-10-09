@@ -27,7 +27,7 @@ from claude_hub.models import (
     WorkspaceTask,
     WorkspaceTaskStatus,
 )
-from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+from claude_hub.models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._reports import ReportCallIdConflict
 
@@ -123,14 +123,18 @@ async def test_distinct_call_ids_are_serialized_and_survive_reload(
 
     first, second = await asyncio.gather(submit(1), submit(2))
     assert first.id != second.id
+    first_call_id = first.call_id
+    second_call_id = second.call_id
+    assert first_call_id is not None
+    assert second_call_id is not None
     mapping = manager.sessions[session.id].report_call_ids
-    assert mapping[first.call_id] == first.id
-    assert mapping[second.call_id] == second.id
+    assert mapping[first_call_id] == first.id
+    assert mapping[second_call_id] == second.id
 
     fresh = WorkspaceManager()
     fresh_mapping = fresh.sessions[session.id].report_call_ids
-    assert fresh_mapping[first.call_id] == first.id
-    assert fresh_mapping[second.call_id] == second.id
+    assert fresh_mapping[first_call_id] == first.id
+    assert fresh_mapping[second_call_id] == second.id
     assert {first.id, second.id} <= set(fresh.reports)
 
 
@@ -379,7 +383,7 @@ async def test_report_rollback_serializes_concurrent_followup_task(
 
     monkeypatch.setattr(manager, "_atomic_write_text", fail_report_commit_once)
 
-    async def concurrent_followup() -> object:
+    async def concurrent_followup() -> TaskEvent:
         await rename_started.wait()
         return await manager.followup_task(
             workspace_id,
@@ -749,10 +753,12 @@ async def test_postcommit_snapshot_failure_is_success_and_durable(
         lambda _workspace_id: (_ for _ in ()).throw(OSError("snapshot failed")),
     )
     report = await manager.create_report(session.id, payload)
-    assert manager.sessions[session.id].report_call_ids[payload.call_id] == report.id
+    call_id = payload.call_id
+    assert call_id is not None
+    assert manager.sessions[session.id].report_call_ids[call_id] == report.id
 
     fresh = WorkspaceManager()
-    assert fresh.sessions[session.id].report_call_ids[payload.call_id] == report.id
+    assert fresh.sessions[session.id].report_call_ids[call_id] == report.id
     assert fresh.reports[report.id].message == payload.message
 
 
@@ -927,7 +933,9 @@ async def test_goal_packet_supplement_retry_reuses_cycle_and_call_id(
         report,
         ["acceptance_check"],
     )
-    first_message = send.await_args.args[1]
+    first_await = send.await_args
+    assert first_await is not None
+    first_message = first_await.args[1]
     assert manager.tasks[task.id].review_cycle == 3
     assert f"{task.id}-goal-packet-supplement-cycle-3-attempt-{report.id}" in first_message
 
@@ -937,7 +945,9 @@ async def test_goal_packet_supplement_retry_reuses_cycle_and_call_id(
         report,
         ["acceptance_check"],
     )
-    second_message = send.await_args.args[1]
+    second_await = send.await_args
+    assert second_await is not None
+    second_message = second_await.args[1]
     assert manager.tasks[task.id].review_cycle == 3
     assert second_message == first_message
 

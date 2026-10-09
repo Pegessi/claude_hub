@@ -8,44 +8,41 @@ on:
 
 jobs:
   backend:
+    name: Backend / ${{ matrix.label }}
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./backend
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: backend-format
+            label: format
+          - target: backend-types
+            label: mypy (all files)
+          - target: backend-tests
+            label: pytest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python 3.11
+      - id: uv-version
+        name: Read declared uv version
+        run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
+      - name: Set up declared Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Install uv
+          python-version-file: .python-test-version
+      - name: Set up declared uv
         uses: astral-sh/setup-uv@v7
-      - name: Cache uv packages
-        uses: actions/cache@v4
         with:
-          path: |
-            .venv
-            ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('backend/uv.lock', 'backend/pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-uv-
-      - name: Install dependencies
-        run: uv sync --extra dev
-      - name: Run black (formatting check)
-        run: uv run black --check .
-      - name: Run isort (import order check)
-        run: uv run isort --check .
-      - name: Run mypy (type check)
-        run: uv run mypy .
-      - name: Run pytest (tests)
-        # test_terminal_replay.py and test_terminal_input_latency_perf.py are
-        # Playwright browser E2E tests (they drive xterm.js via chromium and
-        # need tmux/ttyd). They run in the terminal-e2e job, not here — this
-        # job installs no browser/tmux/ttyd. Collecting the perf harness here
-        # also leaves a running event loop that breaks every later
-        # asyncio.run() test, so it must be ignored, not just skipped at runtime.
-        run: uv run pytest -xvs --ignore=tests/test_terminal_replay.py --ignore=tests/test_terminal_input_latency_perf.py --cov=claude_hub --cov-report=xml:coverage.xml --cov-report=term-missing
+          version: ${{ steps.uv-version.outputs.version }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install locked backend dependencies
+        working-directory: ./backend
+        run: uv sync --frozen --extra dev --python "$(cat ../.python-test-version)"
+      - name: Run unified backend check
+        run: ./scripts/verify.sh ${{ matrix.target }}
       - name: Upload backend coverage to Codecov
+        if: matrix.target == 'backend-tests'
         uses: codecov/codecov-action@v5
         with:
           files: ./backend/coverage.xml
@@ -57,48 +54,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify AGENTS.md and CLAUDE.md stay in sync
-        run: |
-          if ! diff -q AGENTS.md CLAUDE.md >/dev/null 2>&1; then
-            echo "::error::AGENTS.md and CLAUDE.md differ. These files must remain byte-identical. Update both in the same commit."
-            diff AGENTS.md CLAUDE.md || true
-            exit 1
-          fi
-          echo "✓ AGENTS.md == CLAUDE.md"
+      - name: Verify document invariants
+        run: ./scripts/verify.sh docs
 
   frontend:
+    name: Frontend / ${{ matrix.label }}
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./frontend
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: frontend-lint
+            label: lint
+          - target: frontend-types
+            label: typecheck
+          - target: frontend-tests
+            label: node tests
+          - target: frontend-build
+            label: bundle
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Install pnpm
+      - name: Install declared pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
-      - name: Cache pnpm packages
-        uses: actions/cache@v4
+          package_json_file: frontend/package.json
+      - name: Set up declared Node.js
+        uses: actions/setup-node@v4
         with:
-          path: |
-            node_modules
-            ~/.pnpm-store
-          key: ${{ runner.os }}-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-
-      - name: Install dependencies
-        run: pnpm install
-      - name: Run ESLint (linting)
-        run: pnpm run lint:check
-      # TODO(T1): no coverage until Vitest is set up — see frontend/package.json test:unit TODO.
-      - name: Run unit tests
-        run: pnpm run test:unit
-      - name: Run Type check and build
-        run: pnpm run build
+          node-version-file: .node-test-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install locked frontend dependencies
+        working-directory: ./frontend
+        run: pnpm install --frozen-lockfile
+      - name: Run unified frontend check
+        run: ./scripts/verify.sh ${{ matrix.target }}
 
   ttyd:
     name: Verify ttyd & tmux
@@ -150,9 +141,14 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version-file: .python-test-version
+      - id: uv-version
+        name: Read declared uv version
+        run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ steps.uv-version.outputs.version }}
       - name: Cache uv packages
         uses: actions/cache@v4
         with:
@@ -163,7 +159,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-uv-
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev --python "$(cat ../.python-test-version)"
       - name: Install Playwright browsers
         run: uv run playwright install chromium --with-deps
       - name: Install tmux
@@ -196,9 +192,14 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version-file: .python-test-version
+      - id: uv-version
+        name: Read declared uv version
+        run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ steps.uv-version.outputs.version }}
       - name: Cache uv packages (security-audit)
         uses: actions/cache@v4
         with:
@@ -210,7 +211,7 @@ jobs:
             ${{ runner.os }}-uv-
       - name: Install backend deps
         working-directory: ./backend
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev --python "$(cat ../.python-test-version)"
 
       - name: Run Bandit (Python SAST)
         working-directory: ./backend
@@ -230,11 +231,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: .node-test-version
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          package_json_file: frontend/package.json
       - name: Cache pnpm packages (security-audit)
         uses: actions/cache@v4
         with:
@@ -246,7 +247,7 @@ jobs:
             ${{ runner.os }}-pnpm-
       - name: Install frontend deps
         working-directory: ./frontend
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Run pnpm audit (production deps)
         working-directory: ./frontend

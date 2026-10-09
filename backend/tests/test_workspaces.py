@@ -33,6 +33,7 @@ from claude_hub.models import (
     WorkspaceTask,
     WorkspaceTaskStatus,
 )
+from claude_hub.services.feedback_lessons import FeedbackLessonStore
 from claude_hub.services.workspace_manager import workspace_manager
 
 workspace_module = import_module("claude_hub.services.workspace_manager")
@@ -3695,7 +3696,7 @@ def test_feedback_summary_prompt_and_completion_failures_remain_retryable(
     completion_failed = False
 
     def fail_first_completion_commit(
-        store: object,
+        store: FeedbackLessonStore,
         workspace_id: str,
         run_id: str,
     ) -> int | None:
@@ -11216,6 +11217,7 @@ def test_monitor_recovers_sealed_gp_verdict_when_worker_idle(
         },
     )
     reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
 
     # Construct the stranded shape directly: reviewer verdict sealed the round
     # (reviewed_cycle == review_cycle), packet APPROVED, but continue_task never
@@ -11224,7 +11226,9 @@ def test_monitor_recovers_sealed_gp_verdict_when_worker_idle(
     # the try/except wrapper existed.
     worker = workspace_manager.sessions[started["session_id"]]
     gp_review_cycle = workspace_manager.tasks[task["id"]].review_cycle
-    approved_packet = workspace_manager.tasks[task["id"]].goal_packet.model_copy(
+    goal_packet = workspace_manager.tasks[task["id"]].goal_packet
+    assert goal_packet is not None
+    approved_packet = goal_packet.model_copy(
         update={"status": GoalPacketStatus.APPROVED, "updated_at": datetime.now()}
     )
     workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
@@ -11511,6 +11515,7 @@ def _seed_sealed_round(
         },
     )
     reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
     worker = workspace_manager.sessions[started["session_id"]]
     review_cycle = workspace_manager.tasks[task["id"]].review_cycle
 
@@ -11648,6 +11653,7 @@ def test_monitor_does_not_auto_continue_reviewer_after_sealed_terminal_verdict(
         packet_status=GoalPacketStatus.APPROVED,
     )
     reviewer_id = workspace_manager.tasks[task["id"]].review_session_id
+    assert reviewer_id is not None
     reviewer = workspace_manager.sessions[reviewer_id]
     workspace_manager.sessions[reviewer_id] = reviewer.model_copy(
         update={
@@ -11770,7 +11776,9 @@ def test_monitor_recovers_sealed_impl_review_failed_verdict(
     # then advance review_cycle once (impl round), then re-seal with
     # reviewed_cycle matching.
     t = workspace_manager.tasks[task["id"]]
-    approved_packet = t.goal_packet.model_copy(
+    goal_packet = t.goal_packet
+    assert goal_packet is not None
+    approved_packet = goal_packet.model_copy(
         update={"status": GoalPacketStatus.APPROVED, "updated_at": datetime.now()}
     )
     impl_cycle = t.review_cycle + 1

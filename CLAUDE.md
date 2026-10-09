@@ -105,7 +105,9 @@ independent review and human-acceptance requirements.
 - [Terminal debugging](docs/terminal-debugging.md), [deployment](docs/DEPLOYMENT.md)
 - [Feedback lessons](docs/working-logs/lessons-catalog.md)
 
-Backend checks run from `backend/` with `uv run pytest` plus applicable
-black/isort/mypy checks. Frontend checks run from `frontend/` with
-`pnpm lint:check`, `pnpm exec vue-tsc --noEmit`, `pnpm build`.
+Run `./scripts/verify.sh all` from the task worktree before final handoff;
+`--help` lists individual targets for iteration. The backend type target includes
+tests. Local checks and CI share this entry point and the declared tool versions;
+see [setup and validation](CONTRIBUTING.md#5-run-validation). Record each result
+and any unrun checks rather than treating a partial pass as complete validation.
 `pnpm lint` writes fixes and must not be used for read-only review.

@@ -331,12 +331,35 @@ Subsequent requests:
 
 **Reason**: In home/LAN deployment, requiring OAuth is friction. Users on the local network are implicitly trusted. This makes the default (no Feishu config) experience seamless.
 
-## Agent Types
+## Agent Types and Execution Paths
 
-| Type | Shell | Solo Mode Behavior |
-|------|-------|--------------------|
-| `claude` | `claude` CLI | `IS_SANDBOX=1 claude --dangerously-skip-permissions` then fallback to `$SHELL` |
-| `cursor` | `$SHELL` (bash/zsh) | N/A (cursor is a GUI app, terminal just provides shell) |
+`AgentType` selects the provider/CLI; `SessionKind` distinguishes Terminal and
+Chat presentation. Task execution control is a separate concept and must not be
+inferred from either field.
+
+| Type | Execution support |
+| --- | --- |
+| `claude` | Claude CLI terminal launch and native Chat transport |
+| `codex` | Codex CLI terminal launch and native app-server Chat transport |
+| `traex` | TraeX CLI launch and its Codex-compatible native Chat transport |
+| `cursor` | Cursor CLI terminal launch and native Chat transport; not GUI-only |
+| `terminal` | Plain shell; no native provider Chat transport |
+
+The terminal-focused overview above is not the native Chat execution path:
+
+```text
+Chat input → api/agent_stream → native ProviderSession
+           → normalized, persisted events → StructuredPane
+
+Terminal input → api/terminal → ttyd/tmux
+
+Workspace-managed Task → workspace_manager dispatch/report/review lifecycle
+Initiator-managed Task → explicit progress/handoff; no implicit dispatch
+```
+
+For provider behavior read `services/agent_stream/native.py`, the corresponding
+adapter, and `tailer.py`; for Task control read `workspace_manager/_task_execution.py`.
+These are separate lifecycle owners even when they share a Workspace or tab.
 
 ## Environment & Proxy Handling
 

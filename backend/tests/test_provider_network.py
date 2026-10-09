@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import pytest
 
@@ -367,7 +367,7 @@ async def test_codex_login_status_resolves_chatgpt_endpoint_and_is_cached(
     login_calls = 0
     probe = RecordingProbe([ProbeResult(True, "http", 401)])
 
-    async def login_status(env: dict[str, str]) -> Optional[str]:
+    async def login_status(env: Mapping[str, str]) -> Optional[str]:
         nonlocal login_calls
         login_calls += 1
         return "chatgpt"
@@ -385,7 +385,7 @@ async def test_codex_login_status_resolves_chatgpt_endpoint_and_is_cached(
 
 @pytest.mark.asyncio
 async def test_codex_api_key_status_uses_api_endpoint(tmp_path: Path) -> None:
-    async def login_status(env: dict[str, str]) -> Optional[str]:
+    async def login_status(env: Mapping[str, str]) -> Optional[str]:
         return "api_key"
 
     probe = RecordingProbe([ProbeResult(True, "http", 403)])
@@ -439,7 +439,7 @@ async def test_official_codex_login_status_parser_does_not_expose_output(
 async def test_unknown_codex_login_preserves_auto_but_forced_mode_fails(
     tmp_path: Path,
 ) -> None:
-    async def login_status(env: dict[str, str]) -> Optional[str]:
+    async def login_status(env: Mapping[str, str]) -> Optional[str]:
         return None
 
     probe = RecordingProbe([])

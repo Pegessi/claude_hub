@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -30,6 +30,7 @@ from claude_hub.models import (
     ManagedSessionStatus,
     SessionKind,
     StreamCapabilities,
+    StreamModeOption,
     User,
     WorkspaceSessionRole,
 )
@@ -46,6 +47,7 @@ from claude_hub.services.agent_stream.base import (
     SnapshotRecord,
     TranscriptSnapshot,
 )
+from claude_hub.services.agent_stream.native import ProviderSession
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import SessionTailer, TailerManager
 
@@ -142,10 +144,15 @@ def test_tab_mode_persistence_strips_stream_namespace(
     from claude_hub.api import agent_stream as agent_stream_api
 
     persisted: List[Tuple[str, str]] = []
+
+    def persist_mode(tab_id: str, mode: str) -> bool:
+        persisted.append((tab_id, mode))
+        return True
+
     monkeypatch.setattr(
         agent_stream_api.ttyd_manager,
         "set_tab_chat_mode",
-        lambda tab_id, mode: persisted.append((tab_id, mode)) or True,
+        persist_mode,
     )
 
     agent_stream_api._persist_tab_chat_mode("terminal-tab-real-tab-id", "plan")
@@ -368,7 +375,7 @@ def test_tailer_manager_set_env_propagates_to_live_transport() -> None:
     transport so it takes effect on the next turn."""
     from claude_hub.services.agent_stream.tailer import TailerManager
 
-    session = SimpleNamespace(id="sess-env-live", solo_mode=True)
+    session = _native_session().model_copy(update={"id": "sess-env-live", "solo_mode": True})
     transport = MagicMock()
     tailer = SessionTailer(
         "ws-env",
@@ -402,14 +409,14 @@ def test_tailer_manager_set_env_skips_when_tailer_missing_or_errored() -> None:
         lambda: None,
         native_transport=other_transport,
     )
-    session_a = SimpleNamespace(id="sess-env-missing")
+    session_a = _native_session().model_copy(update={"id": "sess-env-missing"})
     manager_a = TailerManager.__new__(TailerManager)
     manager_a._tailers = {"sess-other": other_tailer}
     manager_a.set_env(session_a, {"FOO": "bar"})  # must not raise
     other_transport.update_env.assert_not_called()
 
     # Case (b): tailer exists but its native transport failed to start.
-    session_b = SimpleNamespace(id="sess-env-errored")
+    session_b = _native_session().model_copy(update={"id": "sess-env-errored"})
     transport_b = MagicMock()
     tailer_b = SessionTailer(
         "ws-env",
@@ -492,8 +499,8 @@ async def test_set_stream_mode_returns_updated_capabilities(
         adapter_id="claude-native",
         schema_version=1,
         available_modes=[
-            {"id": "default", "label": "Default", "description": "Normal"},
-            {"id": "plan", "label": "Plan", "description": "Read only"},
+            StreamModeOption(id="default", label="Default", description="Normal"),
+            StreamModeOption(id="plan", label="Plan", description="Read only"),
         ],
         current_mode="plan",
         supports_dynamic_modes=True,
@@ -871,18 +878,22 @@ def test_store_sequential_pages_resume_from_cached_file_offset(
 
             def __next__(self) -> str:
                 line = next(self.handle)
+                assert isinstance(line, str)
                 self.lines_read += 1
                 return line
 
             def readline(self, *args: Any) -> str:
                 line = self.handle.readline(*args)
+                assert isinstance(line, str)
                 if line:
                     self.lines_read += 1
                 return line
 
             def seek(self, offset: int, *args: Any) -> int:
                 self.seek_offsets.append(offset)
-                return self.handle.seek(offset, *args)
+                result = self.handle.seek(offset, *args)
+                assert isinstance(result, int)
+                return result
 
             def __getattr__(self, name: str) -> Any:
                 return getattr(self.handle, name)
@@ -1416,7 +1427,7 @@ def test_claude_two_assistant_messages_with_tool_no_reconcile_error() -> None:
 
     adapter = ClaudeJsonlAdapter()
     ctx = _ctx()
-    lines = [
+    lines: List[Dict[str, Any]] = [
         {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg1"}}},
         {
             "type": "stream_event",
@@ -1520,7 +1531,7 @@ def test_claude_genuine_text_mismatch_still_errors() -> None:
 
     adapter = ClaudeJsonlAdapter()
     ctx = _ctx()
-    lines = [
+    lines: List[Dict[str, Any]] = [
         {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg1"}}},
         {
             "type": "stream_event",
@@ -1556,7 +1567,7 @@ def test_claude_streamed_tool_use_with_block_index_emits_single_tool_start() -> 
 
     adapter = ClaudeJsonlAdapter()
     ctx = _ctx()
-    lines = [
+    lines: List[Dict[str, Any]] = [
         {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg1"}}},
         {
             "type": "stream_event",
@@ -1684,7 +1695,7 @@ def test_claude_ask_user_question_streaming_emits_approval_once() -> None:
             }
         ]
     }
-    lines = [
+    lines: List[Dict[str, Any]] = [
         {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg1"}}},
         {
             "type": "stream_event",
@@ -1772,7 +1783,7 @@ def test_claude_tool_snapshot_before_block_stop_emits_single_tool_start() -> Non
 
     adapter = ClaudeJsonlAdapter()
     ctx = _ctx()
-    lines = [
+    lines: List[Dict[str, Any]] = [
         {
             "type": "stream_event",
             "event": {"type": "message_start", "message": {"id": "msg1"}},
@@ -1840,7 +1851,7 @@ def test_claude_malformed_streamed_tool_args_fall_back_to_final_snapshot() -> No
 
     adapter = ClaudeJsonlAdapter()
     ctx = _ctx()
-    lines = [
+    lines: List[Dict[str, Any]] = [
         {
             "type": "stream_event",
             "event": {"type": "message_start", "message": {"id": "msg1"}},
@@ -1906,7 +1917,7 @@ def test_claude_final_only_two_assistant_messages_scoped_by_message_id() -> None
 
     adapter = ClaudeJsonlAdapter()
     ctx = _ctx()
-    lines = [
+    lines: List[Dict[str, Any]] = [
         {
             "type": "assistant",
             "message": {
@@ -1964,7 +1975,7 @@ def test_claude_consecutive_same_message_id_rows_accumulate() -> None:
 
     adapter = ClaudeJsonlAdapter()
     ctx = _ctx()
-    lines = [
+    lines: List[Dict[str, Any]] = [
         {
             "type": "assistant",
             "message": {"id": "msg_same", "content": [{"type": "thinking", "thinking": "thought"}]},
@@ -2265,10 +2276,11 @@ def test_sse_live_stream_terminates_when_session_deleted(
             since_sequence=-1,
             current_user=fake_user,
         )
-        agen = response.body_iterator
+        agen = response.body_iterator.__aiter__()
 
         # First chunk is the "hello" event.
         hello = await agen.__anext__()
+        assert isinstance(hello, str)
         assert hello.startswith("event: hello")
 
         # Delete the session out from under the stream.
@@ -2277,6 +2289,7 @@ def test_sse_live_stream_terminates_when_session_deleted(
         # The stream must emit an error event and then end (no endless
         # heartbeats). Guard with a timeout so a regression fails fast.
         error_chunk = await asyncio.wait_for(agen.__anext__(), timeout=5.0)
+        assert isinstance(error_chunk, str)
         assert error_chunk.startswith("event: error")
         assert "session was deleted" in error_chunk
 
@@ -2373,6 +2386,9 @@ class _FakeNativeTransport:
     tailer's push consumer awaits ``read_line`` directly — no polling.
     """
 
+    session: ManagedSession
+    active_thread_id: Optional[str]
+
     def accepts_notification(self, record):
         return True
 
@@ -2450,6 +2466,11 @@ class _FakeNativeTransport:
 
     def maybe_capture_conversation_id(self, record) -> None:
         pass
+
+
+def _as_provider_session(transport: _FakeNativeTransport) -> ProviderSession:
+    # This test double intentionally implements only the observed transport contract.
+    return cast(ProviderSession, transport)
 
 
 def _native_session(agent_type: AgentType = AgentType.CLAUDE) -> ManagedSession:
@@ -2537,7 +2558,7 @@ async def test_cancel_turn_closes_orphaned_durable_turn_after_restart(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
         post_persist_observers=[observer],
     )
 
@@ -2735,7 +2756,7 @@ async def test_starting_tailer_surfaces_orphaned_turn_after_restart(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=_FakeNativeTransport(),
+        native_transport=_as_provider_session(_FakeNativeTransport()),
     )
 
     await tailer.start()
@@ -2776,7 +2797,7 @@ async def test_user_cancel_does_not_report_runtime_interruption(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
         post_persist_observers=[observe],
     )
     await tailer.send_message("hello", [], client_turn_id="turn-user-stop")
@@ -2806,7 +2827,7 @@ async def test_cancel_turn_rejects_stale_expected_turn_id(store: AgentStreamStor
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.send_message("new turn", [], client_turn_id="turn-new")
 
@@ -2842,7 +2863,7 @@ async def test_cancel_turn_rejects_stale_expected_orphan_id(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=_FakeNativeTransport(),
+        native_transport=_as_provider_session(_FakeNativeTransport()),
     )
 
     assert await tailer.cancel_turn(expected_turn_id="turn-old") is False
@@ -2866,7 +2887,7 @@ async def test_stopping_tailer_terminalizes_active_native_turn(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.start()
     await tailer.send_message("hello", [], client_turn_id="turn-shutdown")
@@ -2924,7 +2945,7 @@ async def test_native_subscriber_receives_delta_far_below_poll_interval() -> Non
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     # Let the push consumer task start and block on read_line.
@@ -2962,7 +2983,7 @@ async def test_native_multiple_deltas_before_turn_completed() -> None:
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -3016,7 +3037,7 @@ async def test_native_runtime_is_idle_on_completion_before_one_shot_process_eof(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     manager = TailerManager(lambda _session_id: session)
     manager._tailers[session.id] = tailer
@@ -3065,7 +3086,7 @@ async def test_native_runtime_needs_attention_on_failed_completion_before_eof() 
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     manager = TailerManager(lambda _session_id: session)
     manager._tailers[session.id] = tailer
@@ -3125,7 +3146,7 @@ async def test_idle_reap_does_not_cancel_healthy_inflight_turn(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await tailer.send_message("hello", [], client_turn_id="turn-bg")
@@ -3187,7 +3208,7 @@ async def test_active_long_running_turn_has_no_duration_cap(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await tailer.send_message("run a long review", [], client_turn_id="turn-long-active")
@@ -3234,7 +3255,7 @@ async def test_outstanding_tool_call_suppresses_stream_inactivity_reap(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await tailer.send_message("run the tests", [], client_turn_id="turn-long-tool")
@@ -3288,7 +3309,7 @@ async def test_raw_queue_status_suppresses_inactivity_without_visible_payload(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=_FakeNativeTransport(eof_is_fatal=False),
+        native_transport=_as_provider_session(_FakeNativeTransport(eof_is_fatal=False)),
     )
     tailer._last_event_at = time.monotonic() - 1.0
     assert tailer._stream_inactive() is True
@@ -3330,7 +3351,7 @@ async def test_stream_inactivity_timeout_reaps_silent_turn(
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
         store=store,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await tailer.send_message("hello", [], client_turn_id="turn-silent")
@@ -3378,7 +3399,7 @@ async def test_retry_preserves_healthy_inflight_tailer(monkeypatch: pytest.Monke
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     manager = TailerManager(lambda _session_id: session)
     manager._tailers[session.id] = tailer
@@ -3415,7 +3436,7 @@ async def test_retry_replaces_hard_failed_tailer(monkeypatch: pytest.MonkeyPatch
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     tailer._hard_failed = True
     manager = TailerManager(lambda _session_id: session)
@@ -3426,7 +3447,7 @@ async def test_retry_replaces_hard_failed_tailer(monkeypatch: pytest.MonkeyPatch
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=_FakeNativeTransport(eof_is_fatal=False),
+        native_transport=_as_provider_session(_FakeNativeTransport(eof_is_fatal=False)),
     )
 
     # Stub the (real-transport-creating) factory so the replace path stays
@@ -3436,7 +3457,7 @@ async def test_retry_replaces_hard_failed_tailer(monkeypatch: pytest.MonkeyPatch
         manager._tailers[sess.id] = fresh
         return fresh
 
-    manager._get_or_create = fake_get_or_create
+    monkeypatch.setattr(manager, "_get_or_create", fake_get_or_create)
 
     result = await manager.retry(session)
 
@@ -3459,7 +3480,7 @@ async def test_native_first_turn_is_fanned_out_not_swallowed_by_backfill() -> No
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -3543,7 +3564,7 @@ async def test_feishu_turn_persists_source_while_provider_receives_context(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
 
     await tailer.send_message(
@@ -3583,7 +3604,7 @@ async def test_wrapped_feishu_question_answer_is_not_consumed_as_native_answer(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     answer = json.dumps(
         {
@@ -3618,8 +3639,11 @@ async def test_web_tab_send_marks_source_server_side(monkeypatch: pytest.MonkeyP
 
     captured: list[dict] = []
 
-    async def fake_dispatch(tab_id, payload, **kwargs) -> str:
+    async def fake_dispatch(
+        tab_id: str, payload: agent_stream_api.AgentStreamSendRequest, **kwargs: Any
+    ) -> str:
         captured.append({"tab_id": tab_id, "payload": payload, **kwargs})
+        assert payload.client_turn_id is not None
         return payload.client_turn_id
 
     monkeypatch.setattr(agent_stream_api, "_dispatch_tab_stream_input", fake_dispatch)
@@ -3658,7 +3682,7 @@ async def test_goal_turn_hides_internal_prompt_and_protocol_from_visible_transcr
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
         post_persist_observers=[observer],
     )
     await tailer.start()
@@ -3742,7 +3766,7 @@ async def test_goal_turn_synthesizes_completion_when_provider_result_never_arriv
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
         post_persist_observers=[observer],
     )
     await tailer.start()
@@ -3810,7 +3834,7 @@ async def test_goal_turn_provider_result_within_grace_wins(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.start()
     await tailer.send_message(
@@ -3872,7 +3896,7 @@ async def test_goal_turn_persistent_transport_is_not_synthesized(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.start()
     await tailer.send_message(
@@ -3934,7 +3958,7 @@ async def test_goal_turn_eof_before_grace_synthesizes_completion(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
         post_persist_observers=[observer],
     )
     await tailer.start()
@@ -3993,7 +4017,7 @@ async def test_goal_turn_without_envelope_is_still_reaped_silent(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.start()
     await tailer.send_message(
@@ -4043,7 +4067,7 @@ async def test_approval_resolve_clears_synthetic_tool_wait() -> None:
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=_FakeNativeTransport(),
+        native_transport=_as_provider_session(_FakeNativeTransport()),
     )
     ctx = NormalizeContext(
         session_id=session.id,
@@ -4088,7 +4112,7 @@ async def test_goal_turn_drops_unclosed_control_block_from_visible_transcript(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.start()
     await tailer.send_message(
@@ -4140,7 +4164,7 @@ async def test_goal_turn_drops_partial_control_opener_at_eof(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.start()
     await tailer.send_message(
@@ -4195,7 +4219,7 @@ async def test_codex_goal_completion_summary_does_not_persist_protocol(
         session_id=session.id,
         adapter=CodexJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
         post_persist_observers=[observer],
     )
     await tailer.start()
@@ -4251,7 +4275,7 @@ async def test_native_codex_answer_emits_persisted_approval_resolved(
         session_id=session.id,
         adapter=CodexJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -4318,7 +4342,7 @@ async def test_native_claude_answer_emits_persisted_approval_resolved(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -4393,7 +4417,7 @@ async def test_native_claude_answer_after_turn_end_emits_approval_resolved(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -4464,7 +4488,7 @@ async def test_native_idle_reap_stops_transport(monkeypatch: pytest.MonkeyPatch)
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     # Subscribe then immediately unsubscribe so _subscribers is empty and the
     # idle timer can fire.
@@ -4499,7 +4523,7 @@ async def test_native_after_idle_stop_resubscribe_restarts_transport() -> None:
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
 
     # First subscribe → idle reap stops transport.
@@ -4585,7 +4609,7 @@ async def test_headless_restart_after_idle_does_not_reap_cold_scheduled_turn(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
 
     # Simulate the post-idle-reap state: still registered, consumer stopped,
@@ -4628,7 +4652,7 @@ async def test_native_nonzero_exit_emits_error_and_failed_turn_completed_once() 
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -4681,7 +4705,7 @@ async def test_native_clean_exit_without_completion_emits_failed_turn_completed(
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -4738,7 +4762,7 @@ async def test_native_clean_exit_with_completion_does_not_synthesize_failure() -
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -4798,7 +4822,7 @@ async def test_native_provider_completion_then_nonzero_exit_emits_exactly_one_co
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -4844,7 +4868,7 @@ async def test_native_provider_error_result_then_nonzero_exit_emits_exactly_one_
         session_id=session.id,
         adapter=ClaudeJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -4898,7 +4922,7 @@ async def test_codex_fatal_eof_emits_error_and_failed_turn_completed_once() -> N
         session_id=session.id,
         adapter=CodexJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
         post_persist_observers=[observe],
     )
     queue = await tailer.subscribe()
@@ -4949,7 +4973,7 @@ async def test_codex_turn_completed_ack_after_persistence_no_turn_ahead() -> Non
         session_id=session.id,
         adapter=CodexJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
@@ -5008,7 +5032,7 @@ async def test_child_completion_keeps_headless_parent_alive(
         session_id=session.id,
         adapter=CodexJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
     )
     try:
         await tailer.start()
@@ -5059,7 +5083,7 @@ async def test_child_completion_preserves_parent_turn_and_final_text(
         session_id=session.id,
         adapter=CodexJsonlAdapter(),
         session_getter=lambda: session,
-        native_transport=transport,
+        native_transport=_as_provider_session(transport),
         post_persist_observers=[observe],
     )
     queue = await tailer.subscribe()
@@ -5148,7 +5172,9 @@ def _setup_wait_manager(
 
     class _Store:
         async def read_since(self, since: int, limit: int = 200) -> AgentStreamEventPage:
-            return await read_since_impl(since, limit)
+            page = await read_since_impl(since, limit)
+            assert isinstance(page, AgentStreamEventPage)
+            return page
 
     monkeypatch.setattr(manager, "get_store", lambda ws, sid: _Store())
     return manager

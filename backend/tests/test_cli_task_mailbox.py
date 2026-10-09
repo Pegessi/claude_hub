@@ -77,7 +77,9 @@ def _query(request: httpx.Request) -> Dict[str, List[str]]:
 
 
 def _json(request: httpx.Request) -> Dict[str, Any]:
-    return json.loads(request.content)
+    payload = json.loads(request.content)
+    assert isinstance(payload, dict)
+    return payload
 
 
 def test_help_registers_task_mailbox_commands() -> None:

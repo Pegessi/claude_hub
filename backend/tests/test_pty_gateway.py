@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib
 import os
 import re
-import sys
+from typing import cast
 
 import pytest
 
@@ -38,10 +39,11 @@ from claude_hub.services.remote_profiles import (
     reject_unsupported_interactive,
     resolve_transport,
 )
+from claude_hub.services.ttyd_manager import TTYDProcess
 
-# The package ``claude_hub.services.ttyd_manager`` re-exports a manager singleton
-# that shadows the submodule attribute; reach the real module via sys.modules.
-tmod = sys.modules["claude_hub.services.ttyd_manager"]
+# The package re-exports a singleton with the module's name. Keep the real module
+# available for monkeypatching without confusing it with that singleton.
+tmod = importlib.import_module("claude_hub.services.ttyd_manager")
 
 
 # --------------------------------------------------------------------------- #
@@ -84,7 +86,9 @@ def test_explicit_transport_override_wins(monkeypatch: pytest.MonkeyPatch) -> No
     forced = forced.model_copy(update={"transport": RemoteTransport.PTY_GATEWAY})
     assert resolve_transport(forced) == RemoteTransport.PTY_GATEWAY
     # String value from JSON config is accepted.
-    strp = RemoteProfile(id="plain2", name="p", ssh_host="plain2.example", transport="pty_gateway")
+    strp = RemoteProfile.model_validate(
+        dict(id="plain2", name="p", ssh_host="plain2.example", transport="pty_gateway")
+    )
     assert resolve_transport(strp) == RemoteTransport.PTY_GATEWAY
     # Env override classifies otherwise-unknown hosts.
     monkeypatch.setenv("CLAUDE_HUB_PTY_GATEWAY_HOSTS", "custom-gateway.internal")
@@ -259,8 +263,8 @@ class _ScriptedChannel:
 async def test_pty_exec_returns_body_and_closes() -> None:
     channel = _ScriptedChannel(body="payload")
 
-    async def connector(_profile: RemoteProfile) -> _ScriptedChannel:
-        return channel
+    async def connector(_profile: RemoteProfile) -> pty_exec.SshPty:
+        return cast(pty_exec.SshPty, channel)
 
     out = await pty_exec.pty_exec(
         RemoteProfile(id="m", name="m", ssh_host="m"), "cmd", connector=connector
@@ -274,8 +278,8 @@ async def test_pty_exec_returns_body_and_closes() -> None:
 async def test_pty_exec_propagates_handshake_failure() -> None:
     channel = _ScriptedChannel(fail="prompt")
 
-    async def connector(_profile: RemoteProfile) -> _ScriptedChannel:
-        return channel
+    async def connector(_profile: RemoteProfile) -> pty_exec.SshPty:
+        return cast(pty_exec.SshPty, channel)
 
     with pytest.raises(PtyExecError):
         await pty_exec.pty_exec(
@@ -294,7 +298,9 @@ async def test_pty_exec_against_local_bash_pty() -> None:
         env["TERM"] = "xterm"
         return await pty_exec.spawn_pty(["bash", "--noprofile", "--norc", "-i"], env=env)
 
-    profile = RemoteProfile(id="fake", name="fake", ssh_host="fake", transport="pty_gateway")
+    profile = RemoteProfile(
+        id="fake", name="fake", ssh_host="fake", transport=RemoteTransport.PTY_GATEWAY
+    )
     body = await pty_exec.pty_exec(
         profile,
         "echo GATEWAY_OK; for i in 1 2; do echo line$i; done",
@@ -312,13 +318,15 @@ async def test_pty_exec_against_local_bash_pty() -> None:
 
 
 _GW = RemoteProfile(
-    id="merlin_dev", name="merlin_dev", ssh_host="merlin_dev", transport="pty_gateway"
+    id="merlin_dev", name="merlin_dev", ssh_host="merlin_dev", transport=RemoteTransport.PTY_GATEWAY
 )
-_NORMAL = RemoteProfile(id="mac_mini", name="m", ssh_host="mac-mini.local", transport="normal")
+_NORMAL = RemoteProfile(
+    id="mac_mini", name="m", ssh_host="mac-mini.local", transport=RemoteTransport.NORMAL
+)
 
 
-def _process(profile_id: str, *, forward: int | None = None, reconnect: bool = True) -> object:
-    return tmod.TTYDProcess(
+def _process(profile_id: str, *, forward: int | None = None, reconnect: bool = True) -> TTYDProcess:
+    return TTYDProcess(
         "deadbeef-1234",
         19173,
         "remote-tab",

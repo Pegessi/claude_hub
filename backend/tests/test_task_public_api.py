@@ -80,7 +80,9 @@ def _create_workspace(client: TestClient, tmp_path: Path, name: str) -> str:
         json={"name": name, "path": str(repo), "target": "local"},
     )
     assert response.status_code == 201, response.text
-    return response.json()["id"]
+    workspace_id = response.json()["id"]
+    assert isinstance(workspace_id, str)
+    return workspace_id
 
 
 def _create_task(
@@ -98,7 +100,9 @@ def _create_task(
         body["parent_task_id"] = parent_task_id
     response = client.post(f"/api/workspaces/{workspace_id}/tasks", json=body)
     assert response.status_code == 201, response.text
-    return response.json()
+    payload = response.json()
+    assert isinstance(payload, dict)
+    return payload
 
 
 def test_ordinary_task_tree_events_wait_ack_followup(

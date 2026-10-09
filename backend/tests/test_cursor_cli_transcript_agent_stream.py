@@ -62,6 +62,12 @@ def _make_session(**overrides: Any) -> ManagedSession:
     return ManagedSession(**base)
 
 
+def _session_id(session: ManagedSession) -> str:
+    session_id = session.agent_session_id
+    assert session_id is not None
+    return session_id
+
+
 def _write_transcript(
     data_root: Path, cwd: str, session_id: str, rows: List[Dict[str, Any]]
 ) -> Path:
@@ -82,12 +88,12 @@ def test_discover_source_returns_pinned_path_when_provenance_valid(tmp_path: Pat
     cwd = str(tmp_path / "proj")
     data_root = tmp_path / "cursor-data"
     session = _make_session(workspace_path=cwd, cursor_data_dir=str(data_root))
-    rows = [
+    rows: List[Dict[str, Any]] = [
         {"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}},
         {"role": "assistant", "message": {"content": [{"type": "text", "text": "hello"}]}},
         {"type": "turn_ended", "status": "success"},
     ]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()
@@ -109,7 +115,7 @@ def test_discover_source_canonicalizes_equivalent_workspace_path(tmp_path: Path)
     path = _write_transcript(
         data_root,
         str(canonical_cwd),
-        session.agent_session_id,
+        _session_id(session),
         [{"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}],
     )
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
@@ -124,7 +130,7 @@ def test_discover_source_none_when_transport_not_terminal_transcript(tmp_path: P
         workspace_path=cwd, cursor_data_dir=str(data_root), cursor_transport="terminal"
     )
     rows = [{"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()
@@ -136,7 +142,7 @@ def test_discover_source_none_when_data_dir_missing(tmp_path: Path) -> None:
     session = _make_session(workspace_path=cwd, cursor_data_dir=None)
     rows = [{"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}]
     data_root = tmp_path / "cursor-data"
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()
@@ -152,7 +158,7 @@ def test_discover_source_none_when_cli_version_unsupported(tmp_path: Path) -> No
         cursor_cli_version="0.0.0-unsupported",
     )
     rows = [{"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()
@@ -168,7 +174,7 @@ def test_discover_source_none_when_schema_mismatch(tmp_path: Path) -> None:
         cursor_transcript_schema="wrong-schema",
     )
     rows = [{"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()
@@ -196,7 +202,7 @@ def test_discover_source_none_when_path_not_absolute(tmp_path: Path) -> None:
     data_root = tmp_path / "cursor-data"
     session = _make_session(workspace_path=cwd, cursor_data_dir=str(data_root))
     rows = [{"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}]
-    _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": "relative/path.jsonl"})
 
     adapter = CursorCliTranscriptAdapter()
@@ -231,8 +237,8 @@ def test_discover_source_none_when_file_missing(tmp_path: Path) -> None:
         / "projects"
         / comp
         / "agent-transcripts"
-        / session.agent_session_id
-        / f"{session.agent_session_id}.jsonl"
+        / _session_id(session)
+        / f"{_session_id(session)}.jsonl"
     )
     session = session.model_copy(update={"cursor_transcript_path": str(missing)})
 
@@ -256,7 +262,7 @@ def test_capabilities_structured_true_when_provenance_valid(tmp_path: Path) -> N
     data_root = tmp_path / "cursor-data"
     session = _make_session(workspace_path=cwd, cursor_data_dir=str(data_root))
     rows = [{"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()
@@ -272,12 +278,12 @@ def test_read_snapshot_returns_digest_and_stable_source_ids(tmp_path: Path) -> N
     cwd = str(tmp_path / "proj")
     data_root = tmp_path / "cursor-data"
     session = _make_session(workspace_path=cwd, cursor_data_dir=str(data_root))
-    rows = [
+    rows: List[Dict[str, Any]] = [
         {"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}},
         {"role": "assistant", "message": {"content": [{"type": "text", "text": "hello"}]}},
         {"type": "turn_ended", "status": "success"},
     ]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()
@@ -299,7 +305,7 @@ def test_read_snapshot_deduplicates_identical_rows_with_occurrence_ordinals(tmp_
     session = _make_session(workspace_path=cwd, cursor_data_dir=str(data_root))
     row = {"role": "user", "message": {"content": [{"type": "text", "text": "dup"}]}}
     rows = [row, row, row]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()
@@ -320,7 +326,7 @@ def test_read_snapshot_rejects_partial_final_line(tmp_path: Path) -> None:
     data_root = tmp_path / "cursor-data"
     session = _make_session(workspace_path=cwd, cursor_data_dir=str(data_root))
     rows = [{"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     # append a partial line without trailing newline
     with path.open("a", encoding="utf-8") as f:
         f.write('{"role": "assistant"')
@@ -336,7 +342,7 @@ def test_read_snapshot_rejects_unknown_row_type(tmp_path: Path) -> None:
     data_root = tmp_path / "cursor-data"
     session = _make_session(workspace_path=cwd, cursor_data_dir=str(data_root))
     rows = [{"weird": "row"}]
-    path = _write_transcript(data_root, cwd, session.agent_session_id, rows)
+    path = _write_transcript(data_root, cwd, _session_id(session), rows)
     session = session.model_copy(update={"cursor_transcript_path": str(path)})
 
     adapter = CursorCliTranscriptAdapter()

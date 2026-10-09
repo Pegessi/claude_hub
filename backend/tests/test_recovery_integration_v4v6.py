@@ -39,11 +39,7 @@ tm = importlib.import_module("claude_hub.services.ttyd_manager")
 from claude_hub.services._cursor_verify import (  # noqa: E402
     _cursor_id_exists as _cursor_id_exists_fn,
 )
-
-TTYDManager = tm.TTYDManager
-TTYDProcess = tm.TTYDProcess
-ScanEntry = tm.ScanEntry
-
+from claude_hub.services.ttyd_manager import ScanEntry, TTYDManager, TTYDProcess
 
 # ─── helpers to build realistic on-disk state ────────────────────────────
 

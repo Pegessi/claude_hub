@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TypedDict, cast
 
 import pytest
 
@@ -28,6 +29,18 @@ from claude_hub.services.feishu_bot_pool import (
 
 _T0 = 1_700_000_000.0
 _OWNER = OwnerIdentity(open_id="ou-owner", email="owner@example.com", kind=OWNER_KIND_OAUTH)
+
+
+class _RawBot(TypedDict):
+    app_id: str
+    binding: object | None
+    generation: int
+    revision: int
+    revoked_at: float | None
+
+
+class _RawPool(TypedDict):
+    bots: dict[str, _RawBot]
 
 
 class _Clock:
@@ -69,8 +82,10 @@ def _env(app_id: str) -> dict[str, str]:
     }
 
 
-def _raw(store: FeishuBotPoolStore) -> dict:
-    return json.loads(store.path.read_text(encoding="utf-8"))
+def _raw(store: FeishuBotPoolStore) -> _RawPool:
+    raw: object = json.loads(store.path.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    return cast(_RawPool, raw)
 
 
 def _entry(store: FeishuBotPoolStore, bot_id: str, environ: dict[str, str]) -> BotEntry:

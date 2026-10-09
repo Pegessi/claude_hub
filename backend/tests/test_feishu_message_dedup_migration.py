@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
 import pytest
 
@@ -39,8 +39,16 @@ def _write_v1(path: Path, events: dict[str, Any], **extra: Any) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _read(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+class _DedupState(TypedDict):
+    version: int
+    events: dict[str, dict[str, object]]
+    legacy_events: dict[str, dict[str, object]]
+
+
+def _read(path: Path) -> _DedupState:
+    raw: object = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    return cast(_DedupState, raw)
 
 
 def test_migrated_message_id_is_still_claimed(tmp_path: Path) -> None:

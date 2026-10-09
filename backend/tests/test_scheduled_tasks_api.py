@@ -13,6 +13,8 @@ from claude_hub.main import app
 from claude_hub.models import (
     AgentType,
     ScheduledTask,
+    ScheduledTaskCreate,
+    ScheduledTaskKind,
     ScheduledTaskRun,
     ScheduledTaskRunStatus,
     User,
@@ -38,7 +40,7 @@ async def test_chat_schedule_create_run_and_list_runs(
     task = ScheduledTask(
         id="schedule-1",
         name="Daily summary",
-        kind="chat_turn",
+        kind=ScheduledTaskKind.CHAT_TURN,
         interval_seconds=3600,
         tab_id="chat-1",
         agent_type=AgentType.TRAEX,
@@ -57,9 +59,9 @@ async def test_chat_schedule_create_run_and_list_runs(
         queued_at=now,
         waiting_reason="waiting for the current Chat response",
     )
-    created_bodies: list[object] = []
+    created_bodies: list[ScheduledTaskCreate] = []
 
-    def create(body: object) -> ScheduledTask:
+    def create(body: ScheduledTaskCreate) -> ScheduledTask:
         created_bodies.append(body)
         return task
 
