@@ -45,9 +45,7 @@ def bot_summary(
         "generation": 1,
         "configured": True,
         "app_secret_configured": True,
-        "verification_token_configured": True,
-        "encrypt_key_configured": True,
-        "event_url": f"https://hub.example.test/api/feishu/bot/events/{bot_id}",
+        "connection_status": "connected",
         "updated_at": NOW,
         "binding": binding,
         "my_claims": [],
@@ -208,8 +206,6 @@ async def main() -> None:
                         "name",
                         "app_id",
                         "app_secret",
-                        "verification_token",
-                        "encrypt_key",
                     }
                     created = bot_summary(
                         "bot-created",
@@ -231,8 +227,6 @@ async def main() -> None:
                     assert submitted["expected_revision"] == bot["revision"]
                     assert set(submitted) == {
                         "app_secret",
-                        "verification_token",
-                        "encrypt_key",
                         "expected_revision",
                     }
                     bot["revision"] += 1
@@ -257,7 +251,6 @@ async def main() -> None:
                             "revision": bot["revision"],
                             "code": "CH-ABCDEF1234",
                             "expires_at": CODE_EXPIRES,
-                            "event_url": bot["event_url"],
                         },
                         status=201,
                     )
@@ -347,8 +340,6 @@ async def main() -> None:
             await settings.get_by_label("Name", exact=True).fill("Primary Bot")
             await settings.get_by_label("App ID", exact=True).fill("app-created")
             await settings.get_by_label("App Secret", exact=True).fill("create-secret")
-            await settings.get_by_label("Verification Token", exact=True).fill("create-token")
-            await settings.get_by_label("Encrypt Key", exact=True).fill("create-encrypt")
             await settings.get_by_role("button", name="Validate and add", exact=True).click()
             await expect(
                 settings.get_by_role("heading", name="Primary Bot", exact=True)
@@ -369,8 +360,11 @@ async def main() -> None:
                 settings.get_by_role("status").filter(has_text="Bot added.")
             ).to_be_visible()
             await expect(settings.get_by_label("App Secret", exact=True)).to_have_value("")
-            await expect(settings.get_by_label("Verification Token", exact=True)).to_have_value("")
-            await expect(settings.get_by_label("Encrypt Key", exact=True)).to_have_value("")
+            await expect(settings.locator(".connection-card")).to_contain_text(
+                "Connected"
+            )
+            for retired_label in ("Verification Token", "Encrypt Key", "Callback URL"):
+                await expect(settings.get_by_text(retired_label, exact=True)).to_have_count(0)
 
             for row in await settings.locator('[aria-label="Bots"] > button').all():
                 box = await row.bounding_box()
@@ -385,32 +379,27 @@ async def main() -> None:
                 "name": "Primary Bot",
                 "app_id": "app-created",
                 "app_secret": "create-secret",
-                "verification_token": "create-token",
-                "encrypt_key": "create-encrypt",
             }
 
-            # Replacing credentials uses the selected revision and clears all
-            # three secret drafts on success.
+            # Replacing credentials uses the selected revision and clears the
+            # App Secret draft on success.
             await settings.get_by_label("App Secret", exact=True).fill("replace-secret")
-            await settings.get_by_label("Verification Token", exact=True).fill("replace-token")
-            await settings.get_by_label("Encrypt Key", exact=True).fill("replace-encrypt")
             await settings.get_by_role("button", name="Validate and replace", exact=True).click()
             await expect(
                 settings.get_by_role("status").filter(has_text="Credentials replaced")
             ).to_be_visible()
             await expect(settings.get_by_label("App Secret", exact=True)).to_have_value("")
-            await expect(settings.get_by_label("Verification Token", exact=True)).to_have_value("")
-            await expect(settings.get_by_label("Encrypt Key", exact=True)).to_have_value("")
             secrets_call = next(
                 call for call in api_calls if call["path"].endswith("/bot-created/secrets")
             )
-            assert secrets_call["body"]["expected_revision"] == 1
+            assert secrets_call["body"] == {
+                "app_secret": "replace-secret",
+                "expected_revision": 1,
+            }
 
             # Closing with dirty secret drafts unmounts the real dialog. A fresh
             # mount and selection must not recover those secrets.
             await settings.get_by_label("App Secret", exact=True).fill("close-secret")
-            await settings.get_by_label("Verification Token", exact=True).fill("close-token")
-            await settings.get_by_label("Encrypt Key", exact=True).fill("close-encrypt")
             await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
             await expect(settings).to_have_count(0)
             await page.get_by_role("button", name="Open Bot settings", exact=True).click()
@@ -421,8 +410,6 @@ async def main() -> None:
                 has_text="Primary Bot"
             ).click()
             await expect(settings.get_by_label("App Secret", exact=True)).to_have_value("")
-            await expect(settings.get_by_label("Verification Token", exact=True)).to_have_value("")
-            await expect(settings.get_by_label("Encrypt Key", exact=True)).to_have_value("")
 
             # Environment credentials and deletion are read-only. Occupancy is
             # visible in settings and the occupied Bot cannot be selected later.
@@ -459,7 +446,7 @@ async def main() -> None:
             start_call = next(call for call in api_calls if call["path"].endswith("/pair/start"))
             assert start_call["body"] == {"tab_id": "tab-1", "expected_revision": 2}
 
-            # Simulate the callback claim only in mock server state, then run the
+            # Simulate the WebSocket claim only in mock server state, then run the
             # exact poll callback scheduled by the real composable.
             created = bot_by_id("bot-created")
             created["revision"] += 1
@@ -516,14 +503,8 @@ async def main() -> None:
             for forbidden in (
                 CONFIRM_WORD,
                 "create-secret",
-                "create-token",
-                "create-encrypt",
                 "replace-secret",
-                "replace-token",
-                "replace-encrypt",
                 "close-secret",
-                "close-token",
-                "close-encrypt",
             ):
                 assert all(forbidden not in body for body in response_bodies)
 

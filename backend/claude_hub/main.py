@@ -110,11 +110,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await ttyd_manager.start_all_tabs()
         workspace_manager.start_background_monitor()
         try:
+            from .api.feishu_bot import start_feishu_websockets
+
+            await start_feishu_websockets()
+        except Exception:
+            logger.exception("Feishu Bot WebSocket startup failed")
+        try:
             yield
         finally:
             # Shutdown
             logger.info("Shutting down Claude Hub Backend")
             try:
+                try:
+                    from .api.feishu_bot import stop_feishu_websockets
+
+                    await stop_feishu_websockets()
+                except Exception:
+                    logger.exception("Failed to stop Feishu Bot WebSockets")
                 # Stop new scheduled dispatch before draining its transports.
                 await workspace_manager.stop_background_monitor()
             finally:
