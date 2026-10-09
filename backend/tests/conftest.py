@@ -287,6 +287,27 @@ def backend_server() -> Generator[None, None, None]:
             shutil.rmtree(_OWNED_TEST_RUNTIME, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def _shorten_agent_prompt_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop tests from idling through the production agent-prompt budget.
+
+    Bootstrap waits up to ``AGENT_PROMPT_WAIT_SECONDS`` for a real agent TUI to
+    print a usable prompt. Fake terminals never print one, so the wait always
+    ran to its full 25s: one agent creation cost 25s, a test creating two cost
+    50s, and those tests alone dominated the suite's wall time.
+
+    The wait loop, its readiness predicate and its fail-closed handling of the
+    Codex update dialog are untouched — only the budget shrinks, so a stub that
+    does report readiness still short-circuits exactly as before. Tests that
+    assert on the handshake itself override this again locally.
+    """
+    messaging = __import__(
+        "claude_hub.services.workspace_manager._messaging",
+        fromlist=["AGENT_PROMPT_WAIT_SECONDS"],
+    )
+    monkeypatch.setattr(messaging, "AGENT_PROMPT_WAIT_SECONDS", 0.5, raising=True)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _scale_playwright_timeouts() -> Generator[None, None, None]:
     """Widen Playwright wait deadlines by ``E2E_TIMEOUT_SCALE`` on slow runners.

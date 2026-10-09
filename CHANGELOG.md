@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix(test): stop the backend suite idling through agent-prompt waits
+
+- Bootstrap waits up to 25s for a real agent TUI prompt. Fake terminals never
+  print one, so every agent creation spent the full budget idling: a single
+  test creating two agents cost 50s, and ~20 such tests dominated the suite.
+  Shorten the budget for tests only; the wait loop, its readiness check and
+  its fail-closed handling of the Codex update dialog are unchanged.
+- The default backend scope now finishes in about 5 minutes instead of 24.
+- Put the isolated HMR backend inside its cleanup scope as soon as it starts,
+  so a failing Vite startup can no longer leave it running and holding a port.
+
 ### feat(runtime): rebuild frontend during supervised restart
 
 - Make the production menu restart run the committed frontend build after
