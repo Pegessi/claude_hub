@@ -325,9 +325,14 @@ async def main() -> None:
                 "aria-label", re.compile(r"^Feishu connection settings · "),
             )
             trigger_box = await trigger.bounding_box()
+            name_box = await page.locator(".pane-session-name").bounding_box()
             assert trigger_box is not None
-            assert 8 <= trigger_box["y"] <= 16
-            assert 8 <= 1280 - trigger_box["x"] - trigger_box["width"] <= 18
+            assert name_box is not None
+            assert trigger_box["y"] == name_box["y"] == 6
+            assert trigger_box["height"] == name_box["height"] == 24
+            assert name_box["x"] + name_box["width"] < trigger_box["x"]
+            assert trigger_box["x"] - name_box["x"] - name_box["width"] == 5
+            assert 7 <= 1280 - trigger_box["x"] - trigger_box["width"] <= 9
             assert await trigger.locator("svg").count() == 1
             await page.screenshot(path=str(output / "feishu-status-entry-desktop.png"))
 
@@ -526,8 +531,12 @@ async def main() -> None:
             await binding_panel.get_by_role("button", name="Close", exact=True).click()
             await page.set_viewport_size({"width": 390, "height": 844})
             trigger_box = await trigger.bounding_box()
+            name_box = await page.locator(".pane-session-name").bounding_box()
             assert trigger_box is not None
-            assert trigger_box["y"] == 8
+            assert name_box is not None
+            assert trigger_box["y"] == name_box["y"] == 6
+            assert trigger_box["height"] == name_box["height"] == 24
+            assert name_box["x"] + name_box["width"] < trigger_box["x"]
             assert 7 <= 390 - trigger_box["x"] - trigger_box["width"] <= 9
             await page.get_by_role("button", name="Open Bot settings", exact=True).click()
             settings = page.get_by_test_id("feishu-bot-settings-dialog")
