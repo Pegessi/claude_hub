@@ -65,6 +65,9 @@ Commands (run in the task worktree):
 
 - Use `./scripts/verify.sh all` for final validation and `--help` for focused
   targets. The backend type check includes tests; each target reports separately.
+- For UI changes, additionally run the explicit browser gates and check the
+  affected states/layouts in [UI acceptance](UI_ACCEPTANCE.md). `all` does not
+  start browsers or prove live provider/OAuth/Bot behavior.
 - Use the declared tool versions and locked setup from
   [CONTRIBUTING](../CONTRIBUTING.md#5-run-validation). Verification does not
   install dependencies or silently select a different runtime.

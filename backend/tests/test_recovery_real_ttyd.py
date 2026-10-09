@@ -29,8 +29,9 @@ Layout (Goal Packet AC10/V7):
   - one owned Codex SID resumes from active storage and another from flat
     ``archived_sessions/``; a stray archived rollout remains a negative decoy
   - Real ports, unique per tab; no port conflicts.
-  - Wall-clock oracle: cold recovery completes under 10 s; harness setup and
-    identity assertions receive a small scheduling allowance.
+  - Default wall-clock budgets are 10 s cold / 12 s overall. Explicit E2E
+    timeout scaling keeps functional validation usable on contended hosts;
+    scaled success does not demonstrate the original 10 s performance target.
 """
 
 from __future__ import annotations
@@ -40,18 +41,22 @@ import datetime as dt
 import hashlib
 import importlib
 import json
+import math
 import os
 import shlex
 import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pytest
+
+from .conftest import E2E_TIMEOUT_SCALE, scale_timeout
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -267,8 +272,14 @@ while True:
 def _write_standin(tmp_home: Path, name: str, source: str) -> Path:
     bindir = tmp_home / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
+    source_path = bindir / f".{name}.py"
+    source_path.write_text(source, encoding="utf-8")
     p = bindir / name
-    p.write_text("#!/usr/bin/env python3\n" + source, encoding="utf-8")
+    # PATH may resolve a different Python than the declared pytest toolchain.
+    p.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(source_path))} "$@"\n',
+        encoding="utf-8",
+    )
     os.chmod(p, 0o755)
     return p
 
@@ -349,13 +360,19 @@ def _seed_cursor_store(tmp_home: Path, sid: str, cwd: str) -> Path:
 @pytest.mark.asyncio
 @pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_real_cold_restart_7tab_bijection(tmp_path, monkeypatch):
-    """Seven real ttyd/tmux tabs preserve exact identity in under 10 seconds."""
+    """Seven real tabs preserve identity within explicitly reported timing budgets."""
     real_ttyd = shutil.which("ttyd")
     real_tmux = shutil.which("tmux")
     if not real_ttyd or not real_tmux:
         pytest.skip("ttyd/tmux not available on PATH")
-    if not shutil.which("python3"):
-        pytest.skip("python3 not on PATH (stand-ins need it)")
+    cold_budget, overall_budget = scale_timeout(10.0), scale_timeout(12.0)
+    if not all(math.isfinite(value) and value > 0 for value in (cold_budget, overall_budget)):
+        pytest.fail("real recovery requires finite, positive timing budgets")
+    print(
+        f"real-7tab budgets: scale={E2E_TIMEOUT_SCALE:g} "
+        f"cold={cold_budget:g}s (base=10) overall={overall_budget:g}s (base=12)",
+        flush=True,
+    )
     test_started = time.monotonic()
 
     tmp_home = tmp_path / "home"
@@ -528,7 +545,15 @@ async def test_real_cold_restart_7tab_bijection(tmp_path, monkeypatch):
         cold_started = time.monotonic()
         await manager.start_all_tabs()
         cold_elapsed = time.monotonic() - cold_started
-        assert cold_elapsed < 10.0, f"cold restart start_all_tabs took {cold_elapsed:.2f}s"
+        print(
+            f"real-7tab cold={cold_elapsed:.2f}s budget={cold_budget:g}s "
+            f"scale={E2E_TIMEOUT_SCALE:g} original_10s_met={cold_elapsed < 10.0}",
+            flush=True,
+        )
+        assert cold_elapsed < cold_budget, (
+            f"cold restart took {cold_elapsed:.2f}s; budget={cold_budget:g}s "
+            f"base=10s scale={E2E_TIMEOUT_SCALE:g}"
+        )
         _assert_runtime(manager, "post-restart")
 
         codex_sids: set[str] = set()
@@ -568,7 +593,15 @@ async def test_real_cold_restart_7tab_bijection(tmp_path, monkeypatch):
         assert active_post.st_size > active_pre.st_size
         assert active_post.st_mtime_ns > active_pre.st_mtime_ns
         overall_elapsed = time.monotonic() - test_started
-        assert overall_elapsed < 12.0, f"full real recovery oracle took {overall_elapsed:.2f}s"
+        print(
+            f"real-7tab overall={overall_elapsed:.2f}s budget={overall_budget:g}s "
+            f"scale={E2E_TIMEOUT_SCALE:g} original_12s_met={overall_elapsed < 12.0}",
+            flush=True,
+        )
+        assert overall_elapsed < overall_budget, (
+            f"full real recovery took {overall_elapsed:.2f}s; budget={overall_budget:g}s "
+            f"base=12s scale={E2E_TIMEOUT_SCALE:g}"
+        )
 
         print(
             f"\nreal-7tab PASSED: cold={cold_elapsed:.2f}s overall={overall_elapsed:.2f}s; "
@@ -583,3 +616,33 @@ async def test_real_cold_restart_7tab_bijection(tmp_path, monkeypatch):
             except Exception:
                 pass
         _kill_isolated_tmux_server()
+
+
+def test_standin_uses_declared_python_and_preserves_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    standin = _write_standin(
+        tmp_path,
+        "fixture tool",
+        "import json, sys; print(json.dumps([sys.executable, list(sys.version_info[:3]), "
+        "sys.prefix, sys.argv[1:]]))\n",
+    )
+    marker = tmp_path / "wrong-python-used"
+    shadow = standin.parent / "python3"
+    shadow.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 99\n", encoding="utf-8")
+    shadow.chmod(0o755)
+    monkeypatch.setenv("PATH", str(standin.parent) + os.pathsep + os.environ.get("PATH", ""))
+    arguments = ["", "two words", "quote'and\"value"]
+    result = subprocess.run(
+        [str(standin), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    executable, version, prefix, actual_arguments = json.loads(result.stdout)
+    assert executable == sys.executable
+    assert version == list(sys.version_info[:3])
+    assert prefix == sys.prefix
+    assert actual_arguments == arguments
+    assert not marker.exists()

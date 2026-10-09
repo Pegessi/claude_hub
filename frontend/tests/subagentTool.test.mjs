@@ -120,13 +120,13 @@ test('parseSubagent treats sendInput as a directive to an existing thread', () =
   assert.equal(parseSubagent('sendInput', { receiverThreadIds: args.receiverThreadIds }), null)
 })
 
-test('status and provider labels cover every lifecycle/provider and pass through unknowns', () => {
-  assert.equal(subagentStatusLabel('running'), '运行中')
-  assert.equal(subagentStatusLabel('completed'), '已完成')
-  assert.equal(subagentStatusLabel('failed'), '失败')
-  assert.equal(subagentStatusLabel('cancelled'), '已取消')
+test('status and provider labels use the product UI language and pass through unknowns', () => {
+  assert.equal(subagentStatusLabel('running'), 'Running')
+  assert.equal(subagentStatusLabel('completed'), 'Completed')
+  assert.equal(subagentStatusLabel('failed'), 'Failed')
+  assert.equal(subagentStatusLabel('cancelled'), 'Cancelled')
   assert.equal(subagentStatusLabel('something-else'), 'something-else')
-  assert.equal(subagentProviderLabel('claude'), 'Claude 子代理')
-  assert.equal(subagentProviderLabel('cursor'), 'Cursor 子代理')
-  assert.equal(subagentProviderLabel('traex'), 'TraeX 子代理')
+  assert.equal(subagentProviderLabel('claude'), 'Claude sub-agent')
+  assert.equal(subagentProviderLabel('cursor'), 'Cursor sub-agent')
+  assert.equal(subagentProviderLabel('traex'), 'TraeX sub-agent')
 })
