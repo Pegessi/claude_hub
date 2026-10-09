@@ -2,6 +2,7 @@ import logging
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -42,7 +43,12 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 # File handler
-file_handler = logging.FileHandler(log_file, encoding="utf-8")
+file_handler = RotatingFileHandler(
+    log_file,
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
@@ -57,6 +63,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     with BackendInstanceLock(backend_lock_file):
         # Startup
         logger.info("Starting Claude Hub Backend")
+        try:
+            from .services.feishu_bot_websocket import prewarm_lark_sdk
+
+            prewarm_lark_sdk()
+        except Exception:
+            logger.exception("Feishu Bot SDK prewarm failed to start")
         try:
             from .services.goal_run import get_goal_manager
 

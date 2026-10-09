@@ -11,9 +11,9 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from claude_hub.api.agent_stream import (
@@ -26,8 +26,8 @@ from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.agent_stream.turn_source import (
-    FEISHU_PROVIDER_TEXT_FORMAT_V1,
-    format_feishu_provider_text_v1,
+    FEISHU_PROVIDER_TEXT_FORMAT_V2,
+    format_feishu_provider_text_v2,
 )
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
@@ -64,13 +64,13 @@ from claude_hub.services.feishu_bot_pool import (
     PairingClaim,
     PoolSnapshot,
     dedup_key,
-    deprecated_env_present,
     turn_id_for,
 )
 from claude_hub.services.feishu_bot_websocket import (
     FeishuBotWebSocketSupervisor,
     message_event_from_sdk,
 )
+from claude_hub.services.feishu_message_format import build_feishu_message_payload
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/feishu/bot", tags=["feishu-bot"])
@@ -83,7 +83,10 @@ _now: Callable[[], float] = time.time
 _BODY_BYTES = 16 * 1024
 _GATE_TIMEOUT_SECONDS = 20.0
 _OUTBOUND_POST_TIMEOUT_SECONDS = 20.0
+_REACTION_POST_TIMEOUT_SECONDS = 2.0
 _MAX_GATES = 256
+_MAX_TAB_DISPATCH_QUEUES = 256
+_MAX_TAB_QUEUE_WAITERS = 8
 
 
 @dataclass
@@ -97,6 +100,95 @@ _bot_gates: dict[str, _BotGate] = {}
 # Creation has no bot_id yet, so it uses one dedicated lock instead of mixing
 # app_ids into the per-Bot registry key space.
 _create_gate = asyncio.Lock()
+
+
+class _TabDispatchQueueFull(RuntimeError):
+    """The bounded Feishu-only queue cannot retain another message."""
+
+
+@dataclass
+class _TabDispatchQueue:
+    waiters: list[asyncio.Future[None]]
+
+
+_tab_dispatch_queues: dict[str, _TabDispatchQueue] = {}
+
+
+def _release_tab_dispatch(tab_id: str, queue: _TabDispatchQueue) -> None:
+    """Transfer ownership FIFO, or evict an idle registry entry."""
+
+    while queue.waiters:
+        next_waiter = queue.waiters.pop(0)
+        if next_waiter.done():
+            continue
+        next_waiter.set_result(None)
+        return
+    if _tab_dispatch_queues.get(tab_id) is queue:
+        del _tab_dispatch_queues[tab_id]
+
+
+class _TabDispatchReservation:
+    """One pre-await position in a tab's Feishu FIFO.
+
+    Reservation happens before the reaction HTTP call, so transport latency
+    cannot reorder messages that the WebSocket route tasks delivered in order.
+    ``cancel`` also covers cancellation before ``__aenter__`` is reached.
+    """
+
+    def __init__(
+        self,
+        tab_id: str,
+        queue: _TabDispatchQueue,
+        waiter: asyncio.Future[None] | None,
+    ) -> None:
+        self._tab_id = tab_id
+        self._queue = queue
+        self._waiter = waiter
+        self._closed = False
+
+    async def __aenter__(self) -> None:
+        if self._closed:
+            raise RuntimeError("Feishu tab dispatch reservation is closed")
+        if self._waiter is not None:
+            try:
+                await self._waiter
+            except BaseException:
+                self.cancel()
+                raise
+        return None
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        self.cancel()
+
+    def cancel(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        waiter = self._waiter
+        if waiter is None or (waiter.done() and not waiter.cancelled()):
+            # Immediate reservations and successfully awakened waiters own the
+            # active slot, so cancellation must hand it to the next waiter.
+            _release_tab_dispatch(self._tab_id, self._queue)
+            return
+        try:
+            self._queue.waiters.remove(waiter)
+        except ValueError:
+            pass
+
+
+def _reserve_tab_dispatch(tab_id: str) -> _TabDispatchReservation:
+    queue = _tab_dispatch_queues.get(tab_id)
+    if queue is None:
+        if len(_tab_dispatch_queues) >= _MAX_TAB_DISPATCH_QUEUES:
+            raise _TabDispatchQueueFull("Feishu tab dispatch registry is at capacity")
+        queue = _TabDispatchQueue(waiters=[])
+        _tab_dispatch_queues[tab_id] = queue
+        return _TabDispatchReservation(tab_id, queue, None)
+    if len(queue.waiters) >= _MAX_TAB_QUEUE_WAITERS:
+        raise _TabDispatchQueueFull("Feishu tab dispatch queue is at capacity")
+    waiter = asyncio.get_running_loop().create_future()
+    queue.waiters.append(waiter)
+    return _TabDispatchReservation(tab_id, queue, waiter)
 
 
 def _enter_gate_registry(bot_id: str) -> _BotGate:
@@ -679,7 +771,7 @@ def _turn_metadata(bot_id: str, event: FeishuMessageEvent) -> dict[str, Any]:
 
     return {
         "origin": "feishu",
-        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V2,
         "feishu": {
             "bot_id": bot_id,
             "app_id": event.app_id,
@@ -750,6 +842,7 @@ async def _reply_if_current(
     text: str,
     *,
     still_valid: Callable[[], bool] | None = None,
+    formatted: bool = False,
 ) -> bool:
     try:
         # Token acquisition can block on Feishu and must stay outside the gate.
@@ -760,14 +853,49 @@ async def _reply_if_current(
             if still_valid is not None and not still_valid():
                 return False
             # An already-sent request cannot be recalled, so a timeout is never retried.
-            await asyncio.wait_for(
-                client.reply_text(event.message_id, text, access_token=token),
-                timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
-            )
+            if formatted:
+                payload = build_feishu_message_payload(text)
+                outbound = client.reply_message(
+                    event.message_id,
+                    payload.msg_type,
+                    payload.content,
+                    access_token=token,
+                )
+            else:
+                outbound = client.reply_text(event.message_id, text, access_token=token)
+            await asyncio.wait_for(outbound, timeout=_OUTBOUND_POST_TIMEOUT_SECONDS)
             return True
     except Exception as exc:
         logger.warning("Feishu Bot reply failed: %s", type(exc).__name__)
         return False
+
+
+async def _add_processing_reaction(
+    client: FeishuBotClient, event: FeishuMessageEvent
+) -> str | None:
+    """Best-effort hint; legacy Bots may not have the reaction scope."""
+
+    try:
+        # ``wait_for`` creates a child task and then waits for its cancellation
+        # handshake when the route is cancelled. Keeping the HTTP await in this
+        # task lets shutdown cancellation release its FIFO reservation promptly.
+        async with asyncio.timeout(_REACTION_POST_TIMEOUT_SECONDS):
+            return await client.add_reaction(event.message_id, "Typing")
+    except Exception as exc:
+        logger.info("Feishu Bot processing reaction unavailable: %s", type(exc).__name__)
+        return None
+
+
+async def _delete_processing_reaction(
+    client: FeishuBotClient, event: FeishuMessageEvent, reaction_id: str | None
+) -> None:
+    if reaction_id is None:
+        return
+    try:
+        async with asyncio.timeout(_REACTION_POST_TIMEOUT_SECONDS):
+            await client.delete_reaction(event.message_id, reaction_id)
+    except Exception as exc:
+        logger.info("Feishu Bot processing reaction cleanup unavailable: %s", type(exc).__name__)
 
 
 _PAIRING_FAILURE_TEXT = {
@@ -819,6 +947,9 @@ async def _handle_message_event(
     client = FeishuBotClient(effective.config)
     status_value = "failed"
     binding: BotBinding | None = None
+    reservation: _TabDispatchReservation | None = None
+    reaction_id: str | None = None
+    dispatch_started = False
     try:
         if not _pool.is_current(effective):
             return
@@ -846,10 +977,26 @@ async def _handle_message_event(
                     _pool.drop_binding(bot_id, binding.pairing_id)
             return
         _validate_saved_target(binding)
+        try:
+            reservation = _reserve_tab_dispatch(binding.tab_id)
+        except _TabDispatchQueueFull:
+            reaction_id = await _add_processing_reaction(client, event)
+            await _reply_if_current(
+                client,
+                event,
+                effective,
+                "Claude Hub 消息队列已满，本条消息未执行，请稍后重试。",
+                still_valid=lambda: binding is not None
+                and _binding_still_routes(effective, binding),
+            )
+            return
+        reaction_id = await _add_processing_reaction(client, event)
+        await reservation.__aenter__()
         dispatch_binding = binding
+        dispatch_started = True
         assistant_text = await dispatch_tab_chat_and_wait(
             binding.tab_id,
-            format_feishu_provider_text_v1(
+            format_feishu_provider_text_v2(
                 event.text,
                 app_id=event.app_id,
                 chat_id=event.chat_id,
@@ -871,8 +1018,17 @@ async def _handle_message_event(
                 if binding is not None
                 else None
             ),
+            formatted=True,
         ):
             status_value = "completed"
+    except asyncio.CancelledError:
+        if not dispatch_started:
+            # A queued message cancelled during shutdown never entered the Chat
+            # bridge, so its durable at-most-once claim must remain retryable.
+            # The outer WebSocket intake releases only this explicit retirement
+            # signal after the reservation/reaction cleanup below has completed.
+            raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id)) from None
+        raise
     except HTTPException as exc:
         logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
         reason = (
@@ -911,7 +1067,12 @@ async def _handle_message_event(
             ),
         )
     finally:
-        _dedup.finish(dedup_key(bot_id, event.message_id), status_value)
+        if reservation is not None:
+            reservation.cancel()
+        try:
+            await _delete_processing_reaction(client, event, reaction_id)
+        finally:
+            _dedup.finish(dedup_key(bot_id, event.message_id), status_value)
 
 
 async def _handle_sdk_event(bot_id: str, data: Any) -> None:
