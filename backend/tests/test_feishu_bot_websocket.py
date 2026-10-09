@@ -10,11 +10,13 @@ import httpx
 import pytest
 
 from claude_hub.services.feishu_bot import FeishuBotConfig
-from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
+from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore, OwnerIdentity
 from claude_hub.services.feishu_bot_websocket import (
     FeishuBotWebSocketSupervisor,
+    _BoundedRouteTasks,
     _discover_connection_url,
     _LarkConnection,
+    _RouteCapacityExceeded,
     message_event_from_sdk,
 )
 
@@ -115,6 +117,49 @@ async def test_supervisor_reconciles_one_connection_per_effective_bot(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_pairing_revision_keeps_the_connection_and_routes_immediately(tmp_path) -> None:
+    pool = FeishuBotPoolStore(
+        path=tmp_path / "pool.json",
+        legacy_path=tmp_path / "legacy.json",
+        now=lambda: 1_700_000_000.0,
+    )
+    bot_id = pool.create_bot(name="Bot", config=_config(), environ={})
+    received: list[Any] = []
+    connections: list[_FakeConnection] = []
+
+    def factory(config: FeishuBotConfig, callback: Any) -> _FakeConnection:
+        connection = _FakeConnection(config, callback)
+        connections.append(connection)
+        return connection
+
+    async def handle(_bot: str, event: Any) -> None:
+        received.append(event)
+
+    supervisor = FeishuBotWebSocketSupervisor(pool, handle, connection_factory=factory)
+    await supervisor.start()
+    await asyncio.sleep(0)
+    entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    pool.issue_code(
+        bot_id,
+        owner=OwnerIdentity(open_id="ou-owner", email="owner@example.test", kind="oauth"),
+        tab_id="tab-1",
+        workspace_id=None,
+        expected_revision=entry.revision,
+        environ={},
+    )
+
+    event = SimpleNamespace(marker="pairing-code")
+    await connections[0].callback(event)
+    await supervisor.reconcile()
+
+    assert received == [event]
+    assert len(connections) == 1
+    assert connections[0].closed is False
+    await supervisor.stop()
+
+
+@pytest.mark.asyncio
 async def test_supervisor_stops_disabled_and_deleted_bots(tmp_path) -> None:
     pool = FeishuBotPoolStore(
         path=tmp_path / "pool.json",
@@ -143,7 +188,8 @@ async def test_supervisor_stops_disabled_and_deleted_bots(tmp_path) -> None:
 
     assert connections[0].closed is True
     assert supervisor.status(bot_id) == "stopped"
-    await connections[0].callback(SimpleNamespace(marker="late"))
+    with pytest.raises(_RouteCapacityExceeded, match="no longer active"):
+        connections[0].callback(SimpleNamespace(marker="late"))
 
 
 @pytest.mark.asyncio
@@ -211,19 +257,104 @@ async def test_transport_close_does_not_cancel_an_accepted_message() -> None:
         await release.wait()
         routed.set()
 
-    connection = _LarkConnection(_config(), callback)
-    task = asyncio.create_task(callback(SimpleNamespace(marker="accepted")))
-    connection._route_tasks.add(task)
-    task.add_done_callback(connection._route_finished)
+    route_tasks = _BoundedRouteTasks()
+    connection = _LarkConnection(_config(), callback, route_tasks=route_tasks)
+    route_tasks.submit(callback, SimpleNamespace(marker="accepted"))
     await asyncio.sleep(0)
 
     await connection.close()
-    assert task.cancelled() is False
 
     release.set()
-    await task
+    assert await route_tasks.drain(1) is True
     assert routed.is_set()
-    assert not connection._route_tasks
+
+
+@pytest.mark.asyncio
+async def test_supervisor_final_stop_drains_accepted_routes(tmp_path) -> None:
+    pool = FeishuBotPoolStore(
+        path=tmp_path / "pool.json",
+        legacy_path=tmp_path / "legacy.json",
+        now=lambda: 1_700_000_000.0,
+    )
+    pool.create_bot(name="Bot", config=_config(), environ={})
+    connections: list[_FakeConnection] = []
+    route_tasks = _BoundedRouteTasks()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    routed = asyncio.Event()
+
+    def factory(config: FeishuBotConfig, callback: Any) -> _FakeConnection:
+        connection = _FakeConnection(config, callback)
+        connections.append(connection)
+        return connection
+
+    async def handle(_bot: str, _event: Any) -> None:
+        started.set()
+        await release.wait()
+        routed.set()
+
+    supervisor = FeishuBotWebSocketSupervisor(
+        pool,
+        handle,
+        connection_factory=factory,
+        route_tasks=route_tasks,
+        shutdown_drain_seconds=1,
+    )
+    await supervisor.start()
+    await asyncio.sleep(0)
+    route_tasks.submit(connections[0].callback, SimpleNamespace(marker="accepted"))
+    await started.wait()
+
+    stopping = asyncio.create_task(supervisor.stop())
+    for _ in range(10):
+        if connections[0].closed:
+            break
+        await asyncio.sleep(0)
+
+    assert connections[0].closed is True
+    assert stopping.done() is False
+    release.set()
+    await stopping
+    assert routed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_route_capacity_rejects_before_ack_and_shutdown_timeout_cancels() -> None:
+    route_tasks = _BoundedRouteTasks(max_tasks=1)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked(_event: Any) -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    route_tasks.submit(blocked, SimpleNamespace(marker="first"))
+    await started.wait()
+    with pytest.raises(_RouteCapacityExceeded, match="at capacity"):
+        route_tasks.submit(blocked, SimpleNamespace(marker="second"))
+
+    assert await route_tasks.drain(0) is False
+    assert cancelled.is_set()
+    with pytest.raises(_RouteCapacityExceeded, match="at capacity"):
+        route_tasks.submit(blocked, SimpleNamespace(marker="stopping"))
+
+    route_tasks.start_accepting()
+
+
+def test_lark_callback_rejects_capacity_synchronously_before_sdk_ack() -> None:
+    route_tasks = _BoundedRouteTasks(max_tasks=1)
+
+    async def callback(_event: Any) -> None:
+        await asyncio.Future()
+
+    connection = _LarkConnection(_config(), callback, route_tasks=route_tasks)
+    route_tasks.stop_accepting()
+
+    with pytest.raises(_RouteCapacityExceeded, match="at capacity"):
+        connection._accept_message(SimpleNamespace(marker="overloaded"))
 
 
 @pytest.mark.asyncio

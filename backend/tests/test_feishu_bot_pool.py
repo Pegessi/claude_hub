@@ -1015,6 +1015,28 @@ def test_websocket_message_time_respects_latest_binding_activation(
     assert api.wire.reply_texts() == (["clock-checked answer"] if should_dispatch else [])
 
 
+def test_cancelled_websocket_route_releases_dedup_for_retry(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    payload = _message("app-1", "hello", clock.value, message_id="om-cancelled")
+    attempts = 0
+
+    async def cancelled(*_args, **_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise bot_api.ExternalDispatchRetired("feishu-turn")
+
+    monkeypatch.setattr(bot_api, "_handle_message_event", cancelled)
+
+    with pytest.raises(bot_api.ExternalDispatchRetired):
+        asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
+    with pytest.raises(bot_api.ExternalDispatchRetired):
+        asyncio.run(bot_api._handle_sdk_event(bot_id, payload))
+
+    assert attempts == 2
+
+
 def test_pair_code_rate_limit_is_per_identity_and_expires(
     pool: FeishuBotPoolStore, clock: Clock
 ) -> None:
