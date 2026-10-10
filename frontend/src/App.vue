@@ -490,6 +490,8 @@ onUnmounted(() => {
   /* Maso-inspired carbon chrome: surfaces stay close and quiet, while the
      current context uses the same clear blue family as Maso's main theme. */
   --ch-color-app-bg: #1b1b1c;
+  --ch-color-main-bg: #181818;
+  --ch-color-sidebar-bg: #1c1c1c;
   --ch-color-canvas: #171718;
   --ch-color-surface: #1d1d1f;
   --ch-color-surface-raised: #242426;
@@ -622,6 +624,8 @@ onUnmounted(() => {
   /* Light keeps the same neutral geometry with a muted clay-orange
      interaction family, separated from saturated amber warnings and red errors. */
   --ch-color-app-bg: #f4f4f5;
+  --ch-color-main-bg: #ffffff;
+  --ch-color-sidebar-bg: #f5f5f5;
   --ch-color-canvas: #f0f0f2;
   --ch-color-surface: #fafafa;
   --ch-color-surface-raised: #ffffff;
@@ -1277,6 +1281,7 @@ textarea {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  background: var(--ch-color-main-bg);
 }
 
 .empty-state {

@@ -752,7 +752,7 @@ watch(mobileDrawerOpen, isOpen => {
   width: 240px;
   min-width: 240px;
   height: 100%;
-  background: var(--ch-color-surface);
+  background: var(--ch-color-sidebar-bg);
   border-right: 1px solid var(--ch-color-border-muted);
   transition:
     width var(--ch-motion-standard),
@@ -914,7 +914,7 @@ watch(mobileDrawerOpen, isOpen => {
   z-index: 2;
   max-height: 40vh;
   overflow-y: auto;
-  background: var(--ch-color-surface);
+  background: var(--ch-color-sidebar-bg);
   border-bottom: 1px solid var(--ch-color-border-muted);
   margin-bottom: 6px;
 }
@@ -948,7 +948,7 @@ watch(mobileDrawerOpen, isOpen => {
   padding: 5px 8px;
   border: 1px dashed var(--ch-color-accent);
   border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface);
+  background: var(--ch-color-sidebar-bg);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-size-xs);
 }
@@ -1165,48 +1165,45 @@ watch(mobileDrawerOpen, isOpen => {
   background: var(--ch-color-text-subtle);
 }
 
-/* Unread ping: a soft accent halo plus an accent ring that expands outward
-   from the dot and fades, repeating. Shown only for tabs with an unread
-   completed turn. The halo keeps the state legible between ripple frames.
-   For working/attention the halo is stacked with the status glow so neither
-   signal is suppressed. */
+/* A completed turn that has not been opened gets a small sheen contained
+   inside its existing status light. This keeps completion visible without
+   wrapping a green idle dot in an unrelated blue ring. */
 .chat-sidebar__item-status[data-unread='true'] {
-  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
+  overflow: hidden;
 }
 
-.chat-sidebar__item-status[data-status='working'][data-unread='true'] {
-  box-shadow: 0 0 6px var(--ch-color-warning-bg), 0 0 0 2px var(--ch-color-accent-ring);
-}
-
-.chat-sidebar__item-status[data-status='attention'][data-unread='true'] {
-  box-shadow: 0 0 6px var(--ch-color-attention-bg), 0 0 0 2px var(--ch-color-accent-ring);
+.chat-sidebar__item-status[data-status='idle'][data-unread='true'] {
+  box-shadow: 0 0 7px var(--ch-color-success-bg);
 }
 
 .chat-sidebar__item-status[data-unread='true']::after {
   content: '';
   position: absolute;
-  top: 0;
-  left: 0;
-  /* The global `* { box-sizing: border-box }` reset does NOT reach
-     pseudo-elements; without this the 1.5px border adds onto width:100%
-     (content-box), making the 11px ring sit down-right of the 8px dot. */
-  box-sizing: border-box;
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  border: 1.5px solid var(--ch-color-accent);
-  animation: sidebar-unread-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+  inset: -2px;
+  border-radius: inherit;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.88) 48%,
+    transparent 66%
+  );
+  transform: translateX(-125%);
+  animation: sidebar-complete-sheen 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
-@keyframes sidebar-unread-ping {
-  0% { transform: scale(1); opacity: 0.9; }
-  75%, 100% { transform: scale(2.4); opacity: 0; }
+@keyframes sidebar-complete-sheen {
+  0%, 38% { transform: translateX(-125%); }
+  68%, 100% { transform: translateX(125%); }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .chat-sidebar__item[data-runtime-status='working']::after,
   .chat-sidebar__item-status[data-unread='true']::after {
     animation: none;
+  }
+
+  .chat-sidebar__item-status[data-unread='true']::after {
+    display: none;
   }
 
   .chat-sidebar__item[data-runtime-status='working']::after {
