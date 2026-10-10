@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type {
   TerminalAgentStatus,
   TerminalTab,
@@ -106,6 +106,13 @@ export const useTerminalStore = defineStore('terminal', () => {
   )
   const panes = ref<Pane[]>([])
   const activePaneId = ref<string | null>(null)
+  // Actionable Chat queues live inside keyed StructuredPane instances. Keep a
+  // small store-level registry for the two cross-instance concerns that local
+  // component state cannot safely coordinate: KeepAlive eviction protection
+  // and serialized foreground activation. Draft contents remain local.
+  const protectedQueuedChats = ref<Array<{ paneId: string; tabId: string }>>([])
+  const queuedChatActivationRequests = ref<Array<{ paneId: string; tabId: string }>>([])
+  const queuedChatActivationOwner = computed(() => queuedChatActivationRequests.value[0] ?? null)
 
   // Left chat sidebar collapse state, persisted across reloads.
   const sidebarCollapsed = ref<boolean>(
@@ -207,6 +214,18 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function setLayout(type: LayoutType) {
+    const nextConfig = LAYOUT_CONFIGS[type]
+    const retainedPaneIds = new Set(
+      panes.value.slice(0, nextConfig.rows * nextConfig.cols).map(pane => pane.id)
+    )
+    if (protectedQueuedChats.value.some(entry => !retainedPaneIds.has(entry.paneId))) {
+      pushNotification({
+        type: 'warning',
+        message: 'Wait for queued Chat messages before reducing the pane layout.',
+        autoDismissMs: 6000,
+      })
+      return
+    }
     layoutType.value = type
     localStorage.setItem(STORAGE_KEY_LAYOUT, type)
     initializePanes()
@@ -235,6 +254,78 @@ export const useTerminalStore = defineStore('terminal', () => {
       activeTabId.value = pane.tabId
     }
   }
+
+  function sameQueuedChat(
+    entry: { paneId: string; tabId: string },
+    paneId: string,
+    tabId: string,
+  ): boolean {
+    return entry.paneId === paneId && entry.tabId === tabId
+  }
+
+  function setQueuedChatProtected(paneId: string, tabId: string, protectedState: boolean) {
+    const index = protectedQueuedChats.value.findIndex(entry =>
+      sameQueuedChat(entry, paneId, tabId)
+    )
+    if (protectedState && index < 0) {
+      protectedQueuedChats.value.push({ paneId, tabId })
+    } else if (!protectedState && index >= 0) {
+      protectedQueuedChats.value.splice(index, 1)
+    }
+  }
+
+  function paneHasProtectedQueuedChat(paneId: string): boolean {
+    return protectedQueuedChats.value.some(entry => entry.paneId === paneId)
+  }
+
+  function isQueuedChatActivationOwner(paneId: string, tabId: string): boolean {
+    const owner = queuedChatActivationOwner.value
+    return Boolean(owner && sameQueuedChat(owner, paneId, tabId))
+  }
+
+  function hasQueuedChatActivationRequest(paneId: string, tabId: string): boolean {
+    return queuedChatActivationRequests.value.some(entry =>
+      sameQueuedChat(entry, paneId, tabId)
+    )
+  }
+
+  function ensureQueuedChatActivation() {
+    const owner = queuedChatActivationOwner.value
+    if (!owner) return
+    if (activePaneId.value !== owner.paneId) setActivePane(owner.paneId)
+    if (activeTabId.value !== owner.tabId) setActiveTab(owner.tabId)
+  }
+
+  function requestQueuedChatActivation(paneId: string, tabId: string) {
+    if (!queuedChatActivationRequests.value.some(entry =>
+      sameQueuedChat(entry, paneId, tabId)
+    )) {
+      queuedChatActivationRequests.value.push({ paneId, tabId })
+    }
+    // Only the FIFO head may select UI state. Later completions wait until the
+    // current owner has actually attempted its foreground send.
+    ensureQueuedChatActivation()
+  }
+
+  function releaseQueuedChatActivation(paneId: string, tabId: string) {
+    const index = queuedChatActivationRequests.value.findIndex(entry =>
+      sameQueuedChat(entry, paneId, tabId)
+    )
+    if (index < 0) return
+    const releasedOwner = index === 0
+    queuedChatActivationRequests.value.splice(index, 1)
+    if (releasedOwner) ensureQueuedChatActivation()
+  }
+
+  // A user click can land between the store request and KeepAlive's
+  // onActivated acknowledgement. Reassert the FIFO head on the next reactive
+  // flush so a one-shot selection cannot be superseded and left connected
+  // forever. Once the component starts its send it releases the head.
+  watch(
+    [activePaneId, activeTabId, queuedChatActivationOwner],
+    () => ensureQueuedChatActivation(),
+    { flush: 'post' },
+  )
 
   function assignTabToPane(tabId: string, paneId?: string) {
     const targetPaneId = paneId || activePaneId.value
@@ -758,6 +849,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     activePaneId,
     activePane,
     activePaneIsChat,
+    queuedChatActivationOwner,
     sidebarCollapsed,
     mobileDrawerOpen,
     openMobileDrawer,
@@ -781,6 +873,12 @@ export const useTerminalStore = defineStore('terminal', () => {
     reorderTabById,
     setLayout,
     setActivePane,
+    setQueuedChatProtected,
+    paneHasProtectedQueuedChat,
+    isQueuedChatActivationOwner,
+    hasQueuedChatActivationRequest,
+    requestQueuedChatActivation,
+    releaseQueuedChatActivation,
     assignTabToPane,
     getPaneCountForTab,
     initializePanes,

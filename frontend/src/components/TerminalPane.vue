@@ -146,10 +146,11 @@
       v-if="pane.tabId && isChatSession"
       class="pane-structured"
     >
-      <KeepAlive :max="MAX_CACHED_CHAT_PANES">
+      <KeepAlive :max="chatCacheMax">
         <StructuredPane
           :key="pane.tabId"
           :tab-id="pane.tabId"
+          :pane-id="pane.id"
         />
       </KeepAlive>
     </div>
@@ -223,11 +224,13 @@ function handleReconnect() {
   store.requestPaneReconnect(tabId)
 }
 
-// Upper bound on cached StructuredPane instances per pane. Each entry holds a
-// full conversation DOM + composer state, so this stays modest; the global
-// history LRU (agentStreamHistoryCache) is the larger safety net for panes
-// evicted from this cache.
+// Upper bound on ordinary cached StructuredPane instances per pane. A Chat
+// with an actionable local queue temporarily removes the bound so Vue cannot
+// evict and destroy that draft before its turn completes.
 const MAX_CACHED_CHAT_PANES = 8
+const chatCacheMax = computed(() =>
+  store.paneHasProtectedQueuedChat(props.pane.id) ? undefined : MAX_CACHED_CHAT_PANES
+)
 
 const isDragOver = ref(false)
 

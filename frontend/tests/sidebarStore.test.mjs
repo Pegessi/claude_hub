@@ -164,6 +164,51 @@ test('selecting a session from the mobile drawer switches tab AND dismisses it',
   assert.equal(store.activeTabId, 'b')
 })
 
+test('queued Chat activation is FIFO and protects local drafts from cache eviction', async t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.activePaneId
+  assert.ok(paneId)
+
+  store.setQueuedChatProtected(paneId, 'a', true)
+  assert.equal(store.paneHasProtectedQueuedChat(paneId), true)
+
+  store.requestQueuedChatActivation(paneId, 'a')
+  store.requestQueuedChatActivation(paneId, 'b')
+  assert.equal(store.activeTabId, 'a', 'a later completion must not supersede the FIFO head')
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'a'), true)
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'b'), false)
+
+  store.setActiveTab('terminal')
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(store.activeTabId, 'a', 'a user selection before activation acknowledgement is retried')
+
+  store.releaseQueuedChatActivation(paneId, 'a')
+  assert.equal(store.activeTabId, 'b', 'the next ready Chat activates after the first send attempt')
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'b'), true)
+
+  store.releaseQueuedChatActivation(paneId, 'b')
+  store.setQueuedChatProtected(paneId, 'a', false)
+  assert.equal(store.paneHasProtectedQueuedChat(paneId), false)
+})
+
+test('a pane with a queued Chat cannot be removed by a smaller layout', t => {
+  const { store } = setup(t)
+  store.setLayout('2x1')
+  const protectedPane = store.panes[1]
+  store.assignTabToPane('a', protectedPane.id)
+  store.setQueuedChatProtected(protectedPane.id, 'a', true)
+
+  store.setLayout('1x1')
+
+  assert.equal(store.layoutType, '2x1')
+  assert.equal(store.panes.some(pane => pane.id === protectedPane.id), true)
+  assert.equal(
+    store.notifications.at(-1)?.message,
+    'Wait for queued Chat messages before reducing the pane layout.',
+  )
+})
+
 test('pinned group is still built for mobile-shaped chat data (presentation-agnostic)', async t => {
   const { store } = setup(t)
   store.setChatPinned('a', true)

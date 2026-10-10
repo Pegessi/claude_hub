@@ -1386,6 +1386,8 @@ import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } f
 const props = defineProps<{
   /** A top-level Chat tab owns its transcript directly. */
   tabId: string
+  /** Keep queued drafts attached to the pane whose KeepAlive owns this instance. */
+  paneId: string
 }>()
 
 const terminalStore = useTerminalStore()
@@ -1882,11 +1884,33 @@ function handleViewportResize() {
 }
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
 const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
+// Keep a queued Chat's observer alive while it is hidden so the component can
+// see the current turn finish. The queue still cannot send in the background:
+// it first selects this Chat through the store, then waits for KeepAlive to
+// activate the pane before flushing.
+const isPaneActivated = ref(false)
+const isQueueSendInProgress = ref(false)
 // A queued POST failure is delivery-uncertain: the provider may have accepted
 // it even when the browser did not receive the acknowledgement. Keep later
 // queued messages paused until the user deliberately sends the restored draft
 // and that explicit send succeeds.
 const isDraftQueuePaused = ref(false)
+const hasProtectedQueueState = computed(() =>
+  draftQueue.value.length > 0 || isDraftQueuePaused.value || isQueueSendInProgress.value
+)
+const isWaitingForQueuedChatActivation = computed(() =>
+  terminalStore.hasQueuedChatActivationRequest(props.paneId, props.tabId)
+  && !terminalStore.isQueuedChatActivationOwner(props.paneId, props.tabId)
+)
+watch(
+  hasProtectedQueueState,
+  protectedState => terminalStore.setQueuedChatProtected(
+    props.paneId,
+    props.tabId,
+    protectedState,
+  ),
+  { immediate: true, flush: 'sync' },
+)
 const isPreparingAttachments = ref(false)
 const turnInFlight = computed(() => isChatModeLocked(
   pendingDirectTurns.value.length > 0,
@@ -2004,12 +2028,14 @@ onMounted(() => {
 // KeepAlive lifecycle. The pane is keyed by tabId (see TerminalPane), so each
 // chat tab owns a stable instance and the tabId prop never changes for a given
 // instance — the old tabId watcher that wiped the composer on every switch is
-// gone. The stream is owned by the *active* pane: on deactivate we stop it
-// (caching history) so cached panes don't hold open SSE/long-poll connections;
-// on activate we resume from the cached snapshot (reconciling, no full reload).
+// gone. The stream is normally owned by the *active* pane. On deactivate we
+// stop it (caching history), except when a local queued draft still needs to
+// observe the current turn's completion before it can reactivate this Chat. On
+// activate we resume from the cached snapshot (reconciling, no full reload).
 // onActivated also fires on the initial mount, so it replaces the startStream()
 // call that used to live in onMounted.
 onActivated(() => {
+  isPaneActivated.value = true
   timelineDisposed = false
   timelineVisit++
   visibleHistoryStart.value = null
@@ -2023,12 +2049,13 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
+  isPaneActivated.value = false
   isAddMenuOpen.value = false
   isGoalSetupOpen.value = false
   goalRefreshEpoch++
   timelineDisposed = true
   timelineVisit++
-  stop()
+  suspendStreamForDeactivation()
   timelineResizeObserver?.disconnect()
   timelineResizeObserver = null
   cancelScheduledTimelineScroll()
@@ -2036,6 +2063,8 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
+  terminalStore.setQueuedChatProtected(props.paneId, props.tabId, false)
+  terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
   goalRefreshEpoch++
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
@@ -2544,6 +2573,13 @@ function enqueueDraft() {
   void nextTick(() => syncComposerTextareaHeight())
 }
 
+function suspendStreamForDeactivation() {
+  // A paused queue needs explicit user intervention, so it has no reason to
+  // retain a background observer. An unpaused queue does: its stream supplies
+  // the authoritative turn-completed edge that requests Chat activation.
+  if (draftQueue.value.length === 0 || isDraftQueuePaused.value) stop()
+}
+
 async function flushDraftQueue() {
   while (
     draftQueue.value.length > 0
@@ -2553,18 +2589,39 @@ async function flushDraftQueue() {
     && !isSending.value
     && !goalComposerLocked.value
   ) {
-    const next = draftQueue.value.shift()
-    if (!next) break
-    draftMessage.value = next.message
-    attachments.value = next.attachments
-    const sent = await submit('normal', undefined, 'queue')
+    isQueueSendInProgress.value = true
+    let sent = false
+    try {
+      const next = draftQueue.value.shift()
+      if (!next) break
+      draftMessage.value = next.message
+      attachments.value = next.attachments
+      sent = await submit('normal', undefined, 'queue')
+    } finally {
+      isQueueSendInProgress.value = false
+      // The next ready hidden Chat may activate only after this one has
+      // completed its foreground send attempt (including POST acknowledgement
+      // or the existing delivery-uncertain pause path).
+      terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+    }
     if (!sent) break
   }
 }
 
 function requestDraftQueueFlush() {
+  if (!isPaneActivated.value) {
+    if (draftQueue.value.length === 0 || isDraftQueuePaused.value) {
+      terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+      stop()
+    } else if (!turnInFlight.value && !isSending.value) {
+      terminalStore.requestQueuedChatActivation(props.paneId, props.tabId)
+    }
+    return
+  }
   if (
     isSubmissionReady.value
+    && isPaneActivated.value
+    && !isWaitingForQueuedChatActivation.value
     && !isDraftQueuePaused.value
     && !turnInFlight.value
     && draftQueue.value.length > 0
@@ -2583,6 +2640,8 @@ watch(
     goalComposerLocked,
     isSubmissionReady,
     isDraftQueuePaused,
+    isPaneActivated,
+    isWaitingForQueuedChatActivation,
   ],
   requestDraftQueueFlush,
 )

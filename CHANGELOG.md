@@ -5,6 +5,21 @@
 
 ## Unreleased
 
+### fix(chat): activate queued conversations before sending
+
+- Keep only Chats with an actionable local queue observing their hidden turn,
+  so the queue receives the authoritative completion edge without leaving every
+  cached Chat stream connected.
+- When that turn finishes, restore the queue's owning pane and Chat, wait for
+  its structured stream to become active and live, then send the next message
+  exactly once instead of leaving it on `Waiting for response…`.
+- Serialize simultaneous hidden-Chat completions and protect queued component
+  instances from cache eviction or pane-layout removal until their foreground
+  send attempt retires.
+- Release hidden streams for empty or delivery-uncertain queues, preserving the
+  existing explicit-resend recovery boundary. See the
+  [queued Chat activation notes](docs/working-logs/2026-10-11-chat-queue-activation.md).
+
 ### fix(chat): match Claude model options to each tab environment
 
 - Build the Claude Chat model picker from the selected tab's
