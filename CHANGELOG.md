@@ -10,9 +10,12 @@
 - Prewarm the Feishu SDK once per backend process, time connection stages without
   exposing credentials, and keep the Bot settings view refreshed while a connection
   is starting or retrying.
-- Serialize bounded bursts of messages per paired Chat instead of rejecting the
-  second Feishu message as busy, with a best-effort typing reaction while each
-  message is queued or running.
+- Coalesce same-Chat messages received within a one-second quiet window (with a
+  three-second maximum wait) into one ordered model request. Messages arriving
+  after a turn starts become one follow-up batch instead of interrupting the
+  active turn; bounded backpressure and per-message deduplication remain intact.
+- Show a best-effort received reaction while a message is being coalesced or
+  queued, then a typing reaction when its batch starts.
 - Deliver assistant Markdown as Feishu rich-text posts with code-block support and
   versioned provider guidance, while preserving historical `feishu-v1` turns and
   preventing model-authored mention tags from notifying users implicitly.
