@@ -89,7 +89,7 @@ _MAX_GATES = 256
 _MAX_TAB_DISPATCH_QUEUES = 256
 _MAX_TAB_QUEUE_WAITERS = 8
 _MESSAGE_COALESCE_QUIET_SECONDS = 1.0
-_MESSAGE_COALESCE_MAX_WAIT_SECONDS = 3.0
+_MESSAGE_COALESCE_MAX_WAIT_SECONDS = 5.0
 
 
 @dataclass
@@ -119,7 +119,9 @@ class _TabDispatchItem:
     arrived_at: float
     start: asyncio.Future[None]
     outcome: asyncio.Future[str]
-    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    reaction_dispatch_started: asyncio.Event = field(default_factory=asyncio.Event)
+    reaction_finished: asyncio.Event = field(default_factory=asyncio.Event)
+    reaction_task: asyncio.Task[None] | None = None
     queued_reaction_id: str | None = None
     processing_reaction_id: str | None = None
     dispatch_started: bool = False
@@ -202,7 +204,7 @@ def _cancel_tab_dispatch(tab_id: str, item: _TabDispatchItem) -> None:
     if queue is None or item.cancelled:
         return
     item.cancelled = True
-    item.ready.set()
+    item.reaction_finished.set()
     if not item.dispatch_started:
         try:
             queue.pending.remove(item)
@@ -848,6 +850,20 @@ async def _admit_binding_dispatch(
         yield
 
 
+@asynccontextmanager
+async def _admit_batch_dispatch(
+    queue: _TabDispatchQueue,
+    effective: EffectiveBot,
+    binding: BotBinding,
+    event: FeishuMessageEvent,
+) -> AsyncIterator[None]:
+    """Mark follow-up history only after native delivery is accepted."""
+
+    async with _admit_binding_dispatch(effective, binding, event):
+        yield
+    queue.has_dispatched = True
+
+
 def _claim_still_live(bot_id: str, claim: PairingClaim) -> bool:
     try:
         entry = _pool.snapshot().get(bot_id)
@@ -924,6 +940,64 @@ async def _delete_processing_reaction(
         logger.info("Feishu Bot processing reaction cleanup unavailable: %s", type(exc).__name__)
 
 
+async def _wait_for_reaction_dispatch(item: _TabDispatchItem) -> bool:
+    """Wait for dispatch or completion without coupling either to Feishu I/O."""
+
+    dispatch = asyncio.create_task(item.reaction_dispatch_started.wait())
+    finished = asyncio.create_task(item.reaction_finished.wait())
+    try:
+        await asyncio.wait({dispatch, finished}, return_when=asyncio.FIRST_COMPLETED)
+        return item.reaction_dispatch_started.is_set() and not item.reaction_finished.is_set()
+    finally:
+        for waiter in (dispatch, finished):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(dispatch, finished, return_exceptions=True)
+
+
+async def _maintain_processing_reaction(item: _TabDispatchItem) -> None:
+    """Run the optional reaction lifecycle outside the native dispatch path."""
+
+    try:
+        item.queued_reaction_id = await _add_processing_reaction(
+            item.client, item.event, "OneSecond"
+        )
+        if not await _wait_for_reaction_dispatch(item):
+            return
+        await _delete_processing_reaction(item.client, item.event, item.queued_reaction_id)
+        item.queued_reaction_id = None
+        if item.reaction_finished.is_set():
+            return
+        item.processing_reaction_id = await _add_processing_reaction(item.client, item.event)
+        await item.reaction_finished.wait()
+    finally:
+        await _delete_processing_reaction(
+            item.client,
+            item.event,
+            item.processing_reaction_id or item.queued_reaction_id,
+        )
+        item.processing_reaction_id = None
+        item.queued_reaction_id = None
+
+
+async def _finish_processing_reaction(item: _TabDispatchItem) -> None:
+    """Finish the owned reaction task even if route cancellation repeats."""
+
+    task = item.reaction_task
+    if task is None:
+        return
+    item.reaction_finished.set()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # A second shutdown cancellation must not orphan the shielded task
+            # or replace the precise ExternalDispatchRetired already propagating
+            # from the route. Reaction I/O is bounded by its own timeouts.
+            continue
+    await task
+
+
 def _batch_visible_text(items: list[_TabDispatchItem], *, followup: bool) -> str:
     if len(items) == 1 and not followup:
         return items[0].event.text
@@ -990,12 +1064,6 @@ async def _collect_tab_dispatch_batch(
         if not _batch_matches(leader, item):
             break
         candidates.append(item)
-    # Keep ownership in ``pending`` until every accepted route has installed
-    # its reaction. If the leader is cancelled here, its normal cancellation
-    # path can remove it and promote the next item without stranding followers
-    # in an ownerless ``active`` batch.
-    await asyncio.gather(*(item.ready.wait() for item in candidates))
-    candidates = [item for item in candidates if item in queue.pending and not item.cancelled]
     return candidates, queue.has_dispatched
 
 
@@ -1022,6 +1090,7 @@ def _finish_tab_dispatch_batch(
     for item in batch:
         if not item.outcome.done():
             item.outcome.set_result(status)
+        item.reaction_finished.set()
     queue.active = []
     _promote_tab_dispatch(tab_id, queue)
 
@@ -1036,20 +1105,10 @@ async def _dispatch_tab_batch(
             candidates, followup = await _collect_tab_dispatch_batch(queue, leader)
             if not candidates:
                 raise ExternalDispatchRetired(turn_id_for(leader.bot_id, leader.event.message_id))
-            # Keep the candidates in ``pending`` through reaction I/O. Cancellation
-            # can still remove and safely replay any not-yet-dispatched message.
-            if leader.queued_reaction_id is not None:
-                await _delete_processing_reaction(
-                    leader.client, leader.event, leader.queued_reaction_id
-                )
-                leader.queued_reaction_id = None
-            leader.processing_reaction_id = await _add_processing_reaction(
-                leader.client, leader.event
-            )
             batch = _claim_tab_dispatch_batch(queue, candidates)
             if not batch:
                 raise ExternalDispatchRetired(turn_id_for(leader.bot_id, leader.event.message_id))
-            queue.has_dispatched = True
+            batch[0].reaction_dispatch_started.set()
             visible_text = _batch_visible_text(batch, followup=followup)
             assistant_text = await dispatch_tab_chat_and_wait(
                 tab_id,
@@ -1068,18 +1127,20 @@ async def _dispatch_tab_batch(
                     "feishu_coalesced": len(batch) > 1,
                     "feishu_followup": followup,
                 },
-                admission_guard=lambda: _admit_binding_dispatch(
-                    leader.effective, leader.binding, leader.event
+                admission_guard=lambda: _admit_batch_dispatch(
+                    queue, leader.effective, leader.binding, leader.event
                 ),
             )
             status = (
                 "completed"
                 if await _reply_if_current(
-                    leader.client,
-                    leader.event,
-                    leader.effective,
+                    batch[-1].client,
+                    batch[-1].event,
+                    batch[-1].effective,
                     assistant_text,
-                    still_valid=lambda: _binding_still_routes(leader.effective, leader.binding),
+                    still_valid=lambda: _binding_still_routes(
+                        batch[-1].effective, batch[-1].binding
+                    ),
                     formatted=True,
                 )
                 else "failed"
@@ -1234,8 +1295,7 @@ async def _handle_message_event(
             )
             await _delete_processing_reaction(client, event, reaction_id)
             return
-        item.queued_reaction_id = await _add_processing_reaction(client, event, "OneSecond")
-        item.ready.set()
+        item.reaction_task = asyncio.create_task(_maintain_processing_reaction(item))
         await item.start
         queue = _tab_dispatch_queues.get(binding.tab_id)
         if queue is None:
@@ -1290,9 +1350,7 @@ async def _handle_message_event(
             _cancel_tab_dispatch(binding.tab_id, item)
         try:
             if item is not None:
-                await _delete_processing_reaction(
-                    client, event, item.processing_reaction_id or item.queued_reaction_id
-                )
+                await _finish_processing_reaction(item)
         finally:
             _dedup.finish(dedup_key(bot_id, event.message_id), status_value)
 
