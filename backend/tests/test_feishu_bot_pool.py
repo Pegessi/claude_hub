@@ -37,7 +37,6 @@ from claude_hub.services.feishu_bot_pool import (
     OWNER_KIND_OAUTH,
     FeishuBindingCodeError,
     FeishuBotAppIdConflict,
-    FeishuBotNotFound,
     FeishuBotOccupied,
     FeishuBotPoolStateError,
     FeishuBotPoolStore,
@@ -748,6 +747,12 @@ class _Wire:
 
     def __init__(self) -> None:
         self.replies: list[dict[str, Any]] = []
+        self.reply_message_ids: list[str] = []
+        self.reaction_creates: list[str] = []
+        self.reaction_types: list[tuple[str, str]] = []
+        self.reaction_deletes: list[tuple[str, str]] = []
+        self.fail_reaction_create = False
+        self.fail_reaction_delete = False
         self.token_calls = 0
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -758,11 +763,38 @@ class _Wire:
             )
         if request.url.path.endswith("/reply"):
             self.replies.append(json.loads(request.content))
+            self.reply_message_ids.append(request.url.path.split("/")[-2])
+            return httpx.Response(200, json={"code": 0})
+        path = request.url.path.split("/")
+        if request.method == "POST" and request.url.path.endswith("/reactions"):
+            message_id = path[-2]
+            self.reaction_creates.append(message_id)
+            if self.fail_reaction_create:
+                return httpx.Response(403, json={"code": 99991672})
+            body = json.loads(request.content)
+            emoji_type = body["reaction_type"]["emoji_type"]
+            assert emoji_type in {"OneSecond", "Typing"}
+            self.reaction_types.append((message_id, emoji_type))
+            return httpx.Response(
+                200, json={"code": 0, "data": {"reaction_id": f"react-{message_id}"}}
+            )
+        if request.method == "DELETE" and "/reactions/" in request.url.path:
+            message_id, reaction_id = path[-3], path[-1]
+            self.reaction_deletes.append((message_id, reaction_id))
+            if self.fail_reaction_delete:
+                return httpx.Response(403, json={"code": 99991672})
             return httpx.Response(200, json={"code": 0})
         return httpx.Response(404, json={"code": 1})
 
     def reply_texts(self) -> list[str]:
-        return [json.loads(item["content"])["text"] for item in self.replies]
+        texts: list[str] = []
+        for item in self.replies:
+            content = json.loads(item["content"])
+            if item["msg_type"] == "text":
+                texts.append(content["text"])
+            else:
+                texts.append(content["zh_cn"]["content"][0][0]["text"])
+        return texts
 
 
 @pytest.fixture
@@ -798,6 +830,9 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: Clock, wire: _Wi
         bot_api, "_dedup", FeishuMessageDedupStore(path=tmp_path / "feishu_bot.json", now=clock)
     )
     monkeypatch.setattr(bot_api, "_bot_gates", {})
+    monkeypatch.setattr(bot_api, "_tab_dispatch_queues", {})
+    monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.01)
+    monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.04)
     # Chat target validation has its own tests; stubbing it here keeps these
     # cases about the pool and the WebSocket event path.
     monkeypatch.setattr(bot_api, "_validate_bind_target", lambda tab_id, workspace_id: None)
@@ -873,6 +908,728 @@ def test_duplicate_message_is_claimed_once(api, clock: Clock) -> None:
     asyncio.run(bot_api._handle_sdk_event(bot_id, message))
     asyncio.run(bot_api._handle_sdk_event(bot_id, message))
     assert len(api.wire.replies) == 1
+
+
+def test_continuous_message_burst_default_max_wait_is_five_seconds() -> None:
+    assert bot_api._MESSAGE_COALESCE_MAX_WAIT_SECONDS == 5.0
+
+
+def test_short_bound_message_burst_is_coalesced_in_arrival_order(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.02)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.08)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        submitted: list[str] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            assert "lightweight Markdown" in _text
+            assert _kwargs["turn_metadata"]["provider_text_format"] == "feishu-v2"
+            async with admission_guard():
+                submitted.append(visible_text)
+            return "combined answer"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        tasks = [
+            asyncio.create_task(
+                bot_api._handle_sdk_event(
+                    bot_id, _message("app-1", text, clock.value, message_id=f"om-{index}")
+                )
+            )
+            for index, text in enumerate(("one", "two", "three"), start=1)
+        ]
+        await asyncio.gather(*tasks)
+
+        assert len(submitted) == 1
+        assert submitted[0].index("[消息 1]\none") < submitted[0].index("[消息 2]\ntwo")
+        assert submitted[0].index("[消息 2]\ntwo") < submitted[0].index("[消息 3]\nthree")
+        assert api.wire.reply_texts() == ["combined answer"]
+        assert api.wire.reply_message_ids == ["om-3"]
+        assert [reply["msg_type"] for reply in api.wire.replies] == ["post"]
+        assert {(message_id, emoji) for message_id, emoji in api.wire.reaction_types} >= {
+            ("om-1", "OneSecond"),
+            ("om-2", "OneSecond"),
+            ("om-3", "OneSecond"),
+        }
+        assert bot_api._tab_dispatch_queues == {}
+
+    asyncio.run(scenario())
+
+
+def test_messages_arriving_during_a_turn_form_one_followup_without_interrupting(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.02)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.08)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        submitted: list[str] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                submitted.append(visible_text)
+            if len(submitted) == 1:
+                first_started.set()
+                await release_first.wait()
+            return f"answer-{len(submitted)}"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        first = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "initial", clock.value, message_id="om-first")
+            )
+        )
+        await first_started.wait()
+        followups = [
+            asyncio.create_task(
+                bot_api._handle_sdk_event(
+                    bot_id, _message("app-1", text, clock.value, message_id=message_id)
+                )
+            )
+            for text, message_id in (("more context", "om-more"), ("final detail", "om-final"))
+        ]
+        await asyncio.sleep(0.04)
+        assert submitted == ["initial"], "a follow-up must not interrupt the active model turn"
+
+        release_first.set()
+        await asyncio.gather(first, *followups)
+
+        assert len(submitted) == 2
+        assert "处理上一条消息期间补充" in submitted[1]
+        assert submitted[1].index("[消息 1]\nmore context") < submitted[1].index(
+            "[消息 2]\nfinal detail"
+        )
+        assert api.wire.reply_texts() == ["answer-1", "answer-2"]
+        assert bot_api._tab_dispatch_queues == {}
+
+    asyncio.run(scenario())
+
+
+def test_rejected_batch_does_not_mark_the_first_admitted_turn_as_followup(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.01)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.04)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        first_attempted = asyncio.Event()
+        release_rejection = asyncio.Event()
+        admitted: list[tuple[str, bool]] = []
+        attempts = 0
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                first_attempted.set()
+                await release_rejection.wait()
+                raise HTTPException(
+                    status_code=409,
+                    headers={bot_api.CHAT_ERROR_REASON_HEADER: "chat_busy"},
+                )
+            async with admission_guard():
+                admitted.append((visible_text, kwargs["turn_metadata"]["feishu_followup"]))
+            return "done"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        first = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "rejected", clock.value, message_id="om-rejected")
+            )
+        )
+        await first_attempted.wait()
+        second = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "first admitted", clock.value, message_id="om-admitted")
+            )
+        )
+        for _ in range(100):
+            queue = bot_api._tab_dispatch_queues.get("tab-1")
+            if queue is not None and len(queue.waiters) == 1:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("second message never entered the existing queue")
+
+        release_rejection.set()
+        await asyncio.gather(first, second)
+
+        assert admitted == [("first admitted", False)]
+        assert bot_api._tab_dispatch_queues == {}
+
+    asyncio.run(scenario())
+
+
+def test_continuous_message_burst_is_dispatched_at_the_max_wait(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.05)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.12)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        started = asyncio.Event()
+        submitted: list[str] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                submitted.append(visible_text)
+                started.set()
+            return "done"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        tasks = [
+            asyncio.create_task(
+                bot_api._handle_sdk_event(
+                    bot_id, _message("app-1", "first", clock.value, message_id="om-max-0")
+                )
+            )
+        ]
+        for index in range(1, 4):
+            await asyncio.sleep(0.035)
+            tasks.append(
+                asyncio.create_task(
+                    bot_api._handle_sdk_event(
+                        bot_id,
+                        _message(
+                            "app-1",
+                            f"extra-{index}",
+                            clock.value,
+                            message_id=f"om-max-{index}",
+                        ),
+                    )
+                )
+            )
+
+        await asyncio.wait_for(started.wait(), timeout=0.08)
+        await asyncio.gather(*tasks)
+        assert len(submitted) == 1
+        assert "extra-3" in submitted[0]
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_a_coalesced_follower_does_not_cancel_the_shared_turn(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.04)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.1)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        submitted: list[str] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                submitted.append(visible_text)
+            return "done"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        leader = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "keep", clock.value, message_id="om-keep")
+            )
+        )
+        follower_payload = _message(
+            "app-1", "cancel me", clock.value, message_id="om-cancel-follower"
+        )
+        follower = asyncio.create_task(bot_api._handle_sdk_event(bot_id, follower_payload))
+        for _ in range(100):
+            queue = bot_api._tab_dispatch_queues.get("tab-1")
+            if queue is not None and len(queue.pending) == 2:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("follower never joined the coalescing window")
+
+        follower.cancel()
+        with pytest.raises(bot_api.ExternalDispatchRetired):
+            await follower
+        await leader
+        assert submitted == ["keep"]
+
+        # The cancelled message never entered the model turn, so the same-ID
+        # WebSocket retry must be admitted and delivered once.
+        await bot_api._handle_sdk_event(bot_id, follower_payload)
+        assert submitted == ["keep", "cancel me"]
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_releases_every_claim_when_a_coalesced_turn_retires(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.02)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.08)
+        monkeypatch.setattr(bot_api, "_BATCH_RETIREMENT_WAIT_SECONDS", 0.5)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        dispatched = asyncio.Event()
+        release_retirement = asyncio.Event()
+        attempts: list[str] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                attempts.append(visible_text)
+                dispatched.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                await release_retirement.wait()
+                raise bot_api.ExternalDispatchRetired(_turn_id) from None
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        payloads = [
+            _message("app-1", text, clock.value, message_id=f"om-shutdown-{index}")
+            for index, text in enumerate(("one", "two", "three"), start=1)
+        ]
+        routes = [
+            asyncio.create_task(bot_api._handle_sdk_event(bot_id, payload)) for payload in payloads
+        ]
+        await dispatched.wait()
+        for route in routes:
+            route.cancel()
+        await asyncio.sleep(0)
+        release_retirement.set()
+        results = await asyncio.gather(*routes, return_exceptions=True)
+        # asyncio Tasks normalize CancelledError subclasses in gathered return
+        # values, so the durable replay below is the authoritative retirement
+        # assertion. All route tasks must at least end through cancellation.
+        assert all(isinstance(result, asyncio.CancelledError) for result in results)
+
+        # Each route owned a separate durable claim even though the model saw
+        # one batch. Safe retirement must make all three IDs retryable.
+        async def replay_dispatch(
+            _tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs
+        ):
+            async with admission_guard():
+                attempts.append(visible_text)
+            return "done"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", replay_dispatch)
+        await asyncio.gather(*(bot_api._handle_sdk_event(bot_id, payload) for payload in payloads))
+        assert len(attempts) == 2
+        assert "[消息 3]\nthree" in attempts[-1]
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_during_error_reply_releases_the_active_batch(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.02)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.08)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        error_reply_started = asyncio.Event()
+        real_reply = bot_api._reply_if_current
+
+        async def dispatch(*_args, **_kwargs):
+            raise HTTPException(
+                status_code=409,
+                headers={bot_api.CHAT_ERROR_REASON_HEADER: "chat_busy"},
+            )
+
+        async def blocked_reply(client, event, effective, text, **kwargs):
+            if "正在处理其他消息" in text:
+                error_reply_started.set()
+                await asyncio.Future()
+            return await real_reply(client, event, effective, text, **kwargs)
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        monkeypatch.setattr(bot_api, "_reply_if_current", blocked_reply)
+        routes = [
+            asyncio.create_task(
+                bot_api._handle_sdk_event(
+                    bot_id, _message("app-1", text, clock.value, message_id=message_id)
+                )
+            )
+            for text, message_id in (("one", "om-error-one"), ("two", "om-error-two"))
+        ]
+        await error_reply_started.wait()
+        for route in routes:
+            route.cancel()
+        await asyncio.gather(*routes, return_exceptions=True)
+
+        assert bot_api._tab_dispatch_queues == {}
+
+    asyncio.run(scenario())
+
+
+def test_bound_message_queue_has_an_explicit_capacity_response(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **_kwargs):
+            async with admission_guard():
+                started.set()
+            await release.wait()
+            return "done"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        first = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "active", clock.value, message_id="om-active")
+            )
+        )
+        await started.wait()
+        waiting = []
+        for index in range(bot_api._MAX_TAB_QUEUE_WAITERS):
+            waiting.append(
+                asyncio.create_task(
+                    bot_api._handle_sdk_event(
+                        bot_id,
+                        _message("app-1", "waiting", clock.value, message_id=f"om-wait-{index}"),
+                    )
+                )
+            )
+            for _ in range(20):
+                queue = bot_api._tab_dispatch_queues.get("tab-1")
+                if queue is not None and len(queue.waiters) == index + 1:
+                    break
+                await asyncio.sleep(0)
+
+        await bot_api._handle_sdk_event(
+            bot_id, _message("app-1", "overflow", clock.value, message_id="om-overflow")
+        )
+        assert api.wire.reply_texts() == ["Claude Hub 消息队列已满，本条消息未执行，请稍后重试。"]
+        assert ("om-overflow", "react-om-overflow") in api.wire.reaction_deletes
+
+        release.set()
+        await asyncio.gather(first, *waiting)
+        assert bot_api._tab_dispatch_queues == {}
+
+    async def bounded_scenario() -> None:
+        await asyncio.wait_for(scenario(), timeout=2)
+
+    asyncio.run(bounded_scenario())
+
+
+@pytest.mark.parametrize("failure", ["create", "delete"])
+def test_reaction_permission_failure_never_fails_the_main_message(
+    api, clock: Clock, wire: _Wire, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    _pair(api.pool, bot_id, owner=LOCAL, environ={})
+    setattr(wire, f"fail_reaction_{failure}", True)
+
+    async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **_kwargs):
+        async with admission_guard():
+            pass
+        return "still delivered"
+
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id, _message("app-1", "hello", clock.value, message_id=f"om-{failure}")
+        )
+    )
+
+    assert api.wire.reply_texts() == ["still delivered"]
+    assert bot_api._tab_dispatch_queues == {}
+
+
+def test_reaction_network_steps_do_not_delay_native_dispatch(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        queued_add_started = asyncio.Event()
+        allow_queued_add = asyncio.Event()
+        queued_delete_started = asyncio.Event()
+        allow_queued_delete = asyncio.Event()
+        typing_add_started = asyncio.Event()
+        allow_typing_add = asyncio.Event()
+        native_started = asyncio.Event()
+        allow_native_reply = asyncio.Event()
+        add_calls = 0
+        delete_calls = 0
+
+        async def add_reaction(_client, _event, emoji_type="Typing"):
+            nonlocal add_calls
+            add_calls += 1
+            if add_calls == 1:
+                assert emoji_type == "OneSecond"
+                queued_add_started.set()
+                await allow_queued_add.wait()
+                return "queued-reaction"
+            assert emoji_type == "Typing"
+            typing_add_started.set()
+            await allow_typing_add.wait()
+            return "typing-reaction"
+
+        async def delete_reaction(_client, _event, _reaction_id):
+            nonlocal delete_calls
+            delete_calls += 1
+            if delete_calls == 1:
+                queued_delete_started.set()
+                await allow_queued_delete.wait()
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **_kwargs):
+            async with admission_guard():
+                native_started.set()
+            await allow_native_reply.wait()
+            return "done"
+
+        monkeypatch.setattr(bot_api, "_add_processing_reaction", add_reaction)
+        monkeypatch.setattr(bot_api, "_delete_processing_reaction", delete_reaction)
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        route = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "hello", clock.value, message_id="om-reactions")
+            )
+        )
+
+        try:
+            await queued_add_started.wait()
+            await asyncio.wait_for(native_started.wait(), timeout=1.0)
+            allow_queued_add.set()
+            await queued_delete_started.wait()
+            assert native_started.is_set()
+            allow_queued_delete.set()
+            await typing_add_started.wait()
+            assert native_started.is_set()
+            allow_typing_add.set()
+            allow_native_reply.set()
+            await route
+        finally:
+            allow_queued_add.set()
+            allow_queued_delete.set()
+            allow_typing_add.set()
+            allow_native_reply.set()
+            if not route.done():
+                route.cancel()
+            await asyncio.gather(route, return_exceptions=True)
+
+        assert add_calls == 2
+        assert delete_calls == 2
+        assert bot_api._tab_dispatch_queues == {}
+
+    asyncio.run(scenario())
+
+
+def test_double_cancellation_during_reaction_cleanup_preserves_retirement(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 10.0)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 10.0)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        reaction_added = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        reaction_tasks: list[asyncio.Task[None]] = []
+
+        async def add_reaction(_client, _event, _emoji_type="Typing"):
+            reaction_added.set()
+            return "queued-reaction"
+
+        async def delete_reaction(_client, _event, _reaction_id):
+            task = asyncio.current_task()
+            assert task is not None
+            reaction_tasks.append(task)
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+        monkeypatch.setattr(bot_api, "_add_processing_reaction", add_reaction)
+        monkeypatch.setattr(bot_api, "_delete_processing_reaction", delete_reaction)
+        message_id = "om-double-cancel"
+        route = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "hello", clock.value, message_id=message_id)
+            )
+        )
+
+        try:
+            await reaction_added.wait()
+            await asyncio.sleep(0)
+            route.cancel()
+            await cleanup_started.wait()
+            route.cancel()
+            release_cleanup.set()
+            with pytest.raises(bot_api.ExternalDispatchRetired):
+                await route
+        finally:
+            release_cleanup.set()
+            if not route.done():
+                route.cancel()
+            await asyncio.gather(route, return_exceptions=True)
+
+        assert reaction_tasks
+        assert all(task.done() for task in reaction_tasks)
+        assert bot_api._tab_dispatch_queues == {}
+        key = bot_api.dedup_key(bot_id, message_id)
+        assert bot_api._dedup.claim(key), "the precise retirement must release the dedup claim"
+        bot_api._dedup.release(key)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=2))
+
+
+def test_queued_message_rechecks_binding_before_dispatch(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        submitted: list[str] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                submitted.append(visible_text)
+            if visible_text == "first":
+                first_started.set()
+                await release_first.wait()
+            return "done"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        first = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "first", clock.value, message_id="om-first")
+            )
+        )
+        await first_started.wait()
+        second = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "second", clock.value, message_id="om-second")
+            )
+        )
+        for _ in range(100):
+            queue = bot_api._tab_dispatch_queues.get("tab-1")
+            if queue is not None and len(queue.waiters) == 1 and queue.waiters[0]._callbacks:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("queued route never reached its reservation wait")
+        entry = api.pool.snapshot({}).get(bot_id)
+        api.pool.release_binding(bot_id, expected_revision=entry.revision, environ={})
+        release_first.set()
+        await asyncio.gather(first, second)
+
+        assert submitted == ["first"]
+        assert bot_api._tab_dispatch_queues == {}
+        assert ("om-second", "react-om-second") in api.wire.reaction_deletes
+
+    asyncio.run(scenario())
+
+
+def test_external_web_busy_remains_an_accurate_rejection(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    _pair(api.pool, bot_id, owner=LOCAL, environ={})
+
+    async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **_kwargs):
+        async with admission_guard():
+            pass
+        raise HTTPException(
+            status_code=409, headers={bot_api.CHAT_ERROR_REASON_HEADER: "chat_busy"}
+        )
+
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id, _message("app-1", "hello", clock.value, message_id="om-web-busy")
+        )
+    )
+
+    assert api.wire.reply_texts() == [
+        "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"
+    ]
+    assert bot_api._tab_dispatch_queues == {}
+
+
+def test_dispatch_queue_cancellation_releases_waiters_and_registry(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        started = asyncio.Event()
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **_kwargs):
+            async with admission_guard():
+                started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        active = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "active", clock.value, message_id="om-active")
+            )
+        )
+        await started.wait()
+        waiting = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "waiting", clock.value, message_id="om-waiting")
+            )
+        )
+        for _ in range(100):
+            queue = bot_api._tab_dispatch_queues.get("tab-1")
+            if queue is not None and len(queue.waiters) == 1 and queue.waiters[0]._callbacks:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("queued route never reached its reservation wait")
+
+        waiting.cancel()
+        done, _pending = await asyncio.wait({waiting}, timeout=1)
+        assert done, waiting.get_stack()
+        with pytest.raises(bot_api.ExternalDispatchRetired):
+            await waiting
+        assert bot_api._tab_dispatch_queues["tab-1"].waiters == []
+
+        # The cancelled waiter never entered the Chat bridge, so a WebSocket
+        # replay with the same message ID must be admitted and queued again.
+        replayed = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "waiting", clock.value, message_id="om-waiting")
+            )
+        )
+        for _ in range(100):
+            queue = bot_api._tab_dispatch_queues.get("tab-1")
+            if queue is not None and len(queue.waiters) == 1 and queue.waiters[0]._callbacks:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("same-ID replay was not admitted after queued cancellation")
+        replayed.cancel()
+        with pytest.raises(bot_api.ExternalDispatchRetired):
+            await replayed
+
+        active.cancel()
+        done, _pending = await asyncio.wait({active}, timeout=1)
+        assert done, active.get_stack()
+        with pytest.raises(asyncio.CancelledError):
+            await active
+        await asyncio.sleep(0)
+
+        assert bot_api._tab_dispatch_queues == {}
+        assert set(api.wire.reaction_deletes) == {
+            ("om-active", "react-om-active"),
+            ("om-waiting", "react-om-waiting"),
+        }
+
+    async def bounded_scenario() -> None:
+        await asyncio.wait_for(scenario(), timeout=2)
+
+    asyncio.run(bounded_scenario())
 
 
 def test_replaced_single_bot_interfaces_return_410(api) -> None:

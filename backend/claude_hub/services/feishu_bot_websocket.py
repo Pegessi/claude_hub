@@ -7,6 +7,9 @@ import importlib
 import inspect
 import json
 import logging
+import threading
+import time
+from concurrent.futures import Future
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Awaitable, Callable, Protocol
@@ -42,10 +45,105 @@ class _Connection(Protocol):
 
 ConnectionFactory = Callable[[FeishuBotConfig, Callable[[Any], Awaitable[None]]], _Connection]
 EventHandler = Callable[[str, Any], Awaitable[None]]
+SdkModules = tuple[Any, Any]
+
+
+class _SdkLoader(Protocol):
+    async def load(self) -> SdkModules: ...
 
 
 class _RouteCapacityExceeded(RuntimeError):
     """Raised synchronously so the SDK returns a retryable failure response."""
+
+
+class _LarkSdkLoader:
+    """Import lark-oapi once in a process-wide, event-loop-safe flight."""
+
+    def __init__(self, *, import_module: Callable[[str], Any] = importlib.import_module) -> None:
+        self._import_module = import_module
+        self._lock = threading.Lock()
+        self._future: Future[SdkModules] | None = None
+
+    def prewarm(self) -> None:
+        self._start()
+
+    async def load(self) -> SdkModules:
+        # The underlying future cannot be cancelled by an individual Bot or
+        # during shutdown. Import runs on one daemon thread and all connections
+        # await the same result without occupying the Hub event loop.
+        return await asyncio.shield(asyncio.wrap_future(self._start()))
+
+    def _start(self) -> Future[SdkModules]:
+        with self._lock:
+            if self._future is not None:
+                return self._future
+            future: Future[SdkModules] = Future()
+            self._future = future
+            thread = threading.Thread(
+                target=self._import_and_publish,
+                args=(future,),
+                name="feishu-lark-sdk-import",
+                daemon=True,
+            )
+            thread.start()
+            return future
+
+    def _import_and_publish(self, future: Future[SdkModules]) -> None:
+        started = time.perf_counter()
+        try:
+            modules = (
+                self._import_module("lark_oapi"),
+                self._import_module("lark_oapi.ws.client"),
+            )
+        except BaseException as exc:
+            logger.warning(
+                "Feishu WebSocket stage=sdk_import outcome=failed duration_ms=%.1f error_type=%s",
+                (time.perf_counter() - started) * 1000,
+                type(exc).__name__,
+            )
+            future.set_exception(exc)
+        else:
+            logger.info(
+                "Feishu WebSocket stage=sdk_import outcome=completed duration_ms=%.1f",
+                (time.perf_counter() - started) * 1000,
+            )
+            future.set_result(modules)
+
+
+_LARK_SDK_LOADER = _LarkSdkLoader()
+
+
+def prewarm_lark_sdk() -> None:
+    """Start the process-wide SDK import before the first Bot needs it."""
+
+    _LARK_SDK_LOADER.prewarm()
+
+
+async def _timed_connection_stage(stage: str, operation: Awaitable[Any]) -> Any:
+    started = time.perf_counter()
+    try:
+        result = await operation
+    except asyncio.CancelledError:
+        logger.info(
+            "Feishu WebSocket stage=%s outcome=cancelled duration_ms=%.1f",
+            stage,
+            (time.perf_counter() - started) * 1000,
+        )
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Feishu WebSocket stage=%s outcome=failed duration_ms=%.1f error_type=%s",
+            stage,
+            (time.perf_counter() - started) * 1000,
+            type(exc).__name__,
+        )
+        raise
+    logger.info(
+        "Feishu WebSocket stage=%s outcome=completed duration_ms=%.1f",
+        stage,
+        (time.perf_counter() - started) * 1000,
+    )
+    return result
 
 
 class _BoundedRouteTasks:
@@ -223,10 +321,12 @@ class _LarkConnection:
         callback: Callable[[Any], Awaitable[None]],
         *,
         route_tasks: _BoundedRouteTasks,
+        sdk_loader: _SdkLoader = _LARK_SDK_LOADER,
     ) -> None:
         self._config = config
         self._callback = callback
         self._route_tasks = route_tasks
+        self._sdk_loader = sdk_loader
         self._client: Any = None
         self._receive_task: asyncio.Task[Any] | None = None
         self._ping_task: asyncio.Task[Any] | None = None
@@ -237,10 +337,7 @@ class _LarkConnection:
         return self._client is not None and getattr(self._client, "_conn", None) is not None
 
     async def run(self) -> None:
-        # Importing lark-oapi is comparatively expensive; keep it off the Hub
-        # event loop so startup cannot stall unrelated requests.
-        lark = await asyncio.to_thread(importlib.import_module, "lark_oapi")
-        lark_ws_client = await asyncio.to_thread(importlib.import_module, "lark_oapi.ws.client")
+        lark, lark_ws_client = await self._sdk_loader.load()
 
         loop = asyncio.get_running_loop()
         setattr(lark_ws_client, "loop", loop)
@@ -266,10 +363,13 @@ class _LarkConnection:
             await original_receive()
 
         client._receive_message_loop = receive
-        initial_url = await _discover_connection_url(client, self._config, lark_ws_client)
-        client._get_conn_url = lambda: initial_url
         try:
-            await client._connect()
+            initial_url = await _timed_connection_stage(
+                "endpoint_discovery",
+                _discover_connection_url(client, self._config, lark_ws_client),
+            )
+            client._get_conn_url = lambda: initial_url
+            await _timed_connection_stage("websocket_handshake", client._connect())
             # ``_connect`` schedules the receive loop. Let its wrapper record
             # the task before building the liveness wait set.
             await asyncio.sleep(0)
@@ -468,4 +568,5 @@ class FeishuBotWebSocketSupervisor:
 __all__ = [
     "FeishuBotWebSocketSupervisor",
     "message_event_from_sdk",
+    "prewarm_lark_sdk",
 ]

@@ -43,6 +43,28 @@
 - Scale the two fixed 10s restart deadlines by the E2E timeout factor and
   print the measured time, so a loaded runner no longer fails them outright.
 
+### feat(feishu): make Bot conversations responsive and richly formatted
+
+- Prewarm the Feishu SDK once per backend process, time connection stages without
+  exposing credentials, and keep the Bot settings view refreshed while a connection
+  is starting or retrying.
+- Coalesce same-Chat messages received within a one-second quiet window (with a
+  five-second maximum wait) into one ordered model request. Messages arriving
+  after a turn starts become one follow-up batch instead of interrupting the
+  active turn; bounded backpressure and per-message deduplication remain intact.
+- Show a best-effort received reaction while a message is being coalesced or
+  queued, then a typing reaction when its batch starts, without letting reaction
+  network latency delay native model dispatch; repeated shutdown cancellation
+  still waits for the bounded reaction cleanup it owns.
+- Anchor a combined response to the newest message in its batch, and only label
+  later input as a follow-up after an earlier Feishu turn passed Chat admission.
+- Deliver assistant Markdown as Feishu rich-text posts with code-block support and
+  versioned provider guidance, while preserving historical `feishu-v1` turns and
+  preventing model-authored mention tags from notifying users implicitly.
+- Bound backend file logs with rotation and stop INFO-level tab-list dumps from
+  obscuring connection diagnostics. See the
+  [Feishu interaction v2 notes](docs/working-logs/2026-10-10-feishu-interaction-v2.md).
+
 ### feat(runtime): rebuild frontend during supervised restart
 
 - Make the production menu restart run the committed frontend build after
