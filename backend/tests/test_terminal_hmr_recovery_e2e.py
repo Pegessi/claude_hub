@@ -34,6 +34,36 @@ from .conftest import (
 )
 from .test_terminal_replay import normalize_xterm_lines
 
+
+def _chromium_can_launch() -> bool:
+    """Report whether Playwright can actually launch a browser here.
+
+    The per-fixture tmux/ttyd and node_modules guards run too late to help:
+    pytest-playwright's session-scoped ``browser`` fixture launches first, so a
+    machine without the browser binary reports a collection error rather than a
+    skip. The backend CI job installs tmux and ttyd but no browsers, which is
+    exactly that case.
+
+    Launching is the only honest probe. ``executable_path`` names the full
+    chromium build, while these tests run through the separate headless shell,
+    so a path check would pass on a machine that still cannot start a browser.
+    """
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            browser.close()
+            return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _chromium_can_launch(),
+    reason="Playwright cannot launch chromium here; run: playwright install chromium",
+)
+
 _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 _HARNESS_HTML = "/test/harness/terminal-hmr-harness.html"
 

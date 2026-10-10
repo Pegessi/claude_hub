@@ -53,6 +53,8 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
+from .conftest import E2E_TIMEOUT_SCALE, scale_timeout
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -525,10 +527,19 @@ async def test_real_cold_restart_7tab_bijection(tmp_path, monkeypatch):
 
         manager = tm.TTYDManager()
         assert all(proc.from_persisted_state for proc in manager.processes.values())
+        cold_budget = scale_timeout(10.0)
         cold_started = time.monotonic()
         await manager.start_all_tabs()
         cold_elapsed = time.monotonic() - cold_started
-        assert cold_elapsed < 10.0, f"cold restart start_all_tabs took {cold_elapsed:.2f}s"
+        print(
+            f"cold restart start_all_tabs={cold_elapsed:.2f}s budget={cold_budget:g}s "
+            f"scale={E2E_TIMEOUT_SCALE:g} original_10s_met={cold_elapsed < 10.0}",
+            flush=True,
+        )
+        assert cold_elapsed < cold_budget, (
+            f"cold restart start_all_tabs took {cold_elapsed:.2f}s; "
+            f"budget={cold_budget:g}s base=10s scale={E2E_TIMEOUT_SCALE:g}"
+        )
         _assert_runtime(manager, "post-restart")
 
         codex_sids: set[str] = set()

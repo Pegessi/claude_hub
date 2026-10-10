@@ -10,6 +10,8 @@ from uuid import uuid4
 import pytest
 from httpx import AsyncClient
 
+from .conftest import E2E_TIMEOUT_SCALE, scale_timeout
+
 
 def _free_port():
     with socket.socket() as sock:
@@ -794,11 +796,20 @@ async def events():
         assert stream.readline().startswith(b"data:")
         with store.locked() as state:
             state["operation"] = {"id": "stream", "instance_id": old_id, "status": "preparing"}
+        budget = scale_timeout(10)
         started = time.monotonic()
         launcher.restart()
         elapsed = time.monotonic() - started
         assert marker.exists(), "SIGKILL skipped application shutdown"
-        assert elapsed < 10, f"stream restart took {elapsed:.2f}s"
+        print(
+            f"stream restart={elapsed:.2f}s budget={budget:g}s "
+            f"scale={E2E_TIMEOUT_SCALE:g} original_10s_met={elapsed < 10}",
+            flush=True,
+        )
+        assert elapsed < budget, (
+            f"stream restart took {elapsed:.2f}s; budget={budget:g}s "
+            f"base=10s scale={E2E_TIMEOUT_SCALE:g}"
+        )
         assert launcher.instance_id != old_id
         assert store.read()["operation"]["status"] == "succeeded"
     finally:
