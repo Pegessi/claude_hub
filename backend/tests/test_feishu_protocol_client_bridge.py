@@ -7,7 +7,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Mapping
 from unittest.mock import AsyncMock
 
 import httpx
@@ -95,6 +94,51 @@ async def test_client_uses_only_injected_http_transport(bot_config: FeishuBotCon
     assert "receive_id" not in reply_body
     assert reply_body["msg_type"] == "text"
     assert json.loads(reply_body["content"]) == {"text": "exact reply"}
+
+
+@pytest.mark.asyncio
+async def test_client_supports_structured_messages_and_reaction_lifecycle(
+    bot_config: FeishuBotConfig,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        if request.method == "POST" and request.url.path.endswith("/reactions"):
+            return httpx.Response(200, json={"code": 0, "data": {"reaction_id": "react-1"}})
+        return httpx.Response(200, json={"code": 0})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        await client.send_message("oc-chat", "interactive", {"elements": []})
+        await client.reply_message("om-inbound", "post", {"zh_cn": {"title": "T"}})
+        reaction_id = await client.add_reaction("om-inbound", "Typing")
+        await client.delete_reaction("om-inbound", reaction_id)
+
+    assert [request.url.path for request in requests] == [
+        "/open-apis/auth/v3/tenant_access_token/internal",
+        "/open-apis/im/v1/messages",
+        "/open-apis/im/v1/messages/om-inbound/reply",
+        "/open-apis/im/v1/messages/om-inbound/reactions",
+        "/open-apis/im/v1/messages/om-inbound/reactions/react-1",
+    ]
+    assert requests[3].method == "POST"
+    assert json.loads(requests[3].content) == {"reaction_type": {"emoji_type": "Typing"}}
+    assert requests[4].method == "DELETE"
+    assert all(
+        request.headers["authorization"] == "Bearer tenant-token" for request in requests[1:]
+    )
+    assert json.loads(requests[1].content)["msg_type"] == "interactive"
+    assert json.loads(json.loads(requests[1].content)["content"]) == {"elements": []}
+    assert json.loads(requests[2].content)["msg_type"] == "post"
 
 
 @pytest.mark.parametrize("bad_token", ["", "   "])
