@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix(chat): match Claude model options to each tab environment
+
+- Build the Claude Chat model picker from the selected tab's
+  `ANTHROPIC_MODEL` and default Opus, Sonnet, and Haiku model variables,
+  preserving first-seen order and removing duplicate ids.
+- Keep the curated Claude catalog only when the tab does not configure any
+  model ids, so custom gateways no longer show stale, incompatible choices.
+- Refresh capabilities in place after a model change, without restarting the
+  timeline stream, so the open picker immediately reflects the updated env.
+- See the [Claude model picker notes](docs/working-logs/2026-10-10-claude-model-picker-env.md).
+
 ### fix(logging): bound backend log retention
 
 - Rotate `~/.claude_hub/logs/backend.log` at 10 MiB with five backups by
