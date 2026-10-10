@@ -69,6 +69,8 @@ function hueDistance(a, b) {
 test('dark theme uses the Maso carbon ladder and main-branch blue roles', () => {
   const dark = themeBlock(':root {')
   assert.equal(token(dark, 'ch-color-app-bg'), '#1b1b1c')
+  assert.equal(token(dark, 'ch-color-main-bg'), '#181818')
+  assert.equal(token(dark, 'ch-color-sidebar-bg'), '#1c1c1c')
   assert.equal(token(dark, 'ch-color-canvas'), '#171718')
   assert.equal(token(dark, 'ch-color-surface'), '#1d1d1f')
   assert.equal(token(dark, 'ch-color-surface-control'), '#29292c')
@@ -101,6 +103,8 @@ test('dark theme uses the Maso carbon ladder and main-branch blue roles', () => 
 test('light theme pairs the neutral ladder with distinct muted clay-orange roles', () => {
   const light = themeBlock(":root[data-theme='light']")
   assert.equal(token(light, 'ch-color-app-bg'), '#f4f4f5')
+  assert.equal(token(light, 'ch-color-main-bg'), '#ffffff')
+  assert.equal(token(light, 'ch-color-sidebar-bg'), '#f5f5f5')
   assert.equal(token(light, 'ch-color-canvas'), '#f0f0f2')
   assert.equal(token(light, 'ch-color-surface'), '#fafafa')
   assert.equal(token(light, 'ch-color-surface-selected'), '#f4eae3')

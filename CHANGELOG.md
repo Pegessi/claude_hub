@@ -16,6 +16,10 @@
   primary-action roles separate with accessible contrast.
 - Theme user-message bubbles alongside the surrounding Dark and Light chrome
   instead of retaining a hard-coded blue fill in Light mode.
+- Match Maso's sidebar/main surface split (`#1c1c1c` / `#181818` in Dark and
+  `#f5f5f5` / white in Light) without repainting unrelated application surfaces.
+- Replace the blue completion ripple around idle session dots with a restrained
+  sheen contained inside the existing status light.
 - Highlight only genuinely working Chat sessions with a restrained travelling
   edge light, including a static reduced-motion fallback.
 - See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).

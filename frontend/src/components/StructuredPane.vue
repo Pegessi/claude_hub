@@ -3317,7 +3317,7 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background-color: var(--ch-color-app-bg);
+  background-color: var(--ch-color-main-bg);
   color: var(--ch-color-text);
   font-size: 13px;
   line-height: 1.5;
@@ -4234,7 +4234,7 @@ onUnmounted(() => {
 .structured-pane {
   background:
     radial-gradient(circle at 50% -22%, var(--ch-color-surface-soft), transparent 44%),
-    var(--ch-color-app-bg);
+    var(--ch-color-main-bg);
 }
 
 .structured-timeline {

@@ -30,6 +30,13 @@ drag reordering, and make genuinely active work easy to scan.
   keeps hovered Dark buttons above the WCAG AA contrast threshold.
 - User messages use a theme role instead of a fixed blue: Maso deep blue in
   Dark and the contrast-safe clay-orange fill in Light.
+- The Chat layout now gives the two primary planes their own roles, copied from
+  Maso's base/nav split: Dark main `#181818` with sidebar `#1c1c1c`, and Light
+  main white with sidebar `#f5f5f5`. Shared application surfaces stay on their
+  prior tokens so Workspace and dialogs do not change as a side effect.
+- An unread completed turn keeps its semantic status color and receives a small
+  highlight moving inside the dot. It no longer combines a green idle dot with
+  a large blue ripple; reduced-motion users receive the static dot.
 - Only sessions whose runtime status is `working` receive the travelling edge
   light. The yellow status dot remains the semantic working indicator, idle and
   attention colors are unchanged, and reduced-motion users receive a static
@@ -41,7 +48,7 @@ drag reordering, and make genuinely active work easy to scan.
 ## Validation
 
 - Focused interaction, store, theme, and semantic-color tests passed.
-- Full frontend unit suite after the final Maso-blue revision: `710 passed`; the added tests
+- Full frontend unit suite after the final Maso-blue revision: `711 passed`; the added tests
   cover delete success/failure, stale-pin cleanup, menu removal, palette tokens,
   accent contrast, separation of selected/focus/primary roles, and a repository-
   wide guard against translucent keyboard-focus rings.
@@ -66,7 +73,7 @@ drag reordering, and make genuinely active work easy to scan.
   decorative halos retain their separate translucent role.
 - Final repository-wide `./scripts/verify.sh all` (pinned Node 24.21.0, uv
   0.12.15, Python 3.11.16, and pnpm 9.15.9) passed docs, backend formatting
-  and types, frontend lint and types, all 710 frontend tests, and the production
+  and types, frontend lint and types, all 711 frontend tests, and the production
   build. The backend suite stopped at `1803 passed, 1 skipped` because
   the unchanged `test_frontend_build_timeout_keeps_current_backend_and_dist`
   hit macOS

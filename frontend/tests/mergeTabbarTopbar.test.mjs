@@ -58,18 +58,24 @@ test('a status light in the sidebar shows working, idle, attention, and offline'
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='offline'\]/)
 })
 
-test('an unread completed turn shows a ping ripple on the status light', () => {
+test('an unread completed turn shows a contained sheen on the status light', () => {
   // the status light carries an unread flag
   assert.match(chatSidebar, /:data-unread="tab\.is_unread \? 'true' : 'false'"/)
-  // the ping ripple: an accent ring expanding outward from the dot
+  // The completion cue stays inside the status light instead of drawing the
+  // old oversized blue ring around a green dot.
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-unread='true'\]::after/)
-  assert.match(chatSidebar, /@keyframes sidebar-unread-ping/)
-  // the ripple must be border-box: the global * reset does not reach
-  // pseudo-elements, so a content-box border would offset the ring down-right
-  assert.match(
-    chatSidebar,
-    /\.chat-sidebar__item-status\[data-unread='true'\]::after\s*\{[^}]*box-sizing:\s*border-box/s
-  )
+  assert.match(chatSidebar, /@keyframes sidebar-complete-sheen/)
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-unread='true'\]\s*\{[^}]*overflow:\s*hidden/s)
+  assert.match(chatSidebar, /linear-gradient\(\s*105deg,[\s\S]*rgba\(255, 255, 255, 0\.88\)/)
+  assert.doesNotMatch(chatSidebar, /@keyframes sidebar-unread-ping/)
+  assert.doesNotMatch(chatSidebar, /border:\s*1\.5px solid var\(--ch-color-accent\)/)
+  assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item-status\[data-unread='true'\]::after[\s\S]*?display: none;/)
+})
+
+test('Maso sidebar and main planes use distinct semantic background roles', () => {
+  assert.match(chatSidebar, /\.chat-sidebar\s*\{[^}]*background: var\(--ch-color-sidebar-bg\);/s)
+  assert.match(app, /\.terminal-main-column\s*\{[^}]*background: var\(--ch-color-main-bg\);/s)
+  assert.match(terminalPane, /\.terminal-pane\s*\{[^}]*background-color: var\(--ch-color-main-bg\);/s)
 })
 
 test('a working session gets a Maso-style edge sweep with reduced-motion fallback', () => {

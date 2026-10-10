@@ -304,7 +304,7 @@ onUnmounted(() => {
   position: relative;
   display: flex;
   flex-direction: column;
-  background-color: var(--ch-color-app-bg);
+  background-color: var(--ch-color-main-bg);
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-lg);
   overflow: hidden;
@@ -505,6 +505,6 @@ onUnmounted(() => {
   min-height: 0;
   position: relative;
   z-index: 2;
-  background-color: var(--ch-color-app-bg);
+  background-color: var(--ch-color-main-bg);
 }
 </style>
