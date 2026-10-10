@@ -174,11 +174,9 @@
                 type="button"
                 class="chat-sidebar__item-main"
                 :aria-current="tab.id === activeTabId ? 'page' : undefined"
-                :title="`${tab.name || 'Untitled'} — ${tab.cwd || 'No directory'}. Double-click to rename; Alt+↑/↓ to reorder`"
+                :title="`${tab.name || 'Untitled'} — ${tab.cwd || 'No directory'}. Double-click to rename; drag to reorder`"
                 @click.stop="onRowClick($event, tab)"
                 @dblclick.stop="startRename(tab)"
-                @keydown.alt.up.prevent="moveInGroup(tab, group, -1)"
-                @keydown.alt.down.prevent="moveInGroup(tab, group, 1)"
               >
                 <span
                   class="chat-sidebar__item-status"
@@ -202,16 +200,13 @@
                 @keyup.enter="handleRenameTab(tab.id)"
                 @keyup.escape="cancelRename(tab.id)"
               >
-              <!-- Same ⋯ actions as the TabBar (rename / duplicate / archive /
-                   copy link / switch env). Hover-revealed like the old archive. -->
+              <!-- Same ⋯ actions as the TabBar. Reordering stays on the row's
+                   direct pointer-drag interaction instead of menu commands. -->
               <TabActionsMenu
                 class="chat-sidebar__item-menu"
                 :tab="tab"
                 variant="sidebar"
-                :move-up-disabled="group.tabs[0]?.id === tab.id"
-                :move-down-disabled="group.tabs[group.tabs.length - 1]?.id === tab.id"
                 @rename="startRename"
-                @move="direction => moveInGroup(tab, group, direction)"
               />
             </div>
             <button
@@ -746,20 +741,6 @@ watch(mobileDrawerOpen, isOpen => {
   }
 })
 
-function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 1) {
-  const index = group.tabs.findIndex(item => item.id === tab.id)
-  const target = group.tabs[index + direction]
-  if (index < 0 || !target) return
-  store.reorderTabById(tab.id, target.id, direction < 0 ? 'before' : 'after')
-  // Keep the moved row reachable when it crosses the preview boundary.
-  if (!group.pinned) expandedGroups.value = new Set([...expandedGroups.value, group.cwd])
-  nextTick(() => {
-    const rows = document.querySelectorAll<HTMLElement>('.chat-sidebar__item')
-    const row = [...rows].find(item => item.dataset.tabId === tab.id)
-    row?.querySelector<HTMLButtonElement>('.chat-sidebar__item-main')?.focus()
-    row?.scrollIntoView({ block: 'nearest' })
-  })
-}
 </script>
 
 <style scoped>

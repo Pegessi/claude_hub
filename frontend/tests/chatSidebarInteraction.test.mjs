@@ -21,6 +21,8 @@ test('session reorder uses pointer events instead of browser-native drag and dat
   assert.match(source, /\.chat-sidebar__pin-drop \{[\s\S]*position: absolute;/)
   assert.doesNotMatch(source, /@dragstart=/)
   assert.doesNotMatch(source, /dataTransfer/)
+  assert.doesNotMatch(source, /@keydown\.alt\.(up|down)/)
+  assert.doesNotMatch(source, /@move=/)
 })
 
 test('sidebar resize is bounded, accessible, and browser-persisted', () => {
