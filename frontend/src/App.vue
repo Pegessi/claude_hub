@@ -487,44 +487,46 @@ onUnmounted(() => {
   --visual-viewport-offset-top: 0px;
   --mobile-controls-viewport-shift: 0px;
   --keyboard-height: 0px;
-  /* Developer-tool dark theme: a Radix Slate / VS Code-inspired neutral
-     ladder keeps the workspace readable, while selection, focus, and primary
-     action each get a distinct blue role instead of sharing one loud accent. */
-  --ch-color-app-bg: #1f2023;
-  --ch-color-canvas: #18191b;
-  --ch-color-surface: #212225;
-  --ch-color-surface-raised: #272a2d;
-  --ch-color-surface-soft: #25272a;
-  --ch-color-surface-muted: #2b2e32;
-  --ch-color-surface-control: #2e3135;
-  --ch-color-surface-control-hover: #363a3f;
-  --ch-color-surface-control-active: #43484e;
-  --ch-color-surface-pressed: #4b5158;
-  --ch-color-surface-selected: #293947;
-  --ch-color-surface-sunken: #18191b;
-  --ch-color-surface-glass: rgba(33, 34, 37, 0.97);
+  /* Maso-inspired carbon chrome: surfaces stay close and quiet, while the
+     current context uses the same clear blue family as Maso's main theme. */
+  --ch-color-app-bg: #1b1b1c;
+  --ch-color-canvas: #171718;
+  --ch-color-surface: #1d1d1f;
+  --ch-color-surface-raised: #242426;
+  --ch-color-surface-soft: #202022;
+  --ch-color-surface-muted: #252527;
+  --ch-color-surface-control: #29292c;
+  --ch-color-surface-control-hover: #313135;
+  --ch-color-surface-control-active: #38383d;
+  --ch-color-surface-pressed: #414147;
+  --ch-color-surface-selected: #2a2f36;
+  --ch-color-surface-sunken: #151516;
+  --ch-color-surface-glass: rgba(29, 29, 31, 0.97);
   --ch-color-overlay: rgba(0, 0, 0, 0.68);
   --ch-color-overlay-soft: rgba(0, 0, 0, 0.56);
-  --ch-color-border: #363a3f;
-  --ch-color-border-muted: #2e3135;
-  --ch-color-border-strong: #43484e;
-  --ch-color-border-hover: #5a6169;
-  --ch-color-border-selected: #568aa8;
-  --ch-color-text: #d7d9dd;
-  --ch-color-text-strong: #f2f3f5;
-  --ch-color-text-muted: #b0b4ba;
-  --ch-color-text-subtle: #8f959d;
-  --ch-color-text-soft: #9da2a9;
-  --ch-color-text-selected: #e4f3fb;
+  --ch-color-border: #2f2f33;
+  --ch-color-border-muted: #28282c;
+  --ch-color-border-strong: #3a3a40;
+  --ch-color-border-hover: #4a4a52;
+  --ch-color-border-selected: #5a9cf0;
+  --ch-color-text: #c7c7cc;
+  --ch-color-text-strong: #f1f1f3;
+  --ch-color-text-muted: #a0a0a8;
+  --ch-color-text-subtle: #74747d;
+  --ch-color-text-soft: #8a8a93;
+  --ch-color-text-selected: #eef6ff;
   --ch-color-text-inverse: #ffffff;
-  --ch-color-text-code: #e4e7eb;
-  --ch-color-accent: #83b6d8;
-  --ch-color-accent-strong: #326f98;
-  --ch-color-accent-hover: #3a769f;
-  --ch-color-accent-soft: rgba(131, 182, 216, 0.16);
-  --ch-color-accent-ring: #83b6d8;
-  --ch-color-accent-halo: rgba(131, 182, 216, 0.26);
-  --ch-color-accent-ring-strong: rgba(131, 182, 216, 0.48);
+  --ch-color-text-code: #dedee3;
+  --ch-color-accent: #7cb7ff;
+  --ch-color-accent-strong: #3276ba;
+  --ch-color-accent-hover: #4a8ce0;
+  --ch-color-accent-fill-hover: #3478bb;
+  --ch-color-accent-soft: rgba(90, 156, 240, 0.16);
+  --ch-color-accent-ring: #7cb7ff;
+  --ch-color-accent-halo: rgba(90, 156, 240, 0.3);
+  --ch-color-accent-ring-strong: rgba(124, 183, 255, 0.58);
+  --ch-color-session-glow: #5a9cf0;
+  --ch-color-session-glow-strong: #9acbff;
   --ch-color-success: #4ade80;
   --ch-color-success-strong: #22c55e;
   --ch-color-success-hover: #16a34a;
@@ -544,9 +546,9 @@ onUnmounted(() => {
   --ch-color-danger-text: #fca5a5;
   --ch-color-discovery-bg: rgba(183, 148, 224, 0.1);
   --ch-color-discovery-border: rgba(183, 148, 224, 0.3);
-  --ch-color-chip-bg: rgba(237, 238, 240, 0.08);
-  --ch-color-chip-bg-muted: rgba(237, 238, 240, 0.05);
-  --ch-color-row-hover: rgba(237, 238, 240, 0.075);
+  --ch-color-chip-bg: rgba(240, 240, 244, 0.075);
+  --ch-color-chip-bg-muted: rgba(240, 240, 244, 0.045);
+  --ch-color-row-hover: rgba(240, 240, 244, 0.06);
   --ch-shadow-popover: 0 14px 36px rgba(0, 0, 0, 0.46), 0 0 0 1px rgba(255, 255, 255, 0.02);
   --ch-shadow-dialog: 0 24px 72px rgba(0, 0, 0, 0.5);
   --ch-shadow-soft: 0 3px 14px rgba(0, 0, 0, 0.34);
@@ -561,19 +563,19 @@ onUnmounted(() => {
   --ch-motion-standard: 160ms cubic-bezier(0.2, 0, 0, 1);
   --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.15);
   --ch-shadow-button-hover: 0 2px 8px rgba(0, 0, 0, 0.2);
-  --ch-shadow-button-primary: 0 1px 5px rgba(50, 111, 152, 0.4);
+  --ch-shadow-button-primary: 0 1px 6px rgba(50, 118, 186, 0.4);
   --ch-font-size-xs: 11px;
   --ch-font-size-sm: 12px;
   --ch-font-size-base: 13px;
   --ch-font-size-md: 13px;
   --ch-font-size-lg: 14px;
-  --ch-tab-fade-start: #212225;
-  --ch-tab-fade-end: rgba(33, 34, 37, 0);
-  --ch-terminal-bg: #1f2023;
+  --ch-tab-fade-start: #1d1d1f;
+  --ch-tab-fade-end: rgba(29, 29, 31, 0);
+  --ch-terminal-bg: #1b1b1c;
   --ch-terminal-canvas-filter: none;
   --ch-terminal-fg: #e5e7eb;
   --ch-terminal-cursor: #f4f4f5;
-  --ch-terminal-selection: rgba(131, 182, 216, 0.3);
+  --ch-terminal-selection: rgba(90, 156, 240, 0.3);
   --ch-terminal-black: #1f2937;
   --ch-terminal-red: #c26b6b;
   --ch-terminal-green: #4f8f63;
@@ -613,11 +615,11 @@ onUnmounted(() => {
 
 :root[data-theme='light'] {
   color-scheme: light;
-  /* The light theme mirrors the same neutral and interaction roles, using a
-     soft mist canvas rather than unrelated warm-paper values. */
-  --ch-color-app-bg: #f3f4f6;
-  --ch-color-canvas: #eef0f2;
-  --ch-color-surface: #fbfbfc;
+  /* Light keeps the same neutral geometry with a muted clay-orange
+     interaction family, separated from saturated amber warnings and red errors. */
+  --ch-color-app-bg: #f4f4f5;
+  --ch-color-canvas: #f0f0f2;
+  --ch-color-surface: #fafafa;
   --ch-color-surface-raised: #ffffff;
   --ch-color-surface-soft: #f4f5f6;
   --ch-color-surface-muted: #e8eaed;
@@ -625,7 +627,7 @@ onUnmounted(() => {
   --ch-color-surface-control-hover: #e4e7ea;
   --ch-color-surface-control-active: #d9dde1;
   --ch-color-surface-pressed: #cdd2d7;
-  --ch-color-surface-selected: #e2edf4;
+  --ch-color-surface-selected: #f4eae3;
   --ch-color-surface-sunken: #e9ebee;
   --ch-color-surface-glass: rgba(251, 251, 252, 0.97);
   --ch-color-overlay: rgba(32, 30, 27, 0.42);
@@ -634,22 +636,25 @@ onUnmounted(() => {
   --ch-color-border-muted: #e1e3e6;
   --ch-color-border-strong: #c5c9ce;
   --ch-color-border-hover: #9ca3ab;
-  --ch-color-border-selected: #5f8aa5;
+  --ch-color-border-selected: #a9795d;
   --ch-color-text: #25282d;
   --ch-color-text-strong: #15171a;
   --ch-color-text-muted: #5e646c;
   --ch-color-text-subtle: #7a818a;
   --ch-color-text-soft: #676d75;
-  --ch-color-text-selected: #143e58;
+  --ch-color-text-selected: #523622;
   --ch-color-text-inverse: #ffffff;
   --ch-color-text-code: #1d2329;
-  --ch-color-accent: #246f98;
-  --ch-color-accent-strong: #1d6f9d;
-  --ch-color-accent-hover: #176a9a;
-  --ch-color-accent-soft: rgba(36, 111, 152, 0.11);
-  --ch-color-accent-ring: #246f98;
-  --ch-color-accent-halo: rgba(36, 111, 152, 0.18);
-  --ch-color-accent-ring-strong: rgba(36, 111, 152, 0.42);
+  --ch-color-accent: #976549;
+  --ch-color-accent-strong: #82533a;
+  --ch-color-accent-hover: #86583f;
+  --ch-color-accent-fill-hover: #754a33;
+  --ch-color-accent-soft: rgba(151, 101, 73, 0.1);
+  --ch-color-accent-ring: #976549;
+  --ch-color-accent-halo: rgba(151, 101, 73, 0.2);
+  --ch-color-accent-ring-strong: rgba(151, 101, 73, 0.46);
+  --ch-color-session-glow: #a9795d;
+  --ch-color-session-glow-strong: #c69b82;
   --ch-color-success: #16a34a;
   --ch-color-success-strong: #15803d;
   --ch-color-success-hover: #166534;
@@ -686,7 +691,7 @@ onUnmounted(() => {
   --ch-motion-standard: 160ms cubic-bezier(0.2, 0, 0, 1);
   --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.06);
   --ch-shadow-button-hover: 0 2px 8px rgba(0, 0, 0, 0.1);
-  --ch-shadow-button-primary: 0 1px 5px rgba(29, 111, 157, 0.24);
+  --ch-shadow-button-primary: 0 1px 5px rgba(130, 83, 58, 0.24);
   --ch-font-size-xs: 11px;
   --ch-font-size-sm: 12px;
   --ch-font-size-base: 13px;
@@ -698,7 +703,7 @@ onUnmounted(() => {
   --ch-terminal-canvas-filter: contrast(0.78) saturate(0.55) brightness(1.22);
   --ch-terminal-fg: #262626;
   --ch-terminal-cursor: #33455a;
-  --ch-terminal-selection: rgba(36, 111, 152, 0.2);
+  --ch-terminal-selection: rgba(151, 101, 73, 0.2);
   --ch-terminal-black: #ececea;
   --ch-terminal-red: #f0d4d0;
   --ch-terminal-green: #dcecdf;
@@ -872,13 +877,13 @@ textarea {
 }
 
 .ch-btn--primary:hover:not(:disabled) {
-  background: var(--ch-color-accent-hover);
-  border-color: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
+  border-color: var(--ch-color-accent-fill-hover);
   box-shadow: var(--ch-shadow-button-primary);
 }
 
 .ch-btn--primary:active:not(:disabled) {
-  background: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 

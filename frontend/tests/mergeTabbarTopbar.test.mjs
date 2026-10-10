@@ -72,6 +72,17 @@ test('an unread completed turn shows a ping ripple on the status light', () => {
   )
 })
 
+test('a working session gets a Maso-style edge sweep with reduced-motion fallback', () => {
+  assert.match(chatSidebar, /:data-runtime-status="getTabStatus\(tab\)"/)
+  assert.match(chatSidebar, /\.chat-sidebar__item\[data-runtime-status='working'\]::after/)
+  assert.match(chatSidebar, /@keyframes sidebar-working-sweep/)
+  assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item\[data-runtime-status='working'\]::after,[\s\S]*?animation: none;/)
+  assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item\[data-runtime-status='working'\]::after \{[^}]*background: var\(--ch-color-session-glow\);/)
+  assert.match(chatSidebar, /--ch-color-session-glow-strong/)
+  assert.match(chatSidebar, /> :deep\(\.chat-sidebar__item-menu\) \{\s*position: absolute;[\s\S]*?z-index: 1;/)
+  assert.doesNotMatch(chatSidebar, /\[data-runtime-status='working'\] > \* \{/)
+})
+
 test('a session-name pill sits in the top-right corner of each pane', () => {
   assert.match(terminalPane, /class="pane-session-name"/)
   assert.match(terminalPane, /const tabName = computed/)

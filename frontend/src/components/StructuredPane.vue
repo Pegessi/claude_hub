@@ -4065,7 +4065,7 @@ onUnmounted(() => {
 }
 
 .composer-send-btn:hover:not(:disabled) {
-  background-color: var(--ch-color-accent-hover);
+  background-color: var(--ch-color-accent-fill-hover);
 }
 
 .composer-send-btn:disabled {

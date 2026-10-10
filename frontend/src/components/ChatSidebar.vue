@@ -164,6 +164,7 @@
               :key="tab.id"
               class="chat-sidebar__item"
               :class="{ active: tab.id === activeTabId, dragging: tab.id === draggedTabId }"
+              :data-runtime-status="getTabStatus(tab)"
               :data-tab-id="tab.id"
               :data-drop-position="dropTarget?.id === tab.id ? dropTarget.position : undefined"
               @pointerdown="onRowPointerDown($event, tab)"
@@ -1010,12 +1011,16 @@ watch(mobileDrawerOpen, isOpen => {
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
   border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text);
   font-size: var(--ch-font-size-sm);
-  transition: background var(--ch-motion-fast);
+  transition:
+    background var(--ch-motion-fast),
+    border-color var(--ch-motion-fast),
+    box-shadow var(--ch-motion-fast);
   cursor: grab;
   touch-action: pan-y;
 }
@@ -1026,7 +1031,53 @@ watch(mobileDrawerOpen, isOpen => {
 
 .chat-sidebar__item.active {
   background: var(--ch-color-surface-selected);
+  border-color: var(--ch-color-border-selected);
   color: var(--ch-color-text-selected);
+  box-shadow:
+    0 0 0 1px var(--ch-color-accent-halo),
+    0 0 18px -7px var(--ch-color-session-glow);
+}
+
+/* A running session gets a narrow travelling highlight around its edge. The
+   warning-colored status dot still carries the semantic "working" state;
+   this theme accent sweep only makes live work scannable in a long list. */
+.chat-sidebar__item[data-runtime-status='working']::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(
+    105deg,
+    transparent 18%,
+    var(--ch-color-session-glow) 42%,
+    var(--ch-color-session-glow-strong) 52%,
+    transparent 76%
+  ) 100% 0 / 240% 100%;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: sidebar-working-sweep 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.chat-sidebar__item[data-runtime-status='working']:not(.active) {
+  background: linear-gradient(90deg, var(--ch-color-accent-soft), transparent 72%);
+}
+
+.chat-sidebar__item[data-runtime-status='working'] > .chat-sidebar__item-main,
+.chat-sidebar__item[data-runtime-status='working'] > .chat-sidebar__rename-input {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes sidebar-working-sweep {
+  0% { background-position: 100% 0; opacity: 0.35; }
+  45% { opacity: 1; }
+  100% { background-position: -70% 0; opacity: 0.35; }
 }
 
 .chat-sidebar__item.dragging {
@@ -1152,6 +1203,18 @@ watch(mobileDrawerOpen, isOpen => {
   75%, 100% { transform: scale(2.4); opacity: 0; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .chat-sidebar__item[data-runtime-status='working']::after,
+  .chat-sidebar__item-status[data-unread='true']::after {
+    animation: none;
+  }
+
+  .chat-sidebar__item[data-runtime-status='working']::after {
+    background: var(--ch-color-session-glow);
+    opacity: 0.72;
+  }
+}
+
 .chat-sidebar__item-name {
   flex: 1;
   min-width: 0;
@@ -1172,14 +1235,15 @@ watch(mobileDrawerOpen, isOpen => {
 
 /* Hover-revealed ⋯ actions menu (same actions as the TabBar). Absolute,
    over the timestamp; focus-within keeps it reachable via keyboard. */
-.chat-sidebar__item-menu {
+.chat-sidebar__item > :deep(.chat-sidebar__item-menu) {
   position: absolute;
   right: 4px;
+  z-index: 1;
   display: none;
 }
 
-.chat-sidebar__item:hover .chat-sidebar__item-menu,
-.chat-sidebar__item:focus-within .chat-sidebar__item-menu {
+.chat-sidebar__item:hover > :deep(.chat-sidebar__item-menu),
+.chat-sidebar__item:focus-within > :deep(.chat-sidebar__item-menu) {
   display: inline-flex;
 }
 
