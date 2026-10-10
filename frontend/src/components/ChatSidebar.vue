@@ -1026,7 +1026,7 @@ watch(mobileDrawerOpen, isOpen => {
 
 .chat-sidebar__item.active {
   background: var(--ch-color-surface-selected);
-  color: var(--ch-color-text-strong);
+  color: var(--ch-color-text-selected);
 }
 
 .chat-sidebar__item.dragging {

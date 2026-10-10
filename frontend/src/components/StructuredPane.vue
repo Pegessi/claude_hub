@@ -4057,7 +4057,7 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 500;
   color: #fff;
-  background-color: var(--ch-color-accent);
+  background-color: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);
   cursor: pointer;
@@ -4216,7 +4216,7 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 500;
   color: #fff;
-  background: var(--ch-color-accent);
+  background: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);
   cursor: pointer;
@@ -4615,19 +4615,22 @@ onUnmounted(() => {
   justify-content: center;
   flex: 0 0 auto;
   border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-accent-soft);
-  color: var(--ch-color-accent);
+  border: 1px solid var(--ch-color-border-selected);
+  background: var(--ch-color-surface-selected);
+  color: var(--ch-color-text-selected);
   font-size: 11px;
   font-weight: 600;
 }
 
 .conversation-avatar--tool {
+  border-color: var(--ch-color-border-muted);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
   font-size: 10px;
 }
 
 .conversation-avatar--waiting {
+  border-color: var(--ch-color-border-muted);
   color: var(--ch-color-text-subtle);
   background: var(--ch-color-surface-control);
 }

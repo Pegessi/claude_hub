@@ -20,18 +20,22 @@ and retain direct drag reordering.
 - Successful deletion now returns an explicit boolean to callers and removes
   any browser-persisted pin for the deleted session. Existing TabBar and
   archived-session confirmation surfaces also stay open when deletion fails.
-- Dark uses near-black neutral surfaces with a warm coral highlight. Light uses
-  warm paper surfaces with a deeper terracotta accent. Semantic status colors
-  remain unchanged, while terminal surfaces and text selection follow the new
-  neutrals. Primary button colors retain at least 4.5:1 contrast against their
-  inverse text.
+- Dark uses a Radix Slate / VS Code-inspired surface ladder instead of stacking
+  near-black panels. Light mirrors those roles with cool mist neutrals. A calm
+  blue family is split across selected surfaces, focus borders, foreground
+  accents, and primary buttons so active controls are visible without turning
+  the whole interface blue. Semantic status colors remain unchanged.
+- Active mode, layout, sidebar item, pane, and assistant avatar now share the
+  selected-surface language. Empty panes use a theme-aware line icon and
+  brighter guidance instead of a dim system emoji.
 
 ## Validation
 
-- Focused interaction, store, theme, and semantic-color tests: `27 passed`.
-- Full frontend unit suite after final review: `706 passed`; the added tests
+- Focused interaction, store, theme, and semantic-color tests passed.
+- Full frontend unit suite after the researched palette revision: `709 passed`; the added tests
   cover delete success/failure, stale-pin cleanup, menu removal, palette tokens,
-  and accent contrast.
+  accent contrast, separation of selected/focus/primary roles, and a repository-
+  wide guard against translucent keyboard-focus rings.
 - `pnpm lint:check`, `pnpm typecheck`, and `pnpm build` passed.
 - Playwright reviewed the worktree frontend on `127.0.0.1:5184` in Dark and
   Light at 1440x980. It verified the menu stays inside the viewport, Move
@@ -39,12 +43,18 @@ and retain direct drag reordering.
   Escape closes it, pointer movement enters drag state, and the console has no
   errors or warnings. No session was deleted. The one test reorder write was
   restored and verified against the backend before continuing.
+- A second Playwright visual pass covered the researched Dark/Light palette,
+  2x2 empty-pane hierarchy, and real assistant avatars. Both themes rendered
+  without console errors or warnings.
 - Independent diff review found and fixed insufficient Dark primary-button
-  contrast, then added a regression assertion for both themes.
+  contrast. The researched revision review then caught foreground accents reused
+  as white-text fills and translucent focus rings; filled controls now use the
+  contrast-safe strong role, keyboard focus uses a solid contrast-safe ring, and
+  decorative halos retain their separate translucent role.
 - Final repository-wide `./scripts/verify.sh all` (pinned Node 24.21.0, uv
-  0.12.15, Python 3.11.16, and pnpm 9.15.9): docs, backend formatting and
-  types, frontend lint and types, all 706 frontend tests, and the production
-  build passed. The backend suite stopped at `1803 passed, 1 skipped` because
+  0.12.15, Python 3.11.16, and pnpm 9.15.9) passed docs, backend formatting
+  and types, frontend lint and types, all 709 frontend tests, and the production
+  build. The backend suite stopped at `1803 passed, 1 skipped` because
   the unchanged `test_frontend_build_timeout_keeps_current_backend_and_dist`
   hit macOS
   `EPERM` while starting its process-group fixture. The same test passed alone
