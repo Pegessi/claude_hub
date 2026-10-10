@@ -487,40 +487,44 @@ onUnmounted(() => {
   --visual-viewport-offset-top: 0px;
   --mobile-controls-viewport-shift: 0px;
   --keyboard-height: 0px;
-  /* Codex-inspired dark chrome: near-black canvas, quiet neutral elevation,
-     and one warm accent reserved for focus and primary actions. */
-  --ch-color-app-bg: #10100f;
-  --ch-color-canvas: #0d0d0c;
-  --ch-color-surface: #171716;
-  --ch-color-surface-raised: #1d1d1b;
-  --ch-color-surface-soft: #20201e;
-  --ch-color-surface-muted: #242421;
-  --ch-color-surface-control: #252522;
-  --ch-color-surface-control-hover: #2d2d29;
-  --ch-color-surface-control-active: #33332f;
-  --ch-color-surface-pressed: #393934;
-  --ch-color-surface-selected: #2a2723;
-  --ch-color-surface-sunken: #121211;
-  --ch-color-surface-glass: rgba(23, 23, 22, 0.96);
+  /* Developer-tool dark theme: a Radix Slate / VS Code-inspired neutral
+     ladder keeps the workspace readable, while selection, focus, and primary
+     action each get a distinct blue role instead of sharing one loud accent. */
+  --ch-color-app-bg: #1f2023;
+  --ch-color-canvas: #18191b;
+  --ch-color-surface: #212225;
+  --ch-color-surface-raised: #272a2d;
+  --ch-color-surface-soft: #25272a;
+  --ch-color-surface-muted: #2b2e32;
+  --ch-color-surface-control: #2e3135;
+  --ch-color-surface-control-hover: #363a3f;
+  --ch-color-surface-control-active: #43484e;
+  --ch-color-surface-pressed: #4b5158;
+  --ch-color-surface-selected: #293947;
+  --ch-color-surface-sunken: #18191b;
+  --ch-color-surface-glass: rgba(33, 34, 37, 0.97);
   --ch-color-overlay: rgba(0, 0, 0, 0.68);
   --ch-color-overlay-soft: rgba(0, 0, 0, 0.56);
-  --ch-color-border: #2b2b28;
-  --ch-color-border-muted: #242422;
-  --ch-color-border-strong: #383834;
-  --ch-color-border-hover: #4b4a45;
-  --ch-color-text: #e6e4df;
-  --ch-color-text-strong: #f4f2ed;
-  --ch-color-text-muted: #aaa7a0;
-  --ch-color-text-subtle: #77736d;
-  --ch-color-text-soft: #8e8a83;
-  --ch-color-text-inverse: #fffaf6;
-  --ch-color-text-code: #ebe8e2;
-  --ch-color-accent: #e58a68;
-  --ch-color-accent-strong: #b6573b;
-  --ch-color-accent-hover: #ad5136;
-  --ch-color-accent-soft: rgba(229, 138, 104, 0.14);
-  --ch-color-accent-ring: rgba(229, 138, 104, 0.2);
-  --ch-color-accent-ring-strong: rgba(229, 138, 104, 0.48);
+  --ch-color-border: #363a3f;
+  --ch-color-border-muted: #2e3135;
+  --ch-color-border-strong: #43484e;
+  --ch-color-border-hover: #5a6169;
+  --ch-color-border-selected: #568aa8;
+  --ch-color-text: #d7d9dd;
+  --ch-color-text-strong: #f2f3f5;
+  --ch-color-text-muted: #b0b4ba;
+  --ch-color-text-subtle: #8f959d;
+  --ch-color-text-soft: #9da2a9;
+  --ch-color-text-selected: #e4f3fb;
+  --ch-color-text-inverse: #ffffff;
+  --ch-color-text-code: #e4e7eb;
+  --ch-color-accent: #83b6d8;
+  --ch-color-accent-strong: #326f98;
+  --ch-color-accent-hover: #3a769f;
+  --ch-color-accent-soft: rgba(131, 182, 216, 0.16);
+  --ch-color-accent-ring: #83b6d8;
+  --ch-color-accent-halo: rgba(131, 182, 216, 0.26);
+  --ch-color-accent-ring-strong: rgba(131, 182, 216, 0.48);
   --ch-color-success: #4ade80;
   --ch-color-success-strong: #22c55e;
   --ch-color-success-hover: #16a34a;
@@ -540,9 +544,9 @@ onUnmounted(() => {
   --ch-color-danger-text: #fca5a5;
   --ch-color-discovery-bg: rgba(183, 148, 224, 0.1);
   --ch-color-discovery-border: rgba(183, 148, 224, 0.3);
-  --ch-color-chip-bg: rgba(244, 242, 237, 0.07);
-  --ch-color-chip-bg-muted: rgba(244, 242, 237, 0.045);
-  --ch-color-row-hover: rgba(244, 242, 237, 0.055);
+  --ch-color-chip-bg: rgba(237, 238, 240, 0.08);
+  --ch-color-chip-bg-muted: rgba(237, 238, 240, 0.05);
+  --ch-color-row-hover: rgba(237, 238, 240, 0.075);
   --ch-shadow-popover: 0 14px 36px rgba(0, 0, 0, 0.46), 0 0 0 1px rgba(255, 255, 255, 0.02);
   --ch-shadow-dialog: 0 24px 72px rgba(0, 0, 0, 0.5);
   --ch-shadow-soft: 0 3px 14px rgba(0, 0, 0, 0.34);
@@ -557,19 +561,19 @@ onUnmounted(() => {
   --ch-motion-standard: 160ms cubic-bezier(0.2, 0, 0, 1);
   --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.15);
   --ch-shadow-button-hover: 0 2px 8px rgba(0, 0, 0, 0.2);
-  --ch-shadow-button-primary: 0 1px 4px rgba(182, 87, 59, 0.3);
+  --ch-shadow-button-primary: 0 1px 5px rgba(50, 111, 152, 0.4);
   --ch-font-size-xs: 11px;
   --ch-font-size-sm: 12px;
   --ch-font-size-base: 13px;
   --ch-font-size-md: 13px;
   --ch-font-size-lg: 14px;
-  --ch-tab-fade-start: #171716;
-  --ch-tab-fade-end: rgba(23, 23, 22, 0);
-  --ch-terminal-bg: #171716;
+  --ch-tab-fade-start: #212225;
+  --ch-tab-fade-end: rgba(33, 34, 37, 0);
+  --ch-terminal-bg: #1f2023;
   --ch-terminal-canvas-filter: none;
   --ch-terminal-fg: #e5e7eb;
   --ch-terminal-cursor: #f4f4f5;
-  --ch-terminal-selection: rgba(229, 138, 104, 0.24);
+  --ch-terminal-selection: rgba(131, 182, 216, 0.3);
   --ch-terminal-black: #1f2937;
   --ch-terminal-red: #c26b6b;
   --ch-terminal-green: #4f8f63;
@@ -609,39 +613,43 @@ onUnmounted(() => {
 
 :root[data-theme='light'] {
   color-scheme: light;
-  /* Warm paper surfaces echo Codex without sacrificing the contrast needed by
-     a dense operational UI. */
-  --ch-color-app-bg: #e9e8e4;
-  --ch-color-canvas: #f3f2ef;
-  --ch-color-surface: #f8f7f4;
-  --ch-color-surface-raised: #fffefb;
-  --ch-color-surface-soft: #efeee9;
-  --ch-color-surface-muted: #e7e5df;
-  --ch-color-surface-control: #eeece6;
-  --ch-color-surface-control-hover: #e3e1da;
-  --ch-color-surface-control-active: #d9d6ce;
-  --ch-color-surface-pressed: #cecbc2;
-  --ch-color-surface-selected: #ebe6df;
-  --ch-color-surface-sunken: #eae8e2;
-  --ch-color-surface-glass: rgba(248, 247, 244, 0.96);
+  /* The light theme mirrors the same neutral and interaction roles, using a
+     soft mist canvas rather than unrelated warm-paper values. */
+  --ch-color-app-bg: #f3f4f6;
+  --ch-color-canvas: #eef0f2;
+  --ch-color-surface: #fbfbfc;
+  --ch-color-surface-raised: #ffffff;
+  --ch-color-surface-soft: #f4f5f6;
+  --ch-color-surface-muted: #e8eaed;
+  --ch-color-surface-control: #f0f1f3;
+  --ch-color-surface-control-hover: #e4e7ea;
+  --ch-color-surface-control-active: #d9dde1;
+  --ch-color-surface-pressed: #cdd2d7;
+  --ch-color-surface-selected: #e2edf4;
+  --ch-color-surface-sunken: #e9ebee;
+  --ch-color-surface-glass: rgba(251, 251, 252, 0.97);
   --ch-color-overlay: rgba(32, 30, 27, 0.42);
   --ch-color-overlay-soft: rgba(32, 30, 27, 0.32);
-  --ch-color-border: #d8d5cd;
-  --ch-color-border-muted: #e3e0d9;
-  --ch-color-border-strong: #c7c3ba;
-  --ch-color-border-hover: #aaa59b;
-  --ch-color-text: #292724;
-  --ch-color-text-strong: #171614;
-  --ch-color-text-muted: #69655f;
-  --ch-color-text-subtle: #908b83;
-  --ch-color-text-soft: #77726b;
-  --ch-color-text-code: #22201e;
-  --ch-color-accent: #b25539;
-  --ch-color-accent-strong: #a94c31;
-  --ch-color-accent-hover: #974028;
-  --ch-color-accent-soft: rgba(178, 85, 57, 0.11);
-  --ch-color-accent-ring: rgba(178, 85, 57, 0.16);
-  --ch-color-accent-ring-strong: rgba(178, 85, 57, 0.42);
+  --ch-color-border: #d6d9dd;
+  --ch-color-border-muted: #e1e3e6;
+  --ch-color-border-strong: #c5c9ce;
+  --ch-color-border-hover: #9ca3ab;
+  --ch-color-border-selected: #5f8aa5;
+  --ch-color-text: #25282d;
+  --ch-color-text-strong: #15171a;
+  --ch-color-text-muted: #5e646c;
+  --ch-color-text-subtle: #7a818a;
+  --ch-color-text-soft: #676d75;
+  --ch-color-text-selected: #143e58;
+  --ch-color-text-inverse: #ffffff;
+  --ch-color-text-code: #1d2329;
+  --ch-color-accent: #246f98;
+  --ch-color-accent-strong: #1d6f9d;
+  --ch-color-accent-hover: #176a9a;
+  --ch-color-accent-soft: rgba(36, 111, 152, 0.11);
+  --ch-color-accent-ring: #246f98;
+  --ch-color-accent-halo: rgba(36, 111, 152, 0.18);
+  --ch-color-accent-ring-strong: rgba(36, 111, 152, 0.42);
   --ch-color-success: #16a34a;
   --ch-color-success-strong: #15803d;
   --ch-color-success-hover: #166534;
@@ -661,9 +669,9 @@ onUnmounted(() => {
   --ch-color-danger-text: #991b1b;
   --ch-color-discovery-bg: #eae4f0;
   --ch-color-discovery-border: #c0b4d0;
-  --ch-color-chip-bg: rgba(41, 39, 36, 0.055);
-  --ch-color-chip-bg-muted: rgba(41, 39, 36, 0.035);
-  --ch-color-row-hover: rgba(41, 39, 36, 0.05);
+  --ch-color-chip-bg: rgba(37, 40, 45, 0.06);
+  --ch-color-chip-bg-muted: rgba(37, 40, 45, 0.04);
+  --ch-color-row-hover: rgba(37, 40, 45, 0.055);
   --ch-shadow-popover: 0 14px 36px rgba(32, 30, 27, 0.13), 0 0 0 1px rgba(32, 30, 27, 0.02);
   --ch-shadow-dialog: 0 24px 72px rgba(32, 30, 27, 0.16);
   --ch-shadow-soft: 0 3px 14px rgba(32, 30, 27, 0.09);
@@ -678,19 +686,19 @@ onUnmounted(() => {
   --ch-motion-standard: 160ms cubic-bezier(0.2, 0, 0, 1);
   --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.06);
   --ch-shadow-button-hover: 0 2px 8px rgba(0, 0, 0, 0.1);
-  --ch-shadow-button-primary: 0 1px 4px rgba(169, 76, 49, 0.24);
+  --ch-shadow-button-primary: 0 1px 5px rgba(29, 111, 157, 0.24);
   --ch-font-size-xs: 11px;
   --ch-font-size-sm: 12px;
   --ch-font-size-base: 13px;
   --ch-font-size-md: 13px;
   --ch-font-size-lg: 14px;
-  --ch-tab-fade-start: #f8f7f4;
-  --ch-tab-fade-end: rgba(248, 247, 244, 0);
-  --ch-terminal-bg: #f3f2ef;
+  --ch-tab-fade-start: #fbfbfc;
+  --ch-tab-fade-end: rgba(251, 251, 252, 0);
+  --ch-terminal-bg: #f3f4f6;
   --ch-terminal-canvas-filter: contrast(0.78) saturate(0.55) brightness(1.22);
   --ch-terminal-fg: #262626;
   --ch-terminal-cursor: #33455a;
-  --ch-terminal-selection: rgba(189, 91, 59, 0.18);
+  --ch-terminal-selection: rgba(36, 111, 152, 0.2);
   --ch-terminal-black: #ececea;
   --ch-terminal-red: #f0d4d0;
   --ch-terminal-green: #dcecdf;
@@ -979,9 +987,9 @@ textarea {
 }
 
 .ch-segmented__btn.active {
-  background: var(--ch-color-surface-control-hover);
-  border-color: var(--ch-color-accent-ring-strong);
-  color: var(--ch-color-text);
+  background: var(--ch-color-surface-selected);
+  border-color: var(--ch-color-border-selected);
+  color: var(--ch-color-text-selected);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
@@ -1135,9 +1143,9 @@ textarea {
 }
 
 .mode-button.active {
-  background: var(--ch-color-surface-control-hover);
-  border-color: var(--ch-color-accent-ring-strong);
-  color: var(--ch-color-text);
+  background: var(--ch-color-surface-selected);
+  border-color: var(--ch-color-border-selected);
+  color: var(--ch-color-text-selected);
   box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
 }
 
