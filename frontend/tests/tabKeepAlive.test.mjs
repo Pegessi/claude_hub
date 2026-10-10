@@ -21,11 +21,16 @@ const historyCache = readFileSync(
 // tabId inside a bounded <KeepAlive>, so each chat tab owns a cached instance.
 // ---------------------------------------------------------------------------
 
-test('TerminalPane caches StructuredPane per tabId inside a bounded KeepAlive', () => {
+test('TerminalPane caches StructuredPane per tabId without evicting actionable queues', () => {
   assert.match(
     terminalPane,
-    /<KeepAlive\s+:max="[^"]+"/,
-    'a <KeepAlive> with a bounded :max must wrap the chat pane',
+    /<KeepAlive\s+:max="chatCacheMax"/,
+    'the chat cache limit must be queue-aware',
+  )
+  assert.match(
+    terminalPane,
+    /paneHasProtectedQueuedChat\(props\.pane\.id\)\s*\?\s*undefined/,
+    'an actionable queued Chat must be protected from KeepAlive eviction',
   )
   // The key is what gives each chat tab its own cached instance; without it a
   // tab switch would reuse one instance and wipe state via the prop change.
@@ -34,14 +39,19 @@ test('TerminalPane caches StructuredPane per tabId inside a bounded KeepAlive', 
     /<StructuredPane[\s\S]*?:key="pane\.tabId"/,
     'StructuredPane must be keyed by pane.tabId so each chat tab gets a cached instance',
   )
+  assert.match(
+    terminalPane,
+    /<StructuredPane[\s\S]*?:pane-id="pane\.id"/,
+    'StructuredPane must know which pane owns its cached queue',
+  )
 })
 
-test('StructuredPane resumes/stops the stream on KeepAlive activate/deactivate', () => {
+test('StructuredPane resumes the stream and suspends non-queued observers on KeepAlive edges', () => {
   assert.match(structuredPane, /onActivated\(/, 'onActivated must resume the stream')
   assert.match(
     structuredPane,
-    /onDeactivated\(/,
-    'onDeactivated must stop the stream (caching history) so cached panes do not hold open connections',
+    /onDeactivated\([\s\S]*?suspendStreamForDeactivation\(\)/,
+    'onDeactivated must release ordinary cached streams while an actionable queue keeps observing completion',
   )
 })
 
@@ -52,7 +62,7 @@ test('switching back rearms latest before cached history reconciles', () => {
   const visibleHistoryStart = { value: 120 }
   const activate = new Function(
     'resetActivation', 'startStream', 'hydrateGoal', 'nextTick', 'observeTimelineGeometry',
-    'visibleHistoryStart', 'timelineDisposed', 'timelineVisit', body,
+    'visibleHistoryStart', 'isPaneActivated', 'timelineDisposed', 'timelineVisit', body,
   )
   activate(
     () => calls.push('reset'),
@@ -60,7 +70,7 @@ test('switching back rearms latest before cached history reconciles', () => {
     () => calls.push('hydrate-goal'),
     () => {},
     () => {},
-    visibleHistoryStart, true, 0,
+    visibleHistoryStart, { value: false }, true, 0,
   )
   assert.deepEqual(calls, ['reset', 'start', 'hydrate-goal'])
   assert.equal(visibleHistoryStart.value, null, 'a new visit starts with the latest history window')

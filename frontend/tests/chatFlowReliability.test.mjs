@@ -199,13 +199,14 @@ async function loadComposerEntries() {
   const snippet = [
     extractFunction(source, 'sendToStream'),
     extractFunction(source, 'submit'),
+    extractFunction(source, 'suspendStreamForDeactivation'),
     extractFunction(source, 'flushDraftQueue'),
     extractFunction(source, 'requestDraftQueueFlush'),
   ].join('\n')
   const { outputText } = ts.transpileModule(snippet, transpileOptions)
   return new Function(
     'deps',
-    `const { isSending, goalComposerLocked, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, canSend, props } = deps;\n${outputText}\nreturn { submit, flushDraftQueue, requestDraftQueueFlush };`,
+    `const { isSending, goalComposerLocked, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, isWaitingForQueuedChatActivation, canSend, stop, props } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush };`,
   )
 }
 
@@ -223,6 +224,11 @@ function composerDeps(options = {}) {
   ))
   const draftQueue = ref([])
   const connectionState = ref(options.connectionState ?? 'live')
+  const isPaneActivated = ref(options.isPaneActivated ?? true)
+  const activationCalls = []
+  let activationPending = false
+  let activationOwner = false
+  let stopCalls = 0
   const isPreparingAttachments = ref(options.isPreparingAttachments ?? false)
   const isUpdatingMode = ref(options.isUpdatingMode ?? false)
   const isUpdatingModel = ref(options.isUpdatingModel ?? false)
@@ -249,11 +255,32 @@ function composerDeps(options = {}) {
     pendingDirectTurns,
     requestLatestAnchor() {},
     async hydrateGoal() {},
-    terminalStore: { async fetchAgentStatuses() {} },
+    terminalStore: {
+      async fetchAgentStatuses() {},
+      setQueuedChatProtected() {},
+      requestQueuedChatActivation(paneId, tabId) {
+        activationPending = true
+        activationOwner = true
+        activationCalls.push(`pane:${paneId}`)
+        activationCalls.push(`tab:${tabId}`)
+      },
+      releaseQueuedChatActivation() {
+        activationPending = false
+        activationOwner = false
+      },
+      hasQueuedChatActivationRequest() { return activationPending },
+      isQueuedChatActivationOwner() { return activationOwner },
+    },
     nextTick,
     syncComposerTextareaHeight() {},
     draftQueue,
     connectionState,
+    isPaneActivated,
+    isQueueSendInProgress: ref(false),
+    isWaitingForQueuedChatActivation: computed(() => activationPending && !activationOwner),
+    activationCalls,
+    stop() { stopCalls += 1 },
+    getStopCalls() { return stopCalls },
     isPreparingAttachments,
     isUpdatingMode,
     isUpdatingModel,
@@ -261,7 +288,7 @@ function composerDeps(options = {}) {
     isSubmissionReady,
     isDraftQueuePaused: ref(false),
     canSend,
-    props: { tabId: 'tab-a' },
+    props: { tabId: 'tab-a', paneId: 'pane-a' },
   }
 }
 
@@ -274,6 +301,8 @@ function watchDraftQueue(deps, requestDraftQueueFlush) {
       deps.goalComposerLocked,
       deps.isSubmissionReady,
       deps.isDraftQueuePaused,
+      deps.isPaneActivated,
+      deps.isWaitingForQueuedChatActivation,
     ],
     requestDraftQueueFlush,
   )
@@ -318,6 +347,79 @@ test('queue watcher waits for live recovery before sending', async t => {
   await waitFor(() => sendCalls === 1, 'queue did not resume after the stream became live')
   assert.equal(deps.draftQueue.value.length, 0)
   assert.equal(deps.pendingDirectTurns.value.length, 1)
+})
+
+test('hidden queue activates its Chat before sending and flushes once after activation', async t => {
+  const makeEntries = await loadComposerEntries()
+  let sendCalls = 0
+  t.mock.method(globalThis, 'fetch', async () => {
+    sendCalls += 1
+    return { ok: true, json: async () => ({}) }
+  })
+  const deps = composerDeps({
+    draftMessage: '',
+    connectionState: 'live',
+    isPaneActivated: false,
+  })
+  const entries = makeEntries(deps)
+  const unwatch = watchDraftQueue(deps, entries.requestDraftQueueFlush)
+  t.after(unwatch)
+
+  deps.draftQueue.value = [{ message: 'queued for hidden Chat', attachments: [] }]
+  await nextTick()
+
+  assert.deepEqual(deps.activationCalls, ['pane:pane-a', 'tab:tab-a'])
+  assert.equal(sendCalls, 0, 'a hidden Chat must not send before it is activated')
+  assert.equal(deps.draftQueue.value.length, 1)
+
+  deps.isPaneActivated.value = true
+  await waitFor(() => sendCalls === 1, 'queue did not flush after its Chat activated')
+  assert.deepEqual(
+    deps.activationCalls,
+    ['pane:pane-a', 'tab:tab-a'],
+    'activation must not be requested twice',
+  )
+  assert.equal(deps.draftQueue.value.length, 0)
+  assert.equal(deps.pendingDirectTurns.value.length, 1)
+})
+
+test('deactivation keeps only an actionable queued Chat stream alive', async () => {
+  const makeEntries = await loadComposerEntries()
+
+  const queued = composerDeps({ draftMessage: '' })
+  queued.draftQueue.value = [{ message: 'wait for current turn', attachments: [] }]
+  makeEntries(queued).suspendStreamForDeactivation()
+  assert.equal(queued.getStopCalls(), 0, 'an actionable hidden queue must keep observing completion')
+
+  queued.isDraftQueuePaused.value = true
+  makeEntries(queued).suspendStreamForDeactivation()
+  assert.equal(queued.getStopCalls(), 1, 'a delivery-uncertain queue must not retain a hidden stream')
+
+  const empty = composerDeps({ draftMessage: '' })
+  makeEntries(empty).suspendStreamForDeactivation()
+  assert.equal(empty.getStopCalls(), 1, 'an empty hidden Chat must release its stream')
+})
+
+test('a hidden queue releases its observer if delivery becomes uncertain', async () => {
+  const makeEntries = await loadComposerEntries()
+  const deps = composerDeps({
+    draftMessage: '',
+    connectionState: 'live',
+    isPaneActivated: false,
+  })
+  deps.draftQueue.value = [{ message: 'do not retry implicitly', attachments: [] }]
+  const entries = makeEntries(deps)
+  const unwatch = watchDraftQueue(deps, entries.requestDraftQueueFlush)
+
+  deps.authoritativeTurnInFlight.value = true
+  await nextTick()
+  deps.isDraftQueuePaused.value = true
+  await nextTick()
+  unwatch()
+
+  assert.equal(deps.getStopCalls(), 1)
+  assert.deepEqual(deps.activationCalls, [])
+  assert.equal(deps.draftQueue.value.length, 1)
 })
 
 test('queue watcher preserves every item through attachment and model updates', async t => {
