@@ -11,11 +11,15 @@
   exposing credentials, and keep the Bot settings view refreshed while a connection
   is starting or retrying.
 - Coalesce same-Chat messages received within a one-second quiet window (with a
-  three-second maximum wait) into one ordered model request. Messages arriving
+  five-second maximum wait) into one ordered model request. Messages arriving
   after a turn starts become one follow-up batch instead of interrupting the
   active turn; bounded backpressure and per-message deduplication remain intact.
 - Show a best-effort received reaction while a message is being coalesced or
-  queued, then a typing reaction when its batch starts.
+  queued, then a typing reaction when its batch starts, without letting reaction
+  network latency delay native model dispatch; repeated shutdown cancellation
+  still waits for the bounded reaction cleanup it owns.
+- Anchor a combined response to the newest message in its batch, and only label
+  later input as a follow-up after an earlier Feishu turn passed Chat admission.
 - Deliver assistant Markdown as Feishu rich-text posts with code-block support and
   versioned provider guidance, while preserving historical `feishu-v1` turns and
   preventing model-authored mention tags from notifying users implicitly.

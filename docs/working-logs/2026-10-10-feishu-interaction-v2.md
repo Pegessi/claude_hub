@@ -55,7 +55,7 @@ unrelated refresh.
 Each paired Chat gets one active Feishu dispatch and a bounded queue of later
 messages. The first message waits for a one-second quiet window so a short burst
 can be submitted as one ordered model request; continuous typing can delay that
-request for at most three seconds. A single message keeps its original visible
+request for at most five seconds. A single message keeps its original visible
 text, while a batch is labeled and numbered so the model handles it as one
 request without losing arrival order.
 
@@ -75,9 +75,12 @@ other members of its would-be batch.
 
 For a valid bound message, the Bot best-effort adds Feishu's `OneSecond` reaction
 while the message is being coalesced or queued. The batch leader changes to a
-`Typing` reaction immediately before native dispatch; all exact reaction records
-are deleted in the route cleanup path. Missing reaction scope or a transient
-reaction API failure never blocks the model turn or its reply.
+`Typing` reaction when native dispatch starts; all exact reaction records are
+deleted in the route cleanup path. This lifecycle runs independently from native
+dispatch, so missing scope, a slow API, or a transient reaction failure never
+delays the model turn or its reply. Combined replies are anchored to the newest
+message in their batch. A rejected batch does not make the next admitted message
+look like a follow-up.
 
 Operators who want the typing hint should grant the Bot
 `im:message.reactions:write_only`; the rest of the integration remains usable
@@ -111,7 +114,7 @@ versions. Results:
   cleanup, same-message replay after a queued cancellation, structured replies,
   SDK single-flight import and log rotation.
 - The subsequent coalescing refinement adds focused coverage for one-second
-  burst grouping, the three-second maximum wait, one non-interrupting follow-up,
+  burst grouping, the five-second maximum wait, one non-interrupting follow-up,
   queue capacity, external busy admission, follower cancellation/replay, and
   per-message reaction cleanup.
 - A separate formatter boundary probe checked 30,772 balanced combinations of
@@ -128,14 +131,18 @@ versions. Results:
   stopped after the smoke check. The shared service on `:8173` was untouched.
 
 `./scripts/verify.sh all` was attempted before handoff. Its frontend, format and
-type targets passed. Repeated fail-fast backend runs passed more than 1,660 tests
-before unrelated asynchronous queue-status tests failed nondeterministically. A
-no-fail-fast run then finished with 2,779 passed, 7 skipped, one failure and 12
-setup errors: the assertion failure was an unchanged restart timeout test whose
-subprocess setup returned macOS `Operation not permitted`, while all 12 setup
-errors were unchanged Playwright tests whose isolated HOME had no downloaded
-Chromium executable. Those environment failures are recorded separately from
-the 316 passing tests that exercise every changed backend path.
+type targets passed. The final no-fail-fast backend run completed all 2,843
+collected cases with 2,797 passed, 7 skipped, one failure and 38 setup errors. The
+unchanged restart timeout test could not start its subprocess under the macOS
+verification sandbox (`Operation not permitted`), but passed when run in
+isolation. All 38 setup errors were unchanged Playwright cases whose isolated
+HOME had no Chromium executable. A supplemental run using the existing browser
+cache started those suites normally: 39 cases passed, while three unchanged
+terminal scrollback cases consistently timed out waiting for xterm history both
+in the suite and in a separate rerun. No terminal code is touched by this
+candidate. The changed Feishu test module passes all 76 cases; the independent
+review also reran seven cancellation and retirement cases with asyncio debug
+enabled and reported no findings.
 
 Independent review found two candidate defects: a pre-dispatch cancellation
 could retain a deduplication claim, and a Markdown truncation boundary could
@@ -152,6 +159,22 @@ wait for its bounded retirement result, while batch resolution and queue release
 run from an outer `finally`. Both races have targeted regression tests; re-review
 of the fixes reported no findings.
 
+A final cross-review found that reaction I/O still extended the nominal batching
+deadline, successful combined replies were anchored to the oldest constituent,
+and a rejected first batch incorrectly advanced follow-up state. Reaction work
+now runs off the native-dispatch critical path, success replies use the newest
+constituent as their Feishu anchor, and follow-up history advances only after Chat
+admission accepts native delivery. Regression tests exercise stalled reaction
+operations and both corrected queue semantics. A follow-up cancellation review
+found that a second shutdown cancellation during reaction cleanup could orphan the
+reaction task and replace retry-safe retirement with a generic cancellation. Route
+cleanup now continues collecting the bounded task across repeated cancellations,
+with a regression test covering dedup release and task ownership. The review also
+identified that a message already acknowledged by Feishu but still waiting only in
+memory can be lost if final shutdown exceeds the bounded drain. This is an explicit
+operational tradeoff for the current local Hub deployment; durable inbound inbox
+work remains out of scope.
+
 ## Remaining risks
 
 - Typing reactions and extreme Markdown were not exercised in a real Feishu
@@ -159,6 +182,8 @@ of the fixes reported no findings.
   intentionally non-blocking.
 - The long-connection adapter relies on private methods in `lark-oapi 1.5.3`; an
   SDK upgrade should include a real connection smoke check.
+- Accepted messages waiting only in the in-memory follow-up queue are not
+  recoverable if process shutdown exceeds its bounded drain.
 - The existing approximately 28.6 GB live log is not deleted or truncated. On
   the first post-upgrade write it becomes `backend.log.1`; only a later rollover
   ages it out under the five-backup policy, so disk space is not recovered at
