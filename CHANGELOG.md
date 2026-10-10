@@ -15,6 +15,11 @@
 - The default backend scope now finishes in about 5 minutes instead of 24.
 - Put the isolated HMR backend inside its cleanup scope as soon as it starts,
   so a failing Vite startup can no longer leave it running and holding a port.
+- Skip the HMR suite when Playwright cannot launch a browser instead of
+  failing collection. The backend CI job installs tmux and ttyd but no
+  browsers, so this one test turned an otherwise green run red.
+- Scale the two fixed 10s restart deadlines by the E2E timeout factor and
+  print the measured time, so a loaded runner no longer fails them outright.
 
 ### feat(runtime): rebuild frontend during supervised restart
 
