@@ -50,20 +50,34 @@ unrelated refresh.
   future growth; it deliberately does not delete or truncate the existing live
   log without operator authorization.
 
-### Bounded Feishu message serialization
+### Bounded Feishu message coalescing
 
-Each paired Chat gets one active Feishu dispatch and a bounded FIFO of waiting
-messages. Reservation happens before the first network await, preserving arrival
-order. A full queue receives an explicit not-executed response instead of being
-silently lost. Queue ownership is released on success, error and cancellation,
-and idle registries are evicted.
+Each paired Chat gets one active Feishu dispatch and a bounded queue of later
+messages. The first message waits for a one-second quiet window so a short burst
+can be submitted as one ordered model request; continuous typing can delay that
+request for at most three seconds. A single message keeps its original visible
+text, while a batch is labeled and numbered so the model handles it as one
+request without losing arrival order.
 
-For a valid bound message, the Bot best-effort adds Feishu's `Typing` reaction
-while it is waiting or executing, then deletes that exact reaction record in a
-`finally` path. Missing reaction scope or a transient reaction API failure never
-blocks the model turn or its reply. The existing dispatch admission guard still
-rechecks the current binding and target after queueing. An active Web turn, Goal,
-approval or other non-Feishu owner is not bypassed.
+Once native dispatch starts, later messages do not cancel or preempt the active
+turn. They accumulate into one follow-up batch and run after the response. This
+keeps the implementation in the existing external-channel adapter instead of
+adding a provider-specific runtime broker or hidden interrupt path. An active Web
+turn, Goal, approval or other non-Feishu owner is still rejected by the normal
+Chat admission guard.
+
+Reservation happens before the first network await. A full queue receives an
+explicit not-executed response instead of being silently lost; queue ownership
+is released on success, error and cancellation, idle registries are evicted, and
+each constituent message retains its own durable deduplication claim. A cancelled
+message that has not entered native dispatch remains retryable without cancelling
+other members of its would-be batch.
+
+For a valid bound message, the Bot best-effort adds Feishu's `OneSecond` reaction
+while the message is being coalesced or queued. The batch leader changes to a
+`Typing` reaction immediately before native dispatch; all exact reaction records
+are deleted in the route cleanup path. Missing reaction scope or a transient
+reaction API failure never blocks the model turn or its reply.
 
 Operators who want the typing hint should grant the Bot
 `im:message.reactions:write_only`; the rest of the integration remains usable
@@ -96,6 +110,10 @@ versions. Results:
   and capacity, external busy admission, reaction degradation, cancellation
   cleanup, same-message replay after a queued cancellation, structured replies,
   SDK single-flight import and log rotation.
+- The subsequent coalescing refinement adds focused coverage for one-second
+  burst grouping, the three-second maximum wait, one non-interrupting follow-up,
+  queue capacity, external busy admission, follower cancellation/replay, and
+  per-message reaction cleanup.
 - A separate formatter boundary probe checked 30,772 balanced combinations of
   backtick/tilde fences, lengths and truncation offsets. Every result stayed at
   or below 20,000 characters and retained balanced fences.
@@ -124,7 +142,15 @@ could retain a deduplication claim, and a Markdown truncation boundary could
 unbalance a fenced block. Both were fixed and regression-tested. A second review
 then found a mixed three/four-backtick truncation case; truncation now recomputes
 the exact prefix state monotonically and verifies the complete candidate before
-returning. Final independent review reported no findings.
+returning.
+
+The coalescing refinement received a separate concurrency review. It found that
+simultaneous shutdown cancellation could preserve follower deduplication claims
+after the shared turn retired safely, and that cancellation during an error reply
+could leave `queue.active` wedged. Followers now shield the shared outcome and
+wait for its bounded retirement result, while batch resolution and queue release
+run from an outer `finally`. Both races have targeted regression tests; re-review
+of the fixes reported no findings.
 
 ## Remaining risks
 

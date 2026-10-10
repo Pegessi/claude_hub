@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable
 
@@ -84,9 +84,12 @@ _BODY_BYTES = 16 * 1024
 _GATE_TIMEOUT_SECONDS = 20.0
 _OUTBOUND_POST_TIMEOUT_SECONDS = 20.0
 _REACTION_POST_TIMEOUT_SECONDS = 2.0
+_BATCH_RETIREMENT_WAIT_SECONDS = 12.0
 _MAX_GATES = 256
 _MAX_TAB_DISPATCH_QUEUES = 256
 _MAX_TAB_QUEUE_WAITERS = 8
+_MESSAGE_COALESCE_QUIET_SECONDS = 1.0
+_MESSAGE_COALESCE_MAX_WAIT_SECONDS = 3.0
 
 
 @dataclass
@@ -107,88 +110,111 @@ class _TabDispatchQueueFull(RuntimeError):
 
 
 @dataclass
+class _TabDispatchItem:
+    bot_id: str
+    event: FeishuMessageEvent
+    effective: EffectiveBot
+    binding: BotBinding
+    client: FeishuBotClient
+    arrived_at: float
+    start: asyncio.Future[None]
+    outcome: asyncio.Future[str]
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    queued_reaction_id: str | None = None
+    processing_reaction_id: str | None = None
+    dispatch_started: bool = False
+    cancelled: bool = False
+
+
+@dataclass
 class _TabDispatchQueue:
-    waiters: list[asyncio.Future[None]]
+    pending: list[_TabDispatchItem]
+    active: list[_TabDispatchItem]
+    processor: _TabDispatchItem | None
+    changed: asyncio.Event
+    has_dispatched: bool = False
+
+    @property
+    def waiters(self) -> list[asyncio.Future[None]]:
+        """Compatibility view used by queue lifecycle tests."""
+
+        return [item.start for item in self.pending if item is not self.processor]
 
 
 _tab_dispatch_queues: dict[str, _TabDispatchQueue] = {}
 
 
-def _release_tab_dispatch(tab_id: str, queue: _TabDispatchQueue) -> None:
-    """Transfer ownership FIFO, or evict an idle registry entry."""
-
-    while queue.waiters:
-        next_waiter = queue.waiters.pop(0)
-        if next_waiter.done():
-            continue
-        next_waiter.set_result(None)
+def _promote_tab_dispatch(tab_id: str, queue: _TabDispatchQueue) -> None:
+    if queue.processor is not None or queue.active:
         return
-    if _tab_dispatch_queues.get(tab_id) is queue:
+    queue.pending[:] = [item for item in queue.pending if not item.cancelled]
+    if queue.pending:
+        queue.processor = queue.pending[0]
+        if not queue.processor.start.done():
+            queue.processor.start.set_result(None)
+        queue.changed.set()
+    elif not queue.active and _tab_dispatch_queues.get(tab_id) is queue:
         del _tab_dispatch_queues[tab_id]
 
 
-class _TabDispatchReservation:
-    """One pre-await position in a tab's Feishu FIFO.
-
-    Reservation happens before the reaction HTTP call, so transport latency
-    cannot reorder messages that the WebSocket route tasks delivered in order.
-    ``cancel`` also covers cancellation before ``__aenter__`` is reached.
-    """
-
-    def __init__(
-        self,
-        tab_id: str,
-        queue: _TabDispatchQueue,
-        waiter: asyncio.Future[None] | None,
-    ) -> None:
-        self._tab_id = tab_id
-        self._queue = queue
-        self._waiter = waiter
-        self._closed = False
-
-    async def __aenter__(self) -> None:
-        if self._closed:
-            raise RuntimeError("Feishu tab dispatch reservation is closed")
-        if self._waiter is not None:
-            try:
-                await self._waiter
-            except BaseException:
-                self.cancel()
-                raise
-        return None
-
-    async def __aexit__(self, *_exc: Any) -> None:
-        self.cancel()
-
-    def cancel(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        waiter = self._waiter
-        if waiter is None or (waiter.done() and not waiter.cancelled()):
-            # Immediate reservations and successfully awakened waiters own the
-            # active slot, so cancellation must hand it to the next waiter.
-            _release_tab_dispatch(self._tab_id, self._queue)
-            return
-        try:
-            self._queue.waiters.remove(waiter)
-        except ValueError:
-            pass
-
-
-def _reserve_tab_dispatch(tab_id: str) -> _TabDispatchReservation:
+def _reserve_tab_dispatch(
+    tab_id: str,
+    *,
+    bot_id: str,
+    event: FeishuMessageEvent,
+    effective: EffectiveBot,
+    binding: BotBinding,
+    client: FeishuBotClient,
+) -> _TabDispatchItem:
     queue = _tab_dispatch_queues.get(tab_id)
     if queue is None:
         if len(_tab_dispatch_queues) >= _MAX_TAB_DISPATCH_QUEUES:
             raise _TabDispatchQueueFull("Feishu tab dispatch registry is at capacity")
-        queue = _TabDispatchQueue(waiters=[])
+        queue = _TabDispatchQueue(
+            pending=[],
+            active=[],
+            processor=None,
+            changed=asyncio.Event(),
+        )
         _tab_dispatch_queues[tab_id] = queue
-        return _TabDispatchReservation(tab_id, queue, None)
-    if len(queue.waiters) >= _MAX_TAB_QUEUE_WAITERS:
+    # One active/coalescing batch plus at most eight later inbound messages.
+    waiting_limit = _MAX_TAB_QUEUE_WAITERS if queue.active else _MAX_TAB_QUEUE_WAITERS + 1
+    if len(queue.pending) >= waiting_limit:
         raise _TabDispatchQueueFull("Feishu tab dispatch queue is at capacity")
-    waiter = asyncio.get_running_loop().create_future()
-    queue.waiters.append(waiter)
-    return _TabDispatchReservation(tab_id, queue, waiter)
+    item = _TabDispatchItem(
+        bot_id=bot_id,
+        event=event,
+        effective=effective,
+        binding=binding,
+        client=client,
+        arrived_at=asyncio.get_running_loop().time(),
+        start=asyncio.get_running_loop().create_future(),
+        outcome=asyncio.get_running_loop().create_future(),
+    )
+    queue.pending.append(item)
+    queue.changed.set()
+    _promote_tab_dispatch(tab_id, queue)
+    return item
+
+
+def _cancel_tab_dispatch(tab_id: str, item: _TabDispatchItem) -> None:
+    queue = _tab_dispatch_queues.get(tab_id)
+    if queue is None or item.cancelled:
+        return
+    item.cancelled = True
+    item.ready.set()
+    if not item.dispatch_started:
+        try:
+            queue.pending.remove(item)
+        except ValueError:
+            try:
+                queue.active.remove(item)
+            except ValueError:
+                pass
+    if queue.processor is item:
+        queue.processor = None
+    queue.changed.set()
+    _promote_tab_dispatch(tab_id, queue)
 
 
 def _enter_gate_registry(bot_id: str) -> _BotGate:
@@ -871,7 +897,7 @@ async def _reply_if_current(
 
 
 async def _add_processing_reaction(
-    client: FeishuBotClient, event: FeishuMessageEvent
+    client: FeishuBotClient, event: FeishuMessageEvent, emoji_type: str = "Typing"
 ) -> str | None:
     """Best-effort hint; legacy Bots may not have the reaction scope."""
 
@@ -880,7 +906,7 @@ async def _add_processing_reaction(
         # handshake when the route is cancelled. Keeping the HTTP await in this
         # task lets shutdown cancellation release its FIFO reservation promptly.
         async with asyncio.timeout(_REACTION_POST_TIMEOUT_SECONDS):
-            return await client.add_reaction(event.message_id, "Typing")
+            return await client.add_reaction(event.message_id, emoji_type)
     except Exception as exc:
         logger.info("Feishu Bot processing reaction unavailable: %s", type(exc).__name__)
         return None
@@ -896,6 +922,218 @@ async def _delete_processing_reaction(
             await client.delete_reaction(event.message_id, reaction_id)
     except Exception as exc:
         logger.info("Feishu Bot processing reaction cleanup unavailable: %s", type(exc).__name__)
+
+
+def _batch_visible_text(items: list[_TabDispatchItem], *, followup: bool) -> str:
+    if len(items) == 1 and not followup:
+        return items[0].event.text
+    intro = (
+        "用户在你处理上一条消息期间补充了以下信息，请结合已有上下文统一处理："
+        if followup
+        else "用户在短时间内连续发送了以下消息，请作为一次请求统一处理："
+    )
+    messages = "\n\n".join(
+        f"[消息 {index}]\n{item.event.text}" for index, item in enumerate(items, start=1)
+    )
+    return f"{intro}\n\n{messages}"
+
+
+def _batch_matches(first: _TabDispatchItem, candidate: _TabDispatchItem) -> bool:
+    return (
+        candidate.bot_id == first.bot_id
+        and candidate.binding.pairing_id == first.binding.pairing_id
+        and candidate.effective.generation == first.effective.generation
+        and candidate.effective.revision == first.effective.revision
+    )
+
+
+async def _collect_tab_dispatch_batch(
+    queue: _TabDispatchQueue, leader: _TabDispatchItem
+) -> tuple[list[_TabDispatchItem], bool]:
+    """Wait for a short quiet period and identify one ordered batch."""
+
+    loop = asyncio.get_running_loop()
+    first_arrival = leader.arrived_at
+    while True:
+        # Clear before taking the snapshot: an arrival after this point sets
+        # the event, while an earlier arrival is already represented below.
+        # Clearing after the snapshot would lose a wake-up in between and
+        # could dispatch before the intended quiet period elapsed.
+        queue.changed.clear()
+        live = [item for item in queue.pending if not item.cancelled]
+        matching: list[_TabDispatchItem] = []
+        for item in live:
+            if matching and not _batch_matches(leader, item):
+                break
+            if _batch_matches(leader, item):
+                matching.append(item)
+        last_arrival = matching[-1].arrived_at if matching else first_arrival
+        deadline = min(
+            first_arrival + _MESSAGE_COALESCE_MAX_WAIT_SECONDS,
+            last_arrival + _MESSAGE_COALESCE_QUIET_SECONDS,
+        )
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(queue.changed.wait(), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+
+    candidates: list[_TabDispatchItem] = []
+    for item in list(queue.pending):
+        if item.cancelled:
+            queue.pending.remove(item)
+            continue
+        if candidates and not _batch_matches(leader, item):
+            break
+        if not _batch_matches(leader, item):
+            break
+        candidates.append(item)
+    # Keep ownership in ``pending`` until every accepted route has installed
+    # its reaction. If the leader is cancelled here, its normal cancellation
+    # path can remove it and promote the next item without stranding followers
+    # in an ownerless ``active`` batch.
+    await asyncio.gather(*(item.ready.wait() for item in candidates))
+    candidates = [item for item in candidates if item in queue.pending and not item.cancelled]
+    return candidates, queue.has_dispatched
+
+
+def _claim_tab_dispatch_batch(
+    queue: _TabDispatchQueue, candidates: list[_TabDispatchItem]
+) -> list[_TabDispatchItem]:
+    """Synchronously commit candidates immediately before native dispatch."""
+
+    batch = [item for item in candidates if item in queue.pending and not item.cancelled]
+    for item in batch:
+        queue.pending.remove(item)
+    queue.processor = None
+    queue.active = batch
+    for item in batch:
+        item.dispatch_started = True
+        if not item.start.done():
+            item.start.set_result(None)
+    return batch
+
+
+def _finish_tab_dispatch_batch(
+    tab_id: str, queue: _TabDispatchQueue, batch: list[_TabDispatchItem], status: str
+) -> None:
+    for item in batch:
+        if not item.outcome.done():
+            item.outcome.set_result(status)
+    queue.active = []
+    _promote_tab_dispatch(tab_id, queue)
+
+
+async def _dispatch_tab_batch(
+    tab_id: str, queue: _TabDispatchQueue, leader: _TabDispatchItem
+) -> str:
+    batch: list[_TabDispatchItem] = []
+    status = "failed"
+    try:
+        try:
+            candidates, followup = await _collect_tab_dispatch_batch(queue, leader)
+            if not candidates:
+                raise ExternalDispatchRetired(turn_id_for(leader.bot_id, leader.event.message_id))
+            # Keep the candidates in ``pending`` through reaction I/O. Cancellation
+            # can still remove and safely replay any not-yet-dispatched message.
+            if leader.queued_reaction_id is not None:
+                await _delete_processing_reaction(
+                    leader.client, leader.event, leader.queued_reaction_id
+                )
+                leader.queued_reaction_id = None
+            leader.processing_reaction_id = await _add_processing_reaction(
+                leader.client, leader.event
+            )
+            batch = _claim_tab_dispatch_batch(queue, candidates)
+            if not batch:
+                raise ExternalDispatchRetired(turn_id_for(leader.bot_id, leader.event.message_id))
+            queue.has_dispatched = True
+            visible_text = _batch_visible_text(batch, followup=followup)
+            assistant_text = await dispatch_tab_chat_and_wait(
+                tab_id,
+                format_feishu_provider_text_v2(
+                    visible_text,
+                    app_id=leader.event.app_id,
+                    chat_id=leader.event.chat_id,
+                    message_id=leader.event.message_id,
+                    sender_open_id=leader.event.sender_open_id,
+                ),
+                turn_id_for(leader.bot_id, leader.event.message_id),
+                visible_text=visible_text,
+                turn_metadata={
+                    **_turn_metadata(leader.bot_id, leader.event),
+                    "feishu_message_ids": [item.event.message_id for item in batch],
+                    "feishu_coalesced": len(batch) > 1,
+                    "feishu_followup": followup,
+                },
+                admission_guard=lambda: _admit_binding_dispatch(
+                    leader.effective, leader.binding, leader.event
+                ),
+            )
+            status = (
+                "completed"
+                if await _reply_if_current(
+                    leader.client,
+                    leader.event,
+                    leader.effective,
+                    assistant_text,
+                    still_valid=lambda: _binding_still_routes(leader.effective, leader.binding),
+                    formatted=True,
+                )
+                else "failed"
+            )
+        except ExternalDispatchRetired:
+            status = "retired"
+        except HTTPException as exc:
+            logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
+            reason = (
+                (exc.headers or {}).get(CHAT_ERROR_REASON_HEADER)
+                if exc.status_code == 409
+                else None
+            )
+            if reason == "message_outside_binding_period":
+                status = "failed"
+            else:
+                if reason == "chat_busy":
+                    message = "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"
+                elif exc.status_code == 409 and reason != "binding_target_missing":
+                    message = (
+                        "Claude Hub Chat 当前不可用，本条消息尚未执行。"
+                        "请在网页检查 Chat 状态后重试。"
+                    )
+                else:
+                    message = "Claude Hub 目标当前不可用，请在网页重新配对。"
+                target = batch[-1] if batch else leader
+                await _reply_if_current(
+                    target.client,
+                    target.event,
+                    target.effective,
+                    message,
+                    still_valid=lambda: _binding_still_routes(target.effective, target.binding),
+                )
+                status = "failed"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Feishu Bot message dispatch failed")
+            target = batch[-1] if batch else leader
+            await _reply_if_current(
+                target.client,
+                target.event,
+                target.effective,
+                "Claude Hub 处理消息失败，请稍后重试。",
+                still_valid=lambda: _binding_still_routes(target.effective, target.binding),
+            )
+            status = "failed"
+        return status
+    finally:
+        # This outer finally also runs when cancellation strikes while an error
+        # reply is being posted from one of the handlers above. No path may
+        # leave a claimed batch in ``queue.active`` with unresolved followers.
+        if batch:
+            _finish_tab_dispatch_batch(tab_id, queue, batch, status)
 
 
 _PAIRING_FAILURE_TEXT = {
@@ -947,9 +1185,7 @@ async def _handle_message_event(
     client = FeishuBotClient(effective.config)
     status_value = "failed"
     binding: BotBinding | None = None
-    reservation: _TabDispatchReservation | None = None
-    reaction_id: str | None = None
-    dispatch_started = False
+    item: _TabDispatchItem | None = None
     try:
         if not _pool.is_current(effective):
             return
@@ -978,9 +1214,16 @@ async def _handle_message_event(
             return
         _validate_saved_target(binding)
         try:
-            reservation = _reserve_tab_dispatch(binding.tab_id)
+            item = _reserve_tab_dispatch(
+                binding.tab_id,
+                bot_id=bot_id,
+                event=event,
+                effective=effective,
+                binding=binding,
+                client=client,
+            )
         except _TabDispatchQueueFull:
-            reaction_id = await _add_processing_reaction(client, event)
+            reaction_id = await _add_processing_reaction(client, event, "OneSecond")
             await _reply_if_current(
                 client,
                 event,
@@ -989,70 +1232,46 @@ async def _handle_message_event(
                 still_valid=lambda: binding is not None
                 and _binding_still_routes(effective, binding),
             )
+            await _delete_processing_reaction(client, event, reaction_id)
             return
-        reaction_id = await _add_processing_reaction(client, event)
-        await reservation.__aenter__()
-        dispatch_binding = binding
-        dispatch_started = True
-        assistant_text = await dispatch_tab_chat_and_wait(
-            binding.tab_id,
-            format_feishu_provider_text_v2(
-                event.text,
-                app_id=event.app_id,
-                chat_id=event.chat_id,
-                message_id=event.message_id,
-                sender_open_id=event.sender_open_id,
-            ),
-            turn_id_for(bot_id, event.message_id),
-            visible_text=event.text,
-            turn_metadata=_turn_metadata(bot_id, event),
-            admission_guard=lambda: _admit_binding_dispatch(effective, dispatch_binding, event),
-        )
-        if await _reply_if_current(
-            client,
-            event,
-            effective,
-            assistant_text,
-            still_valid=(
-                (lambda: binding is not None and _binding_still_routes(effective, binding))
-                if binding is not None
-                else None
-            ),
-            formatted=True,
-        ):
-            status_value = "completed"
+        item.queued_reaction_id = await _add_processing_reaction(client, event, "OneSecond")
+        item.ready.set()
+        await item.start
+        queue = _tab_dispatch_queues.get(binding.tab_id)
+        if queue is None:
+            raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id))
+        if queue.processor is item:
+            status_value = await _dispatch_tab_batch(binding.tab_id, queue, item)
+        else:
+            status_value = await asyncio.shield(item.outcome)
+        if status_value == "retired":
+            raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id))
     except asyncio.CancelledError:
-        if not dispatch_started:
+        if item is None or not item.dispatch_started:
             # A queued message cancelled during shutdown never entered the Chat
             # bridge, so its durable at-most-once claim must remain retryable.
             # The outer WebSocket intake releases only this explicit retirement
             # signal after the reservation/reaction cleanup below has completed.
             raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id)) from None
+        if not item.outcome.done():
+            # A coalesced follower does not own the shared native turn. During
+            # shutdown its route task may be cancelled before the batch leader
+            # has proved whether that turn stopped safely. Shielding ``outcome``
+            # keeps the leader's result channel alive; wait slightly longer
+            # than the bridge's bounded retirement so every constituent claim
+            # follows the same retry decision.
+            try:
+                status_value = await asyncio.wait_for(
+                    asyncio.shield(item.outcome),
+                    timeout=_BATCH_RETIREMENT_WAIT_SECONDS,
+                )
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        if item.outcome.done() and not item.outcome.cancelled():
+            status_value = item.outcome.result()
+        if status_value == "retired":
+            raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id)) from None
         raise
-    except HTTPException as exc:
-        logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
-        reason = (
-            (exc.headers or {}).get(CHAT_ERROR_REASON_HEADER) if exc.status_code == 409 else None
-        )
-        if reason == "message_outside_binding_period":
-            return
-        if reason == "chat_busy":
-            message = "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"
-        elif exc.status_code == 409 and reason != "binding_target_missing":
-            message = "Claude Hub Chat 当前不可用，本条消息尚未执行。请在网页检查 Chat 状态后重试。"
-        else:
-            message = "Claude Hub 目标当前不可用，请在网页重新配对。"
-        await _reply_if_current(
-            client,
-            event,
-            effective,
-            message,
-            still_valid=(
-                (lambda: binding is not None and _binding_still_routes(effective, binding))
-                if binding is not None
-                else None
-            ),
-        )
     except Exception:
         logger.exception("Feishu Bot message dispatch failed")
         await _reply_if_current(
@@ -1067,10 +1286,13 @@ async def _handle_message_event(
             ),
         )
     finally:
-        if reservation is not None:
-            reservation.cancel()
+        if binding is not None and item is not None:
+            _cancel_tab_dispatch(binding.tab_id, item)
         try:
-            await _delete_processing_reaction(client, event, reaction_id)
+            if item is not None:
+                await _delete_processing_reaction(
+                    client, event, item.processing_reaction_id or item.queued_reaction_id
+                )
         finally:
             _dedup.finish(dedup_key(bot_id, event.message_id), status_value)
 
