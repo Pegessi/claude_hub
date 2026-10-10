@@ -462,10 +462,12 @@ def _help_confirms_plan_mode(binary: str, flag: str) -> bool:
 # ── available models ────────────────────────────────────────────────────────
 #
 # Cursor's ``agent`` CLI can list its current model catalog (``--list-models``),
-# so the picker is discovered at runtime instead of hardcoded. claude/codex
-# have no equivalent flag, so they fall back to a curated static list. The
-# whole catalog is cached per agent type with a TTL so we do not spawn a probe
-# on every capabilities fetch.
+# so the picker is discovered at runtime instead of hardcoded. Claude uses the
+# selected tab's model environment because a custom Anthropic-compatible
+# gateway may expose ids that no global catalog can know. Providers without a
+# discovered or configured catalog fall back to a curated static list. Shared
+# catalogs are cached per agent type with a TTL so we do not spawn a probe on
+# every capabilities fetch.
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -536,6 +538,12 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "cursor-grok-4.6-high",
     ],
 }
+_CLAUDE_MODEL_ENV_KEYS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+)
 
 
 def _static_options(agent_type: str) -> List[StreamModelOption]:
@@ -543,6 +551,21 @@ def _static_options(agent_type: str) -> List[StreamModelOption]:
     return [
         StreamModelOption(id=model_id, label=model_id, description="")
         for model_id in _STATIC_MODELS.get(agent_type, [])
+    ]
+
+
+def _claude_env_options(env: Dict[str, str]) -> List[StreamModelOption]:
+    """Build the Claude catalog advertised by one tab's launch env."""
+    model_ids: List[str] = []
+    seen: set[str] = set()
+    for key in _CLAUDE_MODEL_ENV_KEYS:
+        model_id = env.get(key, "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        model_ids.append(model_id)
+    return [
+        StreamModelOption(id=model_id, label=model_id, description="") for model_id in model_ids
     ]
 
 
@@ -1222,11 +1245,17 @@ class ProviderSession(ABC):
     async def prepare_capabilities(self) -> None:
         """Discover the available models for this session's agent type.
 
-        Cursor is probed at runtime via ``agent --list-models``; other agent
-        types use the curated static list. Results are cached with a TTL (see
-        ``available_models_for``), so this is cheap to call on every
-        capabilities fetch.
+        Claude uses the model ids configured for this specific session, with
+        the curated list only as a fallback. Cursor is probed at runtime via
+        ``agent --list-models``; other agent types use the curated static list.
+        Shared results are cached with a TTL (see ``available_models_for``), so
+        this is cheap to call on every capabilities fetch.
         """
+        if self.session.agent_type == AgentType.CLAUDE:
+            configured = _claude_env_options(self.session.env)
+            if configured:
+                self._available_models = configured
+                return
         self._available_models = await available_models_for(self.session.agent_type.value)
 
     async def set_mode(self, mode: str) -> None:

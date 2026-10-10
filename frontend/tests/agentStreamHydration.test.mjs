@@ -59,3 +59,35 @@ test('the final delta-only hydration page is committed before live, without deep
   assert.equal(isProxy(stream.events.value[0].payload), false)
   assert.ok(requests.some(url => url.endsWith('/wait')))
 })
+
+test('capabilities can be refreshed in place after the active tab environment changes', async t => {
+  let capabilityCalls = 0
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url.endsWith('/capabilities')) {
+      capabilityCalls += 1
+      return {
+        ok: true,
+        json: async () => ({
+          structured: true,
+          available_models: [
+            { id: capabilityCalls === 1 ? 'gateway/first' : 'gateway/second' },
+          ],
+        }),
+      }
+    }
+    if (url.includes('/events?')) {
+      return {
+        ok: true, json: async () => ({ events: [], next_sequence: -1, has_more: false }),
+      }
+    }
+    return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))))
+  })
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+  await stream.start('model-env-refresh', 'terminal-tab')
+
+  await stream.refreshCapabilities()
+
+  assert.equal(capabilityCalls, 2)
+  assert.equal(stream.capabilities.value.available_models[0].id, 'gateway/second')
+})
