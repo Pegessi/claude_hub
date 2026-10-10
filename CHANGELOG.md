@@ -14,6 +14,8 @@
 - Rebuild Dark around Maso's carbon surface ladder and current main-branch blue,
   pair Light with a muted clay-orange accent, and keep selected, focus, and
   primary-action roles separate with accessible contrast.
+- Theme user-message bubbles alongside the surrounding Dark and Light chrome
+  instead of retaining a hard-coded blue fill in Light mode.
 - Highlight only genuinely working Chat sessions with a restrained travelling
   edge light, including a static reduced-motion fallback.
 - See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).

@@ -4312,11 +4312,9 @@ onUnmounted(() => {
 }
 
 .conversation-bubble--user {
-  --paseo-user-bubble: #3268a8;
-
   position: relative;
-  background: var(--paseo-user-bubble);
-  color: #fff;
+  background: var(--ch-color-message-user-bg);
+  color: var(--ch-color-text-inverse);
   border-bottom-right-radius: var(--ch-radius-sm);
 }
 
@@ -4326,7 +4324,7 @@ onUnmounted(() => {
   gap: 5px;
   min-width: 0;
   margin-bottom: 6px;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--ch-color-message-user-muted);
   font-size: 11px;
   font-weight: 600;
   line-height: 16px;
@@ -4425,11 +4423,16 @@ onUnmounted(() => {
   display: grid;
   place-items: center;
   padding: 10px;
-  border: 1px dashed color-mix(in srgb, #fff 36%, transparent);
+  border: 1px dashed var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
-  color: color-mix(in srgb, #fff 78%, transparent);
+  color: var(--ch-color-text-muted);
   font-size: 11px;
   text-align: center;
+}
+
+.conversation-bubble--user .turn-attachment-placeholder {
+  border-color: color-mix(in srgb, #fff 36%, transparent);
+  color: var(--ch-color-message-user-muted);
 }
 
 /* ---- Edit-resend UI ---- */
@@ -4465,7 +4468,7 @@ onUnmounted(() => {
 }
 
 /* Inline editing: the message itself becomes the input. The form used to force
-   ``min-width: 320px`` and draw a bordered dark box inside the blue bubble, so
+   ``min-width: 320px`` and draw a bordered dark box inside the user bubble, so
    a two-character message opened a wide bubble holding an empty-looking form.
    Now the bubble sizes to its content and the textarea reads as the message. */
 .edit-resend-form {
@@ -4490,16 +4493,13 @@ onUnmounted(() => {
 }
 
 .edit-resend-textarea:focus-visible {
-  /* 2px at 65%: the earlier 1px/45% ring measured 2.43:1 against the bubble
-     blue, under the 3:1 the focus indicator needs — weaker than the border it
-     replaced. */
-  outline: 2px solid color-mix(in srgb, #fff 65%, transparent);
+  outline: 2px solid var(--ch-color-message-user-focus);
   outline-offset: 3px;
   border-radius: 2px;
 }
 
 .edit-resend-textarea::placeholder {
-  color: color-mix(in srgb, #fff 50%, transparent);
+  color: var(--ch-color-message-user-muted);
 }
 
 .edit-resend-actions {
@@ -4548,7 +4548,7 @@ onUnmounted(() => {
 }
 
 .edit-resend-error {
-  color: #ffb4b4;
+  color: var(--ch-color-message-user-error);
   font-size: 12px;
 }
 

@@ -22,6 +22,13 @@ function themeBlock(selector) {
   return app.slice(open + 1, close)
 }
 
+function styleBlock(source, selector) {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = source.match(new RegExp(`^\\s*${escapedSelector}\\s*\\{([^}]*)\\}`, 'm'))
+  assert.ok(match, `${selector} style block exists`)
+  return match[1]
+}
+
 function token(block, name) {
   const match = block.match(new RegExp(`--${name}\\s*:\\s*([^;]+);`))
   assert.ok(match, `--${name} exists`)
@@ -75,10 +82,17 @@ test('dark theme uses the Maso carbon ladder and main-branch blue roles', () => 
   assert.equal(token(dark, 'ch-color-accent-fill-hover'), '#3478bb')
   assert.equal(token(dark, 'ch-color-accent-soft'), 'rgba(90, 156, 240, 0.16)')
   assert.equal(token(dark, 'ch-color-session-glow'), '#5a9cf0')
+  assert.equal(token(dark, 'ch-color-message-user-bg'), '#3276ba')
+  assert.equal(token(dark, 'ch-color-message-user-muted'), '#f7fafc')
+  assert.equal(token(dark, 'ch-color-message-user-error'), '#fffafa')
   assert.ok(contrast(token(dark, 'ch-color-accent'), token(dark, 'ch-color-surface')) >= 7)
   assert.ok(contrast(token(dark, 'ch-color-accent-ring'), token(dark, 'ch-color-surface')) >= 3)
   assert.ok(contrast(token(dark, 'ch-color-accent-strong'), token(dark, 'ch-color-text-inverse')) >= 4.5)
   assert.ok(contrast(token(dark, 'ch-color-accent-fill-hover'), token(dark, 'ch-color-text-inverse')) >= 4.5)
+  assert.ok(contrast(token(dark, 'ch-color-message-user-bg'), token(dark, 'ch-color-text-inverse')) >= 4.5)
+  assert.ok(contrast(token(dark, 'ch-color-message-user-muted'), token(dark, 'ch-color-message-user-bg')) >= 4.5)
+  assert.ok(contrast(token(dark, 'ch-color-message-user-error'), token(dark, 'ch-color-message-user-bg')) >= 4.5)
+  assert.ok(contrast(token(dark, 'ch-color-message-user-focus'), token(dark, 'ch-color-message-user-bg')) >= 3)
   assert.ok(contrast(token(dark, 'ch-color-text-selected'), token(dark, 'ch-color-surface-selected')) >= 7)
   assert.ok(contrast(token(dark, 'ch-color-border-selected'), token(dark, 'ch-color-surface-selected')) >= 3)
   assert.notEqual(token(dark, 'ch-color-surface-selected'), token(dark, 'ch-color-accent-strong'))
@@ -95,10 +109,17 @@ test('light theme pairs the neutral ladder with distinct muted clay-orange roles
   assert.equal(token(light, 'ch-color-accent'), '#976549')
   assert.equal(token(light, 'ch-color-accent-fill-hover'), '#754a33')
   assert.equal(token(light, 'ch-color-session-glow'), '#a9795d')
+  assert.equal(token(light, 'ch-color-message-user-bg'), '#82533a')
+  assert.equal(token(light, 'ch-color-message-user-muted'), '#e4d9d4')
+  assert.equal(token(light, 'ch-color-message-user-error'), '#ffdada')
   assert.ok(contrast(token(light, 'ch-color-accent'), token(light, 'ch-color-surface')) >= 4.5)
   assert.ok(contrast(token(light, 'ch-color-accent-ring'), token(light, 'ch-color-surface')) >= 3)
   assert.ok(contrast(token(light, 'ch-color-accent-strong'), token(light, 'ch-color-text-inverse')) >= 4.5)
   assert.ok(contrast(token(light, 'ch-color-accent-fill-hover'), token(light, 'ch-color-text-inverse')) >= 4.5)
+  assert.ok(contrast(token(light, 'ch-color-message-user-bg'), token(light, 'ch-color-text-inverse')) >= 4.5)
+  assert.ok(contrast(token(light, 'ch-color-message-user-muted'), token(light, 'ch-color-message-user-bg')) >= 4.5)
+  assert.ok(contrast(token(light, 'ch-color-message-user-error'), token(light, 'ch-color-message-user-bg')) >= 4.5)
+  assert.ok(contrast(token(light, 'ch-color-message-user-focus'), token(light, 'ch-color-message-user-bg')) >= 3)
   assert.ok(contrast(token(light, 'ch-color-text-selected'), token(light, 'ch-color-surface-selected')) >= 7)
   assert.ok(contrast(token(light, 'ch-color-border-selected'), token(light, 'ch-color-surface-selected')) >= 3)
 
@@ -119,12 +140,31 @@ test('selected, focus, and primary-action roles remain separate in key controls'
     readFile(new URL('../src/components/TerminalPane.vue', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/StructuredPane.vue', import.meta.url), 'utf8'),
   ])
+  const userBubble = styleBlock(structured, '.conversation-bubble--user')
+  const messageSource = styleBlock(structured, '.conversation-message-source')
+  const attachmentPlaceholder = styleBlock(structured, '.turn-attachment-placeholder')
+  const userAttachmentPlaceholder = styleBlock(structured, '.conversation-bubble--user .turn-attachment-placeholder')
+  const agentImageMissing = styleBlock(structured, '.agent-image-missing')
+  const editFocus = styleBlock(structured, '.edit-resend-textarea:focus-visible')
+  const editPlaceholder = styleBlock(structured, '.edit-resend-textarea::placeholder')
+  const editError = styleBlock(structured, '.edit-resend-error')
 
   assert.match(app, /\.mode-button\.active[\s\S]*?background: var\(--ch-color-surface-selected\);[\s\S]*?border-color: var\(--ch-color-border-selected\);/)
   assert.match(app, /\.mode-button:focus-visible[\s\S]*?box-shadow: 0 0 0 3px var\(--ch-color-accent-ring\);/)
   assert.match(layout, /\.layout-btn\.active[\s\S]*?border-color: var\(--ch-color-border-selected\);[\s\S]*?background-color: var\(--ch-color-surface-selected\);/)
   assert.match(pane, /\.terminal-pane\.active[\s\S]*?border-color: var\(--ch-color-border-selected\);/)
   assert.match(structured, /\.conversation-avatar \{[\s\S]*?background: var\(--ch-color-surface-selected\);[\s\S]*?color: var\(--ch-color-text-selected\);/)
+  assert.match(userBubble, /background: var\(--ch-color-message-user-bg\);/)
+  assert.match(userBubble, /color: var\(--ch-color-text-inverse\);/)
+  assert.match(messageSource, /color: var\(--ch-color-message-user-muted\);/)
+  assert.match(attachmentPlaceholder, /border: 1px dashed var\(--ch-color-border-strong\);/)
+  assert.match(attachmentPlaceholder, /color: var\(--ch-color-text-muted\);/)
+  assert.doesNotMatch(attachmentPlaceholder, /--ch-color-message-user-muted/)
+  assert.match(userAttachmentPlaceholder, /color: var\(--ch-color-message-user-muted\);/)
+  assert.doesNotMatch(agentImageMissing, /--ch-color-message-user-muted/)
+  assert.match(editFocus, /outline: 2px solid var\(--ch-color-message-user-focus\);/)
+  assert.match(editPlaceholder, /color: var\(--ch-color-message-user-muted\);/)
+  assert.match(editError, /color: var\(--ch-color-message-user-error\);/)
   assert.match(app, /\.ch-btn--primary \{[\s\S]*?background: var\(--ch-color-accent-strong\);/)
 })
 

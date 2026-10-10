@@ -28,6 +28,8 @@ drag reordering, and make genuinely active work easy to scan.
 - White-text controls use a separate contrast-safe fill pair: the brighter
   Maso hover token remains available for non-text emphasis, while `#3478bb`
   keeps hovered Dark buttons above the WCAG AA contrast threshold.
+- User messages use a theme role instead of a fixed blue: Maso deep blue in
+  Dark and the contrast-safe clay-orange fill in Light.
 - Only sessions whose runtime status is `working` receive the travelling edge
   light. The yellow status dot remains the semantic working indicator, idle and
   attention colors are unchanged, and reduced-motion users receive a static
