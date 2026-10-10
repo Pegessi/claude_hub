@@ -1,7 +1,8 @@
 import logging
 import sys
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -22,7 +23,6 @@ from .services.service_restart import INSTANCE_ID
 # live instance lock, logs, or tabs.json with the 8173 main service.
 _RUNTIME_HOME = resolve_runtime_home()
 log_dir = _RUNTIME_HOME / "logs"
-log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / "backend.log"
 backend_lock_file = _RUNTIME_HOME / "backend.lock"
 
@@ -41,20 +41,48 @@ console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# File handler
-file_handler = logging.FileHandler(log_file, encoding="utf-8")
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
-
 # Get our logger
 logger = logging.getLogger(__name__)
-logger.info(f"Logging to file: {log_file}")
+
+
+@contextmanager
+def backend_file_logging(
+    path: Path, *, max_bytes: int, backup_count: int
+) -> Iterator[RotatingFileHandler]:
+    """Attach the bounded file log while this process owns the runtime."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+        delay=True,
+    )
+    handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        root_logger.removeHandler(handler)
+        handler.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan - manage startup and shutdown."""
-    with BackendInstanceLock(backend_lock_file):
+    # Context managers enter left-to-right: a rejected duplicate never opens
+    # or rotates the active owner's log. They exit right-to-left so the file
+    # handler is flushed and closed before runtime ownership is released.
+    with (
+        BackendInstanceLock(backend_lock_file),
+        backend_file_logging(
+            log_file,
+            max_bytes=settings.backend_log_max_bytes,
+            backup_count=settings.backend_log_backup_count,
+        ),
+    ):
+        logger.info("Logging to file: %s", log_file)
         # Startup
         logger.info("Starting Claude Hub Backend")
         try:

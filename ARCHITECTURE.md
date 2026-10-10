@@ -275,7 +275,7 @@ Subsequent requests:
 | Task attachments | `~/.claude_hub/workspaces/<id>/attachments/` | Pasted images / uploaded files referenced by tasks |
 | Feedback lessons | `~/.claude_hub/workspaces/<id>/lessons.json` | Scored, context-tagged lessons learned from this workspace's runs |
 | Agent env profiles | Per-tab generated scripts under `~/.claude_hub/tunnel/` or tab-specific settings | Proxy scripts, launch env JSON (deleted on tab stop) |
-| Backend logs | `~/.claude_hub/logs/backend.log` | Rolling file log (all backend logging mirrored here) |
+| Backend logs | `~/.claude_hub/logs/backend.log` | Attached only while the backend owns its instance lock; size-rotated at 10 MiB active + 5 backups by default; configurable with `BACKEND_LOG_MAX_BYTES` and `BACKEND_LOG_BACKUP_COUNT` |
 | layout preference | `localStorage` (browser) | Key `claude_hub_layout_type`, e.g. "2x2" |
 | launch env presets | `localStorage` (browser) | Custom/hidden preset state + user-created profiles |
 | terminal tab ordering (UI cache) | `localStorage` (browser) | Per-workspace cached order, reconciled with backend on load |

@@ -76,8 +76,10 @@
 产出 `index.html` 后才整树替换 `frontend/dist`，避免构建中暴露半成品。依赖同步失败、
 前端构建失败或超时时，旧后端和旧 `dist` 继续运行，页面显示失败原因，不会进入
 中断服务阶段。操作状态保存在当前 runtime home 下 `restart/state.json`，后端日志
-在 `logs/backend.log`；同步、构建或启动失败还应查看启动终端输出。前端构建上限
-为 90 秒，页面等待超过 5 分钟只提示未确认恢复，不会重复重启。
+在 `logs/backend.log`；该文件默认按 10 MiB 轮转并保留 5 份备份，可通过
+`BACKEND_LOG_MAX_BYTES` 和 `BACKEND_LOG_BACKUP_COUNT` 调整。同步、构建或启动失败
+还应查看启动终端输出。前端构建上限为 90 秒，页面等待超过 5 分钟只提示未确认
+恢复，不会重复重启。
 
 ---
 

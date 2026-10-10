@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix(logging): bound backend log retention
+
+- Rotate `~/.claude_hub/logs/backend.log` at 10 MiB with five backups by
+  default, with environment overrides for deployments that need a different
+  retention budget.
+- Stop writing complete tab ID and name collections at INFO level for every
+  `list_tabs` poll. On a local Hub with about 200 saved tabs, those two messages
+  accounted for 98.8% of a recent 10,000-line sample and drove roughly 29 KB/s
+  of log writes.
+- See the [backend log growth notes](docs/working-logs/2026-10-10-backend-log-growth.md).
+
 ### fix(test): stop the backend suite idling through agent-prompt waits
 
 - Bootstrap waits up to 25s for a real agent TUI prompt. Fake terminals never

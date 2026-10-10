@@ -2,6 +2,7 @@ import asyncio
 import errno
 import importlib
 import json
+import logging
 import os
 import shlex
 import socket
@@ -5813,6 +5814,17 @@ def test_list_tabs_excludes_archived(monkeypatch: MonkeyPatch, tmp_path: Path) -
 
     assert [t.id for t in manager.list_tabs()] == ["archive-tab"]
     assert [t.id for t in manager.list_archived_tabs()] == ["archived-tab"]
+
+
+def test_list_tabs_does_not_emit_full_state_at_info(
+    caplog: pytest.LogCaptureFixture, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    manager, _ = _make_archive_test_manager(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger=ttyd_manager_module.__name__):
+        assert [tab.id for tab in manager.list_tabs()] == ["archive-tab"]
+
+    assert not [record for record in caplog.records if record.name == ttyd_manager_module.__name__]
 
 
 def test_list_archived_tabs_sorted_newest_first(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
