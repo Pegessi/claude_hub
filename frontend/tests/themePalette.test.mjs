@@ -39,39 +39,78 @@ function contrast(a, b) {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
-test('dark theme uses a readable slate surface ladder and distinct interaction roles', () => {
+function hsl(hex) {
+  const [red, green, blue] = hex.slice(1).match(/../g).map(part => Number.parseInt(part, 16) / 255)
+  const max = Math.max(red, green, blue)
+  const min = Math.min(red, green, blue)
+  const delta = max - min
+  const lightness = (max + min) / 2
+  let hue = 0
+  if (delta && max === red) hue = 60 * (((green - blue) / delta) % 6)
+  if (delta && max === green) hue = 60 * (((blue - red) / delta) + 2)
+  if (delta && max === blue) hue = 60 * (((red - green) / delta) + 4)
+  if (hue < 0) hue += 360
+  const saturation = delta ? delta / (1 - Math.abs(2 * lightness - 1)) * 100 : 0
+  return { hue, saturation }
+}
+
+function hueDistance(a, b) {
+  const distance = Math.abs(a - b)
+  return Math.min(distance, 360 - distance)
+}
+
+test('dark theme uses the Maso carbon ladder and main-branch blue roles', () => {
   const dark = themeBlock(':root {')
-  assert.equal(token(dark, 'ch-color-app-bg'), '#1f2023')
-  assert.equal(token(dark, 'ch-color-canvas'), '#18191b')
-  assert.equal(token(dark, 'ch-color-surface'), '#212225')
-  assert.equal(token(dark, 'ch-color-surface-control'), '#2e3135')
-  assert.equal(token(dark, 'ch-color-surface-selected'), '#293947')
-  assert.equal(token(dark, 'ch-color-border-selected'), '#568aa8')
-  assert.equal(token(dark, 'ch-color-text'), '#d7d9dd')
-  assert.equal(token(dark, 'ch-color-text-selected'), '#e4f3fb')
-  assert.equal(token(dark, 'ch-color-accent'), '#83b6d8')
+  assert.equal(token(dark, 'ch-color-app-bg'), '#1b1b1c')
+  assert.equal(token(dark, 'ch-color-canvas'), '#171718')
+  assert.equal(token(dark, 'ch-color-surface'), '#1d1d1f')
+  assert.equal(token(dark, 'ch-color-surface-control'), '#29292c')
+  assert.equal(token(dark, 'ch-color-surface-selected'), '#2a2f36')
+  assert.equal(token(dark, 'ch-color-border-selected'), '#5a9cf0')
+  assert.equal(token(dark, 'ch-color-text'), '#c7c7cc')
+  assert.equal(token(dark, 'ch-color-text-selected'), '#eef6ff')
+  assert.equal(token(dark, 'ch-color-accent'), '#7cb7ff')
+  assert.equal(token(dark, 'ch-color-accent-strong'), '#3276ba')
+  assert.equal(token(dark, 'ch-color-accent-hover'), '#4a8ce0')
+  assert.equal(token(dark, 'ch-color-accent-fill-hover'), '#3478bb')
+  assert.equal(token(dark, 'ch-color-accent-soft'), 'rgba(90, 156, 240, 0.16)')
+  assert.equal(token(dark, 'ch-color-session-glow'), '#5a9cf0')
   assert.ok(contrast(token(dark, 'ch-color-accent'), token(dark, 'ch-color-surface')) >= 7)
   assert.ok(contrast(token(dark, 'ch-color-accent-ring'), token(dark, 'ch-color-surface')) >= 3)
   assert.ok(contrast(token(dark, 'ch-color-accent-strong'), token(dark, 'ch-color-text-inverse')) >= 4.5)
+  assert.ok(contrast(token(dark, 'ch-color-accent-fill-hover'), token(dark, 'ch-color-text-inverse')) >= 4.5)
   assert.ok(contrast(token(dark, 'ch-color-text-selected'), token(dark, 'ch-color-surface-selected')) >= 7)
   assert.ok(contrast(token(dark, 'ch-color-border-selected'), token(dark, 'ch-color-surface-selected')) >= 3)
   assert.notEqual(token(dark, 'ch-color-surface-selected'), token(dark, 'ch-color-accent-strong'))
 })
 
-test('light theme mirrors the neutral ladder and readable blue roles', () => {
+test('light theme pairs the neutral ladder with distinct muted clay-orange roles', () => {
   const light = themeBlock(":root[data-theme='light']")
-  assert.equal(token(light, 'ch-color-app-bg'), '#f3f4f6')
-  assert.equal(token(light, 'ch-color-canvas'), '#eef0f2')
-  assert.equal(token(light, 'ch-color-surface'), '#fbfbfc')
-  assert.equal(token(light, 'ch-color-surface-selected'), '#e2edf4')
-  assert.equal(token(light, 'ch-color-border-selected'), '#5f8aa5')
+  assert.equal(token(light, 'ch-color-app-bg'), '#f4f4f5')
+  assert.equal(token(light, 'ch-color-canvas'), '#f0f0f2')
+  assert.equal(token(light, 'ch-color-surface'), '#fafafa')
+  assert.equal(token(light, 'ch-color-surface-selected'), '#f4eae3')
+  assert.equal(token(light, 'ch-color-border-selected'), '#a9795d')
   assert.equal(token(light, 'ch-color-text'), '#25282d')
-  assert.equal(token(light, 'ch-color-accent'), '#246f98')
+  assert.equal(token(light, 'ch-color-accent'), '#976549')
+  assert.equal(token(light, 'ch-color-accent-fill-hover'), '#754a33')
+  assert.equal(token(light, 'ch-color-session-glow'), '#a9795d')
   assert.ok(contrast(token(light, 'ch-color-accent'), token(light, 'ch-color-surface')) >= 4.5)
   assert.ok(contrast(token(light, 'ch-color-accent-ring'), token(light, 'ch-color-surface')) >= 3)
   assert.ok(contrast(token(light, 'ch-color-accent-strong'), token(light, 'ch-color-text-inverse')) >= 4.5)
+  assert.ok(contrast(token(light, 'ch-color-accent-fill-hover'), token(light, 'ch-color-text-inverse')) >= 4.5)
   assert.ok(contrast(token(light, 'ch-color-text-selected'), token(light, 'ch-color-surface-selected')) >= 7)
   assert.ok(contrast(token(light, 'ch-color-border-selected'), token(light, 'ch-color-surface-selected')) >= 3)
+
+  const accent = hsl(token(light, 'ch-color-accent'))
+  for (const semanticToken of ['ch-color-danger', 'ch-color-warning']) {
+    const semantic = hsl(token(light, semanticToken))
+    assert.ok(
+      hueDistance(accent.hue, semantic.hue) >= 18
+        || Math.abs(accent.saturation - semantic.saturation) >= 40,
+      `Light accent must remain visually distinct from --${semanticToken}`,
+    )
+  }
 })
 
 test('selected, focus, and primary-action roles remain separate in key controls', async () => {
@@ -105,7 +144,7 @@ test('keyboard focus uses the solid ring rather than a translucent selected-stat
   }
 })
 
-test('filled accent controls use the contrast-safe strong role', async () => {
+test('filled accent controls use contrast-safe fill roles', async () => {
   const componentUrls = [
     '../src/components/AgentWorkspaceView.vue',
     '../src/components/GoalSetupDialog.vue',
@@ -122,11 +161,11 @@ test('filled accent controls use the contrast-safe strong role', async () => {
   for (const { path, source } of vueSources) {
     for (const match of source.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       const [, selector, declarations] = match
-      const usesForegroundAccentAsFill = /background(?:-color)?:\s*var\(--ch-color-accent\);/.test(declarations)
+      const usesForegroundAccentAsFill = /background(?:-color)?:\s*var\(--ch-color-accent(?:-hover)?\);/.test(declarations)
       const usesLightForeground = /(?:^|;)\s*color:\s*(?:#fff(?:fff)?|white|var\(--ch-color-(?:text-inverse|on-accent)(?:,\s*#fff)?\))/.test(declarations)
       assert.ok(
         !(usesForegroundAccentAsFill && usesLightForeground),
-        `${path} ${selector.trim()} must use --ch-color-accent-strong for a light-text fill`,
+        `${path} ${selector.trim()} must use a contrast-safe accent fill role with light text`,
       )
     }
   }
@@ -137,4 +176,7 @@ test('filled accent controls use the contrast-safe strong role', async () => {
   assert.match(components[3], /\.composer-send-btn[\s\S]*?background-color: var\(--ch-color-accent-strong\);/)
   assert.match(components[3], /\.approval-submit-btn[\s\S]*?background: var\(--ch-color-accent-strong\);/)
   assert.match(components[4], /\.pane-indicator[\s\S]*?background-color: var\(--ch-color-accent-strong\);/)
+  assert.match(app, /\.ch-btn--primary:hover:not\(:disabled\)[\s\S]*?background: var\(--ch-color-accent-fill-hover\);/)
+  assert.match(components[0], /\.primary-button:hover[\s\S]*?background: var\(--ch-color-accent-fill-hover\);/)
+  assert.match(components[3], /\.composer-send-btn:hover:not\(:disabled\)[\s\S]*?background-color: var\(--ch-color-accent-fill-hover\);/)
 })

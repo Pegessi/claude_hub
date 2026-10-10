@@ -1,11 +1,11 @@
-# Chat session menu and Codex-inspired themes
+# Chat session menu and Maso-inspired themes
 
 ## Goal
 
-Make the Chat sidebar's session actions easier to understand and bring both
-application themes closer to Codex's restrained developer-tool character. The
-sidebar should expose permanent deletion, avoid redundant menu-based ordering,
-and retain direct drag reordering.
+Make the Chat sidebar's session actions easier to understand and give both
+application themes a coherent developer-tool character. The sidebar should
+expose permanent deletion, avoid redundant menu-based ordering, retain direct
+drag reordering, and make genuinely active work easy to scan.
 
 ## Behavior
 
@@ -20,11 +20,18 @@ and retain direct drag reordering.
 - Successful deletion now returns an explicit boolean to callers and removes
   any browser-persisted pin for the deleted session. Existing TabBar and
   archived-session confirmation surfaces also stay open when deletion fails.
-- Dark uses a Radix Slate / VS Code-inspired surface ladder instead of stacking
-  near-black panels. Light mirrors those roles with cool mist neutrals. A calm
-  blue family is split across selected surfaces, focus borders, foreground
-  accents, and primary buttons so active controls are visible without turning
-  the whole interface blue. Semantic status colors remain unchanged.
+- Dark uses Maso's compact carbon hierarchy and the blue family already present
+  on `main`: `#7cb7ff` for foreground emphasis and focus, `#5a9cf0` for selected
+  borders and live-session light, and a darker `#3276ba` for white-text actions.
+  Light keeps neutral surfaces with a low-saturation clay-orange family; both
+  hue and saturation stay separated from the brighter warning and danger roles.
+- White-text controls use a separate contrast-safe fill pair: the brighter
+  Maso hover token remains available for non-text emphasis, while `#3478bb`
+  keeps hovered Dark buttons above the WCAG AA contrast threshold.
+- Only sessions whose runtime status is `working` receive the travelling edge
+  light. The yellow status dot remains the semantic working indicator, idle and
+  attention colors are unchanged, and reduced-motion users receive a static
+  edge instead of an animation.
 - Active mode, layout, sidebar item, pane, and assistant avatar now share the
   selected-surface language. Empty panes use a theme-aware line icon and
   brighter guidance instead of a dim system emoji.
@@ -32,7 +39,7 @@ and retain direct drag reordering.
 ## Validation
 
 - Focused interaction, store, theme, and semantic-color tests passed.
-- Full frontend unit suite after the researched palette revision: `709 passed`; the added tests
+- Full frontend unit suite after the final Maso-blue revision: `710 passed`; the added tests
   cover delete success/failure, stale-pin cleanup, menu removal, palette tokens,
   accent contrast, separation of selected/focus/primary roles, and a repository-
   wide guard against translucent keyboard-focus rings.
@@ -46,6 +53,10 @@ and retain direct drag reordering.
 - A second Playwright visual pass covered the researched Dark/Light palette,
   2x2 empty-pane hierarchy, and real assistant avatars. Both themes rendered
   without console errors or warnings.
+- The final 5184 visual pass rendered 11 real Chat sessions with no page errors,
+  observed two genuine `working` sessions in Dark, and confirmed the computed
+  Maso tokens (`#7cb7ff`, `#5a9cf0`, and `#3276ba`) plus the Light clay-orange
+  selected state.
 - Independent diff review found and fixed insufficient Dark primary-button
   contrast. The researched revision review then caught foreground accents reused
   as white-text fills and translucent focus rings; filled controls now use the
@@ -53,7 +64,7 @@ and retain direct drag reordering.
   decorative halos retain their separate translucent role.
 - Final repository-wide `./scripts/verify.sh all` (pinned Node 24.21.0, uv
   0.12.15, Python 3.11.16, and pnpm 9.15.9) passed docs, backend formatting
-  and types, frontend lint and types, all 709 frontend tests, and the production
+  and types, frontend lint and types, all 710 frontend tests, and the production
   build. The backend suite stopped at `1803 passed, 1 skipped` because
   the unchanged `test_frontend_build_timeout_keeps_current_backend_and_dist`
   hit macOS

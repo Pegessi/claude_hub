@@ -5,15 +5,17 @@
 
 ## Unreleased
 
-### style(chat): refine session actions and Codex-inspired themes
+### style(chat): refine session actions and Maso-inspired themes
 
 - Add a destructive **Delete** action to the shared session menu with a focused
   confirmation dialog, failure-safe state, and cleanup of stale pinned ids.
 - Remove **Move up** / **Move down** and their keyboard shortcut from the Chat
   sidebar while preserving its direct pointer-drag reordering interaction.
-- Rebuild Dark and Light around a coherent slate surface ladder with separate
-  selected, focus, and primary-action roles, brighter icon/text hierarchy,
-  accessible button contrast, and matching terminal selection colors.
+- Rebuild Dark around Maso's carbon surface ladder and current main-branch blue,
+  pair Light with a muted clay-orange accent, and keep selected, focus, and
+  primary-action roles separate with accessible contrast.
+- Highlight only genuinely working Chat sessions with a restrained travelling
+  edge light, including a static reduced-motion fallback.
 - See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).
 
 ### fix(chat): match Claude model options to each tab environment
