@@ -89,9 +89,12 @@ test('useViewport is a shared singleton with one resize listener', () => {
 
 test('session actions live in a shared TabActionsMenu used by both surfaces', () => {
   // the shared menu offers the same actions the TabBar used to own
-  for (const label of ['Rename', 'Duplicate', 'Archive', 'Copy Link', 'Switch Env / Model…']) {
+  for (const label of ['Rename', 'Duplicate', 'Archive', 'Copy Link', 'Switch Env / Model…', 'Delete']) {
     assert.match(tabActionsMenu, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
+  assert.doesNotMatch(tabActionsMenu, /Move up|Move down/)
+  assert.match(tabActionsMenu, /Delete session\?/)
+  assert.match(tabActionsMenu, /store\.deleteTab\(props\.tab\.id\)/)
   // both the TabBar and the sidebar mount it
   assert.match(tabBar, /<TabActionsMenu/)
   assert.match(chatSidebar, /<TabActionsMenu/)

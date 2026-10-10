@@ -3,7 +3,7 @@
     Shared per-session actions menu (⋯) used by both the TabBar and the chat
     sidebar, so every session surface offers the same operations:
 
-      Rename · Duplicate · Archive · Copy Link · Switch Env / Model…
+      Rename · Duplicate · Archive · Copy Link · Switch Env / Model… · Delete
 
     Only the trigger is rendered inline; the popover is teleported to <body>
     so it escapes any overflow clipping in the parent. The Switch Env modal
@@ -18,6 +18,7 @@
       rename       parent owns inline rename UI; menu just closes and emits
   -->
   <button
+    v-bind="$attrs"
     ref="triggerRef"
     type="button"
     :class="['tam-trigger', `tam-trigger--${variant}`]"
@@ -54,34 +55,6 @@
         >⌖</span>
         <span>{{ store.pinnedChatIds.has(tab.id) ? 'Unpin session' : 'Pin session' }}</span>
       </button>
-      <template v-if="variant === 'sidebar'">
-        <button
-          type="button"
-          class="tam-item"
-          role="menuitem"
-          :disabled="moveUpDisabled"
-          @click="handleMove(-1)"
-        >
-          <span
-            class="tam-item-icon"
-            aria-hidden="true"
-          >↑</span>
-          <span>Move up</span>
-        </button>
-        <button
-          type="button"
-          class="tam-item"
-          role="menuitem"
-          :disabled="moveDownDisabled"
-          @click="handleMove(1)"
-        >
-          <span
-            class="tam-item-icon"
-            aria-hidden="true"
-          >↓</span>
-          <span>Move down</span>
-        </button>
-      </template>
       <button
         type="button"
         class="tam-item"
@@ -149,6 +122,77 @@
         >⚙</span>
         <span>Switch Env / Model…</span>
       </LoadingButton>
+      <div
+        class="tam-divider"
+        role="separator"
+      />
+      <button
+        type="button"
+        class="tam-item tam-item--danger"
+        role="menuitem"
+        @click="openDeleteConfirm"
+      >
+        <span
+          class="tam-item-icon"
+          aria-hidden="true"
+        >⌫</span>
+        <span>Delete</span>
+      </button>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="showDeleteConfirm"
+      class="tam-overlay tam-delete-overlay"
+      role="presentation"
+      @click.self="closeDeleteConfirm"
+      @keydown.esc="closeDeleteConfirm"
+      @dragstart.stop
+    >
+      <div
+        class="tam-modal tam-delete-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tam-delete-title"
+        aria-describedby="tam-delete-description"
+      >
+        <div
+          class="tam-delete-icon"
+          aria-hidden="true"
+        >
+          ⌫
+        </div>
+        <h3 id="tam-delete-title">
+          Delete session?
+        </h3>
+        <p
+          id="tam-delete-description"
+          class="tam-delete-description"
+        >
+          “{{ tab.name || 'Untitled' }}” and its conversation history will be
+          permanently deleted. This cannot be undone.
+        </p>
+        <div class="tam-modal-actions">
+          <button
+            ref="deleteCancelRef"
+            type="button"
+            class="ch-btn"
+            @click="closeDeleteConfirm"
+          >
+            Cancel
+          </button>
+          <LoadingButton
+            type="button"
+            class="ch-btn ch-btn--danger"
+            :loading="isPending(actionKey('delete'))"
+            loading-label="Deleting session"
+            @click="handleDelete"
+          >
+            Delete permanently
+          </LoadingButton>
+        </div>
+      </div>
     </div>
   </Teleport>
 
@@ -302,22 +346,19 @@ import { writeClipboard } from '@/utils/clipboard'
 import { buildTabShareText } from '@/utils/deepLink'
 import type { SwitchEnvRequest, TerminalTab } from '@/types'
 
+defineOptions({ inheritAttrs: false })
+
 interface Props {
   tab: TerminalTab
   variant?: 'tabbar' | 'sidebar'
-  moveUpDisabled?: boolean
-  moveDownDisabled?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   variant: 'tabbar',
-  moveUpDisabled: true,
-  moveDownDisabled: true,
 })
 
 const emit = defineEmits<{
   (e: 'rename', tab: TerminalTab): void
-  (e: 'move', direction: -1 | 1): void
 }>()
 
 const store = useTerminalStore()
@@ -328,6 +369,8 @@ const { isPending, runPending } = usePendingActions()
 const open = ref(false)
 const triggerRef = ref<HTMLButtonElement | null>(null)
 const panelRef = ref<HTMLElement | null>(null)
+const deleteCancelRef = ref<HTMLButtonElement | null>(null)
+const showDeleteConfirm = ref(false)
 // Bumped on scroll/resize while open so the fixed-position panel re-measures.
 const positionTick = ref(0)
 
@@ -341,7 +384,7 @@ const panelStyle = computed<CSSProperties>(() => {
   const rect = trigger.getBoundingClientRect()
   // Align the panel's right edge with the trigger; place it just below with a gap.
   const panelWidth = 200
-  const panelHeightEst = props.variant === 'sidebar' ? 310 : 240
+  const panelHeightEst = 280
   let top = rect.bottom + 6
   let left = rect.right - panelWidth
   const vw = window.innerWidth
@@ -437,11 +480,6 @@ function handleTogglePin() {
   store.setChatPinned(props.tab.id, !store.pinnedChatIds.has(props.tab.id))
 }
 
-function handleMove(direction: -1 | 1) {
-  close()
-  emit('move', direction)
-}
-
 function handleRename() {
   close()
   emit('rename', props.tab)
@@ -455,6 +493,32 @@ async function handleDuplicate() {
 async function handleArchive() {
   close()
   await runPending(actionKey('archive'), () => store.archiveTab(props.tab.id))
+}
+
+async function openDeleteConfirm() {
+  close()
+  await nextTick()
+  showDeleteConfirm.value = true
+  await nextTick()
+  deleteCancelRef.value?.focus()
+}
+
+async function closeDeleteConfirm() {
+  if (isPending(actionKey('delete'))) return
+  showDeleteConfirm.value = false
+  await nextTick()
+  triggerRef.value?.focus()
+}
+
+async function handleDelete() {
+  const deleted = await runPending(actionKey('delete'), () => store.deleteTab(props.tab.id))
+  if (!deleted) return
+  showDeleteConfirm.value = false
+  store.pushNotification({
+    type: 'success',
+    message: 'Session deleted',
+    autoDismissMs: 3000,
+  })
 }
 
 async function handleCopyLink() {
@@ -641,6 +705,21 @@ async function handleSwitchEnv() {
   background: var(--ch-color-row-hover);
 }
 
+.tam-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--ch-color-border-muted);
+}
+
+.tam-item--danger,
+.tam-item--danger .tam-item-icon {
+  color: var(--ch-color-danger-text);
+}
+
+.tam-item--danger:hover {
+  background: var(--ch-color-danger-bg);
+}
+
 .tam-item:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -688,6 +767,40 @@ async function handleSwitchEnv() {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
+  box-shadow: var(--ch-shadow-dialog);
+}
+
+.tam-delete-overlay {
+  z-index: 1300;
+}
+
+.tam-delete-modal {
+  width: min(420px, calc(100vw - 32px));
+}
+
+.tam-delete-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin-bottom: 16px;
+  border-radius: var(--ch-radius-md);
+  color: var(--ch-color-danger-text);
+  background: var(--ch-color-danger-bg);
+  font-size: 18px;
+}
+
+.tam-delete-modal h3 {
+  margin: 0;
+  font-size: var(--ch-font-size-lg);
+}
+
+.tam-delete-description {
+  margin: 8px 0 0;
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-md);
+  line-height: 1.55;
 }
 
 .tam-switch-env-header {

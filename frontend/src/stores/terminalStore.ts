@@ -120,7 +120,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   })())
 
   function setChatPinned(tabId: string, pinned: boolean) {
-    if (!chatTabs.value.some(tab => tab.id === tabId)) return
+    // Pinning requires a current Chat, while unpinning must also be able to
+    // clean stale ids after archive/delete removed the row.
+    if (pinned && !chatTabs.value.some(tab => tab.id === tabId)) return
     const next = new Set(pinnedChatIds.value)
     if (pinned) next.add(tabId)
     else next.delete(tabId)
@@ -538,8 +540,11 @@ export const useTerminalStore = defineStore('terminal', () => {
       if (activeTabId.value === tabId) {
         activeTabId.value = manualTabs.value.length ? manualTabs.value[0].id : null
       }
+      setChatPinned(tabId, false)
+      return true
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Unknown error')
+      return false
     } finally {
       isLoading.value = false
     }
@@ -626,8 +631,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   // Permanently delete an archived tab (reuses the hard-delete path, then
   // refreshes the archived list so the row disappears).
   async function permanentDeleteTab(tabId: string) {
-    await deleteTab(tabId)
-    void fetchArchivedTabs()
+    const deleted = await deleteTab(tabId)
+    if (deleted) void fetchArchivedTabs()
+    return deleted
   }
 
   async function switchEnv(tabId: string, data: SwitchEnvRequest) {

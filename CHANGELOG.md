@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### style(chat): refine session actions and Codex-inspired themes
+
+- Add a destructive **Delete** action to the shared session menu with a focused
+  confirmation dialog, failure-safe state, and cleanup of stale pinned ids.
+- Remove **Move up** / **Move down** and their keyboard shortcut from the Chat
+  sidebar while preserving its direct pointer-drag reordering interaction.
+- Rebalance Dark and Light around neutral near-black and warm-paper surfaces
+  with restrained terracotta accents, accessible primary-button contrast, and
+  matching terminal selection colors.
+- See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).
+
 ### fix(chat): match Claude model options to each tab environment
 
 - Build the Claude Chat model picker from the selected tab's

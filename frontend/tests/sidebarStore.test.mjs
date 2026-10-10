@@ -89,6 +89,31 @@ test('newly created and duplicated sessions are prepended without reordering exi
   )
 })
 
+test('deleting a session reports success and clears its pinned preference', async t => {
+  const { store, storage } = setup(t)
+  store.setChatPinned('a', true)
+  store.activeTabId = 'a'
+
+  const deleted = await store.deleteTab('a')
+
+  assert.equal(deleted, true)
+  assert.deepEqual(store.tabs.map(tab => tab.id), ['terminal', 'b', 'managed'])
+  assert.equal(store.activeTabId, 'terminal')
+  assert.deepEqual(JSON.parse(storage.get('claude_hub_pinned_chat_ids')), [])
+})
+
+test('failed deletion reports failure and preserves session state', async t => {
+  const { store, storage } = setup(t)
+  store.setChatPinned('a', true)
+  globalThis.fetch.mock.mockImplementation(async () => ({ ok: false }))
+
+  const deleted = await store.deleteTab('a')
+
+  assert.equal(deleted, false)
+  assert.ok(store.tabs.some(tab => tab.id === 'a'))
+  assert.deepEqual(JSON.parse(storage.get('claude_hub_pinned_chat_ids')), ['a'])
+})
+
 test('ID-based reorder keeps managed and terminal rows and saves the complete order', async t => {
   const { store } = setup(t)
   store.activeTabId = 'b'

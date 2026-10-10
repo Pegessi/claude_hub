@@ -900,11 +900,10 @@ async function handleRenameTab() {
 async function confirmCloseTab() {
   if (tabToClose.value) {
     const tabId = tabToClose.value.id
-    await runPending(tabActionKey('close', tabId), async () => {
-      await store.deleteTab(tabId)
-      tabToClose.value = null
-      showCloseConfirm.value = false
-    })
+    const deleted = await runPending(tabActionKey('close', tabId), () => store.deleteTab(tabId))
+    if (!deleted) return
+    tabToClose.value = null
+    showCloseConfirm.value = false
   }
 }
 
