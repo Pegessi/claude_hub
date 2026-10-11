@@ -1,34 +1,35 @@
-"""Bounded agent-stream attachment preview cache.
+"""Bounded agent-stream attachment image cache.
 
-The cache stores only browser-generated bounded previews — never the original
-image bytes or data URLs. The original decoded bytes exist only for the active
-provider send and are then released; the frontend is responsible for producing
-the bounded preview (max edge 1024px) before upload, and the backend enforces
-a hard persisted-preview byte cap.
+The cache stores the display image the browser uploads as the "preview": the
+original image itself when it fits the per-image cap and dimension bound, or
+a near-lossless re-encode otherwise. Data URLs are never stored. The backend
+enforces a hard persisted byte cap and dimension bound.
 
 Provider-specific original-image staging
 ----------------------------------------
 
-* **Claude**: original image bytes are held in memory only for the duration of
-  the provider send; they are never written to disk.
+* **Claude**: the provider send holds original image bytes in memory only; the
+  only on-disk copy is the display image in this cache.
 * **Codex**: the native provider requires transient local image files to pass
   to the subprocess. These are written to an app-owned temp directory with
   restrictive (0700) permissions and cleaned up on completion, failure, stop,
-  and via age-based orphan GC. They are **never** written to the durable
-  preview cache, the event JSON, or the manifest.
+  and via age-based orphan GC. These temp files are separate from this cache,
+  the event JSON, and the manifest.
 
-Three explicit limits are enforced with oldest-created-first (FIFO) eviction:
+Three explicit limits are enforced with least-recently-used (LRU) eviction:
 
-* per-preview byte cap (default 512 KiB)
-* per-session total bytes / count (default 64 MiB / 200)
-* global total bytes / count (default 512 MiB / 2000)
+* per-preview byte cap (default 8 MiB)
+* per-session total bytes / count (default 1 GiB / 5000)
+* global total bytes / count (default 1 GiB / 5000)
 
 Limits are validated for consistency at construction: the per-preview cap may
 not exceed either the per-session or the global byte budget, otherwise a
 single valid preview could be immediately self-evicted.
 
-Eviction order: session quota first, global quota second. FIFO uses immutable
-creation order, not access time.
+Eviction order: session quota first, global quota second. Recency is the
+manifest's ``last_used_at``: set on save and refreshed by reads at most once
+per ``_LRU_TOUCH_INTERVAL_SECONDS`` so viewing history rarely rewrites the
+manifest. Entries without it (older manifests) use ``created_at``.
 
 The event payload stores only an opaque attachment id, mime type, byte size,
 and optional dimensions — never a local path or raw bytes. The GET endpoint
@@ -457,11 +458,14 @@ def _safe_clear_session_dir(workspace_id: str, session_id: str) -> None:
 
 _ALLOWED_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
-# Maximum edge length for a persisted preview. The frontend is expected to
-# resample to max edge 1024px before upload, but the client-supplied
-# width/height is untrusted; we parse the actual dimensions from the image
-# header and reject anything outside 1..MAX_PREVIEW_EDGE.
-MAX_PREVIEW_EDGE = 1024
+# Maximum edge length for a persisted preview; it bounds browser decode memory.
+# The frontend stores originals within it and re-encodes larger images to fit.
+# Client-supplied width/height is untrusted; we parse the actual dimensions
+# from the image header and reject anything outside 1..MAX_PREVIEW_EDGE.
+MAX_PREVIEW_EDGE = 8192
+
+# Reads refresh LRU recency at most this often per entry.
+_LRU_TOUCH_INTERVAL_SECONDS = 3600.0
 
 
 def _magic_mime(data: bytes) -> Optional[str]:
@@ -624,10 +628,18 @@ def _normalize_entry(entry: Any) -> Optional[Dict[str, Any]]:
         return None
     if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
         return None
-    # Reject NaN, inf, and negative timestamps so FIFO sorting and TTL
+    # Reject NaN, inf, and negative timestamps so LRU sorting and TTL
     # eviction cannot be poisoned by a corrupt manifest entry.
     if not math.isfinite(created_at) or created_at < 0:
         return None
+    last_used_at = entry.get("last_used_at", created_at)
+    if (
+        isinstance(last_used_at, bool)
+        or not isinstance(last_used_at, (int, float))
+        or not math.isfinite(last_used_at)
+        or last_used_at < 0
+    ):
+        last_used_at = created_at
 
     return {
         "id": att_id,
@@ -638,17 +650,22 @@ def _normalize_entry(entry: Any) -> Optional[Dict[str, Any]]:
         "width": width,
         "height": height,
         "created_at": float(created_at),
+        "last_used_at": float(last_used_at),
     }
+
+
+def _lru_key(entry: Dict[str, Any]) -> Tuple[float, float]:
+    return (entry.get("last_used_at", entry["created_at"]), entry["created_at"])
 
 
 class AgentStreamAttachmentStore:
     """File-backed bounded preview cache for one agent session."""
 
-    DEFAULT_MAX_PREVIEW_BYTES = 512 * 1024  # 512 KiB
-    DEFAULT_MAX_SESSION_COUNT = 200
-    DEFAULT_MAX_SESSION_BYTES = 64 * 1024 * 1024  # 64 MiB
-    DEFAULT_MAX_GLOBAL_COUNT = 2000
-    DEFAULT_MAX_GLOBAL_BYTES = 512 * 1024 * 1024  # 512 MiB
+    DEFAULT_MAX_PREVIEW_BYTES = 8 * 1024 * 1024  # 8 MiB
+    DEFAULT_MAX_SESSION_COUNT = 5000
+    DEFAULT_MAX_SESSION_BYTES = 1024 * 1024 * 1024  # 1 GiB
+    DEFAULT_MAX_GLOBAL_COUNT = 5000
+    DEFAULT_MAX_GLOBAL_BYTES = 1024 * 1024 * 1024  # 1 GiB
 
     def __init__(
         self,
@@ -843,6 +860,7 @@ class AgentStreamAttachmentStore:
                 "width": parsed_width,
                 "height": parsed_height,
                 "created_at": created_at,
+                "last_used_at": created_at,
             }
 
             # Publish the file and the manifest atomically: if the manifest
@@ -964,7 +982,16 @@ class AgentStreamAttachmentStore:
                 index = [e for e in index if e.get("id") != attachment_id]
                 self._write_index(index)
                 raise KeyError(attachment_id)
-            return path.read_bytes(), entry["mime_type"]
+            data = path.read_bytes()
+            now = time.time()
+            if now - entry["last_used_at"] >= _LRU_TOUCH_INTERVAL_SECONDS:
+                entry["last_used_at"] = now
+                try:
+                    self._write_index(index)
+                except OSError:
+                    # Recency is advisory; a failed refresh must not fail the read.
+                    pass
+            return data, entry["mime_type"]
 
     async def _delete_by_id(self, attachment_id: str) -> None:
         """Delete a single preview by id from the index and disk.
@@ -1038,7 +1065,7 @@ class AgentStreamAttachmentStore:
         Deletes orphan files (present on disk but absent from the index) and
         stale index entries (present in the index but absent from disk, or
         with unsafe path components). Enforces both per-session and global
-        quotas by evicting oldest-first. Also enforces the optional age TTL.
+        quotas by evicting least-recently-used first. Also enforces the optional age TTL.
 
         A corrupt index entry can never escape the preview root: workspace
         and session ids are reduced to SHA-256 hex digests before being used
@@ -1231,7 +1258,7 @@ class AgentStreamAttachmentStore:
     # ── eviction ──────────────────────────────────────────────────────────
 
     def _evict_session(self, index: List[Dict[str, Any]]) -> bool:
-        """Evict oldest-first within this session until session quota holds.
+        """Evict least-recently-used first within this session until its quota holds.
 
         Returns ``True`` if at least one entry was removed, ``False``
         otherwise. Does **not** persist the index; the caller writes the
@@ -1240,8 +1267,7 @@ class AgentStreamAttachmentStore:
         """
         session_entries = self._session_entries(index)
         session_bytes = sum(e["size"] for e in session_entries)
-        # Sort by immutable created_at (FIFO).
-        session_entries.sort(key=lambda e: e["created_at"])
+        session_entries.sort(key=_lru_key)
 
         changed = False
         while session_entries and (
@@ -1270,7 +1296,7 @@ class AgentStreamAttachmentStore:
 
         changed = False
         for (ws, sess), entries in sessions.items():
-            entries.sort(key=lambda e: e["created_at"])
+            entries.sort(key=_lru_key)
             total = sum(e["size"] for e in entries)
             while entries and (
                 len(entries) > self.max_session_count or total > self.max_session_bytes
@@ -1282,13 +1308,13 @@ class AgentStreamAttachmentStore:
         return changed
 
     def _evict_global(self, index: List[Dict[str, Any]]) -> bool:
-        """Evict oldest-first globally until global quota holds.
+        """Evict least-recently-used first globally until the global quota holds.
 
         Returns ``True`` if at least one entry was removed, ``False``
         otherwise. Does not persist the index.
         """
         global_bytes = sum(e["size"] for e in index)
-        index.sort(key=lambda e: e["created_at"])
+        index.sort(key=_lru_key)
 
         changed = False
         while index and (
