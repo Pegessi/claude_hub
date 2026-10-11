@@ -8,9 +8,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
+from unittest import mock
 
 import pytest
 
@@ -75,6 +77,15 @@ if os.environ.get("FAIL_CHECK") == operation:
 """
 
 
+# Includes a scenario no list names, so a regression to a hard-coded list is
+# caught rather than silently passing.
+_FIXTURE_BROWSER_SCENARIOS = (
+    "browser_task_execution_panel.py",
+    "browser_feishu_provenance.py",
+    "browser_newly_added_scenario.py",
+)
+
+
 @dataclass
 class VerifyFixture:
     root: Path
@@ -130,6 +141,7 @@ def verify_fixture(tmp_path: Path) -> VerifyFixture:
         root / "scripts",
         root / "backend/.venv/bin",
         root / "frontend/node_modules",
+        root / "frontend/tests",
         fake_bin,
         artifacts,
     ):
@@ -147,6 +159,11 @@ def verify_fixture(tmp_path: Path) -> VerifyFixture:
     for filename in ("AGENTS.md", "CLAUDE.md"):
         (root / filename).write_text("same\n")
     (root / "frontend/package.json").write_text(json.dumps({"packageManager": "pnpm@9.9.9"}))
+    # The format target discovers scenarios, so the fixture repo needs real
+    # ones. The shared lifecycle helper is tooling and must stay separate.
+    (root / "frontend/tests/browser_lifecycle.py").write_text("# helper\n")
+    for scenario in _FIXTURE_BROWSER_SCENARIOS:
+        (root / "frontend/tests" / scenario).write_text("# scenario\n")
     # Never copy caller credentials into the recording tools' environment.
     env = {
         "PATH": f"{fake_bin}{os.pathsep}{os.defpath}",
@@ -377,17 +394,17 @@ def test_scope_arguments_are_rejected_outside_explicit_focused_mode(
 def test_format_checks_include_all_browser_scenarios(verify_fixture: VerifyFixture) -> None:
     result = verify_fixture.run("backend-format")
     assert result.returncode == 0, result.stderr
+    # Every scenario present on disk must be formatted, including the one the
+    # fixture adds that no list in this file names.
     paths = {
         str(verify_fixture.root / path)
         for path in (
             "scripts/verify_browser_mocks.py",
             "frontend/tests/browser_lifecycle.py",
-            "frontend/tests/browser_task_execution_panel.py",
-            "frontend/tests/browser_agent_workspace_task_create.py",
-            "frontend/tests/browser_chat_subagent_region.py",
-            "frontend/tests/browser_feishu_provenance.py",
-            "frontend/tests/browser_feishu_bot_components.py",
         )
+    } | {
+        str(verify_fixture.root / "frontend/tests" / scenario)
+        for scenario in _FIXTURE_BROWSER_SCENARIOS
     }
     for operation in ("black", "isort"):
         calls = verify_fixture.calls(operation)
@@ -460,3 +477,92 @@ def test_terminal_hmr_rejects_extra_arguments_without_starting_pytest(
     result = verify_fixture.run("terminal-hmr", "--", "tests/test_auth.py")
     assert result.returncode != 0
     assert not verify_fixture.calls("pytest")
+
+
+def test_browser_scenario_format_list_is_discovered_not_hardcoded() -> None:
+    """Every browser scenario must reach the formatter.
+
+    The list used to be hard-coded, so a scenario added later was silently
+    skipped by ``backend-format``. Discovery is what keeps that from
+    recurring; asserting the discovery expression is present is weaker than
+    asserting behavior, so this checks the real outcome: no scenario file on
+    disk is absent from what the target would format.
+    """
+    root = Path(__file__).resolve().parents[2]
+    scenarios = {
+        path.name
+        for path in (root / "frontend" / "tests").glob("browser_*.py")
+        if path.name != "browser_lifecycle.py"
+    }
+    assert scenarios, "no browser scenarios found; the glob or layout changed"
+
+    verify = (root / "scripts" / "verify.sh").read_text()
+    assert (
+        "find \"$ROOT/frontend/tests\" -maxdepth 1 -name 'browser_*.py'" in verify
+    ), "the format target must discover scenarios; a hard-coded list drops new ones"
+    # A hard-coded list would name scenarios individually. None should appear.
+    named = sorted(name for name in scenarios if f'tests/{name}"' in verify)
+    assert not named, f"scenarios are listed individually again: {named}"
+
+
+def test_hmr_browser_guard_honours_the_explicitly_selected_browser() -> None:
+    """The skip decision must use the browser the tests will actually use.
+
+    The guard probed Playwright's default cache while the launch fixture used
+    ``CLAUDE_HUB_BROWSER_EXECUTABLE``. On a machine with an explicitly selected
+    browser and no default cache, that skipped the entire module -- and the
+    ``terminal-hmr`` target rejects skips, so the mismatch failed the target
+    even though a usable browser was present.
+
+    The probe is executed in isolation with a stubbed Playwright so the
+    assertion is about which browser is requested, not about launching one.
+    """
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "backend" / "tests" / "test_terminal_hmr_recovery_e2e.py").read_text()
+    start = source.index("def _chromium_can_launch")
+    guard_source = source[start : source.index("pytestmark", start)]
+
+    launches: list[dict[str, object]] = []
+
+    class _Browser:
+        def close(self) -> None:
+            return None
+
+    class _Chromium:
+        def launch(self, **kwargs: object) -> _Browser:
+            launches.append(kwargs)
+            return _Browser()
+
+    class _Playwright:
+        chromium = _Chromium()
+
+        def __enter__(self) -> "_Playwright":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    stub = types.ModuleType("playwright.sync_api")
+    stub.sync_playwright = lambda: _Playwright()  # type: ignore[attr-defined]
+
+    namespace: dict[str, object] = {"os": os, "Path": Path, "Any": Any}
+    with mock.patch.dict(sys.modules, {"playwright.sync_api": stub}):
+        exec(guard_source, namespace)
+        guard = cast(Callable[[], bool], namespace["_chromium_can_launch"])
+
+        selected = Path(sys.executable).resolve()  # any existing executable
+        with mock.patch.dict(os.environ, {"CLAUDE_HUB_BROWSER_EXECUTABLE": str(selected)}):
+            assert guard() is True
+        assert launches[-1].get("executable_path") == str(
+            selected
+        ), "the guard must probe the explicitly selected browser"
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_HUB_BROWSER_EXECUTABLE", None)
+            guard()
+        assert (
+            "executable_path" not in launches[-1]
+        ), "without an explicit selection the guard must probe the default browser"
+
+        with mock.patch.dict(os.environ, {"CLAUDE_HUB_BROWSER_EXECUTABLE": "/nonexistent/chrome"}):
+            assert guard() is False

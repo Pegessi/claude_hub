@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### test(chat): gate the Chat composer and align merged acceptance checks
+
+- Add a sixth browser scenario covering the Chat composer: send and clear,
+  local queueing while a turn is live, Stop draining the queue, a failed send
+  keeping the user's text, retry under a new client turn id, and mobile
+  reachability of both controls.
+- Probe the browser the tests actually use when deciding whether to skip the
+  terminal HMR module. Probing Playwright's default cache skipped the whole
+  module where an explicitly selected browser was available, which the
+  no-skip `terminal-hmr` target then failed.
+- Discover browser scenarios for the format target instead of listing them,
+  so a newly added scenario can no longer escape the formatter.
+- Drop the Chat-only `right: 56px` offset: the name pill and the Feishu
+  control now share one flex row, which prevents the overlap structurally.
+- Restore the full secret request-body assertion and update the provenance
+  mock to the WebSocket contract (`connection_status`).
+
 ### fix(chat): match Claude model options to each tab environment
 
 - Build the Claude Chat model picker from the selected tab's

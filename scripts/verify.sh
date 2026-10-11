@@ -212,14 +212,10 @@ run_browser_mocks() {
 }
 
 run_one() {
+  local _scenario
+  local -a browser_scenarios=()
   local -a browser_tools=(
     "$ROOT/scripts/verify_browser_mocks.py" "$ROOT/frontend/tests/browser_lifecycle.py")
-  local -a browser_scenarios=(
-    "$ROOT/frontend/tests/browser_task_execution_panel.py"
-    "$ROOT/frontend/tests/browser_agent_workspace_task_create.py"
-    "$ROOT/frontend/tests/browser_chat_subagent_region.py"
-    "$ROOT/frontend/tests/browser_feishu_provenance.py"
-    "$ROOT/frontend/tests/browser_feishu_bot_components.py")
   case "$1" in
     browser-mocks) run_browser_mocks ;;
     terminal-hmr) run_terminal_hmr ;;
@@ -228,6 +224,17 @@ run_one() {
       ;;
     backend-format)
       check_backend_tools
+      # Discovered, not listed: a hard-coded list silently drops every
+      # scenario added later, which is how the Chat composer gate escaped
+      # the formatter. browser_lifecycle.py is shared tooling, listed above.
+      while IFS= read -r _scenario; do
+        browser_scenarios+=("$_scenario")
+      done < <(find "$ROOT/frontend/tests" -maxdepth 1 -name 'browser_*.py' \
+        ! -name 'browser_lifecycle.py' | sort)
+      if [ ${#browser_scenarios[@]} -eq 0 ]; then
+        echo "ERROR: no browser scenarios discovered" >&2
+        return 1
+      fi
       (cd "$ROOT/backend" && uv run --offline --no-sync black --config pyproject.toml --check . "${browser_tools[@]}" "${browser_scenarios[@]}" \
         && uv run --offline --no-sync isort --settings-path pyproject.toml --check . "${browser_tools[@]}" "${browser_scenarios[@]}")
       ;;
