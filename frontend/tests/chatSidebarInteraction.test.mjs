@@ -34,6 +34,15 @@ test('workspace headers support pointer drag ordering with a visible drop edge',
   ))
 })
 
+test('the Pinned header folds the pinned section like a workspace header', () => {
+  const header = source.match(/<button\s+v-if="group\.pinned"[\s\S]*?<\/button>/)?.[0] ?? ''
+  assert.match(header, /class="chat-sidebar__group-header chat-sidebar__pinned-header"/)
+  assert.match(header, /:aria-expanded="!group\.collapsed"/)
+  assert.match(header, /@click="pinnedCollapsed = !pinnedCollapsed"/)
+  assert.match(header, /class="chat-sidebar__group-chevron"/)
+  assert.match(source, /pinnedCollapsed: pinnedCollapsed\.value,/)
+})
+
 test('only working rows mount the per-row beam and star field', () => {
   assert.match(source, /<ChatSidebarWorkingEffect\s+v-if="getTabStatus\(tab\) === 'working'"\s+:seed="tab\.id"\s*\/>/)
   assert.doesNotMatch(source, /working-comet/)

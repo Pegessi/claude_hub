@@ -123,14 +123,30 @@ test('active session beyond the preview replaces the sixth row and remains visib
   assert.equal(folded.collapsed, true)
 })
 
-test('pinned sessions are always expanded, excluded from normal groups, and keep persisted order', () => {
+test('pinned sessions start expanded, are excluded from normal groups, and keep persisted order', () => {
   const tabs = sessions(12)
   const pins = new Set(ids(tabs.slice(2, 10)).reverse())
   const groups = buildChatSidebarGroups(tabs, pins, sidebarOptions({ collapsed: new Set(['/repo']) }))
   assert.equal(groups[0].pinned, true)
+  assert.equal(groups[0].collapsed, false)
   assert.deepEqual(ids(groups[0].visibleTabs), ids(tabs.slice(2, 10)))
   assert.equal(groups[0].hiddenCount, 0)
   assert.deepEqual(ids(groups[1].tabs), ['tab-0', 'tab-1', 'tab-10', 'tab-11'])
+})
+
+test('a folded pinned section keeps its count and only the active pinned row, and search unfolds it', () => {
+  const tabs = sessions(6)
+  const pins = new Set(['tab-1', 'tab-3', 'tab-4'])
+  const folded = buildChatSidebarGroups(tabs, pins, sidebarOptions({ pinnedCollapsed: true }))[0]
+  assert.equal(folded.collapsed, true)
+  assert.deepEqual(folded.visibleTabs, [])
+  assert.equal(folded.tabs.length, 3)
+  assert.equal(folded.hiddenCount, 3)
+  const withActive = buildChatSidebarGroups(tabs, pins, sidebarOptions({ pinnedCollapsed: true, activeTabId: 'tab-3' }))[0]
+  assert.deepEqual(ids(withActive.visibleTabs), ['tab-3'])
+  const searched = buildChatSidebarGroups(tabs, pins, sidebarOptions({ pinnedCollapsed: true, query: 'Session' }))[0]
+  assert.equal(searched.collapsed, false)
+  assert.deepEqual(ids(searched.visibleTabs), ['tab-1', 'tab-3', 'tab-4'])
 })
 
 test('search reaches hidden and folded sessions by name and full directory path', () => {

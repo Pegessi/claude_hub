@@ -109,16 +109,33 @@
           :data-group-key="group.key"
           :data-group-drop-position="groupDropTarget?.cwd === group.cwd ? groupDropTarget.position : undefined"
         >
-          <div
+          <button
             v-if="group.pinned"
+            type="button"
             class="chat-sidebar__group-header chat-sidebar__pinned-header"
-            title="Pins are saved on this Hub"
+            title="Pins are saved on this Hub. Click to collapse"
             data-pointer-drop="group"
+            :aria-expanded="!group.collapsed"
+            :aria-controls="`chat-group-${group.key}`"
+            @click="pinnedCollapsed = !pinnedCollapsed"
           >
             <span aria-hidden="true">⌖</span>
             <span class="chat-sidebar__group-label">Pinned</span>
             <span class="chat-sidebar__group-count">{{ group.tabs.length }}</span>
-          </div>
+            <svg
+              class="chat-sidebar__group-chevron"
+              :class="{ collapsed: group.collapsed }"
+              viewBox="0 0 16 16"
+              width="12"
+              height="12"
+              aria-hidden="true"
+            >
+              <path
+                fill="currentColor"
+                d="M4.5 6 8 9.5 11.5 6l.9.9L8 11.3 3.6 6.9z"
+              />
+            </svg>
+          </button>
           <button
             v-else
             type="button"
@@ -415,6 +432,7 @@ const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
 
 const filterText = ref('')
 const collapsedGroups = ref<Set<string>>(new Set())
+const pinnedCollapsed = ref(false)
 const expandedGroups = ref<Set<string>>(new Set())
 const draggedTabId = ref<string | null>(null)
 const dropTarget = ref<{ id: string; position: 'before' | 'after' } | null>(null)
@@ -590,6 +608,7 @@ function onGroupHeaderClick(cwd: string) {
 const filteredGroups = computed(() => buildChatSidebarGroups(chatTabs.value, pinnedChatIds.value, {
   query: filterText.value, activeTabId: activeTabId.value,
   collapsed: collapsedGroups.value, expanded: expandedGroups.value,
+  pinnedCollapsed: pinnedCollapsed.value,
 }))
 
 function toggleExpanded(cwd: string) {
@@ -1029,7 +1048,7 @@ watch(mobileDrawerOpen, isOpen => {
 }
 
 .chat-sidebar__group-header.chat-sidebar__pinned-header {
-  cursor: default;
+  cursor: pointer;
 }
 
 .chat-sidebar__show-more {
@@ -1472,6 +1491,15 @@ watch(mobileDrawerOpen, isOpen => {
   /* 44px touch rows: the existing desktop paddings are slightly tighter. */
   .chat-sidebar.mobile-drawer .chat-sidebar__item {
     min-height: 44px;
+  }
+
+  /* A phone-height drawer cannot spare 40vh for a sticky block that rows
+     scroll underneath, so pins scroll with the list here. */
+  .chat-sidebar.mobile-drawer .chat-sidebar__group--pinned {
+    position: relative;
+    z-index: auto;
+    max-height: none;
+    overflow: visible;
   }
 
   /* Horizontal drags on the header must reach JS (close gesture); vertical
