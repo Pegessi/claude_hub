@@ -15,26 +15,24 @@
       class="working-effect__beam"
       focusable="false"
     >
-      <g class="working-effect__orbit">
-        <rect
-          class="working-effect__bloom"
-          width="100%"
-          height="100%"
-          rx="5.5"
-          pathLength="100"
-          :stroke-dasharray="BLOOM_DASHARRAY"
-        />
-        <rect
-          v-for="(dasharray, index) in BEAM_LAYERS"
-          :key="index"
-          class="working-effect__layer"
-          width="100%"
-          height="100%"
-          rx="5.5"
-          pathLength="100"
-          :stroke-dasharray="dasharray"
-        />
-      </g>
+      <rect
+        class="working-effect__bloom"
+        width="100%"
+        height="100%"
+        rx="5.5"
+        pathLength="100"
+        :stroke-dasharray="BLOOM_DASHARRAY"
+      />
+      <rect
+        v-for="(dasharray, index) in BEAM_LAYERS"
+        :key="index"
+        class="working-effect__layer"
+        width="100%"
+        height="100%"
+        rx="5.5"
+        pathLength="100"
+        :stroke-dasharray="dasharray"
+      />
     </svg>
     <span class="working-effect__sky">
       <span class="working-effect__pool" />
@@ -93,14 +91,14 @@ const stars = computed(() => createWorkingStarfield(props.seed))
   overflow: visible;
 }
 
+/* Dash arrays come from createWorkingBeamLayers: every layer straddles the
+   pulse peak at WORKING_BEAM_TAIL, so starting the offset there puts the peak
+   on the orbit phase, and one lap moves every layer together. Each rect runs
+   its own animation: animating the inherited stroke-dashoffset on a shared
+   <g> instead makes every frame recalculate styles at several times the
+   main-thread cost for the same picture. */
 .working-effect__beam rect {
   fill: none;
-}
-
-/* Dash arrays come from createWorkingBeamLayers: every layer straddles the
-   pulse peak at WORKING_BEAM_TAIL, so starting the shared offset there puts
-   the peak on the orbit phase, and one lap moves every layer together. */
-.working-effect__orbit {
   stroke-dashoffset: 18;
   animation: working-effect-orbit var(--working-orbit) linear infinite;
 }
