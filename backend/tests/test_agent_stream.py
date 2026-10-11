@@ -4079,6 +4079,67 @@ async def test_goal_turn_persistent_transport_is_not_synthesized(
 
 
 @pytest.mark.asyncio
+async def test_ordinary_turn_in_goal_chat_hides_envelope_without_goal_synthesis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manual turn after a Goal may echo the protocol; hide it, never end the turn."""
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(tailer_module, "GOAL_TERMINAL_GRACE_S", 0.0)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-goal-history-manual",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    await tailer.start()
+    await tailer.send_message(
+        "What changed?",
+        [],
+        client_turn_id="manual-turn",
+        turn_metadata={"origin": "web"},
+        strip_goal_protocol=True,
+    )
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": 'Answer.\n<goal-checkpoint>{"remaining":[]}</goal-checkpoint>'
+                    '<goal-status state="complete">done</goal-status>',
+                },
+            },
+        }
+    )
+
+    await asyncio.sleep(0.25)
+    page = await tailer._store.read_since(-1, limit=100)
+    assert not any(e.type == AgentStreamEventType.TURN_COMPLETED for e in page.events)
+    assert tailer._goal_terminal_at is None
+
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+    completed = await _wait_for_store_event(tailer._store, AgentStreamEventType.TURN_COMPLETED)
+    page = await tailer._store.read_since(-1, limit=100)
+    visible = "".join(
+        str(event.payload.get("text") or "")
+        for event in page.events
+        if event.type == AgentStreamEventType.TEXT_DELTA
+    )
+    assert visible == "Answer.\n"
+    assert completed.payload["assistant_text"] == visible
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
 async def test_goal_turn_eof_before_grace_synthesizes_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

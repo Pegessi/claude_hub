@@ -1331,6 +1331,7 @@ async def _send_to_native(
     *,
     visible_text: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
+    strip_goal_protocol: bool = False,
 ) -> None:
     """Deliver composer input to the native provider transport atomically.
 
@@ -1364,6 +1365,7 @@ async def _send_to_native(
         delivery=payload.delivery,
         visible_text=visible_text,
         turn_metadata=turn_metadata,
+        strip_goal_protocol=strip_goal_protocol,
     )
 
 
@@ -1435,38 +1437,90 @@ async def _dispatch_tab_stream_input(
     allow_question_answer: bool = True,
     admission_guard: Optional[_ChatAdmissionGuard] = None,
 ) -> str:
-    """Deliver one turn through the existing direct-Chat admission path."""
-    from ..services.goal_run import get_goal_admission_lock, get_goal_manager
+    """Deliver one turn through the existing direct-Chat admission path.
+
+    While a Goal is active, a steer, a Claude/Cursor question answer, or any
+    reply to a blocked Goal becomes the next Goal turn instead of pausing it.
+    """
+    from ..models.goal_run import GOAL_STEER_INPUT_MAX_LENGTH
+    from ..services.goal_run import (
+        GoalPolicyError,
+        get_goal_admission_lock,
+        get_goal_manager,
+    )
 
     async with get_goal_admission_lock(tab_id):
-        goal = get_goal_manager().current(tab_id)
+        goal_manager = get_goal_manager()
+        goal = goal_manager.current(tab_id)
         session = _terminal_tab_session_or_404(tab_id)
         manager = _get_tab_tailer_manager()
+        if goal is not None and allow_question_answer and not payload.attachments:
+            active = goal.status.value == "active"
+            if (
+                active
+                and goal.current_turn_id
+                and await manager.answer_pending_question(
+                    session, payload.text, goal.current_turn_id
+                )
+            ):
+                return str(goal.current_turn_id)
+            steer = False
+            if active:
+                steer = payload.delivery == "steer" or bool(
+                    goal.current_turn_id
+                    and await manager.accepts_question_followup(
+                        session, payload.text, goal.current_turn_id
+                    )
+                )
+            elif goal.status.value == "blocked":
+                if payload.delivery != "steer" and await manager.turn_in_flight(session):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Wait for the current turn before replying to the Goal",
+                        headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+                    )
+                steer = True
+            if steer:
+                if len(payload.text) > GOAL_STEER_INPUT_MAX_LENGTH:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "Goal steer messages are limited to "
+                            f"{GOAL_STEER_INPUT_MAX_LENGTH} characters"
+                        ),
+                    )
+                await manager.resolve_answered_questions(session, payload.text)
+                try:
+                    goal = await goal_manager.steer(
+                        goal.id,
+                        f"steer:{payload.client_turn_id}",
+                        payload.text,
+                        payload.client_turn_id,
+                    )
+                except GoalPolicyError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=str(exc),
+                        headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+                    ) from exc
+                delivered = payload.client_turn_id in goal.completed_turn_ids or (
+                    goal.current_turn_id == payload.client_turn_id
+                    and goal.dispatch_state.value == "dispatched"
+                )
+                if not delivered:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=goal.status_message or "the Goal turn was not delivered",
+                    )
+                return payload.client_turn_id
         if goal is not None and (
             goal.status.value == "active" or goal.dispatch_state.value != "idle"
         ):
-            if (
-                allow_question_answer
-                and goal.status.value == "active"
-                and goal.current_turn_id
-                and not payload.attachments
-            ):
-                if await manager.answer_pending_question(
-                    session, payload.text, goal.current_turn_id
-                ):
-                    return str(goal.current_turn_id)
-                if await manager.accepts_question_followup(
-                    session, payload.text, goal.current_turn_id
-                ):
-                    goal = await get_goal_manager().pause(
-                        goal.id, f"answer:{payload.client_turn_id}"
-                    )
-            if goal.status.value == "active" or goal.dispatch_state.value != "idle":
-                raise HTTPException(
-                    status_code=409,
-                    detail="Pause or finish the active Goal before sending a manual turn",
-                    headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
-                )
+            raise HTTPException(
+                status_code=409,
+                detail="Pause or finish the active Goal before sending a manual turn",
+                headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+            )
         # Internal external-channel guards authorize submission, not the whole
         # model turn. HTTP request models never carry this callable.
         guard = admission_guard() if admission_guard is not None else nullcontext()
@@ -1477,6 +1531,7 @@ async def _dispatch_tab_stream_input(
                 manager,
                 visible_text=visible_text,
                 turn_metadata=turn_metadata,
+                strip_goal_protocol=goal_manager.has_goal_history(tab_id),
             )
         return payload.client_turn_id
 

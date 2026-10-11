@@ -786,3 +786,131 @@ async def test_pause_waits_only_for_acceptance_not_dispatch_callers_lifetime(
     finally:
         caller_finished.set()
         await task
+
+
+@pytest.mark.asyncio
+async def test_steer_replaces_running_goal_turn_and_keeps_goal_active(tmp_path: Path) -> None:
+    prompts: list[tuple[str | None, str]] = []
+    cancelled: list[str | None] = []
+
+    async def dispatch(goal, prompt):
+        prompts.append((goal.pending_step_id, prompt))
+        return goal.pending_step_id
+
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"),
+        dispatch,
+        lambda goal: cancelled.append(goal.current_turn_id),
+    )
+    goal = await manager.create_and_start("tab-1", request())
+    first_turn = goal.current_turn_id
+
+    steered = await manager.steer(goal.id, "steer-1", "Use the staging DB", "user-turn")
+
+    assert cancelled == [first_turn]
+    assert steered.status == GoalRunStatus.ACTIVE
+    assert steered.current_turn_id == "user-turn"
+    assert steered.dispatch_state == GoalDispatchState.DISPATCHED
+    assert steered.pending_input is None
+    assert prompts[-1][0] == "user-turn"
+    assert "Use the staging DB" in prompts[-1][1]
+    assert "Address it first" in prompts[-1][1]
+    # The next continuation no longer repeats the delivered message.
+    assert "Use the staging DB" not in build_continuation_prompt(steered)
+
+    replay = await manager.steer(goal.id, "steer-1", "Use the staging DB", "user-turn")
+    assert replay.current_turn_id == "user-turn"
+    assert len(prompts) == 2
+    with pytest.raises(GoalPolicyError, match="another mutation"):
+        await manager.pause(goal.id, "steer-1")
+
+
+@pytest.mark.asyncio
+async def test_steer_requires_running_goal_and_keeps_input_when_dispatch_fails(
+    tmp_path: Path,
+) -> None:
+    fail = False
+
+    async def dispatch(goal, prompt):
+        if fail:
+            raise RuntimeError("transport offline")
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch)
+    goal = await manager.create_and_start("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    with pytest.raises(GoalPolicyError, match="Resume the Goal"):
+        await manager.steer(goal.id, "steer-paused", "hello", "turn-paused")
+
+    await manager.resume(goal.id, "resume")
+    # An unpersistable message is refused before it can corrupt the snapshot.
+    with pytest.raises(ValueError, match="limited to"):
+        await manager.steer(goal.id, "steer-long", "x" * 32_001, "turn-long")
+    assert manager.get(goal.id).pending_input is None
+    assert "steer-long" not in manager.get(goal.id).idempotency
+    fail = True
+    failed = await manager.steer(goal.id, "steer-1", "Keep me", "turn-1")
+    assert failed.status == GoalRunStatus.PAUSED
+    assert failed.dispatch_state == GoalDispatchState.UNCERTAIN
+    assert failed.pending_input == "Keep me"
+    assert "Keep me" in build_continuation_prompt(failed)
+
+
+@pytest.mark.asyncio
+async def test_blocked_goal_can_be_steered_with_the_user_reply(tmp_path: Path) -> None:
+    async def dispatch(goal, prompt):
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch)
+    goal = await manager.create_and_start("tab-1", request())
+    assert goal.current_turn_id is not None
+    blocked = await manager.on_turn_completed(
+        "tab-1", goal.current_turn_id, "completed", response_with_checkpoint("needs_input")
+    )
+    assert blocked is not None and blocked.status == GoalRunStatus.BLOCKED
+
+    resumed = await manager.steer(goal.id, "reply", "Option B", "reply-turn")
+    assert resumed.status == GoalRunStatus.ACTIVE
+    assert resumed.current_turn_id == "reply-turn"
+
+
+@pytest.mark.asyncio
+async def test_resume_during_chat_turn_waits_for_that_turn_boundary(tmp_path: Path) -> None:
+    dispatched: list[str | None] = []
+
+    async def dispatch(goal, prompt):
+        dispatched.append(goal.pending_step_id)
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch)
+    goal = await manager.create_and_start("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    assert len(dispatched) == 1
+
+    deferred = await manager.resume(goal.id, "resume", after_current_turn=True)
+    assert deferred.status == GoalRunStatus.ACTIVE
+    assert deferred.dispatch_state == GoalDispatchState.IDLE
+    assert deferred.resume_after_turn is True
+    assert deferred.status_message == "resumes when the current Chat turn finishes"
+    assert len(dispatched) == 1
+
+    released = await manager.on_turn_completed("tab-1", "manual-turn", "completed", "done")
+    assert released is not None
+    assert released.resume_after_turn is False
+    assert released.dispatch_state == GoalDispatchState.DISPATCHED
+    assert len(dispatched) == 2
+
+    await manager.pause(goal.id, "pause-2")
+    await manager.resume(goal.id, "resume-2", after_current_turn=True)
+    paused = await manager.pause(goal.id, "pause-3")
+    assert paused.resume_after_turn is False
+    await manager.on_turn_completed("tab-1", "manual-turn-2", "completed", "done")
+    assert len(dispatched) == 2
+
+    await manager.resume(goal.id, "resume-3", after_current_turn=True)
+    released = await manager.release_deferred_resume(goal.id)
+    assert released.dispatch_state == GoalDispatchState.DISPATCHED
+    assert len(dispatched) == 3
+    # Releasing twice is a no-op.
+    await manager.release_deferred_resume(goal.id)
+    assert len(dispatched) == 3
