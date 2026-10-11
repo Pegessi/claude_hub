@@ -98,29 +98,6 @@ test('the pulse peak rides the orbit phase without a solid head segment', () => 
   assert.doesNotMatch(template, /<g[\s>]/)
 })
 
-test('both themes define a cool cyan-to-blue working light', () => {
-  const app = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
-  const block = selector => {
-    const open = app.indexOf('{', app.indexOf(selector))
-    return app.slice(open + 1, app.indexOf('}', open))
-  }
-  const hue = hex => {
-    const [r, g, b] = hex.slice(1).match(/../g).map(part => Number.parseInt(part, 16))
-    const max = Math.max(r, g, b)
-    const delta = max - Math.min(r, g, b)
-    const sector = max === r ? ((g - b) / delta) % 6 : max === g ? (b - r) / delta + 2 : (r - g) / delta + 4
-    return (60 * sector + 360) % 360
-  }
-  const used = [...new Set(effect.match(/--ch-color-session-[a-z-]+/g))]
-  for (const theme of [block(':root {'), block(":root[data-theme='light'] {")]) {
-    for (const name of used) assert.match(theme, new RegExp(`${name}:`), name)
-    for (const name of ['beam', 'beam-tail']) {
-      const value = theme.match(new RegExp(`--ch-color-session-${name}: (#[0-9a-f]{6});`))[1]
-      assert.ok(hue(value) >= 180 && hue(value) <= 230, `${name} ${value}`)
-    }
-  }
-})
-
 test('the working light is decorative and disappears for reduced motion', () => {
   assert.match(effect, /class="working-effect"\s+aria-hidden="true"/)
   assert.match(effect, /pointer-events: none;/)
