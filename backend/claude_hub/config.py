@@ -43,14 +43,15 @@ class Settings(BaseSettings):
     auth_allowed_emails: Optional[str] = None  # Comma-separated list
     auth_allowed_open_ids: Optional[str] = None  # Comma-separated list
 
-    # Agent-stream attachment preview cache limits.
-    # The cache stores only browser-generated bounded previews (never the
-    # original image bytes). All limits are enforced with FIFO eviction.
-    attachment_max_preview_bytes: int = 512 * 1024  # 512 KiB per preview
-    attachment_max_session_count: int = 200
-    attachment_max_session_bytes: int = 64 * 1024 * 1024  # 64 MiB per session
-    attachment_max_global_count: int = 2000
-    attachment_max_global_bytes: int = 512 * 1024 * 1024  # 512 MiB global
+    # Agent-stream Chat image cache limits, enforced least-recently-used first.
+    # The composer stores the original image when it fits the per-image cap
+    # (its own 8 MiB upload limit), so sent images keep their quality. The
+    # session limits default to the global ones: one 1 GiB LRU pool.
+    attachment_max_preview_bytes: int = 8 * 1024 * 1024  # 8 MiB per image
+    attachment_max_session_count: int = 5000
+    attachment_max_session_bytes: int = 1024 * 1024 * 1024  # 1 GiB
+    attachment_max_global_count: int = 5000
+    attachment_max_global_bytes: int = 1024 * 1024 * 1024  # 1 GiB
     # Optional age-based eviction. None disables age TTL.
     attachment_max_age_seconds: Optional[float] = None
 

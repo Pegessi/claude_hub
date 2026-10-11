@@ -693,16 +693,14 @@ class SessionTailer:
         the turn, so input and output never diverge across two sessions.
 
         ``images`` are the original (full-resolution) bytes sent to the
-        provider. ``previews`` are the bounded (max edge 1024px) bytes that
-        the frontend generated for display; only the previews are persisted to
-        the attachment cache. The original bytes are never written to disk
-        (except for Codex's transient temp staging, which is cleaned up).
+        provider. ``previews`` are the display images the frontend uploaded
+        (the original itself when it fits the cache cap); only the previews
+        are persisted to the attachment cache.
 
         If ``previews`` is ``None`` the originals are still sent to the
         provider but **not** durably cached — the ``turn_started`` event
         carries non-renderable placeholder metadata so the turn is still
-        visible but no original bytes are persisted. This preserves the
-        "originals never enter the durable cache" boundary.
+        visible but no image bytes are persisted.
 
         ``reuse_attachments`` (edit-resend only): when supplied, no new
         previews are persisted — the supplied metadata (with its existing
@@ -803,7 +801,7 @@ class SessionTailer:
                     f"preview count ({len(previews)}) must match image count ({len(images)})"
                 )
 
-            # 4. Persist bounded previews. Originals are never used as previews.
+            # 4. Persist the uploaded display images.
             attachment_metas: List[Dict[str, Any]] = []
             saved_ids: List[str] = []
             try:
@@ -3167,8 +3165,8 @@ class TailerManager:
 
         # Read the original turn's attachment preview bytes BEFORE truncating
         # so they can be re-sent to the provider.  The durable cache stores
-        # only bounded previews (never the original full-resolution bytes), so
-        # the preview is what we re-send; the attachment IDs are re-referenced
+        # the uploaded display image (the original when it fit the cache cap),
+        # so the preview is what we re-send; the attachment IDs are re-referenced
         # in the new turn (via ``reuse_attachments`` below) so the same
         # thumbnails render.  A preview that was evicted/expired is skipped:
         # its ID is still re-referenced (UI shows "Preview expired") but the
