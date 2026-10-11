@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### perf(mobile): hold working-session light while the drawer is shut or dragged
+
+- The working-row beam and stars animate on the main thread every frame, and a
+  closed mobile drawer is only `visibility: hidden`, so they kept running
+  behind every page. They now pause, frozen on their current frame, until the
+  drawer is open and at rest, and pause again while a drag follows the finger.
+- Measured at 4x CPU throttle with four working Chats: a closed drawer now
+  costs 1ms of main thread per second instead of 148ms, and each drag move
+  6.6ms instead of 20.3ms (4.5ms with no light at all). Desktop is unchanged.
+
 ### fix(chat): keep Stop and Queue on one composer line on phones
 
 - The composer tools no longer take part in the toolbar's wrap decision, so

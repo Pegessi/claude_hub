@@ -1493,6 +1493,14 @@ watch(mobileDrawerOpen, isOpen => {
     min-height: 44px;
   }
 
+  /* Working-row beams animate on the main thread every frame. Hold them while
+     the drawer is hidden or following the finger, so they neither tax the page
+     behind a closed drawer nor drop frames from the drag. */
+  .chat-sidebar.mobile-drawer:not(.mobile-drawer--open) :deep(.working-effect *),
+  .chat-sidebar.mobile-drawer.mobile-drawer--dragging :deep(.working-effect *) {
+    animation-play-state: paused;
+  }
+
   /* A phone-height drawer cannot spare 40vh for a sticky block that rows
      scroll underneath, so pins scroll with the list here. */
   .chat-sidebar.mobile-drawer .chat-sidebar__group--pinned {
