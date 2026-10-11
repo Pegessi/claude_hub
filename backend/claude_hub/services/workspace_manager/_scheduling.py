@@ -184,6 +184,7 @@ class _SchedulingMixin:
         name = payload.name.strip()
         if not name:
             raise ValueError("name must not be empty")
+        env_preset = payload.env_preset.strip() if payload.env_preset else None
         now = _wm._now()
         agent_type = payload.agent_type
         if payload.kind == ScheduledTaskKind.CHAT_TURN and payload.tab_id:
@@ -203,6 +204,7 @@ class _SchedulingMixin:
             agent_type=agent_type,
             message=payload.message,
             task_title=payload.task_title,
+            env_preset=env_preset,
             run_count=0,
             created_at=now,
             updated_at=now,
@@ -330,6 +332,8 @@ class _SchedulingMixin:
             updates["name"] = updates["name"].strip()
             if not updates["name"]:
                 raise ValueError("name must not be empty")
+        if "env_preset" in updates and isinstance(updates["env_preset"], str):
+            updates["env_preset"] = updates["env_preset"].strip() or None
 
         schedule_keys = ("run_at", "cron", "interval_seconds")
         schedule_changed = any(k in updates for k in schedule_keys)
@@ -341,6 +345,17 @@ class _SchedulingMixin:
 
         now = _wm._now()
         merged = task.model_copy(update={**updates, "updated_at": now})
+
+        if (
+            "env_preset" not in updates
+            and merged.env_preset
+            and merged.kind not in (ScheduledTaskKind.NEW_SESSION, ScheduledTaskKind.HUB_TASK)
+        ):
+            # A preset on a non-session kind can only come from a hand-edited
+            # persistence file (the API rejects it). Drop the stale value here
+            # so it cannot lock out every future edit/disable of the schedule,
+            # which all re-run validation against the merged record.
+            merged = merged.model_copy(update={"env_preset": None})
 
         fields = merged.model_dump()
         self._validate_scheduled_task_fields(fields, existing=task)
@@ -471,6 +486,23 @@ class _SchedulingMixin:
         still be disabled or edited (only changing the tab re-validates).
         """
         kind = fields.get("kind")
+
+        env_preset = fields.get("env_preset")
+        if env_preset:
+            if kind not in (ScheduledTaskKind.NEW_SESSION, ScheduledTaskKind.HUB_TASK):
+                raise ValueError("env_preset is only valid for new_session / hub_task tasks")
+            # Resolve at create/update time so an unknown preset fails the
+            # request instead of silently failing on every fire.
+            from ..env_preset_resolver import (
+                EnvPresetNotFoundError,
+                EnvPresetParseError,
+                resolve_env_preset,
+            )
+
+            try:
+                resolve_env_preset(env_preset)
+            except (EnvPresetNotFoundError, EnvPresetParseError) as exc:
+                raise ValueError(str(exc)) from None
 
         schedule_count = sum(
             1 for key in ("run_at", "cron", "interval_seconds") if fields.get(key) is not None
@@ -1374,8 +1406,35 @@ class _SchedulingMixin:
         except Exception:
             logger.exception("Best-effort delete of scheduled-task session %s failed", session_id)
 
+    def _resolve_fire_env_preset(self, task: ScheduledTask) -> Optional[str]:
+        """Return the task's env preset, re-validating at fire time.
+
+        The preset was resolved when the schedule was created or edited, but a
+        custom preset can be deleted or corrupted afterwards. Fail the fire
+        with a message that names the schedule and preset so ``last_error``
+        explains why no worker was spawned.
+        """
+        if not task.env_preset:
+            return task.env_preset
+        from ..env_preset_resolver import (
+            EnvPresetNotFoundError,
+            EnvPresetParseError,
+            resolve_env_preset,
+        )
+
+        try:
+            resolve_env_preset(task.env_preset)
+        except (EnvPresetNotFoundError, EnvPresetParseError) as exc:
+            raise ValueError(
+                f"scheduled task {task.name!r} references env preset "
+                f"{task.env_preset!r} that is no longer available; edit the schedule "
+                f"to choose a valid preset ({exc})"
+            ) from None
+        return task.env_preset
+
     async def _fire_new_session(self, task: ScheduledTask) -> None:
         """Create a new session in the workspace and send it the message."""
+        env_preset = self._resolve_fire_env_preset(task)
         session = await self.ensure_workspace_agent(
             task.workspace_id,
             EnsureWorkspaceAgentRequest(
@@ -1384,6 +1443,7 @@ class _SchedulingMixin:
                 caller_owned_ephemeral=True,
                 role=WorkspaceSessionRole.ORCHESTRATOR,
                 reuse_existing=False,
+                env_preset=env_preset,
             ),
         )
         try:
@@ -1403,6 +1463,7 @@ class _SchedulingMixin:
         session so no agent / reviewer resources are held.
         """
         now = _wm._now()
+        env_preset = self._resolve_fire_env_preset(task)
         # Validation at create/update time guarantees task_title and message are
         # set for hub_task; assert so the type checker sees non-Optional str.
         assert task.task_title is not None
@@ -1427,6 +1488,7 @@ class _SchedulingMixin:
                 caller_owned_ephemeral=True,
                 role=WorkspaceSessionRole.ORCHESTRATOR,
                 reuse_existing=False,
+                env_preset=env_preset,
             ),
         )
         try:
@@ -1599,6 +1661,11 @@ class _SchedulingMixin:
                     caller_owned_ephemeral=True,
                     role=WorkspaceSessionRole.ORCHESTRATOR,
                     reuse_existing=False,
+                    # Carry the original launch preset onto the replacement so
+                    # a redispatch does not silently fall back to the built-in
+                    # agent default. A vanished session row leaves no preset
+                    # record to recover.
+                    env_preset=dead_session.env_preset if dead_session else None,
                 ),
             )
         except Exception:

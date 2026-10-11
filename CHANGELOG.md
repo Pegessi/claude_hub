@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### feat(scheduling): env preset for session-creating scheduled tasks
+
+- `new_session` / `hub_task` schedules accept an `env_preset` (built-in or
+  saved custom preset id/name) used to launch the worker session, instead of
+  always inheriting the agent type's built-in default launch environment.
+- Presets are resolved at create/update time, so an unknown or malformed
+  preset fails the request immediately rather than breaking every fire.
+- `claude-hub schedule create/update --env-preset` exposes the option and the
+  Scheduled Tasks panel gains an Env preset picker for the two session kinds.
+- Fixes recurring `hub_task` schedules (e.g. the QFO4ALL 512890 daily push)
+  that could only ever spawn workers on the expired Volcengine Coding Plan
+  default endpoint and failed every run with provider 400 errors.
+
 ### fix(feishu): preserve rich inbound messages and Bot identity
 
 - Fetch each Bot's Feishu-managed name and HTTPS avatar during credential
