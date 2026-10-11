@@ -170,7 +170,7 @@ test('queued Chat activation is FIFO and protects local drafts from cache evicti
   const paneId = store.activePaneId
   assert.ok(paneId)
 
-  store.setQueuedChatProtected(paneId, 'a', true)
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'queued', attachments: [] })
   assert.equal(store.paneHasProtectedQueuedChat(paneId), true)
 
   store.requestQueuedChatActivation(paneId, 'a')
@@ -188,7 +188,7 @@ test('queued Chat activation is FIFO and protects local drafts from cache evicti
   assert.equal(store.isQueuedChatActivationOwner(paneId, 'b'), true)
 
   store.releaseQueuedChatActivation(paneId, 'b')
-  store.setQueuedChatProtected(paneId, 'a', false)
+  store.getQueuedChatState(paneId, 'a').drafts = []
   assert.equal(store.paneHasProtectedQueuedChat(paneId), false)
 })
 
@@ -197,7 +197,7 @@ test('a pane with a queued Chat cannot be removed by a smaller layout', t => {
   store.setLayout('2x1')
   const protectedPane = store.panes[1]
   store.assignTabToPane('a', protectedPane.id)
-  store.setQueuedChatProtected(protectedPane.id, 'a', true)
+  store.getQueuedChatState(protectedPane.id, 'a').drafts.push({ message: 'queued', attachments: [] })
 
   store.setLayout('1x1')
 
@@ -207,6 +207,98 @@ test('a pane with a queued Chat cannot be removed by a smaller layout', t => {
     store.notifications.at(-1)?.message,
     'Wait for queued Chat messages before reducing the pane layout.',
   )
+})
+
+test('moving a cached queued Chat migrates its state and FIFO request between panes', t => {
+  const { store } = setup(t)
+  store.setLayout('2x1')
+  const [firstPane, secondPane] = store.panes
+
+  store.assignTabToPane('a', firstPane.id)
+  const queue = store.getQueuedChatState(firstPane.id, 'a')
+  queue.drafts.push({ message: 'follow the cached Chat', attachments: [] })
+  store.requestQueuedChatActivation(firstPane.id, 'a')
+
+  store.assignTabToPane('a', secondPane.id)
+  assert.equal(queue.paneId, secondPane.id)
+  assert.equal(store.isQueuedChatActivationOwner(secondPane.id, 'a'), true)
+  assert.equal(store.isQueuedChatActivationOwner(firstPane.id, 'a'), false)
+  assert.deepEqual(store.observedQueuedChatIds(secondPane.id), ['a'])
+
+  store.assignTabToPane('a', firstPane.id)
+  assert.equal(queue.paneId, firstPane.id)
+  assert.equal(store.isQueuedChatActivationOwner(firstPane.id, 'a'), true)
+  assert.equal(store.isQueuedChatActivationOwner(secondPane.id, 'a'), false)
+  assert.deepEqual(store.observedQueuedChatIds(firstPane.id), ['a'])
+})
+
+test('an in-flight queued send settles its migrated owner by tab and advances FIFO', t => {
+  const { store } = setup(t)
+  store.setLayout('2x1')
+  const [firstPane, secondPane] = store.panes
+  store.assignTabToPane('a', firstPane.id)
+  store.getQueuedChatState(firstPane.id, 'a').drafts.push({ message: 'sending', attachments: [] })
+  store.requestQueuedChatActivation(firstPane.id, 'a')
+  store.requestQueuedChatActivation(firstPane.id, 'b')
+  const requestId = store.queuedChatActivationRequestId(firstPane.id, 'a')
+  assert.ok(requestId)
+
+  store.assignTabToPane('a', secondPane.id)
+  assert.equal(store.isQueuedChatActivationOwner(secondPane.id, 'a'), true)
+
+  // The POST was started by the old first-pane component, but settlement must
+  // retire the request after its ownership migrated to the second pane.
+  store.settleQueuedChatActivation('a', requestId)
+
+  assert.equal(store.hasQueuedChatActivationRequest(secondPane.id, 'a'), false)
+  assert.equal(store.isQueuedChatActivationOwner(firstPane.id, 'b'), true)
+  assert.equal(store.activeTabId, 'b')
+})
+
+test('an old queued POST cannot settle a same-tab request recreated after archive cleanup', t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.activePaneId
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'old generation', attachments: [] })
+  store.requestQueuedChatActivation(paneId, 'a')
+  const oldRequestId = store.queuedChatActivationRequestId(paneId, 'a')
+  assert.ok(oldRequestId)
+
+  // Archive/unarchive reuses the tab ID after discard; model that store
+  // boundary without touching a backend endpoint.
+  store.discardQueuedChat('a')
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'new generation', attachments: [] })
+  store.requestQueuedChatActivation(paneId, 'a')
+  const newRequestId = store.queuedChatActivationRequestId(paneId, 'a')
+  assert.ok(newRequestId)
+  assert.notEqual(newRequestId, oldRequestId)
+
+  store.settleQueuedChatActivation('a', oldRequestId)
+
+  assert.equal(store.queuedChatActivationRequestId(paneId, 'a'), newRequestId)
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'a'), true)
+})
+
+test('deleting a queued Chat discards its state and advances FIFO', async t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.activePaneId
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'discard me', attachments: [] })
+  store.requestQueuedChatActivation(paneId, 'a')
+  store.requestQueuedChatActivation(paneId, 'b')
+
+  await store.deleteTab('a')
+
+  assert.equal(store.tabs.some(tab => tab.id === 'a'), false)
+  assert.equal(store.paneHasProtectedQueuedChat(paneId), false)
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'b'), true)
+  assert.equal(store.activeTabId, 'b')
+
+  store.getQueuedChatState(paneId, 'b').drafts.push({ message: 'archive me', attachments: [] })
+  await store.archiveTab('b')
+  assert.equal(store.tabs.some(tab => tab.id === 'b'), false)
+  assert.equal(store.paneHasProtectedQueuedChat(paneId), false)
+  assert.equal(store.queuedChatActivationOwner, null)
 })
 
 test('pinned group is still built for mobile-shaped chat data (presentation-agnostic)', async t => {

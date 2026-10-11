@@ -1375,7 +1375,10 @@ import {
   hasAuthoritativeTerminalFor,
   withOptimisticCancelled,
 } from '@/utils/agentStreamStopReset'
-import { useTerminalStore } from '@/stores/terminalStore'
+import {
+  useTerminalStore,
+  type QueuedChatDraftAttachment,
+} from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
@@ -1862,11 +1865,7 @@ const pendingTurns = computed(() => {
 // Declared before any ``immediate`` watchers so ``turnInFlight`` / ``draftQueue``
 // are initialized when Vue runs the first callback (TDZ-safe).
 
-interface DraftAttachment extends WorkspaceAttachmentCreate {
-  id: string
-  preview_url: string
-  size_bytes: number
-}
+type DraftAttachment = QueuedChatDraftAttachment
 
 const draftMessage = ref('')
 const attachments = ref<DraftAttachment[]>([])
@@ -1883,33 +1882,22 @@ function handleViewportResize() {
   isMobileViewport.value = window.innerWidth <= 768
 }
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
-const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
-// Keep a queued Chat's observer alive while it is hidden so the component can
-// see the current turn finish. The queue still cannot send in the background:
-// it first selects this Chat through the store, then waits for KeepAlive to
-// activate the pane before flushing.
+const queuedChatState = terminalStore.getQueuedChatState(props.paneId, props.tabId)
+const draftQueue = toRef(queuedChatState, 'drafts')
+// Queue data lives in the store so bounded KeepAlive eviction cannot lose it.
+// QueuedChatObserver supplies the hidden completion edge; this full pane only
+// sends after its owning pane and Chat are active in the foreground.
 const isPaneActivated = ref(false)
-const isQueueSendInProgress = ref(false)
+const isQueueSendInProgress = toRef(queuedChatState, 'sendInProgress')
 // A queued POST failure is delivery-uncertain: the provider may have accepted
 // it even when the browser did not receive the acknowledgement. Keep later
 // queued messages paused until the user deliberately sends the restored draft
 // and that explicit send succeeds.
-const isDraftQueuePaused = ref(false)
-const hasProtectedQueueState = computed(() =>
-  draftQueue.value.length > 0 || isDraftQueuePaused.value || isQueueSendInProgress.value
-)
+const isDraftQueuePaused = toRef(queuedChatState, 'paused')
+const queueAutoActivationBlock = toRef(queuedChatState, 'autoActivationBlock')
 const isWaitingForQueuedChatActivation = computed(() =>
   terminalStore.hasQueuedChatActivationRequest(props.paneId, props.tabId)
   && !terminalStore.isQueuedChatActivationOwner(props.paneId, props.tabId)
-)
-watch(
-  hasProtectedQueueState,
-  protectedState => terminalStore.setQueuedChatProtected(
-    props.paneId,
-    props.tabId,
-    protectedState,
-  ),
-  { immediate: true, flush: 'sync' },
 )
 const isPreparingAttachments = ref(false)
 const turnInFlight = computed(() => isChatModeLocked(
@@ -2028,10 +2016,10 @@ onMounted(() => {
 // KeepAlive lifecycle. The pane is keyed by tabId (see TerminalPane), so each
 // chat tab owns a stable instance and the tabId prop never changes for a given
 // instance — the old tabId watcher that wiped the composer on every switch is
-// gone. The stream is normally owned by the *active* pane. On deactivate we
-// stop it (caching history), except when a local queued draft still needs to
-// observe the current turn's completion before it can reactivate this Chat. On
-// activate we resume from the cached snapshot (reconciling, no full reload).
+// gone. The full stream is owned by the *active* pane. On deactivate we stop
+// it (caching history); a separate minimal observer watches any hidden queued
+// draft until it can reactivate this Chat. On activate we resume from the
+// cached snapshot (reconciling, no full reload).
 // onActivated also fires on the initial mount, so it replaces the startStream()
 // call that used to live in onMounted.
 onActivated(() => {
@@ -2063,8 +2051,11 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
-  terminalStore.setQueuedChatProtected(props.paneId, props.tabId, false)
-  terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+  // A minimal QueuedChatObserver may still own a ready FIFO request after this
+  // full pane is evicted from the bounded KeepAlive cache. Do not release that
+  // store-owned request here: send completion, an explicit failure yield, or
+  // archive/delete owns its retirement.
+  terminalStore.pruneQueuedChatState(props.paneId, props.tabId)
   goalRefreshEpoch++
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
@@ -2574,10 +2565,7 @@ function enqueueDraft() {
 }
 
 function suspendStreamForDeactivation() {
-  // A paused queue needs explicit user intervention, so it has no reason to
-  // retain a background observer. An unpaused queue does: its stream supplies
-  // the authoritative turn-completed edge that requests Chat activation.
-  if (draftQueue.value.length === 0 || isDraftQueuePaused.value) stop()
+  stop()
 }
 
 async function flushDraftQueue() {
@@ -2589,6 +2577,10 @@ async function flushDraftQueue() {
     && !isSending.value
     && !goalComposerLocked.value
   ) {
+    const activationRequestId = terminalStore.queuedChatActivationRequestId(
+      props.paneId,
+      props.tabId,
+    )
     isQueueSendInProgress.value = true
     let sent = false
     try {
@@ -2601,8 +2593,9 @@ async function flushDraftQueue() {
       isQueueSendInProgress.value = false
       // The next ready hidden Chat may activate only after this one has
       // completed its foreground send attempt (including POST acknowledgement
-      // or the existing delivery-uncertain pause path).
-      terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+      // or the existing delivery-uncertain pause path). Settle by the globally
+      // unique tab ID because the Chat may have moved panes during the POST.
+      terminalStore.settleQueuedChatActivation(props.tabId, activationRequestId)
     }
     if (!sent) break
   }
@@ -2610,12 +2603,17 @@ async function flushDraftQueue() {
 
 function requestDraftQueueFlush() {
   if (!isPaneActivated.value) {
-    if (draftQueue.value.length === 0 || isDraftQueuePaused.value) {
-      terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
-      stop()
-    } else if (!turnInFlight.value && !isSending.value) {
-      terminalStore.requestQueuedChatActivation(props.paneId, props.tabId)
-    }
+    terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+    return
+  }
+  if (
+    draftQueue.value.length > 0
+    && (connectionState.value === 'failed' || goalComposerLocked.value)
+  ) {
+    queueAutoActivationBlock.value = connectionState.value === 'failed'
+      ? 'stream-failed'
+      : 'goal-locked'
+    terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
     return
   }
   if (
@@ -2628,6 +2626,7 @@ function requestDraftQueueFlush() {
     && !isSending.value
     && !goalComposerLocked.value
   ) {
+    queueAutoActivationBlock.value = null
     void flushDraftQueue()
   }
 }
@@ -2640,6 +2639,7 @@ watch(
     goalComposerLocked,
     isSubmissionReady,
     isDraftQueuePaused,
+    queueAutoActivationBlock,
     isPaneActivated,
     isWaitingForQueuedChatActivation,
   ],
@@ -2996,24 +2996,41 @@ async function sendToStream(
   atts: WorkspaceAttachmentCreate[],
   clientTurnId: string,
   delivery: 'normal' | 'steer' = 'normal',
+  timeoutMs: number | null = null,
 ) {
   const base = `/api/workspaces/tabs/${props.tabId}/stream/send`
-  const res = await fetch(base, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
-    body: JSON.stringify({
-      client_turn_id: clientTurnId,
-      text: message,
-      delivery,
-      attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
-        filename,
-        mime_type,
-        data_url,
-        preview_data_url,
-      })),
-    }),
-  })
+  const controller = new AbortController()
+  const timer = timeoutMs === null ? null : setTimeout(() => controller.abort(), timeoutMs)
+  let res: Response
+  try {
+    res = await fetch(base, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      signal: controller.signal,
+      body: JSON.stringify({
+        client_turn_id: clientTurnId,
+        text: message,
+        delivery,
+        attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
+          filename,
+          mime_type,
+          data_url,
+          preview_data_url,
+        })),
+      }),
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw Object.assign(
+        new Error('Send timed out. Delivery is uncertain; review the Chat before retrying.'),
+        { cause: error },
+      )
+    }
+    throw error
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
   if (!res.ok) {
     let detail = `HTTP ${res.status}`
     try {
@@ -3188,7 +3205,7 @@ async function submit(
       ]
     }
     requestLatestAnchor(true)
-    await sendToStream(message, atts, clientTurnId, delivery)
+    await sendToStream(message, atts, clientTurnId, delivery, source === 'queue' ? 15_000 : null)
     if (messageOverride) await hydrateGoal()
     // A successful explicit send resolves a previously uncertain queued item.
     // Automatic queue sends never clear this flag; only deliberate user input

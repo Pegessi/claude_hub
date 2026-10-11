@@ -10,6 +10,10 @@ const structuredPane = readFileSync(
   new URL('../src/components/StructuredPane.vue', import.meta.url),
   'utf8',
 )
+const queuedObserver = readFileSync(
+  new URL('../src/components/QueuedChatObserver.vue', import.meta.url),
+  'utf8',
+)
 const historyCache = readFileSync(
   new URL('../src/utils/agentStreamHistoryCache.ts', import.meta.url),
   'utf8',
@@ -21,22 +25,22 @@ const historyCache = readFileSync(
 // tabId inside a bounded <KeepAlive>, so each chat tab owns a cached instance.
 // ---------------------------------------------------------------------------
 
-test('TerminalPane caches StructuredPane per tabId without evicting actionable queues', () => {
+test('TerminalPane keeps the full Chat cache bounded and mounts minimal queue observers', () => {
   assert.match(
     terminalPane,
-    /<KeepAlive\s+:max="chatCacheMax"/,
-    'the chat cache limit must be queue-aware',
+    /<KeepAlive\s+:max="MAX_CACHED_CHAT_PANES"/,
+    'the full Chat cache must stay bounded',
   )
   assert.match(
     terminalPane,
-    /paneHasProtectedQueuedChat\(props\.pane\.id\)\s*\?\s*undefined/,
-    'an actionable queued Chat must be protected from KeepAlive eviction',
+    /<QueuedChatObserver[\s\S]*?v-for="tabId in queuedObserverTabIds"/,
+    'evicted queues must retain only a minimal hidden observer',
   )
   // The key is what gives each chat tab its own cached instance; without it a
   // tab switch would reuse one instance and wipe state via the prop change.
   assert.match(
     terminalPane,
-    /<StructuredPane[\s\S]*?:key="pane\.tabId"/,
+    /<StructuredPane[\s\S]*?:key="store\.chatPaneCacheKey\(pane\.tabId\)"/,
     'StructuredPane must be keyed by pane.tabId so each chat tab gets a cached instance',
   )
   assert.match(
@@ -46,12 +50,38 @@ test('TerminalPane caches StructuredPane per tabId without evicting actionable q
   )
 })
 
+test('minimal queued observer requests foreground activation on completion or failure', () => {
+  assert.match(queuedObserver, /void start\(props\.tabId, 'terminal-tab'\)/)
+  assert.match(
+    queuedObserver,
+    /connectionState\.value === 'live' && !turnInFlight\.value/,
+    'cold hydration must not mistake empty history for a completed turn',
+  )
+  assert.match(queuedObserver, /requestQueuedChatActivation\(props\.paneId, props\.tabId\)/)
+})
+
 test('StructuredPane resumes the stream and suspends non-queued observers on KeepAlive edges', () => {
   assert.match(structuredPane, /onActivated\(/, 'onActivated must resume the stream')
   assert.match(
     structuredPane,
     /onDeactivated\([\s\S]*?suspendStreamForDeactivation\(\)/,
     'onDeactivated must release ordinary cached streams while an actionable queue keeps observing completion',
+  )
+})
+
+test('KeepAlive eviction preserves a minimal observer owned activation request', () => {
+  const unmountedBody = structuredPane.match(
+    /onUnmounted\(\(\) => \{([\s\S]*?)\n\}\)\n\nfunction retry/,
+  )?.[1] ?? ''
+  assert.doesNotMatch(
+    unmountedBody,
+    /releaseQueuedChatActivation/,
+    'evicting a full cached pane must not drop the hidden observer FIFO request',
+  )
+  assert.match(
+    unmountedBody,
+    /pruneQueuedChatState/,
+    'ordinary empty queue state should still be pruned on cache eviction',
   )
 })
 

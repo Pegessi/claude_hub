@@ -146,14 +146,20 @@
       v-if="pane.tabId && isChatSession"
       class="pane-structured"
     >
-      <KeepAlive :max="chatCacheMax">
+      <KeepAlive :max="MAX_CACHED_CHAT_PANES">
         <StructuredPane
-          :key="pane.tabId"
+          :key="store.chatPaneCacheKey(pane.tabId)"
           :tab-id="pane.tabId"
           :pane-id="pane.id"
         />
       </KeepAlive>
     </div>
+    <QueuedChatObserver
+      v-for="tabId in queuedObserverTabIds"
+      :key="tabId"
+      :pane-id="pane.id"
+      :tab-id="tabId"
+    />
   </div>
 </template>
 
@@ -164,6 +170,7 @@ import { useTerminalStore } from '@/stores/terminalStore'
 import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import TerminalView from '@/components/TerminalView.vue'
 import StructuredPane from '@/components/StructuredPane.vue'
+import QueuedChatObserver from '@/components/QueuedChatObserver.vue'
 import type { Pane, TerminalTab } from '@/types'
 
 const props = defineProps<{
@@ -224,12 +231,12 @@ function handleReconnect() {
   store.requestPaneReconnect(tabId)
 }
 
-// Upper bound on ordinary cached StructuredPane instances per pane. A Chat
-// with an actionable local queue temporarily removes the bound so Vue cannot
-// evict and destroy that draft before its turn completes.
+// Full Chat panes remain bounded. Minimal queued-draft state lives in Pinia,
+// and QueuedChatObserver owns only the hidden completion stream needed to
+// reactivate an evicted queued Chat.
 const MAX_CACHED_CHAT_PANES = 8
-const chatCacheMax = computed(() =>
-  store.paneHasProtectedQueuedChat(props.pane.id) ? undefined : MAX_CACHED_CHAT_PANES
+const queuedObserverTabIds = computed(() =>
+  store.observedQueuedChatIds(props.pane.id).filter(tabId => tabId !== props.pane.tabId)
 )
 
 const isDragOver = ref(false)

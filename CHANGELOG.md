@@ -15,7 +15,15 @@
   exactly once instead of leaving it on `Waiting for response…`.
 - Serialize simultaneous hidden-Chat completions and protect queued component
   instances from cache eviction or pane-layout removal until their foreground
-  send attempt retires.
+  send attempt retires; migrate queue ownership when a cached Chat moves panes,
+  including while its automatic send is awaiting acknowledgement, without
+  allowing an old send to retire a same-Chat request recreated after archive.
+- Keep the full Chat `KeepAlive` cache bounded by storing only queued drafts in
+  Pinia and using a minimal hidden completion observer, and retire invalid
+  activation owners when a Chat is removed or cannot send without dropping a
+  ready observer request when its full cached pane is evicted.
+- Bound automatic queued POSTs so an unacknowledged request enters the existing
+  delivery-uncertain recovery path instead of monopolizing the activation FIFO.
 - Release hidden streams for empty or delivery-uncertain queues, preserving the
   existing explicit-resend recovery boundary. See the
   [queued Chat activation notes](docs/working-logs/2026-10-11-chat-queue-activation.md).
