@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### fix(feishu): preserve rich inbound messages and Bot identity
+
+- Fetch each Bot's Feishu-managed name and HTTPS avatar during credential
+  validation, persist them with the pool, and stamp them into immutable turn
+  provenance so Chat history shows the Bot identity that received the message.
+- Accept Feishu rich-text `post` events alongside plain text, convert supported
+  text, links, mentions, code blocks and separators to bounded Markdown, and
+  deliver embedded images to image-capable Chat providers as native attachments.
+- Keep mixed messages responsive when one image cannot be downloaded or a
+  coalesced burst exceeds the shared attachment budget: retain the text and
+  image placeholders instead of dropping the whole turn.
+- See the [Feishu rich ingress notes](docs/working-logs/2026-10-12-feishu-rich-ingress.md).
+
 ### style(theme): raise text contrast and Chat reading size
 
 - Brighten the Dark text ladder to Maso's reading level: body text moves from

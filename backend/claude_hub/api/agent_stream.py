@@ -209,7 +209,9 @@ def _terminal_tab_stream_session(tab_id: str) -> Optional[ManagedSession]:
     )
 
 
-def _terminal_tab_stream_session_by_id(stream_session_id: str) -> Optional[ManagedSession]:
+def _terminal_tab_stream_session_by_id(
+    stream_session_id: str,
+) -> Optional[ManagedSession]:
     if not stream_session_id.startswith(_TAB_STREAM_SESSION_PREFIX):
         return None
     return _terminal_tab_stream_session(stream_session_id.removeprefix(_TAB_STREAM_SESSION_PREFIX))
@@ -290,7 +292,9 @@ async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> Optional[s
         other_orphan = await tailer.store.latest_unfinished_turn()
     except Exception:
         logger.exception(
-            "Scheduled run liveness: orphan lookup failed for tab=%s turn=%s", tab_id, turn_id
+            "Scheduled run liveness: orphan lookup failed for tab=%s turn=%s",
+            tab_id,
+            turn_id,
         )
         return "unknown"
     if other_orphan is not None and other_orphan.turn_id != turn_id:
@@ -1488,6 +1492,7 @@ async def dispatch_tab_chat_and_wait(
     *,
     visible_text: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[AgentStreamAttachment]] = None,
     timeout_seconds: float = 300.0,
     admission_guard: Optional[_ChatAdmissionGuard] = None,
 ) -> str:
@@ -1519,7 +1524,11 @@ async def dispatch_tab_chat_and_wait(
                 dispatch_options["admission_guard"] = admission_guard
             expected_turn_id = await _dispatch_tab_stream_input(
                 tab_id,
-                AgentStreamSendRequest(text=text, client_turn_id=client_turn_id),
+                AgentStreamSendRequest(
+                    text=text,
+                    attachments=list(attachments or []),
+                    client_turn_id=client_turn_id,
+                ),
                 **dispatch_options,
             )
         except StructuredSourceUnavailable as exc:
@@ -2174,5 +2183,5 @@ async def tab_task_context(
         execution_ref=ref,
         tasks=linked,
         workspace_ids=sorted(workspace_ids),
-        reason="active" if ref is not None else ("inactive" if tailers else "not_observed"),
+        reason=("active" if ref is not None else ("inactive" if tailers else "not_observed")),
     )

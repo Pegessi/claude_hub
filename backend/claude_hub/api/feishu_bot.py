@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 
 from claude_hub.api.agent_stream import (
     CHAT_ERROR_REASON_HEADER,
+    AgentStreamAttachment,
     ExternalDispatchRetired,
     dispatch_tab_chat_and_wait,
 )
@@ -32,6 +34,7 @@ from claude_hub.services.agent_stream.turn_source import (
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotConfig,
+    FeishuBotProfile,
     FeishuMessageDedupStore,
     FeishuMessageEvent,
     feishu_message_time_is_valid,
@@ -90,6 +93,8 @@ _MAX_TAB_DISPATCH_QUEUES = 256
 _MAX_TAB_QUEUE_WAITERS = 8
 _MESSAGE_COALESCE_QUIET_SECONDS = 1.0
 _MESSAGE_COALESCE_MAX_WAIT_SECONDS = 5.0
+_MAX_BATCH_IMAGE_ATTACHMENTS = 10
+_MAX_BATCH_IMAGE_BYTES = 40 * 1024 * 1024
 
 
 @dataclass
@@ -125,6 +130,7 @@ class _TabDispatchItem:
     queued_reaction_id: str | None = None
     processing_reaction_id: str | None = None
     dispatch_started: bool = False
+    native_bridge_started: bool = False
     cancelled: bool = False
 
 
@@ -330,6 +336,8 @@ class FeishuPairingView(BaseModel):
 class FeishuBotSummary(BaseModel):
     bot_id: str
     name: str
+    feishu_name: str | None
+    feishu_avatar_url: str | None
     app_id: str
     source: str
     enabled: bool
@@ -447,6 +455,8 @@ def _summary(entry: BotEntry, actor: OwnerIdentity) -> FeishuBotSummary:
     return FeishuBotSummary(
         bot_id=entry.bot_id,
         name=entry.name,
+        feishu_name=entry.feishu_name,
+        feishu_avatar_url=entry.feishu_avatar_url,
         app_id=entry.app_id,
         source=entry.source,
         enabled=entry.enabled,
@@ -461,6 +471,14 @@ def _summary(entry: BotEntry, actor: OwnerIdentity) -> FeishuBotSummary:
         binding=binding,
         my_claims=claims,
     )
+
+
+def _validated_profile(value: object, fallback_name: str) -> FeishuBotProfile:
+    """Keep simple test adapters compatible while production returns a profile."""
+
+    if isinstance(value, FeishuBotProfile):
+        return value
+    return FeishuBotProfile(name=fallback_name, avatar_url=None)
 
 
 def _pool_response(user: User, *, focus_bot_id: str | None = None) -> FeishuBotPoolResponse:
@@ -571,7 +589,9 @@ async def _reconcile_ws() -> None:
 
 
 @router.get("/bots", response_model=FeishuBotPoolResponse)
-async def list_feishu_bots(user: User = Depends(require_hub_user)) -> FeishuBotPoolResponse:
+async def list_feishu_bots(
+    user: User = Depends(require_hub_user),
+) -> FeishuBotPoolResponse:
     return _pool_response(user)
 
 
@@ -593,11 +613,18 @@ async def create_feishu_bot(
         raise HTTPException(status_code=409, detail="app_id_already_in_pool")
     # Credential validation reaches Feishu and must never hold a gate.
     try:
-        await FeishuBotClient(candidate).validate_credentials()
+        profile = _validated_profile(await FeishuBotClient(candidate).validate_credentials(), name)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="feishu_credentials_rejected") from exc
     async with _create_gate:
-        bot_id = await _in_pool(lambda: _pool.create_bot(name=name, config=candidate))
+        bot_id = await _in_pool(
+            lambda: _pool.create_bot(
+                name=name,
+                config=candidate,
+                feishu_name=profile.name,
+                feishu_avatar_url=profile.avatar_url,
+            )
+        )
     await _reconcile_ws()
     return _pool_response(user, focus_bot_id=bot_id)
 
@@ -620,7 +647,9 @@ async def rotate_feishu_bot_secrets(
         app_secret=_secret(value, "app_secret"),
     )
     try:
-        await FeishuBotClient(candidate).validate_credentials()
+        profile = _validated_profile(
+            await FeishuBotClient(candidate).validate_credentials(), entry.name
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail="feishu_credentials_rejected") from exc
     async with _gate(bot_id):
@@ -628,6 +657,8 @@ async def rotate_feishu_bot_secrets(
             lambda: _pool.rotate_secrets(
                 bot_id,
                 app_secret=candidate.app_secret,
+                feishu_name=profile.name,
+                feishu_avatar_url=profile.avatar_url,
                 expected_revision=expected_revision,
             )
         )
@@ -793,7 +824,7 @@ def _binding_code(text: str) -> str | None:
     return match.group(1).upper() if match is not None else None
 
 
-def _turn_metadata(bot_id: str, event: FeishuMessageEvent) -> dict[str, Any]:
+def _turn_metadata(effective: EffectiveBot, event: FeishuMessageEvent) -> dict[str, Any]:
     """Additive only: ``bot_id`` joins the existing ``feishu`` sub-object so no
     Task schema or frontend reader has to change."""
 
@@ -801,13 +832,171 @@ def _turn_metadata(bot_id: str, event: FeishuMessageEvent) -> dict[str, Any]:
         "origin": "feishu",
         "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V2,
         "feishu": {
-            "bot_id": bot_id,
+            "bot_id": effective.bot_id,
             "app_id": event.app_id,
+            "bot_name": effective.feishu_name,
+            "bot_avatar_url": effective.feishu_avatar_url,
             "chat_id": event.chat_id,
             "message_id": event.message_id,
             "sender_open_id": event.sender_open_id,
         },
     }
+
+
+def _image_mime(content: bytes) -> str | None:
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+async def _event_attachments(
+    client: FeishuBotClient,
+    event: FeishuMessageEvent,
+    *,
+    remaining_count: int,
+    remaining_bytes: int,
+) -> tuple[list[AgentStreamAttachment], int, list[int]]:
+    """Download one event's images within the shared native-turn budget."""
+
+    attachments: list[AgentStreamAttachment] = []
+    used_bytes = 0
+    omitted: list[int] = []
+    for index, image_key in enumerate(event.image_keys, start=1):
+        if len(attachments) >= remaining_count:
+            logger.info(
+                "Feishu message image omitted for %s item %d: batch count limit",
+                event.message_id,
+                index,
+            )
+            omitted.append(index)
+            continue
+        try:
+            content = await client.download_message_image(event.message_id, image_key)
+            mime_type = _image_mime(content)
+            if mime_type is None:
+                raise ValueError("unsupported image bytes")
+        except Exception as exc:
+            logger.info(
+                "Feishu message image unavailable for %s item %d: %s",
+                event.message_id,
+                index,
+                type(exc).__name__,
+            )
+            omitted.append(index)
+            continue
+        if len(content) > remaining_bytes - used_bytes:
+            logger.info(
+                "Feishu message image omitted for %s item %d: batch byte limit",
+                event.message_id,
+                index,
+            )
+            omitted.append(index)
+            continue
+        encoded = base64.b64encode(content).decode("ascii")
+        attachments.append(
+            AgentStreamAttachment(
+                filename=f"feishu-image-{index}.{mime_type.split('/', 1)[1]}",
+                mime_type=mime_type,
+                data_url=f"data:{mime_type};base64,{encoded}",
+            )
+        )
+        used_bytes += len(content)
+    return attachments, used_bytes, omitted
+
+
+async def _refresh_missing_profile(
+    effective: EffectiveBot, client: FeishuBotClient
+) -> EffectiveBot:
+    if effective.feishu_name is not None:
+        return effective
+    try:
+        profile = await client.get_bot_profile()
+    except Exception as exc:
+        logger.info(
+            "Feishu Bot profile refresh unavailable for %s: %s",
+            effective.bot_id,
+            type(exc).__name__,
+        )
+        profile = None
+
+    if profile is not None:
+        profile_target = effective
+        for _attempt in range(2):
+            try:
+                _pool.update_profile(
+                    effective.bot_id,
+                    feishu_name=profile.name,
+                    feishu_avatar_url=profile.avatar_url,
+                    expected_revision=profile_target.revision,
+                )
+            except FeishuBotRevisionConflict:
+                try:
+                    current = _pool.effective(effective.bot_id)
+                except FeishuBotPoolError:
+                    return effective
+                if (
+                    current.app_id != effective.app_id
+                    or current.config != effective.config
+                    or current.generation != effective.generation
+                ):
+                    return effective
+                profile_target = current
+                continue
+            except Exception as exc:
+                logger.info(
+                    "Feishu Bot profile refresh unavailable for %s: %s",
+                    effective.bot_id,
+                    type(exc).__name__,
+                )
+                break
+            try:
+                current = _pool.effective(effective.bot_id)
+            except FeishuBotPoolError:
+                return effective
+            if (
+                current.app_id != effective.app_id
+                or current.config != effective.config
+                or current.generation != effective.generation
+            ):
+                return effective
+            return current
+        return EffectiveBot(
+            bot_id=profile_target.bot_id,
+            app_id=profile_target.app_id,
+            config=profile_target.config,
+            revision=profile_target.revision,
+            generation=profile_target.generation,
+            feishu_name=profile.name,
+            feishu_avatar_url=profile.avatar_url,
+        )
+
+    try:
+        fallback = _pool.snapshot().get(effective.bot_id)
+    except FeishuBotPoolError:
+        fallback = None
+    if (
+        fallback is not None
+        and fallback.config is not None
+        and fallback.app_id == effective.app_id
+        and fallback.config == effective.config
+        and fallback.generation == effective.generation
+    ):
+        return EffectiveBot(
+            bot_id=effective.bot_id,
+            app_id=fallback.app_id,
+            config=fallback.config,
+            revision=fallback.revision,
+            generation=fallback.generation,
+            feishu_name=fallback.feishu_name or fallback.name,
+            feishu_avatar_url=fallback.feishu_avatar_url,
+        )
+    return effective
 
 
 def _binding_still_routes(effective: EffectiveBot, binding: BotBinding) -> bool:
@@ -1110,6 +1299,34 @@ async def _dispatch_tab_batch(
                 raise ExternalDispatchRetired(turn_id_for(leader.bot_id, leader.event.message_id))
             batch[0].reaction_dispatch_started.set()
             visible_text = _batch_visible_text(batch, followup=followup)
+            attachments: list[AgentStreamAttachment] = []
+            attachment_bytes = 0
+            omitted_images: list[str] = []
+            for message_index, item in enumerate(batch, start=1):
+                event_attachments, event_bytes, omitted = await _event_attachments(
+                    item.client,
+                    item.event,
+                    remaining_count=_MAX_BATCH_IMAGE_ATTACHMENTS - len(attachments),
+                    remaining_bytes=_MAX_BATCH_IMAGE_BYTES - attachment_bytes,
+                )
+                attachments.extend(event_attachments)
+                attachment_bytes += event_bytes
+                omitted_images.extend(
+                    (
+                        f"消息 {message_index} 的图片 {image_index}"
+                        if len(batch) > 1
+                        else f"图片 {image_index}"
+                    )
+                    for image_index in omitted
+                )
+            if omitted_images:
+                visible_text += (
+                    "\n\n[系统提示：以下图片未能转发给模型："
+                    + "、".join(omitted_images)
+                    + "。请勿假设已经看到这些图片；如需分析，请提示用户重新发送。]"
+                )
+            for item in batch:
+                item.native_bridge_started = True
             assistant_text = await dispatch_tab_chat_and_wait(
                 tab_id,
                 format_feishu_provider_text_v2(
@@ -1122,11 +1339,12 @@ async def _dispatch_tab_batch(
                 turn_id_for(leader.bot_id, leader.event.message_id),
                 visible_text=visible_text,
                 turn_metadata={
-                    **_turn_metadata(leader.bot_id, leader.event),
+                    **_turn_metadata(leader.effective, leader.event),
                     "feishu_message_ids": [item.event.message_id for item in batch],
                     "feishu_coalesced": len(batch) > 1,
                     "feishu_followup": followup,
                 },
+                attachments=attachments,
                 admission_guard=lambda: _admit_batch_dispatch(
                     queue, leader.effective, leader.binding, leader.event
                 ),
@@ -1176,6 +1394,9 @@ async def _dispatch_tab_batch(
                 )
                 status = "failed"
         except asyncio.CancelledError:
+            if batch and not any(item.native_bridge_started for item in batch):
+                status = "retired"
+                return status
             raise
         except Exception:
             logger.exception("Feishu Bot message dispatch failed")
@@ -1216,7 +1437,10 @@ async def _handle_pairing_code(
             if not _pool.is_current(effective):
                 return False
             claim, word = _pool.claim_code(
-                bot_id, code=code, sender_open_id=event.sender_open_id, chat_id=event.chat_id
+                bot_id,
+                code=code,
+                sender_open_id=event.sender_open_id,
+                chat_id=event.chat_id,
             )
             # Consuming the code advances this Bot's revision, so the pre-claim
             # snapshot is now deliberately stale. Re-read it instead of
@@ -1248,6 +1472,7 @@ async def _handle_message_event(
     binding: BotBinding | None = None
     item: _TabDispatchItem | None = None
     try:
+        effective = await _refresh_missing_profile(effective, client)
         if not _pool.is_current(effective):
             return
         code = _binding_code(event.text)
@@ -1299,8 +1524,11 @@ async def _handle_message_event(
         await item.start
         queue = _tab_dispatch_queues.get(binding.tab_id)
         if queue is None:
-            raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id))
-        if queue.processor is item:
+            # The batch leader may complete and retire the queue before a
+            # coalesced follower resumes from ``item.start``. Its per-item
+            # outcome remains the authoritative result channel.
+            status_value = await asyncio.shield(item.outcome)
+        elif queue.processor is item:
             status_value = await _dispatch_tab_batch(binding.tab_id, queue, item)
         else:
             status_value = await asyncio.shield(item.outcome)
