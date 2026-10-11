@@ -10,6 +10,7 @@ import type {
   Pane,
   StoreNotification,
   NotificationType,
+  WorkspaceAttachmentCreate,
 } from '@/types'
 import { groupChatsByCwd, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
 import {
@@ -24,6 +25,26 @@ const STORAGE_KEY_SIDEBAR = 'claude_hub_sidebar_collapsed'
 // archived pins stay dormant and reappear if that session is restored.
 const STORAGE_KEY_PINNED_CHATS = 'claude_hub_pinned_chat_ids'
 const STATUS_POLL_INTERVAL_MS = 5000
+
+export interface QueuedChatDraftAttachment extends WorkspaceAttachmentCreate {
+  id: string
+  preview_url: string
+  size_bytes: number
+}
+
+export interface QueuedChatDraft {
+  message: string
+  attachments: QueuedChatDraftAttachment[]
+}
+
+interface QueuedChatState {
+  paneId: string
+  tabId: string
+  drafts: QueuedChatDraft[]
+  paused: boolean
+  sendInProgress: boolean
+  autoActivationBlock: 'stream-failed' | 'goal-locked' | null
+}
 
 function generatePaneId(): string {
   return 'pane-' + Math.random().toString(36).substr(2, 9)
@@ -106,12 +127,13 @@ export const useTerminalStore = defineStore('terminal', () => {
   )
   const panes = ref<Pane[]>([])
   const activePaneId = ref<string | null>(null)
-  // Actionable Chat queues live inside keyed StructuredPane instances. Keep a
-  // small store-level registry for the two cross-instance concerns that local
-  // component state cannot safely coordinate: KeepAlive eviction protection
-  // and serialized foreground activation. Draft contents remain local.
-  const protectedQueuedChats = ref<Array<{ paneId: string; tabId: string }>>([])
-  const queuedChatActivationRequests = ref<Array<{ paneId: string; tabId: string }>>([])
+  // Queue state outlives the bounded StructuredPane KeepAlive cache. Hidden
+  // completion observers and recreated panes share this small durable browser
+  // record; full transcript DOM and stream state remain component-local.
+  const queuedChatStates = ref<QueuedChatState[]>([])
+  const chatPaneCacheEpochs = ref<Record<string, number>>({})
+  const queuedChatActivationRequests = ref<Array<{ id: number; paneId: string; tabId: string }>>([])
+  let nextQueuedChatActivationRequestId = 1
   const queuedChatActivationOwner = computed(() => queuedChatActivationRequests.value[0] ?? null)
 
   // Left chat sidebar collapse state, persisted across reloads.
@@ -218,7 +240,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     const retainedPaneIds = new Set(
       panes.value.slice(0, nextConfig.rows * nextConfig.cols).map(pane => pane.id)
     )
-    if (protectedQueuedChats.value.some(entry => !retainedPaneIds.has(entry.paneId))) {
+    if (queuedChatStates.value.some(state =>
+      queuedChatStateIsProtected(state) && !retainedPaneIds.has(state.paneId)
+    )) {
       pushNotification({
         type: 'warning',
         message: 'Wait for queued Chat messages before reducing the pane layout.',
@@ -263,19 +287,85 @@ export const useTerminalStore = defineStore('terminal', () => {
     return entry.paneId === paneId && entry.tabId === tabId
   }
 
-  function setQueuedChatProtected(paneId: string, tabId: string, protectedState: boolean) {
-    const index = protectedQueuedChats.value.findIndex(entry =>
-      sameQueuedChat(entry, paneId, tabId)
-    )
-    if (protectedState && index < 0) {
-      protectedQueuedChats.value.push({ paneId, tabId })
-    } else if (!protectedState && index >= 0) {
-      protectedQueuedChats.value.splice(index, 1)
+  function queuedChatStateIsProtected(state: QueuedChatState): boolean {
+    return state.drafts.length > 0 || state.paused || state.sendInProgress
+  }
+
+  function getQueuedChatState(paneId: string, tabId: string): QueuedChatState {
+    let state = queuedChatStates.value.find(entry => entry.tabId === tabId)
+    if (!state) {
+      queuedChatStates.value.push({
+        paneId,
+        tabId,
+        drafts: [],
+        paused: false,
+        sendInProgress: false,
+        autoActivationBlock: null,
+      })
+      state = queuedChatStates.value[queuedChatStates.value.length - 1]
+    } else {
+      moveQueuedChatToPane(tabId, paneId)
     }
+    return state
+  }
+
+  function moveQueuedChatToPane(tabId: string, paneId: string) {
+    const state = queuedChatStates.value.find(entry => entry.tabId === tabId)
+    if (!state || state.paneId === paneId) return
+    state.paneId = paneId
+    for (const request of queuedChatActivationRequests.value) {
+      if (request.tabId === tabId) request.paneId = paneId
+    }
+    ensureQueuedChatActivation()
   }
 
   function paneHasProtectedQueuedChat(paneId: string): boolean {
-    return protectedQueuedChats.value.some(entry => entry.paneId === paneId)
+    return queuedChatStates.value.some(state =>
+      state.paneId === paneId && queuedChatStateIsProtected(state)
+    )
+  }
+
+  function protectedQueuedChatIds(paneId: string): string[] {
+    return queuedChatStates.value
+      .filter(state => state.paneId === paneId && queuedChatStateIsProtected(state))
+      .map(state => state.tabId)
+  }
+
+  function chatPaneCacheKey(tabId: string): string {
+    return `${tabId}:${chatPaneCacheEpochs.value[tabId] ?? 0}`
+  }
+
+  function observedQueuedChatIds(paneId: string): string[] {
+    return queuedChatStates.value
+      .filter(state =>
+        state.paneId === paneId
+        && state.drafts.length > 0
+        && !state.paused
+        && !state.sendInProgress
+      )
+      .map(state => state.tabId)
+  }
+
+  function discardQueuedChat(tabId: string) {
+    queuedChatStates.value = queuedChatStates.value.filter(state => state.tabId !== tabId)
+    const releasedOwner = queuedChatActivationRequests.value[0]?.tabId === tabId
+    queuedChatActivationRequests.value = queuedChatActivationRequests.value.filter(
+      request => request.tabId !== tabId
+    )
+    chatPaneCacheEpochs.value[tabId] = (chatPaneCacheEpochs.value[tabId] ?? 0) + 1
+    if (releasedOwner) ensureQueuedChatActivation()
+  }
+
+  function pruneQueuedChatState(paneId: string, tabId: string) {
+    const state = queuedChatStates.value.find(entry => entry.tabId === tabId)
+    if (
+      state
+      && state.paneId === paneId
+      && !queuedChatStateIsProtected(state)
+      && !queuedChatActivationRequests.value.some(request => request.tabId === tabId)
+    ) {
+      queuedChatStates.value = queuedChatStates.value.filter(entry => entry !== state)
+    }
   }
 
   function isQueuedChatActivationOwner(paneId: string, tabId: string): boolean {
@@ -289,18 +379,33 @@ export const useTerminalStore = defineStore('terminal', () => {
     )
   }
 
+  function queuedChatActivationRequestId(paneId: string, tabId: string): number | null {
+    return queuedChatActivationRequests.value.find(entry =>
+      sameQueuedChat(entry, paneId, tabId)
+    )?.id ?? null
+  }
+
   function ensureQueuedChatActivation() {
-    const owner = queuedChatActivationOwner.value
+    let owner = queuedChatActivationOwner.value
+    while (owner && (
+      !tabs.value.some(tab => tab.id === owner?.tabId)
+      || !panes.value.some(pane => pane.id === owner?.paneId)
+    )) {
+      queuedChatActivationRequests.value.shift()
+      owner = queuedChatActivationOwner.value
+    }
     if (!owner) return
     if (activePaneId.value !== owner.paneId) setActivePane(owner.paneId)
     if (activeTabId.value !== owner.tabId) setActiveTab(owner.tabId)
   }
 
   function requestQueuedChatActivation(paneId: string, tabId: string) {
-    if (!queuedChatActivationRequests.value.some(entry =>
-      sameQueuedChat(entry, paneId, tabId)
-    )) {
-      queuedChatActivationRequests.value.push({ paneId, tabId })
+    if (!queuedChatActivationRequests.value.some(entry => entry.tabId === tabId)) {
+      queuedChatActivationRequests.value.push({
+        id: nextQueuedChatActivationRequestId++,
+        paneId,
+        tabId,
+      })
     }
     // Only the FIFO head may select UI state. Later completions wait until the
     // current owner has actually attempted its foreground send.
@@ -310,6 +415,22 @@ export const useTerminalStore = defineStore('terminal', () => {
   function releaseQueuedChatActivation(paneId: string, tabId: string) {
     const index = queuedChatActivationRequests.value.findIndex(entry =>
       sameQueuedChat(entry, paneId, tabId)
+    )
+    if (index < 0) return
+    const releasedOwner = index === 0
+    queuedChatActivationRequests.value.splice(index, 1)
+    if (releasedOwner) ensureQueuedChatActivation()
+  }
+
+  function settleQueuedChatActivation(tabId: string, requestId: number | null) {
+    // The Chat may move panes while its automatic POST is in flight. The
+    // request is globally unique per tab, so settle against its current store
+    // ownership instead of the sending component's captured pane ID. Its
+    // generation ID also prevents an old POST from retiring a same-tab request
+    // created after archive/unarchive.
+    if (requestId === null) return
+    const index = queuedChatActivationRequests.value.findIndex(
+      entry => entry.tabId === tabId && entry.id === requestId
     )
     if (index < 0) return
     const releasedOwner = index === 0
@@ -345,6 +466,11 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
 
     if (assigned) {
+      // Moving a tab can reactivate an existing KeepAlive instance whose setup
+      // will not rerun. Migrate store-owned queue/request ownership at the
+      // assignment boundary so a completion cannot pull the Chat back to its
+      // previous pane.
+      moveQueuedChatToPane(tabId, targetPaneId)
       activeTabId.value = tabId
     }
   }
@@ -620,6 +746,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to delete tab')
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
+      discardQueuedChat(tabId)
       // Remove tab from all panes
       panes.value.forEach(pane => {
         if (pane.tabId === tabId) {
@@ -664,6 +791,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to archive tab')
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
+      discardQueuedChat(tabId)
       // Remove tab from all panes, remembering the first pane that lost it so
       // the fallback tab can take its slot.
       let orphanedPaneId: string | null = null
@@ -873,12 +1001,19 @@ export const useTerminalStore = defineStore('terminal', () => {
     reorderTabById,
     setLayout,
     setActivePane,
-    setQueuedChatProtected,
+    getQueuedChatState,
+    chatPaneCacheKey,
     paneHasProtectedQueuedChat,
+    protectedQueuedChatIds,
+    observedQueuedChatIds,
+    discardQueuedChat,
+    pruneQueuedChatState,
     isQueuedChatActivationOwner,
     hasQueuedChatActivationRequest,
+    queuedChatActivationRequestId,
     requestQueuedChatActivation,
     releaseQueuedChatActivation,
+    settleQueuedChatActivation,
     assignTabToPane,
     getPaneCountForTab,
     initializePanes,
