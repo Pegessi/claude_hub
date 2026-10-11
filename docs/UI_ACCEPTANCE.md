@@ -80,7 +80,8 @@ budgets remain 10s/12s. A scaled functional pass is not proof of an unscaled
 performance goal; keep that condition visible in the handoff.
 
 Other deliberate boundaries:
-- Terminal replay remains in its existing informational CI job.
+- Terminal replay is a blocking CI job with a `terminal-replay` verify
+  target, after its width and shell assumptions were fixed.
 - `test_terminal_input_latency_perf.py` is a documented, on-demand measurement,
   not a portable timing gate. Its module documents the manual command; do not
   start its terminal load against a shared service.

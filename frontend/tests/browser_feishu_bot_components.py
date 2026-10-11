@@ -375,7 +375,10 @@ async def main(browser_run: BrowserRun) -> None:
         secrets_call = next(
             call for call in api_calls if call["path"].endswith("/bot-created/secrets")
         )
-        assert secrets_call["body"]["expected_revision"] == 1
+        assert secrets_call["body"] == {
+            "app_secret": "replace-secret",
+            "expected_revision": 1,
+        }
 
         # Closing with dirty secret drafts unmounts the real dialog. A fresh
         # mount and selection must not recover those secrets.

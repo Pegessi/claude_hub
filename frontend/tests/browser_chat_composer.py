@@ -82,6 +82,7 @@ async def main(browser_run: BrowserRun) -> None:
     state = {"events": list(EVENTS), "fail_texts": {FAILING_TEXT}, "turn_open": False}
 
     async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
+
         async def block_websocket(socket) -> None:
             await socket.close(code=1000, reason="mocked Chat composer smoke")
 
