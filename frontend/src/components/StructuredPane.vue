@@ -1154,7 +1154,7 @@
             <div
               v-if="isModelPickerAvailable"
               ref="modelPickerEl"
-              class="composer-mode-picker"
+              class="composer-mode-picker composer-model-picker"
             >
               <button
                 ref="modelTriggerEl"
@@ -3832,17 +3832,29 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+/* A zero flex basis keeps the tools out of the row's wrap decision, so Stop and
+   Send/Queue always share the toolbar line; the model label truncates instead. */
 .composer-tools {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  flex: 0 0 auto;
-  margin-right: auto;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .composer-mode-picker {
   position: relative;
   flex: 0 0 auto;
+}
+
+.composer-mode-picker.composer-model-picker {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 210px;
+}
+
+.composer-model-picker .composer-mode-trigger {
+  max-width: 100%;
 }
 
 .composer-mode-trigger {
@@ -5292,7 +5304,8 @@ onUnmounted(() => {
   box-shadow: none;
 }
 
-.composer-send-btn {
+.composer-send-btn,
+.composer-stop-btn {
   height: 34px;
   border-radius: var(--ch-radius-sm);
 }
@@ -5329,6 +5342,10 @@ onUnmounted(() => {
   .composer-mode-trigger {
     max-width: 170px;
     padding: 0 7px;
+  }
+
+  .composer-mode-picker.composer-model-picker {
+    max-width: 170px;
   }
 
   .composer-mode-menu {
