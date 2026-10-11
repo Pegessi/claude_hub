@@ -1066,7 +1066,7 @@ watch(mobileDrawerOpen, isOpen => {
   border: none;
   border-radius: var(--ch-radius-md);
   background: transparent;
-  color: var(--ch-color-text-muted);
+  color: var(--ch-color-text);
   font-size: var(--ch-font-size-sm);
   font-weight: 600;
   cursor: pointer;
@@ -1158,18 +1158,20 @@ watch(mobileDrawerOpen, isOpen => {
   border: 1px solid transparent;
   border-radius: var(--ch-radius-md);
   background: transparent;
-  color: var(--ch-color-text);
+  color: var(--ch-color-text-muted);
   font-size: var(--ch-font-size-sm);
   transition:
     background var(--ch-motion-fast),
     border-color var(--ch-motion-fast),
-    box-shadow var(--ch-motion-fast);
+    box-shadow var(--ch-motion-fast),
+    color var(--ch-motion-fast);
   cursor: grab;
   touch-action: pan-y;
 }
 
 .chat-sidebar__item:hover {
   background: var(--ch-color-row-hover);
+  color: var(--ch-color-text);
 }
 
 .chat-sidebar__item.active {

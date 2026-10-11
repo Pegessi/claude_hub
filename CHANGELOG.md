@@ -15,6 +15,9 @@
 - Render Chat user and assistant messages at 14px with a 1.65 line height,
   measured against Maso's body text, while dense Workspace panels keep 12px
   compact Markdown.
+- Follow Maso's sidebar hierarchy: workspace headers use body text, unselected
+  sessions use the muted role (7.6:1 in Dark) and brighten on hover, and the
+  selected session keeps its selected text color.
 
 ### style(chat): refine session actions and Maso-inspired themes
 
