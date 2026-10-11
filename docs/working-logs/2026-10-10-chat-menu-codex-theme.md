@@ -44,11 +44,15 @@ drag reordering, and make genuinely active work easy to scan.
 - Active mode, layout, sidebar item, pane, and assistant avatar now share the
   selected-surface language. Empty panes use a theme-aware line icon and
   brighter guidance instead of a dim system emoji.
+- Sidebar rows now use 7px vertical padding with 3px row gaps and 8px between
+  workspace groups. Dragging a workspace header moves all manual sessions in
+  that cwd as one persisted block without changing any session cwd. Terminal
+  Status follows the Chat workspace sequence and appends terminal-only groups.
 
 ## Validation
 
 - Focused interaction, store, theme, and semantic-color tests passed.
-- Full frontend unit suite after the final Maso-blue revision: `711 passed`; the added tests
+- Full frontend unit suite after the latest sidebar-order revision: `716 passed`; the added tests
   cover delete success/failure, stale-pin cleanup, menu removal, palette tokens,
   accent contrast, separation of selected/focus/primary roles, and a repository-
   wide guard against translucent keyboard-focus rings.
@@ -66,6 +70,12 @@ drag reordering, and make genuinely active work easy to scan.
   observed two genuine `working` sessions in Dark, and confirmed the computed
   Maso tokens (`#7cb7ff`, `#5a9cf0`, and `#3276ba`) plus the Light clay-orange
   selected state.
+- A follow-up Playwright pass at 1440x1050 measured 31px Chat rows, 29px
+  workspace headers, 3px row gaps, and 8px group spacing. It dragged
+  `codex_workspace` after `claude_hub`, observed one complete 35-tab order
+  write, and confirmed Terminal Status rendered the same four workspace groups
+  in the same order with no page errors. The order request was intercepted, so
+  the live backend order remained unchanged.
 - Independent diff review found and fixed insufficient Dark primary-button
   contrast. The researched revision review then caught foreground accents reused
   as white-text fills and translucent focus rings; filled controls now use the

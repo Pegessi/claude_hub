@@ -11,7 +11,7 @@ import type {
   StoreNotification,
   NotificationType,
 } from '@/types'
-import { groupChatsByCwd, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
+import { groupChatsByCwd, moveCwdGroup, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
 import {
   createPaneReconnectRegistry,
   type PaneReconnectStatus,
@@ -742,6 +742,24 @@ export const useTerminalStore = defineStore('terminal', () => {
     void saveTabOrder()
   }
 
+  function reorderChatWorkspace(
+    sourceCwd: string, targetCwd: string, position: 'before' | 'after',
+  ) {
+    const chatCwds = new Set(chatTabsByCwd.value.map(group => group.cwd))
+    if (!chatCwds.has(sourceCwd) || !chatCwds.has(targetCwd)) return
+    // Move every manual tab in the directory, including raw terminals. This
+    // makes the persisted workspace order apply to both Chat and Terminal
+    // Status while leaving Workspace-managed agents in their own tail block.
+    const reorderedManualTabs = moveCwdGroup(
+      manualTabs.value, sourceCwd, targetCwd, position,
+    )
+    if (reorderedManualTabs === manualTabs.value || reorderedManualTabs.every(
+      (tab, index) => tab === manualTabs.value[index],
+    )) return
+    tabs.value = [...reorderedManualTabs, ...managedTabs.value]
+    void saveTabOrder()
+  }
+
   return {
     tabs,
     manualTabs,
@@ -785,6 +803,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     setActiveTab,
     reorderTabs,
     reorderTabById,
+    reorderChatWorkspace,
     setLayout,
     setActivePane,
     assignTabToPane,

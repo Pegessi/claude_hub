@@ -22,6 +22,9 @@
   sheen contained inside the existing status light.
 - Highlight only genuinely working Chat sessions with a restrained travelling
   edge light, including a static reduced-motion fallback.
+- Give Chat rows and workspace groups more breathing room, allow dragging a
+  workspace header to persist the whole directory block, and keep Terminal
+  Status workspace groups in the same order as the Chat sidebar.
 - See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).
 
 ### fix(chat): match Claude model options to each tab environment

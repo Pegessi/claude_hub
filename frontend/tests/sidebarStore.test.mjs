@@ -161,6 +161,28 @@ test('missing or managed drag IDs do not write order or remove sessions', async 
   assert.equal(globalThis.fetch.mock.calls.length, 0)
 })
 
+test('workspace reorder moves every manual tab in the cwd and saves complete order', async t => {
+  const { store } = setup(t)
+  store.tabs = [
+    { id: 'a-chat', cwd: '/a', session_kind: 'chat' },
+    { id: 'b-chat', cwd: '/b', session_kind: 'chat' },
+    { id: 'a-terminal', cwd: '/a', session_kind: 'terminal' },
+    { id: 'managed', workspace_id: 'ws', session_kind: 'chat' },
+  ]
+
+  store.reorderChatWorkspace('/a', '/b', 'after')
+  await store.saveTabOrder()
+
+  assert.deepEqual(
+    store.tabs.map(tab => tab.id),
+    ['b-chat', 'a-chat', 'a-terminal', 'managed'],
+  )
+  assert.deepEqual(
+    JSON.parse(globalThis.fetch.mock.calls.at(-1).arguments[1].body).tab_ids,
+    ['b-chat', 'a-chat', 'a-terminal', 'managed'],
+  )
+})
+
 test('mobile drawer open/close/toggle actions update visibility', t => {
   const { store } = setup(t)
   assert.equal(store.mobileDrawerOpen, false)

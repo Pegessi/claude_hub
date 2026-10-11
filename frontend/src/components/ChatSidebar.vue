@@ -102,8 +102,12 @@
           v-for="group in filteredGroups"
           :key="group.key"
           class="chat-sidebar__group"
-          :class="{ 'chat-sidebar__group--pinned': group.pinned }"
+          :class="{
+            'chat-sidebar__group--pinned': group.pinned,
+            'chat-sidebar__group--dragging': !group.pinned && draggedGroupCwd === group.cwd,
+          }"
           :data-group-key="group.key"
+          :data-group-drop-position="groupDropTarget?.cwd === group.cwd ? groupDropTarget.position : undefined"
         >
           <div
             v-if="group.pinned"
@@ -122,7 +126,9 @@
             data-pointer-drop="group"
             :aria-expanded="!group.collapsed"
             :aria-controls="`chat-group-${group.key}`"
-            @click="toggleGroup(group.cwd)"
+            :title="`${group.cwd}. Click to collapse; drag to reorder workspaces`"
+            @pointerdown="onGroupPointerDown($event, group)"
+            @click="onGroupHeaderClick(group.cwd)"
           >
             <svg
               viewBox="0 0 16 16"
@@ -404,6 +410,8 @@ const dropTarget = ref<{ id: string; position: 'before' | 'after' } | null>(null
 const dropGroupKey = ref<string | null>(null)
 const dropOnPinZone = ref(false)
 const dropAtGroupStart = ref(false)
+const draggedGroupCwd = ref<string | null>(null)
+const groupDropTarget = ref<{ cwd: string; position: 'before' | 'after' } | null>(null)
 const SIDEBAR_DEFAULT_WIDTH = 240
 const SIDEBAR_MIN_WIDTH = 200
 const SIDEBAR_MAX_WIDTH = 480
@@ -490,8 +498,12 @@ onUnmounted(() => {
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
   window.removeEventListener('pointercancel', onPointerCancel)
+  window.removeEventListener('pointermove', onGroupPointerMove)
+  window.removeEventListener('pointerup', onGroupPointerUp)
+  window.removeEventListener('pointercancel', onGroupPointerCancel)
   window.removeEventListener('keydown', handleDrawerKeydown)
   clearDrag()
+  clearGroupDrag()
 })
 
 // Inline row rename (mirrors the TabBar's double-click rename).
@@ -559,6 +571,11 @@ function toggleGroup(cwd: string) {
   collapsedGroups.value = next
 }
 
+function onGroupHeaderClick(cwd: string) {
+  if (suppressNextGroupClick) return
+  toggleGroup(cwd)
+}
+
 const filteredGroups = computed(() => buildChatSidebarGroups(chatTabs.value, pinnedChatIds.value, {
   query: filterText.value, activeTabId: activeTabId.value,
   collapsed: collapsedGroups.value, expanded: expandedGroups.value,
@@ -599,6 +616,8 @@ interface PointerDragState {
 const POINTER_DRAG_THRESHOLD_PX = 5
 let pointerDrag: PointerDragState | null = null
 let suppressNextRowClick = false
+let groupPointerDrag: PointerDragState | null = null
+let suppressNextGroupClick = false
 
 function draggedForGroup(group: ChatSidebarGroup) {
   const source = chatTabs.value.find(tab => tab.id === draggedTabId.value)
@@ -719,6 +738,84 @@ function onRowClick(event: MouseEvent, tab: TerminalTab) {
   } else {
     setActiveTab(tab.id)
   }
+}
+
+function updateGroupPointerDrop(clientX: number, clientY: number) {
+  groupDropTarget.value = null
+  const target = document.elementFromPoint(clientX, clientY)
+  const element = target?.closest<HTMLElement>('.chat-sidebar__group')
+  const group = groupFromElement(element ?? null)
+  if (!group || group.pinned || group.cwd === draggedGroupCwd.value) return
+  const header = element!.querySelector<HTMLElement>('.chat-sidebar__group-header')
+  const rect = header?.getBoundingClientRect() ?? element!.getBoundingClientRect()
+  groupDropTarget.value = {
+    cwd: group.cwd,
+    position: clientY < rect.top + rect.height / 2 ? 'before' : 'after',
+  }
+}
+
+function clearGroupDrag() {
+  draggedGroupCwd.value = null
+  groupDropTarget.value = null
+  document.body.classList.remove('chat-sidebar-group-dragging')
+}
+
+function onGroupPointerMove(event: PointerEvent) {
+  const drag = groupPointerDrag
+  if (!drag || event.pointerId !== drag.pointerId) return
+  if (!drag.moved) {
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY)
+    if (distance < POINTER_DRAG_THRESHOLD_PX) return
+    drag.moved = true
+    draggedGroupCwd.value = drag.sourceId
+    document.body.classList.add('chat-sidebar-group-dragging')
+  }
+  event.preventDefault()
+  updateGroupPointerDrop(event.clientX, event.clientY)
+}
+
+function finishGroupPointerDrag(event: PointerEvent, cancelled = false) {
+  const drag = groupPointerDrag
+  if (!drag || event.pointerId !== drag.pointerId) return
+  groupPointerDrag = null
+  window.removeEventListener('pointermove', onGroupPointerMove)
+  window.removeEventListener('pointerup', onGroupPointerUp)
+  window.removeEventListener('pointercancel', onGroupPointerCancel)
+  if (!drag.moved) return
+
+  suppressNextGroupClick = true
+  window.setTimeout(() => { suppressNextGroupClick = false }, 0)
+  if (!cancelled && groupDropTarget.value) {
+    store.reorderChatWorkspace(
+      drag.sourceId, groupDropTarget.value.cwd, groupDropTarget.value.position,
+    )
+  }
+  clearGroupDrag()
+}
+
+function onGroupPointerUp(event: PointerEvent) {
+  finishGroupPointerDrag(event)
+}
+
+function onGroupPointerCancel(event: PointerEvent) {
+  finishGroupPointerDrag(event, true)
+}
+
+function onGroupPointerDown(event: PointerEvent, group: ChatSidebarGroup) {
+  if (
+    event.button !== 0 || !event.isPrimary || group.pinned ||
+    filterText.value.trim() || draggedTabId.value
+  ) return
+  groupPointerDrag = {
+    pointerId: event.pointerId,
+    sourceId: group.cwd,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+  }
+  window.addEventListener('pointermove', onGroupPointerMove, { passive: false })
+  window.addEventListener('pointerup', onGroupPointerUp)
+  window.addEventListener('pointercancel', onGroupPointerCancel)
 }
 
 // The archived-sessions browser opens above the drawer; dismiss the drawer.
@@ -905,7 +1002,8 @@ watch(mobileDrawerOpen, isOpen => {
 
 /* Groups */
 .chat-sidebar__group {
-  margin-bottom: 2px;
+  position: relative;
+  margin-bottom: 8px;
 }
 
 .chat-sidebar__group--pinned {
@@ -919,7 +1017,7 @@ watch(mobileDrawerOpen, isOpen => {
   margin-bottom: 6px;
 }
 
-.chat-sidebar__pinned-header {
+.chat-sidebar__group-header.chat-sidebar__pinned-header {
   cursor: default;
 }
 
@@ -954,11 +1052,12 @@ watch(mobileDrawerOpen, isOpen => {
 }
 
 .chat-sidebar__group-header {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 5px 6px;
+  padding: 7px 7px;
   border: none;
   border-radius: var(--ch-radius-md);
   background: transparent;
@@ -966,11 +1065,20 @@ watch(mobileDrawerOpen, isOpen => {
   font-size: var(--ch-font-size-sm);
   font-weight: 600;
   cursor: pointer;
+  touch-action: pan-y;
   transition: background var(--ch-motion-fast);
 }
 
 .chat-sidebar__group-header:hover {
   background: var(--ch-color-surface-control-hover);
+}
+
+.chat-sidebar__group-header:not(.chat-sidebar__pinned-header) {
+  cursor: grab;
+}
+
+.chat-sidebar__group-header:not(.chat-sidebar__pinned-header):active {
+  cursor: grabbing;
 }
 
 .chat-sidebar__group-label {
@@ -999,8 +1107,38 @@ watch(mobileDrawerOpen, isOpen => {
 .chat-sidebar__group-items {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  margin: 2px 0 4px;
+  gap: 3px;
+  margin: 3px 0 6px;
+}
+
+.chat-sidebar__group--dragging {
+  opacity: 0.45;
+}
+
+:global(body.chat-sidebar-group-dragging) {
+  cursor: grabbing !important;
+  user-select: none;
+}
+
+.chat-sidebar__group[data-group-drop-position] > .chat-sidebar__group-header::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  z-index: 3;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--ch-color-accent);
+  box-shadow: 0 0 8px var(--ch-color-accent-halo);
+  pointer-events: none;
+}
+
+.chat-sidebar__group[data-group-drop-position='before'] > .chat-sidebar__group-header::before {
+  top: -4px;
+}
+
+.chat-sidebar__group[data-group-drop-position='after'] > .chat-sidebar__group-header::before {
+  bottom: -4px;
 }
 
 /* Chat rows: a plain container; the clickable surface is the inner main
@@ -1011,7 +1149,7 @@ watch(mobileDrawerOpen, isOpen => {
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 5px 7px;
+  padding: 7px 7px;
   border: 1px solid transparent;
   border-radius: var(--ch-radius-md);
   background: transparent;
