@@ -25,6 +25,15 @@ test('session reorder uses pointer events instead of browser-native drag and dat
   assert.doesNotMatch(source, /@move=/)
 })
 
+test('workspace headers support pointer drag ordering with a visible drop edge', () => {
+  assert.ok(source.includes('@pointerdown="onGroupPointerDown($event, group)"'))
+  assert.ok(source.includes('store.reorderChatWorkspace('))
+  assert.ok(source.includes('groupDropTarget.value = {'))
+  assert.ok(source.includes(
+    '.chat-sidebar__group[data-group-drop-position] > .chat-sidebar__group-header::before',
+  ))
+})
+
 test('sidebar resize is bounded, accessible, and browser-persisted', () => {
   assert.match(source, /class="chat-sidebar__resize-handle"/)
   assert.match(source, /role="separator"/)

@@ -27,6 +27,10 @@ const tabActionsMenu = readFileSync(
   new URL('../src/components/TabActionsMenu.vue', import.meta.url),
   'utf8',
 )
+const agentStatusPanel = readFileSync(
+  new URL('../src/components/AgentStatusFloatingPanel.vue', import.meta.url),
+  'utf8',
+)
 const useCwdHistory = readFileSync(
   new URL('../src/composables/useCwdHistory.ts', import.meta.url),
   'utf8',
@@ -76,6 +80,15 @@ test('Maso sidebar and main planes use distinct semantic background roles', () =
   assert.match(chatSidebar, /\.chat-sidebar\s*\{[^}]*background: var\(--ch-color-sidebar-bg\);/s)
   assert.match(app, /\.terminal-main-column\s*\{[^}]*background: var\(--ch-color-main-bg\);/s)
   assert.match(terminalPane, /\.terminal-pane\s*\{[^}]*background-color: var\(--ch-color-main-bg\);/s)
+})
+
+test('Terminal Status follows the Chat workspace order before terminal-only groups', () => {
+  assert.ok(agentStatusPanel.includes(
+    'chatTabs.value.filter(tab => !pinnedChatIds.value.has(tab.id))',
+  ))
+  assert.ok(agentStatusPanel.includes(
+    'groupChatsByCwd(rows.value.map(row => row.tab), chatCwdOrder)',
+  ))
 })
 
 test('a working session gets a Maso-style edge sweep with reduced-motion fallback', () => {
