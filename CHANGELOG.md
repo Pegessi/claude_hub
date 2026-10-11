@@ -5,6 +5,44 @@
 
 ## Unreleased
 
+### perf(mobile): hold working-session light while the drawer is shut or dragged
+
+- The working-row beam and stars animate on the main thread every frame, and a
+  closed mobile drawer is only `visibility: hidden`, so they kept running
+  behind every page. They now pause, frozen on their current frame, until the
+  drawer is open and at rest, and pause again while a drag follows the finger.
+- Measured at 4x CPU throttle with four working Chats: a closed drawer now
+  costs 1ms of main thread per second instead of 148ms, and each drag move
+  6.6ms instead of 20.3ms (4.5ms with no light at all). Desktop is unchanged.
+- See the [mobile drawer polish notes](docs/working-logs/2026-10-12-mobile-drawer-polish.md).
+
+### fix(chat): keep Stop and Queue on one composer line on phones
+
+- The composer tools no longer take part in the toolbar's wrap decision, so
+  Stop and Send/Queue stay side by side; on narrow screens the model label
+  truncates (the full name stays in its menu) instead of pushing Queue onto
+  another line. Verified at 320, 360, and 440px wide; desktop is unchanged.
+- Stop now matches the Send/Queue button's 34px height and corner radius.
+
+### fix(sidebar): fold the Pinned section and stop it covering the mobile drawer
+
+- Tapping the Pinned header now folds or unfolds the pinned Chats, with the
+  same chevron, count, and active-row retention as workspace headers; a search
+  still shows every matching pin.
+- In the mobile drawer the Pinned section scrolls with the list. On a
+  phone-height screen its sticky 40vh block covered the workspace header and
+  the active Chat scrolled beneath it. Desktop keeps the sticky section.
+
+### feat(mobile): open the Chat drawer with a swipe anywhere on the main view
+
+- A clearly rightward single-finger swipe anywhere on the mobile main column
+  now follows the finger and opens the Chat drawer with the existing commit
+  rules. It needs 12px of travel and a 1.5:1 horizontal bias, so taps,
+  vertical scrolling, diagonal drags and leftward swipes stay with the content.
+- Editable fields, horizontal scrollers that can still scroll back, the
+  terminal key bar, and TabBar dialogs keep their own gestures. Terminal panes
+  run inside an iframe, so they keep opening the drawer from the left edge band.
+
 ### style(theme): raise text contrast and Chat reading size
 
 - Brighten the Dark text ladder to Maso's reading level: body text moves from

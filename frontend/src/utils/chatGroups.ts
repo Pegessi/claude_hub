@@ -62,6 +62,7 @@ export function buildChatSidebarGroups(
     activeTabId: string | null
     collapsed: ReadonlySet<string>
     expanded: ReadonlySet<string>
+    pinnedCollapsed?: boolean
   },
 ): ChatSidebarGroup[] {
   const query = options.query.trim().toLowerCase()
@@ -71,9 +72,12 @@ export function buildChatSidebarGroups(
   const groups: ChatSidebarGroup[] = []
   const pinned = tabs.filter(tab => pinnedIds.has(tab.id) && matches(tab))
   if (pinned.length) {
+    const collapsed = !query && Boolean(options.pinnedCollapsed)
+    const active = pinned.find(tab => tab.id === options.activeTabId)
+    const visibleTabs = collapsed ? (active ? [active] : []) : pinned
     groups.push({
-      key: 'pinned', cwd: '', pinned: true, tabs: pinned, visibleTabs: pinned,
-      collapsed: false, expanded: true, hiddenCount: 0,
+      key: 'pinned', cwd: '', pinned: true, tabs: pinned, visibleTabs,
+      collapsed, expanded: true, hiddenCount: pinned.length - visibleTabs.length,
     })
   }
   for (const group of groupChatsByCwd(tabs.filter(tab => !pinnedIds.has(tab.id)))) {

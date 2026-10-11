@@ -1,9 +1,11 @@
 import { ref, watch, onUnmounted, type Ref } from 'vue'
 import {
   classifyIntent,
+  classifySurfaceIntent,
   dragBackdropOpacity,
   dragTranslatePx,
   resolveEdgeSwipe,
+  scrollerKeepsSurfaceSwipe,
   EDGE_DIRECTION_SLOP_PX,
 } from '@/utils/edgeSwipe'
 
@@ -12,6 +14,9 @@ import {
  *  - open: horizontal drag starting on the invisible left edge band (needed
  *    because the ttyd terminal runs in an <iframe>, whose touches never
  *    bubble to this document);
+ *  - open: a clearly rightward swipe anywhere on the main content surface,
+ *    except over editable fields, `[data-drawer-swipe-ignore]` regions and
+ *    horizontal scrollers that can still scroll back;
  *  - close: leftward drag starting on the backdrop or the panel header;
  *  - tap on the band is forwarded to the surface underneath so the narrow
  *    edge sliver does not become a dead zone;
@@ -22,7 +27,10 @@ import {
  * events to them.
  */
 
-type Zone = 'open' | 'close'
+type Zone = 'open' | 'close' | 'surface'
+
+const SURFACE_SWIPE_EXCLUDED =
+  'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [data-drawer-swipe-ignore]'
 
 interface ActiveDrag {
   touchId: number
@@ -46,6 +54,8 @@ interface UseEdgeSwipeDrawerOptions {
   backdropRef: Ref<HTMLElement | null>
   /** Header strip: left-drag closes without fighting list scroll/rows. */
   closeDragRef: Ref<HTMLElement | null>
+  /** Main content surface: a rightward swipe on it opens the drawer. */
+  surfaceRef?: Ref<HTMLElement | null | undefined>
   /** Only bind while true (mobile + terminal mode). */
   enabled: Ref<boolean>
   open: () => void
@@ -59,6 +69,7 @@ export function useEdgeSwipeDrawer(options: UseEdgeSwipeDrawerOptions) {
     panelRef,
     backdropRef,
     closeDragRef,
+    surfaceRef,
     enabled,
     open: openDrawer,
     close: closeDrawer,
@@ -78,9 +89,22 @@ export function useEdgeSwipeDrawer(options: UseEdgeSwipeDrawerOptions) {
     return width > 0 ? width : 320
   }
 
+  function canStartSurfaceSwipe(target: EventTarget | null, surface: HTMLElement): boolean {
+    if (isOpen() || !(target instanceof Element)) return false
+    if (target.closest(SURFACE_SWIPE_EXCLUDED)) return false
+    for (let el: Element | null = target; el && el !== surface; el = el.parentElement) {
+      if (scrollerKeepsSurfaceSwipe(el.scrollLeft, getComputedStyle(el).overflowX)) return false
+    }
+    return true
+  }
+
   function beginDrag(event: TouchEvent, zone: Zone) {
     // Only track the first finger; multi-touch belongs to the surface below.
     if (drag || event.changedTouches.length !== 1) return
+    if (zone === 'surface') {
+      const surface = event.currentTarget
+      if (!(surface instanceof HTMLElement) || !canStartSurfaceSwipe(event.target, surface)) return
+    }
     const touch = event.changedTouches[0]
     drag = {
       touchId: touch.identifier,
@@ -102,15 +126,23 @@ export function useEdgeSwipeDrawer(options: UseEdgeSwipeDrawerOptions) {
     if (!touch) return
 
     if (!state.captured) {
-      const intent = classifyIntent(
-        touch.clientX - state.startX,
-        touch.clientY - state.startY,
-      )
-      if (intent === 'undecided') return
-      if (intent === 'vertical') {
-        // Hand the gesture back: never intercept vertical scroll/selection.
-        drag = null
-        return
+      const dx = touch.clientX - state.startX
+      const dy = touch.clientY - state.startY
+      if (state.zone === 'surface') {
+        const intent = event.touches.length > 1 ? 'ignore' : classifySurfaceIntent(dx, dy)
+        if (intent === 'undecided') return
+        if (intent === 'ignore') {
+          drag = null
+          return
+        }
+      } else {
+        const intent = classifyIntent(dx, dy)
+        if (intent === 'undecided') return
+        if (intent === 'vertical') {
+          // Hand the gesture back: never intercept vertical scroll/selection.
+          drag = null
+          return
+        }
       }
       state.captured = true
       dragging.value = true
@@ -245,9 +277,10 @@ export function useEdgeSwipeDrawer(options: UseEdgeSwipeDrawerOptions) {
     if (bandRef.value) bindZone(bandRef.value, 'open')
     if (backdropRef.value) bindZone(backdropRef.value, 'close')
     if (closeDragRef.value) bindZone(closeDragRef.value, 'close')
+    if (surfaceRef?.value) bindZone(surfaceRef.value, 'surface')
   }
 
-  watch([enabled, bandRef, backdropRef, closeDragRef], rebind, { immediate: true })
+  watch([enabled, bandRef, backdropRef, closeDragRef, () => surfaceRef?.value], rebind, { immediate: true })
 
   onUnmounted(() => {
     unbindAll()

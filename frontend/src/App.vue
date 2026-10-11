@@ -101,9 +101,13 @@
       >
         <ChatSidebar
           class="terminal-sidebar"
+          :swipe-surface="terminalMainColumn"
           @open-archive="archivePanelOpen = true"
         />
-        <div class="terminal-main-column">
+        <div
+          ref="terminalMainColumn"
+          class="terminal-main-column"
+        >
           <TabBar v-if="isMobile" />
           <LayoutSelector />
           <div
@@ -177,6 +181,7 @@ const {
   scheduledTaskCreateRequest,
 } = storeToRefs(appStore)
 const archivePanelOpen = ref(false)
+const terminalMainColumn = ref<HTMLElement | null>(null)
 const { isMobile } = useViewport()
 
 // Clear all error-type notifications from the terminal store toast stack.
