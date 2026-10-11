@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import logging
+import re
 import threading
 import time
 from concurrent.futures import Future
@@ -31,6 +32,7 @@ _DISCOVERY_TIMEOUT_SECONDS = 15.0
 _MAX_ROUTE_TASKS = 32
 _SHUTDOWN_DRAIN_SECONDS = 30.0
 _MAX_INPUT_CHARS = 4_000
+_MAX_POST_IMAGES = 10
 _MAX_MESSAGE_TIME_MS = 4_102_444_800_000
 
 
@@ -210,6 +212,88 @@ def _required_text(value: Any, name: str) -> str:
     return value.strip()
 
 
+def _post_link(text: str, href: Any) -> str:
+    label = text.replace("]", "\\]")
+    if not isinstance(href, str) or not href.startswith(("https://", "http://")):
+        return text
+    return f"[{label}]({href.replace(')', '%29')})"
+
+
+def _post_text(content: Any) -> tuple[str, tuple[str, ...]]:
+    """Convert Feishu ``post`` rows to bounded, deterministic Markdown."""
+
+    if not isinstance(content, dict):
+        raise ValueError("Feishu post message content is invalid")
+    body = content
+    if not isinstance(body.get("content"), list):
+        localized = next(
+            (
+                value
+                for value in body.values()
+                if isinstance(value, dict) and isinstance(value.get("content"), list)
+            ),
+            None,
+        )
+        if localized is not None:
+            body = localized
+    rows = body.get("content")
+    if not isinstance(rows, list):
+        raise ValueError("Feishu post message content is invalid")
+    image_keys: list[str] = []
+    rendered_rows: list[str] = []
+    for raw_row in rows:
+        if not isinstance(raw_row, list):
+            raise ValueError("Feishu post message row is invalid")
+        pieces: list[str] = []
+        for element in raw_row:
+            if not isinstance(element, dict):
+                continue
+            tag = element.get("tag")
+            raw_text = element.get("text")
+            text = raw_text if isinstance(raw_text, str) else ""
+            if tag in {"text", "md"}:
+                pieces.append(text)
+            elif tag == "a":
+                pieces.append(_post_link(text, element.get("href")))
+            elif tag == "at":
+                name = element.get("user_name") or element.get("name") or text
+                pieces.append(f"@{name}" if isinstance(name, str) and name else "@用户")
+            elif tag == "img":
+                image_key = element.get("image_key")
+                if isinstance(image_key, str) and image_key.strip():
+                    if len(image_keys) < _MAX_POST_IMAGES:
+                        image_keys.append(image_key.strip())
+                        pieces.append(f"【图片 {len(image_keys)}】")
+                    else:
+                        pieces.append("【图片未转发：单条消息最多 10 张】")
+            elif tag == "code_block":
+                language = element.get("language")
+                fence_language = (
+                    language
+                    if isinstance(language, str) and re.fullmatch(r"[A-Za-z0-9_+-]{1,32}", language)
+                    else ""
+                )
+                pieces.append(f"\n```{fence_language}\n{text}\n```\n")
+            elif tag == "hr":
+                pieces.append("\n---\n")
+            elif text:
+                pieces.append(text)
+            elif isinstance(tag, str) and tag:
+                pieces.append(f"【{tag} 内容】")
+        rendered_rows.append("".join(pieces).strip())
+    title = body.get("title")
+    body_text = "\n".join(row for row in rendered_rows if row)
+    if isinstance(title, str) and title.strip():
+        text = f"# {title.strip()}\n\n{body_text}".strip()
+    else:
+        text = body_text.strip()
+    if not text:
+        raise ValueError("Feishu post message has no supported content")
+    if len(text) > _MAX_INPUT_CHARS:
+        raise ValueError("Feishu post message is too long")
+    return text, tuple(image_keys)
+
+
 def message_event_from_sdk(data: Any, *, expected_app_id: str) -> FeishuMessageEvent:
     """Normalize the SDK model after the long connection authenticated it."""
 
@@ -225,16 +309,21 @@ def message_event_from_sdk(data: Any, *, expected_app_id: str) -> FeishuMessageE
         raise ValueError("Only Feishu user messages are supported")
     if getattr(message, "chat_type", None) != "p2p":
         raise ValueError("Only Feishu p2p messages are supported")
-    if getattr(message, "message_type", None) != "text":
-        raise ValueError("Only Feishu text messages are supported")
+    message_type = getattr(message, "message_type", None)
+    if message_type not in {"text", "post"}:
+        raise ValueError("Only Feishu text and post messages are supported")
     try:
         content = json.loads(getattr(message, "content", ""))
     except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError("Feishu text message content is invalid") from exc
-    text = content.get("text") if isinstance(content, dict) else None
-    text = _required_text(text, "text")
-    if len(text) > _MAX_INPUT_CHARS:
-        raise ValueError("Feishu text message is too long")
+        raise ValueError(f"Feishu {message_type} message content is invalid") from exc
+    image_keys: tuple[str, ...] = ()
+    if message_type == "text":
+        text = content.get("text") if isinstance(content, dict) else None
+        text = _required_text(text, "text")
+        if len(text) > _MAX_INPUT_CHARS:
+            raise ValueError("Feishu text message is too long")
+    else:
+        text, image_keys = _post_text(content)
     raw_created_at = getattr(message, "create_time", None)
     if (
         not isinstance(raw_created_at, str)
@@ -254,6 +343,7 @@ def message_event_from_sdk(data: Any, *, expected_app_id: str) -> FeishuMessageE
         chat_id=_required_text(getattr(message, "chat_id", None), "chat_id"),
         text=text,
         message_created_at_ms=created_at,
+        image_keys=image_keys,
     )
 
 

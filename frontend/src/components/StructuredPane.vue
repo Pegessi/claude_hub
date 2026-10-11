@@ -120,7 +120,15 @@
                 <span
                   class="conversation-message-source__mark"
                   aria-hidden="true"
-                >飞</span>
+                >
+                  飞
+                  <img
+                    v-if="messageSourceAvatarUrl(turn)"
+                    :src="messageSourceAvatarUrl(turn) || undefined"
+                    alt=""
+                    @error="hideBrokenSourceAvatar"
+                  >
+                </span>
                 <span class="conversation-message-source__label">{{ messageSourceLabel(turn) }}</span>
               </div>
               <!-- Inline edit mode -->
@@ -1356,7 +1364,7 @@ import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted,
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceAvatarUrl, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { subagentProviderLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
@@ -1385,6 +1393,11 @@ import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
+
+function hideBrokenSourceAvatar(event: Event): void {
+  const image = event.currentTarget
+  if (image instanceof HTMLImageElement) image.hidden = true
+}
 
 const props = defineProps<{
   /** A top-level Chat tab owns its transcript directly. */
@@ -4414,6 +4427,7 @@ onUnmounted(() => {
 }
 
 .conversation-message-source__mark {
+  position: relative;
   display: inline-grid;
   width: 16px;
   height: 16px;
@@ -4422,6 +4436,15 @@ onUnmounted(() => {
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.18);
   font-size: 9px;
+  overflow: hidden;
+}
+
+.conversation-message-source__mark img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .conversation-message-source__label {
