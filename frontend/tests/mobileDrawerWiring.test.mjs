@@ -43,6 +43,12 @@ test('the drawer slides in/out via transform and starts hidden when closed', () 
   assert.match(sidebar, /mobile-drawer--open[\s\S]*?transform: translateX\(0\)/)
 })
 
+test('pins scroll with the drawer list instead of sticking over the rows beneath', () => {
+  const mobile = sidebar.match(/@media \(max-width: 768px\) \{[\s\S]*$/)?.[0] ?? ''
+  assert.match(mobile, /\.chat-sidebar\.mobile-drawer \.chat-sidebar__group--pinned \{\s*position: relative;\s*z-index: auto;\s*max-height: none;\s*overflow: visible;/)
+  assert.match(sidebar, /\.chat-sidebar__group--pinned \{\s*position: sticky;/)
+})
+
 test('the pinned group markup from ChatSidebar is reused unchanged in the drawer', () => {
   assert.match(sidebar, /group\.pinned/)
   assert.match(sidebar, /class="chat-sidebar__group-header chat-sidebar__pinned-header"/)

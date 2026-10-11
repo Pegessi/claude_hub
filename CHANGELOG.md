@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### fix(sidebar): fold the Pinned section and stop it covering the mobile drawer
+
+- Tapping the Pinned header now folds or unfolds the pinned Chats, with the
+  same chevron, count, and active-row retention as workspace headers; a search
+  still shows every matching pin.
+- In the mobile drawer the Pinned section scrolls with the list. On a
+  phone-height screen its sticky 40vh block covered the workspace header and
+  the active Chat scrolled beneath it. Desktop keeps the sticky section.
+
 ### feat(mobile): open the Chat drawer with a swipe anywhere on the main view
 
 - A clearly rightward single-finger swipe anywhere on the mobile main column
