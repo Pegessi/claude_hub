@@ -46,7 +46,7 @@
         type="button"
         class="tam-item"
         role="menuitem"
-        title="Saved in this browser"
+        title="Saved on this Hub"
         @click="handleTogglePin"
       >
         <span
@@ -475,9 +475,9 @@ onUnmounted(() => {
 })
 
 // ---- Menu actions ----
-function handleTogglePin() {
+async function handleTogglePin() {
   close()
-  store.setChatPinned(props.tab.id, !store.pinnedChatIds.has(props.tab.id))
+  await store.setChatPinned(props.tab.id, !store.pinnedChatIds.has(props.tab.id))
 }
 
 function handleRename() {

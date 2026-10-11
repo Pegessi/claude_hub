@@ -529,6 +529,8 @@ onUnmounted(() => {
   --ch-color-accent-ring-strong: rgba(124, 183, 255, 0.58);
   --ch-color-session-glow: #5a9cf0;
   --ch-color-session-glow-strong: #9acbff;
+  --ch-color-session-star: #eaf4ff;
+  --ch-color-session-star-halo: rgba(124, 183, 255, 0.6);
   --ch-color-message-user-bg: #3276ba;
   --ch-color-message-user-muted: #f7fafc;
   --ch-color-message-user-focus: #ffffff;
@@ -663,6 +665,8 @@ onUnmounted(() => {
   --ch-color-accent-ring-strong: rgba(151, 101, 73, 0.46);
   --ch-color-session-glow: #a9795d;
   --ch-color-session-glow-strong: #c69b82;
+  --ch-color-session-star: #8a5a40;
+  --ch-color-session-star-halo: rgba(198, 155, 130, 0.26);
   --ch-color-message-user-bg: #82533a;
   --ch-color-message-user-muted: #e4d9d4;
   --ch-color-message-user-focus: #ffffff;

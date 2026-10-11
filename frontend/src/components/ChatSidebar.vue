@@ -112,7 +112,7 @@
           <div
             v-if="group.pinned"
             class="chat-sidebar__group-header chat-sidebar__pinned-header"
-            title="Pins are saved in this browser"
+            title="Pins are saved on this Hub"
             data-pointer-drop="group"
           >
             <span aria-hidden="true">⌖</span>
@@ -176,6 +176,10 @@
               @pointerdown="onRowPointerDown($event, tab)"
               @click="onRowClick($event, tab)"
             >
+              <ChatSidebarWorkingEffect
+                v-if="getTabStatus(tab) === 'working'"
+                :seed="tab.id"
+              />
               <button
                 v-if="renamingTabId !== tab.id"
                 type="button"
@@ -341,6 +345,7 @@ import { useTabStatus } from '@/composables/useTabStatus'
 import { useViewport } from '@/composables/useViewport'
 import { useEdgeSwipeDrawer } from '@/composables/useEdgeSwipeDrawer'
 import TabActionsMenu from '@/components/TabActionsMenu.vue'
+import ChatSidebarWorkingEffect from '@/components/ChatSidebarWorkingEffect.vue'
 import type { TerminalTab } from '@/types'
 
 const emit = defineEmits<{
@@ -1176,46 +1181,18 @@ watch(mobileDrawerOpen, isOpen => {
     0 0 18px -7px var(--ch-color-session-glow);
 }
 
-/* A running session gets a narrow travelling highlight around its edge. The
-   warning-colored status dot still carries the semantic "working" state;
-   this theme accent sweep only makes live work scannable in a long list. */
-.chat-sidebar__item[data-runtime-status='working']::after {
-  content: '';
-  position: absolute;
-  inset: -1px;
-  z-index: 0;
-  padding: 1px;
-  border-radius: inherit;
-  background: linear-gradient(
-    105deg,
-    transparent 18%,
-    var(--ch-color-session-glow) 42%,
-    var(--ch-color-session-glow-strong) 52%,
-    transparent 76%
-  ) 100% 0 / 240% 100%;
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-  animation: sidebar-working-sweep 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-
-.chat-sidebar__item[data-runtime-status='working']:not(.active) {
-  background: linear-gradient(90deg, var(--ch-color-accent-soft), transparent 72%);
+/* Like Maso, a working row is marked only by the light pulse travelling its
+   border (ChatSidebarWorkingEffect), so a selected working row drops its
+   outline glow and keeps just a faint border beside the selected fill. */
+.chat-sidebar__item.active[data-runtime-status='working'] {
+  border-color: color-mix(in srgb, var(--ch-color-border-selected) 20%, transparent);
+  box-shadow: none;
 }
 
 .chat-sidebar__item[data-runtime-status='working'] > .chat-sidebar__item-main,
 .chat-sidebar__item[data-runtime-status='working'] > .chat-sidebar__rename-input {
   position: relative;
   z-index: 1;
-}
-
-@keyframes sidebar-working-sweep {
-  0% { background-position: 100% 0; opacity: 0.35; }
-  45% { opacity: 1; }
-  100% { background-position: -70% 0; opacity: 0.35; }
 }
 
 .chat-sidebar__item.dragging {
@@ -1335,18 +1312,9 @@ watch(mobileDrawerOpen, isOpen => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-sidebar__item[data-runtime-status='working']::after,
   .chat-sidebar__item-status[data-unread='true']::after {
     animation: none;
-  }
-
-  .chat-sidebar__item-status[data-unread='true']::after {
     display: none;
-  }
-
-  .chat-sidebar__item[data-runtime-status='working']::after {
-    background: var(--ch-color-session-glow);
-    opacity: 0.72;
   }
 }
 
