@@ -14,6 +14,7 @@
 - Measured at 4x CPU throttle with four working Chats: a closed drawer now
   costs 1ms of main thread per second instead of 148ms, and each drag move
   6.6ms instead of 20.3ms (4.5ms with no light at all). Desktop is unchanged.
+- See the [mobile drawer polish notes](docs/working-logs/2026-10-12-mobile-drawer-polish.md).
 
 ### fix(chat): keep Stop and Queue on one composer line on phones
 
