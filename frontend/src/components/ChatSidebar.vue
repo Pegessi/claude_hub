@@ -102,13 +102,17 @@
           v-for="group in filteredGroups"
           :key="group.key"
           class="chat-sidebar__group"
-          :class="{ 'chat-sidebar__group--pinned': group.pinned }"
+          :class="{
+            'chat-sidebar__group--pinned': group.pinned,
+            'chat-sidebar__group--dragging': !group.pinned && draggedGroupCwd === group.cwd,
+          }"
           :data-group-key="group.key"
+          :data-group-drop-position="groupDropTarget?.cwd === group.cwd ? groupDropTarget.position : undefined"
         >
           <div
             v-if="group.pinned"
             class="chat-sidebar__group-header chat-sidebar__pinned-header"
-            title="Pins are saved in this browser"
+            title="Pins are saved on this Hub"
             data-pointer-drop="group"
           >
             <span aria-hidden="true">⌖</span>
@@ -122,7 +126,9 @@
             data-pointer-drop="group"
             :aria-expanded="!group.collapsed"
             :aria-controls="`chat-group-${group.key}`"
-            @click="toggleGroup(group.cwd)"
+            :title="`${group.cwd}. Click to collapse; drag to reorder workspaces`"
+            @pointerdown="onGroupPointerDown($event, group)"
+            @click="onGroupHeaderClick(group.cwd)"
           >
             <svg
               viewBox="0 0 16 16"
@@ -164,21 +170,24 @@
               :key="tab.id"
               class="chat-sidebar__item"
               :class="{ active: tab.id === activeTabId, dragging: tab.id === draggedTabId }"
+              :data-runtime-status="getTabStatus(tab)"
               :data-tab-id="tab.id"
               :data-drop-position="dropTarget?.id === tab.id ? dropTarget.position : undefined"
               @pointerdown="onRowPointerDown($event, tab)"
               @click="onRowClick($event, tab)"
             >
+              <ChatSidebarWorkingEffect
+                v-if="getTabStatus(tab) === 'working'"
+                :seed="tab.id"
+              />
               <button
                 v-if="renamingTabId !== tab.id"
                 type="button"
                 class="chat-sidebar__item-main"
                 :aria-current="tab.id === activeTabId ? 'page' : undefined"
-                :title="`${tab.name || 'Untitled'} — ${tab.cwd || 'No directory'}. Double-click to rename; Alt+↑/↓ to reorder`"
+                :title="`${tab.name || 'Untitled'} — ${tab.cwd || 'No directory'}. Double-click to rename; drag to reorder`"
                 @click.stop="onRowClick($event, tab)"
                 @dblclick.stop="startRename(tab)"
-                @keydown.alt.up.prevent="moveInGroup(tab, group, -1)"
-                @keydown.alt.down.prevent="moveInGroup(tab, group, 1)"
               >
                 <span
                   class="chat-sidebar__item-status"
@@ -202,16 +211,13 @@
                 @keyup.enter="handleRenameTab(tab.id)"
                 @keyup.escape="cancelRename(tab.id)"
               >
-              <!-- Same ⋯ actions as the TabBar (rename / duplicate / archive /
-                   copy link / switch env). Hover-revealed like the old archive. -->
+              <!-- Same ⋯ actions as the TabBar. Reordering stays on the row's
+                   direct pointer-drag interaction instead of menu commands. -->
               <TabActionsMenu
                 class="chat-sidebar__item-menu"
                 :tab="tab"
                 variant="sidebar"
-                :move-up-disabled="group.tabs[0]?.id === tab.id"
-                :move-down-disabled="group.tabs[group.tabs.length - 1]?.id === tab.id"
                 @rename="startRename"
-                @move="direction => moveInGroup(tab, group, direction)"
               />
             </div>
             <button
@@ -339,6 +345,7 @@ import { useTabStatus } from '@/composables/useTabStatus'
 import { useViewport } from '@/composables/useViewport'
 import { useEdgeSwipeDrawer } from '@/composables/useEdgeSwipeDrawer'
 import TabActionsMenu from '@/components/TabActionsMenu.vue'
+import ChatSidebarWorkingEffect from '@/components/ChatSidebarWorkingEffect.vue'
 import type { TerminalTab } from '@/types'
 
 const emit = defineEmits<{
@@ -408,6 +415,8 @@ const dropTarget = ref<{ id: string; position: 'before' | 'after' } | null>(null
 const dropGroupKey = ref<string | null>(null)
 const dropOnPinZone = ref(false)
 const dropAtGroupStart = ref(false)
+const draggedGroupCwd = ref<string | null>(null)
+const groupDropTarget = ref<{ cwd: string; position: 'before' | 'after' } | null>(null)
 const SIDEBAR_DEFAULT_WIDTH = 240
 const SIDEBAR_MIN_WIDTH = 200
 const SIDEBAR_MAX_WIDTH = 480
@@ -494,8 +503,12 @@ onUnmounted(() => {
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
   window.removeEventListener('pointercancel', onPointerCancel)
+  window.removeEventListener('pointermove', onGroupPointerMove)
+  window.removeEventListener('pointerup', onGroupPointerUp)
+  window.removeEventListener('pointercancel', onGroupPointerCancel)
   window.removeEventListener('keydown', handleDrawerKeydown)
   clearDrag()
+  clearGroupDrag()
 })
 
 // Inline row rename (mirrors the TabBar's double-click rename).
@@ -563,6 +576,11 @@ function toggleGroup(cwd: string) {
   collapsedGroups.value = next
 }
 
+function onGroupHeaderClick(cwd: string) {
+  if (suppressNextGroupClick) return
+  toggleGroup(cwd)
+}
+
 const filteredGroups = computed(() => buildChatSidebarGroups(chatTabs.value, pinnedChatIds.value, {
   query: filterText.value, activeTabId: activeTabId.value,
   collapsed: collapsedGroups.value, expanded: expandedGroups.value,
@@ -603,6 +621,8 @@ interface PointerDragState {
 const POINTER_DRAG_THRESHOLD_PX = 5
 let pointerDrag: PointerDragState | null = null
 let suppressNextRowClick = false
+let groupPointerDrag: PointerDragState | null = null
+let suppressNextGroupClick = false
 
 function draggedForGroup(group: ChatSidebarGroup) {
   const source = chatTabs.value.find(tab => tab.id === draggedTabId.value)
@@ -725,6 +745,84 @@ function onRowClick(event: MouseEvent, tab: TerminalTab) {
   }
 }
 
+function updateGroupPointerDrop(clientX: number, clientY: number) {
+  groupDropTarget.value = null
+  const target = document.elementFromPoint(clientX, clientY)
+  const element = target?.closest<HTMLElement>('.chat-sidebar__group')
+  const group = groupFromElement(element ?? null)
+  if (!group || group.pinned || group.cwd === draggedGroupCwd.value) return
+  const header = element!.querySelector<HTMLElement>('.chat-sidebar__group-header')
+  const rect = header?.getBoundingClientRect() ?? element!.getBoundingClientRect()
+  groupDropTarget.value = {
+    cwd: group.cwd,
+    position: clientY < rect.top + rect.height / 2 ? 'before' : 'after',
+  }
+}
+
+function clearGroupDrag() {
+  draggedGroupCwd.value = null
+  groupDropTarget.value = null
+  document.body.classList.remove('chat-sidebar-group-dragging')
+}
+
+function onGroupPointerMove(event: PointerEvent) {
+  const drag = groupPointerDrag
+  if (!drag || event.pointerId !== drag.pointerId) return
+  if (!drag.moved) {
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY)
+    if (distance < POINTER_DRAG_THRESHOLD_PX) return
+    drag.moved = true
+    draggedGroupCwd.value = drag.sourceId
+    document.body.classList.add('chat-sidebar-group-dragging')
+  }
+  event.preventDefault()
+  updateGroupPointerDrop(event.clientX, event.clientY)
+}
+
+function finishGroupPointerDrag(event: PointerEvent, cancelled = false) {
+  const drag = groupPointerDrag
+  if (!drag || event.pointerId !== drag.pointerId) return
+  groupPointerDrag = null
+  window.removeEventListener('pointermove', onGroupPointerMove)
+  window.removeEventListener('pointerup', onGroupPointerUp)
+  window.removeEventListener('pointercancel', onGroupPointerCancel)
+  if (!drag.moved) return
+
+  suppressNextGroupClick = true
+  window.setTimeout(() => { suppressNextGroupClick = false }, 0)
+  if (!cancelled && groupDropTarget.value) {
+    store.reorderChatWorkspace(
+      drag.sourceId, groupDropTarget.value.cwd, groupDropTarget.value.position,
+    )
+  }
+  clearGroupDrag()
+}
+
+function onGroupPointerUp(event: PointerEvent) {
+  finishGroupPointerDrag(event)
+}
+
+function onGroupPointerCancel(event: PointerEvent) {
+  finishGroupPointerDrag(event, true)
+}
+
+function onGroupPointerDown(event: PointerEvent, group: ChatSidebarGroup) {
+  if (
+    event.button !== 0 || !event.isPrimary || group.pinned ||
+    filterText.value.trim() || draggedTabId.value
+  ) return
+  groupPointerDrag = {
+    pointerId: event.pointerId,
+    sourceId: group.cwd,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+  }
+  window.addEventListener('pointermove', onGroupPointerMove, { passive: false })
+  window.addEventListener('pointerup', onGroupPointerUp)
+  window.addEventListener('pointercancel', onGroupPointerCancel)
+}
+
 // The archived-sessions browser opens above the drawer; dismiss the drawer.
 function openArchive() {
   if (isMobile.value) closeMobileDrawer()
@@ -746,20 +844,6 @@ watch(mobileDrawerOpen, isOpen => {
   }
 })
 
-function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 1) {
-  const index = group.tabs.findIndex(item => item.id === tab.id)
-  const target = group.tabs[index + direction]
-  if (index < 0 || !target) return
-  store.reorderTabById(tab.id, target.id, direction < 0 ? 'before' : 'after')
-  // Keep the moved row reachable when it crosses the preview boundary.
-  if (!group.pinned) expandedGroups.value = new Set([...expandedGroups.value, group.cwd])
-  nextTick(() => {
-    const rows = document.querySelectorAll<HTMLElement>('.chat-sidebar__item')
-    const row = [...rows].find(item => item.dataset.tabId === tab.id)
-    row?.querySelector<HTMLButtonElement>('.chat-sidebar__item-main')?.focus()
-    row?.scrollIntoView({ block: 'nearest' })
-  })
-}
 </script>
 
 <style scoped>
@@ -770,7 +854,7 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
   width: 240px;
   min-width: 240px;
   height: 100%;
-  background: var(--ch-color-surface);
+  background: var(--ch-color-sidebar-bg);
   border-right: 1px solid var(--ch-color-border-muted);
   transition:
     width var(--ch-motion-standard),
@@ -923,7 +1007,8 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
 
 /* Groups */
 .chat-sidebar__group {
-  margin-bottom: 2px;
+  position: relative;
+  margin-bottom: 8px;
 }
 
 .chat-sidebar__group--pinned {
@@ -932,12 +1017,12 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
   z-index: 2;
   max-height: 40vh;
   overflow-y: auto;
-  background: var(--ch-color-surface);
+  background: var(--ch-color-sidebar-bg);
   border-bottom: 1px solid var(--ch-color-border-muted);
   margin-bottom: 6px;
 }
 
-.chat-sidebar__pinned-header {
+.chat-sidebar__group-header.chat-sidebar__pinned-header {
   cursor: default;
 }
 
@@ -966,17 +1051,18 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
   padding: 5px 8px;
   border: 1px dashed var(--ch-color-accent);
   border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface);
+  background: var(--ch-color-sidebar-bg);
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-size-xs);
 }
 
 .chat-sidebar__group-header {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 5px 6px;
+  padding: 7px 7px;
   border: none;
   border-radius: var(--ch-radius-md);
   background: transparent;
@@ -984,11 +1070,20 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
   font-size: var(--ch-font-size-sm);
   font-weight: 600;
   cursor: pointer;
+  touch-action: pan-y;
   transition: background var(--ch-motion-fast);
 }
 
 .chat-sidebar__group-header:hover {
   background: var(--ch-color-surface-control-hover);
+}
+
+.chat-sidebar__group-header:not(.chat-sidebar__pinned-header) {
+  cursor: grab;
+}
+
+.chat-sidebar__group-header:not(.chat-sidebar__pinned-header):active {
+  cursor: grabbing;
 }
 
 .chat-sidebar__group-label {
@@ -1017,8 +1112,38 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
 .chat-sidebar__group-items {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  margin: 2px 0 4px;
+  gap: 3px;
+  margin: 3px 0 6px;
+}
+
+.chat-sidebar__group--dragging {
+  opacity: 0.45;
+}
+
+:global(body.chat-sidebar-group-dragging) {
+  cursor: grabbing !important;
+  user-select: none;
+}
+
+.chat-sidebar__group[data-group-drop-position] > .chat-sidebar__group-header::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  z-index: 3;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--ch-color-accent);
+  box-shadow: 0 0 8px var(--ch-color-accent-halo);
+  pointer-events: none;
+}
+
+.chat-sidebar__group[data-group-drop-position='before'] > .chat-sidebar__group-header::before {
+  top: -4px;
+}
+
+.chat-sidebar__group[data-group-drop-position='after'] > .chat-sidebar__group-header::before {
+  bottom: -4px;
 }
 
 /* Chat rows: a plain container; the clickable surface is the inner main
@@ -1029,12 +1154,16 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 7px 7px;
+  border: 1px solid transparent;
   border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text);
   font-size: var(--ch-font-size-sm);
-  transition: background var(--ch-motion-fast);
+  transition:
+    background var(--ch-motion-fast),
+    border-color var(--ch-motion-fast),
+    box-shadow var(--ch-motion-fast);
   cursor: grab;
   touch-action: pan-y;
 }
@@ -1045,7 +1174,25 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
 
 .chat-sidebar__item.active {
   background: var(--ch-color-surface-selected);
-  color: var(--ch-color-text-strong);
+  border-color: var(--ch-color-border-selected);
+  color: var(--ch-color-text-selected);
+  box-shadow:
+    0 0 0 1px var(--ch-color-accent-halo),
+    0 0 18px -7px var(--ch-color-session-glow);
+}
+
+/* Like Maso, a working row is marked only by the light pulse travelling its
+   border (ChatSidebarWorkingEffect), so a selected working row drops its
+   outline glow and keeps just a faint border beside the selected fill. */
+.chat-sidebar__item.active[data-runtime-status='working'] {
+  border-color: color-mix(in srgb, var(--ch-color-border-selected) 20%, transparent);
+  box-shadow: none;
+}
+
+.chat-sidebar__item[data-runtime-status='working'] > .chat-sidebar__item-main,
+.chat-sidebar__item[data-runtime-status='working'] > .chat-sidebar__rename-input {
+  position: relative;
+  z-index: 1;
 }
 
 .chat-sidebar__item.dragging {
@@ -1133,42 +1280,42 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
   background: var(--ch-color-text-subtle);
 }
 
-/* Unread ping: a soft accent halo plus an accent ring that expands outward
-   from the dot and fades, repeating. Shown only for tabs with an unread
-   completed turn. The halo keeps the state legible between ripple frames.
-   For working/attention the halo is stacked with the status glow so neither
-   signal is suppressed. */
+/* A completed turn that has not been opened gets a small sheen contained
+   inside its existing status light. This keeps completion visible without
+   wrapping a green idle dot in an unrelated blue ring. */
 .chat-sidebar__item-status[data-unread='true'] {
-  box-shadow: 0 0 0 2px var(--ch-color-accent-ring);
+  overflow: hidden;
 }
 
-.chat-sidebar__item-status[data-status='working'][data-unread='true'] {
-  box-shadow: 0 0 6px var(--ch-color-warning-bg), 0 0 0 2px var(--ch-color-accent-ring);
-}
-
-.chat-sidebar__item-status[data-status='attention'][data-unread='true'] {
-  box-shadow: 0 0 6px var(--ch-color-attention-bg), 0 0 0 2px var(--ch-color-accent-ring);
+.chat-sidebar__item-status[data-status='idle'][data-unread='true'] {
+  box-shadow: 0 0 7px var(--ch-color-success-bg);
 }
 
 .chat-sidebar__item-status[data-unread='true']::after {
   content: '';
   position: absolute;
-  top: 0;
-  left: 0;
-  /* The global `* { box-sizing: border-box }` reset does NOT reach
-     pseudo-elements; without this the 1.5px border adds onto width:100%
-     (content-box), making the 11px ring sit down-right of the 8px dot. */
-  box-sizing: border-box;
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  border: 1.5px solid var(--ch-color-accent);
-  animation: sidebar-unread-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+  inset: -2px;
+  border-radius: inherit;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.88) 48%,
+    transparent 66%
+  );
+  transform: translateX(-125%);
+  animation: sidebar-complete-sheen 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
-@keyframes sidebar-unread-ping {
-  0% { transform: scale(1); opacity: 0.9; }
-  75%, 100% { transform: scale(2.4); opacity: 0; }
+@keyframes sidebar-complete-sheen {
+  0%, 38% { transform: translateX(-125%); }
+  68%, 100% { transform: translateX(125%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-sidebar__item-status[data-unread='true']::after {
+    animation: none;
+    display: none;
+  }
 }
 
 .chat-sidebar__item-name {
@@ -1191,14 +1338,15 @@ function moveInGroup(tab: TerminalTab, group: ChatSidebarGroup, direction: -1 | 
 
 /* Hover-revealed ⋯ actions menu (same actions as the TabBar). Absolute,
    over the timestamp; focus-within keeps it reachable via keyboard. */
-.chat-sidebar__item-menu {
+.chat-sidebar__item > :deep(.chat-sidebar__item-menu) {
   position: absolute;
   right: 4px;
+  z-index: 1;
   display: none;
 }
 
-.chat-sidebar__item:hover .chat-sidebar__item-menu,
-.chat-sidebar__item:focus-within .chat-sidebar__item-menu {
+.chat-sidebar__item:hover > :deep(.chat-sidebar__item-menu),
+.chat-sidebar__item:focus-within > :deep(.chat-sidebar__item-menu) {
   display: inline-flex;
 }
 

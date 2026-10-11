@@ -5,6 +5,33 @@
 
 ## Unreleased
 
+### style(chat): refine session actions and Maso-inspired themes
+
+- Add a destructive **Delete** action to the shared session menu with a focused
+  confirmation dialog, failure-safe state, and cleanup of stale pinned ids.
+- Remove **Move up** / **Move down** and their keyboard shortcut from the Chat
+  sidebar while preserving its direct pointer-drag reordering interaction.
+- Rebuild Dark around Maso's carbon surface ladder and current main-branch blue,
+  pair Light with a muted clay-orange accent, and keep selected, focus, and
+  primary-action roles separate with accessible contrast.
+- Theme user-message bubbles alongside the surrounding Dark and Light chrome
+  instead of retaining a hard-coded blue fill in Light mode.
+- Match Maso's sidebar/main surface split (`#1c1c1c` / `#181818` in Dark and
+  `#f5f5f5` / white in Light) without repainting unrelated application surfaces.
+- Replace the blue completion ripple around idle session dots with a restrained
+  sheen contained inside the existing status light.
+- Mark only genuinely working Chat sessions with a Maso-style light pulse that
+  orbits the row border and fades smoothly at both ends, while dim stars inside
+  the row brighten as it passes; working rows no longer gain a lit outline.
+- Give Chat rows and workspace groups more breathing room, allow dragging a
+  workspace header to persist the whole directory block without reordering
+  pinned Chats, and keep Terminal Status workspace groups in the same order as
+  the Chat sidebar.
+- Persist Chat pins in the Hub runtime instead of per-origin browser storage,
+  using per-user atomic updates so browsers and devices share one state without
+  lost updates. Valid legacy local pins migrate once and are then removed.
+- See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).
+
 ### fix(chat): activate queued conversations before sending
 
 - Keep only Chats with an actionable local queue observing their hidden turn,

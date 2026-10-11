@@ -129,8 +129,8 @@ async function restore(tabId: string) {
 }
 
 async function permanentDelete(tabId: string) {
-  await permanentDeleteTab(tabId)
-  confirmDeleteId.value = null
+  const deleted = await permanentDeleteTab(tabId)
+  if (deleted) confirmDeleteId.value = null
 }
 
 function handleKeydown(event: KeyboardEvent) {

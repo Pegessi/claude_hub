@@ -18,6 +18,7 @@ from starlette.types import Message, Scope
 from claude_hub.api.tabs import router as tabs_router
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.models import AgentType, ExecutionTarget, SessionKind, TerminalTab, User
+from claude_hub.services.chat_sidebar_preferences import ChatSidebarPreferencesStore
 from claude_hub.services.ttyd_manager import TabStartupTimeoutError, TTYDManager
 
 api_tabs_module = importlib.import_module("claude_hub.api.tabs")
@@ -339,6 +340,103 @@ async def test_update_tab_order_route_not_shadowed(
     assert response.status_code == 200
     assert response.json() == {"success": True}
     assert captured_order == []
+
+
+def _sidebar_tab(
+    tab_id: str, *, session_kind: SessionKind = SessionKind.CHAT, workspace_id: str | None = None
+) -> TerminalTab:
+    return TerminalTab(
+        id=tab_id,
+        name=tab_id,
+        cwd="/tmp",
+        agent_type=AgentType.CODEX if session_kind == SessionKind.CHAT else AgentType.TERMINAL,
+        session_kind=session_kind,
+        port=12345,
+        created_at=datetime.now(),
+        is_active=True,
+        workspace_id=workspace_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sidebar_preferences_pin_is_server_persisted_and_filtered(
+    client: AsyncClient, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    store = ChatSidebarPreferencesStore(tmp_path)
+    tabs = [
+        _sidebar_tab("chat"),
+        _sidebar_tab("terminal", session_kind=SessionKind.TERMINAL),
+        _sidebar_tab("managed", workspace_id="workspace"),
+    ]
+    monkeypatch.setattr("claude_hub.api.tabs.chat_sidebar_preferences.get_store", lambda: store)
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.list_tabs", lambda: tabs)
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.list_archived_tabs", lambda: [])
+
+    pinned = await client.put("/api/tabs/sidebar-preferences/pins/chat", json={"pinned": True})
+    assert pinned.status_code == 200
+    assert pinned.json() == {"pinned_tab_ids": ["chat"]}
+    assert store.get_pinned("local") == ["chat"]
+
+    for invalid_id in ("terminal", "managed", "missing"):
+        response = await client.put(
+            f"/api/tabs/sidebar-preferences/pins/{invalid_id}", json={"pinned": True}
+        )
+        assert response.status_code == 404
+
+    # A second API read sees the durable value, while an idempotent unpin does
+    # not need the tab to remain active.
+    reloaded = await client.get("/api/tabs/sidebar-preferences")
+    assert reloaded.json() == {"pinned_tab_ids": ["chat"]}
+    unpinned = await client.put("/api/tabs/sidebar-preferences/pins/chat", json={"pinned": False})
+    assert unpinned.json() == {"pinned_tab_ids": []}
+
+
+@pytest.mark.asyncio
+async def test_sidebar_preferences_keep_archived_pins_and_migrate_browser_once(
+    client: AsyncClient, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    store = ChatSidebarPreferencesStore(tmp_path)
+    active = [_sidebar_tab("active")]
+    archived = [_sidebar_tab("archived")]
+    monkeypatch.setattr("claude_hub.api.tabs.chat_sidebar_preferences.get_store", lambda: store)
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.list_tabs", lambda: active)
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.list_archived_tabs", lambda: archived)
+
+    migrated = await client.post(
+        "/api/tabs/sidebar-preferences/migrate-browser-pins",
+        json={"pinned_tab_ids": ["active", "archived", "missing", "active"]},
+    )
+    repeated = await client.post(
+        "/api/tabs/sidebar-preferences/migrate-browser-pins",
+        json={"pinned_tab_ids": ["missing-later"]},
+    )
+
+    assert migrated.json() == {"pinned_tab_ids": ["active", "archived"]}
+    assert repeated.json() == migrated.json()
+    assert (await client.get("/api/tabs/sidebar-preferences")).json() == migrated.json()
+
+
+@pytest.mark.asyncio
+async def test_delete_tab_cleans_server_pin_without_misreporting_cleanup_failure(
+    client: AsyncClient, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    store = ChatSidebarPreferencesStore(tmp_path)
+    store.set_pinned("local", "chat", True)
+
+    async def fake_delete_tab(tab_id: str) -> bool:
+        return tab_id == "chat"
+
+    monkeypatch.setattr("claude_hub.api.tabs.ttyd_manager.delete_tab", fake_delete_tab)
+    monkeypatch.setattr("claude_hub.api.tabs.chat_sidebar_preferences.get_store", lambda: store)
+
+    response = await client.delete("/api/tabs/chat")
+
+    assert response.status_code == 204
+    assert store.get_pinned("local") == []
+
+    monkeypatch.setattr(store, "remove_tab", lambda _tab_id: (_ for _ in ()).throw(OSError()))
+    response = await client.delete("/api/tabs/chat")
+    assert response.status_code == 204
 
 
 @pytest.mark.asyncio

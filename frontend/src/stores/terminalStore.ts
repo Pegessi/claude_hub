@@ -12,7 +12,7 @@ import type {
   NotificationType,
   WorkspaceAttachmentCreate,
 } from '@/types'
-import { groupChatsByCwd, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
+import { groupChatsByCwd, moveCwdGroup, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
 import {
   createPaneReconnectRegistry,
   type PaneReconnectStatus,
@@ -21,8 +21,8 @@ import {
 const API_BASE = '/api'
 const STORAGE_KEY_LAYOUT = 'claude_hub_layout_type'
 const STORAGE_KEY_SIDEBAR = 'claude_hub_sidebar_collapsed'
-// Browser + origin scoped, like the sidebar/layout preferences. Store IDs only;
-// archived pins stay dormant and reappear if that session is restored.
+// Legacy browser-only pin state. The server is authoritative now; this key is
+// read only for the one-time migration and removed after the server accepts it.
 const STORAGE_KEY_PINNED_CHATS = 'claude_hub_pinned_chat_ids'
 const STATUS_POLL_INTERVAL_MS = 5000
 
@@ -140,25 +140,57 @@ export const useTerminalStore = defineStore('terminal', () => {
   const sidebarCollapsed = ref<boolean>(
     localStorage.getItem(STORAGE_KEY_SIDEBAR) === '1'
   )
-  const pinnedChatIds = ref<Set<string>>((() => {
-    try {
-      return parsePinnedChatIds(localStorage.getItem(STORAGE_KEY_PINNED_CHATS))
-    } catch {
-      return new Set<string>()
-    }
-  })())
+  const pinnedChatIds = ref<Set<string>>(new Set())
+  let chatPinMutationTail: Promise<unknown> = Promise.resolve()
+  let chatPreferencesRequestSequence = 0
+  let chatPreferencesAppliedSequence = 0
 
-  function setChatPinned(tabId: string, pinned: boolean) {
-    if (!chatTabs.value.some(tab => tab.id === tabId)) return
-    const next = new Set(pinnedChatIds.value)
-    if (pinned) next.add(tabId)
-    else next.delete(tabId)
-    pinnedChatIds.value = next
-    try {
-      localStorage.setItem(STORAGE_KEY_PINNED_CHATS, JSON.stringify([...next]))
-    } catch {
-      pushNotification({ type: 'warning', message: 'Pin preference could not be saved in this browser.', autoDismissMs: 6000 })
+  function applyPinnedChatIds(value: unknown, sequence: number) {
+    // A slower GET started before a Pin mutation must not overwrite the newer
+    // mutation response when it arrives out of order.
+    if (sequence < chatPreferencesAppliedSequence) return
+    chatPreferencesAppliedSequence = sequence
+    const ids = Array.isArray(value) ? value : []
+    pinnedChatIds.value = new Set(ids.filter(
+      (id): id is string => typeof id === 'string' && id.length > 0,
+    ))
+  }
+
+  function setChatPinned(tabId: string, pinned: boolean): Promise<boolean> {
+    // Pinning requires a current Chat, while unpinning stays idempotent so a
+    // stale UI can still clear a preference after an archive or deletion.
+    if (pinned && !chatTabs.value.some(tab => tab.id === tabId)) {
+      return Promise.resolve(false)
     }
+    // Capture only work that was already active when the user clicked. This
+    // avoids racing the initial legacy migration without creating a cycle
+    // with a later refresh that correctly waits for this mutation.
+    const precedingSidebarSync = sidebarPreferencesFetchPromise
+    const mutate = async () => {
+      if (precedingSidebarSync) await precedingSidebarSync
+      const sequence = ++chatPreferencesRequestSequence
+      try {
+        const response = await fetch(`${API_BASE}/tabs/sidebar-preferences/pins/${tabId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned }),
+        })
+        if (!response.ok) throw new Error('Failed to save pin preference')
+        const payload: { pinned_tab_ids?: unknown } = await response.json()
+        applyPinnedChatIds(payload.pinned_tab_ids, sequence)
+        return true
+      } catch (e) {
+        pushNotification({
+          type: 'warning',
+          message: e instanceof Error ? e.message : 'Pin preference could not be saved on the server.',
+          autoDismissMs: 6000,
+        })
+        return false
+      }
+    }
+    const result = chatPinMutationTail.then(mutate, mutate)
+    chatPinMutationTail = result
+    return result
   }
   // Mobile slide-out session drawer visibility. Not persisted — it defaults to
   // closed on load. Use the open/close/toggle/select actions from components;
@@ -536,6 +568,74 @@ export const useTerminalStore = defineStore('terminal', () => {
   // (the two floating panels mount at once, poll-driven refreshes overlap)
   // coalesce onto one in-flight request and share its result.
   let tabsFetchPromise: Promise<void> | null = null
+  let sidebarPreferencesFetchPromise: Promise<void> | null = null
+  let legacyPinsMigrated = false
+  let sidebarPreferencesFailureNotified = false
+
+  function syncChatSidebarPreferences(): Promise<void> {
+    if (sidebarPreferencesFetchPromise) return sidebarPreferencesFetchPromise
+    const run = async () => {
+      // A refresh started during a Pin request must read the server only after
+      // that mutation settles; otherwise an older GET can win in the UI.
+      await chatPinMutationTail
+      const sequence = ++chatPreferencesRequestSequence
+      try {
+        let response: Response
+        let legacyPinnedIds: string[] = []
+        if (!legacyPinsMigrated) {
+          try {
+            legacyPinnedIds = [...parsePinnedChatIds(
+              localStorage.getItem(STORAGE_KEY_PINNED_CHATS),
+            )]
+          } catch {
+            // Storage can be disabled; an empty migration still establishes
+            // that this server user now uses the authoritative server state.
+          }
+        }
+        if (!legacyPinsMigrated) {
+          // The empty migration is meaningful: it closes the one-time import
+          // window on the server, preventing an older browser that still has
+          // stale localStorage pins from resurrecting them later.
+          response = await fetch(
+            `${API_BASE}/tabs/sidebar-preferences/migrate-browser-pins`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ pinned_tab_ids: legacyPinnedIds }),
+            },
+          )
+        } else {
+          response = await fetch(`${API_BASE}/tabs/sidebar-preferences`)
+        }
+        if (!response.ok) throw new Error('Failed to load server pin preferences')
+        const payload: { pinned_tab_ids?: unknown } = await response.json()
+        applyPinnedChatIds(payload.pinned_tab_ids, sequence)
+        if (!legacyPinsMigrated) {
+          try {
+            localStorage.removeItem(STORAGE_KEY_PINNED_CHATS)
+          } catch {
+            // The migration is already durable; a blocked cleanup is harmless.
+          }
+          legacyPinsMigrated = true
+        }
+        sidebarPreferencesFailureNotified = false
+      } catch (e) {
+        if (!sidebarPreferencesFailureNotified) {
+          pushNotification({
+            type: 'warning',
+            message: e instanceof Error ? e.message : 'Failed to load server pin preferences',
+            autoDismissMs: 6000,
+          })
+          sidebarPreferencesFailureNotified = true
+        }
+      }
+    }
+    sidebarPreferencesFetchPromise = run().finally(() => {
+      sidebarPreferencesFetchPromise = null
+    })
+    return sidebarPreferencesFetchPromise
+  }
+
   function fetchTabs(options: { force?: boolean } = {}): Promise<void> {
     // Mutation callers (restore, switch-env, create agent, ...) rely on the
     // awaited refresh reflecting the change they just made, so they bypass
@@ -560,6 +660,7 @@ export const useTerminalStore = defineStore('terminal', () => {
             firstPane.tabId = manualTabs.value[0].id
           }
         }
+        await syncChatSidebarPreferences()
       } catch (e) {
         notifyError(e instanceof Error ? e.message : 'Unknown error')
       }
@@ -756,8 +857,13 @@ export const useTerminalStore = defineStore('terminal', () => {
       if (activeTabId.value === tabId) {
         activeTabId.value = manualTabs.value.length ? manualTabs.value[0].id : null
       }
+      const nextPinned = new Set(pinnedChatIds.value)
+      nextPinned.delete(tabId)
+      pinnedChatIds.value = nextPinned
+      return true
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Unknown error')
+      return false
     } finally {
       isLoading.value = false
     }
@@ -845,8 +951,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   // Permanently delete an archived tab (reuses the hard-delete path, then
   // refreshes the archived list so the row disappears).
   async function permanentDeleteTab(tabId: string) {
-    await deleteTab(tabId)
-    void fetchArchivedTabs()
+    const deleted = await deleteTab(tabId)
+    if (deleted) void fetchArchivedTabs()
+    return deleted
   }
 
   async function switchEnv(tabId: string, data: SwitchEnvRequest) {
@@ -955,6 +1062,28 @@ export const useTerminalStore = defineStore('terminal', () => {
     void saveTabOrder()
   }
 
+  function reorderChatWorkspace(
+    sourceCwd: string, targetCwd: string, position: 'before' | 'after',
+  ) {
+    const chatCwds = new Set(chatTabsByCwd.value.map(group => group.cwd))
+    if (!chatCwds.has(sourceCwd) || !chatCwds.has(targetCwd)) return
+    // Move every manual tab in the directory, including raw terminals. This
+    // makes the persisted workspace order apply to both Chat and Terminal
+    // Status while leaving Workspace-managed agents in their own tail block.
+    // Pinned Chats keep their slots because the pinned section follows tab
+    // order, which a workspace drag must not rearrange.
+    const pinned = pinnedChatIds.value
+    const movableTabs = manualTabs.value.filter(tab => !pinned.has(tab.id))
+    const movedTabs = moveCwdGroup(movableTabs, sourceCwd, targetCwd, position)
+    if (movedTabs === movableTabs) return
+    let movedIndex = 0
+    const reorderedManualTabs = manualTabs.value.map(
+      tab => (pinned.has(tab.id) ? tab : movedTabs[movedIndex++]),
+    )
+    tabs.value = [...reorderedManualTabs, ...managedTabs.value]
+    void saveTabOrder()
+  }
+
   return {
     tabs,
     manualTabs,
@@ -999,6 +1128,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     setActiveTab,
     reorderTabs,
     reorderTabById,
+    reorderChatWorkspace,
     setLayout,
     setActivePane,
     getQueuedChatState,

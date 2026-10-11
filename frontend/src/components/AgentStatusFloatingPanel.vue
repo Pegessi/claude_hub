@@ -178,7 +178,9 @@ const props = withDefaults(defineProps<{
 
 const store = useTerminalStore()
 const appStore = useAppStore()
-const { manualTabs, managedTabs, agentStatuses, activeTabId } = storeToRefs(store)
+const {
+  chatTabs, pinnedChatIds, manualTabs, managedTabs, agentStatuses, activeTabId,
+} = storeToRefs(store)
 const { mode } = storeToRefs(appStore)
 const storageKeyExpanded = `claude_hub_${props.source}_status_expanded`
 const storageKeySize = `claude_hub_${props.source}_status_size`
@@ -256,7 +258,10 @@ const rowGroups = computed<AgentRowGroup[]>(() => {
     // share one ordering scheme. The status panel keeps every manual session
     // (including raw terminal tabs); it only adds directory headers.
     const rowByTabId = new Map(rows.value.map(row => [row.tab.id, row]))
-    return groupChatsByCwd(rows.value.map(row => row.tab)).map(group => ({
+    const chatCwdOrder = groupChatsByCwd(
+      chatTabs.value.filter(tab => !pinnedChatIds.value.has(tab.id)),
+    ).map(group => group.cwd)
+    return groupChatsByCwd(rows.value.map(row => row.tab), chatCwdOrder).map(group => ({
       key: `cwd:${group.cwd}`,
       title: cwdLabel(group.cwd),
       tooltip: group.cwd === 'No directory' ? undefined : group.cwd,
