@@ -171,7 +171,10 @@ def _stub_goal(monkeypatch: MonkeyPatch, goal_ref: dict[str, Any] | None = None)
     monkeypatch.setattr(
         goal_module,
         "get_goal_manager",
-        lambda: SimpleNamespace(current=lambda _tab_id: state.get("goal")),
+        lambda: SimpleNamespace(
+            current=lambda _tab_id: state.get("goal"),
+            has_goal_history=lambda _tab_id: state.get("goal") is not None,
+        ),
     )
     monkeypatch.setattr(
         goal_module,

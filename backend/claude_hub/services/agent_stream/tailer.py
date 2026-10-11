@@ -475,6 +475,9 @@ class SessionTailer:
         # with no completion record).
         self._turn_completed_seen: bool = False
         self._goal_protocol_sanitizer: Optional[_GoalProtocolSanitizer] = None
+        # Ordinary turns in a Chat with Goal history are sanitized too, but only
+        # Goal continuation turns may synthesize a completion from the signal.
+        self._goal_protocol_turn: bool = False
         self._visible_assistant_text: str = ""
         # Runtime status is terminalized as soon as the authoritative
         # TURN_COMPLETED event has been persisted and fanned out. The turn
@@ -652,8 +655,14 @@ class SessionTailer:
             await self._emit_approval_resolved(answers)
         return consumed
 
+    async def resolve_answered_questions(self, text: str) -> None:
+        """Close question cards whose answer travels inside another turn."""
+        answers = parse_ask_question_response(text)
+        if answers is not None and self._pending_approvals:
+            await self._emit_approval_resolved(answers)
+
     def accepts_question_followup(self, text: str, expected_turn_id: str) -> bool:
-        """Claude/Cursor questions need a normal follow-up after Goal pauses."""
+        """Claude/Cursor answer questions with a new turn, not in-turn."""
         session = self._session_getter()
         answers = parse_ask_question_response(text)
         if session is None or session.agent_type not in {AgentType.CLAUDE, AgentType.CURSOR}:
@@ -685,6 +694,7 @@ class SessionTailer:
         reuse_attachments: Optional[List[Dict[str, Any]]] = None,
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
+        strip_goal_protocol: bool = False,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -850,9 +860,12 @@ class SessionTailer:
             #    the store and is fanned out to subscribers.
             self._active_turn_id = client_turn_id
             self._reset_turn_watchdog_state()
+            self._goal_protocol_turn = bool(
+                turn_metadata and turn_metadata.get("protocol") == "goal-continuation-v1"
+            )
             self._goal_protocol_sanitizer = (
                 _GoalProtocolSanitizer()
-                if turn_metadata and turn_metadata.get("protocol") == "goal-continuation-v1"
+                if self._goal_protocol_turn or strip_goal_protocol
                 else None
             )
             self._run_epoch += 1
@@ -1141,7 +1154,7 @@ class SessionTailer:
         keeps writing (a protocol violation), the latch clears until the
         signal is trailing again.
         """
-        if self._goal_protocol_sanitizer is None or transport.eof_is_fatal:
+        if not self._goal_protocol_turn or transport.eof_is_fatal:
             return
         tail = self._assistant_text[-_GOAL_TAIL_SCAN_CHARS:]
         if "goal-status" not in tail:
@@ -1218,6 +1231,7 @@ class SessionTailer:
         self._assistant_text = ""
         self._visible_assistant_text = ""
         self._goal_protocol_sanitizer = None
+        self._goal_protocol_turn = False
 
     def _record_watchdog_activity(self, event: AgentStreamEvent) -> None:
         """Track conditions that legitimately pause model streaming."""
@@ -2274,6 +2288,7 @@ class SessionTailer:
             self._assistant_text = ""
             self._visible_assistant_text = ""
             self._goal_protocol_sanitizer = None
+            self._goal_protocol_turn = False
         return True
 
     def _notify_post_persist(self, event: AgentStreamEvent) -> None:
@@ -2996,6 +3011,7 @@ class TailerManager:
         delivery: str = "normal",
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
+        strip_goal_protocol: bool = False,
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
@@ -3017,6 +3033,7 @@ class TailerManager:
             delivery=delivery,
             visible_text=visible_text,
             turn_metadata=turn_metadata,
+            strip_goal_protocol=strip_goal_protocol,
         )
 
     async def cancel_turn(
@@ -3050,6 +3067,10 @@ class TailerManager:
     ) -> bool:
         tailer = await self._get_or_create(session)
         return tailer.accepts_question_followup(text, expected_turn_id)
+
+    async def resolve_answered_questions(self, session: ManagedSession, text: str) -> None:
+        tailer = await self._get_or_create(session)
+        await tailer.resolve_answered_questions(text)
 
     async def edit_resend(
         self,

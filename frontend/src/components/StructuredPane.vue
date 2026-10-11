@@ -323,7 +323,7 @@
               >✦</span>
               <div class="conversation-bubble conversation-bubble--assistant">
                 <MarkdownContent
-                  :text="part.text"
+                  :text="stripTrailingGoalProtocol(part.text)"
                   :tab-id="props.tabId"
                   compact
                   :complete="turn.completed"
@@ -1074,8 +1074,8 @@
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
-            :disabled="isSending || connectionState !== 'live' || goalComposerLocked"
-            :title="goalComposerReason || undefined"
+            :disabled="isSending || connectionState !== 'live' || goalInputBlocked"
+            :title="goalInputBlocked ? goalComposerReason || undefined : undefined"
             @compositionstart="isComposing = true"
             @compositionend="isComposing = false"
             @keydown.enter.exact="handleComposerEnter"
@@ -1291,18 +1291,23 @@
             type="button"
             class="composer-send-btn"
             :disabled="!canSend || isSending"
-            :title="goalComposerReason || undefined"
-            @click="() => submit('normal')"
+            :title="goalSteerOnly ? 'Send now as the next Goal turn' : goalComposerReason || undefined"
+            @click="() => submit(goalSteerOnly ? 'steer' : 'normal')"
           >
-            {{ isSending ? 'Sending…' : (turnInFlight ? 'Queue' : 'Send') }}
+            {{ isSending ? 'Sending…' : (goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
           </button>
         </div>
         <div
           v-if="!isMobileViewport"
           class="composer-hints"
         >
-          <template v-if="goalComposerLocked">
+          <template v-if="goalInputBlocked">
             <span>{{ goalComposerReason }}</span>
+          </template>
+          <template v-else-if="goalSteerOnly">
+            <span>Enter queue until the Goal stops</span>
+            <span>⌘/Ctrl+Enter steer Goal</span>
+            <span>Shift+Enter newline</span>
           </template>
           <template v-else>
             <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
@@ -1362,7 +1367,12 @@ import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
-import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
+import {
+  goalBlocksPlan,
+  goalPlanLockReason,
+  isGoalTerminal,
+  stripTrailingGoalProtocol,
+} from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
@@ -1418,6 +1428,9 @@ const goalComposerLocked = computed(() => goalBlocksPlan(goal.value))
 const goalComposerReason = computed(() => goalComposerLocked.value
   ? 'Pause or complete the active Goal before sending messages'
   : null)
+// An active Goal accepts text steers as its next turn; Enter queues instead.
+const goalSteerOnly = computed(() => goalComposerLocked.value && goal.value?.status === 'active')
+const goalInputBlocked = computed(() => goalComposerLocked.value && !goalSteerOnly.value)
 
 async function startGoal(input: { objective: string }) {
   if (goalSetupDisabledReason.value) {
@@ -2202,13 +2215,15 @@ const isSubmissionReady = computed(() => connectionState.value === 'live' &&
   !isUpdatingReasoningEffort.value)
 
 const canSend = computed(() => isSubmissionReady.value &&
-  !goalComposerLocked.value &&
-  (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
+  !goalInputBlocked.value &&
+  (goalSteerOnly.value
+    ? draftMessage.value.trim().length > 0 && attachments.value.length === 0
+    : draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
 const attachmentDisabledReason = computed(() => {
   if (!supportsImages.value) return 'This chat does not support image attachments'
-  if (goalComposerLocked.value) return goalComposerReason.value
+  if (goalComposerLocked.value) return 'Pause or complete the active Goal before attaching images'
   if (isSending.value || isPreparingAttachments.value) return 'Wait for the current upload or send to finish'
   return null
 })
@@ -2525,7 +2540,7 @@ function syncComposerTextareaHeight() {
 }
 
 function handleComposerEnter(event: KeyboardEvent) {
-  if (goalComposerLocked.value) {
+  if (goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return
   }
@@ -2535,7 +2550,7 @@ function handleComposerEnter(event: KeyboardEvent) {
     metaKey: event.metaKey,
     ctrlKey: event.ctrlKey,
     altKey: event.altKey,
-    turnInFlight: turnInFlight.value,
+    turnInFlight: turnInFlight.value || goalSteerOnly.value,
     hasDraft: draftMessage.value.trim().length > 0 || attachments.value.length > 0,
     isMobile: isMobileViewport.value,
   })
@@ -2549,7 +2564,7 @@ function handleComposerEnter(event: KeyboardEvent) {
 }
 
 function enqueueDraft() {
-  if (goalComposerLocked.value) {
+  if (goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return
   }
@@ -3134,7 +3149,7 @@ async function submit(
   source: 'user' | 'queue' = 'user',
 ): Promise<boolean> {
   if (isSending.value) return false
-  if (!messageOverride && goalComposerLocked.value) {
+  if (!messageOverride && goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return false
   }
@@ -3149,7 +3164,7 @@ async function submit(
   const message = messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || attachments.value.length > 0
   if (!hasContent) return false
-  if (delivery === 'normal' && turnInFlight.value && !messageOverride) {
+  if (delivery === 'normal' && (turnInFlight.value || goalSteerOnly.value) && !messageOverride) {
     enqueueDraft()
     return false
   }
