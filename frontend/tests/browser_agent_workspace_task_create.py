@@ -490,9 +490,13 @@ async def main() -> None:
             before = len(create_calls)
             await modal.get_by_role("button", name="Create Task", exact=True).click()
             recover_create = modal.get_by_role(
-                "button", name="Recover saved create request", exact=True
+                "button", name="Retry saved request", exact=True
             )
             await expect(recover_create).to_be_visible()
+            await expect(
+                modal.get_by_role("button", name="Discard and start over", exact=True)
+            ).to_be_visible()
+            await modal.screenshot(path=str(output / "agent-workspace-task-recover.png"))
             first = create_calls[-1]
             assert first["body"]["execution_control"] == "initiator"
             assert first["body"]["source"] == {"kind": "human", "tab_id": None, "agent_id": None}
@@ -642,7 +646,7 @@ async def main() -> None:
             before = len(create_calls)
             await modal.get_by_role("button", name="Create Task", exact=True).click()
             await expect(
-                modal.get_by_role("button", name="Recover saved create request", exact=True)
+                modal.get_by_role("button", name="Retry saved request", exact=True)
             ).to_be_visible()
             assert len(create_calls) == before + 1
             await modal.get_by_role("button", name="Cancel", exact=True).click()
@@ -655,12 +659,12 @@ async def main() -> None:
             await expect(modal.get_by_role("alert")).to_contain_text(
                 "saved request uses the newer Task contract"
             )
-            recover = modal.get_by_role("button", name="Recover saved create request", exact=True)
+            recover = modal.get_by_role("button", name="Retry saved request", exact=True)
             await expect(recover).to_be_disabled()
             await request_submit_without_post(modal)
             assert len(create_calls) == before + 1
             await modal.get_by_role(
-                "button", name="discard it and edit a new Task", exact=True
+                "button", name="Discard and start over", exact=True
             ).click()
             await modal.get_by_role("button", name="Cancel", exact=True).click()
 
