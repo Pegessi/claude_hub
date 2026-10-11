@@ -14,6 +14,8 @@ import asyncio
 import importlib
 import json
 import shutil
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +26,22 @@ _COMPACTABLE_HISTORY_TYPES = frozenset(
     {AgentStreamEventType.TEXT_DELTA, AgentStreamEventType.THINKING_DELTA}
 )
 _HISTORY_CHUNK_COUNT_KEY = "_history_chunk_count"
+
+
+class TurnLifecycleState(str, Enum):
+    """Durable lifecycle state for one stable Hub turn id."""
+
+    NOT_STARTED = "not_started"
+    UNFINISHED = "unfinished"
+    TERMINAL = "terminal"
+
+
+@dataclass(frozen=True)
+class TurnLifecycleSnapshot:
+    """One consistent scan of an expected turn and the latest orphan."""
+
+    state: TurnLifecycleState
+    latest_unfinished: Optional[AgentStreamEvent]
 
 
 def compact_history_events(events: List[AgentStreamEvent]) -> List[AgentStreamEvent]:
@@ -294,6 +312,74 @@ class AgentStreamStore:
         except OSError:
             return 0
         return n
+
+    async def inspect_turn_lifecycle(self, turn_id: str) -> TurnLifecycleSnapshot:
+        """Inspect one turn without conflating absence, progress, and completion.
+
+        External-channel shutdown uses this to decide whether a delivery claim
+        may be retried. Unlike ordinary history reads, this proof-oriented scan
+        fails closed on malformed or unreadable state: treating an unknown row
+        as "not started" could replay a turn that already ran tools.
+
+        The latest unfinished turn is returned from the same scan so callers do
+        not race two independent views of the append-only lifecycle.
+        """
+        if not turn_id:
+            raise ValueError("turn_id must not be empty")
+
+        async with self._read_lock:
+            state = TurnLifecycleState.NOT_STARTED
+            latest_unfinished: Optional[AgentStreamEvent] = None
+
+            def _read() -> None:
+                nonlocal state, latest_unfinished
+                if not self._path.exists():
+                    return
+                try:
+                    with self._path.open("r", encoding="utf-8") as f:
+                        for line in f:
+                            stripped = line.strip()
+                            if not stripped:
+                                continue
+                            try:
+                                obj = json.loads(stripped)
+                                event = AgentStreamEvent.model_validate(obj)
+                            except (json.JSONDecodeError, ValueError) as exc:
+                                raise RuntimeError(
+                                    f"cannot inspect corrupt agent stream {self._path}"
+                                ) from exc
+
+                            event_turn_id = event.turn_id
+                            if event.type == AgentStreamEventType.TURN_STARTED:
+                                latest_unfinished = event
+                                if (
+                                    event_turn_id == turn_id
+                                    and state != TurnLifecycleState.TERMINAL
+                                ):
+                                    state = TurnLifecycleState.UNFINISHED
+                                continue
+
+                            if event.type not in {
+                                AgentStreamEventType.TURN_COMPLETED,
+                                AgentStreamEventType.ERROR,
+                            }:
+                                continue
+                            if event_turn_id == turn_id and state == TurnLifecycleState.UNFINISHED:
+                                state = TurnLifecycleState.TERMINAL
+                            if latest_unfinished is not None:
+                                candidate_turn_id = latest_unfinished.turn_id
+                                same_turn = (
+                                    event_turn_id == candidate_turn_id
+                                    if candidate_turn_id is not None
+                                    else event.run_epoch == latest_unfinished.run_epoch
+                                )
+                                if same_turn:
+                                    latest_unfinished = None
+                except OSError as exc:
+                    raise RuntimeError(f"cannot inspect agent stream {self._path}") from exc
+
+            await asyncio.to_thread(_read)
+            return TurnLifecycleSnapshot(state=state, latest_unfinished=latest_unfinished)
 
     async def latest_unfinished_turn(self) -> Optional[AgentStreamEvent]:
         """Return the latest turn whose durable lifecycle has no terminal edge.

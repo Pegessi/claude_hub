@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     ttyd_base_port: int = 10000
     default_command: str = "claude"
 
+    # Keep the long-lived backend log bounded. RotatingFileHandler retains the
+    # active file plus ``backend_log_backup_count`` numbered backups.
+    backend_log_max_bytes: int = 10 * 1024 * 1024
+    backend_log_backup_count: int = 5
+
     # Serve the built frontend (frontend/dist) from FastAPI at the same origin
     # as the API. start.sh sets SERVE_FRONTEND=true in production mode so the
     # backend serves the SPA directly — no vite dev server, no HMR WebSocket
@@ -56,9 +61,14 @@ class Settings(BaseSettings):
     max_forks_per_tab: int = 12
     max_total_tabs: int = 200
 
-    @field_validator("max_forks_per_tab", "max_total_tabs")
+    @field_validator(
+        "max_forks_per_tab",
+        "max_total_tabs",
+        "backend_log_max_bytes",
+        "backend_log_backup_count",
+    )
     @classmethod
-    def _growth_limit_positive(cls, v: int) -> int:
+    def _positive_limit(cls, v: int) -> int:
         if v <= 0:
             raise ValueError(f"must be positive, got {v}")
         return v

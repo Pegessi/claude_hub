@@ -1,5 +1,6 @@
 export type FeishuBotSource = 'stored' | 'environment' | 'invalid_environment'
 export type FeishuPairingOwnerKind = 'oauth' | 'local'
+export type FeishuBotConnectionStatus = 'connected' | 'connecting' | 'failed' | 'stopped'
 
 export interface FeishuActiveBinding {
   pairing_id: string
@@ -36,9 +37,7 @@ export interface FeishuBotSummary {
   generation: number
   configured: boolean
   app_secret_configured: boolean
-  verification_token_configured: boolean
-  encrypt_key_configured: boolean
-  event_url: string | null
+  connection_status: FeishuBotConnectionStatus
   updated_at: string | null
   binding: FeishuActiveBinding | null
   my_claims: FeishuPairingClaim[]
@@ -57,20 +56,15 @@ export interface FeishuPairStartResponse {
   revision: number
   code: string
   expires_at: string
-  event_url: string
 }
 
 export interface FeishuBotCreateInput {
   name: string
   app_id: string
   app_secret: string
-  verification_token: string
-  encrypt_key: string
 }
 export interface FeishuBotSecretsInput {
   app_secret: string
-  verification_token: string
-  encrypt_key: string
   expected_revision: number
 }
 export interface FeishuBotPatchInput {
@@ -96,7 +90,7 @@ const ERROR_CODES = new Set([
   'bot_already_bound', 'chat_already_bound', 'pairing_not_claimed',
   'pairing_confirmation_mismatch', 'pairing_expired', 'pairing_not_owned',
   'bot_disabled', 'bot_not_found', 'pair_code_rate_limited',
-  'public_url_invalid', 'routing_cleanup_failed',
+  'routing_cleanup_failed',
   'pool_capacity_reached', 'chat_tab_workspace_changed',
   'chat_tab_not_found', 'bot_credentials_read_only',
 ])
@@ -132,7 +126,6 @@ function fixedMessage(status: number, code: string | null): string {
   }
   if (status === 503) {
     if (code === 'bot_operation_busy') return 'Another Bot operation is in progress. Wait and try again.'
-    if (code === 'public_url_invalid') return 'The instance public URL is invalid. A submitted change may already have taken effect.'
     return 'The Bot pool is unavailable or damaged. Check the Hub configuration.'
   }
   if (status === 409) {

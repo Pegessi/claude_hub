@@ -209,30 +209,7 @@
               Copy code
             </button>
           </div>
-          <div class="callback-box">
-            <div>
-              <span>Callback URL</span>
-              <code>{{ pendingCode.event_url }}</code>
-            </div>
-            <button
-              type="button"
-              class="ch-btn ch-btn--icon ch-btn--sm ch-btn--ghost"
-              aria-label="Copy callback URL"
-              @click="copy(pendingCode.event_url, 'Callback URL copied.')"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                aria-hidden="true"
-              ><rect
-                x="5.25"
-                y="5.25"
-                width="7.5"
-                height="7.5"
-                rx="1.5"
-              /><path d="M10.75 5.25v-2h-7.5v7.5h2" /></svg>
-            </button>
-          </div>
-          <small class="expiry">Expires {{ formatTime(pendingCode.expires_at) }} · Waiting for the Bot conversation</small>
+          <small class="expiry">Expires {{ formatTime(pendingCode.expires_at) }} · Waiting over the Bot's WebSocket connection</small>
         </template>
 
         <template v-else-if="viewState === 'claimed' && claim">
@@ -297,7 +274,7 @@
 </template>
 
 <script setup lang="ts">
-import { onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef } from 'vue'
+import { onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useFeishuBinding } from '@/composables/useFeishuBinding'
 import { writeClipboard } from '@/utils/clipboard'
 
@@ -348,14 +325,16 @@ onUnmounted(() => {
 })
 onActivated(() => { void resume() })
 onDeactivated(() => { close(); pause() })
+watch(() => props.tabId, close, { flush: 'sync' })
 </script>
 
 <style scoped>
 .feishu-binding {
-  position: absolute;
-  top: 12px;
-  right: 14px;
-  z-index: 24;
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: var(--pane-chrome-control-size, 24px);
+  flex: 0 0 auto;
 }
 
 .trigger {
@@ -363,16 +342,15 @@ onDeactivated(() => { close(); pause() })
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: var(--pane-chrome-control-size, 24px);
+  height: var(--pane-chrome-control-size, 24px);
   padding: 0;
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  background: color-mix(in srgb, var(--ch-color-surface) 88%, transparent);
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  background: var(--ch-color-surface-raised);
   color: var(--ch-color-text-muted);
-  box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
+  box-shadow: 0 1px 4px var(--ch-shadow-color-soft);
   cursor: pointer;
-  backdrop-filter: blur(8px);
   transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast), color var(--ch-motion-fast), box-shadow var(--ch-motion-fast);
 }
 
@@ -389,14 +367,14 @@ onDeactivated(() => { close(); pause() })
   box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
-.trigger-icon { width: 18px; height: 18px; }
+.trigger-icon { width: 14px; height: 14px; }
 .status-dot {
   position: absolute;
-  top: 5px;
-  right: 5px;
-  width: 6px;
-  height: 6px;
-  border: 1.5px solid var(--ch-color-surface);
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--ch-color-surface-raised);
   border-radius: 50%;
   background: var(--ch-color-text-subtle);
 }
@@ -425,7 +403,6 @@ onDeactivated(() => { close(); pause() })
 .panel-heading,
 .panel-actions,
 .code-box,
-.callback-box,
 .step-copy,
 .connected-card { display: flex; }
 .panel-header { align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
@@ -445,8 +422,7 @@ onDeactivated(() => { close(); pause() })
   font-size: 14px;
   font-weight: 700;
 }
-.close-button svg,
-.callback-box button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.close-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 
 .connection-status {
   display: inline-flex;
@@ -501,10 +477,6 @@ onDeactivated(() => { close(); pause() })
 }
 .code-box { align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; padding: 12px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-sunken); }
 .code-box output { color: var(--ch-color-text-strong); font: 700 19px/1 var(--ch-font-mono); letter-spacing: .08em; }
-.callback-box { align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding: 8px 9px 8px 11px; border-radius: var(--ch-radius-md); background: var(--ch-color-chip-bg-muted); }
-.callback-box > div { min-width: 0; }
-.callback-box span { display: block; margin-bottom: 2px; color: var(--ch-color-text-subtle); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
-.callback-box code { display: block; overflow: hidden; color: var(--ch-color-text-muted); font: 10px/1.35 var(--ch-font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .expiry { display: block; margin-bottom: 14px; color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); }
 .confirmation-input { text-transform: uppercase; font-family: var(--ch-font-mono); font-weight: 700; letter-spacing: .14em; }
 
@@ -520,8 +492,6 @@ onDeactivated(() => { close(); pause() })
 .panel-actions { justify-content: flex-end; gap: 8px; }
 
 @media (max-width: 640px) {
-  .feishu-binding { top: 8px; right: 8px; }
-  .trigger { width: 36px; height: 36px; }
   .panel { width: calc(100vw - 16px); max-height: calc(100dvh - 60px); padding: 14px; }
   .panel .ch-btn,
   .panel .ch-input,

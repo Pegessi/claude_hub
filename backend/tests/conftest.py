@@ -104,6 +104,21 @@ def capture_pane_sync(session_name: str, start: str = "-100000", end: str = "") 
     return result.stdout
 
 
+def tmux_pane_width(session_name: str) -> int:
+    """Return the tmux pane width, or 0 when the session is unavailable."""
+    import subprocess
+
+    result = subprocess.run(
+        _test_tmux_command("display-message", "-p", "-t", session_name, "#{pane_width}"),
+        capture_output=True,
+        text=True,
+    )
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return 0
+
+
 def send_keys_sync(session_name: str, *keys: str) -> None:
     """Send keys to a tmux session synchronously."""
     import subprocess
@@ -270,6 +285,27 @@ def backend_server() -> Generator[None, None, None]:
         if _OWNED_TEST_RUNTIME is not None:
             subprocess.run(tmux_command("kill-server"), capture_output=True)
             shutil.rmtree(_OWNED_TEST_RUNTIME, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _shorten_agent_prompt_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop tests from idling through the production agent-prompt budget.
+
+    Bootstrap waits up to ``AGENT_PROMPT_WAIT_SECONDS`` for a real agent TUI to
+    print a usable prompt. Fake terminals never print one, so the wait always
+    ran to its full 25s: one agent creation cost 25s, a test creating two cost
+    50s, and those tests alone dominated the suite's wall time.
+
+    The wait loop, its readiness predicate and its fail-closed handling of the
+    Codex update dialog are untouched — only the budget shrinks, so a stub that
+    does report readiness still short-circuits exactly as before. Tests that
+    assert on the handshake itself override this again locally.
+    """
+    messaging = __import__(
+        "claude_hub.services.workspace_manager._messaging",
+        fromlist=["AGENT_PROMPT_WAIT_SECONDS"],
+    )
+    monkeypatch.setattr(messaging, "AGENT_PROMPT_WAIT_SECONDS", 0.5, raising=True)
 
 
 @pytest.fixture(scope="session", autouse=True)

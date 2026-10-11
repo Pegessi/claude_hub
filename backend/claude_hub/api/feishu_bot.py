@@ -1,11 +1,10 @@
-"""Feishu Bot pool administration, pairing, and per-Bot event callbacks."""
+"""Feishu Bot pool administration, pairing, and long-connection routing."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -14,10 +13,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from claude_hub.api.agent_stream import CHAT_ERROR_REASON_HEADER, dispatch_tab_chat_and_wait
+from claude_hub.api.agent_stream import (
+    CHAT_ERROR_REASON_HEADER,
+    ExternalDispatchRetired,
+    dispatch_tab_chat_and_wait,
+)
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
@@ -27,18 +30,13 @@ from claude_hub.services.agent_stream.turn_source import (
     format_feishu_provider_text_v1,
 )
 from claude_hub.services.feishu_bot import (
-    MAX_FEISHU_EVENT_BYTES,
     FeishuBotClient,
     FeishuBotConfig,
-    FeishuEventPayloadError,
-    FeishuEventVerificationError,
     FeishuMessageDedupStore,
     FeishuMessageEvent,
     feishu_message_time_is_valid,
-    parse_feishu_callback,
 )
 from claude_hub.services.feishu_bot_pool import (
-    ENV_BOT_ID,
     MAX_BOTS,
     OWNER_KIND_LOCAL,
     OWNER_KIND_OAUTH,
@@ -67,10 +65,12 @@ from claude_hub.services.feishu_bot_pool import (
     PoolSnapshot,
     dedup_key,
     deprecated_env_present,
-    environment_present,
     turn_id_for,
 )
-from claude_hub.services.public_base_url import get_public_base_url
+from claude_hub.services.feishu_bot_websocket import (
+    FeishuBotWebSocketSupervisor,
+    message_event_from_sdk,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/feishu/bot", tags=["feishu-bot"])
@@ -84,10 +84,6 @@ _BODY_BYTES = 16 * 1024
 _GATE_TIMEOUT_SECONDS = 20.0
 _OUTBOUND_POST_TIMEOUT_SECONDS = 20.0
 _MAX_GATES = 256
-_PUBLIC_URL_ENV_NAMES = (
-    "CLAUDE_HUB_PUBLIC_BASE_URL",
-    "CLAUDE_HUB_PROVIDER_PUBLIC_URL",
-)
 
 
 @dataclass
@@ -223,9 +219,7 @@ class FeishuBotSummary(BaseModel):
     generation: int
     configured: bool
     app_secret_configured: bool
-    verification_token_configured: bool
-    encrypt_key_configured: bool
-    event_url: str | None
+    connection_status: str
     updated_at: datetime | None
     binding: FeishuPairingView | None
     my_claims: list[FeishuPairingView]
@@ -243,7 +237,6 @@ class FeishuPairStartResponse(BaseModel):
     bot_id: str
     code: str
     expires_at: datetime
-    event_url: str
     revision: int
 
 
@@ -283,17 +276,6 @@ def _snapshot() -> PoolSnapshot:
         return _pool.snapshot()
     except FeishuBotPoolError as exc:
         raise _pool_http_error(exc) from exc
-
-
-def _event_url(entry: BotEntry) -> str | None:
-    if not entry.configured:
-        return None
-    if not any(os.environ.get(name, "").strip() for name in _PUBLIC_URL_ENV_NAMES):
-        return None
-    try:
-        return f"{get_public_base_url()}/api/feishu/bot/events/{entry.bot_id}"
-    except ValueError as exc:
-        raise HTTPException(status_code=503, detail="public_url_invalid") from exc
 
 
 def _pairing_view(
@@ -354,9 +336,7 @@ def _summary(entry: BotEntry, actor: OwnerIdentity) -> FeishuBotSummary:
         generation=entry.generation,
         configured=entry.configured,
         app_secret_configured=bool(config and config.app_secret),
-        verification_token_configured=bool(config and config.verification_token),
-        encrypt_key_configured=bool(config and config.encrypt_key),
-        event_url=_event_url(entry),
+        connection_status=_ws_supervisor.status(entry.bot_id),
         updated_at=_utc(entry.updated_at),
         binding=binding,
         my_claims=claims,
@@ -458,6 +438,15 @@ async def _in_pool(action: Callable[[], Any]) -> Any:
         raise _pool_http_error(exc) from exc
 
 
+async def _reconcile_ws() -> None:
+    """Apply pool mutations immediately; the monitor remains the retry path."""
+
+    try:
+        await _ws_supervisor.reconcile()
+    except Exception:
+        logger.exception("Feishu WebSocket reconciliation failed after a pool mutation")
+
+
 # ------------------------------------------------------------ pool routes
 
 
@@ -471,12 +460,10 @@ async def create_feishu_bot(
     request: Request, user: User = Depends(require_hub_user)
 ) -> FeishuBotPoolResponse:
     value = await _read_json(request)
-    _exact_keys(value, {"name", "app_id", "app_secret", "verification_token", "encrypt_key"})
+    _exact_keys(value, {"name", "app_id", "app_secret"})
     candidate = FeishuBotConfig(
         app_id=_secret(value, "app_id"),
         app_secret=_secret(value, "app_secret"),
-        verification_token=_secret(value, "verification_token"),
-        encrypt_key=_secret(value, "encrypt_key"),
     )
     name = _name(value, "name")
     snapshot = _snapshot()
@@ -491,6 +478,7 @@ async def create_feishu_bot(
         raise HTTPException(status_code=502, detail="feishu_credentials_rejected") from exc
     async with _create_gate:
         bot_id = await _in_pool(lambda: _pool.create_bot(name=name, config=candidate))
+    await _reconcile_ws()
     return _pool_response(user, focus_bot_id=bot_id)
 
 
@@ -499,7 +487,7 @@ async def rotate_feishu_bot_secrets(
     bot_id: str, request: Request, user: User = Depends(require_hub_user)
 ) -> FeishuBotPoolResponse:
     value = await _read_json(request)
-    _exact_keys(value, {"app_secret", "verification_token", "encrypt_key", "expected_revision"})
+    _exact_keys(value, {"app_secret", "expected_revision"})
     expected_revision = _revision(value)
     snapshot = _snapshot()
     entry = snapshot.get(bot_id)
@@ -510,8 +498,6 @@ async def rotate_feishu_bot_secrets(
     candidate = FeishuBotConfig(
         app_id=entry.app_id,
         app_secret=_secret(value, "app_secret"),
-        verification_token=_secret(value, "verification_token"),
-        encrypt_key=_secret(value, "encrypt_key"),
     )
     try:
         await FeishuBotClient(candidate).validate_credentials()
@@ -522,11 +508,10 @@ async def rotate_feishu_bot_secrets(
             lambda: _pool.rotate_secrets(
                 bot_id,
                 app_secret=candidate.app_secret,
-                verification_token=candidate.verification_token,
-                encrypt_key=candidate.encrypt_key or "",
                 expected_revision=expected_revision,
             )
         )
+    await _reconcile_ws()
     return _pool_response(user, focus_bot_id=bot_id)
 
 
@@ -553,6 +538,7 @@ async def update_feishu_bot(
                 bot_id, expected_revision=expected_revision, name=name, enabled=enabled
             )
         )
+    await _reconcile_ws()
     return _pool_response(user, focus_bot_id=bot_id)
 
 
@@ -567,6 +553,7 @@ async def delete_feishu_bot(
         raise HTTPException(status_code=404, detail="bot_not_found")
     async with _gate(bot_id):
         await _in_pool(lambda: _pool.delete_bot(bot_id, expected_revision=expected_revision))
+    await _reconcile_ws()
     return _pool_response(user, focus_bot_id=None)
 
 
@@ -598,9 +585,6 @@ async def start_feishu_pairing(
         if not _owner_is_authorized(owner):
             raise HTTPException(status_code=403, detail="hub_identity_revoked")
         workspace_id = _validate_bind_target(tab_id, requested_workspace)
-        event_url = _event_url(entry)
-        if event_url is None:
-            raise HTTPException(status_code=503, detail="public_url_invalid")
         code, expires_at, revision = await _in_pool(
             lambda: _pool.issue_code(
                 bot_id,
@@ -612,9 +596,7 @@ async def start_feishu_pairing(
         )
     issued = _utc(expires_at)
     assert issued is not None
-    return FeishuPairStartResponse(
-        bot_id=bot_id, code=code, expires_at=issued, event_url=event_url, revision=revision
-    )
+    return FeishuPairStartResponse(bot_id=bot_id, code=code, expires_at=issued, revision=revision)
 
 
 @router.post("/bots/{bot_id}/pair/activate", response_model=FeishuBotPoolResponse)
@@ -932,64 +914,43 @@ async def _handle_message_event(
         _dedup.finish(dedup_key(bot_id, event.message_id), status_value)
 
 
-async def _read_bounded_event_body(request: Request) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > MAX_FEISHU_EVENT_BYTES:
-            raise HTTPException(status_code=413, detail="event_too_large")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-async def _intake(
-    bot_id: str, request: Request, background_tasks: BackgroundTasks
-) -> dict[str, Any]:
-    raw_body = await _read_bounded_event_body(request)
+async def _handle_sdk_event(bot_id: str, data: Any) -> None:
     try:
         effective = _pool.effective(bot_id)
-    except FeishuBotRevoked:
-        # A deleted or disabled Bot answers 2xx so Feishu stops retrying, and
-        # replies to nothing. A tombstone is what makes this distinguishable
-        # from a mistyped callback URL.
-        return {"ok": True, "ignored": True}
-    except FeishuBotNotFound as exc:
-        raise HTTPException(status_code=404, detail="bot_not_found") from exc
-    except FeishuBotPoolError as exc:
-        raise _pool_http_error(exc) from exc
+        event = message_event_from_sdk(data, expected_app_id=effective.app_id)
+    except FeishuBotPoolError:
+        return
+    except ValueError as exc:
+        logger.info("Ignored unsupported Feishu WebSocket event for Bot %s: %s", bot_id, exc)
+        return
+    if not _dedup.claim(dedup_key(bot_id, event.message_id)):
+        return
+    key = dedup_key(bot_id, event.message_id)
     try:
-        kind, value = parse_feishu_callback(raw_body, request.headers, effective.config, now=_now())
-    except FeishuEventVerificationError as exc:
-        raise HTTPException(status_code=401, detail="event_verification_failed") from exc
-    except FeishuEventPayloadError as exc:
-        raise HTTPException(status_code=400, detail="event_payload_rejected") from exc
-    if kind == "challenge":
-        return {"challenge": value}
-    if not isinstance(value, FeishuMessageEvent):
-        raise HTTPException(status_code=400, detail="event_payload_rejected")
-    if not _dedup.claim(dedup_key(bot_id, value.message_id)):
-        return {"ok": True, "duplicate": True}
-    background_tasks.add_task(_handle_message_event, bot_id, value, effective)
-    return {"ok": True}
+        await _handle_message_event(bot_id, event, effective)
+    except ExternalDispatchRetired:
+        # Final shutdown cancels only after its bounded drain. The Chat bridge
+        # proved the matching turn was stopped or never started, so releasing
+        # the claim lets a same-ID replay recover without duplicating a
+        # completed or superseded turn.
+        _dedup.release(key)
+        raise
 
 
-@router.post("/events/{bot_id}")
-async def receive_feishu_event(
-    bot_id: str, request: Request, background_tasks: BackgroundTasks
-) -> dict[str, Any]:
-    return await _intake(bot_id, request, background_tasks)
+_ws_supervisor = FeishuBotWebSocketSupervisor(_pool, _handle_sdk_event)
 
 
-@router.post("/events")
-async def receive_legacy_feishu_event(
-    request: Request, background_tasks: BackgroundTasks
-) -> dict[str, Any]:
-    """Kept only for the environment Bot's already-configured callback URL."""
-
-    if not environment_present():
-        raise HTTPException(status_code=404, detail="bot_not_found")
-    return await _intake(ENV_BOT_ID, request, background_tasks)
+async def start_feishu_websockets() -> None:
+    await _ws_supervisor.start()
 
 
-__all__ = ["require_hub_user", "router"]
+async def stop_feishu_websockets() -> None:
+    await _ws_supervisor.stop()
+
+
+__all__ = [
+    "require_hub_user",
+    "router",
+    "start_feishu_websockets",
+    "stop_feishu_websockets",
+]

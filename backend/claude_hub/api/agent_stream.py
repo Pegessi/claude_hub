@@ -1368,8 +1368,13 @@ async def _send_to_native(
 
 
 CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
+_EXTERNAL_CANCEL_TIMEOUT_SECONDS = 10.0
 
 _ChatAdmissionGuard = Callable[[], AbstractAsyncContextManager[None]]
+
+
+class ExternalDispatchRetired(asyncio.CancelledError):
+    """Cancellation after the matching turn is stopped or never started."""
 
 
 def _map_send_exception(exc: Exception) -> HTTPException:
@@ -1496,6 +1501,11 @@ async def dispatch_tab_chat_and_wait(
     session = _terminal_tab_session_or_404(tab_id)
     manager = _get_tab_tailer_manager()
     queue: Optional[asyncio.Queue[AgentStreamEvent]] = None
+    # The client-provided id is the authoritative Hub turn id. Set it before
+    # dispatch so cancellation racing the native send can still target only
+    # this turn and distinguish a proven not-yet-started delivery from a
+    # completed or superseded one.
+    expected_turn_id: Optional[str] = client_turn_id
     last_error = ""
     try:
         try:
@@ -1554,6 +1564,31 @@ async def dispatch_tab_chat_and_wait(
             if not isinstance(assistant_text, str) or not assistant_text.strip():
                 raise RuntimeError(last_error or "Chat turn completed without assistant text")
             return assistant_text.strip()
+    except asyncio.CancelledError:
+        if expected_turn_id is not None:
+            # Callers that own a background external-channel task may cancel it
+            # during bounded process shutdown. Retire the matching native turn
+            # before their dedup claim is released; never leave it executing
+            # against tailers that lifespan teardown is about to stop.
+            try:
+                retirement = await asyncio.wait_for(
+                    manager.retire_external_turn(session, expected_turn_id=expected_turn_id),
+                    timeout=_EXTERNAL_CANCEL_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to cancel Chat turn %s after external dispatch cancellation",
+                    expected_turn_id,
+                )
+            else:
+                if retirement.safe_to_retry:
+                    raise ExternalDispatchRetired(expected_turn_id) from None
+                logger.warning(
+                    "Preserving external delivery claim for Chat turn %s after cancellation: %s",
+                    expected_turn_id,
+                    retirement.value,
+                )
+        raise
     finally:
         if queue is not None:
             manager.unsubscribe(session.id, queue)
@@ -2046,6 +2081,7 @@ async def get_tab_quoted_image(
 
 __all__ = [
     "CHAT_ERROR_REASON_HEADER",
+    "ExternalDispatchRetired",
     "dispatch_tab_chat_and_wait",
     "router",
     "_reset_tailer_manager",

@@ -6,8 +6,6 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
-    <FeishuBindingPanel :tab-id="props.tabId" />
-
     <!-- Chat sessions fail closed on this surface. A stream failure never
          mounts a hidden raw terminal; users can retry or create a Terminal. -->
     <div
@@ -1380,7 +1378,6 @@ import {
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
@@ -1432,6 +1429,7 @@ const {
   capabilities,
   start,
   retry: retryStream,
+  refreshCapabilities,
   setMode,
   stop,
   nudge,
@@ -1638,10 +1636,10 @@ const REASONING_EFFORT_ENV: Record<string, string> = {
 }
 const LEGACY_TRAEX_REASONING_EFFORT_ENV = 'TRAEX_REASONING_EFFORT'
 
-// Models are discovered at runtime by the backend (cursor via
-// ``agent --list-models``; claude/codex via a curated static list) and
-// surfaced on the session capabilities. The user can still type a custom
-// model id into the picker's text input.
+// Models are surfaced on the session capabilities. Cursor is discovered via
+// ``agent --list-models``; Claude reflects the selected tab's Anthropic model
+// env (with a curated fallback); Codex uses its provider/static catalog. The
+// user can still type a custom model id into the picker's text input.
 const currentTab = computed(() =>
   terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
 )
@@ -1798,6 +1796,7 @@ async function selectModelAndEffort(model: StreamModelOption, effort: string) {
     // Errors surface via the store's notifyError toast; swallow so the
     // rejection is not unhandled.
     await terminalStore.switchEnv(tab.id, { env })
+    await refreshCapabilities()
   } catch {
     // Swallow: error feedback comes from terminalStore.switchEnv's toast.
   } finally {

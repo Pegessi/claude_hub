@@ -85,4 +85,5 @@ test('model picker presents model and thinking effort as a unified two-level men
     structuredPane,
     /:disabled="modeInteractionLocked \|\| isUpdatingModel \|\| isUpdatingReasoningEffort"/,
   )
+  assert.match(structuredPane, /await terminalStore\.switchEnv[\s\S]*?await refreshCapabilities\(\)/)
 })

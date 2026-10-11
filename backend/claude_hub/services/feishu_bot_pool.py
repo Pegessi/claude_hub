@@ -26,7 +26,8 @@ from typing import Any, Mapping
 from claude_hub.services.feishu_bot import FeishuBotConfig
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
-_STATE_VERSION = 2
+_STATE_VERSION = 3
+_PREVIOUS_STATE_VERSION = 2
 _LEGACY_STATE_VERSION = 1
 
 ENV_BOT_ID = "env"
@@ -38,11 +39,13 @@ OFFICIAL_FEISHU_API = "https://open.feishu.cn"
 BOT_ENV_KEYS = (
     "CLAUDE_HUB_FEISHU_BOT_APP_ID",
     "CLAUDE_HUB_FEISHU_BOT_APP_SECRET",
+)
+_REQUIRED_ENV_KEYS = BOT_ENV_KEYS
+DEPRECATED_ENV_KEYS = (
     "CLAUDE_HUB_FEISHU_BOT_VERIFICATION_TOKEN",
     "CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY",
+    "CLAUDE_HUB_FEISHU_BOT_ADMIN_OPEN_IDS",
 )
-_REQUIRED_ENV_KEYS = BOT_ENV_KEYS[:3]
-DEPRECATED_ENV_KEYS = ("CLAUDE_HUB_FEISHU_BOT_ADMIN_OPEN_IDS",)
 
 OWNER_KIND_OAUTH = "oauth"
 OWNER_KIND_LOCAL = "local"
@@ -84,7 +87,7 @@ class FeishuBotNotFound(FeishuBotPoolError):
 
 
 class FeishuBotRevoked(FeishuBotPoolError):
-    """Raised for a deleted or disabled Bot whose callbacks must stay silent."""
+    """Raised for a deleted or disabled Bot whose events must stay silent."""
 
 
 class FeishuBotUnavailable(FeishuBotPoolError):
@@ -348,7 +351,7 @@ def turn_id_for(bot_id: str, message_id: str) -> str:
 
 
 def environment_config(environ: Mapping[str, str] | None = None) -> FeishuBotConfig | None:
-    """Build the legacy single-Bot environment configuration, if complete."""
+    """Build the environment Bot's long-connection credentials, if complete."""
 
     env = os.environ if environ is None else environ
     present = {key: env.get(key, "").strip() for key in BOT_ENV_KEYS}
@@ -360,8 +363,6 @@ def environment_config(environ: Mapping[str, str] | None = None) -> FeishuBotCon
     return FeishuBotConfig(
         app_id=present[BOT_ENV_KEYS[0]],
         app_secret=present[BOT_ENV_KEYS[1]],
-        verification_token=present[BOT_ENV_KEYS[2]],
-        encrypt_key=present[BOT_ENV_KEYS[3]] or None,
         api_base_url=base_url,
     )
 
@@ -419,13 +420,17 @@ class FeishuBotPoolStore:
             # is never consulted again, so a rolled-back write cannot resurrect a
             # revoked authorization.
             return self._migrate_legacy()
-        if _as_int(value.get("version"), "version") != _STATE_VERSION:
+        version = _as_int(value.get("version"), "version")
+        if version not in {_PREVIOUS_STATE_VERSION, _STATE_VERSION}:
             raise FeishuBotPoolStateError("Unsupported Feishu Bot pool state version")
         bots = _as_mapping(value.get("bots"), "bots")
         rate_limits = _as_mapping(value.get("rate_limits"), "rate_limits")
         for bot_id, raw in bots.items():
             _as_text(bot_id, "bots key", limit=_MAX_ID_CHARS)
             _as_mapping(raw, f"bots[{bot_id}]")
+            credentials = raw.get("credentials") if isinstance(raw, dict) else None
+            if isinstance(credentials, dict):
+                raw["credentials"] = {"app_secret": credentials.get("app_secret")}
         _validate_pool_numbers(bots, rate_limits)
         return {
             "version": _STATE_VERSION,
@@ -466,8 +471,7 @@ class FeishuBotPoolStore:
         state = self._empty()
         if raw_config is None:
             # The old store wrote config=None for an explicit disable. Keep that
-            # as a tombstone so callbacks for the retired Bot stay silent
-            # instead of looking like a mistyped URL.
+            # as a tombstone so events for the retired Bot stay silent.
             state["bots"][LEGACY_BOT_ID] = {
                 "bot_id": LEGACY_BOT_ID,
                 "revision": revision,
@@ -477,7 +481,7 @@ class FeishuBotPoolStore:
             return state
         if not isinstance(raw_config, dict):
             raise FeishuBotPoolStateError("Invalid legacy Feishu Bot configuration")
-        keys = ("app_id", "app_secret", "verification_token", "encrypt_key")
+        keys = ("app_id", "app_secret")
         if not all(isinstance(raw_config.get(key), str) and raw_config[key] for key in keys):
             raise FeishuBotPoolStateError("Incomplete legacy Feishu Bot configuration")
         state["bots"][LEGACY_BOT_ID] = {
@@ -486,8 +490,6 @@ class FeishuBotPoolStore:
             "app_id": raw_config["app_id"],
             "credentials": {
                 "app_secret": raw_config["app_secret"],
-                "verification_token": raw_config["verification_token"],
-                "encrypt_key": raw_config["encrypt_key"],
             },
             "revision": revision,
             "generation": generation,
@@ -599,10 +601,6 @@ class FeishuBotPoolStore:
         return FeishuBotConfig(
             app_id=_as_text(raw.get("app_id"), "app_id", limit=_MAX_ID_CHARS),
             app_secret=_as_text(credentials.get("app_secret"), "app_secret"),
-            verification_token=_as_text(
-                credentials.get("verification_token"), "verification_token"
-            ),
-            encrypt_key=_as_text(credentials.get("encrypt_key"), "encrypt_key"),
             api_base_url=OFFICIAL_FEISHU_API,
         )
 
@@ -855,11 +853,7 @@ class FeishuBotPoolStore:
             while bot_id in state["bots"] or bot_id in _RESERVED_BOT_IDS:
                 bot_id = secrets.token_hex(8)
             raw = self._new_entry(bot_id, name, config.app_id, now)
-            raw["credentials"] = {
-                "app_secret": config.app_secret,
-                "verification_token": config.verification_token,
-                "encrypt_key": config.encrypt_key,
-            }
+            raw["credentials"] = {"app_secret": config.app_secret}
             state["bots"][bot_id] = raw
             self._save(state)
             return bot_id
@@ -869,12 +863,10 @@ class FeishuBotPoolStore:
         bot_id: str,
         *,
         app_secret: str,
-        verification_token: str,
-        encrypt_key: str,
         expected_revision: int,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        """Replace all three secrets under the same app_id.
+        """Replace the App Secret under the same app_id.
 
         The active binding is preserved: it identifies a conversation under an
         app identity that has not changed. Bumping ``revision`` is enough to
@@ -890,11 +882,7 @@ class FeishuBotPoolStore:
             if bot_id == ENV_BOT_ID:
                 raise FeishuBotReadOnly(bot_id)
             self._check_revision(raw, expected_revision)
-            raw["credentials"] = {
-                "app_secret": app_secret,
-                "verification_token": verification_token,
-                "encrypt_key": encrypt_key,
-            }
+            raw["credentials"] = {"app_secret": app_secret}
             self._touch(raw, now)
             self._save(state)
 
@@ -929,8 +917,8 @@ class FeishuBotPoolStore:
     ) -> None:
         """Replace the entry with a secret-free tombstone.
 
-        The tombstone is what lets a callback for a revoked Bot be dropped
-        silently instead of looking like a misconfigured URL.
+        The tombstone lets any event already accepted for a revoked Bot be
+        dropped silently.
         """
 
         now = self._now()

@@ -311,7 +311,10 @@ async def main(browser_run: BrowserRun) -> None:
                     trigger_box = await trigger.bounding_box()
                     assert pane_box is not None and name_box is not None and trigger_box is not None
                     assert name_box["x"] >= pane_box["x"] + 7
-                    assert name_box["x"] + name_box["width"] <= trigger_box["x"] - 6
+                    # The name pill and the Feishu control share one flex
+                    # row, so the only requirement is that they do not
+                    # overlap; the row's own gap sets the exact spacing.
+                    assert name_box["x"] + name_box["width"] <= trigger_box["x"]
                     assert (
                         trigger_box["x"] + trigger_box["width"]
                         <= pane_box["x"] + pane_box["width"] + 1

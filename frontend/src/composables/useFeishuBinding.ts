@@ -97,7 +97,7 @@ function schedulePoll() {
   }
   async function reconcileAfterFailure(cause: unknown, signal?: AbortSignal) {
   const e = cause instanceof FeishuBotRequestError ? cause : null
-  if (!e || e.status === 409 || e.status === 404 || e.status === 500 || e.code === 'public_url_invalid') {
+  if (!e || e.status === 409 || e.status === 404 || e.status === 500) {
     await store.refresh(signal)
   }
 }

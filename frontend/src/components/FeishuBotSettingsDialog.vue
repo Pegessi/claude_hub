@@ -35,7 +35,7 @@
     </header>
 
     <div
-      v-if="store.loading || busy || error || store.error || success || clipboardError || clipboardStatus || store.deprecatedEnv.length"
+      v-if="store.loading || busy || error || store.error || success || store.deprecatedEnv.length"
       class="bot-pool__notifications"
     >
       <p
@@ -71,24 +71,10 @@
         {{ success }}
       </p>
       <p
-        v-if="clipboardError"
-        class="notification notification--error"
-        role="alert"
-      >
-        {{ clipboardError }}
-      </p>
-      <p
-        v-if="clipboardStatus"
-        class="notification notification--success"
-        role="status"
-      >
-        {{ clipboardStatus }}
-      </p>
-      <p
         v-if="store.deprecatedEnv.length"
         class="notification notification--warning"
       >
-        Deprecated environment entries: {{ store.deprecatedEnv.join(', ') }}. Migrate them to the Bot pool.
+        Deprecated environment entries: {{ store.deprecatedEnv.join(', ') }}. They are ignored in WebSocket mode and can be removed.
       </p>
     </div>
 
@@ -124,7 +110,7 @@
                 <strong>{{ bot.name }}</strong>
                 <span
                   class="bot-row__status"
-                  :class="{ 'is-disabled': !bot.enabled || !bot.configured }"
+                  :class="connectionClass(bot)"
                   aria-hidden="true"
                 />
               </span>
@@ -170,19 +156,19 @@
           >Connected</span>
         </div>
 
-        <div class="callback-card">
+        <div
+          class="connection-card"
+          :data-state="selected.connection_status"
+        >
+          <span
+            class="connection-card__dot"
+            aria-hidden="true"
+          />
           <div>
-            <span class="section-eyebrow">Event callback</span>
-            <code>{{ selected.event_url || 'Public URL required' }}</code>
+            <span class="section-eyebrow">WebSocket long connection</span>
+            <strong>{{ connectionText(selected) }}</strong>
+            <small>Events arrive directly from Feishu; no public callback URL is required.</small>
           </div>
-          <button
-            v-if="selected.event_url"
-            type="button"
-            class="ch-btn ch-btn--sm"
-            @click="copyUrl"
-          >
-            Copy URL
-          </button>
         </div>
         <p
           v-if="selected.binding"
@@ -218,7 +204,7 @@
           <label class="toggle-row">
             <span>
               <strong>Enabled</strong>
-              <small>Accept callbacks and allow new Chat pairings.</small>
+              <small>Keep the long connection active and allow new Chat pairings.</small>
             </span>
             <input
               v-model="editEnabled"
@@ -258,37 +244,13 @@
               aria-label="Credential configuration"
             >
               <span :class="{ configured: selected.app_secret_configured }">Secret {{ selected.app_secret_configured ? 'set' : 'missing' }}</span>
-              <span :class="{ configured: selected.verification_token_configured }">Token {{ selected.verification_token_configured ? 'set' : 'missing' }}</span>
-              <span :class="{ configured: selected.encrypt_key_configured }">Key {{ selected.encrypt_key_configured ? 'set' : 'missing' }}</span>
             </div>
           </div>
-          <div class="secret-grid">
+          <div class="secret-grid secret-grid--single">
             <label class="field">
               <span class="field-label">App Secret</span>
               <input
                 v-model="appSecret"
-                class="ch-input"
-                :disabled="busy"
-                type="password"
-                required
-                autocomplete="new-password"
-              >
-            </label>
-            <label class="field">
-              <span class="field-label">Verification Token</span>
-              <input
-                v-model="verificationToken"
-                class="ch-input"
-                :disabled="busy"
-                type="password"
-                required
-                autocomplete="new-password"
-              >
-            </label>
-            <label class="field field--wide">
-              <span class="field-label">Encrypt Key</span>
-              <input
-                v-model="encryptKey"
                 class="ch-input"
                 :disabled="busy"
                 type="password"
@@ -375,10 +337,10 @@
         <div class="create-heading">
           <span class="section-eyebrow">{{ store.bots.length ? 'New Bot' : 'Get started' }}</span>
           <h3>Add Bot</h3>
-          <p>Credentials are validated with Feishu, then stored write-only by this Hub instance.</p>
+          <p>App ID and App Secret open a WebSocket long connection to Feishu. No callback token or encryption key is needed.</p>
         </div>
         <div class="create-grid">
-          <label class="field">
+          <label class="field field--wide">
             <span class="field-label">Name</span>
             <input
               v-model="create.name"
@@ -409,31 +371,6 @@
               required
               autocomplete="new-password"
             >
-          </label>
-          <label class="field">
-            <span class="field-label">Verification Token</span>
-            <input
-              v-model="create.verification_token"
-              class="ch-input"
-              :disabled="busy"
-              type="password"
-              required
-              autocomplete="new-password"
-            >
-          </label>
-          <label class="field field--wide">
-            <span class="field-label">Encrypt Key</span>
-            <input
-              v-model="create.encrypt_key"
-              class="ch-input"
-              :disabled="busy"
-              type="password"
-              required
-              autocomplete="new-password"
-              aria-label="Encrypt Key"
-              aria-describedby="create-encrypt-key-hint"
-            >
-            <small id="create-encrypt-key-hint">Recommended for signed, encrypted event callbacks.</small>
           </label>
         </div>
         <div class="create-actions">
@@ -494,7 +431,6 @@ import {
   replaceFeishuBotSecrets, updateFeishuBot,
   type FeishuBotPoolResponse, type FeishuBotSummary,
 } from '@/utils/feishuBotConfig'
-import { writeClipboard } from '@/utils/clipboard'
 
 const emit = defineEmits<{ close: [] }>()
 const store = useFeishuBotPoolStore()
@@ -503,20 +439,11 @@ const selectedId = ref<string | null>(null)
 const selectedRevision = ref<number | null>(null)
 const busy = ref(false), error = ref<string | null>(null), success = ref<string | null>(null)
 const confirmDelete = ref(false), editName = ref(''), editEnabled = ref(true)
-const appSecret = ref(''), verificationToken = ref(''), encryptKey = ref('')
-const create = reactive({ name: '', app_id: '', app_secret: '', verification_token: '', encrypt_key: '' })
+const appSecret = ref('')
+const create = reactive({ name: '', app_id: '', app_secret: '' })
 const selected = computed(() => store.botById(selectedId.value))
-const secretComplete = computed(() => !!(appSecret.value && verificationToken.value && encryptKey.value))
+const secretComplete = computed(() => !!appSecret.value)
 const createComplete = computed(() => Object.values(create).every(Boolean))
-const clipboardError = ref<string | null>(null)
-const clipboardStatus = ref<string | null>(null)
-let clipboardEpoch = 0
-
-function clearClipboardState() {
-  clipboardEpoch += 1
-  clipboardError.value = null
-  clipboardStatus.value = null
-}
 let viewEpoch = 0
 let closed = false
 
@@ -524,12 +451,25 @@ function occupancy(bot: FeishuBotSummary) {
   if (bot.binding) return `In use by Chat ${bot.binding.tab_id}`
   if (!bot.enabled) return 'Disabled'
   if (!bot.configured) return 'Needs configuration'
-  return 'Available'
+  if (bot.connection_status === 'failed') return 'Connection failed'
+  if (bot.connection_status === 'connecting') return 'Connecting'
+  return bot.connection_status === 'connected' ? 'Available' : 'Offline'
 }
-function clearSecrets() { appSecret.value = ''; verificationToken.value = ''; encryptKey.value = '' }
-function clearCreate() { Object.assign(create, { name: '', app_id: '', app_secret: '', verification_token: '', encrypt_key: '' }) }
+function connectionClass(bot: FeishuBotSummary) {
+  return {
+    'is-disabled': !bot.enabled || !bot.configured || bot.connection_status === 'stopped',
+    'is-connecting': bot.connection_status === 'connecting',
+    'is-failed': bot.connection_status === 'failed',
+  }
+}
+function connectionText(bot: FeishuBotSummary) {
+  if (!bot.enabled) return 'Stopped while this Bot is disabled'
+  if (!bot.configured) return 'Credentials are incomplete'
+  return ({ connected: 'Connected to Feishu', connecting: 'Connecting to Feishu', failed: 'Connection failed; Hub will retry', stopped: 'Connection stopped' } as const)[bot.connection_status]
+}
+function clearSecrets() { appSecret.value = '' }
+function clearCreate() { Object.assign(create, { name: '', app_id: '', app_secret: '' }) }
 function fillSelection(bot: FeishuBotSummary | null, clear = true) {
-  clearClipboardState()
   selectedId.value = bot?.bot_id ?? null
   selectedRevision.value = bot?.revision ?? null
   editName.value = bot?.name ?? ''
@@ -561,8 +501,7 @@ async function refresh() {
 function shouldReconcile(cause: unknown): boolean {
   if (!(cause instanceof FeishuBotRequestError)) return true
   if (cause.code === 'bot_operation_busy') return false
-  return cause.status === 500 || cause.code === 'public_url_invalid'
-    || cause.code === 'bot_revision_conflict' || cause.code === 'bot_already_bound'
+  return cause.status === 500 || cause.code === 'bot_revision_conflict' || cause.code === 'bot_already_bound'
     || cause.code === 'chat_already_bound'
 }
 async function mutate(
@@ -611,7 +550,7 @@ async function saveMetadata() {
 async function saveSecrets() {
   const botId = selectedId.value, revision = selectedRevision.value
   if (!botId || revision === null) return false
-  const input = { app_secret: appSecret.value, verification_token: verificationToken.value, encrypt_key: encryptKey.value, expected_revision: revision }
+  const input = { app_secret: appSecret.value, expected_revision: revision }
   return mutate(() => replaceFeishuBotSecrets(botId, input), 'Credentials replaced; the active pairing was preserved.')
 }
 async function removeBot() {
@@ -619,26 +558,7 @@ async function removeBot() {
   if (!botId || revision === null) return false
   return mutate(() => deleteFeishuBot(botId, revision), 'Bot deleted.')
 }
-async function copyUrl() {
-  const url = selected.value?.event_url
-  if (!url || closed) return
-  const current = ++clipboardEpoch
-  clipboardError.value = null
-  clipboardStatus.value = null
-  try {
-    await writeClipboard(url)
-    if (!closed && current === clipboardEpoch) {
-      clipboardStatus.value = 'Callback URL copied.'
-    }
-  } catch {
-    if (!closed && current === clipboardEpoch) {
-      clipboardError.value = 'Could not copy the callback URL. Select and copy it manually.'
-    }
-  }
-}
-
 function clearLocalState() {
-  clearClipboardState()
   closed = true; viewEpoch += 1; busy.value = false
   clearSecrets(); clearCreate()
 }
@@ -795,6 +715,8 @@ onUnmounted(() => { clearLocalState(); dialog.value?.close() })
 .bot-row__meta { display: block; margin-top: 2px; overflow: hidden; color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
 .bot-row__status { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--ch-color-success); }
 .bot-row__status.is-disabled { background: var(--ch-color-text-subtle); }
+.bot-row__status.is-connecting { background: var(--ch-color-warning); }
+.bot-row__status.is-failed { background: var(--ch-color-danger); }
 .bot-row__chevron { width: 14px; height: 14px; fill: none; stroke: var(--ch-color-text-subtle); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .bot-sidebar__empty { padding: 28px 8px; text-align: center; color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-sm); }
 .bot-sidebar__hint { margin-top: auto; padding: 12px 14px 14px; border-top: 1px solid var(--ch-color-border-muted); color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); line-height: 1.45; }
@@ -813,12 +735,17 @@ onUnmounted(() => { clearLocalState(); dialog.value?.close() })
 .source-chip { background: var(--ch-color-chip-bg-muted); color: var(--ch-color-text-subtle); text-transform: capitalize; }
 .occupancy-chip { background: var(--ch-color-accent-soft); color: var(--ch-color-accent); }
 
-.callback-card,
+.connection-card,
 .binding-card { border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-sunken); }
-.callback-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; }
-.callback-card > div { min-width: 0; }
+.connection-card { display: flex; align-items: center; gap: 10px; padding: 11px 12px; }
+.connection-card > div { display: grid; min-width: 0; gap: 2px; }
+.connection-card strong { color: var(--ch-color-text); font-size: var(--ch-font-size-sm); font-weight: 600; }
+.connection-card small { color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); line-height: 1.4; }
+.connection-card__dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--ch-color-text-subtle); }
+.connection-card[data-state='connected'] .connection-card__dot { background: var(--ch-color-success); }
+.connection-card[data-state='connecting'] .connection-card__dot { background: var(--ch-color-warning); }
+.connection-card[data-state='failed'] .connection-card__dot { background: var(--ch-color-danger); }
 .section-eyebrow { display: block; margin-bottom: 4px; color: var(--ch-color-text-subtle); font-size: 10px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
-.callback-card code { display: block; overflow: hidden; color: var(--ch-color-text-muted); font: 11px/1.4 var(--ch-font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .binding-card { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; padding: 9px 11px; color: var(--ch-color-text-muted); font-size: var(--ch-font-size-xs); }
 .binding-card__dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--ch-color-success); }
 .binding-card code { color: var(--ch-color-text-code); font-family: var(--ch-font-mono); }
@@ -846,6 +773,7 @@ onUnmounted(() => { clearLocalState(); dialog.value?.close() })
 .section-actions--end { justify-content: flex-end; }
 .secret-grid,
 .create-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.secret-grid--single { grid-template-columns: minmax(0, 1fr); }
 .field--wide { grid-column: 1 / -1; }
 .credential-state { display: flex; align-items: center; gap: 5px; }
 .credential-state span { padding: 3px 6px; border-radius: 999px; background: var(--ch-color-chip-bg-muted); color: var(--ch-color-text-subtle); font-size: 9px; font-weight: 600; text-transform: uppercase; }
