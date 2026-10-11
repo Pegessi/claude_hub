@@ -22,7 +22,8 @@
   sheen contained inside the existing status light.
 - Mark only genuinely working Chat sessions with a Maso-style light pulse that
   orbits the row border and fades smoothly at both ends, while dim stars inside
-  the row brighten as it passes; working rows no longer gain a lit outline.
+  the row brighten as it passes; working rows no longer gain a lit outline, and
+  both themes use a cool blue-to-cyan palette for the light.
 - Give Chat rows and workspace groups more breathing room, allow dragging a
   workspace header to persist the whole directory block without reordering
   pinned Chats, and keep Terminal Status workspace groups in the same order as

@@ -51,7 +51,12 @@ drag reordering, and make genuinely active work easy to scan.
   clockwise on the border centerline as twelve translucent SVG dashes nested
   around one peak (`createWorkingBeamLayers`), giving an 18-unit fading tail and
   a 3-unit leading fade on a 100-unit perimeter, plus a faint blurred bloom.
-  There is no solid head segment. Inside the row, 14 dim stars and two small
+  There is no solid head segment. The long outer layers use
+  `--ch-color-session-beam-tail` and the short inner layers
+  `--ch-color-session-beam`, so the pulse shifts from blue at its tail to cyan
+  at its peak: `#4f8dff` to `#6ff0ff` in Dark and `#3d7bf5` to `#00b4d8` in
+  Light. Stars use an icy core with a cyan halo in both themes, independent of
+  the Light clay-orange accent. Inside the row, 14 dim stars and two small
   glints, seeded by tab id, brighten as the peak crosses their column on the
   same orbit clock, and a faint light pool follows the peak. The yellow status
   dot remains the semantic working indicator, idle and attention colors are
@@ -69,7 +74,7 @@ drag reordering, and make genuinely active work easy to scan.
 ## Validation
 
 - Focused interaction, store, theme, and semantic-color tests passed.
-- Full frontend unit suite after the cross-review fixes: `730 passed`; the added tests
+- Full frontend unit suite after the cool-palette revision: `731 passed`; the added tests
   cover delete success/failure, stale-pin cleanup, menu removal, palette tokens,
   accent contrast, separation of selected/focus/primary roles, and a repository-
   wide guard against translucent keyboard-focus rings.
@@ -129,7 +134,7 @@ drag reordering, and make genuinely active work easy to scan.
   decorative halos retain their separate translucent role.
 - Final repository-wide `./scripts/verify.sh all` (pinned Node 24.21.0, uv
   0.12.15, Python 3.11.16, and pnpm 9.15.9) passed docs, backend formatting
-  and types, frontend lint and types, all 730 frontend tests, and the production
+  and types, frontend lint and types, all 731 frontend tests, and the production
   build. The backend suite reported `1808 passed, 1 skipped, 1 failed` because
   the unchanged `test_frontend_build_timeout_keeps_current_backend_and_dist`
   hit macOS

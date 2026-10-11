@@ -26,7 +26,7 @@
       <rect
         v-for="(dasharray, index) in BEAM_LAYERS"
         :key="index"
-        class="working-effect__layer"
+        :class="['working-effect__layer', { 'working-effect__layer--core': index >= BEAM_LAYERS.length / 2 }]"
         width="100%"
         height="100%"
         rx="5.5"
@@ -103,16 +103,23 @@ const stars = computed(() => createWorkingStarfield(props.seed))
   animation: working-effect-orbit var(--working-orbit) linear infinite;
 }
 
+/* The long outer layers carry the tail color and the short inner layers the
+   peak color, so the pulse shifts hue from its tail toward its peak. */
 .working-effect__layer {
-  stroke: var(--ch-color-session-glow-strong);
+  stroke: var(--ch-color-session-beam-tail);
   stroke-width: 1.2px;
   opacity: 0.09;
+}
+
+.working-effect__layer--core {
+  stroke: var(--ch-color-session-beam);
+  opacity: 0.12;
 }
 
 .working-effect__bloom {
   stroke: var(--ch-color-session-star-halo);
   stroke-width: 3px;
-  opacity: 0.35;
+  opacity: 0.45;
   filter: blur(2px);
 }
 
