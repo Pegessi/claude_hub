@@ -18,8 +18,15 @@ drag reordering, and make genuinely active work easy to scan.
   Alt+Arrow path was removed with it. Pointer drag remains the single ordering
   interaction and still persists the complete tab order.
 - Successful deletion now returns an explicit boolean to callers and removes
-  any browser-persisted pin for the deleted session. Existing TabBar and
+  any server-persisted pin for the deleted session. Existing TabBar and
   archived-session confirmation surfaces also stay open when deletion fails.
+- Chat pins now use an authenticated server preference API backed by an atomic,
+  locked runtime-home file. Single-tab Pin/Unpin mutations avoid whole-list
+  lost updates, preferences are isolated per server user, and all browser
+  origins/devices share the same state. Existing valid localStorage pins are
+  merged at most once and the legacy key is removed after a successful read.
+  `fetchTabs` synchronizes pins after it restores the active tab and first pane,
+  so the preference request no longer delays pane initialization.
 - Dark uses Maso's compact carbon hierarchy and the blue family already present
   on `main`: `#7cb7ff` for foreground emphasis and focus, `#5a9cf0` for selected
   borders and live-session light, and a darker `#3276ba` for white-text actions.
@@ -37,10 +44,18 @@ drag reordering, and make genuinely active work easy to scan.
 - An unread completed turn keeps its semantic status color and receives a small
   highlight moving inside the dot. It no longer combines a green idle dot with
   a large blue ripple; reduced-motion users receive the static dot.
-- Only sessions whose runtime status is `working` receive the travelling edge
-  light. The yellow status dot remains the semantic working indicator, idle and
-  attention colors are unchanged, and reduced-motion users receive a static
-  edge instead of an animation.
+- Only sessions whose runtime status is `working` mount
+  `ChatSidebarWorkingEffect`. Like Maso, the row is marked by a light pulse
+  alone: it gains no full outline or outer glow, and a selected working row
+  keeps only a 20% selected border beside its selected fill. The pulse travels
+  clockwise on the border centerline as twelve translucent SVG dashes nested
+  around one peak (`createWorkingBeamLayers`), giving an 18-unit fading tail and
+  a 3-unit leading fade on a 100-unit perimeter, plus a faint blurred bloom.
+  There is no solid head segment. Inside the row, 14 dim stars and two small
+  glints, seeded by tab id, brighten as the peak crosses their column on the
+  same orbit clock, and a faint light pool follows the peak. The yellow status
+  dot remains the semantic working indicator, idle and attention colors are
+  unchanged, and reduced-motion users receive no moving light.
 - Active mode, layout, sidebar item, pane, and assistant avatar now share the
   selected-surface language. Empty panes use a theme-aware line icon and
   brighter guidance instead of a dim system emoji.
@@ -52,7 +67,7 @@ drag reordering, and make genuinely active work easy to scan.
 ## Validation
 
 - Focused interaction, store, theme, and semantic-color tests passed.
-- Full frontend unit suite after the latest sidebar-order revision: `716 passed`; the added tests
+- Full frontend unit suite after the working-light revision: `729 passed`; the added tests
   cover delete success/failure, stale-pin cleanup, menu removal, palette tokens,
   accent contrast, separation of selected/focus/primary roles, and a repository-
   wide guard against translucent keyboard-focus rings.
@@ -76,6 +91,23 @@ drag reordering, and make genuinely active work easy to scan.
   write, and confirmed Terminal Status rendered the same four workspace groups
   in the same order with no page errors. The order request was intercepted, so
   the live backend order remained unchanged.
+- A server-Pin Playwright pass used `127.0.0.1:5184` and `localhost:5184` as
+  separate browser origins. Pinning in the first appeared after reloading the
+  second, both legacy localStorage values were null, and the server API returned
+  the same pinned id with no page errors. The isolated preview state was reset.
+- The 5184 review server keeps all live Hub APIs (tabs, Worker sessions, status,
+  streams and Workspace data) on 8173 and routes only the new
+  `/api/tabs/sidebar-preferences*` family to the isolated 8184 preview store.
+  A live comparison returned identical 35-tab id sets and included a newly
+  created `乱码2b5复现` session; that new id also passed the two-origin Pin check.
+- The working-light visual pass paused every row animation at seven orbit
+  phases in Playwright Chromium on 5184, for a selected and an unselected
+  working row in Dark and an unselected row in Light. The pulse stayed on the
+  border with soft ends, stars brightened behind its peak in the same direction,
+  rows showed no full lit outline, and the page reported no errors. An earlier
+  revision showed why replacement was needed: its SVG particles used
+  `offset-path` and never left the row corner, and its solid white head read as
+  a hard segment.
 - Independent diff review found and fixed insufficient Dark primary-button
   contrast. The researched revision review then caught foreground accents reused
   as white-text fills and translucent focus rings; filled controls now use the
@@ -83,8 +115,8 @@ drag reordering, and make genuinely active work easy to scan.
   decorative halos retain their separate translucent role.
 - Final repository-wide `./scripts/verify.sh all` (pinned Node 24.21.0, uv
   0.12.15, Python 3.11.16, and pnpm 9.15.9) passed docs, backend formatting
-  and types, frontend lint and types, all 711 frontend tests, and the production
-  build. The backend suite stopped at `1803 passed, 1 skipped` because
+  and types, frontend lint and types, all 729 frontend tests, and the production
+  build. The backend suite reported `1808 passed, 1 skipped, 1 failed` because
   the unchanged `test_frontend_build_timeout_keeps_current_backend_and_dist`
   hit macOS
   `EPERM` while starting its process-group fixture. The same test passed alone

@@ -20,11 +20,15 @@
   `#f5f5f5` / white in Light) without repainting unrelated application surfaces.
 - Replace the blue completion ripple around idle session dots with a restrained
   sheen contained inside the existing status light.
-- Highlight only genuinely working Chat sessions with a restrained travelling
-  edge light, including a static reduced-motion fallback.
+- Mark only genuinely working Chat sessions with a Maso-style light pulse that
+  orbits the row border and fades smoothly at both ends, while dim stars inside
+  the row brighten as it passes; working rows no longer gain a lit outline.
 - Give Chat rows and workspace groups more breathing room, allow dragging a
   workspace header to persist the whole directory block, and keep Terminal
   Status workspace groups in the same order as the Chat sidebar.
+- Persist Chat pins in the Hub runtime instead of per-origin browser storage,
+  using per-user atomic updates so browsers and devices share one state without
+  lost updates. Valid legacy local pins migrate once and are then removed.
 - See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).
 
 ### fix(chat): match Claude model options to each tab environment

@@ -35,6 +35,10 @@ const useCwdHistory = readFileSync(
   new URL('../src/composables/useCwdHistory.ts', import.meta.url),
   'utf8',
 )
+const viteConfig = readFileSync(
+  new URL('../vite.config.ts', import.meta.url),
+  'utf8',
+)
 
 test('desktop TabBar is merged into the app-mode-bar, terminal-mode only', () => {
   // Desktop TabBar renders inside the app-mode-bar and is terminal-mode only
@@ -91,15 +95,21 @@ test('Terminal Status follows the Chat workspace order before terminal-only grou
   ))
 })
 
-test('a working session gets a Maso-style edge sweep with reduced-motion fallback', () => {
+test('preview Pin API can be isolated without desynchronizing live Hub APIs', () => {
+  assert.match(viteConfig, /VITE_SIDEBAR_PREFERENCES_API_TARGET/)
+  const preferencesProxy = viteConfig.indexOf("'/api/tabs/sidebar-preferences'")
+  const apiProxy = viteConfig.indexOf("'/api'")
+  assert.ok(preferencesProxy >= 0 && preferencesProxy < apiProxy)
+  assert.match(viteConfig, /'\/api\/tabs\/sidebar-preferences': \{[\s\S]*?target: sidebarPreferencesApiTarget/)
+})
+
+test('a working session is marked only by its moving light, not a lit border', () => {
   assert.match(chatSidebar, /:data-runtime-status="getTabStatus\(tab\)"/)
-  assert.match(chatSidebar, /\.chat-sidebar__item\[data-runtime-status='working'\]::after/)
-  assert.match(chatSidebar, /@keyframes sidebar-working-sweep/)
-  assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item\[data-runtime-status='working'\]::after,[\s\S]*?animation: none;/)
-  assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item\[data-runtime-status='working'\]::after \{[^}]*background: var\(--ch-color-session-glow\);/)
-  assert.match(chatSidebar, /--ch-color-session-glow-strong/)
+  assert.doesNotMatch(chatSidebar, /\[data-runtime-status='working'\]:not\(\.active\)/)
+  assert.match(chatSidebar, /\.chat-sidebar__item\.active\[data-runtime-status='working'\] \{\s*border-color: color-mix\(in srgb, var\(--ch-color-border-selected\) 20%, transparent\);\s*box-shadow: none;/)
+  // Row content and the ⋯ menu stay above the decorative light layer.
+  assert.match(chatSidebar, /\[data-runtime-status='working'\] > \.chat-sidebar__item-main,[\s\S]*?z-index: 1;/)
   assert.match(chatSidebar, /> :deep\(\.chat-sidebar__item-menu\) \{\s*position: absolute;[\s\S]*?z-index: 1;/)
-  assert.doesNotMatch(chatSidebar, /\[data-runtime-status='working'\] > \* \{/)
 })
 
 test('a session-name pill sits in the top-right corner of each pane', () => {

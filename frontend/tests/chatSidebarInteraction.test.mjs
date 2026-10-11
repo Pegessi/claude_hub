@@ -34,6 +34,11 @@ test('workspace headers support pointer drag ordering with a visible drop edge',
   ))
 })
 
+test('only working rows mount the per-row beam and star field', () => {
+  assert.match(source, /<ChatSidebarWorkingEffect\s+v-if="getTabStatus\(tab\) === 'working'"\s+:seed="tab\.id"\s*\/>/)
+  assert.doesNotMatch(source, /working-comet/)
+})
+
 test('sidebar resize is bounded, accessible, and browser-persisted', () => {
   assert.match(source, /class="chat-sidebar__resize-handle"/)
   assert.match(source, /role="separator"/)
