@@ -5,6 +5,14 @@
 
 ## Unreleased
 
+### fix(chat): keep Stop and Queue on one composer line on phones
+
+- The composer tools no longer take part in the toolbar's wrap decision, so
+  Stop and Send/Queue stay side by side; on narrow screens the model label
+  truncates (the full name stays in its menu) instead of pushing Queue onto
+  another line. Verified at 320, 360, and 440px wide; desktop is unchanged.
+- Stop now matches the Send/Queue button's 34px height and corner radius.
+
 ### fix(sidebar): fold the Pinned section and stop it covering the mobile drawer
 
 - Tapping the Pinned header now folds or unfolds the pinned Chats, with the
