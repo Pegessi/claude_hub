@@ -21,7 +21,18 @@ export const EDGE_COMMIT_RATIO = 1 / 3
  */
 export const EDGE_FLING_PX_PER_MS = 0.5
 
+/** Main-surface swipes need more travel than the edge band so taps keep their jitter. */
+export const SURFACE_DIRECTION_SLOP_PX = 12
+
+/**
+ * A main-surface swipe must be this many times more horizontal than vertical,
+ * so diagonal reading scrolls stay scrolls.
+ */
+export const SURFACE_HORIZONTAL_BIAS = 1.5
+
 export type EdgeIntent = 'horizontal' | 'vertical' | 'undecided'
+
+export type SurfaceIntent = 'open' | 'ignore' | 'undecided'
 
 /**
  * Did the gesture begin inside the left edge band?
@@ -50,6 +61,26 @@ export function classifyIntent(
   if (absX < slopPx && absY < slopPx) return 'undecided'
   if (absX >= absY) return 'horizontal'
   return 'vertical'
+}
+
+/**
+ * Classify a swipe that began on the main content surface while the drawer is
+ * closed. Only a clearly rightward swipe opens; vertical and leftward swipes
+ * stay with the content.
+ */
+export function classifySurfaceIntent(dx: number, dy: number): SurfaceIntent {
+  const absX = Math.abs(dx)
+  const absY = Math.abs(dy)
+  if (absX < SURFACE_DIRECTION_SLOP_PX && absY < SURFACE_DIRECTION_SLOP_PX) return 'undecided'
+  return dx > 0 && absX >= absY * SURFACE_HORIZONTAL_BIAS ? 'open' : 'ignore'
+}
+
+/**
+ * A rightward swipe over a horizontal scroller that is away from its start
+ * scrolls that content back instead of opening the drawer.
+ */
+export function scrollerKeepsSurfaceSwipe(scrollLeft: number, overflowX: string): boolean {
+  return scrollLeft > 0 && (overflowX === 'auto' || overflowX === 'scroll')
 }
 
 /**

@@ -152,6 +152,7 @@
     <div
       v-if="showModal"
       class="modal-overlay"
+      data-drawer-swipe-ignore
       @click.self="closeCreateModal"
     >
       <div class="modal">
@@ -462,6 +463,7 @@
     <div
       v-if="showCloseConfirm"
       class="modal-overlay"
+      data-drawer-swipe-ignore
       @click.self="showCloseConfirm = false"
     >
       <div class="modal">
