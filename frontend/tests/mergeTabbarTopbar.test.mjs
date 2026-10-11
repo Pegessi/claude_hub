@@ -75,6 +75,8 @@ test('an unread completed turn shows a ping ripple on the status light', () => {
 test('a session-name pill sits in the top-right corner of each pane', () => {
   assert.match(terminalPane, /class="pane-session-name"/)
   assert.match(terminalPane, /const tabName = computed/)
+  assert.match(terminalPane, /--pane-chrome-control-size: 24px/)
+  assert.match(terminalPane, /height: var\(--pane-chrome-control-size\)/)
   // solid background + shadow so content does not show through
   assert.match(terminalPane, /background: var\(--ch-color-surface-raised\)/)
   assert.match(terminalPane, /box-shadow: 0 1px 4px var\(--ch-shadow-color-soft\)/)

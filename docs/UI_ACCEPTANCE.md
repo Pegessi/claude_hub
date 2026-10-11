@@ -37,7 +37,7 @@ The CI job has a separate, explicit installation step.
 
 Both browser targets are explicit, outside `verify.sh all`: they need an installed
 browser and owned ports. Each has an independent blocking CI job.
-The shared format target includes the five scenario scripts. The type target
+The shared format target includes every scenario script. The type target
 checks the complete backend and the typed browser owner/lifecycle helper;
 the existing dynamic scenario scripts are not claimed as strictly type-checked.
 
@@ -46,8 +46,9 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 | Task execution panel | Recording versus managed controls; progress/handoff and retry identity |
 | Workspace Task creation | Unknown outcome/replay; dialog closure and credential recovery; workspace changes |
 | Native subagents | Full thread identity, parent-turn grouping, lifecycle display and English controls |
+| Chat composer in the full Chat page | Send/queue/stop against a live turn; failed send keeps the text and retries under a new identity; mobile reachability |
 | Message provenance in the full Chat page | Persisted Web/Feishu/unknown origins after binding changes; desktop/mobile/grid operation and text clearance |
-| Bot components | Settings/binding behavior, errors, secret clearing and desktop/mobile layout |
+| Bot components | Settings/binding behavior, secret clearing and desktop/mobile layout |
 
 These are real Vue/Pinia DOM checks served by a dedicated Vite process. Page
 APIs are mocked, unknown API routes fail, and WebSockets are blocked. This is
@@ -112,6 +113,6 @@ limits the claim: completed API closes and owned process exits do not prove
 that every possible Chromium descendant has disappeared. Do not remove retained
 failure directories or signal processes without checking their ownership.
 
-The five scenarios cover named requirements, not every control or layout in the
+The scenarios cover named requirements, not every control or layout in the
 application. Extend the relevant scenario for a changed contract; keep a real
 behavioral assertion even when adding a cheap source-wiring test.

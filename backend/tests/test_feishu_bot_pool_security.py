@@ -40,8 +40,6 @@ def _config(app_id: str = "cli_pool", secret: str = _SECRET) -> FeishuBotConfig:
     return FeishuBotConfig(
         app_id=app_id,
         app_secret=secret,
-        verification_token=_TOKEN,
-        encrypt_key=_ENCRYPT,
     )
 
 
@@ -57,8 +55,6 @@ def _cookie(open_id: str = "ou-admin") -> dict[str, str]:
 @pytest.fixture
 def pool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FeishuBotPoolStore:
     for key in BOT_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    for key in ("CLAUDE_HUB_PUBLIC_BASE_URL", "CLAUDE_HUB_PROVIDER_PUBLIC_URL"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(session_store, "SESSIONS_FILE", tmp_path / "sessions.json")
     store = FeishuBotPoolStore(
@@ -127,8 +123,6 @@ def test_stale_expected_revision_is_a_conflict(pool) -> None:
     pool.rotate_secrets(
         bot_id,
         app_secret="second",
-        verification_token=_TOKEN,
-        encrypt_key=_ENCRYPT,
         expected_revision=0,
         environ={},
     )
@@ -137,8 +131,6 @@ def test_stale_expected_revision_is_a_conflict(pool) -> None:
         pool.rotate_secrets(
             bot_id,
             app_secret="third",
-            verification_token=_TOKEN,
-            encrypt_key=_ENCRYPT,
             expected_revision=0,
             environ={},
         )
@@ -157,8 +149,7 @@ async def test_pool_response_never_echoes_secrets(pool) -> None:
     assert _SECRET not in body and _TOKEN not in body and _ENCRYPT not in body
     summary = response.json()["bots"][0]
     assert summary["app_secret_configured"] is True
-    assert summary["verification_token_configured"] is True
-    assert summary["encrypt_key_configured"] is True
+    assert summary["connection_status"] == "stopped"
     assert "app_secret" not in summary and "credentials" not in summary
 
 
@@ -189,8 +180,6 @@ async def test_rejected_credentials_never_create_a_bot(pool, monkeypatch) -> Non
                 "name": "Bot",
                 "app_id": "cli_pool",
                 "app_secret": _SECRET,
-                "verification_token": _TOKEN,
-                "encrypt_key": _ENCRYPT,
             },
             cookies=_cookie(),
         )
@@ -211,8 +200,6 @@ async def test_rejected_credentials_never_rotate_an_existing_bot(pool, monkeypat
             f"/api/feishu/bot/bots/{bot_id}/secrets",
             json={
                 "app_secret": "rotated-secret",
-                "verification_token": _TOKEN,
-                "encrypt_key": _ENCRYPT,
                 "expected_revision": 0,
             },
             cookies=_cookie(),
@@ -276,8 +263,6 @@ async def test_unreadable_admin_body_is_rejected(pool, body: bytes) -> None:
                 "name": "Bot",
                 "app_id": "cli_pool",
                 "app_secret": _SECRET,
-                "verification_token": _TOKEN,
-                "encrypt_key": _ENCRYPT,
                 "extra": 1,
             },
             id="extra-key",
@@ -287,8 +272,6 @@ async def test_unreadable_admin_body_is_rejected(pool, body: bytes) -> None:
                 "name": "   ",
                 "app_id": "cli_pool",
                 "app_secret": _SECRET,
-                "verification_token": _TOKEN,
-                "encrypt_key": _ENCRYPT,
             },
             id="blank-name",
         ),
@@ -297,8 +280,6 @@ async def test_unreadable_admin_body_is_rejected(pool, body: bytes) -> None:
                 "name": "Bot",
                 "app_id": "cli_pool",
                 "app_secret": "",
-                "verification_token": _TOKEN,
-                "encrypt_key": _ENCRYPT,
             },
             id="blank-secret",
         ),
@@ -314,28 +295,6 @@ async def test_admin_body_must_carry_exactly_the_expected_keys(pool, payload) ->
     assert not pool.path.exists()
 
 
-@pytest.mark.asyncio
-async def test_event_body_limit_stops_a_chunked_request(pool) -> None:
-    """The event reader runs before the Bot is resolved, so size wins first."""
-
-    bot_id = pool.create_bot(name="Bot", config=_config(), environ={})
-    continued = False
-
-    async def chunks():
-        nonlocal continued
-        yield b"x" * ((256 * 1024) - 1)
-        yield b"xx"
-        continued = True
-        raise AssertionError("event reader continued past its size limit")
-
-    async with _client() as client:
-        response = await client.post(f"/api/feishu/bot/events/{bot_id}", content=chunks())
-
-    assert response.status_code == 413
-    assert response.json()["detail"] == "event_too_large"
-    assert not continued
-
-
 # -------------------------------------------------------------------- CAS
 
 
@@ -347,8 +306,6 @@ async def test_event_body_limit_stops_a_chunked_request(pool) -> None:
             "/secrets",
             {
                 "app_secret": "rotated",
-                "verification_token": _TOKEN,
-                "encrypt_key": _ENCRYPT,
                 "expected_revision": 7,
             },
             id="rotate",
@@ -515,8 +472,6 @@ async def test_rotation_invalidates_an_in_flight_reply_snapshot(pool) -> None:
     pool.rotate_secrets(
         bot_id,
         app_secret="rotated-secret",
-        verification_token=_TOKEN,
-        encrypt_key=_ENCRYPT,
         expected_revision=effective.revision,
         environ={},
     )
@@ -525,28 +480,6 @@ async def test_rotation_invalidates_an_in_flight_reply_snapshot(pool) -> None:
         cast(FeishuBotClient, Counting()), _event("om-rotated"), effective, "answer"
     )
     assert attempts == []
-
-
-@pytest.mark.asyncio
-async def test_invalid_public_url_returns_a_fixed_error(pool, monkeypatch) -> None:
-    """The bad value must not appear in the response.
-
-    An operator pastes this error into a ticket, and the rejected URL is
-    exactly the kind of string that carries a token in its query.
-    """
-
-    pool.create_bot(name="Bot", config=_config(), environ={})
-    monkeypatch.setenv(
-        "CLAUDE_HUB_PUBLIC_BASE_URL", "https://secret.example.test/path?token=leaked"
-    )
-
-    async with _client() as client:
-        response = await client.get("/api/feishu/bot/bots", cookies=_cookie())
-
-    assert response.status_code == 503
-    assert response.json() == {"detail": "public_url_invalid"}
-    assert "secret.example" not in response.text
-    assert "leaked" not in response.text
 
 
 @pytest.mark.asyncio
@@ -579,8 +512,6 @@ async def test_a_change_during_credential_validation_loses_the_cas(pool, monkeyp
                 f"/api/feishu/bot/bots/{bot_id}/secrets",
                 json={
                     "app_secret": "rotated-secret",
-                    "verification_token": _TOKEN,
-                    "encrypt_key": _ENCRYPT,
                     "expected_revision": 0,
                 },
                 cookies=_cookie(),

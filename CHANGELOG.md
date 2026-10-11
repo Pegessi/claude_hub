@@ -5,6 +5,100 @@
 
 ## Unreleased
 
+### fix(chat): match Claude model options to each tab environment
+
+- Build the Claude Chat model picker from the selected tab's
+  `ANTHROPIC_MODEL` and default Opus, Sonnet, and Haiku model variables,
+  preserving first-seen order and removing duplicate ids.
+- Keep the curated Claude catalog only when the tab does not configure any
+  model ids, so custom gateways no longer show stale, incompatible choices.
+- Refresh capabilities in place after a model change, without restarting the
+  timeline stream, so the open picker immediately reflects the updated env.
+- See the [Claude model picker notes](docs/working-logs/2026-10-10-claude-model-picker-env.md).
+
+### fix(logging): bound backend log retention
+
+- Rotate `~/.claude_hub/logs/backend.log` at 10 MiB with five backups by
+  default, with environment overrides for deployments that need a different
+  retention budget.
+- Stop writing complete tab ID and name collections at INFO level for every
+  `list_tabs` poll. On a local Hub with about 200 saved tabs, those two messages
+  accounted for 98.8% of a recent 10,000-line sample and drove roughly 29 KB/s
+  of log writes.
+- See the [backend log growth notes](docs/working-logs/2026-10-10-backend-log-growth.md).
+
+### fix(test): stop the backend suite idling through agent-prompt waits
+
+- Bootstrap waits up to 25s for a real agent TUI prompt. Fake terminals never
+  print one, so every agent creation spent the full budget idling: a single
+  test creating two agents cost 50s, and ~20 such tests dominated the suite.
+  Shorten the budget for tests only; the wait loop, its readiness check and
+  its fail-closed handling of the Codex update dialog are unchanged.
+- The default backend scope now finishes in about 5 minutes instead of 24.
+- Put the isolated HMR backend inside its cleanup scope as soon as it starts,
+  so a failing Vite startup can no longer leave it running and holding a port.
+- Skip the HMR suite when Playwright cannot launch a browser instead of
+  failing collection. The backend CI job installs tmux and ttyd but no
+  browsers, so this one test turned an otherwise green run red.
+- Scale the two fixed 10s restart deadlines by the E2E timeout factor and
+  print the measured time, so a loaded runner no longer fails them outright.
+
+### feat(runtime): rebuild frontend during supervised restart
+
+- Make the production menu restart run the committed frontend build after
+  backend dependency synchronization and before interrupting the current
+  backend.
+- Build into a launcher-owned staging directory and promote only a complete
+  asset tree, keeping the current backend and SPA available when preparation
+  fails or times out.
+- Rename the action to **Build and restart** and explain its preparation and
+  interruption phases in the confirmation dialog. See the
+  [frontend-aware restart notes](docs/working-logs/2026-10-09-frontend-aware-restart.md).
+
+### fix(test): make the terminal replay E2E suite pass deterministically
+
+- Pin the tmux pane and the browser terminal to the same width before
+  producing or reading history. ttyd resizes the pane to each client, and
+  tmux re-wraps existing lines on resize, so a capture taken at 80 columns
+  could never match a buffer rendered at 156 — a mismatch no timeout could
+  resolve.
+- Stop requesting `/bin/zsh` for the four agent-TUI tabs. It is installed
+  neither on CI runners nor on a stock developer machine, so those tests
+  failed before reaching their assertions.
+- Add an explicit `terminal-replay` verification target so the suite can be
+  run locally; it was previously excluded from every local entrypoint and
+  could only fail in CI.
+- The suite now passes at `CLAUDE_HUB_E2E_TIMEOUT_SCALE=1`, so the CI job
+  gates `main` again instead of being permanently non-blocking.
+
+### feat(feishu): receive Bot events over WebSocket long connections
+
+- Fix connection reconciliation so pairing and other business-state revisions
+  no longer invalidate unchanged transports, and bound/drain accepted message
+  routes during final backend shutdown with retry-safe dedup release that
+  preserves claims for completed, superseded, or unknown Chat turns.
+- Replace public HTTP event callbacks with one supervised Feishu WebSocket
+  connection per enabled Bot, with bounded endpoint discovery and reconciliation
+  on startup and after pool changes.
+- Reduce Bot credentials and management forms to name, App ID, and App Secret;
+  expose connected, connecting, failed, and stopped states in the existing UI.
+- Remove callback URLs, Verification Token, Encrypt Key, and the callback-only
+  public URL resolver. Read version 2 pool files safely, then rewrite them as
+  version 3 without retired callback secrets on the next mutation.
+- Preserve pairing, admission checks, deduplication, Chat routing, and outbound
+  replies. See the [WebSocket migration notes](docs/working-logs/2026-10-09-feishu-websocket.md).
+
+### style(feishu): align Chat header controls
+
+- Place the Chat-scoped Feishu status action in the existing pane chrome beside
+  the session-name pill instead of positioning both controls over the same
+  top-right coordinates.
+- Give the name and Feishu controls one 24 px geometry and the same raised pill
+  surface, border, radius, shadow, spacing, and vertical alignment. Preserve the
+  accessible connection state and the existing pairing popover.
+- Pin the parallel layout with real-component desktop/mobile geometry checks.
+  See the [header control validation notes](docs/working-logs/2026-10-09-feishu-header-controls.md).
+
 ### test(ui): add isolated behavioral acceptance and fix Chat control overlap
 
 - Run five real Vue/Pinia browser scenarios through a shared local/CI entrypoint,
