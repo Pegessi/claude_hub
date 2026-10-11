@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### feat(mobile): open the Chat drawer with a swipe anywhere on the main view
+
+- A clearly rightward single-finger swipe anywhere on the mobile main column
+  now follows the finger and opens the Chat drawer with the existing commit
+  rules. It needs 12px of travel and a 1.5:1 horizontal bias, so taps,
+  vertical scrolling, diagonal drags and leftward swipes stay with the content.
+- Editable fields, horizontal scrollers that can still scroll back, the
+  terminal key bar, and TabBar dialogs keep their own gestures. Terminal panes
+  run inside an iframe, so they keep opening the drawer from the left edge band.
+
 ### style(theme): raise text contrast and Chat reading size
 
 - Brighten the Dark text ladder to Maso's reading level: body text moves from

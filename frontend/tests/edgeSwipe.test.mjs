@@ -20,6 +20,8 @@ const {
   EDGE_BAND_PX,
   isWithinEdgeBand,
   classifyIntent,
+  classifySurfaceIntent,
+  scrollerKeepsSurfaceSwipe,
   dragTranslatePx,
   dragBackdropOpacity,
   resolveEdgeSwipe,
@@ -67,6 +69,32 @@ test('clearly vertical movement is handed back to scroll/selection', () => {
 
 test('exact diagonals resolve to horizontal so an edge fling is never eaten', () => {
   assert.equal(classifyIntent(12, 12), 'horizontal')
+})
+
+// ---- main-surface swipe -------------------------------------------------
+
+test('surface swipe waits past its larger slop so tap jitter stays a tap', () => {
+  assert.equal(classifySurfaceIntent(9, 3), 'undecided')
+  assert.equal(classifySurfaceIntent(-11, 6), 'undecided')
+})
+
+test('surface swipe opens only on a clearly rightward drag', () => {
+  assert.equal(classifySurfaceIntent(30, 4), 'open')
+  assert.equal(classifySurfaceIntent(15, 10), 'open')
+})
+
+test('surface swipe leaves vertical, diagonal and leftward drags to the content', () => {
+  assert.equal(classifySurfaceIntent(4, 30), 'ignore')
+  assert.equal(classifySurfaceIntent(14, 12), 'ignore')
+  assert.equal(classifySurfaceIntent(-30, 2), 'ignore')
+})
+
+test('a horizontal scroller keeps the swipe only while it can scroll back', () => {
+  assert.equal(scrollerKeepsSurfaceSwipe(120, 'auto'), true)
+  assert.equal(scrollerKeepsSurfaceSwipe(1, 'scroll'), true)
+  assert.equal(scrollerKeepsSurfaceSwipe(0, 'auto'), false)
+  assert.equal(scrollerKeepsSurfaceSwipe(80, 'hidden'), false)
+  assert.equal(scrollerKeepsSurfaceSwipe(80, 'visible'), false)
 })
 
 // ---- follow-finger geometry --------------------------------------------

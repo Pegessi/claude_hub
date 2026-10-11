@@ -334,7 +334,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, computed, watch, onUnmounted } from 'vue'
+import { nextTick, ref, computed, watch, onUnmounted, toRef } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
@@ -347,6 +347,11 @@ import { useEdgeSwipeDrawer } from '@/composables/useEdgeSwipeDrawer'
 import TabActionsMenu from '@/components/TabActionsMenu.vue'
 import ChatSidebarWorkingEffect from '@/components/ChatSidebarWorkingEffect.vue'
 import type { TerminalTab } from '@/types'
+
+const props = defineProps<{
+  /** Main content element; a rightward swipe on it opens the mobile drawer. */
+  swipeSurface?: HTMLElement | null
+}>()
 
 const emit = defineEmits<{
   (e: 'open-archive'): void
@@ -389,6 +394,7 @@ const {
   panelRef,
   backdropRef,
   closeDragRef: headerRef,
+  surfaceRef: toRef(props, 'swipeSurface'),
   enabled: computed(() => isMobile.value && isTerminalMode.value),
   open: openMobileDrawer,
   close: closeMobileDrawer,

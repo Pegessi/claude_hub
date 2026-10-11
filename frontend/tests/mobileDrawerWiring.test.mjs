@@ -12,6 +12,7 @@ const sidebar = readFileSync(
 )
 const app = readFileSync(
   new URL('../src/App.vue', import.meta.url),
+  'utf8',
 )
 const tabBar = readFileSync(
   new URL('../src/components/TabBar.vue', import.meta.url),
@@ -19,6 +20,10 @@ const tabBar = readFileSync(
 )
 const composable = readFileSync(
   new URL('../src/composables/useEdgeSwipeDrawer.ts', import.meta.url),
+  'utf8',
+)
+const mobileControls = readFileSync(
+  new URL('../src/components/MobileControls.vue', import.meta.url),
   'utf8',
 )
 
@@ -61,6 +66,18 @@ test('the edge gesture uses the pure composable, not inline template geometry', 
   assert.match(sidebar, /useEdgeSwipeDrawer\(/)
   // touchmove must be non-passive so horizontal takeover can preventDefault.
   assert.match(composable, /addEventListener\('touchmove', onMove, \{ passive: false \}\)/)
+})
+
+test('a rightward swipe on the main column opens the drawer, outside opted-out regions', () => {
+  assert.match(app, /:swipe-surface="terminalMainColumn"/)
+  assert.match(app, /ref="terminalMainColumn"\s+class="terminal-main-column"/)
+  assert.match(sidebar, /surfaceRef: toRef\(props, 'swipeSurface'\)/)
+  assert.match(composable, /bindZone\(surfaceRef\.value, 'surface'\)/)
+  assert.match(composable, /input, textarea, select, \[contenteditable\]:not\(\[contenteditable="false"\]\), \[data-drawer-swipe-ignore\]/)
+  // Surface touches are native, so only the edge band forwards untouched taps.
+  assert.match(composable, /if \(!cancelled && touch && state\.zone === 'open'\) \{\s*forwardTap/)
+  assert.match(mobileControls, /class="mobile-controls-overlay"\s+data-drawer-swipe-ignore/)
+  assert.equal(tabBar.match(/class="modal-overlay"\s+data-drawer-swipe-ignore/g)?.length, 2)
 })
 
 test('TabBar keeps an explicit non-gesture drawer entry wired to the store action', () => {
