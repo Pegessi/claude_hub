@@ -6603,7 +6603,7 @@ onUnmounted(() => {
 .agent-status-delete:focus-visible,
 .agent-status-refresh:focus-visible,
 .agent-status-view-switch button:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline: 2px solid var(--ch-color-accent-ring);
   outline-offset: 2px;
 }
 
@@ -7037,8 +7037,8 @@ onUnmounted(() => {
 }
 
 .primary-button:hover {
-  background: var(--ch-color-accent-hover);
-  border-color: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
+  border-color: var(--ch-color-accent-fill-hover);
   box-shadow: var(--ch-shadow-button-primary);
 }
 
@@ -7472,7 +7472,7 @@ onUnmounted(() => {
 .task-card.selected {
   border-color: var(--ch-color-accent);
   background: var(--ch-color-surface-selected);
-  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 8px 20px var(--ch-shadow-color-soft);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-halo), 0 8px 20px var(--ch-shadow-color-soft);
 }
 
 .task-card--todo::before {
@@ -7799,7 +7799,7 @@ onUnmounted(() => {
   color: var(--ch-color-text);
   padding: 0 10px;
   transition: all var(--ch-motion-fast);
-  -webkit-tap-highlight-color: var(--ch-color-accent-ring);
+  -webkit-tap-highlight-color: var(--ch-color-accent-halo);
 }
 
 .task-actions button {
@@ -7936,7 +7936,7 @@ onUnmounted(() => {
 }
 
 .lang-toggle-btn.active {
-  background: var(--ch-color-accent);
+  background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent, #fff);
 }
 
@@ -9169,7 +9169,7 @@ onUnmounted(() => {
 }
 
 .periodic-task-enable:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline: 2px solid var(--ch-color-accent-ring);
   outline-offset: 2px;
   border-radius: 2px;
 }
@@ -9967,7 +9967,7 @@ onUnmounted(() => {
     font-weight: 500;
     padding: 0 8px;
     cursor: pointer;
-    -webkit-tap-highlight-color: var(--ch-color-accent-ring);
+    -webkit-tap-highlight-color: var(--ch-color-accent-halo);
     transition: all var(--ch-motion-fast);
   }
 

@@ -11,7 +11,7 @@ const source = readFileSync(
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 })
-const { groupChatsByCwd, cwdLabel, buildChatSidebarGroups, moveTabById, canDropChatInGroup, parsePinnedChatIds } = await import(
+const { groupChatsByCwd, cwdLabel, buildChatSidebarGroups, moveCwdGroup, moveTabById, canDropChatInGroup, parsePinnedChatIds } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
 
@@ -52,6 +52,15 @@ test('groupChatsByCwd preserves first directory appearance', () => {
     makeTab({ id: 'b', cwd: '/new-repo', created_at: '2026-09-01T00:00:00Z' }),
   ])
   assert.deepEqual(groups.map(g => g.cwd), ['/old-repo', '/new-repo'])
+})
+
+test('groupChatsByCwd can follow the Chat workspace order and append terminal-only groups', () => {
+  const groups = groupChatsByCwd([
+    makeTab({ id: 'terminal-only', cwd: '/terminal-only', session_kind: 'terminal' }),
+    makeTab({ id: 'chat-b', cwd: '/b' }),
+    makeTab({ id: 'chat-a', cwd: '/a' }),
+  ], ['/a', '/b'])
+  assert.deepEqual(groups.map(group => group.cwd), ['/a', '/b', '/terminal-only'])
 })
 
 test('groupChatsByCwd buckets tabs without a cwd into the "No directory" sentinel', () => {
@@ -158,6 +167,25 @@ test('moveTabById ignores deleted sources, deleted targets, self drops, and unch
     ['missing', 'tab-1', 'before'], ['tab-1', 'missing', 'after'],
     ['tab-1', 'tab-1', 'after'], ['tab-0', 'tab-1', 'before'],
   ]) assert.equal(moveTabById(tabs, source, target, position), tabs)
+})
+
+test('moveCwdGroup moves a whole workspace block and retains its internal tab order', () => {
+  const tabs = [
+    makeTab({ id: 'a-chat', cwd: '/a' }),
+    makeTab({ id: 'b-chat', cwd: '/b' }),
+    makeTab({ id: 'a-terminal', cwd: '/a', session_kind: 'terminal' }),
+    makeTab({ id: 'c-chat', cwd: '/c' }),
+  ]
+  assert.deepEqual(
+    ids(moveCwdGroup(tabs, '/a', '/c', 'after')),
+    ['b-chat', 'c-chat', 'a-chat', 'a-terminal'],
+  )
+  assert.deepEqual(
+    ids(moveCwdGroup(tabs, '/c', '/a', 'before')),
+    ['c-chat', 'a-chat', 'a-terminal', 'b-chat'],
+  )
+  assert.equal(moveCwdGroup(tabs, '/a', '/a', 'after'), tabs)
+  assert.equal(moveCwdGroup(tabs, '/missing', '/a', 'before'), tabs)
 })
 
 test('filtered drag IDs retain unrelated sessions and resolve against concurrently inserted rows', () => {

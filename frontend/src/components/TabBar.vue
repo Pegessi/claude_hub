@@ -900,11 +900,10 @@ async function handleRenameTab() {
 async function confirmCloseTab() {
   if (tabToClose.value) {
     const tabId = tabToClose.value.id
-    await runPending(tabActionKey('close', tabId), async () => {
-      await store.deleteTab(tabId)
-      tabToClose.value = null
-      showCloseConfirm.value = false
-    })
+    const deleted = await runPending(tabActionKey('close', tabId), () => store.deleteTab(tabId))
+    if (!deleted) return
+    tabToClose.value = null
+    showCloseConfirm.value = false
   }
 }
 
@@ -1327,8 +1326,12 @@ async function handleCreateTab() {
 
 .tab.active {
   background-color: var(--ch-color-surface-selected);
-  border-color: var(--ch-color-accent-ring-strong);
+  border-color: var(--ch-color-border-selected);
   box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
+}
+
+.tab.active .tab-name {
+  color: var(--ch-color-text-selected);
 }
 
 .tab.dragging {
@@ -1409,7 +1412,7 @@ async function handleCreateTab() {
 }
 
 .pane-indicator {
-  background-color: var(--ch-color-accent);
+  background-color: var(--ch-color-accent-strong);
   color: var(--ch-color-text-inverse);
   font-size: 10px;
   font-weight: bold;

@@ -455,7 +455,7 @@ onUnmounted(() => {
 
 .control-btn.active:active,
 .control-btn.active.pressed {
-  background-color: var(--ch-color-accent-hover);
+  background-color: var(--ch-color-accent-fill-hover);
   border-color: var(--ch-color-accent-strong);
 }
 
