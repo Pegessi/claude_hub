@@ -5,6 +5,20 @@
 
 ## Unreleased
 
+### style(theme): raise text contrast and Chat reading size
+
+- Brighten the Dark text ladder to Maso's reading level: body text moves from
+  `#c7c7cc` to `#ececef` (10.5:1 to 15.1:1 on the main plane), with the muted,
+  soft, and subtle roles raised in the same order.
+- Lift the faintest text role in both themes above WCAG AA (4.5:1) on the main,
+  sidebar, and surface planes; Light body text was already at 14.8:1.
+- Render Chat user and assistant messages at 14px with a 1.65 line height,
+  measured against Maso's body text, while dense Workspace panels keep 12px
+  compact Markdown.
+- Follow Maso's sidebar hierarchy: workspace headers use body text, unselected
+  sessions use the muted role (7.6:1 in Dark) and brighten on hover, and the
+  selected session keeps its selected text color with a semibold name.
+
 ### style(chat): refine session actions and Maso-inspired themes
 
 - Add a destructive **Delete** action to the shared session menu with a focused
