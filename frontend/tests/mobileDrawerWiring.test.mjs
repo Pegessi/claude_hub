@@ -43,6 +43,11 @@ test('the drawer slides in/out via transform and starts hidden when closed', () 
   assert.match(sidebar, /mobile-drawer--open[\s\S]*?transform: translateX\(0\)/)
 })
 
+test('working-row beams hold still while the drawer is hidden or being dragged', () => {
+  const mobile = sidebar.match(/@media \(max-width: 768px\) \{[\s\S]*$/)?.[0] ?? ''
+  assert.match(mobile, /\.chat-sidebar\.mobile-drawer:not\(\.mobile-drawer--open\) :deep\(\.working-effect \*\),\s*\.chat-sidebar\.mobile-drawer\.mobile-drawer--dragging :deep\(\.working-effect \*\) \{\s*animation-play-state: paused;/)
+})
+
 test('pins scroll with the drawer list instead of sticking over the rows beneath', () => {
   const mobile = sidebar.match(/@media \(max-width: 768px\) \{[\s\S]*$/)?.[0] ?? ''
   assert.match(mobile, /\.chat-sidebar\.mobile-drawer \.chat-sidebar__group--pinned \{\s*position: relative;\s*z-index: auto;\s*max-height: none;\s*overflow: visible;/)
