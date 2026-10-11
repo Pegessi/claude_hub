@@ -109,8 +109,10 @@ Expanded details show the complete objective, checkpoint, blocker, and timestamp
 The active conversation exposes compact Goal state immediately above the
 composer. Status is always conveyed by text as well as color. Cross-tab Goal
 badges are intentionally deferred until Goal summaries join the tab-list API.
-While a Goal is active, manual Send/Queue/Steer and attachments are disabled so
-the Hub remains the sole turn scheduler; provider approval answers remain usable.
+While a Goal is active, attachments are disabled and the Hub remains the sole
+turn scheduler: Enter queues a draft until the Goal stops, while ⌘/Ctrl+Enter
+steers by becoming the next Goal turn (see
+[2026-10-12 Goal steer and resume](2026-10-12-goal-steer-and-resume.md)).
 After a transcript completion, the UI performs a bounded, version-aware refresh
 because the durable Goal observer commits asynchronously. The disclosure exposes
 live status semantics, Escape handling, labelled details, and coarse-pointer touch
@@ -157,9 +159,9 @@ the store checks unfinished execution as well as display status before replaceme
 
 Codex/TraeX question answers use a strict current-turn path with no new-turn
 fallback. Codex matches pending question IDs instead of dismissing every request.
-Claude/Cursor do not have that blocking response channel: an answer to a tracked
-card pauses the Goal and uses the existing follow-up path; the user resumes the
-Goal when that exchange finishes. Ordinary manual sends remain locked while
+Claude/Cursor do not have that blocking response channel. Their answers
+originally paused the Goal; since 2026-10-12 an answer becomes the next Goal
+turn instead (see the steer log above). Ordinary manual sends remain locked while
 execution is active or stopping. New/resumed Goals require Agent/Default mode.
 
 Budget edits apply to the next dispatch decision; an already running turn still

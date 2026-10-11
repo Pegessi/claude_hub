@@ -809,6 +809,8 @@ export interface ChatGoal {
   checkpoint_history?: ChatGoalCheckpoint[]
   checkpoint_warning?: string | null
   status_message?: string | null
+  pending_input?: string | null
+  resume_after_turn?: boolean
   created_at: string
   updated_at: string
   paused_at?: string | null

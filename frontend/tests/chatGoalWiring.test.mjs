@@ -69,15 +69,27 @@ test('turn completion uses bounded version-aware Goal reconciliation', () => {
   assert.ok(pane.includes('current.completed_turn_ids?.includes(turnId)'))
 })
 
-test('active Goal locks composer actions and queued draft flushing', () => {
+test('active Goal accepts steers while queued drafts wait for the Goal to stop', () => {
   assert.ok(pane.includes('goalBlocksPlan(goal.value)'))
-  assert.match(pane, /:disabled="isSending || connectionState !== 'live' || goalComposerLocked"/)
+  assert.ok(pane.includes("goalComposerLocked.value && goal.value?.status === 'active'"))
+  assert.match(pane, /:disabled="isSending \|\| connectionState !== 'live' \|\| goalInputBlocked"/)
   assert.match(
     pane,
     /async function flushDraftQueue\(\)[\s\S]*?isSubmissionReady\.value[\s\S]*?!isDraftQueuePaused\.value[\s\S]*?!goalComposerLocked\.value/,
   )
-  assert.ok(pane.includes('if (!messageOverride && goalComposerLocked.value)'))
+  assert.ok(pane.includes('if (!messageOverride && goalInputBlocked.value)'))
+  // Enter queues and ⌘/Ctrl+Enter steers while the Goal runs.
+  assert.ok(pane.includes('turnInFlight: turnInFlight.value || goalSteerOnly.value'))
+  assert.ok(pane.includes("(turnInFlight.value || goalSteerOnly.value) && !messageOverride"))
+  assert.ok(pane.includes("submit(goalSteerOnly ? 'steer' : 'normal')"))
+  assert.ok(pane.includes('⌘/Ctrl+Enter steer Goal'))
+  // Goal turns cannot carry images.
+  assert.ok(pane.includes('draftMessage.value.trim().length > 0 && attachments.value.length === 0'))
   assert.ok(pane.includes('Pause or complete the active Goal before sending messages'))
+})
+
+test('assistant text hides an unsanitized trailing Goal envelope', () => {
+  assert.ok(pane.includes(':text="stripTrailingGoalProtocol(part.text)"'))
 })
 
 test('expanded Goal details have a visible collapse control and stay above the status bar', () => {

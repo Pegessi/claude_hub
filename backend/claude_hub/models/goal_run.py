@@ -10,6 +10,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 GOAL_OBJECTIVE_MAX_LENGTH = 4000
+GOAL_STEER_INPUT_MAX_LENGTH = 32_000
 GOAL_CHECKPOINT_HISTORY_LIMIT = 10
 GOAL_RECENT_TURN_IDS_LIMIT = 100
 
@@ -95,6 +96,11 @@ class GoalRun(BaseModel):
     checkpoint_history: list[GoalCheckpoint] = Field(default_factory=list)
     checkpoint_warning: str | None = None
     status_message: str | None = None
+    # User text that the next dispatched Goal turn must carry. It is cleared
+    # only after provider acceptance, so an uncertain dispatch keeps it.
+    pending_input: str | None = Field(default=None, max_length=GOAL_STEER_INPUT_MAX_LENGTH)
+    # Resumed while an ordinary Chat turn was running: dispatch once it ends.
+    resume_after_turn: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     paused_at: datetime | None = None
