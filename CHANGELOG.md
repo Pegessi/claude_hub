@@ -31,6 +31,18 @@
   `task progress` finds it by Task ID and `task context` shows the path, so a
   later thread can still report completion.
 
+### fix(goal): steer running Goals and resume after question answers
+
+- ⌘/Ctrl+Enter (or **Steer**) during an active Goal becomes the next Goal turn:
+  the running Goal turn is replaced and the agent addresses the message first
+  while keeping the objective. Enter queues the draft until the Goal stops.
+- Claude/Cursor question answers and replies to a blocked Goal continue the
+  Goal instead of pausing it; answered cards close immediately.
+- Resume while an ordinary Chat turn runs no longer fails with 409; the Goal
+  resumes when that turn finishes.
+- Ordinary replies in a Chat that had a Goal no longer show the trailing
+  checkpoint JSON and status block.
+
 ### perf(mobile): hold working-session light while the drawer is shut or dragged
 
 - The working-row beam and stars animate on the main thread every frame, and a
