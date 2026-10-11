@@ -76,7 +76,7 @@ test('dark theme uses the Maso carbon ladder and main-branch blue roles', () => 
   assert.equal(token(dark, 'ch-color-surface-control'), '#29292c')
   assert.equal(token(dark, 'ch-color-surface-selected'), '#2a2f36')
   assert.equal(token(dark, 'ch-color-border-selected'), '#5a9cf0')
-  assert.equal(token(dark, 'ch-color-text'), '#c7c7cc')
+  assert.equal(token(dark, 'ch-color-text'), '#ececef')
   assert.equal(token(dark, 'ch-color-text-selected'), '#eef6ff')
   assert.equal(token(dark, 'ch-color-accent'), '#7cb7ff')
   assert.equal(token(dark, 'ch-color-accent-strong'), '#3276ba')
@@ -136,6 +136,40 @@ test('light theme pairs the neutral ladder with distinct muted clay-orange roles
       `Light accent must remain visually distinct from --${semanticToken}`,
     )
   }
+})
+
+test('text roles stay readable and ordered on the primary planes of both themes', () => {
+  const textRoles = ['ch-color-text', 'ch-color-text-muted', 'ch-color-text-soft', 'ch-color-text-subtle']
+  for (const selector of [':root {', ":root[data-theme='light']"]) {
+    const theme = themeBlock(selector)
+    const main = token(theme, 'ch-color-main-bg')
+    assert.ok(contrast(token(theme, 'ch-color-text'), main) >= 14, `${selector} body text matches Maso's reading contrast`)
+    for (const plane of ['ch-color-main-bg', 'ch-color-sidebar-bg', 'ch-color-surface']) {
+      for (const role of textRoles) {
+        assert.ok(
+          contrast(token(theme, role), token(theme, plane)) >= 4.5,
+          `${selector} --${role} meets WCAG AA on --${plane}`,
+        )
+      }
+    }
+    const ladder = textRoles.map(role => contrast(token(theme, role), main))
+    for (let index = 1; index < ladder.length; index += 1) {
+      assert.ok(ladder[index] < ladder[index - 1], `${selector} --${textRoles[index]} stays below --${textRoles[index - 1]}`)
+    }
+  }
+})
+
+test('Chat messages use the reading size while compact Markdown stays dense', async () => {
+  const [structured, markdown] = await Promise.all([
+    readFile(new URL('../src/components/StructuredPane.vue', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/MarkdownContent.vue', import.meta.url), 'utf8'),
+  ])
+  const chatMarkdown = styleBlock(structured, '.conversation-bubble :deep(.markdown-content.compact)')
+  const compactMarkdown = styleBlock(markdown, '.markdown-content.compact')
+
+  assert.match(chatMarkdown, /font-size: 14px;/)
+  assert.match(chatMarkdown, /line-height: 1\.65;/)
+  assert.match(compactMarkdown, /font-size: 12px;/)
 })
 
 test('selected, focus, and primary-action roles remain separate in key controls', async () => {

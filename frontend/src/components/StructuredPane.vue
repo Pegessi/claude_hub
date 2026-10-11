@@ -4387,6 +4387,13 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
+/* Chat reads at a larger size than compact Markdown in dense Workspace panels;
+   `.compact` keeps this rule more specific than MarkdownContent's own. */
+.conversation-bubble :deep(.markdown-content.compact) {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
 .conversation-bubble--user {
   position: relative;
   background: var(--ch-color-message-user-bg);
