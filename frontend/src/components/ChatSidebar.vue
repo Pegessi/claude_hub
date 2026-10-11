@@ -1329,6 +1329,10 @@ watch(mobileDrawerOpen, isOpen => {
   text-align: left;
 }
 
+.chat-sidebar__item.active .chat-sidebar__item-name {
+  font-weight: 600;
+}
+
 .chat-sidebar__item-time {
   font-size: var(--ch-font-size-xs);
   color: var(--ch-color-text-subtle);

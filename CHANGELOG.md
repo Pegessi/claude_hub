@@ -17,7 +17,7 @@
   compact Markdown.
 - Follow Maso's sidebar hierarchy: workspace headers use body text, unselected
   sessions use the muted role (7.6:1 in Dark) and brighten on hover, and the
-  selected session keeps its selected text color.
+  selected session keeps its selected text color with a semibold name.
 
 ### style(chat): refine session actions and Maso-inspired themes
 

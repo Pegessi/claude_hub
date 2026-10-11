@@ -91,6 +91,7 @@ test('Maso sidebar text puts workspaces first and dims unselected sessions', () 
   assert.match(chatSidebar, /\n\.chat-sidebar__item \{[^}]*color: var\(--ch-color-text-muted\);/)
   assert.match(chatSidebar, /\n\.chat-sidebar__item:hover \{[^}]*color: var\(--ch-color-text\);/)
   assert.match(chatSidebar, /\n\.chat-sidebar__item\.active \{[^}]*color: var\(--ch-color-text-selected\);/)
+  assert.match(chatSidebar, /\n\.chat-sidebar__item\.active \.chat-sidebar__item-name \{[^}]*font-weight: 600;/)
 })
 
 test('Terminal Status follows the Chat workspace order before terminal-only groups', () => {
