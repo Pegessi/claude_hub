@@ -511,11 +511,11 @@ onUnmounted(() => {
   --ch-color-border-strong: #3a3a40;
   --ch-color-border-hover: #4a4a52;
   --ch-color-border-selected: #5a9cf0;
-  --ch-color-text: #c7c7cc;
-  --ch-color-text-strong: #f1f1f3;
-  --ch-color-text-muted: #a0a0a8;
-  --ch-color-text-subtle: #74747d;
-  --ch-color-text-soft: #8a8a93;
+  --ch-color-text: #ececef;
+  --ch-color-text-strong: #f9f9fa;
+  --ch-color-text-muted: #adadb5;
+  --ch-color-text-subtle: #88888f;
+  --ch-color-text-soft: #9a9aa2;
   --ch-color-text-selected: #eef6ff;
   --ch-color-text-inverse: #ffffff;
   --ch-color-text-code: #dedee3;
@@ -650,8 +650,8 @@ onUnmounted(() => {
   --ch-color-text: #25282d;
   --ch-color-text-strong: #15171a;
   --ch-color-text-muted: #5e646c;
-  --ch-color-text-subtle: #7a818a;
-  --ch-color-text-soft: #676d75;
+  --ch-color-text-subtle: #6a7079;
+  --ch-color-text-soft: #62686f;
   --ch-color-text-selected: #523622;
   --ch-color-text-inverse: #ffffff;
   --ch-color-text-code: #1d2329;
