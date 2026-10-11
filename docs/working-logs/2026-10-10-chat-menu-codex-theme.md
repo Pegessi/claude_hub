@@ -61,13 +61,15 @@ drag reordering, and make genuinely active work easy to scan.
   brighter guidance instead of a dim system emoji.
 - Sidebar rows now use 7px vertical padding with 3px row gaps and 8px between
   workspace groups. Dragging a workspace header moves all manual sessions in
-  that cwd as one persisted block without changing any session cwd. Terminal
-  Status follows the Chat workspace sequence and appends terminal-only groups.
+  that cwd as one persisted block without changing any session cwd. Pinned
+  Chats keep their slots, so a workspace drag never rearranges the pinned
+  section. Terminal Status follows the Chat workspace sequence and appends
+  terminal-only groups.
 
 ## Validation
 
 - Focused interaction, store, theme, and semantic-color tests passed.
-- Full frontend unit suite after the working-light revision: `729 passed`; the added tests
+- Full frontend unit suite after the cross-review fixes: `730 passed`; the added tests
   cover delete success/failure, stale-pin cleanup, menu removal, palette tokens,
   accent contrast, separation of selected/focus/primary roles, and a repository-
   wide guard against translucent keyboard-focus rings.
@@ -108,6 +110,18 @@ drag reordering, and make genuinely active work easy to scan.
   revision showed why replacement was needed: its SVG particles used
   `offset-path` and never left the row corner, and its solid white head read as
   a hard segment.
+- A cross-review of the whole branch against `main` found two issues, both
+  fixed. First, the pulse animated the inherited `stroke-dashoffset` on a shared
+  SVG `<g>`. With two working rows in headless Chromium 145, the effect then
+  cost about 256-324 ms of main-thread work per second, 168-189 ms of it style
+  recalculation; hiding only the beam dropped this to about 2 ms, while the
+  composited stars and pool were negligible. Animating each rect directly keeps
+  the same picture and measured 111-118 ms per second with 36-39 ms of style
+  recalculation; the remainder is per-frame SVG repaint. Second, a workspace
+  drag moved pinned Chats with their cwd block and so reordered the pinned
+  section; a store test reproduced `[P2, P1]` before the fix. The review also
+  merged the branch with `origin/main` in an exported tree: only `CHANGELOG.md`
+  conflicted, and all 746 combined frontend tests plus typecheck passed.
 - Independent diff review found and fixed insufficient Dark primary-button
   contrast. The researched revision review then caught foreground accents reused
   as white-text fills and translucent focus rings; filled controls now use the
@@ -115,7 +129,7 @@ drag reordering, and make genuinely active work easy to scan.
   decorative halos retain their separate translucent role.
 - Final repository-wide `./scripts/verify.sh all` (pinned Node 24.21.0, uv
   0.12.15, Python 3.11.16, and pnpm 9.15.9) passed docs, backend formatting
-  and types, frontend lint and types, all 729 frontend tests, and the production
+  and types, frontend lint and types, all 730 frontend tests, and the production
   build. The backend suite reported `1808 passed, 1 skipped, 1 failed` because
   the unchanged `test_frontend_build_timeout_keeps_current_backend_and_dist`
   hit macOS

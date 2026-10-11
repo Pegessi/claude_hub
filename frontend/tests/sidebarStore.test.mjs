@@ -293,6 +293,30 @@ test('workspace reorder moves every manual tab in the cwd and saves complete ord
   )
 })
 
+test('workspace reorder leaves pinned chats and their pinned order in place', async t => {
+  const { store } = setup(t)
+  store.tabs = [
+    { id: 'pinned-a', cwd: '/a', session_kind: 'chat' },
+    { id: 'a-chat', cwd: '/a', session_kind: 'chat' },
+    { id: 'pinned-b', cwd: '/b', session_kind: 'chat' },
+    { id: 'b-chat', cwd: '/b', session_kind: 'chat' },
+  ]
+  store.pinnedChatIds = new Set(['pinned-a', 'pinned-b'])
+
+  store.reorderChatWorkspace('/b', '/a', 'before')
+  await store.saveTabOrder()
+
+  assert.deepEqual(
+    store.tabs.map(tab => tab.id),
+    ['pinned-a', 'b-chat', 'pinned-b', 'a-chat'],
+  )
+  const order = pinned => store.chatTabs
+    .filter(tab => store.pinnedChatIds.has(tab.id) === pinned)
+    .map(tab => tab.id)
+  assert.deepEqual(order(true), ['pinned-a', 'pinned-b'])
+  assert.deepEqual(order(false), ['b-chat', 'a-chat'])
+})
+
 test('mobile drawer open/close/toggle actions update visibility', t => {
   const { store } = setup(t)
   assert.equal(store.mobileDrawerOpen, false)

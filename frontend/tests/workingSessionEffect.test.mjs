@@ -57,7 +57,7 @@ test('stars spread across the row width instead of clumping', () => {
 })
 
 test('beam, light pool and stars share one orbit clock', () => {
-  assert.match(effect, /\.working-effect__orbit \{[^}]*animation: working-effect-orbit var\(--working-orbit\) linear infinite/)
+  assert.match(effect, /\.working-effect__beam rect \{[^}]*animation: working-effect-orbit var\(--working-orbit\) linear infinite/)
   assert.match(effect, /\.working-effect__pool \{[^}]*animation: working-effect-pool var\(--working-orbit\) linear infinite/)
   assert.match(effect, /animation-duration: var\(--working-orbit\);/)
   assert.match(effect, /animation-delay: calc\(var\(--working-orbit\) \* \(var\(--star-pass\) - 1\.03\)\);/)
@@ -93,6 +93,9 @@ test('the pulse peak rides the orbit phase without a solid head segment', () => 
   assert.match(effect, new RegExp(`@keyframes working-effect-orbit \\{\\s*to \\{ stroke-dashoffset: ${WORKING_BEAM_TAIL - 100}; \\}`))
   assert.match(effect, /v-for="\(dasharray, index\) in BEAM_LAYERS"[\s\S]*?:stroke-dasharray="dasharray"/)
   assert.doesNotMatch(effect, /working-effect__head|working-effect__trail/)
+  // The offset animates on each rect rather than being inherited from a group.
+  const template = effect.slice(0, effect.indexOf('<script'))
+  assert.doesNotMatch(template, /<g[\s>]/)
 })
 
 test('the working light is decorative and disappears for reduced motion', () => {

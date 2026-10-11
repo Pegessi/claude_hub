@@ -851,12 +851,16 @@ export const useTerminalStore = defineStore('terminal', () => {
     // Move every manual tab in the directory, including raw terminals. This
     // makes the persisted workspace order apply to both Chat and Terminal
     // Status while leaving Workspace-managed agents in their own tail block.
-    const reorderedManualTabs = moveCwdGroup(
-      manualTabs.value, sourceCwd, targetCwd, position,
+    // Pinned Chats keep their slots because the pinned section follows tab
+    // order, which a workspace drag must not rearrange.
+    const pinned = pinnedChatIds.value
+    const movableTabs = manualTabs.value.filter(tab => !pinned.has(tab.id))
+    const movedTabs = moveCwdGroup(movableTabs, sourceCwd, targetCwd, position)
+    if (movedTabs === movableTabs) return
+    let movedIndex = 0
+    const reorderedManualTabs = manualTabs.value.map(
+      tab => (pinned.has(tab.id) ? tab : movedTabs[movedIndex++]),
     )
-    if (reorderedManualTabs === manualTabs.value || reorderedManualTabs.every(
-      (tab, index) => tab === manualTabs.value[index],
-    )) return
     tabs.value = [...reorderedManualTabs, ...managedTabs.value]
     void saveTabOrder()
   }
