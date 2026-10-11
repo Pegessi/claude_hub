@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### fix(task): calm create recovery and keep reporter keys findable
+
+- **Add Task** no longer shows the recovery message during a normal create.
+  An unconfirmed request gets a titled notice, **Retry saved request**, and a
+  separate **Discard and start over** button.
+- `task register` and initiator `task handoff` store the reporter key at
+  `~/.claude_hub/reporter-keys/<task-id>.key` when no key file is given;
+  `task progress` finds it by Task ID and `task context` shows the path, so a
+  later thread can still report completion.
+
 ### perf(mobile): hold working-session light while the drawer is shut or dragged
 
 - The working-row beam and stars animate on the main thread every frame, and a
