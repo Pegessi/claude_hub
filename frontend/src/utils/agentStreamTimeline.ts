@@ -3,7 +3,7 @@ import { agentImagePathFromTool } from '@/utils/agentImage'
 import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
 import { formatClockTime, formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
 import type { SubagentView } from '@/utils/subagentTool'
-import { parseSubagent } from '@/utils/subagentTool'
+import { parseSubagent, subagentResultText } from '@/utils/subagentTool'
 
 export interface TimelineTool {
   key: string
@@ -1013,7 +1013,8 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       if (newStatus === 'failed' && tool.name === 'AskUserQuestion') {
         newStatus = 'cancelled'
       }
-      const newResult = payloadString(event, 'result')
+      const newResult = subagentResultText(tool.subagent, event.payload.result)
+        ?? payloadString(event, 'result')
       if (isNew || tool.status !== newStatus || tool.resultText !== newResult) {
         tool.status = newStatus
         tool.resultText = newResult

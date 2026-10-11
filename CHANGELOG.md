@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### fix(chat): keep sent images at full quality in a 1 GiB LRU and show Cursor sub-agent reports
+
+- A sent image is now shown from its original when it fits 8 MiB and an
+  8192px edge, instead of a 1024px JPEG squeezed into 512 KiB. Larger images
+  are scaled to fit and re-encoded as PNG, or high-quality WebP/JPEG when PNG
+  is too big. The provider still receives the original. The local cache now
+  holds these originals.
+- The Chat image cache evicts least recently used images first (reads refresh
+  recency at most hourly) within one 1 GiB pool by default, instead of
+  creation-order FIFO in 64 MiB per Chat and 512 MiB overall.
+- Cursor `Task` cards show the sub-agent type again (Cursor now sends it as
+  `{explore: {}}`) and the child's report from its completion record. The
+  Cursor CLI does not stream a sub-agent's own steps, so those still do not
+  appear live.
+- See the [image quality and Cursor sub-agent notes](docs/working-logs/2026-10-12-chat-image-quality-and-cursor-subagent.md).
+
 ### fix(task): calm create recovery and keep reporter keys findable
 
 - **Add Task** no longer shows the recovery message during a normal create.

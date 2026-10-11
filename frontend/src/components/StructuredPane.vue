@@ -216,6 +216,8 @@
                         :src="attachmentUrl(att.id)"
                         class="turn-attachment-img"
                         alt="attached image"
+                        loading="lazy"
+                        decoding="async"
                         @error="onAttachmentError($event, att)"
                       >
                     </button>
@@ -2291,9 +2293,9 @@ function triggerFilePicker() {
 
 const MAX_ATTACHMENTS = 10
 // Backend enforces a 40 MiB total decoded cap per send request (originals +
-// previews). We enforce it conservatively client-side: sum of original file
-// sizes plus 512 KiB reserved per selected preview must stay <= 40 MiB. The
-// backend remains authoritative.
+// previews; a preview that is the original itself counts once). Only images
+// over the stored-image edge get a separate re-encoded preview, so 512 KiB
+// per preview stays reserved as a margin. The backend remains authoritative.
 const MAX_TOTAL_REQUEST_BYTES = 40 * 1024 * 1024
 const PREVIEW_RESERVED_BYTES = 512 * 1024
 
