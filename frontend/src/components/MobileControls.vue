@@ -2,6 +2,7 @@
   <div
     v-if="isMobile"
     class="mobile-controls-overlay"
+    data-drawer-swipe-ignore
   >
     <Transition name="mobile-controls-panel">
       <div
