@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import sys
 import uuid
@@ -1420,18 +1421,42 @@ def _install_reporter_key(staged: Path, task_id: Any) -> Path:
     return final
 
 
+def _drop_superseded_default_key(task_id: str, current: Path) -> None:
+    """Remove the default key file once a handoff bound the Task to another file."""
+    if not _KEY_FILE_TASK_ID.fullmatch(task_id):
+        return
+    default = _default_reporter_key_file(task_id)
+    try:
+        if not default.exists() or default.resolve() == current.resolve():
+            return
+        default.unlink()
+    except OSError:
+        click.echo(f"Warning: {default} holds the previous execution's key; remove it.", err=True)
+
+
 def _settle_staged_key(
-    error: click.ClickException, exc: HubError, staged: Path | None, reuse_flags: str
+    error: click.ClickException,
+    exc: HubError,
+    staged: Path | None,
+    *,
+    fresh: bool,
+    retry_flags: Callable[[Path], str],
 ) -> click.ClickException:
-    """Drop a staged key the Hub rejected; keep it for retry when the outcome is unknown."""
+    """Drop a fresh staged key the Hub rejected; keep any key an earlier attempt sent."""
     if staged is None or not staged.exists():
         return error
     if exc.status is not None and 400 <= exc.status < 500:
-        staged.unlink(missing_ok=True)
-        return error
+        if fresh:
+            staged.unlink(missing_ok=True)
+            return error
+        return click.ClickException(
+            f"{error.message}. An earlier attempt with this key may have succeeded, so "
+            f"{shlex.quote(str(staged))} was kept; repeat that earlier request unchanged, "
+            "as its outcome-unknown message printed it."
+        )
     return click.ClickException(
         f"{error.message}. The outcome is unknown; to retry the same request, pass "
-        f"{reuse_flags.format(path=staged)}."
+        f"{retry_flags(staged)}."
     )
 
 
@@ -1720,7 +1745,10 @@ def task_register(
             _safe_task_operation_error("register", exc),
             exc,
             staged,
-            "--reporter-key-file {path} --reuse-reporter-key-file",
+            fresh=not reuse_reporter_key_file,
+            retry_flags=lambda path: (
+                f"--reporter-key-file {shlex.quote(str(path))} --reuse-reporter-key-file"
+            ),
         ) from exc
     if staged is not None:
         envelope = data if isinstance(data, dict) else {}
@@ -1838,7 +1866,8 @@ def task_progress(
     default=None,
     help=(
         "New private credential file for an initiator handoff. Defaults to replacing "
-        "~/.claude_hub/reporter-keys/<task-id>.key after the handoff succeeds."
+        "~/.claude_hub/reporter-keys/<task-id>.key after the handoff succeeds; another "
+        "file supersedes that default file, which is then removed."
     ),
 )
 @click.option(
@@ -1909,11 +1938,19 @@ def task_handoff(
             _safe_task_operation_error("handoff", exc),
             exc,
             staged,
-            f"--call-id {resolved_call_id} --new-reporter-key-file {{path}} "
-            "--reuse-new-reporter-key-file",
+            fresh=not reuse_new_reporter_key_file,
+            retry_flags=lambda path: (
+                f"--call-id {shlex.quote(resolved_call_id)} "
+                f"--new-reporter-key-file {shlex.quote(str(path))} "
+                "--reuse-new-reporter-key-file "
+                f"--expected-execution-epoch {expected_execution_epoch} "
+                f"--expected-progress-revision {expected_progress_revision}"
+            ),
         ) from exc
     if staged is not None:
         new_reporter_key_file = _install_reporter_key(staged, task_id)
+    elif execution_control == "initiator" and new_reporter_key_file is not None:
+        _drop_superseded_default_key(task_id, new_reporter_key_file)
     emit(
         _action_summary(data, reporter_key_file=new_reporter_key_file),
         cli_main.as_json(ctx),
