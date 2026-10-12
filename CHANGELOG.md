@@ -5,6 +5,13 @@
 
 ## Unreleased
 
+### fix(feishu): load Bot avatars under production COEP
+
+- Request trusted HTTPS Bot avatars with anonymous CORS mode so Feishu CDN
+  images remain loadable while the Chat page enforces `COEP: require-corp`.
+- Cover the CORS image contract in both the Bot-card and message-provenance
+  browser scenarios.
+
 ### style(feishu): separate the connection, brand and Bot identity icons
 
 - Restore the pane's original link glyph as the Feishu connection entry, and

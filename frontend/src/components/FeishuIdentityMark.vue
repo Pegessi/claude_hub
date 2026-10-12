@@ -6,6 +6,7 @@
       :key="props.identityKey"
       class="feishu-identity-mark__avatar"
       :src="props.avatarUrl || undefined"
+      crossorigin="anonymous"
       alt=""
       aria-hidden="true"
       @error="useBrandFallback"

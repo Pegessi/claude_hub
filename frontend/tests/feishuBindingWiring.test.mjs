@@ -53,6 +53,7 @@ test('the Feishu entry keeps the original status glyph and scopes Bot avatars to
   assert.doesNotMatch(panel, />飞<|>飞\s*<\/span>/)
   assert.match(panel, /class="connected-card__icon"[\s\S]{0,240}data-testid="feishu-binding-identity"/)
   assert.ok(identityMark.includes('failedIdentityKey'))
+  assert.match(identityMark, /crossorigin="anonymous"/)
   assert.match(panel, /return `\$\{props\.tabId\}\\n\$\{botId\}\\n\$\{avatarUrl\}`/)
   assert.ok(identityMark.includes('failedIdentityKey.value !== props.identityKey'))
   assert.ok(binding.includes("currentBot.value?.feishu_name||currentBot.value?.name||'Bot'"))
