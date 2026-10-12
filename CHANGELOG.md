@@ -90,7 +90,10 @@
   than permanently holding that FIFO. That reply is sent only after the exact
   provider turn confirms teardown; blocking approvals cannot be dropped from
   a saturated completion queue, failed terminal writes do not notify durable
-  observers, and failed/cancelled subscriber startup rolls back its queue.
+  observers, and failed/cancelled subscriber startup rolls back its queue. The
+  approval teardown also keeps waiting through the provider's interrupt grace
+  so Codex/TraeX can finish their kill/restart fallback before the FIFO is
+  released; only bounded process shutdown retains the outer cancellation cap.
 - See the [Feishu rich ingress notes](docs/working-logs/2026-10-12-feishu-rich-ingress.md).
 - See the [Feishu preview and long-turn notes](docs/working-logs/2026-10-12-feishu-preview-identity-and-long-turns.md).
 

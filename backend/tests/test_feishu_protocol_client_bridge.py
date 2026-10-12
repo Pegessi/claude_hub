@@ -583,6 +583,63 @@ async def test_external_chat_bridge_stops_turn_that_requires_web_interaction(
     assert unsubscribed == [(session.id, queue)]
 
 
+@pytest.mark.asyncio
+async def test_external_chat_bridge_waits_for_web_interaction_stop_past_shutdown_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    retirement_started = asyncio.Event()
+    allow_retirement = asyncio.Event()
+
+    class FakeManager:
+        async def subscribe_completion(self, _session_arg):
+            return queue
+
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-question-turn"
+            retirement_started.set()
+            await allow_retirement.wait()
+            return ExternalTurnRetirement.CANCELLED_MATCHING
+
+        def unsubscribe_completion(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(
+        tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        await queue.put(
+            AgentStreamEvent(
+                stream_sequence=2,
+                session_id=session.id,
+                tab_id=tab_id,
+                agent_type=AgentType.CODEX,
+                type=AgentStreamEventType.APPROVAL_REQUIRED,
+                turn_id=payload.client_turn_id,
+                call_id="question-1",
+                payload={"questions": [{"id": "q1", "question": "Continue?"}]},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_EXTERNAL_SHUTDOWN_CANCEL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait("tab-1", "provider text", "feishu-question-turn")
+    )
+    await retirement_started.wait()
+    await asyncio.sleep(0.03)
+    assert not task.done()
+
+    allow_retirement.set()
+    with pytest.raises(stream_api.ExternalInteractionRequired, match="approval or answer"):
+        await task
+
+
 @pytest.mark.parametrize(
     "retirement",
     [
@@ -972,7 +1029,7 @@ async def test_external_chat_bridge_cancellation_times_out_a_stalled_native_stop
         dispatched.set()
         return payload.client_turn_id
 
-    monkeypatch.setattr(stream_api, "_EXTERNAL_CANCEL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(stream_api, "_EXTERNAL_SHUTDOWN_CANCEL_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
     monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
     monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)

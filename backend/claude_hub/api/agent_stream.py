@@ -1386,7 +1386,7 @@ async def _send_to_native(
 
 
 CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
-_EXTERNAL_CANCEL_TIMEOUT_SECONDS = 10.0
+_EXTERNAL_SHUTDOWN_CANCEL_TIMEOUT_SECONDS = 10.0
 
 _ChatAdmissionGuard = Callable[[], AbstractAsyncContextManager[None]]
 
@@ -1644,11 +1644,13 @@ async def dispatch_tab_chat_and_wait(
                 # Feishu cannot submit the structured answer required by this
                 # provider turn. Leaving the card open would permanently own
                 # the per-Chat FIFO, so stop the exact turn and direct the user
-                # to Web Chat instead.
+                # to Web Chat instead. Provider-native interruption already
+                # bounds each RPC and may need its full grace period before a
+                # kill/restart fallback. Do not wrap the whole retirement in
+                # that same deadline or cancel the recovery just as it starts.
                 try:
-                    retirement = await asyncio.wait_for(
-                        manager.retire_external_turn(session, expected_turn_id=expected_turn_id),
-                        timeout=_EXTERNAL_CANCEL_TIMEOUT_SECONDS,
+                    retirement = await manager.retire_external_turn(
+                        session, expected_turn_id=expected_turn_id
                     )
                 except Exception as exc:
                     raise RuntimeError(
@@ -1690,7 +1692,7 @@ async def dispatch_tab_chat_and_wait(
             try:
                 retirement = await asyncio.wait_for(
                     manager.retire_external_turn(session, expected_turn_id=expected_turn_id),
-                    timeout=_EXTERNAL_CANCEL_TIMEOUT_SECONDS,
+                    timeout=_EXTERNAL_SHUTDOWN_CANCEL_TIMEOUT_SECONDS,
                 )
             except Exception:
                 logger.exception(
