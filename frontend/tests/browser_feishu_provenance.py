@@ -7,6 +7,7 @@ No Hub backend, provider, or real Feishu application is contacted.
 import asyncio
 import base64
 import json
+import re
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -18,6 +19,13 @@ from playwright.async_api import expect
 def origin(url):
     parsed = urlparse(url)
     return parsed.scheme, parsed.hostname, parsed.port
+
+
+PREVIEW_ID = "11111111111111111111111111111111"
+PREVIEW_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+    "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def active_binding(tab_id: str, created_at: str) -> dict:
@@ -92,13 +100,32 @@ def history():
     ]
     events = []
     for index, (turn_id, text, metadata) in enumerate(messages):
-        payload = {"summary": text, "attachments": [], "mode": "default"}
+        payload = {
+            "summary": text,
+            "attachments": (
+                [
+                    {
+                        "id": PREVIEW_ID,
+                        "mime_type": "image/png",
+                        "bytes": len(PREVIEW_PNG),
+                        "width": 1,
+                        "height": 1,
+                    }
+                ]
+                if turn_id == "feishu-turn"
+                else []
+            ),
+            "mode": "default",
+        }
         if metadata is not None:
             payload["metadata"] = metadata
         for event_type, body in (
             ("turn_started", payload),
             ("text_delta", {"text": "Fixture reply"}),
-            ("turn_completed", {"status": "completed", "assistant_text": "Fixture reply"}),
+            (
+                "turn_completed",
+                {"status": "completed", "assistant_text": "Fixture reply"},
+            ),
         ):
             events.append(
                 {
@@ -109,7 +136,7 @@ def history():
                     "type": event_type,
                     "run_epoch": index + 1,
                     "turn_id": turn_id,
-                    "message_id": f"{turn_id}:user" if event_type == "turn_started" else None,
+                    "message_id": (f"{turn_id}:user" if event_type == "turn_started" else None),
                     "payload": body,
                     "created_at": "2026-10-06T08:00:00Z",
                     "redacted": False,
@@ -168,7 +195,10 @@ async def main(browser_run: BrowserRun) -> None:
     try:
         async with browser_run.context(
             viewport={"width": 1280, "height": 900},
-            launch_args=["--disable-background-networking", "--disable-component-update"],
+            launch_args=[
+                "--disable-background-networking",
+                "--disable-component-update",
+            ],
         ) as context:
             try:
 
@@ -183,14 +213,8 @@ async def main(browser_run: BrowserRun) -> None:
                     path = url.path
                     query = parse_qs(url.query, keep_blank_values=True)
                     if request.url == "https://avatar.example.test/hub-bot.png":
-                        await route.fulfill(
-                            status=200,
-                            content_type="image/png",
-                            body=base64.b64decode(
-                                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
-                                "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-                            ),
-                        )
+                        report["blocked_external_requests"].append(request.url)
+                        await route.abort("failed")
                         return
                     if origin(request.url) != origin(base):
                         report["blocked_external_requests"].append(request.url)
@@ -200,6 +224,9 @@ async def main(browser_run: BrowserRun) -> None:
                         }:
                             report["unexpected_external_requests"].append(request.url)
                         await route.abort("blockedbyclient")
+                        return
+                    if path.endswith(f"/attachments/{PREVIEW_ID}"):
+                        await route.fulfill(status=200, content_type="image/png", body=PREVIEW_PNG)
                         return
                     if not path.startswith("/api/"):
                         if method in {"GET", "HEAD"}:
@@ -264,19 +291,28 @@ async def main(browser_run: BrowserRun) -> None:
                             submitted = json.loads(request.post_data or "")
                         except json.JSONDecodeError:
                             submitted = None
-                        if submitted != {"since_sequence": final_sequence, "timeout_seconds": 30}:
+                        if submitted != {
+                            "since_sequence": final_sequence,
+                            "timeout_seconds": 30,
+                        }:
                             report["unknown_api_requests"].append([method, request.url])
                             await route.fulfill(status=422, body="unexpected wait cursor")
                             return
                         await asyncio.sleep(0.25)
-                        body = {"events": [], "next_sequence": final_sequence, "has_more": False}
+                        body = {
+                            "events": [],
+                            "next_sequence": final_sequence,
+                            "has_more": False,
+                        }
                     elif (
                         method == "GET"
                         and path == f"{stream_base}/live"
                         and query == {"since_sequence": [str(final_sequence)]}
                     ):
                         await route.fulfill(
-                            status=200, content_type="text/event-stream", body=": mock\n\n"
+                            status=200,
+                            content_type="text/event-stream",
+                            body=": mock\n\n",
                         )
                         return
                     else:
@@ -288,7 +324,9 @@ async def main(browser_run: BrowserRun) -> None:
                         )
                         return
                     await route.fulfill(
-                        status=200, content_type="application/json", body=json.dumps(body)
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(body),
                     )
 
                 await context.route_web_socket("**/*", block_websocket)
@@ -316,9 +354,18 @@ async def main(browser_run: BrowserRun) -> None:
                     avatar = labels.locator(".conversation-message-source__mark img")
                     await expect(avatar).to_have_count(1)
                     await expect(avatar).to_have_attribute(
-                        "src", "https://avatar.example.test/hub-bot.png"
+                        "src", re.compile(r"^data:image/png;base64,")
                     )
                     await expect(avatar).to_be_visible()
+                    feishu_bubble = page.locator(
+                        '.conversation-bubble--user[data-message-origin="feishu"]'
+                    )
+                    preview = feishu_bubble.locator(".turn-attachment-img")
+                    await expect(preview).to_have_count(1)
+                    await expect(preview).to_be_visible()
+                    await expect(
+                        feishu_bubble.get_by_text("Preview unavailable", exact=True)
+                    ).to_have_count(0)
                     assert await page.evaluate(
                         "document.documentElement.scrollWidth <= innerWidth + 1"
                     )
@@ -349,7 +396,11 @@ async def main(browser_run: BrowserRun) -> None:
                         active_binding(tab["id"], tab["created_at"]),
                         "bound-current",
                     ),
-                    ("unbound-other", active_binding("ui-tab-other", tab["created_at"]), "unbound"),
+                    (
+                        "unbound-other",
+                        active_binding("ui-tab-other", tab["created_at"]),
+                        "unbound",
+                    ),
                     ("unbound", None, "unbound"),
                 ):
                     binding = current_binding
@@ -366,7 +417,7 @@ async def main(browser_run: BrowserRun) -> None:
                     status = page.get_by_test_id("feishu-binding-status")
                     await expect(status).to_have_attribute("data-state", expected_view)
                     await expect(status).to_have_text(
-                        "Connected with Provenance Bot"
+                        "Connected with Hub 助手"
                         if expected_view == "bound-current"
                         else "Not connected"
                     )
@@ -456,6 +507,9 @@ async def main(browser_run: BrowserRun) -> None:
                     "unexpected_external_requests"
                 ]
                 assert not report["page_errors"], report["page_errors"]
+                assert (
+                    "https://avatar.example.test/hub-bot.png" in report["blocked_external_requests"]
+                )
                 report["result"] = "PASS"
             except BaseException as exc:
                 report["result"] = "FAIL"
@@ -463,7 +517,9 @@ async def main(browser_run: BrowserRun) -> None:
                 if page is not None and not isinstance(exc, asyncio.CancelledError):
                     try:
                         await page.screenshot(
-                            path=str(output / "failure.png"), full_page=True, timeout=2000
+                            path=str(output / "failure.png"),
+                            full_page=True,
+                            timeout=2000,
                         )
                     except Exception:
                         pass

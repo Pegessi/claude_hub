@@ -21,12 +21,14 @@ from claude_hub.api.agent_stream import (
     CHAT_ERROR_REASON_HEADER,
     AgentStreamAttachment,
     ExternalDispatchRetired,
+    ExternalInteractionRequired,
     dispatch_tab_chat_and_wait,
 )
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services import ttyd_manager, workspace_manager
+from claude_hub.services.agent_stream.attachments import preview_within_cache_bounds
 from claude_hub.services.agent_stream.turn_source import (
     FEISHU_PROVIDER_TEXT_FORMAT_V2,
     format_feishu_provider_text_v2,
@@ -904,6 +906,7 @@ async def _event_attachments(
                 filename=f"feishu-image-{index}.{mime_type.split('/', 1)[1]}",
                 mime_type=mime_type,
                 data_url=f"data:{mime_type};base64,{encoded}",
+                preview_is_original=preview_within_cache_bounds(mime_type, content),
             )
         )
         used_bytes += len(content)
@@ -1365,6 +1368,16 @@ async def _dispatch_tab_batch(
             )
         except ExternalDispatchRetired:
             status = "retired"
+        except ExternalInteractionRequired:
+            target = batch[-1] if batch else leader
+            await _reply_if_current(
+                target.client,
+                target.event,
+                target.effective,
+                "本次处理需要在 Claude Hub 网页确认或回答，已停止等待。请在网页处理后重试。",
+                still_valid=lambda: _binding_still_routes(target.effective, target.binding),
+            )
+            status = "failed"
         except HTTPException as exc:
             logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
             reason = (
