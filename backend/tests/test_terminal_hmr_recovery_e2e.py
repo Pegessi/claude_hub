@@ -47,12 +47,26 @@ def _chromium_can_launch() -> bool:
     Launching is the only honest probe. ``executable_path`` names the full
     chromium build, while these tests run through the separate headless shell,
     so a path check would pass on a machine that still cannot start a browser.
+
+    The probe must use the same browser the tests will, which is the one
+    ``browser_type_launch_args`` selects. Probing Playwright's default cache
+    instead would skip the whole module on a machine that has an explicitly
+    selected browser and no default cache -- and ``terminal-hmr`` rejects a
+    run with skips, so that silent mismatch fails the target.
     """
     from playwright.sync_api import sync_playwright
 
+    launch_kwargs: dict[str, Any] = {}
+    selected = os.environ.get("CLAUDE_HUB_BROWSER_EXECUTABLE")
+    if selected:
+        executable = Path(selected)
+        if not executable.is_absolute() or not executable.is_file():
+            return False
+        launch_kwargs["executable_path"] = str(executable.resolve(strict=True))
+
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
+            browser = playwright.chromium.launch(**launch_kwargs)
             browser.close()
             return True
     except Exception:
@@ -66,6 +80,23 @@ pytestmark = pytest.mark.skipif(
 
 _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 _HARNESS_HTML = "/test/harness/terminal-hmr-harness.html"
+
+
+@pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args: dict[str, Any]) -> dict[str, Any]:
+    """Use the explicitly selected browser without restoring a user's cache/home."""
+    options = dict(browser_type_launch_args)
+    selected = os.environ.get("CLAUDE_HUB_BROWSER_EXECUTABLE")
+    if selected:
+        executable = Path(selected)
+        if (
+            not executable.is_absolute()
+            or not executable.is_file()
+            or not os.access(executable, os.X_OK)
+        ):
+            pytest.fail("CLAUDE_HUB_BROWSER_EXECUTABLE must name an existing absolute executable")
+        options["executable_path"] = str(executable.resolve(strict=True))
+    return options
 
 
 def _free_port() -> int:

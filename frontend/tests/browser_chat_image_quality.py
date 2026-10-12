@@ -11,14 +11,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import struct
 import sys
 import zlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from playwright.async_api import async_playwright, expect
+from playwright.async_api import expect
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "image-quality-tab"
 TURN = "cursor-turn"
@@ -36,7 +38,9 @@ def png(width: int, height: int) -> bytes:
         body = kind + data
         return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
 
-    rows = b"".join(b"\x00" + bytes((x * 7 + y) % 256 for x in range(width * 3)) for y in range(height))
+    rows = b"".join(
+        b"\x00" + bytes((x * 7 + y) % 256 for x in range(width * 3)) for y in range(height)
+    )
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
@@ -104,7 +108,7 @@ EVENTS = [
 ]
 
 
-async def main() -> None:
+async def main(browser_run: BrowserRun) -> None:
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
     base = sys.argv[1].rstrip("/")
@@ -121,10 +125,7 @@ async def main() -> None:
     ):
         raise SystemExit("Use an owned numeric-loopback review server")
     output = Path(sys.argv[2]).resolve()
-    browser_path = Path(sys.argv[3]).resolve(strict=True)
-    if not browser_path.is_file() or not os.access(browser_path, os.X_OK):
-        raise SystemExit("An existing executable browser is required")
-    output.mkdir(mode=0o700, parents=False, exist_ok=False)
+    # run_browser_main validates the browser and creates the output dir.
 
     tabs = [
         {
@@ -151,19 +152,13 @@ async def main() -> None:
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
     failure: BaseException | None = None
-    browser = context = page = None
+    page = None
 
-    async with async_playwright() as playwright:
+    async with browser_run.context(
+        viewport={"width": 1280, "height": 900},
+        launch_args=["--disable-background-networking", "--disable-component-update"],
+    ) as context:
         try:
-            browser = await playwright.chromium.launch(
-                headless=True,
-                executable_path=str(browser_path),
-                args=["--disable-background-networking", "--disable-component-update"],
-            )
-            context = await browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                service_workers="block",
-            )
 
             async def block_websocket(socket) -> None:
                 report["blocked_websockets"].append(socket.url)
@@ -222,14 +217,22 @@ async def main() -> None:
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
                     body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
                 elif path.endswith("/live"):
-                    await route.fulfill(status=200, content_type="text/event-stream", body=": mock\n\n")
+                    await route.fulfill(
+                        status=200, content_type="text/event-stream", body=": mock\n\n"
+                    )
                     return
                 elif path.endswith("/stream/send") and request.method == "POST":
                     payload = json.loads(request.post_data or "{}")
                     send_payloads.append(payload)
                     turn = payload["client_turn_id"]
-                    EVENTS.append(event(len(EVENTS), "turn_started", {"mode": "default"}, f"{turn}:user", turn))
-                    EVENTS.append(event(len(EVENTS), "turn_completed", {"status": "completed"}, turn, turn))
+                    EVENTS.append(
+                        event(
+                            len(EVENTS), "turn_started", {"mode": "default"}, f"{turn}:user", turn
+                        )
+                    )
+                    EVENTS.append(
+                        event(len(EVENTS), "turn_completed", {"status": "completed"}, turn, turn)
+                    )
                     body = {"ok": True}
                 elif path.endswith("/goal/current"):
                     body = None
@@ -245,7 +248,9 @@ async def main() -> None:
                         body=json.dumps({"detail": f"unmocked API: {request.method} {path}"}),
                     )
                     return
-                await route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+                await route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(body)
+                )
 
             await context.route_web_socket("**/*", block_websocket)
             await context.route("**/*", route_all)
@@ -268,7 +273,9 @@ async def main() -> None:
                 await file_input.set_input_files(
                     {"name": name, "mimeType": "image/png", "buffer": png(width, height)}
                 )
-                await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(1)
+                await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(
+                    1
+                )
                 send_button = page.locator(".composer-send-btn").first
                 await expect(send_button).to_have_text("Send", timeout=10000)
                 await expect(send_button).to_be_enabled(timeout=10000)
@@ -276,7 +283,9 @@ async def main() -> None:
                 await send_button.click()
                 deadline = asyncio.get_running_loop().time() + 10
                 expected = len(report["sends"]) + 1
-                while len(send_payloads) < expected and asyncio.get_running_loop().time() < deadline:
+                while (
+                    len(send_payloads) < expected and asyncio.get_running_loop().time() < deadline
+                ):
                     await asyncio.sleep(0.05)
                 assert len(send_payloads) == expected, send_payloads
                 [attachment] = send_payloads[-1]["attachments"]
@@ -310,13 +319,6 @@ async def main() -> None:
                     await page.screenshot(path=str(output / "failure.png"), full_page=True)
                 except Exception:
                     pass
-        finally:
-            try:
-                if context is not None:
-                    await context.close()
-            finally:
-                if browser is not None:
-                    await browser.close()
 
     (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
@@ -325,4 +327,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_browser_main(main)

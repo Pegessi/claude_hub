@@ -77,7 +77,7 @@ For a single backend regression, keep the same isolation and evidence handling:
 ./scripts/verify.sh backend-tests -- tests/test_task_attachment_transaction.py -q
 ```
 
-Focused runs record their selected arguments and do not count as a full pass.
+Focused runs record their selected arguments and do not count as a default-suite pass.
 The full backend type target checks both product code and tests. Formatting,
 types, backend behavior, frontend lint, frontend behavior, and frontend build
 report independently; passing one is not evidence that another passed.
@@ -104,6 +104,9 @@ UI checks must state whether they inspected real rendering, mocked APIs, or live
 external integration. A screenshot is evidence of the inspected state, not proof
 of every visual or interaction requirement. Requirements determine the expected
 behavior; existing implementation strings must not be the only test oracle.
+For UI changes, also run the explicit `browser-mocks` and `terminal-hmr` targets in
+[UI acceptance](docs/UI_ACCEPTANCE.md). They require an existing browser and owned
+runtimes; neither is included in `all` or proves live external integration.
 
 For docs-only changes, run `./scripts/verify.sh docs` and verify that the changed
 instructions match the current commands, paths, and module responsibilities.

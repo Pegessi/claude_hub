@@ -91,6 +91,129 @@ jobs:
       - name: Run unified frontend check
         run: ./scripts/verify.sh ${{ matrix.target }}
 
+  browser-mocks:
+    name: Browser / mocked UI acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/claude-hub-browsers
+      CLAUDE_HUB_VERIFY_ARTIFACT_ROOT: ${{ runner.temp }}/claude-hub-browser-evidence
+    steps:
+      - uses: actions/checkout@v4
+      - id: uv-version
+        name: Read declared uv version
+        run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
+      - name: Set up declared Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-test-version
+      - name: Set up declared uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ steps.uv-version.outputs.version }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install declared pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+      - name: Set up declared Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-test-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install locked backend dependencies
+        working-directory: ./backend
+        run: uv sync --frozen --extra dev --python "$(cat ../.python-test-version)"
+      - name: Install locked frontend dependencies
+        working-directory: ./frontend
+        run: pnpm install --frozen-lockfile
+      - name: Install the locked Playwright browser and system dependencies
+        working-directory: ./backend
+        run: uv run --offline --no-sync python -m playwright install --with-deps chromium
+      - name: Select the installed browser explicitly
+        working-directory: ./backend
+        run: |
+          browser="$(uv run --offline --no-sync python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+          test -x "$browser"
+          echo "CLAUDE_HUB_BROWSER_EXECUTABLE=$browser" >> "$GITHUB_ENV"
+      - name: Run isolated mocked browser acceptance
+        run: |
+          mkdir -p "$CLAUDE_HUB_VERIFY_ARTIFACT_ROOT"
+          timeout --signal=TERM --kill-after=60s 12m ./scripts/verify.sh browser-mocks
+      - name: Retain browser reports, screenshots and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-mock-evidence
+          path: ${{ env.CLAUDE_HUB_VERIFY_ARTIFACT_ROOT }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  terminal-hmr:
+    name: Browser / isolated terminal HMR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLAUDE_HUB_E2E_TIMEOUT_SCALE: "3"
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/claude-hub-browsers
+      CLAUDE_HUB_VERIFY_ARTIFACT_ROOT: ${{ runner.temp }}/claude-hub-hmr-evidence
+    steps:
+      - uses: actions/checkout@v4
+      - id: uv-version
+        name: Read declared uv version
+        run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
+      - name: Set up declared Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-test-version
+      - name: Set up declared uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ steps.uv-version.outputs.version }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install declared pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+      - name: Set up declared Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-test-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install locked backend dependencies
+        working-directory: ./backend
+        run: uv sync --frozen --extra dev --python "$(cat ../.python-test-version)"
+      - name: Install locked frontend dependencies
+        working-directory: ./frontend
+        run: pnpm install --frozen-lockfile
+      - name: Install the locked Playwright browser and system dependencies
+        working-directory: ./backend
+        run: uv run --offline --no-sync python -m playwright install --with-deps chromium
+      - name: Select the installed browser explicitly
+        working-directory: ./backend
+        run: |
+          browser="$(uv run --offline --no-sync python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+          test -x "$browser"
+          echo "CLAUDE_HUB_BROWSER_EXECUTABLE=$browser" >> "$GITHUB_ENV"
+      - name: Install terminal system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux ttyd
+      - name: Run isolated terminal HMR acceptance
+        run: |
+          mkdir -p "$CLAUDE_HUB_VERIFY_ARTIFACT_ROOT"
+          timeout --signal=TERM --kill-after=60s 15m ./scripts/verify.sh terminal-hmr
+      - name: Retain browser reports, screenshots and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-hmr-evidence
+          path: ${{ env.CLAUDE_HUB_VERIFY_ARTIFACT_ROOT }}
+          if-no-files-found: warn
+          retention-days: 7
+
   ttyd:
     name: Verify ttyd & tmux
     runs-on: ubuntu-latest
@@ -142,7 +265,7 @@ jobs:
           python-version-file: .python-test-version
       - id: uv-version
         name: Read declared uv version
-        run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(tr -d '[:space:]' < ../.uv-version)" >> "$GITHUB_OUTPUT"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:

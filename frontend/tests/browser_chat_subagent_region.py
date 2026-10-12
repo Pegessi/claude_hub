@@ -4,13 +4,13 @@ Run only with a dedicated Vite server, never 5173/8173:
   python tests/browser_chat_subagent_region.py http://127.0.0.1:5287 /tmp/subagent-region-ui [browser]
 """
 
-import asyncio
 import json
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from playwright.async_api import async_playwright, expect
+from browser_lifecycle import BrowserRun, run_browser_main
+from playwright.async_api import expect
 
 F6 = "01a0e38b-0000-7031-b97e-aaaaaaaaaaaa"
 FEC = "01a0e38b-0000-7031-b97e-bbbbbbbbbbbb"
@@ -127,11 +127,10 @@ EVENTS = [
 ]
 
 
-async def main():
-    if len(sys.argv) not in (3, 4):
+async def main(browser_run: BrowserRun) -> None:
+    if len(sys.argv) != 4:
         raise SystemExit(__doc__)
     base, output_arg = sys.argv[1:3]
-    executable = sys.argv[3] if len(sys.argv) == 4 else None
     parsed_base = urlparse(base)
     if (
         parsed_base.scheme != "http"
@@ -146,184 +145,186 @@ async def main():
     errors = []
     requests = []
     unknown_requests = []
+    blocked_external_requests = []
+    unexpected_external_requests = []
 
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True, executable_path=executable)
-        try:
-            context = await browser.new_context(
-                viewport={"width": 1280, "height": 900}, service_workers="block"
-            )
+    async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
 
-            async def block_websocket(socket):
-                await socket.close(code=1000, reason="mocked UI smoke")
+        async def block_websocket(socket):
+            await socket.close(code=1000, reason="mocked UI smoke")
 
-            async def api(route):
-                request = route.request
-                parsed = urlparse(request.url)
-                if (parsed.scheme, parsed.hostname, parsed.port) != (
-                    parsed_base.scheme,
-                    parsed_base.hostname,
-                    parsed_base.port,
-                ):
-                    await route.abort("blockedbyclient")
-                    return
-                path = parsed.path
-                if not path.startswith("/api/"):
-                    await route.continue_()
-                    return
-                requests.append((request.method, path))
-                if path == "/api/auth/check":
-                    body = {"auth_required": False, "user": None}
-                elif path == "/api/tabs":
-                    body = [
-                        {
-                            "id": TAB,
-                            "name": "Native sub-agents",
-                            "cwd": "/fixture/project",
-                            "agent_type": "codex",
-                            "session_kind": "chat",
-                            "port": 0,
-                            "is_active": True,
-                            "created_at": NOW,
-                        }
-                    ]
-                elif (
-                    path in {"/api/tabs/status", "/api/tabs/archived"}
-                    and request.method == "GET"
-                    and not parsed.query
-                ):
-                    body = []
-                elif path == "/api/env-presets" and request.method == "GET" and not parsed.query:
-                    body = {"custom_presets": [], "hidden_builtin_ids": []}
-                elif (
-                    path == "/api/feishu/bot/bots" and request.method == "GET" and not parsed.query
-                ):
-                    body = {
-                        "pool_revision": 0,
-                        "bots": [],
-                        "pool_editable": True,
-                        "deprecated_env": [],
-                        "focus_bot_id": None,
-                    }
-                elif path.endswith("/capabilities"):
-                    body = {
-                        "structured": True,
-                        "send_message": True,
-                        "supports_goals": False,
-                        "supports_images": False,
+        async def api(route):
+            request = route.request
+            parsed = urlparse(request.url)
+            if (parsed.scheme, parsed.hostname, parsed.port) != (
+                parsed_base.scheme,
+                parsed_base.hostname,
+                parsed_base.port,
+            ):
+                blocked_external_requests.append(request.url)
+                if parsed.scheme != "https" or parsed.hostname not in {
+                    "fonts.googleapis.com",
+                    "fonts.gstatic.com",
+                }:
+                    unexpected_external_requests.append(request.url)
+                await route.abort("blockedbyclient")
+                return
+            path = parsed.path
+            if not path.startswith("/api/"):
+                await route.continue_()
+                return
+            requests.append((request.method, path))
+            if path == "/api/auth/check":
+                body = {"auth_required": False, "user": None}
+            elif path == "/api/tabs":
+                body = [
+                    {
+                        "id": TAB,
+                        "name": "Native sub-agents",
+                        "cwd": "/fixture/project",
                         "agent_type": "codex",
-                        "supports_mode_switch": False,
+                        "session_kind": "chat",
+                        "port": 0,
+                        "is_active": True,
+                        "created_at": NOW,
                     }
-                elif path.endswith("/events"):
-                    body = {
-                        "events": EVENTS,
-                        "next_sequence": len(EVENTS),
-                        "has_more": False,
-                    }
-                elif path.endswith("/wait"):
-                    body = {
-                        "events": [],
-                        "next_sequence": len(EVENTS),
-                        "has_more": False,
-                    }
-                elif path.endswith("/live"):
-                    await route.fulfill(
-                        status=200,
-                        content_type="text/event-stream",
-                        body=": fixture\n\n",
-                    )
-                    return
-                elif path.endswith("/goal/current"):
-                    body = None
-                elif path.endswith("/view"):
-                    body = {"ok": True}
-                elif "network" in path:
-                    body = {"hostname": "fixture", "addresses": []}
-                else:
-                    unknown_requests.append((request.method, path))
-                    await route.fulfill(
-                        status=501,
-                        content_type="application/json",
-                        body=json.dumps({"detail": f"unmocked API: {request.method} {path}"}),
-                    )
-                    return
+                ]
+            elif (
+                path in {"/api/tabs/status", "/api/tabs/archived"}
+                and request.method == "GET"
+                and not parsed.query
+            ):
+                body = []
+            elif path.startswith("/api/tabs/sidebar-preferences"):
+                # Read, one-shot pin migration and per-tab pin updates all
+                # return the same shape; this scenario never depends on pins.
+                body = {"pinned_tab_ids": []}
+            elif path == "/api/env-presets" and request.method == "GET" and not parsed.query:
+                body = {"custom_presets": [], "hidden_builtin_ids": []}
+            elif path == "/api/feishu/bot/bots" and request.method == "GET" and not parsed.query:
+                body = {
+                    "pool_revision": 0,
+                    "bots": [],
+                    "pool_editable": True,
+                    "deprecated_env": [],
+                    "focus_bot_id": None,
+                }
+            elif path.endswith("/capabilities"):
+                body = {
+                    "structured": True,
+                    "send_message": True,
+                    "supports_goals": False,
+                    "supports_images": False,
+                    "agent_type": "codex",
+                    "supports_mode_switch": False,
+                }
+            elif path.endswith("/events"):
+                body = {
+                    "events": EVENTS,
+                    "next_sequence": len(EVENTS),
+                    "has_more": False,
+                }
+            elif path.endswith("/wait"):
+                body = {
+                    "events": [],
+                    "next_sequence": len(EVENTS),
+                    "has_more": False,
+                }
+            elif path.endswith("/live"):
                 await route.fulfill(
-                    status=200, content_type="application/json", body=json.dumps(body)
+                    status=200,
+                    content_type="text/event-stream",
+                    body=": fixture\n\n",
                 )
+                return
+            elif path.endswith("/goal/current"):
+                body = None
+            elif path.endswith("/view"):
+                body = {"ok": True}
+            elif "network" in path:
+                body = {"hostname": "fixture", "addresses": []}
+            else:
+                unknown_requests.append((request.method, path))
+                await route.fulfill(
+                    status=501,
+                    content_type="application/json",
+                    body=json.dumps({"detail": f"unmocked API: {request.method} {path}"}),
+                )
+                return
+            await route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
 
-            await context.route_web_socket("**/*", block_websocket)
-            await context.route("**/*", api)
-            page = await context.new_page()
-            page.on("pageerror", lambda error: errors.append(str(error)))
-            await page.goto(base + f"/?tab={TAB}")
+        await context.route_web_socket("**/*", block_websocket)
+        await context.route("**/*", api)
+        page = await context.new_page()
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(base + f"/?tab={TAB}")
 
-            turns = page.locator(".structured-turn")
-            await expect(turns).to_have_count(2)
-            old_turn = turns.nth(0)
-            next_turn = turns.nth(1)
-            await expect(next_turn).to_contain_text("Next question")
-            await expect(next_turn).to_contain_text("Next answer.")
-            await expect(next_turn.get_by_test_id("subagent-region")).to_have_count(0)
-            process_fold = old_turn.locator(".process-fold")
-            await expect(process_fold).to_have_count(1)
-            await expect(process_fold).to_have_attribute("aria-expanded", "false")
-            region = old_turn.get_by_test_id("subagent-region")
-            await expect(region).to_have_count(1)
-            await expect(region.locator(":scope > summary")).to_be_visible()
-            await expect(region.locator(".subagent-region-status.failed")).to_contain_text(
-                "1 个本轮失败"
-            )
-            assert not await region.evaluate("element => element.open")
-            await page.screenshot(path=str(output / "collapsed-desktop.png"), full_page=True)
-            await process_fold.click()
-            await expect(process_fold).to_have_attribute("aria-expanded", "true")
-            await expect(region).to_have_count(1)
-            await region.locator(":scope > summary").click()
-            rows = region.locator(".subagent-thread-row")
-            await expect(rows).to_have_count(2)
-            await expect(rows.nth(0)).to_have_attribute("data-subagent-thread-id", F6)
-            await expect(rows.nth(1)).to_have_attribute("data-subagent-thread-id", FEC)
-            await expect(rows.nth(0)).to_contain_text(F6)
-            await expect(rows.nth(1)).to_contain_text(FEC)
-            await expect(rows.nth(0)).to_contain_text("本轮失败")
-            await expect(rows.nth(1)).to_contain_text("本轮活动中")
-            await expect(region.locator(".subagent-region-status.failed")).to_contain_text(
-                "1 个本轮失败"
-            )
-            await expect(region.locator(".subagent-region-status.failed")).to_contain_text(
-                "1 个本轮活动中"
-            )
-            await expect(page.locator(".subagent-card--standalone")).to_have_count(0)
+        turns = page.locator(".structured-turn")
+        await expect(turns).to_have_count(2)
+        old_turn = turns.nth(0)
+        next_turn = turns.nth(1)
+        await expect(next_turn).to_contain_text("Next question")
+        await expect(next_turn).to_contain_text("Next answer.")
+        await expect(next_turn.get_by_test_id("subagent-region")).to_have_count(0)
+        process_fold = old_turn.locator(".process-fold")
+        await expect(process_fold).to_have_count(1)
+        await expect(process_fold).to_have_attribute("aria-expanded", "false")
+        region = old_turn.get_by_test_id("subagent-region")
+        await expect(region).to_have_count(1)
+        summary = region.locator(":scope > summary")
+        await expect(summary).to_be_visible()
+        await expect(summary.locator(".subagent-badge")).to_have_text("Native sub-agents")
+        await expect(summary.locator(".subagent-headline")).to_have_text("2 sub-agents")
+        await expect(summary.locator(".subagent-region-status.failed")).to_have_text(
+            "1 failed · 1 active"
+        )
+        assert not await region.evaluate("element => element.open")
+        await page.screenshot(path=str(output / "collapsed-desktop.png"), full_page=True)
+        await process_fold.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "true")
+        await expect(region).to_have_count(1)
+        await region.locator(":scope > summary").click()
+        rows = region.locator(".subagent-thread-row")
+        await expect(rows).to_have_count(2)
+        await expect(rows.nth(0)).to_have_attribute("data-subagent-thread-id", F6)
+        await expect(rows.nth(1)).to_have_attribute("data-subagent-thread-id", FEC)
+        await expect(rows.nth(0)).to_contain_text(F6)
+        await expect(rows.nth(1)).to_contain_text(FEC)
+        await expect(rows.nth(0).locator(":scope > summary .tool-status")).to_have_text("Failed")
+        await expect(rows.nth(1).locator(":scope > summary .tool-status")).to_have_text("Active")
+        await expect(page.locator(".subagent-card--standalone")).to_have_count(0)
 
-            await rows.nth(0).locator(":scope > summary").click()
-            await expect(rows.nth(0)).to_contain_text("初始任务")
-            await expect(rows.nth(0)).to_contain_text("inspect parser")
-            await expect(rows.nth(0)).to_contain_text("first child report")
-            await page.screenshot(path=str(output / "desktop.png"), full_page=True)
+        await rows.nth(0).locator(":scope > summary").click()
+        await expect(
+            rows.nth(0).locator(".subthread-launch .subthread-instruction-arrow")
+        ).to_have_text("→ Original task")
+        await expect(rows.nth(0).locator(".subthread-launch-result > summary")).to_have_text(
+            "Dispatch result"
+        )
+        await expect(rows.nth(0)).to_contain_text("inspect parser")
+        await expect(rows.nth(0)).to_contain_text("first child report")
+        await page.screenshot(path=str(output / "desktop.png"), full_page=True)
 
-            await page.set_viewport_size({"width": 390, "height": 844})
-            await page.wait_for_function(
-                "document.querySelector('.chat-sidebar').classList.contains('mobile-drawer')"
-            )
-            sidebar = page.locator(".chat-sidebar")
-            if "mobile-drawer--open" in (await sidebar.get_attribute("class") or ""):
-                await page.get_by_role("button", name="Close sessions", exact=True).click()
-            await page.wait_for_function(
-                "document.querySelector('.chat-sidebar').getBoundingClientRect().right <= 1"
-            )
-            await expect(region).to_be_visible()
-            for index in range(2):
-                bounds = await rows.nth(index).bounding_box()
-                assert bounds is not None and bounds["x"] >= 0
-                assert bounds["x"] + bounds["width"] <= 391
-            await page.screenshot(path=str(output / "mobile.png"), full_page=True)
-            assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
-            assert not unknown_requests, unknown_requests
-            assert not errors, errors
-            await context.close()
-
-        finally:
-            await browser.close()
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.wait_for_function(
+            "document.querySelector('.chat-sidebar').classList.contains('mobile-drawer')"
+        )
+        sidebar = page.locator(".chat-sidebar")
+        if "mobile-drawer--open" in (await sidebar.get_attribute("class") or ""):
+            await page.get_by_role("button", name="Close sessions", exact=True).click()
+        await page.wait_for_function(
+            "document.querySelector('.chat-sidebar').getBoundingClientRect().right <= 1"
+        )
+        await expect(region).to_be_visible()
+        for index in range(2):
+            bounds = await rows.nth(index).bounding_box()
+            assert bounds is not None and bounds["x"] >= 0
+            assert bounds["x"] + bounds["width"] <= 391
+        await page.screenshot(path=str(output / "mobile.png"), full_page=True)
+        assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        assert not unknown_requests, unknown_requests
+        assert not unexpected_external_requests, unexpected_external_requests
+        assert not errors, errors
 
     report = {
         "result": "PASS",
@@ -337,6 +338,8 @@ async def main():
         ],
         "api_requests": len(requests),
         "unknown_requests": unknown_requests,
+        "blocked_external_requests": blocked_external_requests,
+        "unexpected_external_requests": unexpected_external_requests,
         "page_errors": errors,
         "boundary": "All API requests mocked; no backend or provider request.",
     }
@@ -344,4 +347,5 @@ async def main():
     print(json.dumps(report, indent=2))
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    run_browser_main(main)
