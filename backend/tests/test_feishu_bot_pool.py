@@ -29,7 +29,11 @@ from claude_hub.models import (
 from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 from claude_hub.services.agent_stream.native import ProviderSession
 from claude_hub.services.agent_stream.tailer import SessionTailer
-from claude_hub.services.feishu_bot import FeishuBotClient, FeishuBotConfig
+from claude_hub.services.feishu_bot import (
+    FeishuBotClient,
+    FeishuBotConfig,
+    FeishuBotProfile,
+)
 from claude_hub.services.feishu_bot_pool import (
     ENV_BOT_ID,
     LEGACY_BOT_ID,
@@ -188,7 +192,9 @@ def test_one_bot_holds_at_most_one_binding(pool: FeishuBotPoolStore) -> None:
         )
 
 
-def test_one_chat_tab_is_bound_at_most_once_across_the_pool(pool: FeishuBotPoolStore) -> None:
+def test_one_chat_tab_is_bound_at_most_once_across_the_pool(
+    pool: FeishuBotPoolStore,
+) -> None:
     first = pool.create_bot(name="One", config=_config("app-1"), environ={})
     second = pool.create_bot(name="Two", config=_config("app-2"), environ={})
     _pair(pool, first, tab_id="tab-1", environ={})
@@ -294,6 +300,29 @@ def test_environment_app_change_revokes_binding_and_allows_repairing(
         environ=moved,
     )
     assert code.startswith("CH-")
+
+
+def test_environment_app_change_clears_the_previous_official_profile(
+    pool: FeishuBotPoolStore,
+) -> None:
+    original = _env("env-app")
+    pool.snapshot(original)
+    entry = pool.snapshot(original).get(ENV_BOT_ID)
+    assert entry is not None
+    pool.update_profile(
+        ENV_BOT_ID,
+        feishu_name="Bot A",
+        feishu_avatar_url="https://example.test/a.png",
+        expected_revision=entry.revision,
+        environ=original,
+    )
+
+    changed = pool.snapshot(_env("env-app-next")).get(ENV_BOT_ID)
+
+    assert changed is not None
+    assert changed.app_id == "env-app-next"
+    assert changed.feishu_name is None
+    assert changed.feishu_avatar_url is None
 
 
 def test_environment_app_restore_does_not_resurrect_the_old_binding(
@@ -742,6 +771,38 @@ def _message(app_id: str, text: str, now: float, *, message_id: str = "om-1") ->
     )
 
 
+def _post_message(app_id: str, now: float, *, message_id: str = "om-post") -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        header=SimpleNamespace(event_id=f"ev-{message_id}", app_id=app_id),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user", sender_id=SimpleNamespace(open_id="ou-sender")
+            ),
+            message=SimpleNamespace(
+                chat_type="p2p",
+                message_type="post",
+                message_id=message_id,
+                create_time=str(int(now * 1000)),
+                chat_id="oc-1",
+                content=json.dumps(
+                    {
+                        "title": "看图",
+                        "content": [
+                            [
+                                {"tag": "text", "text": "分析这张图 "},
+                                {"tag": "img", "image_key": "img_v3_input"},
+                            ]
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        ),
+    )
+
+
 class _Wire:
     """Fake Feishu transport that keeps the real client logic intact."""
 
@@ -754,6 +815,7 @@ class _Wire:
         self.fail_reaction_create = False
         self.fail_reaction_delete = False
         self.token_calls = 0
+        self.message_images = {("om-post", "img_v3_input"): b"\x89PNG\r\n\x1a\nimage-bytes"}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/tenant_access_token/internal"):
@@ -761,10 +823,30 @@ class _Wire:
             return httpx.Response(
                 200, json={"code": 0, "tenant_access_token": "t-1", "expire": 7200}
             )
+        if request.url.path == "/open-apis/bot/v3/info/":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "bot": {
+                        "app_name": "Test Bot",
+                        "avatar_url": "https://example.test/bot.png",
+                    },
+                },
+            )
         if request.url.path.endswith("/reply"):
             self.replies.append(json.loads(request.content))
             self.reply_message_ids.append(request.url.path.split("/")[-2])
             return httpx.Response(200, json={"code": 0})
+        if request.method == "GET" and "/resources/" in request.url.path:
+            message_id, image_key = (
+                request.url.path.split("/")[-3],
+                request.url.path.split("/")[-1],
+            )
+            content = self.message_images.get((message_id, image_key))
+            if content is not None:
+                return httpx.Response(200, content=content, headers={"Content-Type": "image/png"})
+            return httpx.Response(404)
         path = request.url.path.split("/")
         if request.method == "POST" and request.url.path.endswith("/reactions"):
             message_id = path[-2]
@@ -827,7 +909,9 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: Clock, wire: _Wi
     )
     monkeypatch.setattr(bot_api, "_pool", store)
     monkeypatch.setattr(
-        bot_api, "_dedup", FeishuMessageDedupStore(path=tmp_path / "feishu_bot.json", now=clock)
+        bot_api,
+        "_dedup",
+        FeishuMessageDedupStore(path=tmp_path / "feishu_bot.json", now=clock),
     )
     monkeypatch.setattr(bot_api, "_bot_gates", {})
     monkeypatch.setattr(bot_api, "_tab_dispatch_queues", {})
@@ -914,6 +998,347 @@ def test_continuous_message_burst_default_max_wait_is_five_seconds() -> None:
     assert bot_api._MESSAGE_COALESCE_MAX_WAIT_SECONDS == 5.0
 
 
+def test_rich_post_dispatches_images_with_official_bot_provenance(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(
+            name="Internal label",
+            config=_config("app-1"),
+            feishu_name="Hub 助手",
+            feishu_avatar_url="https://example.test/bot.png",
+            environ={},
+        )
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        dispatched: list[dict[str, Any]] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **kwargs):
+            async with admission_guard():
+                dispatched.append(kwargs)
+            return "收到图片"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        await bot_api._handle_sdk_event(bot_id, _post_message("app-1", clock.value))
+
+        assert len(dispatched) == 1
+        assert dispatched[0]["visible_text"] == "# 看图\n\n分析这张图 【图片 1】"
+        attachments = dispatched[0]["attachments"]
+        assert len(attachments) == 1
+        assert attachments[0].mime_type == "image/png"
+        assert attachments[0].data_url.startswith("data:image/png;base64,")
+        assert (
+            dispatched[0]["turn_metadata"]["feishu"]
+            | {
+                "bot_name": "Hub 助手",
+                "bot_avatar_url": "https://example.test/bot.png",
+            }
+            == dispatched[0]["turn_metadata"]["feishu"]
+        )
+
+    asyncio.run(scenario())
+
+
+def test_profile_refresh_survives_a_concurrent_bot_rename(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        profile_started = asyncio.Event()
+        release_profile = asyncio.Event()
+        dispatched: list[dict[str, Any]] = []
+
+        async def delayed_profile(_client) -> FeishuBotProfile:
+            profile_started.set()
+            await release_profile.wait()
+            return FeishuBotProfile(
+                name="Hub Assistant",
+                avatar_url="https://example.test/bot.png",
+            )
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **kwargs):
+            async with admission_guard():
+                dispatched.append(kwargs)
+            return "received"
+
+        monkeypatch.setattr(FeishuBotClient, "get_bot_profile", delayed_profile)
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        route = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id,
+                _message(
+                    "app-1",
+                    "hello",
+                    clock.value,
+                    message_id="om-profile-rename",
+                ),
+            )
+        )
+        await profile_started.wait()
+        entry = api.pool.snapshot({}).get(bot_id)
+        assert entry is not None
+        api.pool.update_bot(
+            bot_id,
+            name="Renamed",
+            expected_revision=entry.revision,
+            environ={},
+        )
+        release_profile.set()
+        await route
+
+        assert len(dispatched) == 1
+        assert (
+            dispatched[0]["turn_metadata"]["feishu"]
+            | {
+                "bot_name": "Hub Assistant",
+                "bot_avatar_url": "https://example.test/bot.png",
+            }
+            == dispatched[0]["turn_metadata"]["feishu"]
+        )
+        current = api.pool.effective(bot_id, {})
+        assert current.feishu_name == "Hub Assistant"
+        assert current.feishu_avatar_url == "https://example.test/bot.png"
+
+    asyncio.run(scenario())
+
+
+def test_failed_profile_refresh_survives_a_concurrent_bot_rename(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        profile_started = asyncio.Event()
+        release_profile = asyncio.Event()
+        dispatched: list[dict[str, Any]] = []
+
+        async def failed_profile(_client) -> FeishuBotProfile:
+            profile_started.set()
+            await release_profile.wait()
+            raise httpx.HTTPError("profile unavailable")
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **kwargs):
+            async with admission_guard():
+                dispatched.append(kwargs)
+            return "received"
+
+        monkeypatch.setattr(FeishuBotClient, "get_bot_profile", failed_profile)
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        route = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id,
+                _message(
+                    "app-1",
+                    "hello",
+                    clock.value,
+                    message_id="om-profile-failure-rename",
+                ),
+            )
+        )
+        await profile_started.wait()
+        entry = api.pool.snapshot({}).get(bot_id)
+        assert entry is not None
+        api.pool.update_bot(
+            bot_id,
+            name="Renamed fallback",
+            expected_revision=entry.revision,
+            environ={},
+        )
+        release_profile.set()
+        await route
+
+        assert len(dispatched) == 1
+        assert dispatched[0]["turn_metadata"]["feishu"]["bot_name"] == ("Renamed fallback")
+        assert dispatched[0]["turn_metadata"]["feishu"]["bot_avatar_url"] is None
+
+    asyncio.run(scenario())
+
+
+def test_failed_profile_refresh_reuses_a_concurrently_persisted_profile(
+    api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="Local label", config=_config("app-1"), environ={})
+        effective = api.pool.effective(bot_id, {})
+        failed_profile_started = asyncio.Event()
+        successful_profile_persisted = asyncio.Event()
+
+        class SuccessfulProfileClient:
+            async def get_bot_profile(self) -> FeishuBotProfile:
+                await failed_profile_started.wait()
+                return FeishuBotProfile(
+                    name="Official name",
+                    avatar_url="https://example.test/official.png",
+                )
+
+        class FailedProfileClient:
+            async def get_bot_profile(self) -> FeishuBotProfile:
+                failed_profile_started.set()
+                await successful_profile_persisted.wait()
+                raise httpx.HTTPError("profile unavailable")
+
+        success_task = asyncio.create_task(
+            bot_api._refresh_missing_profile(
+                effective, cast(FeishuBotClient, SuccessfulProfileClient())
+            )
+        )
+        failure_task = asyncio.create_task(
+            bot_api._refresh_missing_profile(
+                effective, cast(FeishuBotClient, FailedProfileClient())
+            )
+        )
+        successful = await success_task
+        successful_profile_persisted.set()
+        failed = await failure_task
+
+        assert successful.feishu_name == "Official name"
+        assert successful.feishu_avatar_url == "https://example.test/official.png"
+        assert failed.feishu_name == "Official name"
+        assert failed.feishu_avatar_url == "https://example.test/official.png"
+        assert api.pool.is_current(successful, {})
+        assert api.pool.is_current(failed, {})
+
+    asyncio.run(scenario())
+
+
+def test_rich_post_keeps_text_and_marks_an_unavailable_image(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        dispatched: list[dict[str, Any]] = []
+
+        async def dispatch(_tab_id, text, _turn_id, *, admission_guard, **kwargs):
+            async with admission_guard():
+                dispatched.append({"text": text, **kwargs})
+            return "请重新发送图片"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        api.wire.message_images.clear()
+        await bot_api._handle_sdk_event(bot_id, _post_message("app-1", clock.value))
+
+        assert len(dispatched) == 1
+        assert dispatched[0]["attachments"] == []
+        assert "以下图片未能转发给模型：图片 1" in dispatched[0]["visible_text"]
+        assert "请勿假设已经看到这些图片" in dispatched[0]["text"]
+        assert api.wire.reply_texts() == ["请重新发送图片"]
+
+    asyncio.run(scenario())
+
+
+def test_coalesced_rich_posts_share_the_native_attachment_budget(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.01)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.04)
+        monkeypatch.setattr(bot_api, "_MAX_BATCH_IMAGE_ATTACHMENTS", 1)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        dispatched: list[list[Any]] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, attachments, **_kwargs):
+            async with admission_guard():
+                dispatched.append(attachments)
+            return "收到"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        api.wire.message_images[("om-post-1", "img_v3_input")] = b"\x89PNG\r\n\x1a\nfirst"
+        api.wire.message_images[("om-post-2", "img_v3_input")] = b"\x89PNG\r\n\x1a\nsecond"
+        await asyncio.gather(
+            bot_api._handle_sdk_event(
+                bot_id, _post_message("app-1", clock.value, message_id="om-post-1")
+            ),
+            bot_api._handle_sdk_event(
+                bot_id, _post_message("app-1", clock.value, message_id="om-post-2")
+            ),
+        )
+
+        assert len(dispatched) == 1
+        assert len(dispatched[0]) == 1
+        assert dispatched[0][0].filename == "feishu-image-1.png"
+
+    asyncio.run(scenario())
+
+
+def test_profile_refresh_cancellation_releases_the_message_claim(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        started = asyncio.Event()
+
+        async def blocked_profile(_client, effective):
+            del effective
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(bot_api, "_refresh_missing_profile", blocked_profile)
+        payload = _message("app-1", "hello", clock.value, message_id="om-profile-cancel")
+        route = asyncio.create_task(bot_api._handle_sdk_event(bot_id, payload))
+        await started.wait()
+        route.cancel()
+        with pytest.raises(bot_api.ExternalDispatchRetired):
+            await route
+
+        key = bot_api.dedup_key(bot_id, "om-profile-cancel")
+        assert bot_api._dedup.claim(key)
+        bot_api._dedup.release(key)
+
+    asyncio.run(scenario())
+
+
+def test_image_prefetch_cancellation_releases_the_whole_unstarted_batch(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.01)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.04)
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Bot",
+            environ={},
+        )
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        started = asyncio.Event()
+        dispatched = False
+
+        async def blocked_attachments(*_args, **_kwargs):
+            started.set()
+            await asyncio.Future()
+
+        async def dispatch(*_args, **_kwargs):
+            nonlocal dispatched
+            dispatched = True
+            return "unexpected"
+
+        monkeypatch.setattr(bot_api, "_event_attachments", blocked_attachments)
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        payloads = [
+            _post_message("app-1", clock.value, message_id=f"om-prefetch-{index}")
+            for index in (1, 2)
+        ]
+        routes = [
+            asyncio.create_task(bot_api._handle_sdk_event(bot_id, payload)) for payload in payloads
+        ]
+        await started.wait()
+        for route in routes:
+            route.cancel()
+        results = await asyncio.gather(*routes, return_exceptions=True)
+
+        assert dispatched is False
+        assert all(isinstance(result, asyncio.CancelledError) for result in results)
+        for index in (1, 2):
+            key = bot_api.dedup_key(bot_id, f"om-prefetch-{index}")
+            assert bot_api._dedup.claim(key)
+            bot_api._dedup.release(key)
+
+    asyncio.run(scenario())
+
+
 def test_short_bound_message_burst_is_coalesced_in_arrival_order(
     api, clock: Clock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -935,7 +1360,8 @@ def test_short_bound_message_burst_is_coalesced_in_arrival_order(
         tasks = [
             asyncio.create_task(
                 bot_api._handle_sdk_event(
-                    bot_id, _message("app-1", text, clock.value, message_id=f"om-{index}")
+                    bot_id,
+                    _message("app-1", text, clock.value, message_id=f"om-{index}"),
                 )
             )
             for index, text in enumerate(("one", "two", "three"), start=1)
@@ -991,7 +1417,10 @@ def test_messages_arriving_during_a_turn_form_one_followup_without_interrupting(
                     bot_id, _message("app-1", text, clock.value, message_id=message_id)
                 )
             )
-            for text, message_id in (("more context", "om-more"), ("final detail", "om-final"))
+            for text, message_id in (
+                ("more context", "om-more"),
+                ("final detail", "om-final"),
+            )
         ]
         await asyncio.sleep(0.04)
         assert submitted == ["initial"], "a follow-up must not interrupt the active model turn"
@@ -1040,13 +1469,15 @@ def test_rejected_batch_does_not_mark_the_first_admitted_turn_as_followup(
         monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
         first = asyncio.create_task(
             bot_api._handle_sdk_event(
-                bot_id, _message("app-1", "rejected", clock.value, message_id="om-rejected")
+                bot_id,
+                _message("app-1", "rejected", clock.value, message_id="om-rejected"),
             )
         )
         await first_attempted.wait()
         second = asyncio.create_task(
             bot_api._handle_sdk_event(
-                bot_id, _message("app-1", "first admitted", clock.value, message_id="om-admitted")
+                bot_id,
+                _message("app-1", "first admitted", clock.value, message_id="om-admitted"),
             )
         )
         for _ in range(100):
@@ -1087,7 +1518,8 @@ def test_continuous_message_burst_is_dispatched_at_the_max_wait(
         tasks = [
             asyncio.create_task(
                 bot_api._handle_sdk_event(
-                    bot_id, _message("app-1", "first", clock.value, message_id="om-max-0")
+                    bot_id,
+                    _message("app-1", "first", clock.value, message_id="om-max-0"),
                 )
             )
         ]
@@ -1292,7 +1724,12 @@ def test_bound_message_queue_has_an_explicit_capacity_response(
                 asyncio.create_task(
                     bot_api._handle_sdk_event(
                         bot_id,
-                        _message("app-1", "waiting", clock.value, message_id=f"om-wait-{index}"),
+                        _message(
+                            "app-1",
+                            "waiting",
+                            clock.value,
+                            message_id=f"om-wait-{index}",
+                        ),
                     )
                 )
             )
@@ -1390,7 +1827,8 @@ def test_reaction_network_steps_do_not_delay_native_dispatch(
         monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
         route = asyncio.create_task(
             bot_api._handle_sdk_event(
-                bot_id, _message("app-1", "hello", clock.value, message_id="om-reactions")
+                bot_id,
+                _message("app-1", "hello", clock.value, message_id="om-reactions"),
             )
         )
 
@@ -1577,7 +2015,8 @@ def test_dispatch_queue_cancellation_releases_waiters_and_registry(
         await started.wait()
         waiting = asyncio.create_task(
             bot_api._handle_sdk_event(
-                bot_id, _message("app-1", "waiting", clock.value, message_id="om-waiting")
+                bot_id,
+                _message("app-1", "waiting", clock.value, message_id="om-waiting"),
             )
         )
         for _ in range(100):
@@ -1599,7 +2038,8 @@ def test_dispatch_queue_cancellation_releases_waiters_and_registry(
         # replay with the same message ID must be admitted and queued again.
         replayed = asyncio.create_task(
             bot_api._handle_sdk_event(
-                bot_id, _message("app-1", "waiting", clock.value, message_id="om-waiting")
+                bot_id,
+                _message("app-1", "waiting", clock.value, message_id="om-waiting"),
             )
         )
         for _ in range(100):
@@ -1712,7 +2152,11 @@ def test_other_peoples_binding_hides_chat_and_owner(api, clock: Clock) -> None:
     ],
 )
 async def test_owner_authorization_matches_the_hub_session_rule(
-    monkeypatch: pytest.MonkeyPatch, open_ids: str, emails: str, open_id: str, email: str
+    monkeypatch: pytest.MonkeyPatch,
+    open_ids: str,
+    emails: str,
+    open_id: str,
+    email: str,
 ) -> None:
     """Pin the Bot-side predicate against Hub's own whitelist behaviour.
 
@@ -2084,5 +2528,9 @@ def test_unbinding_revokes_outstanding_codes(pool: FeishuBotPoolStore) -> None:
     for code in codes:
         with pytest.raises(FeishuBindingCodeError):
             pool.claim_code(
-                bot_id, code=code, sender_open_id="ou-sender", chat_id="oc-1", environ={}
+                bot_id,
+                code=code,
+                sender_open_id="ou-sender",
+                chat_id="oc-1",
+                environ={},
             )

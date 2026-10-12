@@ -20,6 +20,13 @@ from claude_hub.services.runtime_isolation import resolve_runtime_home
 _EVENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _LEGACY_CLAIM_RETENTION_SECONDS = 60 * 60
 _MAX_REPLY_CHARS = 20_000
+_MAX_INBOUND_IMAGE_BYTES = 20 * 1024 * 1024
+_IMAGE_MIME_PREFIXES = {
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/gif": (b"GIF87a", b"GIF89a"),
+    "image/webp": (b"RIFF",),
+}
 
 
 class FeishuBotError(RuntimeError):
@@ -28,6 +35,14 @@ class FeishuBotError(RuntimeError):
 
 class FeishuBotConfigurationError(FeishuBotError):
     """Raised when required Bot settings are absent or inconsistent."""
+
+
+@dataclass(frozen=True)
+class FeishuBotProfile:
+    """Public identity returned by Feishu for the authenticated Bot app."""
+
+    name: str
+    avatar_url: str | None
 
 
 @dataclass(frozen=True)
@@ -72,7 +87,7 @@ class FeishuBinding:
 
 @dataclass(frozen=True)
 class FeishuMessageEvent:
-    """Validated text message fields from ``im.message.receive_v1``."""
+    """Validated message fields from ``im.message.receive_v1``."""
 
     event_id: str
     message_id: str
@@ -81,6 +96,7 @@ class FeishuMessageEvent:
     chat_id: str
     text: str
     message_created_at_ms: int
+    image_keys: tuple[str, ...] = ()
 
 
 class FeishuBotClient:
@@ -237,10 +253,94 @@ class FeishuBotClient:
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected deleting the Bot reaction")
 
-    async def validate_credentials(self) -> None:
-        """Validate app credentials without returning or persisting the token."""
+    async def get_bot_profile(self) -> FeishuBotProfile:
+        """Return the authenticated Bot's Feishu-managed name and avatar."""
 
-        await self.get_tenant_token()
+        token = await self.get_tenant_token()
+        response = await self._request(
+            "GET",
+            "/open-apis/bot/v3/info/",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        bot = payload.get("bot") if isinstance(payload, dict) else None
+        name = bot.get("app_name") if isinstance(bot, dict) else None
+        avatar_url = bot.get("avatar_url") if isinstance(bot, dict) else None
+        if payload.get("code") != 0 or not isinstance(name, str) or not name.strip():
+            raise FeishuBotError("Feishu rejected the Bot info request")
+        if avatar_url is not None and (
+            not isinstance(avatar_url, str)
+            or not avatar_url.strip()
+            or not avatar_url.startswith("https://")
+        ):
+            avatar_url = None
+        return FeishuBotProfile(
+            name=name.strip(),
+            avatar_url=avatar_url.strip() if isinstance(avatar_url, str) else None,
+        )
+
+    async def validate_credentials(self) -> FeishuBotProfile:
+        """Validate credentials and return the authenticated public identity."""
+
+        return await self.get_bot_profile()
+
+    async def download_message_image(self, message_id: str, image_key: str) -> bytes:
+        """Download and validate an image embedded in one inbound message."""
+
+        token = await self.get_tenant_token()
+        path = (
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/resources/"
+            f"{quote(image_key, safe='')}"
+        )
+        if self._client is not None:
+            async with self._client.stream(
+                "GET",
+                path,
+                params={"type": "image"},
+                headers={"Authorization": f"Bearer {token}"},
+            ) as response:
+                return await self._read_message_image(response)
+        async with httpx.AsyncClient(base_url=self._config.api_base_url, timeout=15.0) as client:
+            async with client.stream(
+                "GET",
+                path,
+                params={"type": "image"},
+                headers={"Authorization": f"Bearer {token}"},
+            ) as response:
+                return await self._read_message_image(response)
+
+    @staticmethod
+    async def _read_message_image(response: httpx.Response) -> bytes:
+        """Read at most the accepted body size before validating its magic."""
+
+        response.raise_for_status()
+        mime_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        prefixes = _IMAGE_MIME_PREFIXES.get(mime_type)
+        if prefixes is None:
+            raise FeishuBotError("Feishu returned an invalid message image")
+        raw_length = response.headers.get("content-length")
+        try:
+            content_length = int(raw_length) if raw_length is not None else None
+        except ValueError:
+            content_length = None
+        if content_length is not None and (
+            content_length <= 0 or content_length > _MAX_INBOUND_IMAGE_BYTES
+        ):
+            raise FeishuBotError("Feishu returned an invalid message image")
+        content_buffer = bytearray()
+        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+            remaining = _MAX_INBOUND_IMAGE_BYTES + 1 - len(content_buffer)
+            content_buffer.extend(chunk[:remaining])
+            if len(content_buffer) > _MAX_INBOUND_IMAGE_BYTES:
+                raise FeishuBotError("Feishu returned an invalid message image")
+        content = bytes(content_buffer)
+        valid_magic = bool(prefixes and any(content.startswith(prefix) for prefix in prefixes))
+        if mime_type == "image/webp":
+            valid_magic = content.startswith(b"RIFF") and content[8:12] == b"WEBP"
+        if not content or not valid_magic:
+            raise FeishuBotError("Feishu returned an invalid message image")
+        return content
 
 
 _MAX_FEISHU_MESSAGE_TIME_MS = 4_102_444_800_000
@@ -421,6 +521,7 @@ __all__ = [
     "FeishuBotClient",
     "FeishuBotConfig",
     "FeishuBotConfigurationError",
+    "FeishuBotProfile",
     "FeishuBotError",
     "FeishuMessageEvent",
     "feishu_message_time_is_valid",
