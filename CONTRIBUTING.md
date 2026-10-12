@@ -108,6 +108,77 @@ For UI changes, also run the explicit `browser-mocks` and `terminal-hmr` targets
 [UI acceptance](docs/UI_ACCEPTANCE.md). They require an existing browser and owned
 runtimes; neither is included in `all` or proves live external integration.
 
+#### Environment provenance and commit safety
+
+Backend checks first probe the Python selected by the same `uv run` command used
+for the checks. The probe runs with `-I`, private runtime directories and a neutral
+cwd. It verifies the local editable project and the pytest/Black/isort/mypy module
+and distribution locations. Tools run through `python -I -m`, avoiding copied
+console-script shebangs. This is selected-module provenance, not a dependency-lock
+or file-integrity audit. Recreate each worktree's environment with the locked setup
+above; do not copy a virtual environment. Verification refuses a backend `.env`
+rather than reading, moving or deleting it.
+
+Stage the intended files explicitly, then run:
+
+```bash
+./scripts/verify.sh check-staged
+```
+
+This reads the index's blobs, not the working tree. Git environment variables that
+redirect the repository, index or object database must be unset explicitly; the
+check refuses them instead of inspecting a different snapshot. It rejects the machine-local
+`frontend/pnpm-workspace.yaml` and checks the production host argument of a tracked
+`start.sh`, when present. The repository default remains
+`"${CLAUDE_HUB_HOST:-0.0.0.0}"`; setting `CLAUDE_HUB_HOST=::` in the deployment
+environment is permitted. Intentional changes to that startup contract need a
+corresponding reviewed check change. This is not a general shell interpreter or
+a requirement that the script always exist.
+
+`./scripts/verify.sh checkout-safety` checks the fixed commit resolved from HEAD;
+it runs in `all` and a separate CI job. A committed-tree pass does not validate
+unstaged or staged edits. No hook is installed, Git configuration is unchanged,
+and arbitrary `git commit`/`git commit -a` invocations are not automatically
+intercepted. Do not treat this content check as secret scanning or cleanup
+permission for unrelated files.
+
+#### Reviewing a fixed merge
+
+The merge-decision check compares Git's native reconstruction with one immutable
+merge tree and includes paths with native conflicts. It can identify manual edits
+outside conflict paths; it cannot detect semantic errors in an automatic merge
+or prove that a documented transplant preserved every behavior.
+
+```bash
+# MERGE_SHA must be a full immutable commit ID. Choose a new RECORD_PATH.
+backend/.venv/bin/python -I scripts/check_merge_decisions.py inspect \
+  --merge "$MERGE_SHA" > "$RECORD_PATH"
+./scripts/verify.sh merge-decisions --merge "$MERGE_SHA" --record "$RECORD_PATH"
+```
+
+Inspect generates object identities. Fill only `reason`, `disposition` and
+`destinations` for each path. Dispositions are `resolve`, `retain-parent`,
+`delete` and `transplant`; transplant destinations must exist in that merge tree.
+An independent reviewer still checks the relevant parent changes and resulting
+call paths. The filled record can live beside its working log, as in
+`docs/working-logs/2026-10-12-stage3-merge-decisions.json`. Commit it afterwards:
+it binds the merge SHA and cannot be embedded in the commit it identifies.
+
+Without decision paths, `check` needs no record. Missing/stale coverage exits 1;
+unsupported history/output or Git failure exits 2. Only two-parent merges with one
+merge base are supported. A shallow clone is usable only when every shallow
+boundary is a known ancestor of that base; otherwise obtain sufficient history or
+report the check as unrun. Git must support the required `merge-tree` options.
+Records bind its exact version; regenerate and review the template after an
+upgrade. The tool uses an isolated temporary object database, not the source
+index, worktree, refs, hooks or merge-driver configuration.
+
+This target is explicit, not part of `all` or an automatic CI merge scan. A caller
+must select the merge and supply its history. Later commits require their own
+review; a passing old record does not validate a later repair. The example record
+intentionally retains a known hover-style omission in its historical merge,
+illustrating why coverage of written decisions is not semantic approval.
+
 For docs-only changes, run `./scripts/verify.sh docs` and verify that the changed
 instructions match the current commands, paths, and module responsibilities.
 

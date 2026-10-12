@@ -21,8 +21,11 @@ experiment and managed workspace task uses an isolated feature worktree.**
 4. Frontend changes require a dedicated worktree dev/review server on its own
    port. Stop task-owned servers before merging or leaving the task.
 5. Run validation appropriate to touched files; independently review the candidate
-   and fix actionable findings. Commit with conventional `feat:`, `fix:`, `docs:`,
-   `style:`, `refactor:`, `test:`, `chore:` or `ci:` messages.
+   and fix actionable findings. Stage intended files explicitly and run
+   `./scripts/verify.sh check-staged`. For merges, also follow
+   [fixed-merge review](CONTRIBUTING.md#reviewing-a-fixed-merge).
+   Commit with conventional `feat:`, `fix:`, `docs:`, `style:`, `refactor:`,
+   `test:`, `chore:` or `ci:` messages.
 6. Update `CHANGELOG.md` for meaningful changes and add a focused working log for
    significant work. Deliver branch/SHA, checks/results and unverified risks.
 7. Merge into `main` only after validation and review/approval, then push `main`.
@@ -99,6 +102,7 @@ independent review and human-acceptance requirements.
 - [Architecture and code ownership map](ARCHITECTURE.md), [Task state/UI boundaries](ARCHITECTURE.md#task-state-and-ui-ownership)
 - [UI acceptance: when user-visible work needs a browser gate, how to write
   one, and evidence boundaries](docs/UI_ACCEPTANCE.md)
+- [Development change boundaries: ownership, small changes and maintainable checks](docs/AGENT_WORKFLOW.md#choosing-a-change-boundary)
 - [Detailed workflow, commands, runtime pitfalls and task-specific document index](docs/AGENT_WORKFLOW.md)
 - [Unified Task execution and Agent workflow](docs/working-logs/2026-10-07-agent-workflow-v2.md)
 - [Task UI, Bot pool, pairing and callback safety](docs/working-logs/2026-10-07-bot-pool-and-task-ui.md)

@@ -10,9 +10,14 @@ usage() {
   cat <<'EOF'
 Usage: scripts/verify.sh TARGET
        scripts/verify.sh backend-tests -- PYTEST_ARGS...
+       scripts/verify.sh merge-decisions --merge SHA [--record FILE]
 
 Targets:
   docs             Check repository document invariants
+  checkout-safety  Check committed HEAD for machine-local configuration
+  check-staged     Check the index before committing (explicit only)
+  merge-decisions Check fixed-merge decision records (explicit only;
+                  not a semantic correctness check)
   backend-format   Check Black and isort
   backend-types    Type-check the complete backend, including tests
   backend-tests    Run the default non-browser backend scope with coverage
@@ -24,9 +29,10 @@ Targets:
   terminal-replay  Run the ttyd/tmux replay E2E suite (needs ttyd, tmux and a
                    Playwright browser; explicit only)
   browser-mocks    Run the isolated mocked browser checks (explicit only)
-  all              Run standard targets; the three explicit targets stay opt-in
+  all              Run standard targets; browser, staged and merge checks are explicit
 
-Only backend-tests accepts focused pytest arguments after --. The default and
+Only backend-tests accepts focused pytest arguments after --.
+merge-decisions requires an explicit full merge SHA; its record covers that merge only. The default and
 all/CI retain the default scope; focused results are labeled, not a default-suite pass.
 
 browser-mocks and terminal-hmr require CLAUDE_HUB_BROWSER_EXECUTABLE
@@ -44,18 +50,48 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 read_version() { tr -d '[:space:]' < "$ROOT/$1"; }
 
+backend_python() (
+  unset PYTHONPATH PYTHONHOME PYTHONUSERBASE UV_ENV_FILE
+  uv run --offline --no-sync --no-config --no-env-file --project "$ROOT/backend" \
+    python -I "$@"
+)
+
+backend_tool_command() (
+  local cwd="$1"
+  shift
+  export HOME="$BACKEND_TOOL_ROOT/home" TMPDIR="$BACKEND_TOOL_ROOT/tmp"
+  export XDG_CONFIG_HOME="$BACKEND_TOOL_ROOT/config"
+  export XDG_STATE_HOME="$BACKEND_TOOL_ROOT/state" XDG_CACHE_HOME="$BACKEND_TOOL_ROOT/cache"
+  export CLAUDE_HUB_HOME="$BACKEND_TOOL_ROOT/hub"
+  export CLAUDE_HUB_STATE_ROOT="$BACKEND_TOOL_ROOT/hub-state"
+  export CLAUDE_HUB_TMUX_SOCKET="ch-verify-tools-$$-${RANDOM}"
+  unset CODEX_HOME TRAE_HOME CLAUDE_CONFIG_DIR CLAUDE_HUB_ALLOW_LIVE_RUNTIME
+  unset CLAUDE_HUB_TOKEN CLAUDE_HUB_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+  unset OPENAI_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+  unset PYTEST_ADDOPTS PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD
+  unset PYTHONPATH PYTHONHOME PYTHONUSERBASE UV_ENV_FILE
+  cd "$cwd"
+  "$@"
+)
+
 check_backend_tools() {
   require_command uv
-  local expected_uv expected_python actual_python
-  expected_uv="$(read_version .uv-version)"
-  [[ "$(uv --version | awk '{print $2}')" == "$expected_uv" ]] || fail "use uv $expected_uv"
   [[ -x "$ROOT/backend/.venv/bin/python" ]] || fail \
     "backend/.venv is missing; install locked dependencies using the documented setup first"
-  expected_python="$(read_version .python-test-version)"
-  actual_python="$(cd "$ROOT/backend" && uv run --offline --no-sync python -c \
-    'import platform; print(platform.python_version())')"
-  [[ "$actual_python" == "$expected_python" ]] || fail \
-    "backend environment must use Python $expected_python; found $actual_python"
+  # Settings reads .env relative to the backend cwd. Do not read or move that file.
+  [[ ! -e "$ROOT/backend/.env" && ! -L "$ROOT/backend/.env" ]] || fail \
+    "verification refuses backend/.env; use a clean feature checkout (file left untouched)"
+  BACKEND_TOOL_ROOT="$(mktemp -d /tmp/ch-verify-tools.XXXXXX)"
+  mkdir -p "$BACKEND_TOOL_ROOT"/{home,tmp,config,state,cache,hub,hub-state,cwd}
+  printf 'Backend provenance evidence: %s\n' "$BACKEND_TOOL_ROOT"
+  local expected_uv actual_uv
+  expected_uv="$(read_version .uv-version)"
+  actual_uv="$(backend_tool_command "$BACKEND_TOOL_ROOT/cwd" uv --version)"
+  [[ "$(printf '%s\n' "$actual_uv" | awk '{print $2}')" == "$expected_uv" ]] || fail "use uv $expected_uv"
+  backend_tool_command "$BACKEND_TOOL_ROOT/cwd" backend_python \
+    "$ROOT/scripts/check_backend_environment.py" --root "$ROOT" \
+    > "$BACKEND_TOOL_ROOT/provenance.json" || fail \
+    "backend environment provenance failed; see $BACKEND_TOOL_ROOT"
 }
 
 check_frontend_tools() {
@@ -71,7 +107,7 @@ check_frontend_tools() {
 }
 
 validate_junit_xml() {
-  "$ROOT/backend/.venv/bin/python" - "$1" <<'PYTHON'
+  "$ROOT/backend/.venv/bin/python" -I - "$1" <<'PYTHON'
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -140,8 +176,8 @@ run_backend_pytest() {
     printf 'e2e_timeout_scale_input=%s\n' "${CLAUDE_HUB_E2E_TIMEOUT_SCALE:-1}"
     printf 'pytest_arg=%q\n' "${pytest_args[@]}"
     git -C "$ROOT" rev-parse HEAD
-    (cd "$ROOT/backend" && uv run --offline --no-sync python --version)
-    uv --version
+    printf 'backend_provenance=%s\n' "$BACKEND_TOOL_ROOT/provenance.json"
+    cat "$BACKEND_TOOL_ROOT/provenance.json"
   } > "$evidence/environment.txt"
   status=0
   (
@@ -161,7 +197,7 @@ run_backend_pytest() {
     unset CLAUDE_HUB_ALLOW_LIVE_RUNTIME CLAUDE_HUB_TOKEN CLAUDE_HUB_BASE_URL
     unset ANTHROPIC_API_KEY OPENAI_API_KEY CLAUDE_CODE_OAUTH_TOKEN
     cd "$ROOT/backend"
-    uv run --offline --no-sync pytest "${pytest_args[@]}"
+    backend_python -m pytest "${pytest_args[@]}"
   ) 2>&1 | tee "$evidence/pytest.log" || status=$?
   pytest_status=$status
   printf '%s\n' "$pytest_status" > "$evidence/pytest-exit-code"
@@ -203,7 +239,8 @@ run_browser_mocks() {
   evidence="$(mktemp -d "$parent/claude-hub-browser-mocks.XXXXXX")"
   printf 'Browser mocks evidence parent: %s\n' "$evidence"
   # The Python owner receives signals directly, without an intermediate shell trap.
-  exec "$ROOT/backend/.venv/bin/python" "$ROOT/scripts/verify_browser_mocks.py" \
+  unset PYTHONPATH PYTHONHOME PYTHONUSERBASE
+  exec "$ROOT/backend/.venv/bin/python" -I "$ROOT/scripts/verify_browser_mocks.py" \
     --node "$(command -v node)" \
     --browser "$CLAUDE_HUB_BROWSER_EXECUTABLE" \
     --output "$evidence/run" \
@@ -214,11 +251,23 @@ run_browser_mocks() {
 run_one() {
   local _scenario
   local -a browser_scenarios=()
-  local -a browser_tools=(
+  local -a python_tools=(
     "$ROOT/scripts/verify_browser_mocks.py" "$ROOT/frontend/tests/browser_lifecycle.py")
+  while IFS= read -r _scenario; do
+    python_tools+=("$_scenario")
+  done < <(find "$ROOT/scripts" -maxdepth 1 -name 'check_*.py' | sort)
   case "$1" in
     browser-mocks) run_browser_mocks ;;
     terminal-hmr) run_terminal_hmr ;;
+    checkout-safety|check-staged)
+      require_command python3
+      require_command git
+      if [[ "$1" == check-staged ]]; then
+        python3 -I "$ROOT/scripts/check_checkout_safety.py" --repo "$ROOT" --staged
+      else
+        python3 -I "$ROOT/scripts/check_checkout_safety.py" --repo "$ROOT" --commit HEAD
+      fi
+      ;;
     docs)
       cmp "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md"
       ;;
@@ -235,12 +284,15 @@ run_one() {
         echo "ERROR: no browser scenarios discovered" >&2
         return 1
       fi
-      (cd "$ROOT/backend" && uv run --offline --no-sync black --config pyproject.toml --check . "${browser_tools[@]}" "${browser_scenarios[@]}" \
-        && uv run --offline --no-sync isort --settings-path pyproject.toml --check . "${browser_tools[@]}" "${browser_scenarios[@]}")
+      backend_tool_command "$ROOT/backend" backend_python -m black \
+        --config pyproject.toml --check . "${python_tools[@]}" "${browser_scenarios[@]}"
+      backend_tool_command "$ROOT/backend" backend_python -m isort \
+        --settings-path pyproject.toml --check . "${python_tools[@]}" "${browser_scenarios[@]}"
       ;;
     backend-types)
       check_backend_tools
-      (cd "$ROOT/backend" && uv run --offline --no-sync mypy --config-file pyproject.toml . "${browser_tools[@]}")
+      backend_tool_command "$ROOT/backend" backend_python -m mypy \
+        --config-file pyproject.toml . "${python_tools[@]}"
       ;;
     frontend-lint|frontend-types|frontend-tests|frontend-build)
       check_frontend_tools
@@ -262,7 +314,7 @@ run_one() {
 
 run_all() {
   local failures=0 target
-  for target in docs backend-format backend-types backend-tests \
+  for target in docs checkout-safety backend-format backend-types backend-tests \
     frontend-lint frontend-types frontend-tests frontend-build; do
     printf '\n==> %s\n' "$target"
     if "$ROOT/scripts/verify.sh" "$target"; then
@@ -272,13 +324,19 @@ run_all() {
       failures=$((failures + 1))
     fi
   done
-  printf 'Not run by all: browser-mocks, terminal-hmr; replay/performance/manual UI checks remain separate.\n'
+  printf 'Not run by all: browser-mocks, terminal-hmr, terminal-replay, check-staged, merge-decisions; performance/manual UI checks remain separate.\n'
   ((failures == 0)) || fail "$failures verification target(s) failed"
 }
 
 case "${1:-}" in
   -h|--help) usage ;;
   "") usage; exit 2 ;;
+  merge-decisions)
+    shift
+    require_command python3
+    require_command git
+    exec python3 -I "$ROOT/scripts/check_merge_decisions.py" check "$@"
+    ;;
   backend-tests)
     shift
     if [[ $# -gt 0 ]]; then

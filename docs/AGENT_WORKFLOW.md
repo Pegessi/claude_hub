@@ -52,13 +52,40 @@ needed details; do not edit generated state or infer acceptance from prose.
 
 ## Choosing a change boundary
 
-Before splitting a stateful module, identify who owns the data, mutation lock,
-request identity and cleanup. Move a complete responsibility with its tests;
-separating a template from the state that must outlive it can change behavior.
-Use the current [Task state/UI boundaries](../ARCHITECTURE.md#task-state-and-ui-ownership)
-as a concrete example. Prefer an existing owner and explicit inputs over another
-store or orchestration layer. Keep the current contract here or in the architecture
-map; record the implementation history and measured results in a dated log.
+Before implementation, identify the existing owner of the behavior, its callers,
+and the externally observable contract. For stateful work, also identify who owns
+the data, mutation lock, request identity and cleanup. Prefer an existing owner
+and explicit inputs over another store or orchestration layer. A new owner needs
+a reason the existing one cannot serve, not just a convenient place for new code.
+
+Keep each change independently understandable and testable. Separate substantial
+moves/renames from behavior changes when possible, retaining a working application
+at each step. Coordinate overlapping ownership and integrate reviewed slices
+promptly when authorized; pulling main into a long-lived branch alone does not
+make that work available to other developers. Do not rewrite delivered baselines.
+
+Extract a responsibility when changes repeatedly cross unrelated concerns, callers
+reach into another owner's private state, or one workflow cannot be tested without
+setting up unrelated workflows. File length is a clue, not an acceptance threshold.
+Move the responsibility with its tests; separating a template from the state that
+must outlive it can change behavior. The current
+[Task state/UI boundaries](../ARCHITECTURE.md#task-state-and-ui-ownership) are one
+concrete example, not a mandatory architecture for every module.
+
+Before delivery, review the call path as well as the diff: is there one authority
+for each state transition, are obsolete paths removed, and can the requirement be
+checked without depending on the new implementation's layout? Give stable,
+mechanically testable boundaries executable checks; leave design tradeoffs to
+review. A regression test should fail on the defect it claims to prevent. Keep
+current contracts in the architecture map or focused guide and implementation
+history in dated logs, rather than copying history into the entry instructions.
+
+When a failure recurs, first determine whether the missing protection belongs in
+a behavioral test, a boundary check, tooling, or a short contract clarification.
+If repair exceeds the current scope, record the affected owner, evidence and next
+action in the existing work record. Revisit it when that area changes; do not let
+an unowned TODO substitute for a decision. Remove superseded guidance when its
+replacement is adopted, and reassess checks that repeatedly produce false alarms.
 
 ## Validation and review
 

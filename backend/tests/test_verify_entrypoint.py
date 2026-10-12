@@ -11,7 +11,7 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Generator, cast
 from unittest import mock
 
 import pytest
@@ -27,11 +27,12 @@ keys = (
     "HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
     "CLAUDE_HUB_HOME", "CLAUDE_HUB_STATE_ROOT", "CLAUDE_HUB_TMUX_SOCKET",
     "CLAUDE_HUB_PROVIDER_NETWORK_MODE", "CLAUDE_HUB_ALLOW_LIVE_RUNTIME",
-    "CLAUDE_HUB_TOKEN", "CLAUDE_HUB_BASE_URL", "ANTHROPIC_API_KEY",
+    "CLAUDE_HUB_TOKEN", "CLAUDE_HUB_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_HOME", "TRAE_HOME",
     "CLAUDE_CONFIG_DIR", "COREPACK_ENABLE_NETWORK", "COREPACK_ENABLE_AUTO_PIN",
     "PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "COVERAGE_FILE",
     "GOAL_UI_REVIEW_URL", "CLAUDE_HUB_RUN_CHAT_SIDEBAR_E2E",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "UV_ENV_FILE", "UV_PROJECT_ENVIRONMENT",
 )
 with open(os.environ["VERIFY_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps({"tool": name, "args": args, "cwd": os.getcwd(),
@@ -41,13 +42,25 @@ if name == "uv":
     if args == ["--version"]:
         print("uv " + os.environ["TEST_UV_VERSION"])
         raise SystemExit(0)
-    if args[:3] != ["run", "--offline", "--no-sync"]:
+    prefix = ["run", "--offline", "--no-sync", "--no-config", "--no-env-file", "--project"]
+    if args[:6] != prefix or args[7:9] != ["python", "-I"]:
         raise SystemExit(90)
-    operation = args[3]
-    if operation == "python":
-        prefix = "Python " if "--version" in args else ""
-        print(prefix + os.environ["TEST_PYTHON_VERSION"])
+    project = Path(args[6])
+    tail = args[9:]
+    if tail[:1] == ["-m"] and len(tail) >= 2:
+        operation = tail[1]
+    elif tail and Path(tail[0]).name == "check_backend_environment.py":
+        if tail[1:] != ["--root", str(project.parent)]:
+            raise SystemExit(94)
+        if os.environ["TEST_PYTHON_VERSION"] != (project.parent / ".python-test-version").read_text().strip():
+            raise SystemExit(95)
+        if os.environ.get("FAIL_CHECK") == "backend-environment":
+            raise SystemExit(int(os.environ.get("FAIL_STATUS", "1")))
+        print(json.dumps({"fixture": True, "python": os.environ["TEST_PYTHON_VERSION"],
+                          "prefix": str(project / ".venv")}))
         raise SystemExit(0)
+    else:
+        raise SystemExit(96)
 elif name == "node":
     if args == ["--version"]:
         print("v" + os.environ["TEST_NODE_VERSION"])
@@ -64,9 +77,19 @@ elif name == "pnpm":
         raise SystemExit(92)
     operation = args[1]
 elif name == "git":
-    if len(args) != 4 or args[0] != "-C" or args[2:] != ["rev-parse", "HEAD"]:
+    if len(args) < 3 or args[0] != "-C":
         raise SystemExit(93)
-    print("0123456789abcdef0123456789abcdef01234567")
+    command = args[2:]
+    if command == ["rev-parse", "--show-toplevel"]:
+        print(args[1])
+    elif command == ["rev-parse", "HEAD"] or command == [
+        "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"
+    ]:
+        print("0123456789abcdef0123456789abcdef01234567")
+    elif command[:3] == ["ls-tree", "-r", "-z"] or command[:3] == ["ls-files", "--stage", "-z"]:
+        pass  # No protected paths in the shell fixture's simulated Git snapshot.
+    else:
+        raise SystemExit(93)
     raise SystemExit(0)
 if operation == "pytest" and os.environ.get("VERIFY_JUNIT_XML") not in (None, "missing"):
     report = next(value.split("=", 1)[1] for value in args if value.startswith("--junitxml="))
@@ -107,7 +130,9 @@ class VerifyFixture:
             for row in rows
             if (
                 row["tool"] == "uv"
-                and row["args"][:4] == ["run", "--offline", "--no-sync", operation]
+                and row["args"][:6]
+                == ["run", "--offline", "--no-sync", "--no-config", "--no-env-file", "--project"]
+                and row["args"][7:11] == ["python", "-I", "-m", operation]
             )
             or (row["tool"] == "pnpm" and row["args"] == ["run", operation])
         ]
@@ -132,7 +157,7 @@ def _executable(path: Path, content: str) -> None:
 
 
 @pytest.fixture
-def verify_fixture(tmp_path: Path) -> VerifyFixture:
+def verify_fixture(tmp_path: Path) -> Generator[VerifyFixture, None, None]:
     source = Path(__file__).resolve().parents[2]
     root, fake_bin = tmp_path / "fixture-repo", tmp_path / "fake-bin"
     artifacts, caller = tmp_path / "artifacts", tmp_path / "caller"
@@ -147,6 +172,9 @@ def verify_fixture(tmp_path: Path) -> VerifyFixture:
     ):
         directory.mkdir(parents=True)
     _executable(root / "scripts/verify.sh", (source / "scripts/verify.sh").read_text())
+    for checker in source.joinpath("scripts").glob("check_*.py"):
+        (root / "scripts" / checker.name).write_text(checker.read_text())
+    (root / "scripts/check_newly_added_tool.py").write_text("# fixture-only checker\n")
     _executable(root / "backend/.venv/bin/python", "#!/bin/sh\nexit 0\n")
     for tool in ("uv", "node", "pnpm", "git"):
         _executable(fake_bin / tool, _FAKE_TOOL)
@@ -189,7 +217,23 @@ def verify_fixture(tmp_path: Path) -> VerifyFixture:
         path = caller / key.lower()
         path.mkdir(parents=True)
         env[key] = str(path)
-    return VerifyFixture(root, env, log, artifacts)
+    fixture = VerifyFixture(root, env, log, artifacts)
+    try:
+        yield fixture
+    finally:
+        tool_roots: set[Path] = set()
+        for row in fixture.calls():
+            home = row["env"].get("HOME")
+            if isinstance(home, str):
+                candidate = Path(home).parent
+                if candidate.parent == Path("/tmp") and candidate.name.startswith(
+                    "ch-verify-tools."
+                ):
+                    tool_roots.add(candidate)
+        # Commands in this fixture have completed; only its recorded roots are owned.
+        for tool_root in tool_roots:
+            if tool_root.is_dir():
+                shutil.rmtree(tool_root)
 
 
 def test_all_continues_after_failure(verify_fixture: VerifyFixture) -> None:
@@ -198,6 +242,7 @@ def test_all_continues_after_failure(verify_fixture: VerifyFixture) -> None:
     output = result.stdout + result.stderr
     for target in (
         "docs",
+        "checkout-safety",
         "backend-format",
         "backend-types",
         "backend-tests",
@@ -232,12 +277,20 @@ def test_types_include_tests(verify_fixture: VerifyFixture) -> None:
         "run",
         "--offline",
         "--no-sync",
+        "--no-config",
+        "--no-env-file",
+        "--project",
+        str(verify_fixture.root / "backend"),
+        "python",
+        "-I",
+        "-m",
         "mypy",
         "--config-file",
         "pyproject.toml",
         ".",
         str(verify_fixture.root / "scripts/verify_browser_mocks.py"),
         str(verify_fixture.root / "frontend/tests/browser_lifecycle.py"),
+        *[str(path) for path in sorted((verify_fixture.root / "scripts").glob("check_*.py"))],
     ]
     assert Path(calls[0]["cwd"]) == verify_fixture.root / "backend"
 
@@ -294,6 +347,13 @@ def test_runtime_isolation_and_failure_evidence(verify_fixture: VerifyFixture) -
         "run",
         "--offline",
         "--no-sync",
+        "--no-config",
+        "--no-env-file",
+        "--project",
+        str(verify_fixture.root / "backend"),
+        "python",
+        "-I",
+        "-m",
         "pytest",
         "-xvs",
         "--ignore=tests/test_terminal_replay.py",
@@ -359,6 +419,13 @@ def test_focused_scope_preserves_selection_and_private_environment(
         "run",
         "--offline",
         "--no-sync",
+        "--no-config",
+        "--no-env-file",
+        "--project",
+        str(verify_fixture.root / "backend"),
+        "python",
+        "-I",
+        "-m",
         "pytest",
         "tests/test_demo.py::test_one",
         "-q",
@@ -430,8 +497,13 @@ def test_format_checks_include_all_browser_scenarios(verify_fixture: VerifyFixtu
         ("missing", 0, 1),
     ],
 )
+@pytest.mark.parametrize("shadow_pythonpath", [False, True])
 def test_terminal_hmr_requires_real_junit_success(
-    verify_fixture: VerifyFixture, xml: str, pytest_exit: int, expected: int
+    verify_fixture: VerifyFixture,
+    xml: str,
+    pytest_exit: int,
+    expected: int,
+    shadow_pythonpath: bool,
 ) -> None:
     fake_bin = Path(verify_fixture.env["PATH"].split(os.pathsep)[0])
     for name in ("tmux", "ttyd"):
@@ -443,12 +515,17 @@ def test_terminal_hmr_requires_real_junit_success(
         verify_fixture.root / "backend/.venv/bin/python",
         f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
     )
+    shadow = verify_fixture.root.parent / "python-shadow"
+    if shadow_pythonpath:
+        (shadow / "xml").mkdir(parents=True)
+        (shadow / "xml/__init__.py").write_text("raise RuntimeError('JUNIT_SHADOW_IMPORT')\n")
     temporary: Path | None = None
     try:
         result = verify_fixture.run(
             "terminal-hmr",
             CLAUDE_HUB_BROWSER_EXECUTABLE=str(browser),
             VERIFY_JUNIT_XML=xml,
+            PYTHONPATH=str(shadow) if shadow_pythonpath else "",
             FAIL_CHECK="pytest" if pytest_exit else "",
             FAIL_STATUS=str(pytest_exit),
         )
@@ -466,6 +543,7 @@ def test_terminal_hmr_requires_real_junit_success(
         assert "target=terminal-hmr" in (evidence / "environment.txt").read_text()
         assert (evidence / "pytest-exit-code").read_text().strip() == str(pytest_exit)
         assert (evidence / "exit-code").read_text().strip() == str(expected)
+        assert "JUNIT_SHADOW_IMPORT" not in (evidence / "junit-validation.log").read_text()
     finally:
         if temporary is not None and temporary.is_dir():
             shutil.rmtree(temporary)
@@ -566,3 +644,77 @@ def test_hmr_browser_guard_honours_the_explicitly_selected_browser() -> None:
 
         with mock.patch.dict(os.environ, {"CLAUDE_HUB_BROWSER_EXECUTABLE": "/nonexistent/chrome"}):
             assert guard() is False
+
+
+def test_environment_probe_failure_prevents_the_real_check(verify_fixture: VerifyFixture) -> None:
+    result = verify_fixture.run("backend-types", FAIL_CHECK="backend-environment")
+    assert result.returncode != 0
+    assert not verify_fixture.calls("mypy")
+
+
+def test_backend_dotenv_is_refused_without_loading_it(verify_fixture: VerifyFixture) -> None:
+    dotenv = verify_fixture.root / "backend/.env"
+    dotenv.write_text("TEST_DOTENV_SENTINEL=must-not-load\n")
+    result = verify_fixture.run("backend-tests")
+    assert result.returncode != 0
+    assert dotenv.read_text() == "TEST_DOTENV_SENTINEL=must-not-load\n"
+    assert not verify_fixture.calls("pytest")
+
+
+def test_probe_and_tools_share_uv_and_python_isolation(verify_fixture: VerifyFixture) -> None:
+    result = verify_fixture.run(
+        "backend-types",
+        PYTHONPATH="synthetic",
+        PYTHONHOME="synthetic",
+        PYTHONUSERBASE="synthetic",
+        UV_ENV_FILE="synthetic",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    probes = [
+        row
+        for row in verify_fixture.calls()
+        if row["tool"] == "uv"
+        and row["args"][9:]
+        == [
+            str(verify_fixture.root / "scripts/check_backend_environment.py"),
+            "--root",
+            str(verify_fixture.root),
+        ]
+    ]
+    assert len(probes) == 1
+    tool = verify_fixture.calls("mypy")[0]
+    assert probes[0]["args"][:9] == tool["args"][:9]
+    assert not Path(probes[0]["cwd"]).is_relative_to(verify_fixture.root)
+    assert (
+        Path(probes[0]["env"]["HOME"]).parent.resolve() == Path(probes[0]["cwd"]).parent.resolve()
+    )
+    for row in (probes[0], tool):
+        for key in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "UV_ENV_FILE"):
+            assert row["env"][key] is None
+
+
+def test_backend_provenance_home_does_not_leak_to_pnpm(verify_fixture: VerifyFixture) -> None:
+    # Stop during frontend preflight, without launching a browser or pytest.
+    result = verify_fixture.run("terminal-hmr", TEST_PNPM_VERSION="0.0.0")
+    assert result.returncode != 0
+    calls = [
+        row
+        for row in verify_fixture.calls()
+        if row["tool"] == "pnpm" and row["args"] == ["--version"]
+    ]
+    assert len(calls) == 1
+    for key in ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        assert calls[0]["env"][key] == verify_fixture.env[key]
+    assert not verify_fixture.calls("pytest")
+
+
+def test_new_checker_is_discovered_by_format_and_types(verify_fixture: VerifyFixture) -> None:
+    extra = verify_fixture.root / "scripts/check_added_after_fixture.py"
+    extra.write_text("# fixture-only checker added after initial discovery\n")
+    for target in ("backend-format", "backend-types"):
+        result = verify_fixture.run(target)
+        assert result.returncode == 0, result.stdout + result.stderr
+    for operation in ("black", "isort", "mypy"):
+        calls = verify_fixture.calls(operation)
+        assert len(calls) == 1
+        assert str(extra) in calls[0]["args"]
