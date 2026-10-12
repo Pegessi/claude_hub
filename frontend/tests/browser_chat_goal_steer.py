@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from playwright.async_api import async_playwright, expect
+from playwright.async_api import expect
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "goal-steer-tab"
 DONE_TURN = "goal-turn-1"
@@ -86,7 +88,7 @@ GOAL = {
 }
 
 
-async def main() -> None:
+async def main(browser_run: BrowserRun) -> None:
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
     base = sys.argv[1].rstrip("/")
@@ -103,10 +105,7 @@ async def main() -> None:
     ):
         raise SystemExit("Use an owned numeric-loopback review server")
     output = Path(sys.argv[2]).resolve()
-    browser_path = Path(sys.argv[3]).resolve(strict=True)
-    if not browser_path.is_file() or not os.access(browser_path, os.X_OK):
-        raise SystemExit("An existing executable browser is required")
-    output.mkdir(mode=0o700, parents=False, exist_ok=False)
+    # run_browser_main validates the browser and creates the output dir.
 
     tabs = [
         {
@@ -133,19 +132,13 @@ async def main() -> None:
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
     failure: BaseException | None = None
-    browser = context = page = None
+    page = None
 
-    async with async_playwright() as playwright:
+    async with browser_run.context(
+        viewport={"width": 1280, "height": 900},
+        launch_args=["--disable-background-networking", "--disable-component-update"],
+    ) as context:
         try:
-            browser = await playwright.chromium.launch(
-                headless=True,
-                executable_path=str(browser_path),
-                args=["--disable-background-networking", "--disable-component-update"],
-            )
-            context = await browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                service_workers="block",
-            )
 
             async def block_websocket(socket) -> None:
                 report["blocked_websockets"].append(socket.url)
@@ -280,13 +273,6 @@ async def main() -> None:
                     await page.screenshot(path=str(output / "failure.png"), full_page=True)
                 except Exception:
                     pass
-        finally:
-            try:
-                if context is not None:
-                    await context.close()
-            finally:
-                if browser is not None:
-                    await browser.close()
 
     (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
@@ -295,4 +281,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_browser_main(main)

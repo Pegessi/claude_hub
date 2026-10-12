@@ -30,7 +30,30 @@ RUNNERS = (
     ("browser_chat_composer.py", ""),
     ("browser_feishu_provenance.py", ""),
     ("browser_feishu_bot_components.py", "/tests/feishu_bot_components_harness.html"),
+    ("browser_chat_queue_activation.py", ""),
+    ("browser_chat_goal_steer.py", ""),
+    ("browser_chat_image_quality.py", ""),
 )
+
+# A scenario's entry page cannot be derived from its filename, so the table
+# above stays explicit. What must not stay manual is membership: a scenario
+# added to the directory and forgotten here would never run, which is how
+# three of them sat unexecuted. Discovery is the source of truth for the
+# set; the table only supplies each one's entry page.
+_DISCOVERED = {
+    path.name
+    for path in sorted((FRONTEND / "tests").glob("browser_*.py"))
+    if path.name != "browser_lifecycle.py"
+}
+_REGISTERED = {script for script, _ in RUNNERS}
+if _DISCOVERED != _REGISTERED:
+    missing = sorted(_DISCOVERED - _REGISTERED)
+    unknown = sorted(_REGISTERED - _DISCOVERED)
+    raise SystemExit(
+        "browser scenario registry is out of sync; "
+        f"present but unregistered: {missing or 'none'}; "
+        f"registered but absent: {unknown or 'none'}"
+    )
 
 
 class Interrupted(RuntimeError):

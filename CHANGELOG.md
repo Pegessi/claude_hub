@@ -5,6 +5,22 @@
 
 ## Unreleased
 
+### test(ui): enforce the three unrun scenarios and guide new gates
+
+- Convert `browser_chat_queue_activation.py`, `browser_chat_goal_steer.py`
+  and `browser_chat_image_quality.py` to the shared `run_browser_main`
+  lifecycle and register them. Each drove its own browser and produced no
+  lifecycle evidence, so the gate owner could not run them; all three had
+  sat unexecuted, and one failed the first time it was ever run. The gate
+  now covers nine scenarios.
+- Make registry drift a startup failure: the owner compares the discovered
+  scenario files against `RUNNERS` and refuses to start when they disagree,
+  naming the files. A scenario added and forgotten can no longer go unrun.
+- Document when user-visible work warrants a browser gate and when it does
+  not, how to write an assertion that survives refactoring, and why a gate
+  must be seen to fail once before it is trusted. Linked from the entry
+  guide and the agent workflow.
+
 ### test(chat): gate the Chat composer and align merged acceptance checks
 
 - Add a sixth browser scenario covering the Chat composer: send and clear,
