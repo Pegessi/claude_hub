@@ -35,6 +35,7 @@ function setup(t, initial = {}) {
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
     getItem: key => storage.get(key) ?? null,
     setItem: (key, value) => storage.set(key, value),
+    removeItem: key => storage.delete(key),
   } })
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { setTimeout: () => 0 } })
   t.after(() => {
@@ -54,18 +55,127 @@ function setup(t, initial = {}) {
   return { store, storage }
 }
 
-test('pin and unpin preferences survive new store instances and ignore other session surfaces', t => {
+test('pin and unpin use server preferences and ignore other session surfaces', async t => {
   const { store, storage } = setup(t)
-  store.setChatPinned('a', true)
-  store.setChatPinned('terminal', true)
-  store.setChatPinned('managed', true)
-  assert.deepEqual(JSON.parse(storage.get('claude_hub_pinned_chat_ids')), ['a'])
+  globalThis.fetch.mock.mockImplementation(async (url, request) => {
+    if (url === '/api/tabs/sidebar-preferences/pins/a') {
+      const { pinned } = JSON.parse(request.body)
+      return { ok: true, json: async () => ({ pinned_tab_ids: pinned ? ['a'] : [] }) }
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+
+  assert.equal(await store.setChatPinned('a', true), true)
+  assert.equal(await store.setChatPinned('terminal', true), false)
+  assert.equal(await store.setChatPinned('managed', true), false)
+  assert.equal(store.pinnedChatIds.has('a'), true)
+  assert.equal(storage.has('claude_hub_pinned_chat_ids'), false)
+  assert.equal(globalThis.fetch.mock.calls.length, 1)
+
   setActivePinia(createPinia())
   const reloaded = useTerminalStore()
-  assert.equal(reloaded.pinnedChatIds.has('a'), true)
   reloaded.tabs = store.tabs
-  reloaded.setChatPinned('a', false)
-  assert.deepEqual(JSON.parse(storage.get('claude_hub_pinned_chat_ids')), [])
+  assert.equal(reloaded.pinnedChatIds.has('a'), false)
+  assert.equal(await reloaded.setChatPinned('a', false), true)
+  assert.equal(reloaded.pinnedChatIds.has('a'), false)
+})
+
+test('fetching tabs migrates legacy browser pins once and reloads server state', async t => {
+  const { store, storage } = setup(t, {
+    claude_hub_pinned_chat_ids: JSON.stringify(['a', '', 'a']),
+  })
+  const serverTabs = [...store.tabs]
+  globalThis.fetch.mock.mockImplementation(async (url, request) => {
+    if (url === '/api/tabs') return { ok: true, json: async () => serverTabs }
+    if (url === '/api/tabs/sidebar-preferences/migrate-browser-pins') {
+      assert.deepEqual(JSON.parse(request.body), { pinned_tab_ids: ['a'] })
+      return { ok: true, json: async () => ({ pinned_tab_ids: ['a'] }) }
+    }
+    if (url === '/api/tabs/sidebar-preferences') {
+      return { ok: true, json: async () => ({ pinned_tab_ids: ['b'] }) }
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+
+  await store.fetchTabs()
+  assert.deepEqual([...store.pinnedChatIds], ['a'])
+  assert.equal(storage.has('claude_hub_pinned_chat_ids'), false)
+
+  await store.fetchTabs({ force: true })
+  assert.deepEqual([...store.pinnedChatIds], ['b'])
+  assert.equal(
+    globalThis.fetch.mock.calls.filter(
+      call => call.arguments[0] === '/api/tabs/sidebar-preferences/migrate-browser-pins',
+    ).length,
+    1,
+  )
+})
+
+test('first fetch records an empty legacy migration before stale browsers can revive pins', async t => {
+  const { store, storage } = setup(t)
+  const requestOrder = []
+  globalThis.fetch.mock.mockImplementation(async (url, request) => {
+    requestOrder.push(url)
+    if (url === '/api/tabs') return { ok: true, json: async () => [...store.tabs] }
+    if (url === '/api/tabs/sidebar-preferences/migrate-browser-pins') {
+      assert.deepEqual(JSON.parse(request.body), { pinned_tab_ids: [] })
+      return { ok: true, json: async () => ({ pinned_tab_ids: [] }) }
+    }
+    if (url === '/api/tabs/sidebar-preferences') {
+      return { ok: true, json: async () => ({ pinned_tab_ids: [] }) }
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+
+  await store.fetchTabs()
+  await store.fetchTabs({ force: true })
+
+  assert.deepEqual(requestOrder, [
+    '/api/tabs',
+    '/api/tabs/sidebar-preferences/migrate-browser-pins',
+    '/api/tabs',
+    '/api/tabs/sidebar-preferences',
+  ])
+  assert.equal(storage.has('claude_hub_pinned_chat_ids'), false)
+})
+
+test('pin mutation waits for an in-flight legacy migration', async t => {
+  const { store } = setup(t, {
+    claude_hub_pinned_chat_ids: JSON.stringify(['b']),
+  })
+  let finishMigration
+  const requestOrder = []
+  globalThis.fetch.mock.mockImplementation(async (url, request) => {
+    requestOrder.push(url)
+    if (url === '/api/tabs') return { ok: true, json: async () => [...store.tabs] }
+    if (url === '/api/tabs/sidebar-preferences/migrate-browser-pins') {
+      await new Promise(resolve => { finishMigration = resolve })
+      return { ok: true, json: async () => ({ pinned_tab_ids: ['b'] }) }
+    }
+    if (url === '/api/tabs/sidebar-preferences/pins/a') {
+      assert.deepEqual(JSON.parse(request.body), { pinned: true })
+      return { ok: true, json: async () => ({ pinned_tab_ids: ['b', 'a'] }) }
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+
+  const loading = store.fetchTabs()
+  while (!finishMigration) await Promise.resolve()
+  const pinning = store.setChatPinned('a', true)
+  await Promise.resolve()
+  assert.deepEqual(requestOrder, [
+    '/api/tabs',
+    '/api/tabs/sidebar-preferences/migrate-browser-pins',
+  ])
+
+  finishMigration()
+  await Promise.all([loading, pinning])
+  assert.deepEqual(requestOrder, [
+    '/api/tabs',
+    '/api/tabs/sidebar-preferences/migrate-browser-pins',
+    '/api/tabs/sidebar-preferences/pins/a',
+  ])
+  assert.deepEqual([...store.pinnedChatIds], ['b', 'a'])
 })
 
 test('newly created and duplicated sessions are prepended without reordering existing sessions', async t => {
@@ -87,6 +197,31 @@ test('newly created and duplicated sessions are prepended without reordering exi
     store.tabs.map(tab => tab.id),
     ['duplicate', 'new', 'a', 'terminal', 'b', 'managed'],
   )
+})
+
+test('deleting a session reports success and clears its pinned preference', async t => {
+  const { store } = setup(t)
+  store.pinnedChatIds = new Set(['a'])
+  store.activeTabId = 'a'
+
+  const deleted = await store.deleteTab('a')
+
+  assert.equal(deleted, true)
+  assert.deepEqual(store.tabs.map(tab => tab.id), ['terminal', 'b', 'managed'])
+  assert.equal(store.activeTabId, 'terminal')
+  assert.equal(store.pinnedChatIds.has('a'), false)
+})
+
+test('failed deletion reports failure and preserves session state', async t => {
+  const { store } = setup(t)
+  store.pinnedChatIds = new Set(['a'])
+  globalThis.fetch.mock.mockImplementation(async () => ({ ok: false }))
+
+  const deleted = await store.deleteTab('a')
+
+  assert.equal(deleted, false)
+  assert.ok(store.tabs.some(tab => tab.id === 'a'))
+  assert.equal(store.pinnedChatIds.has('a'), true)
 })
 
 test('ID-based reorder keeps managed and terminal rows and saves the complete order', async t => {
@@ -136,6 +271,52 @@ test('missing or managed drag IDs do not write order or remove sessions', async 
   assert.equal(globalThis.fetch.mock.calls.length, 0)
 })
 
+test('workspace reorder moves every manual tab in the cwd and saves complete order', async t => {
+  const { store } = setup(t)
+  store.tabs = [
+    { id: 'a-chat', cwd: '/a', session_kind: 'chat' },
+    { id: 'b-chat', cwd: '/b', session_kind: 'chat' },
+    { id: 'a-terminal', cwd: '/a', session_kind: 'terminal' },
+    { id: 'managed', workspace_id: 'ws', session_kind: 'chat' },
+  ]
+
+  store.reorderChatWorkspace('/a', '/b', 'after')
+  await store.saveTabOrder()
+
+  assert.deepEqual(
+    store.tabs.map(tab => tab.id),
+    ['b-chat', 'a-chat', 'a-terminal', 'managed'],
+  )
+  assert.deepEqual(
+    JSON.parse(globalThis.fetch.mock.calls.at(-1).arguments[1].body).tab_ids,
+    ['b-chat', 'a-chat', 'a-terminal', 'managed'],
+  )
+})
+
+test('workspace reorder leaves pinned chats and their pinned order in place', async t => {
+  const { store } = setup(t)
+  store.tabs = [
+    { id: 'pinned-a', cwd: '/a', session_kind: 'chat' },
+    { id: 'a-chat', cwd: '/a', session_kind: 'chat' },
+    { id: 'pinned-b', cwd: '/b', session_kind: 'chat' },
+    { id: 'b-chat', cwd: '/b', session_kind: 'chat' },
+  ]
+  store.pinnedChatIds = new Set(['pinned-a', 'pinned-b'])
+
+  store.reorderChatWorkspace('/b', '/a', 'before')
+  await store.saveTabOrder()
+
+  assert.deepEqual(
+    store.tabs.map(tab => tab.id),
+    ['pinned-a', 'b-chat', 'pinned-b', 'a-chat'],
+  )
+  const order = pinned => store.chatTabs
+    .filter(tab => store.pinnedChatIds.has(tab.id) === pinned)
+    .map(tab => tab.id)
+  assert.deepEqual(order(true), ['pinned-a', 'pinned-b'])
+  assert.deepEqual(order(false), ['b-chat', 'a-chat'])
+})
+
 test('mobile drawer open/close/toggle actions update visibility', t => {
   const { store } = setup(t)
   assert.equal(store.mobileDrawerOpen, false)
@@ -164,9 +345,146 @@ test('selecting a session from the mobile drawer switches tab AND dismisses it',
   assert.equal(store.activeTabId, 'b')
 })
 
+test('queued Chat activation is FIFO and protects local drafts from cache eviction', async t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.activePaneId
+  assert.ok(paneId)
+
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'queued', attachments: [] })
+  assert.equal(store.paneHasProtectedQueuedChat(paneId), true)
+
+  store.requestQueuedChatActivation(paneId, 'a')
+  store.requestQueuedChatActivation(paneId, 'b')
+  assert.equal(store.activeTabId, 'a', 'a later completion must not supersede the FIFO head')
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'a'), true)
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'b'), false)
+
+  store.setActiveTab('terminal')
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(store.activeTabId, 'a', 'a user selection before activation acknowledgement is retried')
+
+  store.releaseQueuedChatActivation(paneId, 'a')
+  assert.equal(store.activeTabId, 'b', 'the next ready Chat activates after the first send attempt')
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'b'), true)
+
+  store.releaseQueuedChatActivation(paneId, 'b')
+  store.getQueuedChatState(paneId, 'a').drafts = []
+  assert.equal(store.paneHasProtectedQueuedChat(paneId), false)
+})
+
+test('a pane with a queued Chat cannot be removed by a smaller layout', t => {
+  const { store } = setup(t)
+  store.setLayout('2x1')
+  const protectedPane = store.panes[1]
+  store.assignTabToPane('a', protectedPane.id)
+  store.getQueuedChatState(protectedPane.id, 'a').drafts.push({ message: 'queued', attachments: [] })
+
+  store.setLayout('1x1')
+
+  assert.equal(store.layoutType, '2x1')
+  assert.equal(store.panes.some(pane => pane.id === protectedPane.id), true)
+  assert.equal(
+    store.notifications.at(-1)?.message,
+    'Wait for queued Chat messages before reducing the pane layout.',
+  )
+})
+
+test('moving a cached queued Chat migrates its state and FIFO request between panes', t => {
+  const { store } = setup(t)
+  store.setLayout('2x1')
+  const [firstPane, secondPane] = store.panes
+
+  store.assignTabToPane('a', firstPane.id)
+  const queue = store.getQueuedChatState(firstPane.id, 'a')
+  queue.drafts.push({ message: 'follow the cached Chat', attachments: [] })
+  store.requestQueuedChatActivation(firstPane.id, 'a')
+
+  store.assignTabToPane('a', secondPane.id)
+  assert.equal(queue.paneId, secondPane.id)
+  assert.equal(store.isQueuedChatActivationOwner(secondPane.id, 'a'), true)
+  assert.equal(store.isQueuedChatActivationOwner(firstPane.id, 'a'), false)
+  assert.deepEqual(store.observedQueuedChatIds(secondPane.id), ['a'])
+
+  store.assignTabToPane('a', firstPane.id)
+  assert.equal(queue.paneId, firstPane.id)
+  assert.equal(store.isQueuedChatActivationOwner(firstPane.id, 'a'), true)
+  assert.equal(store.isQueuedChatActivationOwner(secondPane.id, 'a'), false)
+  assert.deepEqual(store.observedQueuedChatIds(firstPane.id), ['a'])
+})
+
+test('an in-flight queued send settles its migrated owner by tab and advances FIFO', t => {
+  const { store } = setup(t)
+  store.setLayout('2x1')
+  const [firstPane, secondPane] = store.panes
+  store.assignTabToPane('a', firstPane.id)
+  store.getQueuedChatState(firstPane.id, 'a').drafts.push({ message: 'sending', attachments: [] })
+  store.requestQueuedChatActivation(firstPane.id, 'a')
+  store.requestQueuedChatActivation(firstPane.id, 'b')
+  const requestId = store.queuedChatActivationRequestId(firstPane.id, 'a')
+  assert.ok(requestId)
+
+  store.assignTabToPane('a', secondPane.id)
+  assert.equal(store.isQueuedChatActivationOwner(secondPane.id, 'a'), true)
+
+  // The POST was started by the old first-pane component, but settlement must
+  // retire the request after its ownership migrated to the second pane.
+  store.settleQueuedChatActivation('a', requestId)
+
+  assert.equal(store.hasQueuedChatActivationRequest(secondPane.id, 'a'), false)
+  assert.equal(store.isQueuedChatActivationOwner(firstPane.id, 'b'), true)
+  assert.equal(store.activeTabId, 'b')
+})
+
+test('an old queued POST cannot settle a same-tab request recreated after archive cleanup', t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.activePaneId
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'old generation', attachments: [] })
+  store.requestQueuedChatActivation(paneId, 'a')
+  const oldRequestId = store.queuedChatActivationRequestId(paneId, 'a')
+  assert.ok(oldRequestId)
+
+  // Archive/unarchive reuses the tab ID after discard; model that store
+  // boundary without touching a backend endpoint.
+  store.discardQueuedChat('a')
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'new generation', attachments: [] })
+  store.requestQueuedChatActivation(paneId, 'a')
+  const newRequestId = store.queuedChatActivationRequestId(paneId, 'a')
+  assert.ok(newRequestId)
+  assert.notEqual(newRequestId, oldRequestId)
+
+  store.settleQueuedChatActivation('a', oldRequestId)
+
+  assert.equal(store.queuedChatActivationRequestId(paneId, 'a'), newRequestId)
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'a'), true)
+})
+
+test('deleting a queued Chat discards its state and advances FIFO', async t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.activePaneId
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'discard me', attachments: [] })
+  store.requestQueuedChatActivation(paneId, 'a')
+  store.requestQueuedChatActivation(paneId, 'b')
+
+  await store.deleteTab('a')
+
+  assert.equal(store.tabs.some(tab => tab.id === 'a'), false)
+  assert.equal(store.paneHasProtectedQueuedChat(paneId), false)
+  assert.equal(store.isQueuedChatActivationOwner(paneId, 'b'), true)
+  assert.equal(store.activeTabId, 'b')
+
+  store.getQueuedChatState(paneId, 'b').drafts.push({ message: 'archive me', attachments: [] })
+  await store.archiveTab('b')
+  assert.equal(store.tabs.some(tab => tab.id === 'b'), false)
+  assert.equal(store.paneHasProtectedQueuedChat(paneId), false)
+  assert.equal(store.queuedChatActivationOwner, null)
+})
+
 test('pinned group is still built for mobile-shaped chat data (presentation-agnostic)', async t => {
   const { store } = setup(t)
-  store.setChatPinned('a', true)
+  store.pinnedChatIds = new Set(['a'])
   // Mobile reuses the exact same buildChatSidebarGroups source as desktop;
   // import it through the same transpile harness used for the store above.
   const { buildChatSidebarGroups } = await import(groupsUrl)

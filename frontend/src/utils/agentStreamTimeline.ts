@@ -3,7 +3,7 @@ import { agentImagePathFromTool } from '@/utils/agentImage'
 import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
 import { formatClockTime, formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
 import type { SubagentView } from '@/utils/subagentTool'
-import { parseSubagent } from '@/utils/subagentTool'
+import { parseSubagent, subagentResultText } from '@/utils/subagentTool'
 
 export interface TimelineTool {
   key: string
@@ -72,6 +72,8 @@ export type TimelineTurnOrigin = 'feishu' | 'web' | 'unknown'
 
 export interface TimelineFeishuProvenance {
   appId: string
+  botName: string | null
+  botAvatarUrl: string | null
   chatId: string
   messageId: string
   senderOpenId: string
@@ -220,6 +222,11 @@ function turnProvenance(event: AgentStreamEvent): {
   }
   const value = rawFeishu as Record<string, unknown>
   const appId = value.app_id
+  const botName = typeof value.bot_name === 'string' && value.bot_name.trim()
+    ? value.bot_name.trim() : null
+  const rawBotAvatarUrl = typeof value.bot_avatar_url === 'string'
+    ? value.bot_avatar_url.trim() : ''
+  const botAvatarUrl = /^https:\/\//.test(rawBotAvatarUrl) ? rawBotAvatarUrl : null
   const chatId = value.chat_id
   const messageId = value.message_id
   const senderOpenId = value.sender_open_id
@@ -233,7 +240,7 @@ function turnProvenance(event: AgentStreamEvent): {
   }
   return {
     origin,
-    feishu: { appId, chatId, messageId, senderOpenId },
+    feishu: { appId, botName, botAvatarUrl, chatId, messageId, senderOpenId },
   }
 }
 
@@ -268,8 +275,11 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
 
 export function messageSourceLabel(turn: TimelineTurn): string | null {
   if (turn.origin !== 'feishu') return null
-  const senderOpenId = turn.feishu?.senderOpenId.trim()
-  return senderOpenId ? `Feishu · ${senderOpenId}` : 'Feishu'
+  return turn.feishu?.botName || 'Feishu'
+}
+
+export function messageSourceAvatarUrl(turn: TimelineTurn): string | null {
+  return turn.origin === 'feishu' ? turn.feishu?.botAvatarUrl || null : null
 }
 
 /** Append or extend the last part of the given kind with more text. */
@@ -1013,7 +1023,8 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       if (newStatus === 'failed' && tool.name === 'AskUserQuestion') {
         newStatus = 'cancelled'
       }
-      const newResult = payloadString(event, 'result')
+      const newResult = subagentResultText(tool.subagent, event.payload.result)
+        ?? payloadString(event, 'result')
       if (isNew || tool.status !== newStatus || tool.resultText !== newResult) {
         tool.status = newStatus
         tool.resultText = newResult

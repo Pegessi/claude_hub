@@ -18,14 +18,10 @@ _OWNER = OwnerIdentity(open_id="ou-hub", email="hub@example.test", kind=OWNER_KI
 _CONFIG = FeishuBotConfig(
     app_id="cli-stored",
     app_secret="test-secret",
-    verification_token="test-token",
-    encrypt_key="test-encrypt",
 )
 _ENV = {
     "CLAUDE_HUB_FEISHU_BOT_APP_ID": "cli-env",
     "CLAUDE_HUB_FEISHU_BOT_APP_SECRET": "env-secret",
-    "CLAUDE_HUB_FEISHU_BOT_VERIFICATION_TOKEN": "env-token",
-    "CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY": "env-encrypt",
 }
 
 
@@ -68,8 +64,6 @@ def _activate(store, bot_id, pending, word, environ):
     "key",
     [
         "CLAUDE_HUB_FEISHU_BOT_APP_SECRET",
-        "CLAUDE_HUB_FEISHU_BOT_VERIFICATION_TOKEN",
-        "CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY",
         "CLAUDE_HUB_FEISHU_API_BASE_URL",
     ],
 )
@@ -113,6 +107,26 @@ def test_invalid_pool_version_is_not_rewritten(tmp_path, version):
     with pytest.raises(FeishuBotPoolStateError):
         store.create_bot(name="new", config=_CONFIG, environ={})
     assert store.path.read_bytes() == before
+
+
+def test_v2_pool_drops_callback_secrets_on_next_write(tmp_path):
+    store = _store(tmp_path)
+    bot_id = store.create_bot(name="test", config=_CONFIG, environ={})
+    state = json.loads(store.path.read_text(encoding="utf-8"))
+    state["version"] = 2
+    state["bots"][bot_id]["credentials"].update(
+        verification_token="legacy-token", encrypt_key="legacy-key"
+    )
+    store.path.write_text(json.dumps(state), encoding="utf-8")
+
+    entry = store.snapshot(environ={}).get(bot_id)
+    assert entry is not None
+    assert entry.config == _CONFIG
+    store.update_bot(bot_id, expected_revision=entry.revision, name="migrated", environ={})
+
+    migrated = json.loads(store.path.read_text(encoding="utf-8"))
+    assert migrated["version"] == 3
+    assert migrated["bots"][bot_id]["credentials"] == {"app_secret": "test-secret"}
 
 
 @pytest.mark.parametrize("version", [True, False, 1.0, "1", None])
@@ -199,8 +213,6 @@ def test_invalid_persisted_time_fails_before_read_or_mutation(tmp_path, bad, fie
             config=FeishuBotConfig(
                 app_id="cli-other",
                 app_secret="other",
-                verification_token="other",
-                encrypt_key="other",
             ),
             environ={},
         )

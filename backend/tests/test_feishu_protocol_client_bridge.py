@@ -1,26 +1,22 @@
-"""Feishu callback protocol, outbound client, and Chat source bridge tests."""
+"""Feishu outbound client and Chat source bridge tests."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Mapping
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi import HTTPException
 
 from claude_hub.api import agent_stream as stream_api
 from claude_hub.models import AgentStreamEvent, AgentStreamEventType, AgentType
 from claude_hub.services import goal_run
+from claude_hub.services.agent_stream import ExternalTurnRetirement
 from claude_hub.services.agent_stream.turn_source import (
     FEISHU_PROVIDER_TEXT_FORMAT_V1,
     format_feishu_provider_text_v1,
@@ -29,11 +25,8 @@ from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotConfig,
     FeishuBotError,
-    FeishuEventPayloadError,
-    FeishuEventVerificationError,
-    FeishuMessageEvent,
+    FeishuBotProfile,
     feishu_message_time_is_valid,
-    parse_feishu_callback,
 )
 
 _NOW = 2_000_000_000
@@ -65,237 +58,13 @@ def bot_config() -> FeishuBotConfig:
     return FeishuBotConfig(
         app_id="cli-bot",
         app_secret="app-secret",
-        verification_token="verify-token",
-        encrypt_key="encrypt-key",
     )
-
-
-def _sign(body: bytes, timestamp: int, nonce: str, encrypt_key: str) -> str:
-    signed = str(timestamp).encode() + nonce.encode() + encrypt_key.encode() + body
-    return hashlib.sha256(signed).hexdigest()
-
-
-def _callback_headers(
-    body: bytes,
-    now: int,
-    *,
-    encrypt_key: str = "encrypt-key",
-) -> dict[str, str]:
-    nonce = "nonce-1"
-    return {
-        "content-type": "application/json",
-        "x-lark-request-timestamp": str(now),
-        "x-lark-request-nonce": nonce,
-        "x-lark-signature": _sign(body, now, nonce, encrypt_key),
-    }
-
-
-def _encrypted_callback(
-    payload: Mapping[str, object],
-    request_time: int,
-    *,
-    encrypt_key: str = "encrypt-key",
-    iv: bytes = b"0123456789abcdef",
-) -> tuple[bytes, dict[str, str]]:
-    plaintext = json.dumps(payload).encode()
-    padder = padding.PKCS7(algorithms.AES.block_size).padder()
-    padded = padder.update(plaintext) + padder.finalize()
-    key = hashlib.sha256(encrypt_key.encode()).digest()
-    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
-    ciphertext = iv + encryptor.update(padded) + encryptor.finalize()
-    body = json.dumps({"encrypt": base64.b64encode(ciphertext).decode()}).encode()
-    return body, _callback_headers(body, request_time, encrypt_key=encrypt_key)
-
-
-def _invalid_padding_callback(now: int) -> tuple[bytes, dict[str, str]]:
-    iv = b"0123456789abcdef"
-    key = hashlib.sha256(b"encrypt-key").digest()
-    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
-    ciphertext = iv + encryptor.update(b"\x00" * 16) + encryptor.finalize()
-    body = json.dumps({"encrypt": base64.b64encode(ciphertext).decode()}).encode()
-    return body, _callback_headers(body, now)
-
-
-def _message_payload(
-    *,
-    created_at: int,
-    text: str,
-    message_id: str = "om-1",
-    sender_open_id: str = "ou-owner",
-    chat_id: str = "oc-chat",
-    app_id: str = "cli-bot",
-) -> dict[str, object]:
-    return {
-        "schema": "2.0",
-        "header": {
-            "event_id": f"evt-{message_id}",
-            "event_type": "im.message.receive_v1",
-            "create_time": str(created_at * 1000),
-            "token": "verify-token",
-            "app_id": app_id,
-            "tenant_key": "tenant-1",
-        },
-        "event": {
-            "sender": {
-                "sender_id": {"open_id": sender_open_id},
-                "sender_type": "user",
-                "tenant_key": "tenant-1",
-            },
-            "message": {
-                "message_id": message_id,
-                "create_time": str(created_at * 1000),
-                "chat_id": chat_id,
-                "chat_type": "p2p",
-                "message_type": "text",
-                "content": json.dumps({"text": text}),
-            },
-        },
-    }
-
-
-def test_encrypted_callback_signature_token_and_time_windows(
-    bot_config: FeishuBotConfig,
-) -> None:
-    challenge = {
-        "challenge": "challenge-value",
-        "token": "verify-token",
-        "type": "url_verification",
-    }
-    body, headers = _encrypted_callback(challenge, _NOW)
-    assert parse_feishu_callback(body, headers, bot_config, now=_NOW) == (
-        "challenge",
-        "challenge-value",
-    )
-    with pytest.raises(FeishuEventPayloadError, match="Plaintext"):
-        parse_feishu_callback(json.dumps(challenge).encode(), {}, bot_config, now=_NOW)
-
-    bad_token_body, bad_token_headers = _encrypted_callback(
-        {**challenge, "token": "wrong"},
-        _NOW,
-    )
-    with pytest.raises(FeishuEventVerificationError, match="verification token"):
-        parse_feishu_callback(bad_token_body, bad_token_headers, bot_config, now=_NOW)
-
-    event_body, event_headers = _encrypted_callback(
-        _message_payload(created_at=_NOW, text="hello"),
-        _NOW,
-    )
-    kind, parsed = parse_feishu_callback(event_body, event_headers, bot_config, now=_NOW)
-    assert kind == "message"
-    assert isinstance(parsed, FeishuMessageEvent)
-    assert parsed.text == "hello"
-    assert parsed.message_id == "om-1"
-    assert parsed.message_created_at_ms == _NOW * 1000
-
-    with pytest.raises(FeishuEventVerificationError, match="signature"):
-        parse_feishu_callback(
-            event_body,
-            {**event_headers, "x-lark-signature": "bad"},
-            bot_config,
-            now=_NOW,
-        )
-
-    stale_request_body, stale_request_headers = _encrypted_callback(
-        _message_payload(created_at=_NOW, text="hello"),
-        _NOW - 301,
-    )
-    with pytest.raises(FeishuEventVerificationError, match="replay window"):
-        parse_feishu_callback(
-            stale_request_body,
-            stale_request_headers,
-            bot_config,
-            now=_NOW,
-        )
-
-    stale_event_body, stale_event_headers = _encrypted_callback(
-        _message_payload(created_at=_NOW - 301, text="hello"),
-        _NOW,
-    )
-    with pytest.raises(FeishuEventVerificationError, match="replay window"):
-        parse_feishu_callback(stale_event_body, stale_event_headers, bot_config, now=_NOW)
-
-    wrong_key = FeishuBotConfig(
-        app_id=bot_config.app_id,
-        app_secret=bot_config.app_secret,
-        verification_token=bot_config.verification_token,
-        encrypt_key="wrong-key",
-    )
-    with pytest.raises(FeishuEventVerificationError, match="signature"):
-        parse_feishu_callback(event_body, event_headers, wrong_key, now=_NOW)
-
-    tampered = json.loads(event_body)
-    encoded = tampered["encrypt"]
-    tampered["encrypt"] = encoded[:-1] + ("A" if encoded[-1] != "A" else "B")
-    with pytest.raises(FeishuEventVerificationError, match="signature"):
-        parse_feishu_callback(json.dumps(tampered).encode(), event_headers, bot_config, now=_NOW)
-
-    padding_body, padding_headers = _invalid_padding_callback(_NOW)
-    with pytest.raises(FeishuEventVerificationError, match="padding"):
-        parse_feishu_callback(padding_body, padding_headers, bot_config, now=_NOW)
-
-    wrong_app_body, wrong_app_headers = _encrypted_callback(
-        _message_payload(created_at=_NOW, text="hello", app_id="cli-other"),
-        _NOW,
-    )
-    with pytest.raises(FeishuEventVerificationError, match="app_id"):
-        parse_feishu_callback(wrong_app_body, wrong_app_headers, bot_config, now=_NOW)
-
-    oversized_body, oversized_headers = _encrypted_callback(
-        _message_payload(created_at=_NOW, text="x" * 4_001),
-        _NOW,
-    )
-    with pytest.raises(FeishuEventPayloadError, match="character limit"):
-        parse_feishu_callback(oversized_body, oversized_headers, bot_config, now=_NOW)
-
-
-def test_plaintext_mode_checks_token_without_request_signature(
-    bot_config: FeishuBotConfig,
-) -> None:
-    plaintext_config = FeishuBotConfig(
-        app_id=bot_config.app_id,
-        app_secret=bot_config.app_secret,
-        verification_token=bot_config.verification_token,
-        encrypt_key=None,
-    )
-    challenge = {
-        "challenge": "plain-challenge",
-        "token": "verify-token",
-        "type": "url_verification",
-    }
-    # Plaintext mode has no request signature; only the verification token is checked.
-    assert parse_feishu_callback(
-        json.dumps(challenge).encode(), {}, plaintext_config, now=_NOW
-    ) == ("challenge", "plain-challenge")
-    with pytest.raises(FeishuEventVerificationError, match="verification token"):
-        parse_feishu_callback(
-            json.dumps({**challenge, "token": "wrong"}).encode(),
-            {},
-            plaintext_config,
-            now=_NOW,
-        )
-
-    encrypted_body, encrypted_headers = _encrypted_callback(challenge, _NOW)
-    with pytest.raises(FeishuEventPayloadError, match="without an Encrypt Key"):
-        parse_feishu_callback(
-            encrypted_body,
-            encrypted_headers,
-            plaintext_config,
-            now=_NOW,
-        )
-
-    kind, parsed = parse_feishu_callback(
-        json.dumps(_message_payload(created_at=_NOW, text="plain event")).encode(),
-        {},
-        plaintext_config,
-        now=_NOW,
-    )
-    assert kind == "message"
-    assert isinstance(parsed, FeishuMessageEvent)
-    assert parsed.text == "plain event"
 
 
 @pytest.mark.asyncio
-async def test_client_uses_only_injected_http_transport(bot_config: FeishuBotConfig) -> None:
+async def test_client_uses_only_injected_http_transport(
+    bot_config: FeishuBotConfig,
+) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -328,6 +97,200 @@ async def test_client_uses_only_injected_http_transport(bot_config: FeishuBotCon
     assert "receive_id" not in reply_body
     assert reply_body["msg_type"] == "text"
     assert json.loads(reply_body["content"]) == {"text": "exact reply"}
+
+
+@pytest.mark.asyncio
+async def test_client_reads_official_bot_profile_and_message_image(
+    bot_config: FeishuBotConfig,
+) -> None:
+    requests: list[httpx.Request] = []
+    png = b"\x89PNG\r\n\x1a\n" + b"image-bytes"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        if request.url.path == "/open-apis/bot/v3/info/":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "msg": "ok",
+                    "bot": {
+                        "app_name": "Hub 助手",
+                        "avatar_url": "https://example.test/bot.png",
+                    },
+                },
+            )
+        if request.url.path == "/open-apis/im/v1/messages/om-post/resources/img_v3_key":
+            assert request.url.params["type"] == "image"
+            return httpx.Response(200, content=png, headers={"Content-Type": "image/png"})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        profile = await client.validate_credentials()
+        image = await client.download_message_image("om-post", "img_v3_key")
+
+    assert profile == FeishuBotProfile(name="Hub 助手", avatar_url="https://example.test/bot.png")
+    assert image == png
+    assert [request.url.path for request in requests] == [
+        "/open-apis/auth/v3/tenant_access_token/internal",
+        "/open-apis/bot/v3/info/",
+        "/open-apis/im/v1/messages/om-post/resources/img_v3_key",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_client_rejects_an_oversized_image_before_reading_its_body(
+    bot_config: FeishuBotConfig,
+) -> None:
+    body_was_read = False
+
+    class UnexpectedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal body_was_read
+            body_was_read = True
+            yield b"not expected"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "image/png",
+                "Content-Length": str(20 * 1024 * 1024 + 1),
+            },
+            stream=UnexpectedBody(),
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        with pytest.raises(FeishuBotError, match="invalid message image"):
+            await client.download_message_image("om-post", "img_v3_oversized")
+
+    assert not body_was_read
+
+
+@pytest.mark.asyncio
+async def test_client_aborts_a_chunked_image_after_the_size_limit(
+    bot_config: FeishuBotConfig,
+) -> None:
+    chunks_yielded = 0
+
+    class OversizedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal chunks_yielded
+            for _ in range(25):
+                chunks_yielded += 1
+                yield b"x" * (1024 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "image/png"},
+            stream=OversizedBody(),
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        with pytest.raises(FeishuBotError, match="invalid message image"):
+            await client.download_message_image("om-post", "img_v3_chunked")
+
+    assert chunks_yielded == 21
+
+
+@pytest.mark.asyncio
+async def test_client_ignores_non_https_bot_avatar(bot_config: FeishuBotConfig) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "bot": {
+                    "app_name": "Hub 助手",
+                    "avatar_url": "http://invalid.test/a.png",
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        assert await client.get_bot_profile() == FeishuBotProfile(name="Hub 助手", avatar_url=None)
+
+
+@pytest.mark.asyncio
+async def test_client_supports_structured_messages_and_reaction_lifecycle(
+    bot_config: FeishuBotConfig,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        if request.method == "POST" and request.url.path.endswith("/reactions"):
+            return httpx.Response(200, json={"code": 0, "data": {"reaction_id": "react-1"}})
+        return httpx.Response(200, json={"code": 0})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        await client.send_message("oc-chat", "interactive", {"elements": []})
+        await client.reply_message("om-inbound", "post", {"zh_cn": {"title": "T"}})
+        reaction_id = await client.add_reaction("om-inbound", "Typing")
+        await client.delete_reaction("om-inbound", reaction_id)
+
+    assert [request.url.path for request in requests] == [
+        "/open-apis/auth/v3/tenant_access_token/internal",
+        "/open-apis/im/v1/messages",
+        "/open-apis/im/v1/messages/om-inbound/reply",
+        "/open-apis/im/v1/messages/om-inbound/reactions",
+        "/open-apis/im/v1/messages/om-inbound/reactions/react-1",
+    ]
+    assert requests[3].method == "POST"
+    assert json.loads(requests[3].content) == {"reaction_type": {"emoji_type": "Typing"}}
+    assert requests[4].method == "DELETE"
+    assert all(
+        request.headers["authorization"] == "Bearer tenant-token" for request in requests[1:]
+    )
+    assert json.loads(requests[1].content)["msg_type"] == "interactive"
+    assert json.loads(json.loads(requests[1].content)["content"]) == {"elements": []}
+    assert json.loads(requests[2].content)["msg_type"] == "post"
 
 
 @pytest.mark.parametrize("bad_token", ["", "   "])
@@ -478,7 +441,9 @@ async def test_external_goal_input_does_not_consume_pending_question(
     monkeypatch.setattr(
         goal_run,
         "get_goal_manager",
-        lambda: SimpleNamespace(current=lambda _tab_id: current),
+        lambda: SimpleNamespace(
+            current=lambda _tab_id: current, has_goal_history=lambda _tab_id: True
+        ),
     )
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: object())
     monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
@@ -577,77 +542,188 @@ async def test_external_chat_bridge_preserves_unknown_conflict(
     assert unsubscribed == [(session.id, queue)]
 
 
+@pytest.mark.asyncio
+async def test_external_chat_bridge_cancellation_stops_the_matching_native_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    dispatched = asyncio.Event()
+    cancelled: list[tuple[object, str | None]] = []
+    unsubscribed: list[tuple[str, object]] = []
+
+    class FakeManager:
+        async def subscribe(self, session_arg):
+            assert session_arg is session
+            return queue
+
+        async def retire_external_turn(self, session_arg, expected_turn_id=None):
+            cancelled.append((session_arg, expected_turn_id))
+            return ExternalTurnRetirement.CANCELLED_MATCHING
+
+        def unsubscribe(self, session_id, queue_arg) -> None:
+            unsubscribed.append((session_id, queue_arg))
+
+    async def fake_dispatch(
+        _tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        dispatched.set()
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    manager = FakeManager()
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=60
+        )
+    )
+    await dispatched.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(stream_api.ExternalDispatchRetired):
+        await task
+    assert cancelled == [(session, "feishu-turn")]
+    assert unsubscribed == [(session.id, queue)]
+
+
+@pytest.mark.asyncio
+async def test_external_chat_bridge_cancellation_releases_when_turn_never_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    dispatched = asyncio.Event()
+
+    class FakeManager:
+        async def subscribe(self, _session_arg):
+            return queue
+
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-turn"
+            return ExternalTurnRetirement.NOT_STARTED
+
+        def unsubscribe(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(
+        _tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        dispatched.set()
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=60
+        )
+    )
+    await dispatched.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(stream_api.ExternalDispatchRetired):
+        await task
+
+
 @pytest.mark.parametrize(
-    "raw",
+    "retirement",
     [
-        pytest.param("missing", id="missing"),
-        pytest.param(None, id="null"),
-        pytest.param(True, id="bool"),
-        pytest.param(_NOW * 1000, id="json-number"),
-        pytest.param("", id="empty"),
-        pytest.param(" 2000000000000", id="whitespace"),
-        pytest.param("+2000000000000", id="sign"),
-        pytest.param("-1", id="negative"),
-        pytest.param("2000000000000.0", id="fraction"),
-        pytest.param("2e12", id="exponent"),
-        pytest.param("２００００００００００００", id="non-ascii"),
-        pytest.param("9" * 14, id="overlong"),
-        pytest.param("4102444800001", id="out-of-range"),
+        ExternalTurnRetirement.ALREADY_TERMINAL,
+        ExternalTurnRetirement.DIFFERENT_TURN,
+        ExternalTurnRetirement.UNKNOWN,
     ],
 )
-def test_message_timestamp_must_be_a_strict_millisecond_string(bot_config, raw):
-    payload = _message_payload(created_at=_NOW, text="hello")
-    event = payload["event"]
-    assert isinstance(event, dict)
-    message = event["message"]
-    assert isinstance(message, dict)
-    if raw == "missing":
-        del message["create_time"]
-    else:
-        message["create_time"] = raw
-    body, headers = _encrypted_callback(payload, _NOW)
-    with pytest.raises(FeishuEventPayloadError, match="message create_time"):
-        parse_feishu_callback(body, headers, bot_config, now=_NOW)
+@pytest.mark.asyncio
+async def test_external_chat_bridge_cancellation_preserves_non_retryable_turns(
+    monkeypatch: pytest.MonkeyPatch, retirement: ExternalTurnRetirement
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    dispatched = asyncio.Event()
 
+    class FakeManager:
+        async def subscribe(self, _session_arg):
+            return queue
 
-def test_message_time_is_preserved_instead_of_the_header_time(bot_config):
-    payload = _message_payload(created_at=_NOW, text="hello")
-    event = payload["event"]
-    assert isinstance(event, dict)
-    message = event["message"]
-    assert isinstance(message, dict)
-    message["create_time"] = str((_NOW - 10) * 1000)
-    body, headers = _encrypted_callback(payload, _NOW)
-    kind, parsed = parse_feishu_callback(body, headers, bot_config, now=_NOW)
-    assert kind == "message"
-    assert parsed.message_created_at_ms == (_NOW - 10) * 1000
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-turn"
+            return retirement
 
+        def unsubscribe(self, _session_id, _queue_arg) -> None:
+            pass
 
-def test_seconds_looking_message_time_is_not_rescaled(bot_config):
-    payload = _message_payload(created_at=_NOW, text="hello")
-    event = payload["event"]
-    assert isinstance(event, dict)
-    message = event["message"]
-    assert isinstance(message, dict)
-    message["create_time"] = str(_NOW)
-    body, headers = _encrypted_callback(payload, _NOW)
-    _, parsed = parse_feishu_callback(body, headers, bot_config, now=_NOW)
-    assert parsed.message_created_at_ms == _NOW
-    assert not feishu_message_time_is_valid(
-        parsed.message_created_at_ms, activated_at=_NOW - 1, now=_NOW
+    async def fake_dispatch(
+        _tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        dispatched.set()
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=60
+        )
     )
+    await dispatched.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await task
+    assert not isinstance(raised.value, stream_api.ExternalDispatchRetired)
 
 
-def test_future_message_is_not_saved_by_a_current_header(bot_config):
-    payload = _message_payload(created_at=_NOW, text="hello")
-    event = payload["event"]
-    assert isinstance(event, dict)
-    message = event["message"]
-    assert isinstance(message, dict)
-    message["create_time"] = str((_NOW + 1) * 1000)
-    body, headers = _encrypted_callback(payload, _NOW)
-    with pytest.raises(FeishuEventVerificationError, match="message timestamp"):
-        parse_feishu_callback(body, headers, bot_config, now=_NOW)
+@pytest.mark.asyncio
+async def test_external_chat_bridge_cancellation_times_out_a_stalled_native_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    dispatched = asyncio.Event()
+
+    class FakeManager:
+        async def subscribe(self, _session_arg):
+            return queue
+
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-turn"
+            await asyncio.Future()
+
+        def unsubscribe(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(
+        _tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        dispatched.set()
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_EXTERNAL_CANCEL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-turn", timeout_seconds=60
+        )
+    )
+    await dispatched.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
 
 
 def test_activation_boundary_does_not_round_down_or_add_grace():

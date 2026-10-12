@@ -72,18 +72,24 @@
             Retry local storage
           </button>
         </section>
-        <section
-          v-else-if="pendingAttempt"
+        <p
+          v-else-if="pendingAttempt && submitting"
           class="modal-hint"
           role="status"
         >
-          Saved request: {{ pendingAttempt.payload.title }}. A saved create request needs confirmation. Recover the exact saved request, or
-          <button
-            type="button"
-            @click="discardPendingAttempt"
-          >
-            discard it and edit a new Task
-          </button>.
+          Creating “{{ pendingAttempt.payload.title }}”…
+        </p>
+        <section
+          v-else-if="pendingAttempt"
+          class="task-create-recovery"
+          role="status"
+        >
+          <p class="task-create-recovery-title">
+            “{{ pendingAttempt.payload.title }}” was not confirmed
+          </p>
+          <p class="modal-hint">
+            Retry sends the identical saved request, so the Task is never created twice. Discard it to edit a new Task instead.
+          </p>
         </section>
         <template v-if="!pendingAttempt && !reporterRecovery">
           <div class="modal-field">
@@ -329,6 +335,14 @@
         </template>
         <div class="modal-actions">
           <button
+            v-if="pendingAttempt && !submitting && !reporterRecovery"
+            type="button"
+            class="tool-button modal-actions-leading"
+            @click="discardPendingAttempt"
+          >
+            Discard and start over
+          </button>
+          <button
             type="button"
             class="tool-button"
             @click="close"
@@ -343,7 +357,7 @@
             :loading="submitting"
             loading-label="Adding task"
           >
-            {{ pendingAttempt ? 'Recover saved create request' : 'Create Task' }}
+            {{ submitting ? 'Creating Task' : (pendingAttempt ? 'Retry saved request' : 'Create Task') }}
           </LoadingButton>
         </div>
       </form>
@@ -701,6 +715,26 @@ const {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
+}
+
+.modal-actions .modal-actions-leading {
+  margin-right: auto;
+}
+
+.task-create-recovery {
+  margin-top: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+}
+
+.task-create-recovery-title {
+  margin: 0;
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .modal-actions button {

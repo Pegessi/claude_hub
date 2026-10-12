@@ -52,6 +52,7 @@ const {
   deliveryAt,
   groupEventsIntoTurns,
   messageClockLabel,
+  messageSourceAvatarUrl,
   messageSourceLabel,
   turnClockLabel,
 } = mod
@@ -95,6 +96,8 @@ test('serialized turn history preserves explicit source without inferring from t
         origin: 'feishu',
         feishu: {
           app_id: 'cli-bot',
+          bot_name: 'Hub 助手',
+          bot_avatar_url: 'https://example.test/bot.png',
           chat_id: 'oc-chat',
           message_id: 'om-message',
           sender_open_id: 'ou-sender',
@@ -122,17 +125,43 @@ test('serialized turn history preserves explicit source without inferring from t
   assert.equal(turns[0].origin, 'feishu')
   assert.deepEqual(turns[0].feishu, {
     appId: 'cli-bot',
+    botName: 'Hub 助手',
+    botAvatarUrl: 'https://example.test/bot.png',
     chatId: 'oc-chat',
     messageId: 'om-message',
     senderOpenId: 'ou-sender',
   })
-  assert.equal(messageSourceLabel(turns[0]), 'Feishu · ou-sender')
+  assert.equal(messageSourceLabel(turns[0]), 'Hub 助手')
+  assert.equal(messageSourceAvatarUrl(turns[0]), 'https://example.test/bot.png')
   assert.equal(turns[1].origin, 'web')
   assert.equal(turns[1].feishu, null)
   assert.equal(messageSourceLabel(turns[1]), null)
+  assert.equal(messageSourceAvatarUrl(turns[1]), null)
   assert.equal(turns[2].origin, 'unknown')
   assert.equal(turns[2].feishu, null)
   assert.equal(messageSourceLabel(turns[2]), null)
+})
+
+test('Feishu source avatars reject non-HTTPS URLs', () => {
+  const turns = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', {
+      summary: 'hello',
+      metadata: {
+        origin: 'feishu',
+        feishu: {
+          app_id: 'cli-bot',
+          bot_name: 'Hub 助手',
+          bot_avatar_url: 'http://invalid.test/bot.png',
+          chat_id: 'oc-chat',
+          message_id: 'om-message',
+          sender_open_id: 'ou-sender',
+        },
+      },
+    }, { turn_id: 'turn-feishu' }),
+  ])
+
+  assert.equal(messageSourceLabel(turns[0]), 'Hub 助手')
+  assert.equal(messageSourceAvatarUrl(turns[0]), null)
 })
 
 test('text_delta appends to assistant text within the current turn', () => {

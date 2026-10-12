@@ -78,6 +78,11 @@ Commands (run in the task worktree):
 - For UI changes, additionally run the explicit browser gates and check the
   affected states/layouts in [UI acceptance](UI_ACCEPTANCE.md). `all` does not
   start browsers or prove live provider/OAuth/Bot behavior.
+- When a change alters what a user can observe or do, extend the scenario that
+  owns that surface, or add one, while writing the change rather than after.
+  [UI acceptance](UI_ACCEPTANCE.md#adding-a-gate-for-new-work) covers when a
+  gate is warranted, when it is not, and why a gate must be seen to fail once
+  before it is trusted.
 - Use the declared tool versions and locked setup from
   [CONTRIBUTING](../CONTRIBUTING.md#5-run-validation). Verification does not
   install dependencies or silently select a different runtime.

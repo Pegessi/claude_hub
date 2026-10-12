@@ -15,7 +15,7 @@ from ..models import (
     TerminalTabUpdate,
     User,
 )
-from ..services import ttyd_manager
+from ..services import chat_sidebar_preferences, ttyd_manager
 from ..services.ttyd_manager import TabLimitExceededError, TabStartupTimeoutError
 from .agent_stream import _get_tab_tailer_manager, _terminal_tab_stream_session
 
@@ -26,6 +26,18 @@ router = APIRouter(prefix="/api/tabs", tags=["tabs"])
 
 class TabOrderUpdate(BaseModel):
     tab_ids: List[str]
+
+
+class ChatSidebarPreferencesResponse(BaseModel):
+    pinned_tab_ids: List[str]
+
+
+class ChatPinUpdate(BaseModel):
+    pinned: bool
+
+
+class LegacyBrowserPinsMigration(BaseModel):
+    pinned_tab_ids: List[str]
 
 
 class ForkTabRequest(BaseModel):
@@ -153,6 +165,69 @@ async def update_tab_order(
     logger.info(f"Updating tab order: {order.tab_ids}, user={current_user.email}")
     ttyd_manager.set_tab_order(order.tab_ids)
     return {"success": True}
+
+
+def _valid_pinnable_tab_ids() -> set[str]:
+    return {
+        tab.id
+        for tab in [*ttyd_manager.list_tabs(), *ttyd_manager.list_archived_tabs()]
+        if tab.session_kind.value == "chat" and not tab.workspace_id
+    }
+
+
+@router.get("/sidebar-preferences", response_model=ChatSidebarPreferencesResponse)
+async def get_chat_sidebar_preferences(
+    current_user: User = Depends(get_current_user),
+) -> ChatSidebarPreferencesResponse:
+    """Return this server user's Chat sidebar preferences."""
+
+    valid_tab_ids = _valid_pinnable_tab_ids()
+    pinned_tab_ids = chat_sidebar_preferences.get_store().get_pinned(current_user.open_id)
+    return ChatSidebarPreferencesResponse(
+        pinned_tab_ids=[tab_id for tab_id in pinned_tab_ids if tab_id in valid_tab_ids]
+    )
+
+
+@router.post(
+    "/sidebar-preferences/migrate-browser-pins",
+    response_model=ChatSidebarPreferencesResponse,
+)
+async def migrate_browser_chat_pins(
+    migration: LegacyBrowserPinsMigration,
+    current_user: User = Depends(get_current_user),
+) -> ChatSidebarPreferencesResponse:
+    """Merge valid legacy localStorage pins once, then use only server state."""
+
+    valid_tab_ids = _valid_pinnable_tab_ids()
+    legacy_ids = [tab_id for tab_id in migration.pinned_tab_ids if tab_id in valid_tab_ids]
+    pinned_tab_ids = chat_sidebar_preferences.get_store().migrate_browser_pins(
+        current_user.open_id, legacy_ids
+    )
+    return ChatSidebarPreferencesResponse(
+        pinned_tab_ids=[tab_id for tab_id in pinned_tab_ids if tab_id in valid_tab_ids]
+    )
+
+
+@router.put(
+    "/sidebar-preferences/pins/{tab_id}",
+    response_model=ChatSidebarPreferencesResponse,
+)
+async def update_chat_pin(
+    tab_id: str,
+    update: ChatPinUpdate,
+    current_user: User = Depends(get_current_user),
+) -> ChatSidebarPreferencesResponse:
+    """Idempotently pin or unpin one Chat without whole-list lost updates."""
+
+    valid_tab_ids = _valid_pinnable_tab_ids()
+    if update.pinned and tab_id not in valid_tab_ids:
+        raise HTTPException(status_code=404, detail="Chat tab not found")
+    pinned_tab_ids = chat_sidebar_preferences.get_store().set_pinned(
+        current_user.open_id, tab_id, update.pinned
+    )
+    return ChatSidebarPreferencesResponse(
+        pinned_tab_ids=[value for value in pinned_tab_ids if value in valid_tab_ids]
+    )
 
 
 @router.post("/{tab_id}/duplicate", response_model=TerminalTab, status_code=201)
@@ -340,3 +415,11 @@ async def delete_tab(
     success = await ttyd_manager.delete_tab(tab_id)
     if not success:
         raise HTTPException(status_code=404, detail="Tab not found")
+    try:
+        chat_sidebar_preferences.get_store().remove_tab(tab_id)
+    except OSError:
+        # The destructive operation already succeeded. A stale preference is
+        # filtered from every API response, so do not misreport the deletion
+        # as failed solely because best-effort preference cleanup could not be
+        # persisted.
+        logger.exception("Failed to remove deleted tab %s from Chat pins", tab_id)

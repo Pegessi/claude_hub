@@ -19,7 +19,6 @@
     <div
       v-if="pane.tabId"
       class="pane-chrome"
-      :class="{ 'pane-chrome--chat': isChatSession }"
     >
       <button
         v-if="!isChatSession"
@@ -107,6 +106,10 @@
         class="pane-session-name"
         :title="tabName"
       >{{ tabName }}</span>
+      <FeishuBindingPanel
+        v-if="isChatSession"
+        :tab-id="pane.tabId"
+      />
     </div>
 
     <!-- 空状态 -->
@@ -114,8 +117,29 @@
       v-if="!pane.tabId"
       class="pane-empty"
     >
-      <div class="empty-icon">
-        📋
+      <div
+        class="empty-icon"
+        aria-hidden="true"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+        >
+          <rect
+            x="3.5"
+            y="4.5"
+            width="17"
+            height="15"
+            rx="2.5"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+          <path
+            d="M8.5 4.5v15M8.5 9h12"
+            stroke="currentColor"
+            stroke-width="1.5"
+          />
+        </svg>
       </div>
       <p>Click a tab to assign to this pane</p>
       <p class="empty-hint">
@@ -145,11 +169,18 @@
     >
       <KeepAlive :max="MAX_CACHED_CHAT_PANES">
         <StructuredPane
-          :key="pane.tabId"
+          :key="store.chatPaneCacheKey(pane.tabId)"
           :tab-id="pane.tabId"
+          :pane-id="pane.id"
         />
       </KeepAlive>
     </div>
+    <QueuedChatObserver
+      v-for="tabId in queuedObserverTabIds"
+      :key="tabId"
+      :pane-id="pane.id"
+      :tab-id="tabId"
+    />
   </div>
 </template>
 
@@ -157,8 +188,10 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
+import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import TerminalView from '@/components/TerminalView.vue'
 import StructuredPane from '@/components/StructuredPane.vue'
+import QueuedChatObserver from '@/components/QueuedChatObserver.vue'
 import type { Pane, TerminalTab } from '@/types'
 
 const props = defineProps<{
@@ -219,11 +252,13 @@ function handleReconnect() {
   store.requestPaneReconnect(tabId)
 }
 
-// Upper bound on cached StructuredPane instances per pane. Each entry holds a
-// full conversation DOM + composer state, so this stays modest; the global
-// history LRU (agentStreamHistoryCache) is the larger safety net for panes
-// evicted from this cache.
+// Full Chat panes remain bounded. Minimal queued-draft state lives in Pinia,
+// and QueuedChatObserver owns only the hidden completion stream needed to
+// reactivate an evicted queued Chat.
 const MAX_CACHED_CHAT_PANES = 8
+const queuedObserverTabIds = computed(() =>
+  store.observedQueuedChatIds(props.pane.id).filter(tabId => tabId !== props.pane.tabId)
+)
 
 const isDragOver = ref(false)
 
@@ -279,7 +314,7 @@ onUnmounted(() => {
   position: relative;
   display: flex;
   flex-direction: column;
-  background-color: var(--ch-color-app-bg);
+  background-color: var(--ch-color-main-bg);
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-lg);
   overflow: hidden;
@@ -287,12 +322,13 @@ onUnmounted(() => {
 }
 
 .terminal-pane.active {
-  border-color: var(--ch-color-accent);
-  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 10px 28px var(--ch-shadow-color-soft);
+  border-color: var(--ch-color-border-selected);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-halo), 0 10px 28px var(--ch-shadow-color-soft);
 }
 
 .terminal-pane.empty {
   border-style: dashed;
+  background-color: var(--ch-color-surface-soft);
 }
 
 .terminal-pane.drag-over {
@@ -300,10 +336,12 @@ onUnmounted(() => {
   background-color: var(--ch-color-success-bg);
 }
 
-/* Floating top-right chrome cluster: manual reconnect icon + session name.
-   Sits in the same spot the session-name pill used to occupy; the cluster
-   never takes a full row and never blocks the terminal surface below. */
+/* Floating top-right chrome cluster: session name plus its contextual action.
+   Keeping every control in this one flex row prevents independently positioned
+   Chat actions from stacking on the name pill. */
 .pane-chrome {
+  --pane-chrome-control-size: 24px;
+
   position: absolute;
   top: 6px;
   right: 8px;
@@ -312,13 +350,6 @@ onUnmounted(() => {
   align-items: center;
   gap: 5px;
   max-width: 55%;
-}
-
-/* Chat owns a separate top-right Feishu control. Leave room for it without
-   changing the terminal reconnect control or the stacking order. */
-.pane-chrome--chat {
-  right: 56px;
-  max-width: min(55%, calc(100% - 64px));
 }
 
 /* Tiny icon-only reconnect control, styled to match the floating name pill:
@@ -330,8 +361,8 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 21px;
-  height: 21px;
+  width: var(--pane-chrome-control-size);
+  height: var(--pane-chrome-control-size);
   padding: 0;
   border-radius: 999px;
   background: var(--ch-color-surface-raised);
@@ -410,8 +441,11 @@ onUnmounted(() => {
 }
 
 .pane-session-name {
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
-  padding: 2px 9px;
+  height: var(--pane-chrome-control-size);
+  padding: 0 9px;
   border-radius: 999px;
   background: var(--ch-color-surface-raised);
   border: 1px solid var(--ch-color-border-muted);
@@ -431,15 +465,26 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: var(--ch-color-text-subtle);
+  color: var(--ch-color-text-muted);
   text-align: center;
   padding: 16px;
 }
 
 .empty-icon {
-  font-size: 32px;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
   margin-bottom: 12px;
-  opacity: 0.5;
+  border: 1px solid var(--ch-color-border-selected);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface-selected);
+  color: var(--ch-color-text-selected);
+}
+
+.empty-icon svg {
+  width: 22px;
+  height: 22px;
 }
 
 .pane-empty p {
@@ -449,7 +494,7 @@ onUnmounted(() => {
 
 .empty-hint {
   font-size: 11px;
-  opacity: 0.7;
+  color: var(--ch-color-text-subtle);
 }
 
 .pane-terminal {
@@ -470,6 +515,6 @@ onUnmounted(() => {
   min-height: 0;
   position: relative;
   z-index: 2;
-  background-color: var(--ch-color-app-bg);
+  background-color: var(--ch-color-main-bg);
 }
 </style>

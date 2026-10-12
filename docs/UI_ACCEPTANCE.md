@@ -37,7 +37,11 @@ The CI job has a separate, explicit installation step.
 
 Both browser targets are explicit, outside `verify.sh all`: they need an installed
 browser and owned ports. Each has an independent blocking CI job.
-The shared format target includes the five scenario scripts. The type target
+Both the format target and the runner registry are driven by discovery, so a
+scenario added to `frontend/tests/` cannot silently go unformatted or unrun:
+the owner refuses to start when the registry and the directory disagree. The
+registry still names each scenario's entry page, which a filename cannot
+supply. The type target
 checks the complete backend and the typed browser owner/lifecycle helper;
 the existing dynamic scenario scripts are not claimed as strictly type-checked.
 
@@ -46,8 +50,12 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 | Task execution panel | Recording versus managed controls; progress/handoff and retry identity |
 | Workspace Task creation | Unknown outcome/replay; dialog closure and credential recovery; workspace changes |
 | Native subagents | Full thread identity, parent-turn grouping, lifecycle display and English controls |
+| Chat composer in the full Chat page | Send/queue/stop against a live turn; failed send keeps the text and retries under a new identity; mobile reachability |
 | Message provenance in the full Chat page | Persisted Web/Feishu/unknown origins after binding changes; desktop/mobile/grid operation and text clearance |
-| Bot components | Settings/binding behavior, errors, secret clearing and desktop/mobile layout |
+| Bot components | Settings/binding behavior, secret clearing and desktop/mobile layout |
+| Queued chat activation | A hidden queued Chat activates before its draft is sent |
+| Goal steering | Steering a running Goal and resuming after a question is answered |
+| Chat image quality | An original image is sent once, sized from the real preview |
 
 These are real Vue/Pinia DOM checks served by a dedicated Vite process. Page
 APIs are mocked, unknown API routes fail, and WebSockets are blocked. This is
@@ -79,7 +87,8 @@ budgets remain 10s/12s. A scaled functional pass is not proof of an unscaled
 performance goal; keep that condition visible in the handoff.
 
 Other deliberate boundaries:
-- Terminal replay remains in its existing informational CI job.
+- Terminal replay is a blocking CI job with a `terminal-replay` verify
+  target, after its width and shell assumptions were fixed.
 - `test_terminal_input_latency_perf.py` is a documented, on-demand measurement,
   not a portable timing gate. Its module documents the manual command; do not
   start its terminal load against a shared service.
@@ -112,6 +121,46 @@ limits the claim: completed API closes and owned process exits do not prove
 that every possible Chromium descendant has disappeared. Do not remove retained
 failure directories or signal processes without checking their ownership.
 
-The five scenarios cover named requirements, not every control or layout in the
+The scenarios cover named requirements, not every control or layout in the
 application. Extend the relevant scenario for a changed contract; keep a real
 behavioral assertion even when adding a cheap source-wiring test.
+
+## Adding a gate for new work
+
+Decide this when the change lands, not afterwards. A gate written later is
+written against the code as it ended up, so it tends to restate the
+implementation instead of the requirement.
+
+Add or extend a browser scenario when the change alters what a user can
+observe or do: a control's enablement or wording, what survives a reload or
+a failed request, what a state transition leaves on screen, or a layout rule
+that has broken before. Prefer extending the scenario that already owns that
+surface; a new scenario is for a surface none of them covers.
+
+Do not add one for logic a unit test can pin down, for styling with no
+behavioral consequence, or to raise a count. Nine real browsers already cost
+several minutes.
+
+Write the assertion against the requirement, in the user's terms. "Stop
+releases the composer and drains the queue" stays true across a refactor;
+"flushDraftQueue is called once" does not, and a gate that breaks on every
+refactor gets weakened until it stops meaning anything. When a product change
+makes an assertion fail, first ask whether the requirement changed. If it
+did, restate it; if it did not, the gate just caught something.
+
+Then make it real:
+
+- Build on `run_browser_main` from the start. A scenario that drives its own
+  browser produces no lifecycle evidence, and the owner refuses it. Three
+  scenarios were written that way and sat unexecuted until converted.
+- Mock the exact endpoints the page calls, with the backend's real response
+  shape. Unknown routes fail by design; that failure is usually a fixture
+  that has drifted from a contract, which is worth knowing.
+- Run it before trusting it, then put the defect back and confirm it fails.
+  A gate that has never failed has not been shown to detect anything. Every
+  scenario here has had an assertion that was wrong until it was run.
+
+Registration is automatic: discovery drives both the formatter and the runner
+registry, and the owner refuses to start when the registry and the directory
+disagree. Supply the entry page in `RUNNERS`, and add a row to the table above
+saying what the scenario accepts.

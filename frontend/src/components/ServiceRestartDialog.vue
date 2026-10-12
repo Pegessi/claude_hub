@@ -9,10 +9,10 @@
     @click="onBackdrop"
   >
     <h2 id="restart-title">
-      {{ phase === 'succeeded' ? 'Service is back online' : 'Restart service' }}
+      {{ phase === 'succeeded' ? 'Service is back online' : 'Build and restart service' }}
     </h2>
     <p id="restart-description">
-      {{ phase === 'confirm' ? 'This interrupts running chats and agent tasks for everyone. The page will briefly disconnect while the service restarts. Resume interrupted work manually after it returns.' : message }}
+      {{ phase === 'confirm' ? 'This rebuilds the frontend, synchronizes backend dependencies, then restarts the service. Running chats and agent tasks are interrupted for everyone only after preparation succeeds. The page will briefly disconnect; resume interrupted work manually after it returns.' : message }}
     </p>
     <p
       v-if="phase === 'confirm' && !status?.available"
@@ -42,7 +42,7 @@
         :disabled="!status?.available"
         @click="confirmRestart"
       >
-        Restart now
+        Build and restart
       </button>
       <button
         v-if="phase === 'error'"
@@ -77,6 +77,7 @@ const status = ref<RestartStatus | null>(null)
 const elapsed = ref(0)
 let pending: PendingRestart | null = null
 let disposed = false
+const recoveryTimeoutMs = 300_000
 
 function savePending(value: PendingRestart | null) {
   pending = value
@@ -88,7 +89,7 @@ async function waitForRecovery() {
   if (!pending) return
   phase.value = 'waiting'
   const started = Date.now()
-  while (!disposed && Date.now() - started < 180_000) {
+  while (!disposed && Date.now() - started < recoveryTimeoutMs) {
     elapsed.value = Math.floor((Date.now() - started) / 1000)
     try {
       const current = await fetchRestartStatus()
@@ -97,7 +98,7 @@ async function waitForRecovery() {
       if (current.operation?.id === pending.id) message.value = current.operation.message
       if (outcome !== 'waiting') {
         phase.value = outcome === 'succeeded' ? 'succeeded' : 'error'
-        if (outcome === 'succeeded') message.value = 'The service has restarted. Resume any interrupted chats or agent tasks manually.'
+        if (outcome === 'succeeded') message.value = 'The frontend was rebuilt and the service restarted. Resume any interrupted chats or agent tasks manually.'
         savePending(null)
         return
       }
@@ -108,7 +109,7 @@ async function waitForRecovery() {
   }
   if (!disposed) {
     phase.value = 'error'
-    message.value = 'Restart could not be confirmed within 3 minutes. Check again, or open a terminal on the host and inspect the service logs. Another restart has not been sent.'
+    message.value = 'Restart could not be confirmed within 5 minutes. Check again, or open a terminal on the host and inspect the service logs. Another restart has not been sent.'
   }
 }
 

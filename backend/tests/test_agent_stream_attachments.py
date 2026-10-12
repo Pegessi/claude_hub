@@ -1,8 +1,8 @@
 """RED tests for the bounded agent-stream attachment preview cache.
 
-The cache stores only browser-generated bounded previews (never the original
-image bytes or data URLs). Three explicit limits are enforced with
-oldest-created-first (FIFO) eviction:
+The cache stores the browser-uploaded display image (the original when it
+fits), never data URLs. Three explicit limits are enforced with
+least-recently-used eviction; without reads it degrades to creation order:
 
 * per-preview byte cap
 * per-session total bytes / count
@@ -193,13 +193,26 @@ def test_save_accepts_all_whitelisted_mimes(state_root: Path) -> None:
 
 
 def test_save_rejects_oversized_dimensions(state_root: Path) -> None:
+    from claude_hub.services.agent_stream.attachments import MAX_PREVIEW_EDGE
+
     store = _make_store(max_preview_bytes=10_000)
-    # Width > 1024.
     with pytest.raises(ValueError):
-        asyncio.run(store.save("image/png", _png(width=2048, height=1)))
-    # Height > 1024.
+        asyncio.run(store.save("image/png", _png(width=MAX_PREVIEW_EDGE + 1, height=1)))
     with pytest.raises(ValueError):
-        asyncio.run(store.save("image/png", _png(width=1, height=2048)))
+        asyncio.run(store.save("image/png", _png(width=1, height=MAX_PREVIEW_EDGE + 1)))
+    # Full-resolution originals up to the edge bound are stored as-is.
+    meta = asyncio.run(store.save("image/png", _png(width=MAX_PREVIEW_EDGE, height=6000)))
+    assert (meta["width"], meta["height"]) == (MAX_PREVIEW_EDGE, 6000)
+
+
+def test_default_limits_keep_originals_in_one_1gib_lru_pool() -> None:
+    from claude_hub.config import Settings
+
+    defaults = Settings()
+    assert defaults.attachment_max_preview_bytes == 8 * 1024 * 1024
+    assert defaults.attachment_max_global_bytes == 1024 * 1024 * 1024
+    assert defaults.attachment_max_session_bytes == defaults.attachment_max_global_bytes
+    assert defaults.attachment_max_session_count == defaults.attachment_max_global_count
 
 
 def test_save_rejects_spoofed_dimensions(state_root: Path) -> None:
@@ -219,10 +232,10 @@ def test_save_returns_parsed_dimensions(state_root: Path) -> None:
     assert meta["height"] == 456
 
 
-# ── session FIFO eviction ───────────────────────────────────────────────────
+# ── session LRU eviction ────────────────────────────────────────────────────
 
 
-def test_session_fifo_eviction_when_count_exceeded(state_root: Path) -> None:
+def test_session_lru_eviction_when_count_exceeded(state_root: Path) -> None:
     store = _make_store(max_session_count=2, max_preview_bytes=10_000)
 
     async def run():
@@ -242,7 +255,7 @@ def test_session_fifo_eviction_when_count_exceeded(state_root: Path) -> None:
     asyncio.run(check())
 
 
-def test_session_fifo_eviction_when_bytes_exceeded(state_root: Path) -> None:
+def test_session_lru_eviction_when_bytes_exceeded(state_root: Path) -> None:
     store = _make_store(max_session_bytes=250, max_preview_bytes=250)
 
     async def run():
@@ -263,10 +276,102 @@ def test_session_fifo_eviction_when_bytes_exceeded(state_root: Path) -> None:
     asyncio.run(check())
 
 
-# ── global FIFO eviction (count and bytes) ──────────────────────────────────
+# ── LRU recency ─────────────────────────────────────────────────────────────
 
 
-def test_global_fifo_eviction_across_sessions_by_count(state_root: Path) -> None:
+def test_reading_an_image_protects_it_from_eviction(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import attachments
+
+    monkeypatch.setattr(attachments, "_LRU_TOUCH_INTERVAL_SECONDS", 0.0)
+    store = _make_store(max_session_count=2, max_preview_bytes=10_000)
+
+    async def run():
+        a = await store.save("image/png", _png())
+        b = await store.save("image/png", _png())
+        await store.read(a["id"])
+        c = await store.save("image/png", _png())
+        return a, b, c
+
+    a, b, c = asyncio.run(run())
+
+    async def check():
+        await store.read(a["id"])
+        with pytest.raises(KeyError):
+            await store.read(b["id"])
+        await store.read(c["id"])
+
+    asyncio.run(check())
+
+
+def test_recent_reads_do_not_rewrite_the_manifest(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    store = _make_store(max_preview_bytes=10_000)
+    meta = asyncio.run(store.save("image/png", _png()))
+    writes: List[int] = []
+    original = AgentStreamAttachmentStore._write_index
+
+    def recording_write(entries: List[Dict[str, Any]]) -> None:
+        writes.append(len(entries))
+        original(entries)
+
+    monkeypatch.setattr(AgentStreamAttachmentStore, "_write_index", staticmethod(recording_write))
+    for _ in range(3):
+        asyncio.run(store.read(meta["id"]))
+    assert writes == []
+
+
+def test_stale_read_refreshes_recency_once(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import attachments
+
+    store = _make_store(max_preview_bytes=10_000)
+    meta = asyncio.run(store.save("image/png", _png()))
+    index_path = state_root / "agent_stream_attachments_index.json"
+    entries = json.loads(index_path.read_text())
+    entries[0]["last_used_at"] = 1.0
+    index_path.write_text(json.dumps(entries))
+
+    later = attachments.time.time() + 10
+    monkeypatch.setattr(attachments.time, "time", lambda: later)
+    asyncio.run(store.read(meta["id"]))
+    [entry] = json.loads(index_path.read_text())
+    assert entry["last_used_at"] == later
+    assert entry["created_at"] < later
+
+
+def test_legacy_manifest_entries_use_creation_time_as_recency(state_root: Path) -> None:
+    from claude_hub.services.agent_stream.attachments import _normalize_entry
+
+    legacy = {
+        "id": "0" * 32,
+        "workspace_id": "ws1",
+        "session_id": "s1",
+        "mime_type": "image/png",
+        "size": 10,
+        "width": 1,
+        "height": 1,
+        "created_at": 5.0,
+    }
+    for extra, expected in (
+        ({}, 5.0),
+        ({"last_used_at": float("nan")}, 5.0),
+        ({"last_used_at": 9}, 9.0),
+    ):
+        normalized = _normalize_entry({**legacy, **extra})
+        assert normalized is not None
+        assert normalized["last_used_at"] == expected
+
+
+# ── global LRU eviction (count and bytes) ───────────────────────────────────
+
+
+def test_global_lru_eviction_across_sessions_by_count(state_root: Path) -> None:
     store_a = _make_store(session_id="s1", max_global_count=2, max_preview_bytes=10_000)
     store_b = _make_store(session_id="s2", max_global_count=2, max_preview_bytes=10_000)
 
@@ -287,7 +392,7 @@ def test_global_fifo_eviction_across_sessions_by_count(state_root: Path) -> None
     asyncio.run(check())
 
 
-def test_global_fifo_eviction_across_sessions_by_bytes(state_root: Path) -> None:
+def test_global_lru_eviction_across_sessions_by_bytes(state_root: Path) -> None:
     store_a = _make_store(session_id="s1", max_global_bytes=250, max_preview_bytes=250)
     store_b = _make_store(session_id="s2", max_global_bytes=250, max_preview_bytes=250)
 
@@ -702,6 +807,64 @@ def test_decode_enforces_aggregate_original_and_preview_limit(
     with pytest.raises(HTTPException, match="total attachment size") as exc_info:
         api._decode_attachments([payload])
     assert exc_info.value.status_code == 400
+
+
+def test_decode_uses_a_flagged_original_as_its_own_preview_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import claude_hub.api.agent_stream as api
+
+    original = _png(width=4000, height=3000, pad=64)
+    resized = _png(width=40, height=30)
+    monkeypatch.setattr(api, "_MAX_TOTAL_ATTACHMENT_BYTES", 2 * len(original) + len(resized))
+    payloads = [
+        api.AgentStreamAttachment(
+            filename="screenshot.png",
+            mime_type="image/png",
+            data_url=_data_url("image/png", original),
+            preview_is_original=True,
+        ),
+        api.AgentStreamAttachment(
+            filename="huge.png",
+            mime_type="image/png",
+            data_url=_data_url("image/png", original),
+            preview_data_url=_data_url("image/png", resized),
+        ),
+    ]
+
+    originals, previews = api._decode_attachments(payloads)
+
+    assert originals == [original, original]
+    assert previews == [original, resized]
+
+
+@pytest.mark.parametrize(
+    "preview_fields",
+    [
+        {"preview_is_original": True, "preview_data_url": "data:image/png;base64,AA=="},
+        {},
+    ],
+)
+def test_decode_rejects_ambiguous_or_mixed_flagged_previews(
+    preview_fields: Dict[str, Any],
+) -> None:
+    from fastapi import HTTPException
+
+    import claude_hub.api.agent_stream as api
+
+    url = _data_url("image/png", _png())
+    payloads = [
+        api.AgentStreamAttachment(
+            filename="a.png", mime_type="image/png", data_url=url, preview_is_original=True
+        ),
+        api.AgentStreamAttachment(
+            filename="b.png", mime_type="image/png", data_url=url, **preview_fields
+        ),
+    ]
+
+    with pytest.raises(HTTPException) as excinfo:
+        api._decode_attachments(payloads)
+    assert excinfo.value.status_code == 400
 
 
 def test_attachment_read_is_scoped_to_workspace_and_session(state_root: Path) -> None:

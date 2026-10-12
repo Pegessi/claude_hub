@@ -26,7 +26,8 @@ from typing import Any, Mapping
 from claude_hub.services.feishu_bot import FeishuBotConfig
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
-_STATE_VERSION = 2
+_STATE_VERSION = 3
+_PREVIOUS_STATE_VERSION = 2
 _LEGACY_STATE_VERSION = 1
 
 ENV_BOT_ID = "env"
@@ -38,11 +39,13 @@ OFFICIAL_FEISHU_API = "https://open.feishu.cn"
 BOT_ENV_KEYS = (
     "CLAUDE_HUB_FEISHU_BOT_APP_ID",
     "CLAUDE_HUB_FEISHU_BOT_APP_SECRET",
+)
+_REQUIRED_ENV_KEYS = BOT_ENV_KEYS
+DEPRECATED_ENV_KEYS = (
     "CLAUDE_HUB_FEISHU_BOT_VERIFICATION_TOKEN",
     "CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY",
+    "CLAUDE_HUB_FEISHU_BOT_ADMIN_OPEN_IDS",
 )
-_REQUIRED_ENV_KEYS = BOT_ENV_KEYS[:3]
-DEPRECATED_ENV_KEYS = ("CLAUDE_HUB_FEISHU_BOT_ADMIN_OPEN_IDS",)
 
 OWNER_KIND_OAUTH = "oauth"
 OWNER_KIND_LOCAL = "local"
@@ -84,7 +87,7 @@ class FeishuBotNotFound(FeishuBotPoolError):
 
 
 class FeishuBotRevoked(FeishuBotPoolError):
-    """Raised for a deleted or disabled Bot whose callbacks must stay silent."""
+    """Raised for a deleted or disabled Bot whose events must stay silent."""
 
 
 class FeishuBotUnavailable(FeishuBotPoolError):
@@ -184,6 +187,8 @@ class BotBinding:
 class BotEntry:
     bot_id: str
     name: str
+    feishu_name: str | None
+    feishu_avatar_url: str | None
     app_id: str
     source: str
     enabled: bool
@@ -221,6 +226,8 @@ class EffectiveBot:
     config: FeishuBotConfig
     revision: int
     generation: int
+    feishu_name: str | None
+    feishu_avatar_url: str | None
 
 
 def _state_error(name: str) -> FeishuBotPoolStateError:
@@ -288,7 +295,10 @@ def _validate_pool_numbers(bots: dict[str, Any], rate_limits: dict[str, Any]) ->
             value = raw.get(field)
             if value is not None:
                 _as_float(value, f"bot.{field}")
-        for collection, created_field in (("pending", "issued_at"), ("claims", "created_at")):
+        for collection, created_field in (
+            ("pending", "issued_at"),
+            ("claims", "created_at"),
+        ):
             records = _as_mapping(raw.get(collection, {}), collection)
             for value in records.values():
                 value = _as_mapping(value, collection)
@@ -347,8 +357,10 @@ def turn_id_for(bot_id: str, message_id: str) -> str:
     return f"feishu-{hashlib.sha256(payload).hexdigest()[:32]}"
 
 
-def environment_config(environ: Mapping[str, str] | None = None) -> FeishuBotConfig | None:
-    """Build the legacy single-Bot environment configuration, if complete."""
+def environment_config(
+    environ: Mapping[str, str] | None = None,
+) -> FeishuBotConfig | None:
+    """Build the environment Bot's long-connection credentials, if complete."""
 
     env = os.environ if environ is None else environ
     present = {key: env.get(key, "").strip() for key in BOT_ENV_KEYS}
@@ -360,8 +372,6 @@ def environment_config(environ: Mapping[str, str] | None = None) -> FeishuBotCon
     return FeishuBotConfig(
         app_id=present[BOT_ENV_KEYS[0]],
         app_secret=present[BOT_ENV_KEYS[1]],
-        verification_token=present[BOT_ENV_KEYS[2]],
-        encrypt_key=present[BOT_ENV_KEYS[3]] or None,
         api_base_url=base_url,
     )
 
@@ -395,7 +405,12 @@ class FeishuBotPoolStore:
 
     @staticmethod
     def _empty() -> dict[str, Any]:
-        return {"version": _STATE_VERSION, "pool_revision": 0, "bots": {}, "rate_limits": {}}
+        return {
+            "version": _STATE_VERSION,
+            "pool_revision": 0,
+            "bots": {},
+            "rate_limits": {},
+        }
 
     def _read_file(self, path: Path) -> dict[str, Any] | None:
         try:
@@ -419,13 +434,17 @@ class FeishuBotPoolStore:
             # is never consulted again, so a rolled-back write cannot resurrect a
             # revoked authorization.
             return self._migrate_legacy()
-        if _as_int(value.get("version"), "version") != _STATE_VERSION:
+        version = _as_int(value.get("version"), "version")
+        if version not in {_PREVIOUS_STATE_VERSION, _STATE_VERSION}:
             raise FeishuBotPoolStateError("Unsupported Feishu Bot pool state version")
         bots = _as_mapping(value.get("bots"), "bots")
         rate_limits = _as_mapping(value.get("rate_limits"), "rate_limits")
         for bot_id, raw in bots.items():
             _as_text(bot_id, "bots key", limit=_MAX_ID_CHARS)
             _as_mapping(raw, f"bots[{bot_id}]")
+            credentials = raw.get("credentials") if isinstance(raw, dict) else None
+            if isinstance(credentials, dict):
+                raw["credentials"] = {"app_secret": credentials.get("app_secret")}
         _validate_pool_numbers(bots, rate_limits)
         return {
             "version": _STATE_VERSION,
@@ -466,8 +485,7 @@ class FeishuBotPoolStore:
         state = self._empty()
         if raw_config is None:
             # The old store wrote config=None for an explicit disable. Keep that
-            # as a tombstone so callbacks for the retired Bot stay silent
-            # instead of looking like a mistyped URL.
+            # as a tombstone so events for the retired Bot stay silent.
             state["bots"][LEGACY_BOT_ID] = {
                 "bot_id": LEGACY_BOT_ID,
                 "revision": revision,
@@ -477,7 +495,7 @@ class FeishuBotPoolStore:
             return state
         if not isinstance(raw_config, dict):
             raise FeishuBotPoolStateError("Invalid legacy Feishu Bot configuration")
-        keys = ("app_id", "app_secret", "verification_token", "encrypt_key")
+        keys = ("app_id", "app_secret")
         if not all(isinstance(raw_config.get(key), str) and raw_config[key] for key in keys):
             raise FeishuBotPoolStateError("Incomplete legacy Feishu Bot configuration")
         state["bots"][LEGACY_BOT_ID] = {
@@ -486,8 +504,6 @@ class FeishuBotPoolStore:
             "app_id": raw_config["app_id"],
             "credentials": {
                 "app_secret": raw_config["app_secret"],
-                "verification_token": raw_config["verification_token"],
-                "encrypt_key": raw_config["encrypt_key"],
             },
             "revision": revision,
             "generation": generation,
@@ -541,7 +557,9 @@ class FeishuBotPoolStore:
             tab_id=_as_text(value.get("tab_id"), f"{name}.tab_id", limit=_MAX_ID_CHARS),
             workspace_id=_as_optional_text(value.get("workspace_id"), f"{name}.workspace_id"),
             sender_open_id=_as_text(
-                value.get("sender_open_id"), f"{name}.sender_open_id", limit=_MAX_ID_CHARS
+                value.get("sender_open_id"),
+                f"{name}.sender_open_id",
+                limit=_MAX_ID_CHARS,
             ),
             chat_id=_as_text(value.get("chat_id"), f"{name}.chat_id", limit=_MAX_ID_CHARS),
             created_at=_as_float(value.get("created_at"), f"{name}.created_at"),
@@ -558,7 +576,9 @@ class FeishuBotPoolStore:
             tab_id=_as_text(value.get("tab_id"), "binding.tab_id", limit=_MAX_ID_CHARS),
             workspace_id=_as_optional_text(value.get("workspace_id"), "binding.workspace_id"),
             sender_open_id=_as_text(
-                value.get("sender_open_id"), "binding.sender_open_id", limit=_MAX_ID_CHARS
+                value.get("sender_open_id"),
+                "binding.sender_open_id",
+                limit=_MAX_ID_CHARS,
             ),
             chat_id=_as_text(value.get("chat_id"), "binding.chat_id", limit=_MAX_ID_CHARS),
             created_at=_as_float(value.get("created_at"), "binding.created_at"),
@@ -599,10 +619,6 @@ class FeishuBotPoolStore:
         return FeishuBotConfig(
             app_id=_as_text(raw.get("app_id"), "app_id", limit=_MAX_ID_CHARS),
             app_secret=_as_text(credentials.get("app_secret"), "app_secret"),
-            verification_token=_as_text(
-                credentials.get("verification_token"), "verification_token"
-            ),
-            encrypt_key=_as_text(credentials.get("encrypt_key"), "encrypt_key"),
             api_base_url=OFFICIAL_FEISHU_API,
         )
 
@@ -640,7 +656,15 @@ class FeishuBotPoolStore:
         return BotEntry(
             bot_id=bot_id,
             name=_as_text(raw.get("name"), "name", limit=_MAX_NAME_CHARS),
-            app_id=config.app_id if config is not None else str(raw.get("app_id") or ""),
+            feishu_name=_as_optional_text(
+                raw.get("feishu_name"), "feishu_name", limit=_MAX_NAME_CHARS
+            ),
+            feishu_avatar_url=_as_optional_text(
+                raw.get("feishu_avatar_url"),
+                "feishu_avatar_url",
+                limit=_MAX_SECRET_CHARS,
+            ),
+            app_id=(config.app_id if config is not None else str(raw.get("app_id") or "")),
             source=source,
             enabled=_as_bool(raw.get("enabled"), "enabled"),
             credentials_editable=not is_env,
@@ -705,6 +729,8 @@ class FeishuBotPoolStore:
             config=entry.config,
             revision=entry.revision,
             generation=entry.generation,
+            feishu_name=entry.feishu_name,
+            feishu_avatar_url=entry.feishu_avatar_url,
         )
 
     def is_current(self, effective: EffectiveBot, environ: Mapping[str, str] | None = None) -> bool:
@@ -792,6 +818,8 @@ class FeishuBotPoolStore:
         # Compare the accepted identity, not the rejected environment value, so
         # reads in a persistent conflict cannot advance the counters forever.
         raw["app_id"] = app_id
+        raw["feishu_name"] = None
+        raw["feishu_avatar_url"] = None
         self._advance_generation(raw)
         self._touch(raw, now)
         return True
@@ -841,7 +869,13 @@ class FeishuBotPoolStore:
     # ------------------------------------------------------- bot lifecycle
 
     def create_bot(
-        self, *, name: str, config: FeishuBotConfig, environ: Mapping[str, str] | None = None
+        self,
+        *,
+        name: str,
+        config: FeishuBotConfig,
+        feishu_name: str | None = None,
+        feishu_avatar_url: str | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> str:
         now = self._now()
         with self._lock:
@@ -855,11 +889,9 @@ class FeishuBotPoolStore:
             while bot_id in state["bots"] or bot_id in _RESERVED_BOT_IDS:
                 bot_id = secrets.token_hex(8)
             raw = self._new_entry(bot_id, name, config.app_id, now)
-            raw["credentials"] = {
-                "app_secret": config.app_secret,
-                "verification_token": config.verification_token,
-                "encrypt_key": config.encrypt_key,
-            }
+            raw["credentials"] = {"app_secret": config.app_secret}
+            raw["feishu_name"] = feishu_name
+            raw["feishu_avatar_url"] = feishu_avatar_url
             state["bots"][bot_id] = raw
             self._save(state)
             return bot_id
@@ -869,12 +901,12 @@ class FeishuBotPoolStore:
         bot_id: str,
         *,
         app_secret: str,
-        verification_token: str,
-        encrypt_key: str,
+        feishu_name: str | None = None,
+        feishu_avatar_url: str | None = None,
         expected_revision: int,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        """Replace all three secrets under the same app_id.
+        """Replace the App Secret under the same app_id.
 
         The active binding is preserved: it identifies a conversation under an
         app identity that has not changed. Bumping ``revision`` is enough to
@@ -890,12 +922,38 @@ class FeishuBotPoolStore:
             if bot_id == ENV_BOT_ID:
                 raise FeishuBotReadOnly(bot_id)
             self._check_revision(raw, expected_revision)
-            raw["credentials"] = {
-                "app_secret": app_secret,
-                "verification_token": verification_token,
-                "encrypt_key": encrypt_key,
-            }
+            raw["credentials"] = {"app_secret": app_secret}
+            raw["feishu_name"] = feishu_name
+            raw["feishu_avatar_url"] = feishu_avatar_url
             self._touch(raw, now)
+            self._save(state)
+
+    def update_profile(
+        self,
+        bot_id: str,
+        *,
+        feishu_name: str,
+        feishu_avatar_url: str | None,
+        expected_revision: int,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        """Persist Feishu-managed presentation metadata without rotating transport."""
+
+        now = self._now()
+        with self._lock:
+            state = self._load()
+            self._prune(state, now)
+            self._sync_env_entry(state, environ, now)
+            raw = self._live_entry(state, bot_id)
+            self._check_revision(raw, expected_revision)
+            if (
+                raw.get("feishu_name") == feishu_name
+                and raw.get("feishu_avatar_url") == feishu_avatar_url
+            ):
+                return
+            raw["feishu_name"] = feishu_name
+            raw["feishu_avatar_url"] = feishu_avatar_url
+            raw["updated_at"] = now
             self._save(state)
 
     def update_bot(
@@ -925,12 +983,16 @@ class FeishuBotPoolStore:
             self._save(state)
 
     def delete_bot(
-        self, bot_id: str, *, expected_revision: int, environ: Mapping[str, str] | None = None
+        self,
+        bot_id: str,
+        *,
+        expected_revision: int,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         """Replace the entry with a secret-free tombstone.
 
-        The tombstone is what lets a callback for a revoked Bot be dropped
-        silently instead of looking like a misconfigured URL.
+        The tombstone lets any event already accepted for a revoked Bot be
+        dropped silently.
         """
 
         now = self._now()
@@ -1113,7 +1175,11 @@ class FeishuBotPoolStore:
             return self._binding_from_dict(bot_id, raw["binding"])
 
     def release_binding(
-        self, bot_id: str, *, expected_revision: int, environ: Mapping[str, str] | None = None
+        self,
+        bot_id: str,
+        *,
+        expected_revision: int,
+        environ: Mapping[str, str] | None = None,
     ) -> BotBinding | None:
         """Unbind explicitly. Advancing the generation is what guarantees that
         a message already in flight cannot land on a later binding."""

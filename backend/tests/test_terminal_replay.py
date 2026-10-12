@@ -31,31 +31,61 @@ from .conftest import (
     normalize_terminal_output,
     scale_timeout,
     send_keys_sync,
+    tmux_pane_width,
     tmux_session_exists,
 )
+
+# These tabs only need a predictable non-agent shell: the behaviour under test
+# is the injected agent-type gate, not anything shell-specific. These tests
+# previously asked for /bin/zsh, which is installed neither on CI runners nor
+# on a stock developer machine, so every one of them failed before reaching
+# its assertions.
+AGENT_TUI_SHELL = "/bin/bash"
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
-def ensure_tmux_session(page: Page, tab_id: str, session_name: str) -> None:
-    """Ensure the tmux session exists by connecting to ttyd once.
+def wait_for_browser_sized_pane(page: Page, session_name: str) -> int:
+    """Wait until tmux reports the width this page's xterm is using.
 
-    ttyd uses `tmux new-session -A`, so the tmux session is only created
-    when the first client connects via WebSocket. We open the page briefly
-    to trigger session creation, then close it.
+    ttyd resizes the tmux pane to match the connected client. tmux re-wraps
+    existing history on resize, so a capture taken at one width cannot be
+    compared against a buffer rendered at another. Callers use this to pin
+    both sides to the same width before producing or reading history.
     """
-    if tmux_session_exists(session_name):
-        return
-
-    page.goto(f"{BACKEND_URL}/api/terminal/proxy/{tab_id}/")
-    page.wait_for_selector(".xterm", timeout=15000)
-    # Wait for ttyd to connect to tmux and create the session
-    for _ in range(int(scale_timeout(30))):
+    page.wait_for_function(
+        "() => !!window.term && window.term.cols > 0",
+        timeout=int(scale_timeout(15) * 1000),
+    )
+    cols = int(page.evaluate("() => window.term.cols"))
+    for _ in range(int(scale_timeout(50))):
+        if tmux_pane_width(session_name) == cols:
+            return cols
         time.sleep(0.2)
+    pytest.fail(
+        f"tmux pane for {session_name} never resized to the client width {cols} "
+        f"(pane is {tmux_pane_width(session_name)})"
+    )
+
+
+def ensure_tmux_session(page: Page, tab_id: str, session_name: str) -> None:
+    """Ensure the tmux session exists and is sized by this page's terminal.
+
+    ttyd uses `tmux new-session -A`, so the tmux session is only created when
+    the first client connects via WebSocket. We stay connected afterwards so
+    the pane keeps the client's dimensions: disconnecting would drop tmux back
+    to its default 80 columns and re-wrap every subsequent line, which no
+    amount of waiting can reconcile with what the browser renders.
+    """
+    page.goto(f"{BACKEND_URL}/api/terminal/proxy/{tab_id}/")
+    page.wait_for_selector(".xterm", timeout=int(scale_timeout(15) * 1000))
+    for _ in range(int(scale_timeout(30))):
         if tmux_session_exists(session_name):
             break
+        time.sleep(0.2)
     else:
         pytest.fail(f"tmux session {session_name} was not created after connecting")
+    wait_for_browser_sized_pane(page, session_name)
 
 
 def produce_scrollback(session_name: str, count: int = 200) -> None:
@@ -144,7 +174,7 @@ def normalize_xterm_lines(lines: list[str]) -> list[str]:
 def load_terminal_page(page: Page, tab_id: str, min_buffer_lines: int | None = None) -> None:
     """Navigate to the terminal proxy page and wait for full rendering."""
     page.goto(f"{BACKEND_URL}/api/terminal/proxy/{tab_id}/")
-    page.wait_for_selector(".xterm", timeout=15000)
+    page.wait_for_selector(".xterm", timeout=int(scale_timeout(15) * 1000))
     wait_for_replay_done(page)
     wait_for_visible_screen(page)
     if min_buffer_lines is not None:
@@ -727,7 +757,7 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
     Agent TUIs use relative cursor operations to update status blocks. Replaying
     a plain tmux snapshot while those updates are still active corrupts xterm's
     screen state, so automatic idle history resync and scroll-only activation
-    paths must avoid fetching history for agent tabs. The tab runs zsh for
+    paths must avoid fetching history for agent tabs. The tab runs a plain shell for
     determinism but is tagged as a Codex tab, which exercises the injected
     agent-type gate without depending on a real agent login in CI.
     """
@@ -737,7 +767,7 @@ def test_agent_tui_tab_does_not_auto_resync_after_live_writes_or_activation(
         json={
             "name": "test-agent-tui-no-auto-resync",
             "agent_type": "codex",
-            "shell": "/bin/zsh",
+            "shell": AGENT_TUI_SHELL,
         },
     )
     assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
@@ -842,7 +872,7 @@ def test_agent_tui_short_history_skips_initial_replay(backend_server: None, page
         json={
             "name": "test-agent-tui-short-history",
             "agent_type": "codex",
-            "shell": "/bin/zsh",
+            "shell": AGENT_TUI_SHELL,
         },
     )
     assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
@@ -885,7 +915,7 @@ def test_agent_tui_initial_replay_keeps_live_frames(backend_server: None, page: 
         json={
             "name": "test-agent-tui-live-frames",
             "agent_type": "codex",
-            "shell": "/bin/zsh",
+            "shell": AGENT_TUI_SHELL,
         },
     )
     assert resp.status_code == 201, f"Failed to create tab: {resp.text}"
@@ -963,7 +993,7 @@ def test_agent_tui_history_view_is_stable_during_live_redraws(
         json={
             "name": "test-agent-tui-history-view-freeze",
             "agent_type": "codex",
-            "shell": "/bin/zsh",
+            "shell": AGENT_TUI_SHELL,
         },
     )
     assert resp.status_code == 201, f"Failed to create tab: {resp.text}"

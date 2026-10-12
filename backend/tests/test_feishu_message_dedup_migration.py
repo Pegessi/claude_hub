@@ -195,7 +195,7 @@ def test_unreadable_legacy_set_is_rejected(tmp_path: Path) -> None:
         store.claim("bot-a:om-13")
 
 
-@pytest.mark.parametrize("operation", ["claim", "finish"])
+@pytest.mark.parametrize("operation", ["claim", "finish", "release"])
 def test_malformed_legacy_entries_fail_closed_without_rewrite(
     tmp_path: Path, operation: str
 ) -> None:
@@ -207,8 +207,10 @@ def test_malformed_legacy_entries_fail_closed_without_rewrite(
     with pytest.raises(FeishuBotError):
         if operation == "claim":
             store.claim("bot-a:om-14")
-        else:
+        elif operation == "finish":
             store.finish("bot-a:om-14", "completed")
+        else:
+            store.release("bot-a:om-14")
     assert path.read_bytes() == before
 
 
@@ -238,7 +240,7 @@ _BAD_RECORDS = [
 
 @pytest.mark.parametrize("record", _BAD_RECORDS)
 @pytest.mark.parametrize("location", ["v1", "v2", "legacy-v2"])
-@pytest.mark.parametrize("operation", ["claim", "finish"])
+@pytest.mark.parametrize("operation", ["claim", "finish", "release"])
 def test_bad_authority_record_is_never_pruned_into_a_fresh_claim(
     tmp_path: Path,
     record: Any,
@@ -258,8 +260,10 @@ def test_bad_authority_record_is_never_pruned_into_a_fresh_claim(
     with pytest.raises(FeishuBotError):
         if operation == "claim":
             store.claim("bot-a:om-old")
-        else:
+        elif operation == "finish":
             store.finish("bot-a:om-old", "completed")
+        else:
+            store.release("bot-a:om-old")
     assert path.read_bytes() == before
 
 
@@ -325,3 +329,27 @@ def test_finish_preserves_original_claim_time(tmp_path: Path) -> None:
         "finished_at": _T0 + 20,
     }
     assert not _ClockedDedupStore(path, _T0 + 30).claim("bot-a:om-new")
+
+
+def test_release_removes_only_the_cancelled_per_bot_claim(tmp_path: Path) -> None:
+    path = tmp_path / "events.json"
+    store = _ClockedDedupStore(path, _T0)
+    assert store.claim("bot-a:om-cancelled")
+    assert store.claim("bot-b:om-cancelled")
+
+    store.release("bot-a:om-cancelled")
+
+    assert store.claim("bot-a:om-cancelled")
+    assert not store.claim("bot-b:om-cancelled")
+
+
+def test_release_preserves_unrelated_and_legacy_authority(tmp_path: Path) -> None:
+    path = tmp_path / "events.json"
+    _write_v1(path, {"om-legacy": {"claimed_at": _T0, "status": "completed"}})
+    store = _ClockedDedupStore(path, _T0 + 1)
+    assert store.claim("bot-a:om-live")
+
+    store.release("bot-a:om-missing")
+
+    assert not store.claim("bot-a:om-live")
+    assert not store.claim("bot-a:om-legacy")
