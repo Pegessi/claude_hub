@@ -3574,10 +3574,7 @@ class TTYDManager:
         # Global backstop: bound the total number of live tabs so even
         # non-fork creation cannot grow without limit. The per-source fork
         # cap is enforced in fork_tab; this catches everything else.
-        if len(self.processes) >= settings.max_total_tabs:
-            raise TabLimitExceededError(
-                f"global tab limit reached ({settings.max_total_tabs}); " "cannot create more tabs"
-            )
+        self._check_live_tab_capacity()
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
@@ -3778,6 +3775,19 @@ class TTYDManager:
             remote_forward_port=source.remote_forward_port,
             env=source.env,
         )
+
+    def _check_live_tab_capacity(self) -> None:
+        """Reject a new live tab once ``settings.max_total_tabs`` are live.
+
+        Archived tabs have released their ttyd port, process and tmux session,
+        so they do not count toward the limit.
+        """
+        live = sum(1 for proc in self.processes.values() if not proc.archived)
+        if live >= settings.max_total_tabs:
+            raise TabLimitExceededError(
+                f"live tab limit reached ({settings.max_total_tabs}); "
+                "archive or delete a session to create more"
+            )
 
     def _count_forks(self, source_tab_id: str) -> int:
         """Count existing tabs forked from ``source_tab_id``."""
@@ -3984,6 +3994,7 @@ class TTYDManager:
             if process is None:
                 return None
             if process.archived:
+                self._check_live_tab_capacity()
                 process.archived = False
                 process.archived_at = None
             logger.info("Unarchiving tab %s (%s)", tab_id, process.name)

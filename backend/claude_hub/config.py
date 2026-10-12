@@ -58,7 +58,8 @@ class Settings(BaseSettings):
     # Fork / tab growth limits. A fork loop must not be able to exhaust ttyd
     # ports, processes, and tmux sessions. ``max_forks_per_tab`` bounds how
     # many forks a single source tab can have; ``max_total_tabs`` is a global
-    # backstop on the number of live tabs. Both are configurable via env vars.
+    # backstop on the number of live (non-archived) tabs. Both are
+    # configurable via env vars.
     max_forks_per_tab: int = 12
     max_total_tabs: int = 200
 
