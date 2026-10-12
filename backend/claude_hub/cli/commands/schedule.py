@@ -54,6 +54,7 @@ def _schedule_body(
     agent_type: str | None,
     message: str | None,
     task_title: str | None,
+    env_preset: str | None = None,
 ) -> Dict[str, Any]:
     """Build a scheduled-task body, validating the schedule spec locally."""
     schedule_fields = [run_at, cron, interval]
@@ -73,6 +74,7 @@ def _schedule_body(
         agent_type=agent_type,
         message=message,
         task_title=task_title,
+        env_preset=env_preset,
     )
     return body
 
@@ -146,6 +148,11 @@ def schedule_get(ctx: click.Context, task_id: str) -> None:
 )
 @click.option("--message", default=None, help="Message to send / task prompt.")
 @click.option("--task-title", default=None, help="Task title (hub_task kind).")
+@click.option(
+    "--env-preset",
+    default=None,
+    help="Env preset id/name for the spawned session (new_session / hub_task).",
+)
 @click.option("--enabled/--disabled", default=True, help="Create enabled (default) or disabled.")
 @click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
@@ -161,6 +168,7 @@ def schedule_create(
     agent_type: str | None,
     message: str | None,
     task_title: str | None,
+    env_preset: str | None,
     enabled: bool,
     payload_json: str | None,
 ) -> None:
@@ -178,6 +186,7 @@ def schedule_create(
         agent_type=agent_type,
         message=message,
         task_title=task_title,
+        env_preset=env_preset,
     )
     try:
         with cli_main.get_client(ctx) as client:
@@ -198,6 +207,11 @@ def schedule_create(
 @click.option("--agent-type", default=None, help="Agent type.")
 @click.option("--message", default=None, help="Message to send / task prompt.")
 @click.option("--task-title", default=None, help="Task title (hub_task kind).")
+@click.option(
+    "--env-preset",
+    default=None,
+    help="Env preset id/name for the spawned session (new_session / hub_task).",
+)
 @click.option("--payload-json", default=None, help="Raw JSON object merged into the body.")
 @click.pass_context
 def schedule_update(
@@ -212,6 +226,7 @@ def schedule_update(
     agent_type: str | None,
     message: str | None,
     task_title: str | None,
+    env_preset: str | None,
     payload_json: str | None,
 ) -> None:
     """Update fields of a scheduled task (kind is immutable).
@@ -232,6 +247,7 @@ def schedule_update(
         agent_type=agent_type,
         message=message,
         task_title=task_title,
+        env_preset=env_preset,
     )
     try:
         with cli_main.get_client(ctx) as client:

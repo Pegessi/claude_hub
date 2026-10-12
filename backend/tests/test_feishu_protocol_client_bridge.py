@@ -25,6 +25,7 @@ from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotConfig,
     FeishuBotError,
+    FeishuBotProfile,
     feishu_message_time_is_valid,
 )
 
@@ -61,7 +62,9 @@ def bot_config() -> FeishuBotConfig:
 
 
 @pytest.mark.asyncio
-async def test_client_uses_only_injected_http_transport(bot_config: FeishuBotConfig) -> None:
+async def test_client_uses_only_injected_http_transport(
+    bot_config: FeishuBotConfig,
+) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -94,6 +97,155 @@ async def test_client_uses_only_injected_http_transport(bot_config: FeishuBotCon
     assert "receive_id" not in reply_body
     assert reply_body["msg_type"] == "text"
     assert json.loads(reply_body["content"]) == {"text": "exact reply"}
+
+
+@pytest.mark.asyncio
+async def test_client_reads_official_bot_profile_and_message_image(
+    bot_config: FeishuBotConfig,
+) -> None:
+    requests: list[httpx.Request] = []
+    png = b"\x89PNG\r\n\x1a\n" + b"image-bytes"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        if request.url.path == "/open-apis/bot/v3/info/":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "msg": "ok",
+                    "bot": {
+                        "app_name": "Hub 助手",
+                        "avatar_url": "https://example.test/bot.png",
+                    },
+                },
+            )
+        if request.url.path == "/open-apis/im/v1/messages/om-post/resources/img_v3_key":
+            assert request.url.params["type"] == "image"
+            return httpx.Response(200, content=png, headers={"Content-Type": "image/png"})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        profile = await client.validate_credentials()
+        image = await client.download_message_image("om-post", "img_v3_key")
+
+    assert profile == FeishuBotProfile(name="Hub 助手", avatar_url="https://example.test/bot.png")
+    assert image == png
+    assert [request.url.path for request in requests] == [
+        "/open-apis/auth/v3/tenant_access_token/internal",
+        "/open-apis/bot/v3/info/",
+        "/open-apis/im/v1/messages/om-post/resources/img_v3_key",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_client_rejects_an_oversized_image_before_reading_its_body(
+    bot_config: FeishuBotConfig,
+) -> None:
+    body_was_read = False
+
+    class UnexpectedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal body_was_read
+            body_was_read = True
+            yield b"not expected"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "image/png",
+                "Content-Length": str(20 * 1024 * 1024 + 1),
+            },
+            stream=UnexpectedBody(),
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        with pytest.raises(FeishuBotError, match="invalid message image"):
+            await client.download_message_image("om-post", "img_v3_oversized")
+
+    assert not body_was_read
+
+
+@pytest.mark.asyncio
+async def test_client_aborts_a_chunked_image_after_the_size_limit(
+    bot_config: FeishuBotConfig,
+) -> None:
+    chunks_yielded = 0
+
+    class OversizedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal chunks_yielded
+            for _ in range(25):
+                chunks_yielded += 1
+                yield b"x" * (1024 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "image/png"},
+            stream=OversizedBody(),
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        with pytest.raises(FeishuBotError, match="invalid message image"):
+            await client.download_message_image("om-post", "img_v3_chunked")
+
+    assert chunks_yielded == 21
+
+
+@pytest.mark.asyncio
+async def test_client_ignores_non_https_bot_avatar(bot_config: FeishuBotConfig) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "bot": {
+                    "app_name": "Hub 助手",
+                    "avatar_url": "http://invalid.test/a.png",
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.test",
+    ) as http_client:
+        client = FeishuBotClient(bot_config, client=http_client)
+        assert await client.get_bot_profile() == FeishuBotProfile(name="Hub 助手", avatar_url=None)
 
 
 @pytest.mark.asyncio

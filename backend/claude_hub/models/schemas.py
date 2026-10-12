@@ -2048,6 +2048,11 @@ class ScheduledTask(BaseModel):
       ``message`` (the task prompt); a system-internal task is published, runs
       on a caller-owned ephemeral orchestrator, and the session is auto-deleted
       once the task is DONE so no agent / reviewer resources are held.
+
+    For the session-creating kinds (``new_session`` / ``hub_task``)
+    ``env_preset`` optionally names a built-in or saved custom env preset
+    (by id or name) used to launch the worker session. Without it the worker
+    gets the agent type's built-in default launch environment.
     """
 
     model_config = {"extra": "forbid"}
@@ -2068,6 +2073,9 @@ class ScheduledTask(BaseModel):
     agent_type: AgentType = AgentType.CLAUDE
     message: Optional[str] = None
     task_title: Optional[str] = None
+    # Env preset (id/name) for the spawned worker session; only valid for
+    # new_session / hub_task kinds.
+    env_preset: Optional[str] = None
 
     # Runtime state.
     last_run_at: Optional[datetime] = None
@@ -2098,6 +2106,7 @@ class ScheduledTaskCreate(BaseModel):
     agent_type: AgentType = AgentType.CLAUDE
     message: Optional[str] = None
     task_title: Optional[str] = None
+    env_preset: Optional[str] = None
 
 
 class ScheduledTaskUpdate(BaseModel):
@@ -2121,6 +2130,7 @@ class ScheduledTaskUpdate(BaseModel):
     agent_type: Optional[AgentType] = None
     message: Optional[str] = None
     task_title: Optional[str] = None
+    env_preset: Optional[str] = None
 
 
 class ScheduledTaskRunResult(BaseModel):

@@ -614,6 +614,7 @@ export interface ScheduledTask {
   agent_type: AgentType
   message?: string | null
   task_title?: string | null
+  env_preset?: string | null
   last_run_at?: string | null
   next_run_at?: string | null
   last_status?: ScheduledTaskStatus | null
@@ -657,6 +658,7 @@ export interface ScheduledTaskCreate {
   agent_type?: AgentType
   message?: string | null
   task_title?: string | null
+  env_preset?: string | null
 }
 
 export interface ScheduledTaskUpdate {
@@ -670,6 +672,7 @@ export interface ScheduledTaskUpdate {
   agent_type?: AgentType | null
   message?: string | null
   task_title?: string | null
+  env_preset?: string | null
 }
 
 export interface ScheduledTaskRunResult {

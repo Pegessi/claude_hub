@@ -23,7 +23,12 @@ from claude_hub.auth import session as session_store
 from claude_hub.config import settings
 from claude_hub.main import app
 from claude_hub.models import User
-from claude_hub.services.feishu_bot import FeishuBotClient, FeishuBotConfig, FeishuMessageDedupStore
+from claude_hub.services.feishu_bot import (
+    FeishuBotClient,
+    FeishuBotConfig,
+    FeishuBotProfile,
+    FeishuMessageDedupStore,
+)
 from claude_hub.services.feishu_bot_pool import (
     BOT_ENV_KEYS,
     FeishuBotPoolStore,
@@ -187,6 +192,38 @@ async def test_rejected_credentials_never_create_a_bot(pool, monkeypatch) -> Non
     assert response.status_code == 502
     assert response.json()["detail"] == "feishu_credentials_rejected"
     assert not pool.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_created_bot_persists_official_feishu_profile(pool, monkeypatch) -> None:
+    class Profiled:
+        def __init__(self, config: FeishuBotConfig) -> None:
+            self.config = config
+
+        async def validate_credentials(self) -> FeishuBotProfile:
+            return FeishuBotProfile(name="Hub 助手", avatar_url="https://example.test/bot.png")
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", Profiled)
+
+    async with _client() as client:
+        response = await client.post(
+            "/api/feishu/bot/bots",
+            json={
+                "name": "Internal label",
+                "app_id": "cli_pool",
+                "app_secret": _SECRET,
+            },
+            cookies=_cookie(),
+        )
+
+    assert response.status_code == 201
+    summary = response.json()["bots"][0]
+    assert summary["feishu_name"] == "Hub 助手"
+    assert summary["feishu_avatar_url"] == "https://example.test/bot.png"
+    persisted = json.loads(pool.path.read_text(encoding="utf-8"))["bots"]
+    raw = next(iter(persisted.values()))
+    assert raw["feishu_name"] == "Hub 助手"
+    assert raw["feishu_avatar_url"] == "https://example.test/bot.png"
 
 
 @pytest.mark.asyncio

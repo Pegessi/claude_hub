@@ -37,6 +37,32 @@
   control now share one flex row, which prevents the overlap structurally.
 - Restore the full secret request-body assertion and update the provenance
   mock to the WebSocket contract (`connection_status`).
+### feat(scheduling): env preset for session-creating scheduled tasks
+
+- `new_session` / `hub_task` schedules accept an `env_preset` (built-in or
+  saved custom preset id/name) used to launch the worker session, instead of
+  always inheriting the agent type's built-in default launch environment.
+- Presets are resolved at create/update time, so an unknown or malformed
+  preset fails the request immediately rather than breaking every fire.
+- `claude-hub schedule create/update --env-preset` exposes the option and the
+  Scheduled Tasks panel gains an Env preset picker for the two session kinds.
+- Fixes recurring `hub_task` schedules (e.g. the QFO4ALL 512890 daily push)
+  that could only ever spawn workers on the expired Volcengine Coding Plan
+  default endpoint and failed every run with provider 400 errors.
+
+### fix(feishu): preserve rich inbound messages and Bot identity
+
+- Fetch each Bot's Feishu-managed name and HTTPS avatar during credential
+  validation, persist them with the pool, and stamp them into immutable turn
+  provenance so Chat history shows the Bot identity that received the message.
+- Accept Feishu rich-text `post` events alongside plain text, convert supported
+  text, links, mentions, code blocks and separators to bounded Markdown, and
+  deliver embedded images to image-capable Chat providers as native attachments.
+- Keep mixed messages responsive when one image cannot be downloaded or a
+  coalesced burst exceeds the shared attachment budget: retain the text and
+  image placeholders instead of dropping the whole turn.
+- See the [Feishu rich ingress notes](docs/working-logs/2026-10-12-feishu-rich-ingress.md).
+
 ### fix(chat): keep sent images at full quality in a 1 GiB LRU and show Cursor sub-agent reports
 
 - A sent image is now shown from its original when it fits 8 MiB and an

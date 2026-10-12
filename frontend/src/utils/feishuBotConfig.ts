@@ -28,6 +28,8 @@ export interface FeishuPairingClaim {
 export interface FeishuBotSummary {
   bot_id: string
   name: string
+  feishu_name: string | null
+  feishu_avatar_url: string | null
   app_id: string
   source: FeishuBotSource
   enabled: boolean
