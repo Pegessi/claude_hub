@@ -204,15 +204,20 @@ async function loadComposerEntries() {
     extractFunction(source, 'requestDraftQueueFlush'),
   ].join('\n')
   const { outputText } = ts.transpileModule(snippet, transpileOptions)
-  return new Function(
+  const { toStreamSendAttachment } = await import(await moduleUrl('utils/agentStreamAttachments'))
+  const factory = new Function(
     'deps',
-    `const { isSending, goalComposerLocked, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush };`,
+    'toStreamSendAttachment',
+    `const { isSending, goalComposerLocked, goalInputBlocked, goalSteerOnly, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush };`,
   )
+  return (deps) => factory(deps, toStreamSendAttachment)
 }
 
 function composerDeps(options = {}) {
   const isSending = ref(false)
   const goalComposerLocked = ref(false)
+  const goalSteerOnly = ref(false)
+  const goalInputBlocked = computed(() => goalComposerLocked.value && !goalSteerOnly.value)
   const composerError = ref(null)
   const goalComposerReason = ref(null)
   const draftMessage = ref(options.draftMessage ?? 'hello')
@@ -245,6 +250,8 @@ function composerDeps(options = {}) {
   return {
     isSending,
     goalComposerLocked,
+    goalSteerOnly,
+    goalInputBlocked,
     composerError,
     goalComposerReason,
     draftMessage,

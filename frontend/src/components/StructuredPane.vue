@@ -216,6 +216,8 @@
                         :src="attachmentUrl(att.id)"
                         class="turn-attachment-img"
                         alt="attached image"
+                        loading="lazy"
+                        decoding="async"
                         @error="onAttachmentError($event, att)"
                       >
                     </button>
@@ -323,7 +325,7 @@
               >✦</span>
               <div class="conversation-bubble conversation-bubble--assistant">
                 <MarkdownContent
-                  :text="part.text"
+                  :text="stripTrailingGoalProtocol(part.text)"
                   :tab-id="props.tabId"
                   compact
                   :complete="turn.completed"
@@ -1074,8 +1076,8 @@
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
-            :disabled="isSending || connectionState !== 'live' || goalComposerLocked"
-            :title="goalComposerReason || undefined"
+            :disabled="isSending || connectionState !== 'live' || goalInputBlocked"
+            :title="goalInputBlocked ? goalComposerReason || undefined : undefined"
             @compositionstart="isComposing = true"
             @compositionend="isComposing = false"
             @keydown.enter.exact="handleComposerEnter"
@@ -1291,18 +1293,23 @@
             type="button"
             class="composer-send-btn"
             :disabled="!canSend || isSending"
-            :title="goalComposerReason || undefined"
-            @click="() => submit('normal')"
+            :title="goalSteerOnly ? 'Send now as the next Goal turn' : goalComposerReason || undefined"
+            @click="() => submit(goalSteerOnly ? 'steer' : 'normal')"
           >
-            {{ isSending ? 'Sending…' : (turnInFlight ? 'Queue' : 'Send') }}
+            {{ isSending ? 'Sending…' : (goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
           </button>
         </div>
         <div
           v-if="!isMobileViewport"
           class="composer-hints"
         >
-          <template v-if="goalComposerLocked">
+          <template v-if="goalInputBlocked">
             <span>{{ goalComposerReason }}</span>
+          </template>
+          <template v-else-if="goalSteerOnly">
+            <span>Enter queue until the Goal stops</span>
+            <span>⌘/Ctrl+Enter steer Goal</span>
+            <span>Shift+Enter newline</span>
           </template>
           <template v-else>
             <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
@@ -1354,6 +1361,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
+import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStreamAttachments'
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
@@ -1362,7 +1370,12 @@ import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
-import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
+import {
+  goalBlocksPlan,
+  goalPlanLockReason,
+  isGoalTerminal,
+  stripTrailingGoalProtocol,
+} from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
@@ -1418,6 +1431,9 @@ const goalComposerLocked = computed(() => goalBlocksPlan(goal.value))
 const goalComposerReason = computed(() => goalComposerLocked.value
   ? 'Pause or complete the active Goal before sending messages'
   : null)
+// An active Goal accepts text steers as its next turn; Enter queues instead.
+const goalSteerOnly = computed(() => goalComposerLocked.value && goal.value?.status === 'active')
+const goalInputBlocked = computed(() => goalComposerLocked.value && !goalSteerOnly.value)
 
 async function startGoal(input: { objective: string }) {
   if (goalSetupDisabledReason.value) {
@@ -2202,13 +2218,15 @@ const isSubmissionReady = computed(() => connectionState.value === 'live' &&
   !isUpdatingReasoningEffort.value)
 
 const canSend = computed(() => isSubmissionReady.value &&
-  !goalComposerLocked.value &&
-  (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
+  !goalInputBlocked.value &&
+  (goalSteerOnly.value
+    ? draftMessage.value.trim().length > 0 && attachments.value.length === 0
+    : draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
 const attachmentDisabledReason = computed(() => {
   if (!supportsImages.value) return 'This chat does not support image attachments'
-  if (goalComposerLocked.value) return goalComposerReason.value
+  if (goalComposerLocked.value) return 'Pause or complete the active Goal before attaching images'
   if (isSending.value || isPreparingAttachments.value) return 'Wait for the current upload or send to finish'
   return null
 })
@@ -2290,12 +2308,11 @@ function triggerFilePicker() {
 }
 
 const MAX_ATTACHMENTS = 10
-// Backend enforces a 40 MiB total decoded cap per send request (originals +
-// previews). We enforce it conservatively client-side: sum of original file
-// sizes plus 512 KiB reserved per selected preview must stay <= 40 MiB. The
-// backend remains authoritative.
+// Backend enforces a 40 MiB total decoded cap per send request (originals plus
+// re-encoded previews). The backend remains authoritative.
 const MAX_TOTAL_REQUEST_BYTES = 40 * 1024 * 1024
-const PREVIEW_RESERVED_BYTES = 512 * 1024
+const TOTAL_REQUEST_LIMIT_ERROR =
+  `Total attachment size exceeds the ${MAX_TOTAL_REQUEST_BYTES / 1024 / 1024} MiB request limit.`
 
 async function addFiles(files: FileList | File[]) {
   // Capture the epoch BEFORE any state mutation. If the source switches
@@ -2307,6 +2324,11 @@ async function addFiles(files: FileList | File[]) {
   composerError.value = null
   if (!supportsImages.value) {
     composerError.value = 'This chat does not support image attachments.'
+    return
+  }
+  // Pasted or dropped images would leave a steer unsendable.
+  if (goalComposerLocked.value) {
+    composerError.value = 'Pause or complete the active Goal before attaching images.'
     return
   }
   // Serialize preparation batches: reject new input while a previous batch is
@@ -2330,15 +2352,13 @@ async function addFiles(files: FileList | File[]) {
     composerError.value = `You can attach up to ${MAX_ATTACHMENTS} images.`
   }
 
-  // Enforce the total request byte cap before reading: sum of existing draft
-  // originals + new originals + 512 KiB per preview must stay <= 40 MiB.
-  const existingBytes = attachments.value.reduce((sum, a) => sum + (a.size_bytes || 0), 0)
+  // Enforce the total request byte cap before reading: existing draft bytes
+  // plus the new originals must fit. A re-encoded preview is counted once it
+  // exists (below).
+  const existingBytes = attachments.value.reduce((sum, a) => sum + attachmentRequestBytes(a), 0)
   const newBytes = accepted.reduce((sum, f) => sum + f.size, 0)
-  const totalPreviews = attachments.value.length + accepted.length
-  const projected = existingBytes + newBytes + totalPreviews * PREVIEW_RESERVED_BYTES
-  if (projected > MAX_TOTAL_REQUEST_BYTES) {
-    const mb = (MAX_TOTAL_REQUEST_BYTES / 1024 / 1024).toFixed(0)
-    composerError.value = `Total attachment size exceeds the ${mb} MiB request limit.`
+  if (existingBytes + newBytes > MAX_TOTAL_REQUEST_BYTES) {
+    composerError.value = TOTAL_REQUEST_LIMIT_ERROR
     return
   }
 
@@ -2395,12 +2415,22 @@ async function addFiles(files: FileList | File[]) {
         if (preparationEpoch.value !== epoch || isSending.value) return
         const idx = attachments.value.findIndex((a) => a.id === provisionalId)
         if (idx < 0) continue // removed by the user while preparing
-        attachments.value[idx] = {
+        const prepared: DraftAttachment = {
           ...provisional,
           preview_data_url: previewDataUrl,
           // Replace the provisional thumbnail with the bounded preview.
           preview_url: previewDataUrl,
         }
+        const total = attachments.value.reduce(
+          (sum, a) => sum + attachmentRequestBytes(a.id === provisionalId ? prepared : a),
+          0,
+        )
+        if (total > MAX_TOTAL_REQUEST_BYTES) {
+          attachments.value = attachments.value.filter((a) => a.id !== provisionalId)
+          composerError.value = TOTAL_REQUEST_LIMIT_ERROR
+          continue
+        }
+        attachments.value[idx] = prepared
       } catch (e) {
         // Preview generation failed. Only mutate state if this batch still
         // owns the composer; otherwise leave the new source's state alone.
@@ -2525,7 +2555,7 @@ function syncComposerTextareaHeight() {
 }
 
 function handleComposerEnter(event: KeyboardEvent) {
-  if (goalComposerLocked.value) {
+  if (goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return
   }
@@ -2535,7 +2565,7 @@ function handleComposerEnter(event: KeyboardEvent) {
     metaKey: event.metaKey,
     ctrlKey: event.ctrlKey,
     altKey: event.altKey,
-    turnInFlight: turnInFlight.value,
+    turnInFlight: turnInFlight.value || goalSteerOnly.value,
     hasDraft: draftMessage.value.trim().length > 0 || attachments.value.length > 0,
     isMobile: isMobileViewport.value,
   })
@@ -2549,7 +2579,7 @@ function handleComposerEnter(event: KeyboardEvent) {
 }
 
 function enqueueDraft() {
-  if (goalComposerLocked.value) {
+  if (goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return
   }
@@ -3013,12 +3043,7 @@ async function sendToStream(
         client_turn_id: clientTurnId,
         text: message,
         delivery,
-        attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
-          filename,
-          mime_type,
-          data_url,
-          preview_data_url,
-        })),
+        attachments: atts.map(toStreamSendAttachment),
       }),
     })
   } catch (error) {
@@ -3135,7 +3160,7 @@ async function submit(
   source: 'user' | 'queue' = 'user',
 ): Promise<boolean> {
   if (isSending.value) return false
-  if (!messageOverride && goalComposerLocked.value) {
+  if (!messageOverride && goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return false
   }
@@ -3150,7 +3175,7 @@ async function submit(
   const message = messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || attachments.value.length > 0
   if (!hasContent) return false
-  if (delivery === 'normal' && turnInFlight.value && !messageOverride) {
+  if (delivery === 'normal' && (turnInFlight.value || goalSteerOnly.value) && !messageOverride) {
     enqueueDraft()
     return false
   }
@@ -3162,8 +3187,8 @@ async function submit(
   // preview_data_url, size_bytes) so we can restore the composer exactly on
   // send failure — no reconstructed ids, no zeroed sizes.
   const draftAtts: DraftAttachment[] = messageOverride ? [] : [...attachments.value]
-  // Wire payload carries the original data_url (for the provider) and the
-  // bounded preview_data_url (for the cache) separately.
+  // The original data_url goes to the provider; preview_data_url is the
+  // stored image (sendToStream flags it instead when it is the original).
   const atts: WorkspaceAttachmentCreate[] = draftAtts.map(
     ({ filename, mime_type, data_url, preview_data_url }) => ({
       filename,

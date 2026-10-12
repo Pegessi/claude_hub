@@ -289,7 +289,9 @@ async def test_external_goal_input_does_not_consume_pending_question(
     monkeypatch.setattr(
         goal_run,
         "get_goal_manager",
-        lambda: SimpleNamespace(current=lambda _tab_id: current),
+        lambda: SimpleNamespace(
+            current=lambda _tab_id: current, has_goal_history=lambda _tab_id: True
+        ),
     )
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: object())
     monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
