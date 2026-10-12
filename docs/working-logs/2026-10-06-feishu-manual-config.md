@@ -3,6 +3,9 @@
 > Historical candidate: the single-Bot/admin design below is superseded by the
 > [shared Bot pool](2026-10-07-bot-pool-and-task-ui.md). Do not use this page as
 > setup instructions for the current pool API. Its original test evidence remains historical.
+> The obsolete `browser_feishu_bot_config.py` fixture was retired in
+> [stage two](2026-10-09-ui-acceptance.md); current pool acceptance uses
+> `browser_feishu_bot_components.py` and the full-page provenance scenario.
 
 ## Scope and deployment status
 

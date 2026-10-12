@@ -5,6 +5,51 @@
 
 ## Unreleased
 
+### test(ui): enforce the three unrun scenarios and guide new gates
+
+- Convert `browser_chat_queue_activation.py`, `browser_chat_goal_steer.py`
+  and `browser_chat_image_quality.py` to the shared `run_browser_main`
+  lifecycle and register them. Each drove its own browser and produced no
+  lifecycle evidence, so the gate owner could not run them; all three had
+  sat unexecuted, and one failed the first time it was ever run. The gate
+  now covers nine scenarios.
+- Make registry drift a startup failure: the owner compares the discovered
+  scenario files against `RUNNERS` and refuses to start when they disagree,
+  naming the files. A scenario added and forgotten can no longer go unrun.
+- Document when user-visible work warrants a browser gate and when it does
+  not, how to write an assertion that survives refactoring, and why a gate
+  must be seen to fail once before it is trusted. Linked from the entry
+  guide and the agent workflow.
+
+### test(chat): gate the Chat composer and align merged acceptance checks
+
+- Add a sixth browser scenario covering the Chat composer: send and clear,
+  local queueing while a turn is live, Stop draining the queue, a failed send
+  keeping the user's text, retry under a new client turn id, and mobile
+  reachability of both controls.
+- Probe the browser the tests actually use when deciding whether to skip the
+  terminal HMR module. Probing Playwright's default cache skipped the whole
+  module where an explicitly selected browser was available, which the
+  no-skip `terminal-hmr` target then failed.
+- Discover browser scenarios for the format target instead of listing them,
+  so a newly added scenario can no longer escape the formatter.
+- Drop the Chat-only `right: 56px` offset: the name pill and the Feishu
+  control now share one flex row, which prevents the overlap structurally.
+- Restore the full secret request-body assertion and update the provenance
+  mock to the WebSocket contract (`connection_status`).
+### feat(scheduling): env preset for session-creating scheduled tasks
+
+- `new_session` / `hub_task` schedules accept an `env_preset` (built-in or
+  saved custom preset id/name) used to launch the worker session, instead of
+  always inheriting the agent type's built-in default launch environment.
+- Presets are resolved at create/update time, so an unknown or malformed
+  preset fails the request immediately rather than breaking every fire.
+- `claude-hub schedule create/update --env-preset` exposes the option and the
+  Scheduled Tasks panel gains an Env preset picker for the two session kinds.
+- Fixes recurring `hub_task` schedules (e.g. the QFO4ALL 512890 daily push)
+  that could only ever spawn workers on the expired Volcengine Coding Plan
+  default endpoint and failed every run with provider 400 errors.
+
 ### fix(feishu): preserve rich inbound messages and Bot identity
 
 - Fetch each Bot's Feishu-managed name and HTTPS avatar during credential
@@ -292,6 +337,20 @@
   accessible connection state and the existing pairing popover.
 - Pin the parallel layout with real-component desktop/mobile geometry checks.
   See the [header control validation notes](docs/working-logs/2026-10-09-feishu-header-controls.md).
+
+### test(ui): add isolated behavioral acceptance and fix Chat control overlap
+
+- Run five real Vue/Pinia browser scenarios through a shared local/CI entrypoint,
+  with mocked APIs, explicit browser selection and recorded resource cleanup.
+- Check Task retry/credential recovery, native child lifecycle display, current
+  Bot-pool contracts and message provenance after binding changes.
+- Give isolated terminal HMR its own blocking target/CI job; require actual
+  nonempty, zero-skip JUnit results. Record default/focused scope and explicit
+  E2E timing scale, and pin recovery stand-ins to the test interpreter.
+- Keep subagent controls consistently English. Separate the Chat name from its
+  Feishu button and keep long mobile first-message text clear of both controls.
+- Define [UI acceptance](docs/UI_ACCEPTANCE.md), including language, interaction,
+  layout and evidence requirements. See the [stage-two record](docs/working-logs/2026-10-09-ui-acceptance.md).
 
 ### fix(quality): make validation reproducible and preserve Task attachments
 

@@ -21,7 +21,6 @@ test('uncorrelated Agent and Task calls retain a clearly scoped fallback card', 
   assert.match(standaloneBlock, /subagentChip\(part\.tool\)/)
   assert.match(standaloneBlock, /subagentCallStatusLabel\(part\.tool\.status\)/)
   assert.doesNotMatch(standaloneBlock, /subagentStatusLabel\(part\.tool\.status\)/)
-  assert.match(standaloneBlock, /子代理调用处理中…/)
 })
 
 test('one turn-level region renders one keyed row per complete provider id', () => {
@@ -37,10 +36,6 @@ test('one turn-level region renders one keyed row per complete provider id', () 
 test('dispatch status and child-turn lifecycle are rendered separately', () => {
   assert.match(regionBlock, /subagentDispatchLabel\(thread\.launchTool\.status\)/)
   assert.match(regionBlock, /subthreadStatusLabel\(thread\)/)
-  assert.match(source, /completed: '本轮完成'/)
-  assert.match(source, /failed: '本轮失败'/)
-  assert.match(source, /unknown: '状态未知'/)
-  assert.match(source, /completed: '已派发'/)
 })
 
 test('expanding a child retains prompt, prose, thinking, tools and images', () => {

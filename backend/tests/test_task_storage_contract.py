@@ -131,6 +131,7 @@ def main_schedule(kind, workspace_id):
         "agent_type": "claude",
         "message": "ordinary scheduled message",
         "task_title": "ordinary task" if kind == "hub_task" else None,
+        "env_preset": "none" if kind in {"new_session", "hub_task"} else None,
         "last_run_at": None,
         "next_run_at": STAMP,
         "last_status": None,

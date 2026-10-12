@@ -188,24 +188,24 @@ export function isSubagentTool(name: unknown, args?: unknown): boolean {
 }
 
 const STATUS_LABELS: Record<SubagentStatus, string> = {
-  running: '运行中',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
+  running: 'Running',
+  completed: 'Completed',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
 }
 
-/** Chinese status badge label for the sub-agent card; unknown → raw status. */
+/** English status badge label for the sub-agent card; unknown → raw status. */
 export function subagentStatusLabel(status: string): string {
   return STATUS_LABELS[status as SubagentStatus] ?? status
 }
 
 const PROVIDER_LABELS: Record<SubagentProvider, string> = {
-  claude: 'Claude 子代理',
-  cursor: 'Cursor 子代理',
-  traex: 'TraeX 子代理',
+  claude: 'Claude sub-agent',
+  cursor: 'Cursor sub-agent',
+  traex: 'TraeX sub-agent',
 }
 
-/** Provider-prefixed identity chip, e.g. ``Claude 子代理``. */
+/** Provider-prefixed identity chip, e.g. ``Claude sub-agent``. */
 export function subagentProviderLabel(provider: SubagentProvider): string {
   return PROVIDER_LABELS[provider]
 }
