@@ -199,6 +199,30 @@ test('newly created and duplicated sessions are prepended without reordering exi
   )
 })
 
+test('a rejected duplicate shows the server reason and keeps the session list', async t => {
+  const { store } = setup(t)
+  globalThis.fetch.mock.mockImplementation(async () => ({
+    ok: false,
+    status: 429,
+    json: async () => ({ detail: 'live tab limit reached (200); archive or delete a session to create more' }),
+  }))
+
+  assert.equal(await store.duplicateTab('a'), undefined)
+  assert.deepEqual(store.tabs.map(tab => tab.id), ['a', 'terminal', 'b', 'managed'])
+  assert.equal(
+    store.notifications.at(-1)?.message,
+    'Failed to duplicate tab: live tab limit reached (200); archive or delete a session to create more',
+  )
+
+  globalThis.fetch.mock.mockImplementation(async () => ({
+    ok: false,
+    status: 502,
+    json: async () => { throw new SyntaxError('Unexpected token <') },
+  }))
+  await store.duplicateTab('a')
+  assert.equal(store.notifications.at(-1)?.message, 'Failed to duplicate tab')
+})
+
 test('deleting a session reports success and clears its pinned preference', async t => {
   const { store } = setup(t)
   store.pinnedChatIds = new Set(['a'])

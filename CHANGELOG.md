@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+### fix(tabs): stop archived sessions from exhausting the tab limit
+
+- The `max_total_tabs` backstop (default 200) now counts only live sessions.
+  Archived sessions have already released their ttyd port, process and tmux
+  session, but they used to count, so 170 archived plus 30 live Chats blocked
+  every new Chat, duplicate and fork.
+- Unarchiving checks the same limit before restoring, so live sessions still
+  never exceed it; a rejected unarchive leaves the session archived.
+- Duplicate returns 429 with the reason instead of a bare 500, unarchive
+  returns 429 at the limit, and the create, duplicate, fork and unarchive
+  toasts show the server's reason rather than only "Failed to duplicate tab".
+
 ### test(ui): enforce the three unrun scenarios and guide new gates
 
 - Convert `browser_chat_queue_activation.py`, `browser_chat_goal_steer.py`
