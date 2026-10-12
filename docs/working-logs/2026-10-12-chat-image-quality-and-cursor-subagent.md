@@ -14,16 +14,21 @@ most of their detail; the provider always received the original.
 The composer now stores the original itself whenever it fits the stored-image
 bounds: 8 MiB (the composer's own upload limit) and an 8192px edge. Only images
 above the edge bound are re-encoded: scaled to fit the edge and the 16.7M-pixel
-canvas limit of mobile Safari, then PNG if it fits, otherwise WebP 0.95, JPEG
-0.92, WebP 0.85, JPEG 0.85. Encoders the browser lacks are skipped by checking
-the blob type, and the size is halved only when none fits. GIFs stay animated
-because the original bytes are kept.
+canvas limit of mobile Safari (dimensions are floored, so rounding cannot
+exceed it), then PNG if it fits, otherwise WebP 0.95, JPEG 0.92, WebP 0.85,
+JPEG 0.85. Encoders the browser lacks are skipped by checking the blob type,
+and the size is halved only when none fits. GIFs stay animated because the
+original bytes are kept.
 
-The backend dimension bound moves to 8192px and the per-image cap to 8 MiB. When
-`preview_data_url` equals `data_url`, `_decode_attachments` reuses the decoded
-original and counts it once against the 40 MiB request budget. The JSON body
-still carries those bytes twice; no server-side body limit exists, so this is
-bandwidth only. Display thumbnails now load lazily and decode asynchronously.
+The backend dimension bound moves to 8192px and the per-image cap to 8 MiB.
+When the original is its own stored image, the composer sends
+`preview_is_original: true` instead of a second base64 copy, and
+`_decode_attachments` reuses the decoded original, so the request carries and
+counts those bytes once. A copy in both fields would double the upload and
+could push a 40 MiB request past the Docker nginx 100 MiB body limit. Setting
+both fields is rejected. The composer checks the 40 MiB request total against
+the real size of each re-encoded preview once it exists, rather than a fixed
+512 KiB reserve. Display thumbnails now load lazily and decode asynchronously.
 
 This changes the privacy note: the local cache now holds originals rather than
 1024px previews. They stay under the existing state-root manifest, the per
@@ -65,19 +70,30 @@ What was missing was rendering what the stream does carry:
 
 ## Validation
 
-- `./scripts/verify.sh all`: docs, backend-format, backend-tests (full suite),
-  frontend-lint, frontend-types, frontend-tests and frontend-build passed. The
-  first run reported four mypy errors in the new tests; those and the black
-  formatting were fixed, then backend-format, backend-types and the focused
-  tests were rerun.
+- `./scripts/verify.sh all`: docs, backend-format, backend-types,
+  frontend-lint, frontend-types, frontend-tests and frontend-build passed.
+  backend-tests stopped at
+  `test_queue_status_wedge.py::test_queue_then_generation_completes_normally`.
+  That test is flaky without this change: it failed 2 of 8 isolated runs on
+  `codex/task-recover-dialog-reporter-key`, which shares this branch's base
+  and does not contain it. The full backend suite with it and the known
+  `test_service_restart.py::test_frontend_build_timeout_keeps_current_backend_and_dist`
+  flake deselected passed (2812 passed, 19 skipped). An earlier full run of
+  this branch passed the whole backend suite.
 - `tests/test_agent_stream_attachments.py` covers default limits, read
-  recency, the hourly touch interval, legacy manifests, and the single count of
-  an original used as its own preview.
+  recency, the hourly touch interval, legacy manifests, a flagged original used
+  as its own preview beside a re-encoded one, and rejection of mixed or doubly
+  set previews.
 - `agentStreamAttachments.test.mjs`, `subagentTool.test.mjs` and
   `agentStreamTimelineReducer.test.mjs` cover the original pass-through, PNG at
-  the edge bound, the canvas limit and encoder fallback, halving, the oneof
-  type, and the Cursor report.
+  the edge bound, the canvas limit and encoder fallback, floored dimensions,
+  halving, the send wire form and request byte count, the oneof type, and the
+  Cursor report. Over a grid of 47,011 sizes past the edge bound, the previous
+  rounding exceeded the canvas limit for 23,063; flooring exceeds it for none.
 - `frontend/tests/browser_chat_image_quality.py` against an owned Vite server
-  with mocked APIs: a 1600x1000 PNG is sent with `preview_data_url` identical to
-  `data_url`; a 9000x40 PNG gets an 8192x36 PNG preview; a Cursor `Task` card
-  shows `explore` and the child report.
+  with mocked APIs: a 1600x1000 PNG is sent once with `preview_is_original` and
+  no `preview_data_url`; a 9000x40 PNG gets an 8192x36 PNG preview; a Cursor
+  `Task` card shows `explore` and the child report.
+- `test_agent_stream.py` run after `test_agent_stream_attachments.py` fails two
+  `set_env` tests with "no current event loop" on `main` too; in the default
+  order both files pass.

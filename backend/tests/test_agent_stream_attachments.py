@@ -809,25 +809,61 @@ def test_decode_enforces_aggregate_original_and_preview_limit(
     assert exc_info.value.status_code == 400
 
 
-def test_decode_counts_an_original_used_as_its_own_preview_once(
+def test_decode_uses_a_flagged_original_as_its_own_preview_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import claude_hub.api.agent_stream as api
 
     original = _png(width=4000, height=3000, pad=64)
-    monkeypatch.setattr(api, "_MAX_TOTAL_ATTACHMENT_BYTES", len(original))
-    url = _data_url("image/png", original)
-    payload = api.AgentStreamAttachment(
-        filename="screenshot.png",
-        mime_type="image/png",
-        data_url=url,
-        preview_data_url=url,
-    )
+    resized = _png(width=40, height=30)
+    monkeypatch.setattr(api, "_MAX_TOTAL_ATTACHMENT_BYTES", 2 * len(original) + len(resized))
+    payloads = [
+        api.AgentStreamAttachment(
+            filename="screenshot.png",
+            mime_type="image/png",
+            data_url=_data_url("image/png", original),
+            preview_is_original=True,
+        ),
+        api.AgentStreamAttachment(
+            filename="huge.png",
+            mime_type="image/png",
+            data_url=_data_url("image/png", original),
+            preview_data_url=_data_url("image/png", resized),
+        ),
+    ]
 
-    originals, previews = api._decode_attachments([payload])
+    originals, previews = api._decode_attachments(payloads)
 
-    assert originals == [original]
-    assert previews == [original]
+    assert originals == [original, original]
+    assert previews == [original, resized]
+
+
+@pytest.mark.parametrize(
+    "preview_fields",
+    [
+        {"preview_is_original": True, "preview_data_url": "data:image/png;base64,AA=="},
+        {},
+    ],
+)
+def test_decode_rejects_ambiguous_or_mixed_flagged_previews(
+    preview_fields: Dict[str, Any],
+) -> None:
+    import claude_hub.api.agent_stream as api
+    from fastapi import HTTPException
+
+    url = _data_url("image/png", _png())
+    payloads = [
+        api.AgentStreamAttachment(
+            filename="a.png", mime_type="image/png", data_url=url, preview_is_original=True
+        ),
+        api.AgentStreamAttachment(
+            filename="b.png", mime_type="image/png", data_url=url, **preview_fields
+        ),
+    ]
+
+    with pytest.raises(HTTPException) as excinfo:
+        api._decode_attachments(payloads)
+    assert excinfo.value.status_code == 400
 
 
 def test_attachment_read_is_scoped_to_workspace_and_session(state_root: Path) -> None:
