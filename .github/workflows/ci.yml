@@ -7,6 +7,15 @@ on:
     branches: [main]
 
 jobs:
+  checkout-safety:
+    name: Committed checkout safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject machine-local configuration in the committed tree
+        run: ./scripts/verify.sh checkout-safety
+
   backend:
     name: Backend / ${{ matrix.label }}
     runs-on: ubuntu-latest

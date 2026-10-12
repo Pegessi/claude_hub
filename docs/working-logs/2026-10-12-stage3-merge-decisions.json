@@ -1,0 +1,174 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "f2a89d22b5dd505125e7adf199144d3525183095",
+  "parents": [
+    "1386e79fbfc5c33d27f1e1b4f0e138d326455945",
+    "7971b727815822e49953739d85ea7987923982b6"
+  ],
+  "base": "47d4e920d739c838d358ec26a94e237c8a655fbb",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "3cdfff13ea5c162376b674a71bed39fc412d69fc",
+  "reconstructed_tree": "14700f78e7762c591728fd0166cf1946aec944ef",
+  "conflicts": [
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "CLAUDE.md",
+    "frontend/src/components/AgentWorkspaceView.vue"
+  ],
+  "decisions": [
+    {
+      "path": "AGENTS.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "200a81c96824662fd63637de95c26cb07d38c985"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ea434c27ca7084812f82fba0b3b5f8cc4a1e02c6"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fff321649d3cb4424019226853f79e9d09a0a86a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "339d8aab8fcd7dbd03f53a40fc530811608625c7"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b59ce7bde2805f35861bc67c0ebed56bb54bfbbc"
+      },
+      "reason": "Keep the stage-three Task state/UI boundary link together with the main-side guidance for adding UI acceptance gates.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "719a4edc3533adb08c47f8fcbd3bf57f51fedeb3"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d9e1defa2c5ac98b7992b07d87aac5f3240655d8"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "811d1f05efe58168b50a1f61f1d39bce1c1a6c4c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0ef15d1777363cd362f05c0d58fa25776f09a59c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "79686674ee701618060683f2076e261ba7067fbf"
+      },
+      "reason": "Retain the stage-three Task persistence and creation-flow entry followed by the main-side entries. This decision records entry preservation, not independent verification of historical results.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "CLAUDE.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "200a81c96824662fd63637de95c26cb07d38c985"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ea434c27ca7084812f82fba0b3b5f8cc4a1e02c6"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fff321649d3cb4424019226853f79e9d09a0a86a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "339d8aab8fcd7dbd03f53a40fc530811608625c7"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b59ce7bde2805f35861bc67c0ebed56bb54bfbbc"
+      },
+      "reason": "Use the same navigation resolution as AGENTS.md and retain byte-identical entry guides.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/components/AgentWorkspaceView.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "07271b95846b9d0bd019cbf23d6da1790307b992"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "87a85c69cc05f335b787116c8a241c43239621a9"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "913b43a182d891f39e119bd760960350f5b1fc3f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "cf5f3bb434419965aaacb866ff82f6c82277aa01"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6aa3c42c55a1da40477f3fdb4fd066a9d205261b"
+      },
+      "reason": "Retain parent-owned creation state and the extracted dialog/attachment helpers. Move main-side creating/uncertain request presentation and discard/retry controls into the dialog, using the flow submitting state. Preserve main theme changes in the parent. Review found that the dialog primary hover still uses the old accent-hover role in this fixed merge; a later repair and its tests are required. Destination existence does not establish complete semantic preservation.",
+      "disposition": "transplant",
+      "destinations": [
+        "frontend/src/components/TaskCreateDialog.vue",
+        "frontend/src/composables/useTaskCreateFlow.ts",
+        "frontend/src/utils/draftAttachments.ts"
+      ]
+    },
+    {
+      "path": "frontend/src/components/TaskCreateDialog.vue",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "341e09607e607f249027a923f63cf7ef84added5"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "341e09607e607f249027a923f63cf7ef84added5"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5a96baa9bf1a863beab7a35baaa9af6e003cf806"
+      },
+      "reason": "Apply the main-side creating status, unconfirmed title, separate discard action and retry label to the stage-three presentation component. The fixed merge still misses the main-side accent-fill-hover change on this component; this historical record retains that known omission, which must be repaired and reviewed in a later commit.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

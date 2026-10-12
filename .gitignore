@@ -3,6 +3,8 @@
 Thumbs.db
 
 # Node.js
+# Machine-local pnpm settings; the index/commit check also rejects forced additions.
+/frontend/pnpm-workspace.yaml
 node_modules/
 dist/
 *.log

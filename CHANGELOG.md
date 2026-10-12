@@ -5,6 +5,23 @@
 
 ## Unreleased
 
+### test(quality): verify environment provenance and review merge decisions
+
+- Probe the actual backend interpreter, local editable source and tool-module
+  provenance before verification; run Python tools through the checked module
+  entry and refuse backend `.env` files without modifying them.
+- Add explicit index checks before commit and committed-tree checks in local
+  validation and CI, protecting machine-local pnpm settings and the portable
+  production host default. No Git hook or configuration is installed.
+- Add a fixed-object merge-decision record check. It identifies native conflicts
+  and differences from Git's reconstructed tree; recorded reasons do not prove
+  semantic correctness, and later commits require separate review.
+- Expand the existing development workflow with ownership, small-change and
+  maintainable-test guidance, backed by a focused best-practice research record.
+- Make the HMR single-owner test count capture owners, wait for the second
+  correlation to be consumed, and exercise a legitimate snapshot retry. HTTP
+  fetch count alone could reject a correct single-owner recovery.
+
 ### fix(ui): preserve the extracted Task dialog's hover theme
 
 - Apply main's contrast-safe primary-button hover fill to the extracted Task

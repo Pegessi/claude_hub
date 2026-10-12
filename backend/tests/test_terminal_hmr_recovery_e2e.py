@@ -2461,7 +2461,7 @@ def test_remote_stable_bootstrap_single_owner_and_status(
     isolated_hmr_stack: dict[str, Any],
     page: Page,
 ) -> None:
-    """Remote stable bootstrap is single-owner; pending correlations reuse persisted agentStatus."""
+    """One remote stable owner serves both correlations across a capture refetch."""
     ctx = isolated_hmr_stack
     base = ctx["base_url"]
     bindir = ctx["bindir"]
@@ -2499,7 +2499,8 @@ def test_remote_stable_bootstrap_single_owner_and_status(
     page.goto(f"{base}/api/terminal/proxy/{tab_id}/")
     page.wait_for_selector(".xterm", timeout=15000)
     page.wait_for_function(
-        "() => window.term && typeof window.term.write === 'function'",
+        """() => window.term && typeof window.term.write === 'function'
+            && window.term.__claudeHubHistoryHooked === true""",
         timeout=int(scale_timeout(15) * 1000),
     )
 
@@ -2517,10 +2518,46 @@ def test_remote_stable_bootstrap_single_owner_and_status(
     page.route(history_pattern, stable_owner_route)
     try:
         page.evaluate("""() => {
+            const term = window.term;
+            const key = '__claudeHubRemoteStableBootstrapInFlight';
+            const descriptor = Object.getOwnPropertyDescriptor(term, key);
+            if ((descriptor && (!('value' in descriptor) || !descriptor.configurable
+                    || !descriptor.writable)) || (!descriptor && key in term)) {
+                throw new Error('owner observer requires an ordinary writable data property');
+            }
+            let value = descriptor ? descriptor.value : undefined;
+            if (value === true) throw new Error('owner already active before observation');
+            const state = window.__remoteOwnerState = {
+                ownerStarts: 0, bConsumed: false, bInFlight: false, bSameTerm: false,
+            };
+            // This test owns the page until closure; term.write is never replaced.
+            Object.defineProperty(term, key, {
+                configurable: true,
+                enumerable: descriptor ? descriptor.enumerable : true,
+                get() { return value; },
+                set(next) {
+                    value = next;
+                    if (next === true) state.ownerStarts++;
+                },
+            });
+            state.read = () => ({
+                ownerStarts: state.ownerStarts, sameTerm: window.term === term,
+                inFlight: term[key] === true, bConsumed: state.bConsumed,
+                bInFlight: state.bInFlight, bSameTerm: state.bSameTerm,
+            });
             window.__remoteOwnerEvents = [];
             window.addEventListener('message', function(event) {
-                if (!event.data || event.data.type !== 'terminal-history-refresh-done') return;
-                window.__remoteOwnerEvents.push(event.data);
+                const data = event.data;
+                if (!data) return;
+                if (data.type === 'terminal-history-refresh-done') {
+                    window.__remoteOwnerEvents.push(data);
+                }
+                if (data.type === 'terminal-bootstrap-correlation'
+                        && data.requestId === 'remote-owner-b') {
+                    state.bInFlight = term[key] === true;
+                    state.bSameTerm = window.term === term;
+                    state.bConsumed = true;
+                }
             });
         }""")
         page.evaluate("""() => {
@@ -2532,20 +2569,28 @@ def test_remote_stable_bootstrap_single_owner_and_status(
         }""")
         _pump_until_held_route(gate, page, scale_timeout(20))
         owner_state = page.evaluate("""() => {
-            const inFlight = !!(window.term && window.term.__claudeHubRemoteStableBootstrapInFlight);
+            const before = window.__remoteOwnerState.read();
             window.postMessage({
                 type: 'terminal-bootstrap-correlation',
                 requestId: 'remote-owner-b',
             }, '*');
-            return {
-                inFlightBeforeB: inFlight,
-                inFlightAfterB: !!(window.term && window.term.__claudeHubRemoteStableBootstrapInFlight),
-            };
+            return before;
         }""")
-        assert owner_state["inFlightBeforeB"] is True
-        assert (
-            owner_state["inFlightAfterB"] is True
-        ), "second correlation must not start another stable bootstrap"
+        assert owner_state["sameTerm"] is True
+        assert owner_state["inFlight"] is True
+        page.wait_for_function(
+            "() => window.__remoteOwnerState.bConsumed === true",
+            timeout=int(scale_timeout(20) * 1000),
+        )
+        joined = page.evaluate("() => window.__remoteOwnerState.read()")
+        assert joined["ownerStarts"] == 1, f"B must join A's owner: {joined}"
+        assert joined["sameTerm"] is True and joined["bSameTerm"] is True
+        assert joined["inFlight"] is True and joined["bInFlight"] is True
+        assert gate["fetch_count"] == 1, "first response must still be held before refetch"
+        # A captured frame requires another snapshot without creating another owner.
+        page.evaluate("""() => {
+            window.term.write('\\r\\nREMOTE_OWNER_CAPTURE_FRAME\\r\\n');
+        }""")
         _fulfill_held_route(gate)
         page.wait_for_function(
             """() => {
@@ -2558,11 +2603,15 @@ def test_remote_stable_bootstrap_single_owner_and_status(
         events = page.evaluate("() => window.__remoteOwnerEvents || []")
         a_events = [e for e in events if e.get("requestId") == "remote-owner-a"]
         b_events = [e for e in events if e.get("requestId") == "remote-owner-b"]
-        assert (
-            gate["fetch_count"] == 1
-        ), f"expected exactly one history fetch; got {gate['fetch_count']}"
+        completed = page.evaluate("() => window.__remoteOwnerState.read()")
+        assert completed["sameTerm"] is True
+        assert completed["inFlight"] is False
+        assert completed["ownerStarts"] == 1, f"refetch must reuse the same owner: {completed}"
+        assert gate["fetch_count"] >= 2, "captured frame must cause a snapshot refetch"
         assert len(a_events) == 1
         assert len(b_events) == 1
+        assert a_events[0].get("ok") is True
+        assert b_events[0].get("ok") is True
         assert a_events[0].get("deferredRecovery") is not True
         assert b_events[0].get("deferredRecovery") is not True
         assert gate["errors"] == [], f"route errors: {gate['errors']}"
