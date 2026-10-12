@@ -42,7 +42,9 @@ metadata, so the tailer did not sanitize it, and the Goal stayed paused.
   because an unvalidated value would make the Goal snapshot fail to load.
 - **Codex/TraeX** keep answering questions in-turn first.
 - **Enter during an active Goal** queues the draft locally; it flushes when the
-  Goal pauses, blocks, or ends. Goal turns cannot carry images.
+  Goal pauses, blocks, or ends. Goal turns cannot carry images; a pasted or
+  dropped image is refused with the same message as the attach button instead
+  of silently disabling Steer.
 - **Answered cards** for Claude/Cursor are closed with `approval_resolved`
   before the Goal turn starts.
 - **Deferred resume.** Resuming while an ordinary Chat turn runs no longer
@@ -50,13 +52,22 @@ metadata, so the tailer did not sanitize it, and the Goal stayed paused.
   message "resumes when the current Chat turn finishes"; the next turn boundary
   dispatches it. Pause, complete, clear, and restart recovery clear the flag. The
   API re-checks the turn guard after storing the deferral to close the race with
-  a turn that ended meanwhile.
+  a turn that ended meanwhile. Another Resume while the deferral waits (for
+  example from a second window) leaves it waiting if a turn still runs, and
+  releases it if none does; it no longer dispatches over the running turn.
 - **Protocol hiding.** Ordinary turns in any Chat that has ever had a Goal pass
-  `strip_goal_protocol` to the tailer, which hides control blocks from visible
-  text. Only Goal continuation turns may synthesize a completion from a trailing
-  `<goal-status>`; ordinary turns never end early. The frontend also hides a
-  complete trailing envelope in history recorded before this change; mid-text
-  examples and earlier unmatched `<goal-status>` openers stay visible.
+  `strip_goal_protocol` to the tailer. Goal continuation turns drop every
+  control block. Ordinary turns drop only the reply's trailing envelope: text
+  from an opener is held until it is known to be an optional checkpoint plus a
+  status block with nothing after it, and is released unchanged as soon as it
+  cannot be (an opener in prose, a checkpoint without JSON, text after the
+  closing tag, an unclosed status body over 4,096 characters, or a failed turn).
+  Dropping every block there deleted mid-text protocol examples, and everything
+  after an unclosed opener, from the persisted reply and from external channel
+  replies. Only Goal continuation turns may synthesize a completion from a
+  trailing `<goal-status>`; ordinary turns never end early. The frontend also
+  hides a complete trailing envelope in history recorded before this change;
+  mid-text examples and earlier unmatched `<goal-status>` openers stay visible.
 
 ## Validation
 
@@ -66,14 +77,22 @@ metadata, so the tailer did not sanitize it, and the Goal stayed paused.
 - API: question answer, ⌘/Ctrl+Enter steer, and blocked reply routing; image and
   plain-Enter refusal; busy blocked reply 409; failed steer 503; deferred resume
   and its race re-check; `strip_goal_protocol` only after Goal history.
-- Tailer: an ordinary turn with the flag hides the envelope and is not completed
-  by Goal synthesis.
+- Tailer: an ordinary turn with the flag hides the trailing envelope, keeps a
+  mid-text example, and is not completed by Goal synthesis; a failed ordinary
+  turn releases text held for a possible envelope.
+- Sanitizer: trailing-only mode at every chunk boundary keeps a mid-text
+  example and drops the trailing envelope; it releases an unclosed opener in
+  prose, a backticked tag, a fenced example, an envelope followed by text, and
+  malformed tags unchanged, and bounds an unclosed status body.
+- API: a second Resume during a deferral leaves it waiting while a turn runs
+  and releases it once none does (fails on the previous commit).
 - Frontend: policy test for trailing-envelope stripping; wiring test for the
-  steer/queue composer contract.
+  steer/queue composer contract and the image refusal while a Goal runs.
 - Browser: `frontend/tests/browser_chat_goal_steer.py` against a task-owned
   Vite server with mocked APIs. With an active Goal turn in flight, the composer
-  stays enabled and shows the steer hints, Enter queues without sending,
-  ⌘+Enter sends `delivery: "steer"`, and a recorded envelope is hidden.
+  stays enabled and shows the steer hints, Enter queues without sending, a
+  pasted image is refused with a visible message, ⌘+Enter sends
+  `delivery: "steer"`, and a recorded envelope is hidden.
 - Full backend suite: `test_service_restart.py::test_frontend_build_timeout_keeps_current_backend_and_dist`
   fails only under full-suite load on this macOS host (also on a branch without
   these changes), most likely because `killpg` returns EPERM during timeout

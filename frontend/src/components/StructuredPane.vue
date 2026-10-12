@@ -2324,6 +2324,11 @@ async function addFiles(files: FileList | File[]) {
     composerError.value = 'This chat does not support image attachments.'
     return
   }
+  // Pasted or dropped images would leave a steer unsendable.
+  if (goalComposerLocked.value) {
+    composerError.value = 'Pause or complete the active Goal before attaching images.'
+    return
+  }
   // Serialize preparation batches: reject new input while a previous batch is
   // still reading/generating previews. Without this, two concurrent batches
   // both set isPreparingAttachments=true; the first to finish clears it and
