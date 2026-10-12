@@ -239,6 +239,12 @@ test('filled accent controls use contrast-safe fill roles', async () => {
   for (const { path, source } of vueSources) {
     for (const match of source.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       const [, selector, declarations] = match
+      // Hover inherits the light text from the base rule, so checking only
+      // declarations that contain both background and color misses this case.
+      if (selector.trim() === '.primary-button:hover' && /background:/.test(declarations)) {
+        assert.match(declarations, /background: var\(--ch-color-accent-fill-hover\);/, `${path} primary hover fill`)
+        assert.match(declarations, /border-color: var\(--ch-color-accent-fill-hover\);/, `${path} primary hover border`)
+      }
       const usesForegroundAccentAsFill = /background(?:-color)?:\s*var\(--ch-color-accent(?:-hover)?\);/.test(declarations)
       const usesLightForeground = /(?:^|;)\s*color:\s*(?:#fff(?:fff)?|white|var\(--ch-color-(?:text-inverse|on-accent)(?:,\s*#fff)?\))/.test(declarations)
       assert.ok(
