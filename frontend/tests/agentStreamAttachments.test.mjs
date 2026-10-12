@@ -135,6 +135,35 @@ test('re-encoding fits the mobile canvas limit, skips missing encoders and keeps
   assert.deepEqual(encodes.at(-1), [4096, 4096, 'image/jpeg', 0.92])
 })
 
+test('scaled dimensions never round past the mobile canvas limit', async () => {
+  for (const [width, height] of [[8193, 2050], [10000, 6000], [12345, 7777]]) {
+    const { encodes } = stubImagePipeline({ width, height, sizeFor: () => MiB })
+    await mod.generatePreviewDataUrl(fakeFile({ size: 6 * MiB }), 'data:image/png;base64,X')
+    const [w, h] = encodes[0]
+    assert.ok(w * h <= 4096 * 4096, `${width}x${height} -> ${w}x${h}`)
+    assert.ok(Math.max(w, h) <= 8192)
+  }
+})
+
+test('the send request carries an original used as its preview once', () => {
+  const original = 'data:image/png;base64,AAAA'
+  const resized = 'data:image/webp;base64,QUJD'
+  const att = { filename: 'a.png', mime_type: 'image/png', data_url: original }
+  assert.deepEqual(mod.toStreamSendAttachment({ ...att, preview_data_url: original }), {
+    ...att,
+    preview_is_original: true,
+  })
+  assert.deepEqual(mod.toStreamSendAttachment({ ...att, preview_data_url: resized }), {
+    ...att,
+    preview_data_url: resized,
+  })
+  assert.equal(mod.attachmentRequestBytes({ ...att, size_bytes: 3, preview_data_url: original }), 3)
+  assert.equal(mod.attachmentRequestBytes({ ...att, size_bytes: 3, preview_data_url: resized }), 6)
+  assert.equal(mod.attachmentRequestBytes({ ...att, size_bytes: 3 }), 3)
+  assert.equal(mod.dataUrlDecodedBytes('data:image/png;base64,QQ=='), 1)
+  assert.equal(mod.dataUrlDecodedBytes('data:image/png;base64,QUI='), 2)
+})
+
 test('the size is halved only when no high-quality encoding fits', async () => {
   const { encodes } = stubImagePipeline({
     width: 8192,

@@ -123,8 +123,10 @@ export async function generatePreviewDataUrl(file: File, dataUrl?: string): Prom
     MAX_PREVIEW_EDGE / longestEdge,
     Math.sqrt(MAX_CANVAS_PIXELS / (img.naturalWidth * img.naturalHeight)),
   )
-  let width = Math.max(1, Math.round(img.naturalWidth * scale))
-  let height = Math.max(1, Math.round(img.naturalHeight * scale))
+  // Floor so the product cannot round past the canvas limit; the epsilon only
+  // absorbs floating-point error on edges that are exact integers.
+  let width = Math.max(1, Math.floor(img.naturalWidth * scale + 1e-6))
+  let height = Math.max(1, Math.floor(img.naturalHeight * scale + 1e-6))
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const canvas = document.createElement('canvas')
     canvas.width = width
@@ -140,4 +142,39 @@ export async function generatePreviewDataUrl(file: File, dataUrl?: string): Prom
     height = Math.max(1, Math.round(height / 2))
   }
   throw new Error('Image exceeds the 8 MiB stored-image limit after downscaling')
+}
+
+interface StreamAttachmentDraft {
+  filename: string
+  mime_type: string
+  data_url: string
+  preview_data_url?: string
+}
+
+/** Decoded byte length of a base64 ``data:`` URL. */
+export function dataUrlDecodedBytes(dataUrl: string): number {
+  const payload = dataUrl.slice(dataUrl.indexOf(',') + 1)
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - padding)
+}
+
+/**
+ * Decoded bytes an attachment adds to a ``/stream/send`` request: the original
+ * plus a re-encoded preview. A preview that is the original adds nothing.
+ */
+export function attachmentRequestBytes(att: StreamAttachmentDraft & { size_bytes: number }): number {
+  const preview = att.preview_data_url
+  return att.size_bytes + (preview && preview !== att.data_url ? dataUrlDecodedBytes(preview) : 0)
+}
+
+/** ``/stream/send`` wire form; a preview that is the original is flagged, not resent. */
+export function toStreamSendAttachment({
+  filename,
+  mime_type,
+  data_url,
+  preview_data_url,
+}: StreamAttachmentDraft) {
+  return preview_data_url === data_url
+    ? { filename, mime_type, data_url, preview_is_original: true }
+    : { filename, mime_type, data_url, preview_data_url }
 }

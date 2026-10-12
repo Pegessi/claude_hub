@@ -204,10 +204,13 @@ async function loadComposerEntries() {
     extractFunction(source, 'requestDraftQueueFlush'),
   ].join('\n')
   const { outputText } = ts.transpileModule(snippet, transpileOptions)
-  return new Function(
+  const { toStreamSendAttachment } = await import(await moduleUrl('utils/agentStreamAttachments'))
+  const factory = new Function(
     'deps',
+    'toStreamSendAttachment',
     `const { isSending, goalComposerLocked, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush };`,
   )
+  return (deps) => factory(deps, toStreamSendAttachment)
 }
 
 function composerDeps(options = {}) {

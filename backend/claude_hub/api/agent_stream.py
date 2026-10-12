@@ -1071,10 +1071,12 @@ class AgentStreamAttachment(BaseModel):
     filename: str
     mime_type: str
     data_url: str
-    # Display image persisted to the attachment cache; the composer sends the
-    # original itself when it fits the cache cap. ``data_url`` goes to the
+    # Display image persisted to the attachment cache. ``data_url`` goes to the
     # provider.
     preview_data_url: Optional[str] = None
+    # Replaces ``preview_data_url`` when the original itself fits the cache,
+    # so the request carries those bytes once.
+    preview_is_original: bool = False
 
 
 class AgentStreamSendRequest(BaseModel):
@@ -1148,7 +1150,8 @@ def _decode_attachments(
     per original) or ``None`` if no previews were supplied.
 
     Previews are all-or-nothing: either every attachment has a
-    ``preview_data_url`` or none do. Mixed presence is rejected with 400.
+    ``preview_data_url`` or ``preview_is_original``, or none do. Mixed
+    presence, or both on one attachment, is rejected with 400.
     When previews are absent, ``previews`` is ``None`` so the tailer emits
     placeholder metadata and never persists original bytes.
 
@@ -1178,7 +1181,16 @@ def _decode_attachments(
 
     originals: List[bytes] = []
     previews: List[bytes] = []
-    has_previews = [a.preview_data_url is not None for a in attachments]
+    for att in attachments:
+        if att.preview_is_original and att.preview_data_url is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"attachment {att.filename!r} sets both preview_data_url "
+                    "and preview_is_original"
+                ),
+            )
+    has_previews = [a.preview_data_url is not None or a.preview_is_original for a in attachments]
     if any(has_previews) and not all(has_previews):
         raise HTTPException(
             status_code=400,
@@ -1237,9 +1249,7 @@ def _decode_attachments(
         # Decode and validate the preview (if supplied). The preview MIME is
         # independent of the original MIME — browsers may transcode to a
         # different format to meet the size cap.
-        if any_preview and att.preview_data_url == att.data_url:
-            # The composer stores originals that fit the cache as their own
-            # preview; count those bytes against the request budget once.
+        if att.preview_is_original:
             previews.append(original)
         elif any_preview:
             prev_mime, preview = _parse_data_url(att.preview_data_url)  # type: ignore[arg-type]
