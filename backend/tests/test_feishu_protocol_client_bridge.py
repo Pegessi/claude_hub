@@ -543,9 +543,9 @@ async def test_external_chat_bridge_stops_turn_that_requires_web_interaction(
         async def subscribe_completion(self, _session_arg):
             return queue
 
-        async def cancel_turn(self, session_arg, *, expected_turn_id=None):
+        async def retire_external_turn(self, session_arg, expected_turn_id=None):
             cancelled.append((session_arg, expected_turn_id))
-            return True
+            return ExternalTurnRetirement.CANCELLED_MATCHING
 
         def unsubscribe_completion(self, session_id, queue_arg) -> None:
             unsubscribed.append((session_id, queue_arg))
@@ -581,6 +581,110 @@ async def test_external_chat_bridge_stops_turn_that_requires_web_interaction(
 
     assert cancelled == [(session, "feishu-question-turn")]
     assert unsubscribed == [(session.id, queue)]
+
+
+@pytest.mark.parametrize(
+    "retirement",
+    [
+        ExternalTurnRetirement.NOT_STARTED,
+        ExternalTurnRetirement.ALREADY_TERMINAL,
+        ExternalTurnRetirement.DIFFERENT_TURN,
+        ExternalTurnRetirement.UNKNOWN,
+    ],
+)
+@pytest.mark.asyncio
+async def test_external_chat_bridge_requires_confirmed_stop_for_web_interaction(
+    monkeypatch: pytest.MonkeyPatch, retirement: ExternalTurnRetirement
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    unsubscribed: list[tuple[str, object]] = []
+
+    class FakeManager:
+        async def subscribe_completion(self, _session_arg):
+            return queue
+
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-question-turn"
+            return retirement
+
+        def unsubscribe_completion(self, session_id, queue_arg) -> None:
+            unsubscribed.append((session_id, queue_arg))
+
+    async def fake_dispatch(
+        tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        await queue.put(
+            AgentStreamEvent(
+                stream_sequence=2,
+                session_id=session.id,
+                tab_id=tab_id,
+                agent_type=AgentType.CODEX,
+                type=AgentStreamEventType.APPROVAL_REQUIRED,
+                turn_id=payload.client_turn_id,
+                call_id="question-1",
+                payload={"questions": [{"id": "q1", "question": "Continue?"}]},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    with pytest.raises(RuntimeError, match="provider stop was not confirmed"):
+        await stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-question-turn"
+        )
+
+    assert unsubscribed == [(session.id, queue)]
+
+
+@pytest.mark.asyncio
+async def test_external_chat_bridge_propagates_failed_stop_for_web_interaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+
+    class FakeManager:
+        async def subscribe_completion(self, _session_arg):
+            return queue
+
+        async def retire_external_turn(self, _session_arg, expected_turn_id=None):
+            assert expected_turn_id == "feishu-question-turn"
+            raise RuntimeError("provider still running")
+
+        def unsubscribe_completion(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(
+        tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        await queue.put(
+            AgentStreamEvent(
+                stream_sequence=2,
+                session_id=session.id,
+                tab_id=tab_id,
+                agent_type=AgentType.CODEX,
+                type=AgentStreamEventType.APPROVAL_REQUIRED,
+                turn_id=payload.client_turn_id,
+                call_id="question-1",
+                payload={"questions": [{"id": "q1", "question": "Continue?"}]},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    with pytest.raises(RuntimeError, match="could not be stopped"):
+        await stream_api.dispatch_tab_chat_and_wait(
+            "tab-1", "provider text", "feishu-question-turn"
+        )
 
 
 @pytest.mark.asyncio
