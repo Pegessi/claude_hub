@@ -15,20 +15,9 @@
       :aria-expanded="open"
       @click="toggle"
     >
-      <svg
+      <FeishuBrandMark
         class="trigger-icon"
-        viewBox="0 0 24 24"
-        fill="none"
-        aria-hidden="true"
-      >
-        <path
-          d="m9.25 14.75-1.4 1.4a3.2 3.2 0 0 1-4.5-4.5l2.3-2.3a3.2 3.2 0 0 1 4.5 0m4.6-.1 1.4-1.4a3.2 3.2 0 0 1 4.5 4.5l-2.3 2.3a3.2 3.2 0 0 1-4.5 0m-3.7-3.7 3.7-3.7"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
+      />
       <span
         class="status-dot"
         aria-hidden="true"

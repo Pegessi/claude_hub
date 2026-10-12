@@ -8,6 +8,7 @@ const panel = readFileSync(new URL('../src/components/FeishuBindingPanel.vue', i
 const binding = readFileSync(new URL('../src/composables/useFeishuBinding.ts', import.meta.url), 'utf8')
 const identity = readFileSync(new URL('../src/utils/feishuIdentity.ts', import.meta.url), 'utf8')
 const identityMark = readFileSync(new URL('../src/components/FeishuIdentityMark.vue', import.meta.url), 'utf8')
+const brandMark = readFileSync(new URL('../src/components/FeishuBrandMark.vue', import.meta.url), 'utf8')
 
 test('local direct Chat surface mounts one Feishu binding panel beside its session name', () => {
   assert.match(pane, /class="pane-chrome"[\s\S]*class="pane-session-name"[\s\S]*<FeishuBindingPanel/)
@@ -40,10 +41,15 @@ test('the Feishu status trigger matches the pane chrome control geometry', () =>
   assert.match(panel, /\.feishu-binding \{[\s\S]*height: var\(--pane-chrome-control-size, 24px\)/)
 })
 
-test('the Feishu entry keeps the original status glyph and scopes Bot avatars to Bot identity', () => {
-  assert.match(panel, /<svg[\s\S]{0,160}class="trigger-icon"/)
-  assert.match(panel, /m9\.25 14\.75-1\.4 1\.4/)
+test('the Feishu entry reuses the monochrome bird mark and scopes Bot avatars to Bot identity', () => {
+  assert.match(panel, /<FeishuBrandMark[\s\S]{0,160}class="trigger-icon"/)
   assert.match(panel, /<FeishuBrandMark[\s\S]{0,160}class="panel-mark"/)
+  assert.equal((panel.match(/<FeishuBrandMark/g) || []).length, 2)
+  assert.doesNotMatch(panel, /<svg[\s\S]{0,160}class="trigger-icon"/)
+  assert.match(brandMark, /data-feishu-brand-mark="bird"/)
+  assert.equal((brandMark.match(/<path/g) || []).length, 3)
+  assert.match(brandMark, /fill:\s*none/)
+  assert.match(brandMark, /stroke:\s*currentColor/)
   assert.match(panel, /data-testid="feishu-binding-identity"/)
   assert.match(panel, /viewState.value !== 'bound-current'/)
   assert.ok(panel.includes('currentBot.value?.feishu_avatar_url'))

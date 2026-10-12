@@ -19,7 +19,7 @@ test('Bot UI follows the shared design language and fits the shared pane chrome'
     assert.ok(dialog.includes(marker), marker)
   }
   assert.match(panel, /\.feishu-binding\s*\{[\s\S]*position:\s*relative;[\s\S]*--pane-chrome-control-size, 24px/)
-  assert.ok(panel.includes('trigger-icon'))
+  assert.match(panel, /<FeishuBrandMark[\s\S]{0,160}class="trigger-icon"/)
   assert.ok(panel.includes('status-dot'))
   assert.ok(panel.includes('Feishu connection settings · ${statusText}'))
   assert.ok(dialog.includes(':aria-pressed="bot.bot_id === selectedId"'))
