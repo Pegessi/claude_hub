@@ -32,10 +32,14 @@ def bot_summary(
     credentials_editable: bool,
     deletable: bool,
     binding: dict | None = None,
+    feishu_name: str | None = None,
+    feishu_avatar_url: str | None = None,
 ) -> dict:
     return {
         "bot_id": bot_id,
         "name": name,
+        "feishu_name": feishu_name,
+        "feishu_avatar_url": feishu_avatar_url,
         "app_id": app_id,
         "source": source,
         "enabled": True,
@@ -171,6 +175,10 @@ async def main() -> None:
                 nonlocal pool_revision
                 request = route.request
                 parsed = urlparse(request.url)
+                if request.url == "https://avatar.example.test/primary-bear.png":
+                    blocked_requests.append((request.method, request.url))
+                    await route.abort("failed")
+                    return
                 if (parsed.scheme, parsed.hostname, parsed.port) != (
                     parsed_base.scheme,
                     parsed_base.hostname,
@@ -214,6 +222,8 @@ async def main() -> None:
                         source="stored",
                         credentials_editable=True,
                         deletable=True,
+                        feishu_name="Primary Bear",
+                        feishu_avatar_url="https://avatar.example.test/primary-bear.png",
                     )
                     bots.append(created)
                     pool_revision += 1
@@ -311,6 +321,7 @@ async def main() -> None:
             await page.goto(url)
 
             trigger = page.get_by_test_id("feishu-binding-trigger")
+            identity = page.get_by_test_id("feishu-binding-identity")
             await expect(trigger).to_be_visible()
             await expect(page.get_by_test_id("feishu-binding-status")).to_have_count(0)
             await expect(trigger).to_have_attribute("title", re.compile(r"^Feishu · "))
@@ -326,7 +337,8 @@ async def main() -> None:
             assert name_box["x"] + name_box["width"] < trigger_box["x"]
             assert trigger_box["x"] - name_box["x"] - name_box["width"] == 5
             assert 7 <= 1280 - trigger_box["x"] - trigger_box["width"] <= 9
-            assert await trigger.locator("svg").count() == 1
+            assert await trigger.locator("svg").count() == 0
+            await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
             await page.screenshot(path=str(output / "feishu-status-entry-desktop.png"))
 
             # Pool create: response is summary-only; submitted credentials clear.
@@ -479,8 +491,16 @@ async def main() -> None:
             await confirm_input.fill(CONFIRM_WORD)
             await binding_panel.get_by_role("button", name="Activate pairing", exact=True).click()
             await expect(page.get_by_test_id("feishu-binding-status")).to_have_text(
-                "Connected with Primary Bot"
+                "Connected with Primary Bear"
             )
+            await expect(identity).to_have_attribute(
+                "src", re.compile(r"^data:image/png;base64,")
+            )
+            await expect(binding_panel.get_by_text("Primary Bear", exact=True)).to_be_visible()
+            for avatar in await binding_panel.locator("img").all():
+                await expect(avatar).to_have_attribute(
+                    "src", re.compile(r"^data:image/png;base64,")
+                )
             activate_call = next(
                 call for call in api_calls if call["path"].endswith("/pair/activate")
             )
@@ -493,6 +513,7 @@ async def main() -> None:
             await binding_panel.get_by_role("button", name="Disconnect Feishu", exact=True).click()
             await binding_panel.get_by_role("button", name="Confirm disconnect", exact=True).click()
             await expect(page.get_by_test_id("feishu-binding-status")).to_have_text("Not connected")
+            await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
             disconnect_call = next(
                 call
                 for call in api_calls
@@ -565,7 +586,10 @@ async def main() -> None:
                 path=str(output / "feishu-bot-components-mobile.png"),
                 full_page=True,
             )
-            assert not blocked_requests, blocked_requests
+            assert blocked_requests, blocked_requests
+            assert set(blocked_requests) == {
+                ("GET", "https://avatar.example.test/primary-bear.png")
+            }, blocked_requests
             assert not unknown_requests, unknown_requests
             assert not page_errors, page_errors
             await context.close()

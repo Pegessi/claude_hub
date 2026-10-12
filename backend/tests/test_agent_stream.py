@@ -5277,6 +5277,49 @@ async def test_codex_turn_completed_ack_after_persistence_no_turn_ahead() -> Non
     await tailer.stop()
 
 
+@pytest.mark.asyncio
+async def test_terminal_append_failure_wakes_live_completion_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed durable terminal write cannot strand a direct waiter."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    queue = await tailer.subscribe_completion()
+    await tailer.send_message("hello", [], client_turn_id="turn-store-failure")
+
+    append = tailer.store.append
+
+    async def fail_terminal_append(event: AgentStreamEvent) -> AgentStreamEvent:
+        if event.type == AgentStreamEventType.TURN_COMPLETED:
+            raise OSError("disk full")
+        return await append(event)
+
+    monkeypatch.setattr(tailer.store, "append", fail_terminal_append)
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+
+    failure = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert failure.type == AgentStreamEventType.TURN_COMPLETED
+    assert failure.turn_id == "turn-store-failure"
+    assert failure.stream_sequence == -1
+    assert failure.payload == {
+        "status": "failed",
+        "error_message": "Chat turn completed but its final state could not be saved.",
+        "_hub_volatile_terminal_failure": True,
+    }
+    assert transport.turn_in_flight is False
+    assert tailer._active_turn_id is None
+    await tailer.stop()
+
+
 # ── Native parent/child lifecycle isolation ────────────────────────────────
 
 

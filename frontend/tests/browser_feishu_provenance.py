@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -18,6 +19,13 @@ from playwright.async_api import async_playwright, expect
 def origin(url):
     parsed = urlparse(url)
     return parsed.scheme, parsed.hostname, parsed.port
+
+
+PREVIEW_ID = "11111111111111111111111111111111"
+PREVIEW_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+    "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def history():
@@ -42,7 +50,17 @@ def history():
     ]
     events = []
     for index, (turn_id, text, metadata) in enumerate(messages):
-        payload = {"summary": text, "attachments": [], "mode": "default"}
+        payload = {
+            "summary": text,
+            "attachments": ([{
+                "id": PREVIEW_ID,
+                "mime_type": "image/png",
+                "bytes": len(PREVIEW_PNG),
+                "width": 1,
+                "height": 1,
+            }] if turn_id == "feishu-turn" else []),
+            "mode": "default",
+        }
         if metadata is not None:
             payload["metadata"] = metadata
         for event_type, body in (
@@ -151,20 +169,19 @@ async def main():
                 request = route.request
                 url = urlparse(request.url)
                 if request.url == "https://avatar.example.test/hub-bot.png":
-                    await route.fulfill(
-                        status=200,
-                        content_type="image/png",
-                        body=base64.b64decode(
-                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
-                            "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-                        ),
-                    )
+                    report["blocked_external_requests"].append(request.url)
+                    await route.abort("failed")
                     return
                 if origin(request.url) != origin(base):
                     report["blocked_external_requests"].append(request.url)
                     await route.abort("blockedbyclient")
                     return
                 path = url.path
+                if path.endswith(f"/attachments/{PREVIEW_ID}"):
+                    await route.fulfill(
+                        status=200, content_type="image/png", body=PREVIEW_PNG
+                    )
+                    return
                 if not path.startswith("/api/"):
                     await route.continue_()
                     return
@@ -267,9 +284,18 @@ async def main():
                 avatar = labels.locator(".conversation-message-source__mark img")
                 await expect(avatar).to_have_count(1)
                 await expect(avatar).to_have_attribute(
-                    "src", "https://avatar.example.test/hub-bot.png"
+                    "src", re.compile(r"^data:image/png;base64,")
                 )
                 await expect(avatar).to_be_visible()
+                feishu_bubble = page.locator(
+                    '.conversation-bubble--user[data-message-origin="feishu"]'
+                )
+                preview = feishu_bubble.locator(".turn-attachment-img")
+                await expect(preview).to_have_count(1)
+                await expect(preview).to_be_visible()
+                await expect(
+                    feishu_bubble.get_by_text("Preview unavailable", exact=True)
+                ).to_have_count(0)
                 assert await page.evaluate(
                     "document.documentElement.scrollWidth <= innerWidth + 1"
                 )
@@ -313,6 +339,9 @@ async def main():
             )
             report["screenshots"].append("mobile-unbound.png")
             assert not report["page_errors"], report["page_errors"]
+            assert "https://avatar.example.test/hub-bot.png" in report[
+                "blocked_external_requests"
+            ]
             report["result"] = "PASS"
         except BaseException as exc:
             failure = exc

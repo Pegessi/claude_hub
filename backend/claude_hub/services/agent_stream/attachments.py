@@ -575,6 +575,29 @@ def _validate_preview_mime(mime_type: str, data: bytes) -> None:
         )
 
 
+def preview_within_cache_bounds(
+    mime_type: str, preview_bytes: bytes, *, max_preview_bytes: Optional[int] = None
+) -> bool:
+    """Return whether an image may be persisted by the preview cache.
+
+    External ingress paths use this before marking an original as its own
+    preview.  The store remains the final enforcement point; this predicate
+    only lets callers degrade an uncacheable original to a non-renderable
+    placeholder without rejecting the original image sent to the provider.
+    """
+
+    if max_preview_bytes is None:
+        max_preview_bytes = _store_kwargs_from_settings()["max_preview_bytes"]
+    if len(preview_bytes) > max_preview_bytes:
+        return False
+    try:
+        _validate_preview_mime(mime_type, preview_bytes)
+        width, height = _parse_image_dimensions(preview_bytes, mime_type)
+    except ValueError:
+        return False
+    return 1 <= width <= MAX_PREVIEW_EDGE and 1 <= height <= MAX_PREVIEW_EDGE
+
+
 # ── index entry normalization ───────────────────────────────────────────────
 
 
