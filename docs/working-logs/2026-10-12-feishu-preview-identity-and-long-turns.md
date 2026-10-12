@@ -49,7 +49,12 @@ expand the accepted conversation or message-type surface.
   a saturated completion queue, while a failed durable terminal write wakes
   only the direct process-local owner and never a post-persist observer. A
   subscription whose tailer startup raises or is cancelled also removes its
-  queue before propagating the original exception.
+  queue before propagating the original exception. The approval path does not
+  put an outer deadline equal to the provider's interrupt grace around this
+  teardown: Codex and TraeX retain enough time to enter their kill/restart
+  fallback before the FIFO is released. Bounded cancellation remains only for
+  process shutdown, where the delivery claim is preserved if retirement cannot
+  be confirmed in time.
 
 ## Current Feishu interaction boundary
 
@@ -97,4 +102,6 @@ independent-review findings are recorded in the task handoff.
 The lifecycle regressions additionally cover provider teardown wait/failure,
 all non-confirming external-retirement outcomes, saturated approval delivery,
 durable-observer suppression after append failure, and subscriber rollback on
-both startup exceptions and cancellation.
+both startup exceptions and cancellation. They also hold an approval teardown
+past the shutdown cancellation bound and verify that the bridge keeps waiting
+until the matching provider turn is confirmed stopped.
