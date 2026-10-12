@@ -26,6 +26,7 @@ PREVIEW_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
     "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+BOT_AVATAR_PNG = PREVIEW_PNG
 
 
 def active_binding(tab_id: str, created_at: str) -> dict:
@@ -89,7 +90,6 @@ def history():
                 "feishu": {
                     "app_id": "cli-bot",
                     "bot_name": "Hub 助手",
-                    "bot_avatar_url": "https://avatar.example.test/hub-bot.png",
                     "chat_id": "oc-chat",
                     "message_id": "om-source-message",
                     "sender_open_id": "ou-feishu-sender",
@@ -176,6 +176,7 @@ async def main(browser_run: BrowserRun) -> None:
     binding = active_binding(tab["id"], tab["created_at"])
     pool_revision = 0
     events = history()
+    pool_response_gate = asyncio.Event()
     stream_base = f'/api/workspaces/tabs/{tab["id"]}/stream'
     goal_current_path = f'/api/tabs/{tab["id"]}/goal/current'
     viewed_path = f'/api/tabs/{tab["id"]}/view'
@@ -186,6 +187,7 @@ async def main(browser_run: BrowserRun) -> None:
         unknown_api_requests=[],
         unexpected_external_requests=[],
         blocked_external_requests=[],
+        bot_avatar_requests=[],
         blocked_websockets=[],
         page_errors=[],
         screenshots=[],
@@ -213,8 +215,10 @@ async def main(browser_run: BrowserRun) -> None:
                     path = url.path
                     query = parse_qs(url.query, keep_blank_values=True)
                     if request.url == "https://avatar.example.test/hub-bot.png":
-                        report["blocked_external_requests"].append(request.url)
-                        await route.abort("failed")
+                        report["bot_avatar_requests"].append(request.url)
+                        await route.fulfill(
+                            status=200, content_type="image/png", body=BOT_AVATAR_PNG
+                        )
                         return
                     if origin(request.url) != origin(base):
                         report["blocked_external_requests"].append(request.url)
@@ -253,6 +257,7 @@ async def main(browser_run: BrowserRun) -> None:
                     elif method == "GET" and path == "/api/env-presets" and not query:
                         body = {"custom_presets": [], "hidden_builtin_ids": []}
                     elif method == "GET" and path == "/api/feishu/bot/bots" and not query:
+                        await pool_response_gate.wait()
                         body = bot_pool(binding, pool_revision)
                     elif method == "GET" and path == goal_current_path and not query:
                         body = None
@@ -351,10 +356,11 @@ async def main(browser_run: BrowserRun) -> None:
                     await expect(
                         labels.locator(".conversation-message-source__label")
                     ).to_have_text("Hub 助手")
-                    avatar = labels.locator(".conversation-message-source__mark img")
-                    await expect(avatar).to_have_count(1)
+                    source_mark = labels.get_by_test_id("conversation-message-source-avatar")
+                    avatar = source_mark.locator("img")
+                    await expect(source_mark).to_have_count(1)
                     await expect(avatar).to_have_attribute(
-                        "src", re.compile(r"^data:image/png;base64,")
+                        "src", "https://avatar.example.test/hub-bot.png"
                     )
                     await expect(avatar).to_be_visible()
                     feishu_bubble = page.locator(
@@ -407,6 +413,18 @@ async def main(browser_run: BrowserRun) -> None:
                     pool_revision += 1
                     if state == "bound-current":
                         await page.goto(base + "/?tab=ui-tab-1", wait_until="domcontentloaded")
+                        # History can paint before the Bot pool resolves. With no
+                        # persisted event avatar, the source starts on the local
+                        # brand SVG and updates in place once this delayed pool
+                        # response supplies the exact App ID's current avatar.
+                        initial_source_mark = page.locator(
+                            '.conversation-bubble--user[data-message-origin="feishu"]'
+                        ).get_by_test_id("conversation-message-source-avatar")
+                        await expect(
+                            initial_source_mark.locator(".feishu-brand-mark")
+                        ).to_be_visible()
+                        await expect(initial_source_mark.locator("img")).to_have_count(0)
+                        pool_response_gate.set()
                     else:
                         await page.reload(wait_until="domcontentloaded")
                     await check_sources()
@@ -442,6 +460,24 @@ async def main(browser_run: BrowserRun) -> None:
                     filename = f"desktop-{state}.png"
                     await page.screenshot(path=str(output / filename), full_page=True)
                     report["screenshots"].append(filename)
+                feishu_metadata = next(
+                    event["payload"]["metadata"]["feishu"]
+                    for event in events
+                    if event["type"] == "turn_started" and event["turn_id"] == "feishu-turn"
+                )
+                # Keep this Chat bound to cli-bot while the message identifies
+                # cli-other-bot. The brand fallback must not borrow the active
+                # Chat Bot merely because exact App ID matching failed.
+                binding = active_binding(tab["id"], tab["created_at"])
+                pool_revision += 1
+                feishu_metadata["app_id"] = "cli-other-bot"
+                await page.reload(wait_until="domcontentloaded")
+                unmatched_source_mark = page.locator(
+                    '.conversation-bubble--user[data-message-origin="feishu"]'
+                ).get_by_test_id("conversation-message-source-avatar")
+                await expect(unmatched_source_mark.locator("img")).to_have_count(0)
+                await expect(unmatched_source_mark.locator(".feishu-brand-mark")).to_be_visible()
+                feishu_metadata["app_id"] = "cli-bot"
                 await page.evaluate("localStorage.setItem('claude_hub_layout_type', '3x1')")
                 await page.reload(wait_until="domcontentloaded")
                 await check_sources()
@@ -507,9 +543,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "unexpected_external_requests"
                 ]
                 assert not report["page_errors"], report["page_errors"]
-                assert (
-                    "https://avatar.example.test/hub-bot.png" in report["blocked_external_requests"]
-                )
+                assert report["bot_avatar_requests"]
                 report["result"] = "PASS"
             except BaseException as exc:
                 report["result"] = "FAIL"
@@ -525,6 +559,7 @@ async def main(browser_run: BrowserRun) -> None:
                         pass
                 raise
     finally:
+        pool_response_gate.set()
         if (
             not browser_run.cleanup_complete
             or browser_run.cancelled

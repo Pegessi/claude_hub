@@ -330,7 +330,6 @@ async def main(browser_run: BrowserRun) -> None:
         await page.goto(url)
 
         trigger = page.get_by_test_id("feishu-binding-trigger")
-        identity = page.get_by_test_id("feishu-binding-identity")
         await expect(trigger).to_be_visible()
         await expect(page.get_by_test_id("feishu-binding-status")).to_have_count(0)
         await expect(trigger).to_have_attribute("title", re.compile(r"^Feishu · "))
@@ -347,8 +346,7 @@ async def main(browser_run: BrowserRun) -> None:
         assert name_box["x"] + name_box["width"] < trigger_box["x"]
         assert trigger_box["x"] - name_box["x"] - name_box["width"] == 5
         assert 7 <= 1280 - trigger_box["x"] - trigger_box["width"] <= 9
-        assert await trigger.locator("svg").count() == 0
-        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+        assert await trigger.locator("svg.trigger-icon").count() == 1
         await page.screenshot(path=str(output / "feishu-status-entry-desktop.png"))
 
         # Pool create: response is summary-only; submitted credentials clear.
@@ -448,6 +446,7 @@ async def main(browser_run: BrowserRun) -> None:
         await trigger.click()
         binding_panel = page.get_by_role("dialog", name="Feishu connection")
         await expect(binding_panel).to_be_visible()
+        await expect(binding_panel.locator(".panel-mark.feishu-brand-mark")).to_be_visible()
         bot_select = binding_panel.get_by_label("Bot", exact=True)
         await expect(bot_select.locator('option[value="bot-occupied"]')).to_have_js_property(
             "disabled", True
@@ -493,10 +492,11 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(page.get_by_test_id("feishu-binding-status")).to_have_text(
             "Connected with Primary Bear"
         )
-        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+        identity = page.get_by_test_id("feishu-binding-identity")
+        await expect(identity).to_be_visible()
+        await expect(identity.locator("img")).to_have_count(0)
+        await expect(identity.locator("svg.feishu-brand-mark")).to_be_visible()
         await expect(binding_panel.get_by_text("Primary Bear", exact=True)).to_be_visible()
-        for avatar in await binding_panel.locator("img").all():
-            await expect(avatar).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
         activate_call = next(call for call in api_calls if call["path"].endswith("/pair/activate"))
         assert activate_call["body"] == {
             "pairing_id": "pair-created",
@@ -507,7 +507,7 @@ async def main(browser_run: BrowserRun) -> None:
         await binding_panel.get_by_role("button", name="Disconnect Feishu", exact=True).click()
         await binding_panel.get_by_role("button", name="Confirm disconnect", exact=True).click()
         await expect(page.get_by_test_id("feishu-binding-status")).to_have_text("Not connected")
-        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+        await expect(page.get_by_test_id("feishu-binding-identity")).to_have_count(0)
         disconnect_call = next(
             call
             for call in api_calls
@@ -554,30 +554,45 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(trigger).to_have_attribute(
             "aria-label", re.compile(r"Connected with Shared Bear A$")
         )
+        await trigger.click()
+        binding_panel = page.get_by_role("dialog", name="Feishu connection")
+        await expect(binding_panel).to_be_visible()
         for _ in range(100):
             if shared_avatar_requests >= 1:
                 break
             await asyncio.sleep(0.01)
         assert shared_avatar_requests == 1
-        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+        identity = page.get_by_test_id("feishu-binding-identity")
+        await expect(identity.locator("img")).to_have_count(0)
+        await expect(identity.locator("svg.feishu-brand-mark")).to_be_visible()
 
         await page.evaluate("window.__FEISHU_BOT_TEST__.setTabId('tab-avatar-b')")
         await expect(trigger).to_have_attribute(
             "aria-label", re.compile(r"Connected with Shared Bear B$")
         )
+        # Changing Chats closes the previous Chat's panel. Reopen the new
+        # Chat's panel so its independently keyed Bot identity is mounted.
+        await expect(binding_panel).to_have_count(0)
+        await trigger.click()
+        binding_panel = page.get_by_role("dialog", name="Feishu connection")
+        await expect(binding_panel).to_be_visible()
+        identity = page.get_by_test_id("feishu-binding-identity")
         for _ in range(100):
             if shared_avatar_requests >= 2:
                 break
             await asyncio.sleep(0.01)
         assert shared_avatar_requests == 2
-        await expect(identity).to_have_attribute("src", SHARED_AVATAR_URL)
+        await expect(identity.locator("img")).to_have_attribute("src", SHARED_AVATAR_URL)
         await page.wait_for_function(
-            "() => { const image = document.querySelector('[data-testid=feishu-binding-identity]'); return image?.complete && image.naturalWidth > 0 }"
+            "() => { const image = document.querySelector('[data-testid=feishu-binding-identity] img'); return image?.complete && image.naturalWidth > 0 }"
+        )
+        await page.screenshot(
+            path=str(output / "feishu-bound-bot-avatar-desktop.png"), full_page=True
         )
 
         await page.evaluate("window.__FEISHU_BOT_TEST__.setTabId('tab-1')")
         await expect(trigger).to_have_attribute("aria-label", re.compile(r"Not connected$"))
-        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+        await expect(page.get_by_test_id("feishu-binding-identity")).to_have_count(0)
 
         for forbidden in (
             CONFIRM_WORD,

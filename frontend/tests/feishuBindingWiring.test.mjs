@@ -7,6 +7,7 @@ const structuredPane = readFileSync(new URL('../src/components/StructuredPane.vu
 const panel = readFileSync(new URL('../src/components/FeishuBindingPanel.vue', import.meta.url), 'utf8')
 const binding = readFileSync(new URL('../src/composables/useFeishuBinding.ts', import.meta.url), 'utf8')
 const identity = readFileSync(new URL('../src/utils/feishuIdentity.ts', import.meta.url), 'utf8')
+const identityMark = readFileSync(new URL('../src/components/FeishuIdentityMark.vue', import.meta.url), 'utf8')
 
 test('local direct Chat surface mounts one Feishu binding panel beside its session name', () => {
   assert.match(pane, /class="pane-chrome"[\s\S]*class="pane-session-name"[\s\S]*<FeishuBindingPanel/)
@@ -39,24 +40,29 @@ test('the Feishu status trigger matches the pane chrome control geometry', () =>
   assert.match(panel, /\.feishu-binding \{[\s\S]*height: var\(--pane-chrome-control-size, 24px\)/)
 })
 
-test('the Feishu entry uses the brand logo until a bound Bot avatar is trusted', () => {
+test('the Feishu entry keeps the original status glyph and scopes Bot avatars to Bot identity', () => {
+  assert.match(panel, /<svg[\s\S]{0,160}class="trigger-icon"/)
+  assert.match(panel, /m9\.25 14\.75-1\.4 1\.4/)
+  assert.match(panel, /<FeishuBrandMark[\s\S]{0,160}class="panel-mark"/)
   assert.match(panel, /data-testid="feishu-binding-identity"/)
   assert.match(panel, /viewState.value !== 'bound-current'/)
   assert.ok(panel.includes('currentBot.value?.feishu_avatar_url'))
   assert.match(panel, /trustedFeishuAvatarUrl/)
   assert.ok(identity.includes("parsed.protocol === 'https:'"))
-  assert.ok(identity.includes('data:image/png;base64,'))
+  assert.doesNotMatch(identity, /data:image\/png|base64/)
   assert.doesNotMatch(panel, />飞<|>飞\s*<\/span>/)
-  assert.match(panel, /<img[\s\S]{0,160}class="trigger-icon"[\s\S]{0,160}data-testid="feishu-binding-identity"/)
-  assert.ok(panel.includes('failedAvatarKey'))
+  assert.match(panel, /class="connected-card__icon"[\s\S]{0,240}data-testid="feishu-binding-identity"/)
+  assert.ok(identityMark.includes('failedIdentityKey'))
   assert.match(panel, /return `\$\{props\.tabId\}\\n\$\{botId\}\\n\$\{avatarUrl\}`/)
-  assert.ok(panel.includes('avatarKey === activeAvatarKey.value'))
-  assert.doesNotMatch(panel, /<svg\s+class="trigger-icon"/)
+  assert.ok(identityMark.includes('failedIdentityKey.value !== props.identityKey'))
   assert.ok(binding.includes("currentBot.value?.feishu_name||currentBot.value?.name||'Bot'"))
 })
 
-test('Feishu message provenance falls back to the same brand mark', () => {
-  assert.ok(structuredPane.includes('messageSourceAvatarUrl(turn) || feishuLogoUrl'))
-  assert.match(structuredPane, /@error="useFeishuSourceFallback"/)
+test('Feishu message provenance resolves a bound Bot avatar before the outline brand mark', () => {
+  assert.ok(structuredPane.includes('resolvedFeishuSourceAvatarUrl(turn)'))
+  assert.ok(structuredPane.includes('bot.app_id === turn.feishu?.appId'))
+  assert.ok(structuredPane.includes('feishuBotPoolStore.pool?.pool_revision'))
+  assert.match(structuredPane, /<FeishuIdentityMark[\s\S]{0,160}conversation-message-source__mark/)
+  assert.ok(structuredPane.includes(':identity-key="feishuSourceIdentityKey(turn)"'))
   assert.doesNotMatch(structuredPane, /conversation-message-source__mark[\s\S]{0,120}>\s*飞/)
 })

@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### style(feishu): separate the connection, brand and Bot identity icons
+
+- Restore the pane's original link glyph as the Feishu connection entry, and
+  replace the blurry embedded fallback bitmap with a theme-aware outline SVG
+  in the connection panel and unbound message provenance.
+- Show the matched Bot's current Feishu avatar on a bound connection card and
+  on Feishu message provenance. Historical messages match by exact App ID,
+  refresh when the Bot pool arrives, and fall back to the outline mark without
+  borrowing an unrelated Chat's Bot identity.
+- Scope failed avatar loads to the full message or Chat/Bot identity, so a bad
+  URL cannot hide another Bot's retry.
+- See the [Feishu icon identity notes](docs/working-logs/2026-10-12-feishu-icon-identity.md).
+
 ### fix(tabs): stop archived sessions from exhausting the tab limit
 
 - The `max_total_tabs` backstop (default 200) now counts only live sessions.
