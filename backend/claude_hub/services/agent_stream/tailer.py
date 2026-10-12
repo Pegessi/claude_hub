@@ -1687,7 +1687,12 @@ class SessionTailer:
         queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX)
         self._subscribers.add(queue)
         self._last_subscriber_at = time.monotonic()
-        await self.start()
+        try:
+            await self.start()
+        except BaseException:
+            self._subscribers.discard(queue)
+            self._last_subscriber_at = time.monotonic()
+            raise
         return queue
 
     async def subscribe_completion(self) -> "asyncio.Queue[AgentStreamEvent]":
@@ -1699,7 +1704,12 @@ class SessionTailer:
         queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue(maxsize=COMPLETION_QUEUE_MAX)
         self._completion_subscribers.add(queue)
         self._last_subscriber_at = time.monotonic()
-        await self.start()
+        try:
+            await self.start()
+        except BaseException:
+            self._completion_subscribers.discard(queue)
+            self._last_subscriber_at = time.monotonic()
+            raise
         return queue
 
     def unsubscribe(self, queue: "asyncio.Queue[AgentStreamEvent]") -> None:
@@ -2401,8 +2411,10 @@ class SessionTailer:
                 if active is None and transport.turn_in_flight:
                     transport.acknowledge_turn_complete()
                 return False
+            persisted = False
             try:
                 await self._publish(event)
+                persisted = True
             except Exception:
                 logger.exception(
                     "agent_stream store append failed for turn_completed session %s",
@@ -2429,7 +2441,8 @@ class SessionTailer:
             self._waiting_for_model_capacity = False
             self._goal_terminal_at = None
             transport.acknowledge_turn_complete()
-            self._notify_post_persist(observer_event)
+            if persisted:
+                self._notify_post_persist(observer_event)
             self._assistant_text = ""
             self._visible_assistant_text = ""
             self._goal_protocol_sanitizer = None
@@ -2969,11 +2982,14 @@ class SessionTailer:
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
-                if event.type != AgentStreamEventType.TURN_COMPLETED:
+                if event.type not in {
+                    AgentStreamEventType.APPROVAL_REQUIRED,
+                    AgentStreamEventType.TURN_COMPLETED,
+                }:
                     continue
                 # Queue operations are synchronous on this event loop: after
-                # removing one stale item the terminal signal is guaranteed to
-                # fit in the bounded queue.
+                # removing one stale item the blocking approval or terminal
+                # signal is guaranteed to fit in the bounded queue.
                 try:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:

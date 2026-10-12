@@ -87,7 +87,10 @@
   a process-local completion signal now releases the Feishu FIFO with a real
   error instead of waiting forever. A model request that needs a structured
   Web Chat approval or answer is stopped with an explicit Feishu reply rather
-  than permanently holding that FIFO.
+  than permanently holding that FIFO. That reply is sent only after the exact
+  provider turn confirms teardown; blocking approvals cannot be dropped from
+  a saturated completion queue, failed terminal writes do not notify durable
+  observers, and failed/cancelled subscriber startup rolls back its queue.
 - See the [Feishu rich ingress notes](docs/working-logs/2026-10-12-feishu-rich-ingress.md).
 - See the [Feishu preview and long-turn notes](docs/working-logs/2026-10-12-feishu-preview-identity-and-long-turns.md).
 

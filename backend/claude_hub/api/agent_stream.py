@@ -57,6 +57,7 @@ from ..models import (
 from ..models.schemas import TaskExecutionControl, TaskExecutionReference
 from ..services import ttyd_manager, workspace_manager
 from ..services.agent_stream import (
+    ExternalTurnRetirement,
     StructuredSourceUnavailable,
     TailerManager,
     get_adapter_for_session,
@@ -1645,17 +1646,18 @@ async def dispatch_tab_chat_and_wait(
                 # the per-Chat FIFO, so stop the exact turn and direct the user
                 # to Web Chat instead.
                 try:
-                    cancelled = await asyncio.wait_for(
-                        manager.cancel_turn(session, expected_turn_id=expected_turn_id),
+                    retirement = await asyncio.wait_for(
+                        manager.retire_external_turn(session, expected_turn_id=expected_turn_id),
                         timeout=_EXTERNAL_CANCEL_TIMEOUT_SECONDS,
                     )
                 except Exception as exc:
                     raise RuntimeError(
                         "Chat turn requires Web Chat interaction and could not be stopped"
                     ) from exc
-                if not cancelled:
+                if retirement != ExternalTurnRetirement.CANCELLED_MATCHING:
                     raise RuntimeError(
-                        "Chat turn requires Web Chat interaction but is no longer active"
+                        "Chat turn requires Web Chat interaction but its provider "
+                        f"stop was not confirmed ({retirement.value})"
                     )
                 raise ExternalInteractionRequired(
                     "Chat turn requires an approval or answer in Web Chat"

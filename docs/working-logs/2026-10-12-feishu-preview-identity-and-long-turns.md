@@ -42,6 +42,14 @@ expand the accepted conversation or message-type surface.
   ready/output paths use a 5s test cap and wait for both durable completion and
   release of the provider guard. This avoids loaded-runner scheduling races
   without weakening the cap behavior under test.
+- Cross-review tightened the external-turn ownership boundary. A structured
+  approval now releases the Feishu FIFO only after the exact provider turn has
+  confirmed teardown; any mismatched, already-terminal, unknown or failed stop
+  fails closed. Blocking approvals and terminal events displace stale errors in
+  a saturated completion queue, while a failed durable terminal write wakes
+  only the direct process-local owner and never a post-persist observer. A
+  subscription whose tailer startup raises or is cancelled also removes its
+  queue before propagating the original exception.
 
 ## Current Feishu interaction boundary
 
@@ -85,3 +93,8 @@ avatar fallback, cross-Chat same-URL retry isolation, and a renderable Feishu
 timeline attachment. The three queue-cap/ready-state regressions also pass 40
 consecutive repetitions (120 cases total). Final command results and
 independent-review findings are recorded in the task handoff.
+
+The lifecycle regressions additionally cover provider teardown wait/failure,
+all non-confirming external-retirement outcomes, saturated approval delivery,
+durable-observer suppression after append failure, and subscriber rollback on
+both startup exceptions and cancellation.
