@@ -258,6 +258,36 @@ def test_goal_resume_releases_when_chat_turn_ends_during_deferral(goal_client, m
     assert resumed["dispatch_state"] == "dispatched"
 
 
+def test_second_resume_during_deferral_waits_for_the_turn_or_releases_it(goal_client, monkeypatch):
+    goal = goal_client.post(
+        "/api/tabs/tab-1/goal", json={"objective": "Finish it", "client_request_id": "create"}
+    ).json()
+    goal_client.post(f"/api/goals/{goal['id']}/pause", json={"client_request_id": "pause"})
+    in_flight = {"value": True}
+
+    async def turn_in_flight(session):
+        return in_flight["value"]
+
+    monkeypatch.setattr(
+        stream_api,
+        "_get_tab_tailer_manager",
+        lambda: SimpleNamespace(turn_in_flight=turn_in_flight),
+    )
+    url = f"/api/goals/{goal['id']}/resume"
+    assert goal_client.post(url, json={"client_request_id": "resume-1"}).json()["resume_after_turn"]
+
+    stale = goal_client.post(url, json={"client_request_id": "resume-2"})
+    assert stale.status_code == 200, stale.text
+    assert stale.json()["status"] == "active"
+    assert stale.json()["resume_after_turn"] is True
+    assert stale.json()["dispatch_state"] == "idle"
+
+    in_flight["value"] = False
+    released = goal_client.post(url, json={"client_request_id": "resume-3"}).json()
+    assert released["resume_after_turn"] is False
+    assert released["dispatch_state"] == "dispatched"
+
+
 def _steerable_goal(monkeypatch, tmp_path, **stream_methods):
     """Use the real Goal transport callback with a recorded native send."""
     manager = GoalRunController(

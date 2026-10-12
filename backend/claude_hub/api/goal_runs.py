@@ -167,7 +167,9 @@ async def resume_goal(
         goal = manager.get(goal_id)
         async with get_goal_admission_lock(goal.tab_id):
             goal = manager.get(goal_id)
-            if body.client_request_id in goal.idempotency or goal.status.value == "active":
+            if body.client_request_id in goal.idempotency or (
+                goal.status.value == "active" and not goal.resume_after_turn
+            ):
                 return await manager.resume(goal_id, body.client_request_id)
             await _ensure_goal_ready(goal.tab_id, check_busy=False)
             if goal.dispatch_state.value != "idle":
@@ -177,7 +179,12 @@ async def resume_goal(
             session = _terminal_tab_session_or_404(goal.tab_id)
             stream_manager = _get_tab_tailer_manager()
             if not await stream_manager.turn_in_flight(session):
+                if goal.resume_after_turn:
+                    return await manager.release_deferred_resume(goal_id)
                 return await manager.resume(goal_id, body.client_request_id)
+            if goal.resume_after_turn:
+                # Already resuming once the running Chat turn ends.
+                return goal
             goal = await manager.resume(goal_id, body.client_request_id, after_current_turn=True)
             # The running turn may have ended before the deferral was stored.
             if not await stream_manager.turn_in_flight(session):
