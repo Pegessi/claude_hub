@@ -447,7 +447,7 @@ async def main(browser_run: BrowserRun) -> None:
                     status = page.get_by_test_id("feishu-binding-status")
                     await expect(status).to_have_attribute("data-state", expected_view)
                     await expect(status).to_have_text(
-                        "Connected with Provenance Bot"
+                        "Connected with Hub 助手"
                         if expected_view == "bound-current"
                         else "Not connected"
                     )
