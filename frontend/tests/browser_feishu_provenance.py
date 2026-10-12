@@ -362,6 +362,7 @@ async def main(browser_run: BrowserRun) -> None:
                     await expect(avatar).to_have_attribute(
                         "src", "https://avatar.example.test/hub-bot.png"
                     )
+                    await expect(avatar).to_have_attribute("crossorigin", "anonymous")
                     await expect(avatar).to_be_visible()
                     feishu_bubble = page.locator(
                         '.conversation-bubble--user[data-message-origin="feishu"]'

@@ -583,6 +583,7 @@ async def main(browser_run: BrowserRun) -> None:
             await asyncio.sleep(0.01)
         assert shared_avatar_requests == 2
         await expect(identity.locator("img")).to_have_attribute("src", SHARED_AVATAR_URL)
+        await expect(identity.locator("img")).to_have_attribute("crossorigin", "anonymous")
         await page.wait_for_function(
             "() => { const image = document.querySelector('[data-testid=feishu-binding-identity] img'); return image?.complete && image.naturalWidth > 0 }"
         )
