@@ -43,7 +43,8 @@
 - Resume while an ordinary Chat turn runs no longer fails with 409; the Goal
   resumes when that turn finishes.
 - Ordinary replies in a Chat that had a Goal no longer show the trailing
-  checkpoint JSON and status block.
+  checkpoint JSON and status block; protocol examples elsewhere in a reply
+  stay intact.
 
 ### perf(mobile): hold working-session light while the drawer is shut or dragged
 

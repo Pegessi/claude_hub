@@ -234,6 +234,54 @@ _GOAL_STATUS_TERMINAL_RE = re.compile(
 _GOAL_TAIL_SCAN_CHARS = 64 * 1024 + 4096
 
 
+_STRICT_STATUS_OPENER_RE = re.compile(r'<goal-status\s+state=["\'][a-z_]+["\']\s*>', re.IGNORECASE)
+_CHECKPOINT_OPENER = "<goal-checkpoint>"
+# A trailing status block is a one-line signal; an unclosed opener with more
+# text than this is prose that mentions the tag.
+_MAX_STATUS_BODY_CHARS = 4096
+
+
+def _trailing_envelope_state(text: str) -> str:
+    """Classify ``text`` (starting at a protocol opener) as a trailing envelope.
+
+    Returns ``"complete"`` when it is an optional checkpoint followed by a
+    status block and only whitespace, ``"partial"`` while more text could still
+    make it one, and ``"no"`` otherwise.  The shape matches the frontend's
+    ``stripTrailingGoalProtocol`` and the controller's trailing signal.
+    """
+    if len(text) > _GOAL_TAIL_SCAN_CHARS:
+        return "no"
+    rest = text
+    lowered = rest.lower()
+    if lowered.startswith("<goal-checkpoint"):
+        if len(rest) < len(_CHECKPOINT_OPENER):
+            return "partial" if _CHECKPOINT_OPENER.startswith(lowered) else "no"
+        if not lowered.startswith(_CHECKPOINT_OPENER):
+            return "no"
+        body = lowered[len(_CHECKPOINT_OPENER) :]
+        if body.lstrip() and not body.lstrip().startswith("{"):
+            return "no"
+        end = body.find("</goal-checkpoint>")
+        if "<goal-checkpoint" in (body if end < 0 else body[:end]):
+            return "no"
+        if end < 0:
+            return "partial"
+        rest = rest[len(_CHECKPOINT_OPENER) + end + len("</goal-checkpoint>") :].lstrip()
+        lowered = rest.lower()
+        if not lowered.startswith("<goal-status"):
+            return "partial" if "<goal-status".startswith(lowered) else "no"
+    opener = _STRICT_STATUS_OPENER_RE.match(rest)
+    if opener is None:
+        return "partial" if ">" not in rest and len(rest) <= 64 else "no"
+    body = lowered[opener.end() :]
+    end = body.find("</goal-status>")
+    if "<goal-status" in (body if end < 0 else body[:end]):
+        return "no"
+    if end < 0:
+        return "partial" if len(body) <= _MAX_STATUS_BODY_CHARS else "no"
+    return "complete" if not body[end + len("</goal-status>") :].strip() else "no"
+
+
 class _GoalProtocolSanitizer:
     """Incrementally remove Goal control blocks from visible assistant text.
 
@@ -241,15 +289,21 @@ class _GoalProtocolSanitizer:
     therefore retains only a short possible opener/closer suffix between
     calls, while the tailer separately retains the complete raw assistant text
     for the in-process Goal observer.
+
+    Goal turns drop every control block.  With ``trailing_only`` (ordinary
+    turns in a Chat that has run a Goal), text from an opener is held until it
+    is known to be the reply's trailing envelope, which is dropped; anything
+    else is released unchanged.
     """
 
     _OPENERS = ("<goal-checkpoint", "<goal-status")
     _OPENING_TAG = re.compile(r"<goal-(checkpoint|status)(?=[\s>])", re.IGNORECASE)
     _CLOSERS = {"checkpoint": "</goal-checkpoint>", "status": "</goal-status>"}
 
-    def __init__(self) -> None:
+    def __init__(self, *, trailing_only: bool = False) -> None:
         self._pending = ""
         self._inside: Optional[str] = None
+        self._trailing_only = trailing_only
 
     @staticmethod
     def _possible_opener_suffix(text: str) -> int:
@@ -261,8 +315,33 @@ class _GoalProtocolSanitizer:
                     best = max(best, length)
         return best
 
+    def _feed_trailing(self, final: bool) -> str:
+        visible: List[str] = []
+        while self._pending:
+            opener = self._OPENING_TAG.search(self._pending)
+            if opener is None:
+                keep = 0 if final else self._possible_opener_suffix(self._pending)
+                emit_end = len(self._pending) - keep
+                visible.append(self._pending[:emit_end])
+                self._pending = self._pending[emit_end:]
+                break
+            visible.append(self._pending[: opener.start()])
+            self._pending = self._pending[opener.start() :]
+            state = _trailing_envelope_state(self._pending)
+            if state == "complete" and final:
+                self._pending = ""
+                break
+            if state == "no" or final:
+                visible.append(self._pending[: opener.end()])
+                self._pending = self._pending[opener.end() :]
+                continue
+            break
+        return "".join(visible)
+
     def feed(self, text: str, *, final: bool = False) -> str:
         self._pending += text
+        if self._trailing_only:
+            return self._feed_trailing(final)
         visible: List[str] = []
         while self._pending:
             lowered = self._pending.lower()
@@ -862,7 +941,7 @@ class SessionTailer:
                 turn_metadata and turn_metadata.get("protocol") == "goal-continuation-v1"
             )
             self._goal_protocol_sanitizer = (
-                _GoalProtocolSanitizer()
+                _GoalProtocolSanitizer(trailing_only=not self._goal_protocol_turn)
                 if self._goal_protocol_turn or strip_goal_protocol
                 else None
             )
@@ -1525,6 +1604,22 @@ class SessionTailer:
             run_epoch=self._run_epoch,
             turn_id=turn_id,
         )
+        held = (
+            self._goal_protocol_sanitizer.feed("", final=True)
+            if self._goal_protocol_sanitizer is not None
+            else ""
+        )
+        if held:
+            self._visible_assistant_text += held
+            try:
+                await self._publish(
+                    redact_event(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": held}))
+                )
+            except Exception:
+                logger.exception(
+                    "agent_stream store append failed for held text session %s",
+                    self.session_id,
+                )
         err_event = ctx.event(
             AgentStreamEventType.ERROR,
             {"message": message},
@@ -2167,7 +2262,9 @@ class SessionTailer:
                         # protocol input too; otherwise the control envelope
                         # would still enter the durable completion summary.
                         goal_protocol_text = raw_summary
-                        summary_sanitizer = _GoalProtocolSanitizer()
+                        summary_sanitizer = _GoalProtocolSanitizer(
+                            trailing_only=not self._goal_protocol_turn
+                        )
                         event.payload["summary"] = summary_sanitizer.feed(raw_summary, final=True)
                     visible = self._goal_protocol_sanitizer.feed("", final=True)
                     if visible:

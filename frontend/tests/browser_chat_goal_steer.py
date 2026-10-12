@@ -226,6 +226,19 @@ async def main() -> None:
             await page.screenshot(path=str(output / "goal-steer-composer.png"), full_page=True)
             report["screenshots"].append("goal-steer-composer.png")
 
+            await composer.evaluate(
+                """(el) => {
+                    const data = new DataTransfer()
+                    data.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'shot.png',
+                        { type: 'image/png' }))
+                    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true }))
+                }"""
+            )
+            await expect(page.locator(".composer-error")).to_have_text(
+                "Pause or complete the active Goal before attaching images."
+            )
+            await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(0)
+
             await composer.fill("Steer the Goal now")
             await composer.press("Meta+Enter")
             deadline = asyncio.get_running_loop().time() + 5
