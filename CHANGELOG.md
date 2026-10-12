@@ -10,8 +10,8 @@
 - A sent image is now shown from its original when it fits 8 MiB and an
   8192px edge, instead of a 1024px JPEG squeezed into 512 KiB. Larger images
   are scaled to fit and re-encoded as PNG, or high-quality WebP/JPEG when PNG
-  is too big. The provider still receives the original. The local cache now
-  holds these originals.
+  is too big. The provider still receives the original, and the request
+  carries it once. The local cache now holds these originals.
 - The Chat image cache evicts least recently used images first (reads refresh
   recency at most hourly) within one 1 GiB pool by default, instead of
   creation-order FIFO in 64 MiB per Chat and 512 MiB overall.
