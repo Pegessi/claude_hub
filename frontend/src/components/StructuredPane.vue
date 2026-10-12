@@ -1154,7 +1154,7 @@
             <div
               v-if="isModelPickerAvailable"
               ref="modelPickerEl"
-              class="composer-mode-picker"
+              class="composer-mode-picker composer-model-picker"
             >
               <button
                 ref="modelTriggerEl"
@@ -1375,7 +1375,10 @@ import {
   hasAuthoritativeTerminalFor,
   withOptimisticCancelled,
 } from '@/utils/agentStreamStopReset'
-import { useTerminalStore } from '@/stores/terminalStore'
+import {
+  useTerminalStore,
+  type QueuedChatDraftAttachment,
+} from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
@@ -1386,6 +1389,8 @@ import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } f
 const props = defineProps<{
   /** A top-level Chat tab owns its transcript directly. */
   tabId: string
+  /** Keep queued drafts attached to the pane whose KeepAlive owns this instance. */
+  paneId: string
 }>()
 
 const terminalStore = useTerminalStore()
@@ -1860,11 +1865,7 @@ const pendingTurns = computed(() => {
 // Declared before any ``immediate`` watchers so ``turnInFlight`` / ``draftQueue``
 // are initialized when Vue runs the first callback (TDZ-safe).
 
-interface DraftAttachment extends WorkspaceAttachmentCreate {
-  id: string
-  preview_url: string
-  size_bytes: number
-}
+type DraftAttachment = QueuedChatDraftAttachment
 
 const draftMessage = ref('')
 const attachments = ref<DraftAttachment[]>([])
@@ -1881,12 +1882,23 @@ function handleViewportResize() {
   isMobileViewport.value = window.innerWidth <= 768
 }
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
-const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
+const queuedChatState = terminalStore.getQueuedChatState(props.paneId, props.tabId)
+const draftQueue = toRef(queuedChatState, 'drafts')
+// Queue data lives in the store so bounded KeepAlive eviction cannot lose it.
+// QueuedChatObserver supplies the hidden completion edge; this full pane only
+// sends after its owning pane and Chat are active in the foreground.
+const isPaneActivated = ref(false)
+const isQueueSendInProgress = toRef(queuedChatState, 'sendInProgress')
 // A queued POST failure is delivery-uncertain: the provider may have accepted
 // it even when the browser did not receive the acknowledgement. Keep later
 // queued messages paused until the user deliberately sends the restored draft
 // and that explicit send succeeds.
-const isDraftQueuePaused = ref(false)
+const isDraftQueuePaused = toRef(queuedChatState, 'paused')
+const queueAutoActivationBlock = toRef(queuedChatState, 'autoActivationBlock')
+const isWaitingForQueuedChatActivation = computed(() =>
+  terminalStore.hasQueuedChatActivationRequest(props.paneId, props.tabId)
+  && !terminalStore.isQueuedChatActivationOwner(props.paneId, props.tabId)
+)
 const isPreparingAttachments = ref(false)
 const turnInFlight = computed(() => isChatModeLocked(
   pendingDirectTurns.value.length > 0,
@@ -2004,12 +2016,14 @@ onMounted(() => {
 // KeepAlive lifecycle. The pane is keyed by tabId (see TerminalPane), so each
 // chat tab owns a stable instance and the tabId prop never changes for a given
 // instance — the old tabId watcher that wiped the composer on every switch is
-// gone. The stream is owned by the *active* pane: on deactivate we stop it
-// (caching history) so cached panes don't hold open SSE/long-poll connections;
-// on activate we resume from the cached snapshot (reconciling, no full reload).
+// gone. The full stream is owned by the *active* pane. On deactivate we stop
+// it (caching history); a separate minimal observer watches any hidden queued
+// draft until it can reactivate this Chat. On activate we resume from the
+// cached snapshot (reconciling, no full reload).
 // onActivated also fires on the initial mount, so it replaces the startStream()
 // call that used to live in onMounted.
 onActivated(() => {
+  isPaneActivated.value = true
   timelineDisposed = false
   timelineVisit++
   visibleHistoryStart.value = null
@@ -2023,12 +2037,13 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
+  isPaneActivated.value = false
   isAddMenuOpen.value = false
   isGoalSetupOpen.value = false
   goalRefreshEpoch++
   timelineDisposed = true
   timelineVisit++
-  stop()
+  suspendStreamForDeactivation()
   timelineResizeObserver?.disconnect()
   timelineResizeObserver = null
   cancelScheduledTimelineScroll()
@@ -2036,6 +2051,11 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
+  // A minimal QueuedChatObserver may still own a ready FIFO request after this
+  // full pane is evicted from the bounded KeepAlive cache. Do not release that
+  // store-owned request here: send completion, an explicit failure yield, or
+  // archive/delete owns its retirement.
+  terminalStore.pruneQueuedChatState(props.paneId, props.tabId)
   goalRefreshEpoch++
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
@@ -2544,6 +2564,10 @@ function enqueueDraft() {
   void nextTick(() => syncComposerTextareaHeight())
 }
 
+function suspendStreamForDeactivation() {
+  stop()
+}
+
 async function flushDraftQueue() {
   while (
     draftQueue.value.length > 0
@@ -2553,24 +2577,56 @@ async function flushDraftQueue() {
     && !isSending.value
     && !goalComposerLocked.value
   ) {
-    const next = draftQueue.value.shift()
-    if (!next) break
-    draftMessage.value = next.message
-    attachments.value = next.attachments
-    const sent = await submit('normal', undefined, 'queue')
+    const activationRequestId = terminalStore.queuedChatActivationRequestId(
+      props.paneId,
+      props.tabId,
+    )
+    isQueueSendInProgress.value = true
+    let sent = false
+    try {
+      const next = draftQueue.value.shift()
+      if (!next) break
+      draftMessage.value = next.message
+      attachments.value = next.attachments
+      sent = await submit('normal', undefined, 'queue')
+    } finally {
+      isQueueSendInProgress.value = false
+      // The next ready hidden Chat may activate only after this one has
+      // completed its foreground send attempt (including POST acknowledgement
+      // or the existing delivery-uncertain pause path). Settle by the globally
+      // unique tab ID because the Chat may have moved panes during the POST.
+      terminalStore.settleQueuedChatActivation(props.tabId, activationRequestId)
+    }
     if (!sent) break
   }
 }
 
 function requestDraftQueueFlush() {
+  if (!isPaneActivated.value) {
+    terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+    return
+  }
+  if (
+    draftQueue.value.length > 0
+    && (connectionState.value === 'failed' || goalComposerLocked.value)
+  ) {
+    queueAutoActivationBlock.value = connectionState.value === 'failed'
+      ? 'stream-failed'
+      : 'goal-locked'
+    terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+    return
+  }
   if (
     isSubmissionReady.value
+    && isPaneActivated.value
+    && !isWaitingForQueuedChatActivation.value
     && !isDraftQueuePaused.value
     && !turnInFlight.value
     && draftQueue.value.length > 0
     && !isSending.value
     && !goalComposerLocked.value
   ) {
+    queueAutoActivationBlock.value = null
     void flushDraftQueue()
   }
 }
@@ -2583,6 +2639,9 @@ watch(
     goalComposerLocked,
     isSubmissionReady,
     isDraftQueuePaused,
+    queueAutoActivationBlock,
+    isPaneActivated,
+    isWaitingForQueuedChatActivation,
   ],
   requestDraftQueueFlush,
 )
@@ -2938,24 +2997,41 @@ async function sendToStream(
   atts: WorkspaceAttachmentCreate[],
   clientTurnId: string,
   delivery: 'normal' | 'steer' = 'normal',
+  timeoutMs: number | null = null,
 ) {
   const base = `/api/workspaces/tabs/${props.tabId}/stream/send`
-  const res = await fetch(base, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
-    body: JSON.stringify({
-      client_turn_id: clientTurnId,
-      text: message,
-      delivery,
-      attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
-        filename,
-        mime_type,
-        data_url,
-        preview_data_url,
-      })),
-    }),
-  })
+  const controller = new AbortController()
+  const timer = timeoutMs === null ? null : setTimeout(() => controller.abort(), timeoutMs)
+  let res: Response
+  try {
+    res = await fetch(base, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      signal: controller.signal,
+      body: JSON.stringify({
+        client_turn_id: clientTurnId,
+        text: message,
+        delivery,
+        attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
+          filename,
+          mime_type,
+          data_url,
+          preview_data_url,
+        })),
+      }),
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw Object.assign(
+        new Error('Send timed out. Delivery is uncertain; review the Chat before retrying.'),
+        { cause: error },
+      )
+    }
+    throw error
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
   if (!res.ok) {
     let detail = `HTTP ${res.status}`
     try {
@@ -3130,7 +3206,7 @@ async function submit(
       ]
     }
     requestLatestAnchor(true)
-    await sendToStream(message, atts, clientTurnId, delivery)
+    await sendToStream(message, atts, clientTurnId, delivery, source === 'queue' ? 15_000 : null)
     if (messageOverride) await hydrateGoal()
     // A successful explicit send resolves a previously uncertain queued item.
     // Automatic queue sends never clear this flag; only deliberate user input
@@ -3318,7 +3394,7 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background-color: var(--ch-color-app-bg);
+  background-color: var(--ch-color-main-bg);
   color: var(--ch-color-text);
   font-size: 13px;
   line-height: 1.5;
@@ -3757,17 +3833,29 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+/* A zero flex basis keeps the tools out of the row's wrap decision, so Stop and
+   Send/Queue always share the toolbar line; the model label truncates instead. */
 .composer-tools {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  flex: 0 0 auto;
-  margin-right: auto;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .composer-mode-picker {
   position: relative;
   flex: 0 0 auto;
+}
+
+.composer-mode-picker.composer-model-picker {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 210px;
+}
+
+.composer-model-picker .composer-mode-trigger {
+  max-width: 100%;
 }
 
 .composer-mode-trigger {
@@ -4058,7 +4146,7 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 500;
   color: #fff;
-  background-color: var(--ch-color-accent);
+  background-color: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);
   cursor: pointer;
@@ -4066,7 +4154,7 @@ onUnmounted(() => {
 }
 
 .composer-send-btn:hover:not(:disabled) {
-  background-color: var(--ch-color-accent-hover);
+  background-color: var(--ch-color-accent-fill-hover);
 }
 
 .composer-send-btn:disabled {
@@ -4217,7 +4305,7 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 500;
   color: #fff;
-  background: var(--ch-color-accent);
+  background: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);
   cursor: pointer;
@@ -4235,7 +4323,7 @@ onUnmounted(() => {
 .structured-pane {
   background:
     radial-gradient(circle at 50% -22%, var(--ch-color-surface-soft), transparent 44%),
-    var(--ch-color-app-bg);
+    var(--ch-color-main-bg);
 }
 
 .structured-timeline {
@@ -4312,12 +4400,17 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
-.conversation-bubble--user {
-  --paseo-user-bubble: #3268a8;
+/* Chat reads at a larger size than compact Markdown in dense Workspace panels;
+   `.compact` keeps this rule more specific than MarkdownContent's own. */
+.conversation-bubble :deep(.markdown-content.compact) {
+  font-size: 14px;
+  line-height: 1.65;
+}
 
+.conversation-bubble--user {
   position: relative;
-  background: var(--paseo-user-bubble);
-  color: #fff;
+  background: var(--ch-color-message-user-bg);
+  color: var(--ch-color-text-inverse);
   border-bottom-right-radius: var(--ch-radius-sm);
 }
 
@@ -4327,7 +4420,7 @@ onUnmounted(() => {
   gap: 5px;
   min-width: 0;
   margin-bottom: 6px;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--ch-color-message-user-muted);
   font-size: 11px;
   font-weight: 600;
   line-height: 16px;
@@ -4426,11 +4519,16 @@ onUnmounted(() => {
   display: grid;
   place-items: center;
   padding: 10px;
-  border: 1px dashed color-mix(in srgb, #fff 36%, transparent);
+  border: 1px dashed var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
-  color: color-mix(in srgb, #fff 78%, transparent);
+  color: var(--ch-color-text-muted);
   font-size: 11px;
   text-align: center;
+}
+
+.conversation-bubble--user .turn-attachment-placeholder {
+  border-color: color-mix(in srgb, #fff 36%, transparent);
+  color: var(--ch-color-message-user-muted);
 }
 
 /* ---- Edit-resend UI ---- */
@@ -4466,7 +4564,7 @@ onUnmounted(() => {
 }
 
 /* Inline editing: the message itself becomes the input. The form used to force
-   ``min-width: 320px`` and draw a bordered dark box inside the blue bubble, so
+   ``min-width: 320px`` and draw a bordered dark box inside the user bubble, so
    a two-character message opened a wide bubble holding an empty-looking form.
    Now the bubble sizes to its content and the textarea reads as the message. */
 .edit-resend-form {
@@ -4491,16 +4589,13 @@ onUnmounted(() => {
 }
 
 .edit-resend-textarea:focus-visible {
-  /* 2px at 65%: the earlier 1px/45% ring measured 2.43:1 against the bubble
-     blue, under the 3:1 the focus indicator needs — weaker than the border it
-     replaced. */
-  outline: 2px solid color-mix(in srgb, #fff 65%, transparent);
+  outline: 2px solid var(--ch-color-message-user-focus);
   outline-offset: 3px;
   border-radius: 2px;
 }
 
 .edit-resend-textarea::placeholder {
-  color: color-mix(in srgb, #fff 50%, transparent);
+  color: var(--ch-color-message-user-muted);
 }
 
 .edit-resend-actions {
@@ -4549,7 +4644,7 @@ onUnmounted(() => {
 }
 
 .edit-resend-error {
-  color: #ffb4b4;
+  color: var(--ch-color-message-user-error);
   font-size: 12px;
 }
 
@@ -4616,19 +4711,22 @@ onUnmounted(() => {
   justify-content: center;
   flex: 0 0 auto;
   border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-accent-soft);
-  color: var(--ch-color-accent);
+  border: 1px solid var(--ch-color-border-selected);
+  background: var(--ch-color-surface-selected);
+  color: var(--ch-color-text-selected);
   font-size: 11px;
   font-weight: 600;
 }
 
 .conversation-avatar--tool {
+  border-color: var(--ch-color-border-muted);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
   font-size: 10px;
 }
 
 .conversation-avatar--waiting {
+  border-color: var(--ch-color-border-muted);
   color: var(--ch-color-text-subtle);
   background: var(--ch-color-surface-control);
 }
@@ -5207,7 +5305,8 @@ onUnmounted(() => {
   box-shadow: none;
 }
 
-.composer-send-btn {
+.composer-send-btn,
+.composer-stop-btn {
   height: 34px;
   border-radius: var(--ch-radius-sm);
 }
@@ -5245,6 +5344,10 @@ onUnmounted(() => {
   .composer-mode-trigger {
     max-width: 170px;
     padding: 0 7px;
+  }
+
+  .composer-mode-picker.composer-model-picker {
+    max-width: 170px;
   }
 
   .composer-mode-menu {

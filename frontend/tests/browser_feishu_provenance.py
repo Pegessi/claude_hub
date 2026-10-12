@@ -204,6 +204,10 @@ async def main(browser_run: BrowserRun) -> None:
                         and not query
                     ):
                         body = []
+                    elif path.startswith("/api/tabs/sidebar-preferences"):
+                        # Read, one-shot pin migration and per-tab pin updates
+                        # share one shape; provenance never depends on pins.
+                        body = {"pinned_tab_ids": []}
                     elif method == "GET" and path == "/api/env-presets" and not query:
                         body = {"custom_presets": [], "hidden_builtin_ids": []}
                     elif method == "GET" and path == "/api/feishu/bot/bots" and not query:

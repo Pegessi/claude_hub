@@ -122,11 +122,19 @@ class FeishuBotClient:
         self._token_expires_at = now + max(60, ttl - 60)
         return self._tenant_token
 
-    async def send_text(self, chat_id: str, text: str) -> None:
+    @staticmethod
+    def _message_content(content: Any) -> str:
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise FeishuBotError("Feishu Bot message content is not JSON serializable") from exc
+
+    async def send_message(
+        self, chat_id: str, msg_type: str, content: Mapping[str, object]
+    ) -> None:
+        """Send one Feishu message whose content follows ``msg_type``'s schema."""
+
         token = await self.get_tenant_token()
-        bounded = text.strip() or "Claude Hub completed without a text response."
-        if len(bounded) > _MAX_REPLY_CHARS:
-            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
         response = await self._request(
             "POST",
             "/open-apis/im/v1/messages",
@@ -134,8 +142,8 @@ class FeishuBotClient:
             headers={"Authorization": f"Bearer {token}"},
             json={
                 "receive_id": chat_id,
-                "msg_type": "text",
-                "content": json.dumps({"text": bounded}, ensure_ascii=False),
+                "msg_type": msg_type,
+                "content": self._message_content(content),
             },
         )
         response.raise_for_status()
@@ -143,30 +151,91 @@ class FeishuBotClient:
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot message")
 
-    async def reply_text(
-        self, message_id: str, text: str, *, access_token: str | None = None
+    async def send_text(self, chat_id: str, text: str) -> None:
+        bounded = text.strip() or "Claude Hub completed without a text response."
+        if len(bounded) > _MAX_REPLY_CHARS:
+            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
+        await self.send_message(chat_id, "text", {"text": bounded})
+
+    async def reply_message(
+        self,
+        message_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        access_token: str | None = None,
     ) -> None:
-        """Reply to one exact inbound message instead of a mutable chat target."""
+        """Reply to one exact inbound message with any supported Feishu type."""
 
         token = await self.get_tenant_token() if access_token is None else access_token
         if not token.strip():
             raise FeishuBotError("Feishu Bot tenant token is empty")
-        bounded = text.strip() or "Claude Hub completed without a text response."
-        if len(bounded) > _MAX_REPLY_CHARS:
-            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
         response = await self._request(
             "POST",
             f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "msg_type": "text",
-                "content": json.dumps({"text": bounded}, ensure_ascii=False),
+                "msg_type": msg_type,
+                "content": self._message_content(content),
             },
         )
         response.raise_for_status()
         payload = response.json()
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot reply")
+
+    async def reply_text(
+        self, message_id: str, text: str, *, access_token: str | None = None
+    ) -> None:
+        """Reply to one exact inbound message instead of a mutable chat target."""
+
+        bounded = text.strip() or "Claude Hub completed without a text response."
+        if len(bounded) > _MAX_REPLY_CHARS:
+            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
+        await self.reply_message(message_id, "text", {"text": bounded}, access_token=access_token)
+
+    async def add_reaction(
+        self, message_id: str, emoji_type: str, *, access_token: str | None = None
+    ) -> str:
+        """Add a reaction and return its id for an exact later deletion."""
+
+        token = await self.get_tenant_token() if access_token is None else access_token
+        if not token.strip():
+            raise FeishuBotError("Feishu Bot tenant token is empty")
+        response = await self._request(
+            "POST",
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reactions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"reaction_type": {"emoji_type": emoji_type}},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data")
+        reaction_id = data.get("reaction_id") if isinstance(data, dict) else None
+        if payload.get("code") != 0 or not isinstance(reaction_id, str) or not reaction_id.strip():
+            raise FeishuBotError("Feishu rejected the Bot reaction")
+        return reaction_id
+
+    async def delete_reaction(
+        self,
+        message_id: str,
+        reaction_id: str,
+        *,
+        access_token: str | None = None,
+    ) -> None:
+        token = await self.get_tenant_token() if access_token is None else access_token
+        if not token.strip():
+            raise FeishuBotError("Feishu Bot tenant token is empty")
+        response = await self._request(
+            "DELETE",
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reactions/"
+            f"{quote(reaction_id, safe='')}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("code") != 0:
+            raise FeishuBotError("Feishu rejected deleting the Bot reaction")
 
     async def validate_credentials(self) -> None:
         """Validate app credentials without returning or persisting the token."""

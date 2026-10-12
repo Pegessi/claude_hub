@@ -21,6 +21,107 @@
   control now share one flex row, which prevents the overlap structurally.
 - Restore the full secret request-body assertion and update the provenance
   mock to the WebSocket contract (`connection_status`).
+### perf(mobile): hold working-session light while the drawer is shut or dragged
+
+- The working-row beam and stars animate on the main thread every frame, and a
+  closed mobile drawer is only `visibility: hidden`, so they kept running
+  behind every page. They now pause, frozen on their current frame, until the
+  drawer is open and at rest, and pause again while a drag follows the finger.
+- Measured at 4x CPU throttle with four working Chats: a closed drawer now
+  costs 1ms of main thread per second instead of 148ms, and each drag move
+  6.6ms instead of 20.3ms (4.5ms with no light at all). Desktop is unchanged.
+- See the [mobile drawer polish notes](docs/working-logs/2026-10-12-mobile-drawer-polish.md).
+
+### fix(chat): keep Stop and Queue on one composer line on phones
+
+- The composer tools no longer take part in the toolbar's wrap decision, so
+  Stop and Send/Queue stay side by side; on narrow screens the model label
+  truncates (the full name stays in its menu) instead of pushing Queue onto
+  another line. Verified at 320, 360, and 440px wide; desktop is unchanged.
+- Stop now matches the Send/Queue button's 34px height and corner radius.
+
+### fix(sidebar): fold the Pinned section and stop it covering the mobile drawer
+
+- Tapping the Pinned header now folds or unfolds the pinned Chats, with the
+  same chevron, count, and active-row retention as workspace headers; a search
+  still shows every matching pin.
+- In the mobile drawer the Pinned section scrolls with the list. On a
+  phone-height screen its sticky 40vh block covered the workspace header and
+  the active Chat scrolled beneath it. Desktop keeps the sticky section.
+
+### feat(mobile): open the Chat drawer with a swipe anywhere on the main view
+
+- A clearly rightward single-finger swipe anywhere on the mobile main column
+  now follows the finger and opens the Chat drawer with the existing commit
+  rules. It needs 12px of travel and a 1.5:1 horizontal bias, so taps,
+  vertical scrolling, diagonal drags and leftward swipes stay with the content.
+- Editable fields, horizontal scrollers that can still scroll back, the
+  terminal key bar, and TabBar dialogs keep their own gestures. Terminal panes
+  run inside an iframe, so they keep opening the drawer from the left edge band.
+
+### style(theme): raise text contrast and Chat reading size
+
+- Brighten the Dark text ladder to Maso's reading level: body text moves from
+  `#c7c7cc` to `#ececef` (10.5:1 to 15.1:1 on the main plane), with the muted,
+  soft, and subtle roles raised in the same order.
+- Lift the faintest text role in both themes above WCAG AA (4.5:1) on the main,
+  sidebar, and surface planes; Light body text was already at 14.8:1.
+- Render Chat user and assistant messages at 14px with a 1.65 line height,
+  measured against Maso's body text, while dense Workspace panels keep 12px
+  compact Markdown.
+- Follow Maso's sidebar hierarchy: workspace headers use body text, unselected
+  sessions use the muted role (7.6:1 in Dark) and brighten on hover, and the
+  selected session keeps its selected text color with a semibold name.
+
+### style(chat): refine session actions and Maso-inspired themes
+
+- Add a destructive **Delete** action to the shared session menu with a focused
+  confirmation dialog, failure-safe state, and cleanup of stale pinned ids.
+- Remove **Move up** / **Move down** and their keyboard shortcut from the Chat
+  sidebar while preserving its direct pointer-drag reordering interaction.
+- Rebuild Dark around Maso's carbon surface ladder and current main-branch blue,
+  pair Light with a muted clay-orange accent, and keep selected, focus, and
+  primary-action roles separate with accessible contrast.
+- Theme user-message bubbles alongside the surrounding Dark and Light chrome
+  instead of retaining a hard-coded blue fill in Light mode.
+- Match Maso's sidebar/main surface split (`#1c1c1c` / `#181818` in Dark and
+  `#f5f5f5` / white in Light) without repainting unrelated application surfaces.
+- Replace the blue completion ripple around idle session dots with a restrained
+  sheen contained inside the existing status light.
+- Mark only genuinely working Chat sessions with a Maso-style light pulse that
+  orbits the row border and fades smoothly at both ends, while dim stars inside
+  the row brighten as it passes; working rows no longer gain a lit outline.
+- Give Chat rows and workspace groups more breathing room, allow dragging a
+  workspace header to persist the whole directory block without reordering
+  pinned Chats, and keep Terminal Status workspace groups in the same order as
+  the Chat sidebar.
+- Persist Chat pins in the Hub runtime instead of per-origin browser storage,
+  using per-user atomic updates so browsers and devices share one state without
+  lost updates. Valid legacy local pins migrate once and are then removed.
+- See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).
+
+### fix(chat): activate queued conversations before sending
+
+- Keep only Chats with an actionable local queue observing their hidden turn,
+  so the queue receives the authoritative completion edge without leaving every
+  cached Chat stream connected.
+- When that turn finishes, restore the queue's owning pane and Chat, wait for
+  its structured stream to become active and live, then send the next message
+  exactly once instead of leaving it on `Waiting for response…`.
+- Serialize simultaneous hidden-Chat completions and protect queued component
+  instances from cache eviction or pane-layout removal until their foreground
+  send attempt retires; migrate queue ownership when a cached Chat moves panes,
+  including while its automatic send is awaiting acknowledgement, without
+  allowing an old send to retire a same-Chat request recreated after archive.
+- Keep the full Chat `KeepAlive` cache bounded by storing only queued drafts in
+  Pinia and using a minimal hidden completion observer, and retire invalid
+  activation owners when a Chat is removed or cannot send without dropping a
+  ready observer request when its full cached pane is evicted.
+- Bound automatic queued POSTs so an unacknowledged request enters the existing
+  delivery-uncertain recovery path instead of monopolizing the activation FIFO.
+- Release hidden streams for empty or delivery-uncertain queues, preserving the
+  existing explicit-resend recovery boundary. See the
+  [queued Chat activation notes](docs/working-logs/2026-10-11-chat-queue-activation.md).
 
 ### fix(chat): match Claude model options to each tab environment
 
@@ -59,6 +160,28 @@
   browsers, so this one test turned an otherwise green run red.
 - Scale the two fixed 10s restart deadlines by the E2E timeout factor and
   print the measured time, so a loaded runner no longer fails them outright.
+
+### feat(feishu): make Bot conversations responsive and richly formatted
+
+- Prewarm the Feishu SDK once per backend process, time connection stages without
+  exposing credentials, and keep the Bot settings view refreshed while a connection
+  is starting or retrying.
+- Coalesce same-Chat messages received within a one-second quiet window (with a
+  five-second maximum wait) into one ordered model request. Messages arriving
+  after a turn starts become one follow-up batch instead of interrupting the
+  active turn; bounded backpressure and per-message deduplication remain intact.
+- Show a best-effort received reaction while a message is being coalesced or
+  queued, then a typing reaction when its batch starts, without letting reaction
+  network latency delay native model dispatch; repeated shutdown cancellation
+  still waits for the bounded reaction cleanup it owns.
+- Anchor a combined response to the newest message in its batch, and only label
+  later input as a follow-up after an earlier Feishu turn passed Chat admission.
+- Deliver assistant Markdown as Feishu rich-text posts with code-block support and
+  versioned provider guidance, while preserving historical `feishu-v1` turns and
+  preventing model-authored mention tags from notifying users implicitly.
+- Bound backend file logs with rotation and stop INFO-level tab-list dumps from
+  obscuring connection diagnostics. See the
+  [Feishu interaction v2 notes](docs/working-logs/2026-10-10-feishu-interaction-v2.md).
 
 ### feat(runtime): rebuild frontend during supervised restart
 

@@ -226,8 +226,8 @@ onUnmounted(() => {
 }
 
 .layout-btn.active {
-  border-color: var(--ch-color-accent-strong);
-  background-color: var(--ch-color-accent-soft);
+  border-color: var(--ch-color-border-selected);
+  background-color: var(--ch-color-surface-selected);
   box-shadow: var(--ch-shadow-button);
 }
 
@@ -244,7 +244,7 @@ onUnmounted(() => {
 }
 
 .layout-btn.active .layout-cell {
-  background-color: var(--ch-color-accent-strong);
+  background-color: var(--ch-color-text-selected);
 }
 
 .layout-menu {
@@ -336,12 +336,13 @@ onUnmounted(() => {
 }
 
 .layout-menu-item.active {
-  border-color: var(--ch-color-accent-ring-strong);
-  background: var(--ch-color-accent-soft);
+  border-color: var(--ch-color-border-selected);
+  background: var(--ch-color-surface-selected);
+  color: var(--ch-color-text-selected);
 }
 
 .layout-menu-item.active .layout-cell {
-  background-color: var(--ch-color-accent-strong);
+  background-color: var(--ch-color-text-selected);
 }
 
 .layout-menu-item-label {
@@ -372,7 +373,7 @@ onUnmounted(() => {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background-color: var(--ch-color-accent);
+  background-color: var(--ch-color-accent-strong);
   color: var(--ch-color-text-inverse);
   display: flex;
   align-items: center;

@@ -21,6 +21,31 @@ test('session reorder uses pointer events instead of browser-native drag and dat
   assert.match(source, /\.chat-sidebar__pin-drop \{[\s\S]*position: absolute;/)
   assert.doesNotMatch(source, /@dragstart=/)
   assert.doesNotMatch(source, /dataTransfer/)
+  assert.doesNotMatch(source, /@keydown\.alt\.(up|down)/)
+  assert.doesNotMatch(source, /@move=/)
+})
+
+test('workspace headers support pointer drag ordering with a visible drop edge', () => {
+  assert.ok(source.includes('@pointerdown="onGroupPointerDown($event, group)"'))
+  assert.ok(source.includes('store.reorderChatWorkspace('))
+  assert.ok(source.includes('groupDropTarget.value = {'))
+  assert.ok(source.includes(
+    '.chat-sidebar__group[data-group-drop-position] > .chat-sidebar__group-header::before',
+  ))
+})
+
+test('the Pinned header folds the pinned section like a workspace header', () => {
+  const header = source.match(/<button\s+v-if="group\.pinned"[\s\S]*?<\/button>/)?.[0] ?? ''
+  assert.match(header, /class="chat-sidebar__group-header chat-sidebar__pinned-header"/)
+  assert.match(header, /:aria-expanded="!group\.collapsed"/)
+  assert.match(header, /@click="pinnedCollapsed = !pinnedCollapsed"/)
+  assert.match(header, /class="chat-sidebar__group-chevron"/)
+  assert.match(source, /pinnedCollapsed: pinnedCollapsed\.value,/)
+})
+
+test('only working rows mount the per-row beam and star field', () => {
+  assert.match(source, /<ChatSidebarWorkingEffect\s+v-if="getTabStatus\(tab\) === 'working'"\s+:seed="tab\.id"\s*\/>/)
+  assert.doesNotMatch(source, /working-comet/)
 })
 
 test('sidebar resize is bounded, accessible, and browser-persisted', () => {

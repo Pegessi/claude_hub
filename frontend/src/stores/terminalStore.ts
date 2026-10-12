@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type {
   TerminalAgentStatus,
   TerminalTab,
@@ -10,8 +10,9 @@ import type {
   Pane,
   StoreNotification,
   NotificationType,
+  WorkspaceAttachmentCreate,
 } from '@/types'
-import { groupChatsByCwd, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
+import { groupChatsByCwd, moveCwdGroup, moveTabById, parsePinnedChatIds } from '@/utils/chatGroups'
 import {
   createPaneReconnectRegistry,
   type PaneReconnectStatus,
@@ -20,10 +21,30 @@ import {
 const API_BASE = '/api'
 const STORAGE_KEY_LAYOUT = 'claude_hub_layout_type'
 const STORAGE_KEY_SIDEBAR = 'claude_hub_sidebar_collapsed'
-// Browser + origin scoped, like the sidebar/layout preferences. Store IDs only;
-// archived pins stay dormant and reappear if that session is restored.
+// Legacy browser-only pin state. The server is authoritative now; this key is
+// read only for the one-time migration and removed after the server accepts it.
 const STORAGE_KEY_PINNED_CHATS = 'claude_hub_pinned_chat_ids'
 const STATUS_POLL_INTERVAL_MS = 5000
+
+export interface QueuedChatDraftAttachment extends WorkspaceAttachmentCreate {
+  id: string
+  preview_url: string
+  size_bytes: number
+}
+
+export interface QueuedChatDraft {
+  message: string
+  attachments: QueuedChatDraftAttachment[]
+}
+
+interface QueuedChatState {
+  paneId: string
+  tabId: string
+  drafts: QueuedChatDraft[]
+  paused: boolean
+  sendInProgress: boolean
+  autoActivationBlock: 'stream-failed' | 'goal-locked' | null
+}
 
 function generatePaneId(): string {
   return 'pane-' + Math.random().toString(36).substr(2, 9)
@@ -106,30 +127,70 @@ export const useTerminalStore = defineStore('terminal', () => {
   )
   const panes = ref<Pane[]>([])
   const activePaneId = ref<string | null>(null)
+  // Queue state outlives the bounded StructuredPane KeepAlive cache. Hidden
+  // completion observers and recreated panes share this small durable browser
+  // record; full transcript DOM and stream state remain component-local.
+  const queuedChatStates = ref<QueuedChatState[]>([])
+  const chatPaneCacheEpochs = ref<Record<string, number>>({})
+  const queuedChatActivationRequests = ref<Array<{ id: number; paneId: string; tabId: string }>>([])
+  let nextQueuedChatActivationRequestId = 1
+  const queuedChatActivationOwner = computed(() => queuedChatActivationRequests.value[0] ?? null)
 
   // Left chat sidebar collapse state, persisted across reloads.
   const sidebarCollapsed = ref<boolean>(
     localStorage.getItem(STORAGE_KEY_SIDEBAR) === '1'
   )
-  const pinnedChatIds = ref<Set<string>>((() => {
-    try {
-      return parsePinnedChatIds(localStorage.getItem(STORAGE_KEY_PINNED_CHATS))
-    } catch {
-      return new Set<string>()
-    }
-  })())
+  const pinnedChatIds = ref<Set<string>>(new Set())
+  let chatPinMutationTail: Promise<unknown> = Promise.resolve()
+  let chatPreferencesRequestSequence = 0
+  let chatPreferencesAppliedSequence = 0
 
-  function setChatPinned(tabId: string, pinned: boolean) {
-    if (!chatTabs.value.some(tab => tab.id === tabId)) return
-    const next = new Set(pinnedChatIds.value)
-    if (pinned) next.add(tabId)
-    else next.delete(tabId)
-    pinnedChatIds.value = next
-    try {
-      localStorage.setItem(STORAGE_KEY_PINNED_CHATS, JSON.stringify([...next]))
-    } catch {
-      pushNotification({ type: 'warning', message: 'Pin preference could not be saved in this browser.', autoDismissMs: 6000 })
+  function applyPinnedChatIds(value: unknown, sequence: number) {
+    // A slower GET started before a Pin mutation must not overwrite the newer
+    // mutation response when it arrives out of order.
+    if (sequence < chatPreferencesAppliedSequence) return
+    chatPreferencesAppliedSequence = sequence
+    const ids = Array.isArray(value) ? value : []
+    pinnedChatIds.value = new Set(ids.filter(
+      (id): id is string => typeof id === 'string' && id.length > 0,
+    ))
+  }
+
+  function setChatPinned(tabId: string, pinned: boolean): Promise<boolean> {
+    // Pinning requires a current Chat, while unpinning stays idempotent so a
+    // stale UI can still clear a preference after an archive or deletion.
+    if (pinned && !chatTabs.value.some(tab => tab.id === tabId)) {
+      return Promise.resolve(false)
     }
+    // Capture only work that was already active when the user clicked. This
+    // avoids racing the initial legacy migration without creating a cycle
+    // with a later refresh that correctly waits for this mutation.
+    const precedingSidebarSync = sidebarPreferencesFetchPromise
+    const mutate = async () => {
+      if (precedingSidebarSync) await precedingSidebarSync
+      const sequence = ++chatPreferencesRequestSequence
+      try {
+        const response = await fetch(`${API_BASE}/tabs/sidebar-preferences/pins/${tabId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned }),
+        })
+        if (!response.ok) throw new Error('Failed to save pin preference')
+        const payload: { pinned_tab_ids?: unknown } = await response.json()
+        applyPinnedChatIds(payload.pinned_tab_ids, sequence)
+        return true
+      } catch (e) {
+        pushNotification({
+          type: 'warning',
+          message: e instanceof Error ? e.message : 'Pin preference could not be saved on the server.',
+          autoDismissMs: 6000,
+        })
+        return false
+      }
+    }
+    const result = chatPinMutationTail.then(mutate, mutate)
+    chatPinMutationTail = result
+    return result
   }
   // Mobile slide-out session drawer visibility. Not persisted — it defaults to
   // closed on load. Use the open/close/toggle/select actions from components;
@@ -207,6 +268,20 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function setLayout(type: LayoutType) {
+    const nextConfig = LAYOUT_CONFIGS[type]
+    const retainedPaneIds = new Set(
+      panes.value.slice(0, nextConfig.rows * nextConfig.cols).map(pane => pane.id)
+    )
+    if (queuedChatStates.value.some(state =>
+      queuedChatStateIsProtected(state) && !retainedPaneIds.has(state.paneId)
+    )) {
+      pushNotification({
+        type: 'warning',
+        message: 'Wait for queued Chat messages before reducing the pane layout.',
+        autoDismissMs: 6000,
+      })
+      return
+    }
     layoutType.value = type
     localStorage.setItem(STORAGE_KEY_LAYOUT, type)
     initializePanes()
@@ -236,6 +311,175 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
   }
 
+  function sameQueuedChat(
+    entry: { paneId: string; tabId: string },
+    paneId: string,
+    tabId: string,
+  ): boolean {
+    return entry.paneId === paneId && entry.tabId === tabId
+  }
+
+  function queuedChatStateIsProtected(state: QueuedChatState): boolean {
+    return state.drafts.length > 0 || state.paused || state.sendInProgress
+  }
+
+  function getQueuedChatState(paneId: string, tabId: string): QueuedChatState {
+    let state = queuedChatStates.value.find(entry => entry.tabId === tabId)
+    if (!state) {
+      queuedChatStates.value.push({
+        paneId,
+        tabId,
+        drafts: [],
+        paused: false,
+        sendInProgress: false,
+        autoActivationBlock: null,
+      })
+      state = queuedChatStates.value[queuedChatStates.value.length - 1]
+    } else {
+      moveQueuedChatToPane(tabId, paneId)
+    }
+    return state
+  }
+
+  function moveQueuedChatToPane(tabId: string, paneId: string) {
+    const state = queuedChatStates.value.find(entry => entry.tabId === tabId)
+    if (!state || state.paneId === paneId) return
+    state.paneId = paneId
+    for (const request of queuedChatActivationRequests.value) {
+      if (request.tabId === tabId) request.paneId = paneId
+    }
+    ensureQueuedChatActivation()
+  }
+
+  function paneHasProtectedQueuedChat(paneId: string): boolean {
+    return queuedChatStates.value.some(state =>
+      state.paneId === paneId && queuedChatStateIsProtected(state)
+    )
+  }
+
+  function protectedQueuedChatIds(paneId: string): string[] {
+    return queuedChatStates.value
+      .filter(state => state.paneId === paneId && queuedChatStateIsProtected(state))
+      .map(state => state.tabId)
+  }
+
+  function chatPaneCacheKey(tabId: string): string {
+    return `${tabId}:${chatPaneCacheEpochs.value[tabId] ?? 0}`
+  }
+
+  function observedQueuedChatIds(paneId: string): string[] {
+    return queuedChatStates.value
+      .filter(state =>
+        state.paneId === paneId
+        && state.drafts.length > 0
+        && !state.paused
+        && !state.sendInProgress
+      )
+      .map(state => state.tabId)
+  }
+
+  function discardQueuedChat(tabId: string) {
+    queuedChatStates.value = queuedChatStates.value.filter(state => state.tabId !== tabId)
+    const releasedOwner = queuedChatActivationRequests.value[0]?.tabId === tabId
+    queuedChatActivationRequests.value = queuedChatActivationRequests.value.filter(
+      request => request.tabId !== tabId
+    )
+    chatPaneCacheEpochs.value[tabId] = (chatPaneCacheEpochs.value[tabId] ?? 0) + 1
+    if (releasedOwner) ensureQueuedChatActivation()
+  }
+
+  function pruneQueuedChatState(paneId: string, tabId: string) {
+    const state = queuedChatStates.value.find(entry => entry.tabId === tabId)
+    if (
+      state
+      && state.paneId === paneId
+      && !queuedChatStateIsProtected(state)
+      && !queuedChatActivationRequests.value.some(request => request.tabId === tabId)
+    ) {
+      queuedChatStates.value = queuedChatStates.value.filter(entry => entry !== state)
+    }
+  }
+
+  function isQueuedChatActivationOwner(paneId: string, tabId: string): boolean {
+    const owner = queuedChatActivationOwner.value
+    return Boolean(owner && sameQueuedChat(owner, paneId, tabId))
+  }
+
+  function hasQueuedChatActivationRequest(paneId: string, tabId: string): boolean {
+    return queuedChatActivationRequests.value.some(entry =>
+      sameQueuedChat(entry, paneId, tabId)
+    )
+  }
+
+  function queuedChatActivationRequestId(paneId: string, tabId: string): number | null {
+    return queuedChatActivationRequests.value.find(entry =>
+      sameQueuedChat(entry, paneId, tabId)
+    )?.id ?? null
+  }
+
+  function ensureQueuedChatActivation() {
+    let owner = queuedChatActivationOwner.value
+    while (owner && (
+      !tabs.value.some(tab => tab.id === owner?.tabId)
+      || !panes.value.some(pane => pane.id === owner?.paneId)
+    )) {
+      queuedChatActivationRequests.value.shift()
+      owner = queuedChatActivationOwner.value
+    }
+    if (!owner) return
+    if (activePaneId.value !== owner.paneId) setActivePane(owner.paneId)
+    if (activeTabId.value !== owner.tabId) setActiveTab(owner.tabId)
+  }
+
+  function requestQueuedChatActivation(paneId: string, tabId: string) {
+    if (!queuedChatActivationRequests.value.some(entry => entry.tabId === tabId)) {
+      queuedChatActivationRequests.value.push({
+        id: nextQueuedChatActivationRequestId++,
+        paneId,
+        tabId,
+      })
+    }
+    // Only the FIFO head may select UI state. Later completions wait until the
+    // current owner has actually attempted its foreground send.
+    ensureQueuedChatActivation()
+  }
+
+  function releaseQueuedChatActivation(paneId: string, tabId: string) {
+    const index = queuedChatActivationRequests.value.findIndex(entry =>
+      sameQueuedChat(entry, paneId, tabId)
+    )
+    if (index < 0) return
+    const releasedOwner = index === 0
+    queuedChatActivationRequests.value.splice(index, 1)
+    if (releasedOwner) ensureQueuedChatActivation()
+  }
+
+  function settleQueuedChatActivation(tabId: string, requestId: number | null) {
+    // The Chat may move panes while its automatic POST is in flight. The
+    // request is globally unique per tab, so settle against its current store
+    // ownership instead of the sending component's captured pane ID. Its
+    // generation ID also prevents an old POST from retiring a same-tab request
+    // created after archive/unarchive.
+    if (requestId === null) return
+    const index = queuedChatActivationRequests.value.findIndex(
+      entry => entry.tabId === tabId && entry.id === requestId
+    )
+    if (index < 0) return
+    const releasedOwner = index === 0
+    queuedChatActivationRequests.value.splice(index, 1)
+    if (releasedOwner) ensureQueuedChatActivation()
+  }
+
+  // A user click can land between the store request and KeepAlive's
+  // onActivated acknowledgement. Reassert the FIFO head on the next reactive
+  // flush so a one-shot selection cannot be superseded and left connected
+  // forever. Once the component starts its send it releases the head.
+  watch(
+    [activePaneId, activeTabId, queuedChatActivationOwner],
+    () => ensureQueuedChatActivation(),
+    { flush: 'post' },
+  )
+
   function assignTabToPane(tabId: string, paneId?: string) {
     const targetPaneId = paneId || activePaneId.value
     if (!targetPaneId) return
@@ -254,6 +498,11 @@ export const useTerminalStore = defineStore('terminal', () => {
     }
 
     if (assigned) {
+      // Moving a tab can reactivate an existing KeepAlive instance whose setup
+      // will not rerun. Migrate store-owned queue/request ownership at the
+      // assignment boundary so a completion cannot pull the Chat back to its
+      // previous pane.
+      moveQueuedChatToPane(tabId, targetPaneId)
       activeTabId.value = tabId
     }
   }
@@ -319,6 +568,74 @@ export const useTerminalStore = defineStore('terminal', () => {
   // (the two floating panels mount at once, poll-driven refreshes overlap)
   // coalesce onto one in-flight request and share its result.
   let tabsFetchPromise: Promise<void> | null = null
+  let sidebarPreferencesFetchPromise: Promise<void> | null = null
+  let legacyPinsMigrated = false
+  let sidebarPreferencesFailureNotified = false
+
+  function syncChatSidebarPreferences(): Promise<void> {
+    if (sidebarPreferencesFetchPromise) return sidebarPreferencesFetchPromise
+    const run = async () => {
+      // A refresh started during a Pin request must read the server only after
+      // that mutation settles; otherwise an older GET can win in the UI.
+      await chatPinMutationTail
+      const sequence = ++chatPreferencesRequestSequence
+      try {
+        let response: Response
+        let legacyPinnedIds: string[] = []
+        if (!legacyPinsMigrated) {
+          try {
+            legacyPinnedIds = [...parsePinnedChatIds(
+              localStorage.getItem(STORAGE_KEY_PINNED_CHATS),
+            )]
+          } catch {
+            // Storage can be disabled; an empty migration still establishes
+            // that this server user now uses the authoritative server state.
+          }
+        }
+        if (!legacyPinsMigrated) {
+          // The empty migration is meaningful: it closes the one-time import
+          // window on the server, preventing an older browser that still has
+          // stale localStorage pins from resurrecting them later.
+          response = await fetch(
+            `${API_BASE}/tabs/sidebar-preferences/migrate-browser-pins`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ pinned_tab_ids: legacyPinnedIds }),
+            },
+          )
+        } else {
+          response = await fetch(`${API_BASE}/tabs/sidebar-preferences`)
+        }
+        if (!response.ok) throw new Error('Failed to load server pin preferences')
+        const payload: { pinned_tab_ids?: unknown } = await response.json()
+        applyPinnedChatIds(payload.pinned_tab_ids, sequence)
+        if (!legacyPinsMigrated) {
+          try {
+            localStorage.removeItem(STORAGE_KEY_PINNED_CHATS)
+          } catch {
+            // The migration is already durable; a blocked cleanup is harmless.
+          }
+          legacyPinsMigrated = true
+        }
+        sidebarPreferencesFailureNotified = false
+      } catch (e) {
+        if (!sidebarPreferencesFailureNotified) {
+          pushNotification({
+            type: 'warning',
+            message: e instanceof Error ? e.message : 'Failed to load server pin preferences',
+            autoDismissMs: 6000,
+          })
+          sidebarPreferencesFailureNotified = true
+        }
+      }
+    }
+    sidebarPreferencesFetchPromise = run().finally(() => {
+      sidebarPreferencesFetchPromise = null
+    })
+    return sidebarPreferencesFetchPromise
+  }
+
   function fetchTabs(options: { force?: boolean } = {}): Promise<void> {
     // Mutation callers (restore, switch-env, create agent, ...) rely on the
     // awaited refresh reflecting the change they just made, so they bypass
@@ -343,6 +660,7 @@ export const useTerminalStore = defineStore('terminal', () => {
             firstPane.tabId = manualTabs.value[0].id
           }
         }
+        await syncChatSidebarPreferences()
       } catch (e) {
         notifyError(e instanceof Error ? e.message : 'Unknown error')
       }
@@ -529,6 +847,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to delete tab')
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
+      discardQueuedChat(tabId)
       // Remove tab from all panes
       panes.value.forEach(pane => {
         if (pane.tabId === tabId) {
@@ -538,8 +857,13 @@ export const useTerminalStore = defineStore('terminal', () => {
       if (activeTabId.value === tabId) {
         activeTabId.value = manualTabs.value.length ? manualTabs.value[0].id : null
       }
+      const nextPinned = new Set(pinnedChatIds.value)
+      nextPinned.delete(tabId)
+      pinnedChatIds.value = nextPinned
+      return true
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Unknown error')
+      return false
     } finally {
       isLoading.value = false
     }
@@ -573,6 +897,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to archive tab')
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
+      discardQueuedChat(tabId)
       // Remove tab from all panes, remembering the first pane that lost it so
       // the fallback tab can take its slot.
       let orphanedPaneId: string | null = null
@@ -626,8 +951,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   // Permanently delete an archived tab (reuses the hard-delete path, then
   // refreshes the archived list so the row disappears).
   async function permanentDeleteTab(tabId: string) {
-    await deleteTab(tabId)
-    void fetchArchivedTabs()
+    const deleted = await deleteTab(tabId)
+    if (deleted) void fetchArchivedTabs()
+    return deleted
   }
 
   async function switchEnv(tabId: string, data: SwitchEnvRequest) {
@@ -736,6 +1062,28 @@ export const useTerminalStore = defineStore('terminal', () => {
     void saveTabOrder()
   }
 
+  function reorderChatWorkspace(
+    sourceCwd: string, targetCwd: string, position: 'before' | 'after',
+  ) {
+    const chatCwds = new Set(chatTabsByCwd.value.map(group => group.cwd))
+    if (!chatCwds.has(sourceCwd) || !chatCwds.has(targetCwd)) return
+    // Move every manual tab in the directory, including raw terminals. This
+    // makes the persisted workspace order apply to both Chat and Terminal
+    // Status while leaving Workspace-managed agents in their own tail block.
+    // Pinned Chats keep their slots because the pinned section follows tab
+    // order, which a workspace drag must not rearrange.
+    const pinned = pinnedChatIds.value
+    const movableTabs = manualTabs.value.filter(tab => !pinned.has(tab.id))
+    const movedTabs = moveCwdGroup(movableTabs, sourceCwd, targetCwd, position)
+    if (movedTabs === movableTabs) return
+    let movedIndex = 0
+    const reorderedManualTabs = manualTabs.value.map(
+      tab => (pinned.has(tab.id) ? tab : movedTabs[movedIndex++]),
+    )
+    tabs.value = [...reorderedManualTabs, ...managedTabs.value]
+    void saveTabOrder()
+  }
+
   return {
     tabs,
     manualTabs,
@@ -758,6 +1106,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     activePaneId,
     activePane,
     activePaneIsChat,
+    queuedChatActivationOwner,
     sidebarCollapsed,
     mobileDrawerOpen,
     openMobileDrawer,
@@ -779,8 +1128,22 @@ export const useTerminalStore = defineStore('terminal', () => {
     setActiveTab,
     reorderTabs,
     reorderTabById,
+    reorderChatWorkspace,
     setLayout,
     setActivePane,
+    getQueuedChatState,
+    chatPaneCacheKey,
+    paneHasProtectedQueuedChat,
+    protectedQueuedChatIds,
+    observedQueuedChatIds,
+    discardQueuedChat,
+    pruneQueuedChatState,
+    isQueuedChatActivationOwner,
+    hasQueuedChatActivationRequest,
+    queuedChatActivationRequestId,
+    requestQueuedChatActivation,
+    releaseQueuedChatActivation,
+    settleQueuedChatActivation,
     assignTabToPane,
     getPaneCountForTab,
     initializePanes,
