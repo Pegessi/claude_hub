@@ -121,7 +121,9 @@ async def test_supervisor_reconciles_one_connection_per_effective_bot(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_pairing_revision_keeps_the_connection_and_routes_immediately(tmp_path) -> None:
+async def test_pairing_revision_keeps_the_connection_and_routes_immediately(
+    tmp_path,
+) -> None:
     pool = FeishuBotPoolStore(
         path=tmp_path / "pool.json",
         legacy_path=tmp_path / "legacy.json",
@@ -600,6 +602,84 @@ def test_sdk_message_is_normalized_without_callback_secrets() -> None:
     assert event.chat_id == "oc-1"
     assert event.text == "hello"
     assert event.message_created_at_ms == 1_700_000_000_000
+
+
+def test_sdk_post_message_preserves_rich_text_and_image_order() -> None:
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="evt-post", app_id="cli-a"),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user", sender_id=SimpleNamespace(open_id="ou-user")
+            ),
+            message=SimpleNamespace(
+                message_id="om-post",
+                chat_id="oc-1",
+                chat_type="p2p",
+                message_type="post",
+                create_time="1700000000000",
+                content=json.dumps(
+                    {
+                        "title": "排查请求",
+                        "content": [
+                            [
+                                {"tag": "text", "text": "请看 "},
+                                {
+                                    "tag": "a",
+                                    "text": "说明",
+                                    "href": "https://example.test/guide",
+                                },
+                            ],
+                            [
+                                {"tag": "img", "image_key": "img_v3_first"},
+                                {"tag": "text", "text": " 和这张图"},
+                                {"tag": "img", "image_key": "img_v3_second"},
+                            ],
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        ),
+    )
+
+    event = message_event_from_sdk(data, expected_app_id="cli-a")
+
+    assert event.text == (
+        "# 排查请求\n\n请看 [说明](https://example.test/guide)\n" "【图片 1】 和这张图【图片 2】"
+    )
+    assert event.image_keys == ("img_v3_first", "img_v3_second")
+
+
+def test_sdk_post_message_accepts_localized_rich_text_payload() -> None:
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="evt-post", app_id="cli-a"),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user", sender_id=SimpleNamespace(open_id="ou-user")
+            ),
+            message=SimpleNamespace(
+                message_id="om-post",
+                chat_id="oc-1",
+                chat_type="p2p",
+                message_type="post",
+                create_time="1700000000000",
+                content=json.dumps(
+                    {
+                        "zh_cn": {
+                            "title": "本地化标题",
+                            "content": [[{"tag": "text", "text": "正文"}]],
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        ),
+    )
+
+    event = message_event_from_sdk(data, expected_app_id="cli-a")
+
+    assert event.text == "# 本地化标题\n\n正文"
+    assert event.image_keys == ()
 
 
 @pytest.mark.parametrize(

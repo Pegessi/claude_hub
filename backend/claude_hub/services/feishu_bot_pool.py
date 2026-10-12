@@ -187,6 +187,8 @@ class BotBinding:
 class BotEntry:
     bot_id: str
     name: str
+    feishu_name: str | None
+    feishu_avatar_url: str | None
     app_id: str
     source: str
     enabled: bool
@@ -224,6 +226,8 @@ class EffectiveBot:
     config: FeishuBotConfig
     revision: int
     generation: int
+    feishu_name: str | None
+    feishu_avatar_url: str | None
 
 
 def _state_error(name: str) -> FeishuBotPoolStateError:
@@ -291,7 +295,10 @@ def _validate_pool_numbers(bots: dict[str, Any], rate_limits: dict[str, Any]) ->
             value = raw.get(field)
             if value is not None:
                 _as_float(value, f"bot.{field}")
-        for collection, created_field in (("pending", "issued_at"), ("claims", "created_at")):
+        for collection, created_field in (
+            ("pending", "issued_at"),
+            ("claims", "created_at"),
+        ):
             records = _as_mapping(raw.get(collection, {}), collection)
             for value in records.values():
                 value = _as_mapping(value, collection)
@@ -350,7 +357,9 @@ def turn_id_for(bot_id: str, message_id: str) -> str:
     return f"feishu-{hashlib.sha256(payload).hexdigest()[:32]}"
 
 
-def environment_config(environ: Mapping[str, str] | None = None) -> FeishuBotConfig | None:
+def environment_config(
+    environ: Mapping[str, str] | None = None,
+) -> FeishuBotConfig | None:
     """Build the environment Bot's long-connection credentials, if complete."""
 
     env = os.environ if environ is None else environ
@@ -396,7 +405,12 @@ class FeishuBotPoolStore:
 
     @staticmethod
     def _empty() -> dict[str, Any]:
-        return {"version": _STATE_VERSION, "pool_revision": 0, "bots": {}, "rate_limits": {}}
+        return {
+            "version": _STATE_VERSION,
+            "pool_revision": 0,
+            "bots": {},
+            "rate_limits": {},
+        }
 
     def _read_file(self, path: Path) -> dict[str, Any] | None:
         try:
@@ -543,7 +557,9 @@ class FeishuBotPoolStore:
             tab_id=_as_text(value.get("tab_id"), f"{name}.tab_id", limit=_MAX_ID_CHARS),
             workspace_id=_as_optional_text(value.get("workspace_id"), f"{name}.workspace_id"),
             sender_open_id=_as_text(
-                value.get("sender_open_id"), f"{name}.sender_open_id", limit=_MAX_ID_CHARS
+                value.get("sender_open_id"),
+                f"{name}.sender_open_id",
+                limit=_MAX_ID_CHARS,
             ),
             chat_id=_as_text(value.get("chat_id"), f"{name}.chat_id", limit=_MAX_ID_CHARS),
             created_at=_as_float(value.get("created_at"), f"{name}.created_at"),
@@ -560,7 +576,9 @@ class FeishuBotPoolStore:
             tab_id=_as_text(value.get("tab_id"), "binding.tab_id", limit=_MAX_ID_CHARS),
             workspace_id=_as_optional_text(value.get("workspace_id"), "binding.workspace_id"),
             sender_open_id=_as_text(
-                value.get("sender_open_id"), "binding.sender_open_id", limit=_MAX_ID_CHARS
+                value.get("sender_open_id"),
+                "binding.sender_open_id",
+                limit=_MAX_ID_CHARS,
             ),
             chat_id=_as_text(value.get("chat_id"), "binding.chat_id", limit=_MAX_ID_CHARS),
             created_at=_as_float(value.get("created_at"), "binding.created_at"),
@@ -638,7 +656,15 @@ class FeishuBotPoolStore:
         return BotEntry(
             bot_id=bot_id,
             name=_as_text(raw.get("name"), "name", limit=_MAX_NAME_CHARS),
-            app_id=config.app_id if config is not None else str(raw.get("app_id") or ""),
+            feishu_name=_as_optional_text(
+                raw.get("feishu_name"), "feishu_name", limit=_MAX_NAME_CHARS
+            ),
+            feishu_avatar_url=_as_optional_text(
+                raw.get("feishu_avatar_url"),
+                "feishu_avatar_url",
+                limit=_MAX_SECRET_CHARS,
+            ),
+            app_id=(config.app_id if config is not None else str(raw.get("app_id") or "")),
             source=source,
             enabled=_as_bool(raw.get("enabled"), "enabled"),
             credentials_editable=not is_env,
@@ -703,6 +729,8 @@ class FeishuBotPoolStore:
             config=entry.config,
             revision=entry.revision,
             generation=entry.generation,
+            feishu_name=entry.feishu_name,
+            feishu_avatar_url=entry.feishu_avatar_url,
         )
 
     def is_current(self, effective: EffectiveBot, environ: Mapping[str, str] | None = None) -> bool:
@@ -790,6 +818,8 @@ class FeishuBotPoolStore:
         # Compare the accepted identity, not the rejected environment value, so
         # reads in a persistent conflict cannot advance the counters forever.
         raw["app_id"] = app_id
+        raw["feishu_name"] = None
+        raw["feishu_avatar_url"] = None
         self._advance_generation(raw)
         self._touch(raw, now)
         return True
@@ -839,7 +869,13 @@ class FeishuBotPoolStore:
     # ------------------------------------------------------- bot lifecycle
 
     def create_bot(
-        self, *, name: str, config: FeishuBotConfig, environ: Mapping[str, str] | None = None
+        self,
+        *,
+        name: str,
+        config: FeishuBotConfig,
+        feishu_name: str | None = None,
+        feishu_avatar_url: str | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> str:
         now = self._now()
         with self._lock:
@@ -854,6 +890,8 @@ class FeishuBotPoolStore:
                 bot_id = secrets.token_hex(8)
             raw = self._new_entry(bot_id, name, config.app_id, now)
             raw["credentials"] = {"app_secret": config.app_secret}
+            raw["feishu_name"] = feishu_name
+            raw["feishu_avatar_url"] = feishu_avatar_url
             state["bots"][bot_id] = raw
             self._save(state)
             return bot_id
@@ -863,6 +901,8 @@ class FeishuBotPoolStore:
         bot_id: str,
         *,
         app_secret: str,
+        feishu_name: str | None = None,
+        feishu_avatar_url: str | None = None,
         expected_revision: int,
         environ: Mapping[str, str] | None = None,
     ) -> None:
@@ -883,7 +923,37 @@ class FeishuBotPoolStore:
                 raise FeishuBotReadOnly(bot_id)
             self._check_revision(raw, expected_revision)
             raw["credentials"] = {"app_secret": app_secret}
+            raw["feishu_name"] = feishu_name
+            raw["feishu_avatar_url"] = feishu_avatar_url
             self._touch(raw, now)
+            self._save(state)
+
+    def update_profile(
+        self,
+        bot_id: str,
+        *,
+        feishu_name: str,
+        feishu_avatar_url: str | None,
+        expected_revision: int,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        """Persist Feishu-managed presentation metadata without rotating transport."""
+
+        now = self._now()
+        with self._lock:
+            state = self._load()
+            self._prune(state, now)
+            self._sync_env_entry(state, environ, now)
+            raw = self._live_entry(state, bot_id)
+            self._check_revision(raw, expected_revision)
+            if (
+                raw.get("feishu_name") == feishu_name
+                and raw.get("feishu_avatar_url") == feishu_avatar_url
+            ):
+                return
+            raw["feishu_name"] = feishu_name
+            raw["feishu_avatar_url"] = feishu_avatar_url
+            raw["updated_at"] = now
             self._save(state)
 
     def update_bot(
@@ -913,7 +983,11 @@ class FeishuBotPoolStore:
             self._save(state)
 
     def delete_bot(
-        self, bot_id: str, *, expected_revision: int, environ: Mapping[str, str] | None = None
+        self,
+        bot_id: str,
+        *,
+        expected_revision: int,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         """Replace the entry with a secret-free tombstone.
 
@@ -1101,7 +1175,11 @@ class FeishuBotPoolStore:
             return self._binding_from_dict(bot_id, raw["binding"])
 
     def release_binding(
-        self, bot_id: str, *, expected_revision: int, environ: Mapping[str, str] | None = None
+        self,
+        bot_id: str,
+        *,
+        expected_revision: int,
+        environ: Mapping[str, str] | None = None,
     ) -> BotBinding | None:
         """Unbind explicitly. Advancing the generation is what guarantees that
         a message already in flight cannot land on a later binding."""
