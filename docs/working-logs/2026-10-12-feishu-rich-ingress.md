@@ -35,13 +35,13 @@ and hard-coded mark.
   the surrounding text and placeholder instead of rejecting the turn.
 - A coalesced batch shares the native path's ten-image and 40 MiB request
   budget. Extra images remain represented by their placeholders instead of
-  making the entire batch fail validation. Original image bytes go only to the
-  provider. They are not persisted as timeline previews, matching the existing
-  attachment-cache boundary; history can therefore show a non-renderable
-  attachment placeholder when no bounded preview exists.
-- The timeline accepts only HTTPS Bot avatars and falls back to the `飞` mark
-  if the URL is absent or the image fails to load. Historical turns without
-  profile metadata keep the generic `Feishu` label.
+  making the entire batch fail validation. The provider always receives the
+  original image. The timeline persists that same image as a preview only when
+  it fits the existing 8 MiB and 8192px bounds; an uncacheable image keeps a
+  non-renderable placeholder without suppressing safe previews in the batch.
+- The timeline accepts only HTTPS Bot avatars and falls back to the bundled
+  Feishu brand mark if the URL is absent or the image fails to load. Historical
+  turns without profile metadata keep the generic `Feishu` label.
 
 ## Verification
 
@@ -72,6 +72,6 @@ as implied by these checks.
   SDK fixtures.
 - Standalone image/file events remain unsupported. Only images embedded in a
   supported rich-text `post` enter this path.
-- Persisted timeline thumbnails would require a bounded server-side image
-  resampler. This change intentionally does not add a new image-processing
-  dependency or persist full-resolution originals.
+- Images outside the existing preview-cache limits remain non-renderable in
+  history. This change intentionally does not add a server-side resampler or
+  widen the cache bounds.

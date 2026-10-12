@@ -121,12 +121,10 @@
                   class="conversation-message-source__mark"
                   aria-hidden="true"
                 >
-                  飞
                   <img
-                    v-if="messageSourceAvatarUrl(turn)"
-                    :src="messageSourceAvatarUrl(turn) || undefined"
+                    :src="messageSourceAvatarUrl(turn) || feishuLogoUrl"
                     alt=""
-                    @error="hideBrokenSourceAvatar"
+                    @error="useFeishuSourceFallback"
                   >
                 </span>
                 <span class="conversation-message-source__label">{{ messageSourceLabel(turn) }}</span>
@@ -1373,6 +1371,7 @@ import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStr
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceAvatarUrl, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { feishuLogoUrl } from '@/utils/feishuIdentity'
 import { subagentProviderLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
@@ -1407,9 +1406,12 @@ import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
-function hideBrokenSourceAvatar(event: Event): void {
+function useFeishuSourceFallback(event: Event): void {
   const image = event.currentTarget
-  if (image instanceof HTMLImageElement) image.hidden = true
+  if (image instanceof HTMLImageElement) {
+    const fallback = new URL(feishuLogoUrl, window.location.href).href
+    if (image.src !== fallback) image.src = feishuLogoUrl
+  }
 }
 
 const props = defineProps<{

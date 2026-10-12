@@ -6,6 +6,7 @@ Usage:
     /tmp/feishu-bot-components EXISTING_BROWSER
 """
 
+import asyncio
 import json
 import re
 import sys
@@ -21,6 +22,12 @@ NOW = CLOCK.isoformat()
 CODE_EXPIRES = (CLOCK + timedelta(seconds=600)).isoformat()
 CLAIM_EXPIRES = (CLOCK + timedelta(seconds=300)).isoformat()
 CONFIRM_WORD = "ABC234"
+SHARED_AVATAR_URL = "https://avatar.example.test/shared-bear.png"
+SHARED_AVATAR_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d4944415408d763f8cfc0f01f00050001ff89993d1d0000000049454e44"
+    "ae426082"
+)
 
 
 def bot_summary(
@@ -32,10 +39,14 @@ def bot_summary(
     credentials_editable: bool,
     deletable: bool,
     binding: dict | None = None,
+    feishu_name: str | None = None,
+    feishu_avatar_url: str | None = None,
 ) -> dict:
     return {
         "bot_id": bot_id,
         "name": name,
+        "feishu_name": feishu_name,
+        "feishu_avatar_url": feishu_avatar_url,
         "app_id": app_id,
         "source": source,
         "enabled": True,
@@ -75,6 +86,7 @@ async def main(browser_run: BrowserRun) -> None:
     api_calls: list[dict] = []
     response_bodies: list[str] = []
     pool_revision = 1
+    shared_avatar_requests = 0
     bots = [
         bot_summary(
             "bot-env",
@@ -158,9 +170,26 @@ async def main(browser_run: BrowserRun) -> None:
             )
 
         async def route_all(route) -> None:
-            nonlocal pool_revision
+            nonlocal pool_revision, shared_avatar_requests
             request = route.request
             parsed = urlparse(request.url)
+            if request.url == SHARED_AVATAR_URL:
+                shared_avatar_requests += 1
+                if shared_avatar_requests == 1:
+                    blocked_requests.append((request.method, request.url))
+                    await route.abort("failed")
+                else:
+                    await route.fulfill(
+                        status=200,
+                        content_type="image/png",
+                        headers={"Cache-Control": "no-store"},
+                        body=SHARED_AVATAR_PNG,
+                    )
+                return
+            if request.url == "https://avatar.example.test/primary-bear.png":
+                blocked_requests.append((request.method, request.url))
+                await route.abort("failed")
+                return
             if (parsed.scheme, parsed.hostname, parsed.port) != (
                 parsed_base.scheme,
                 parsed_base.hostname,
@@ -204,6 +233,8 @@ async def main(browser_run: BrowserRun) -> None:
                     source="stored",
                     credentials_editable=True,
                     deletable=True,
+                    feishu_name="Primary Bear",
+                    feishu_avatar_url="https://avatar.example.test/primary-bear.png",
                 )
                 bots.append(created)
                 pool_revision += 1
@@ -299,6 +330,7 @@ async def main(browser_run: BrowserRun) -> None:
         await page.goto(url)
 
         trigger = page.get_by_test_id("feishu-binding-trigger")
+        identity = page.get_by_test_id("feishu-binding-identity")
         await expect(trigger).to_be_visible()
         await expect(page.get_by_test_id("feishu-binding-status")).to_have_count(0)
         await expect(trigger).to_have_attribute("title", re.compile(r"^Feishu · "))
@@ -315,7 +347,8 @@ async def main(browser_run: BrowserRun) -> None:
         assert name_box["x"] + name_box["width"] < trigger_box["x"]
         assert trigger_box["x"] - name_box["x"] - name_box["width"] == 5
         assert 7 <= 1280 - trigger_box["x"] - trigger_box["width"] <= 9
-        assert await trigger.locator("svg").count() == 1
+        assert await trigger.locator("svg").count() == 0
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
         await page.screenshot(path=str(output / "feishu-status-entry-desktop.png"))
 
         # Pool create: response is summary-only; submitted credentials clear.
@@ -458,8 +491,12 @@ async def main(browser_run: BrowserRun) -> None:
         await confirm_input.fill(CONFIRM_WORD)
         await binding_panel.get_by_role("button", name="Activate pairing", exact=True).click()
         await expect(page.get_by_test_id("feishu-binding-status")).to_have_text(
-            "Connected with Primary Bot"
+            "Connected with Primary Bear"
         )
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+        await expect(binding_panel.get_by_text("Primary Bear", exact=True)).to_be_visible()
+        for avatar in await binding_panel.locator("img").all():
+            await expect(avatar).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
         activate_call = next(call for call in api_calls if call["path"].endswith("/pair/activate"))
         assert activate_call["body"] == {
             "pairing_id": "pair-created",
@@ -470,12 +507,77 @@ async def main(browser_run: BrowserRun) -> None:
         await binding_panel.get_by_role("button", name="Disconnect Feishu", exact=True).click()
         await binding_panel.get_by_role("button", name="Confirm disconnect", exact=True).click()
         await expect(page.get_by_test_id("feishu-binding-status")).to_have_text("Not connected")
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
         disconnect_call = next(
             call
             for call in api_calls
             if call["method"] == "DELETE" and call["path"].endswith("/pairing")
         )
         assert disconnect_call["body"] == {"expected_revision": 5}
+        await binding_panel.get_by_role("button", name="Close", exact=True).click()
+        await expect(binding_panel).to_have_count(0)
+
+        # Avatar failures belong to one Chat/Bot identity, not to the
+        # reused panel instance or URL. Bot A's failed request must not
+        # suppress Bot B's retry when both official profiles share a URL.
+        for bot_id, tab_id, name in (
+            ("bot-avatar-a", "tab-avatar-a", "Shared Bear A"),
+            ("bot-avatar-b", "tab-avatar-b", "Shared Bear B"),
+        ):
+            bots.append(
+                bot_summary(
+                    bot_id,
+                    name,
+                    f"app-{bot_id}",
+                    source="stored",
+                    credentials_editable=True,
+                    deletable=True,
+                    feishu_name=name,
+                    feishu_avatar_url=SHARED_AVATAR_URL,
+                    binding={
+                        "pairing_id": f"pair-{bot_id}",
+                        "state": "active",
+                        "tab_id": tab_id,
+                        "workspace_id": None,
+                        "created_at": NOW,
+                        "is_mine": True,
+                        "owner_kind": "local",
+                        "chat_id": f"oc-{bot_id}",
+                        "bot_id": bot_id,
+                        "app_id": f"app-{bot_id}",
+                        "expires_at": None,
+                    },
+                )
+            )
+        pool_revision += 1
+        await page.evaluate("window.__FEISHU_BOT_TEST__.setTabId('tab-avatar-a')")
+        await expect(trigger).to_have_attribute(
+            "aria-label", re.compile(r"Connected with Shared Bear A$")
+        )
+        for _ in range(100):
+            if shared_avatar_requests >= 1:
+                break
+            await asyncio.sleep(0.01)
+        assert shared_avatar_requests == 1
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+
+        await page.evaluate("window.__FEISHU_BOT_TEST__.setTabId('tab-avatar-b')")
+        await expect(trigger).to_have_attribute(
+            "aria-label", re.compile(r"Connected with Shared Bear B$")
+        )
+        for _ in range(100):
+            if shared_avatar_requests >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert shared_avatar_requests == 2
+        await expect(identity).to_have_attribute("src", SHARED_AVATAR_URL)
+        await page.wait_for_function(
+            "() => { const image = document.querySelector('[data-testid=feishu-binding-identity]'); return image?.complete && image.naturalWidth > 0 }"
+        )
+
+        await page.evaluate("window.__FEISHU_BOT_TEST__.setTabId('tab-1')")
+        await expect(trigger).to_have_attribute("aria-label", re.compile(r"Not connected$"))
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
 
         for forbidden in (
             CONFIRM_WORD,
@@ -486,7 +588,6 @@ async def main(browser_run: BrowserRun) -> None:
             assert all(forbidden not in body for body in response_bodies)
 
         # Both real components remain operable at mobile width.
-        await binding_panel.get_by_role("button", name="Close", exact=True).click()
         await page.set_viewport_size({"width": 390, "height": 844})
         trigger_box = await trigger.bounding_box()
         name_box = await page.locator(".pane-session-name").bounding_box()
@@ -542,7 +643,10 @@ async def main(browser_run: BrowserRun) -> None:
             path=str(output / "feishu-bot-components-mobile.png"),
             full_page=True,
         )
-        assert not blocked_requests, blocked_requests
+        assert set(blocked_requests) == {
+            ("GET", "https://avatar.example.test/primary-bear.png"),
+            ("GET", SHARED_AVATAR_URL),
+        }, blocked_requests
         assert not unknown_requests, unknown_requests
         assert not page_errors, page_errors
 

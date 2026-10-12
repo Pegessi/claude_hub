@@ -159,14 +159,14 @@ def install_stream(monkeypatch, on_send, *, subscribe_release=None, goal_lock=No
     lock = goal_lock or asyncio.Lock()
 
     class Manager:
-        async def subscribe(self, session_arg):
+        async def subscribe_completion(self, session_arg):
             assert session_arg is session
             subscribed.set()
             if subscribe_release is not None:
                 await subscribe_release.wait()
             return queue
 
-        def unsubscribe(self, session_id, queue_arg):
+        def unsubscribe_completion(self, session_id, queue_arg):
             unsubscribed.append((session_id, queue_arg))
 
     manager = Manager()
