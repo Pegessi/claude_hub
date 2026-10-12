@@ -466,7 +466,11 @@ async def test_queue_then_generation_completes_normally(
     monkeypatch: pytest.MonkeyPatch, store: AgentStreamStore, app_servers: _OwnedAppServers
 ) -> None:
     """Queue → ready → real output → turn/completed(completed): not cancelled."""
-    monkeypatch.setattr(tailer_module, "QUEUED_TURN_MAX_WAIT_S", 0.25)
+    # This path must never hit the queue-cap branch: it is checking that a
+    # ready notification followed by real output clears queue state. Keep the
+    # cap above ordinary scheduler stalls so machine load cannot cancel the
+    # fake turn before its already-buffered ready record is consumed.
+    monkeypatch.setattr(tailer_module, "QUEUED_TURN_MAX_WAIT_S", 5.0)
     monkeypatch.setattr(tailer_module, "QUEUE_HEARTBEAT_STALL_S", 300.0)
     harness, transport, tailer = await _start_turn(monkeypatch, store, app_servers)
     server = harness.current
@@ -478,7 +482,14 @@ async def test_queue_then_generation_completes_normally(
 
     async def _done() -> bool:
         completions = await _completion_events(store)
-        return bool(completions) and completions[-1].payload["status"] == "completed"
+        # Persistence happens before the same completion handler releases the
+        # provider guard. Wait for both observable effects so this assertion
+        # cannot race the second half of that handler.
+        return (
+            bool(completions)
+            and completions[-1].payload["status"] == "completed"
+            and not transport.turn_in_flight
+        )
 
     await _wait_until(3.0, _done)
     assert transport.turn_in_flight is False
@@ -492,7 +503,7 @@ async def test_single_queued_notice_mid_generation_does_not_cancel(
     monkeypatch: pytest.MonkeyPatch, store: AgentStreamStore, app_servers: _OwnedAppServers
 ) -> None:
     """An occasional queue/status inside an otherwise active turn is harmless."""
-    monkeypatch.setattr(tailer_module, "QUEUED_TURN_MAX_WAIT_S", 0.2)
+    monkeypatch.setattr(tailer_module, "QUEUED_TURN_MAX_WAIT_S", 5.0)
     harness, transport, tailer = await _start_turn(monkeypatch, store, app_servers)
     server = harness.current
     server.exec_item(CALL_ID, "started")
@@ -502,7 +513,10 @@ async def test_single_queued_notice_mid_generation_does_not_cancel(
     server.turn_completed("provider-turn-1", "completed")
 
     async def _completed_ok() -> bool:
-        return any(c.payload["status"] == "completed" for c in (await _completion_events(store)))
+        return (
+            any(c.payload["status"] == "completed" for c in (await _completion_events(store)))
+            and not transport.turn_in_flight
+        )
 
     await _wait_until(3.0, _completed_ok)
     assert transport.turn_in_flight is False

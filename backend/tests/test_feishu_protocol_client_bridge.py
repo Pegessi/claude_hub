@@ -531,6 +531,59 @@ async def test_external_chat_bridge_fails_on_volatile_terminal_persistence_error
 
 
 @pytest.mark.asyncio
+async def test_external_chat_bridge_stops_turn_that_requires_web_interaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    cancelled: list[tuple[object, str | None]] = []
+    unsubscribed: list[tuple[str, object]] = []
+
+    class FakeManager:
+        async def subscribe_completion(self, _session_arg):
+            return queue
+
+        async def cancel_turn(self, session_arg, *, expected_turn_id=None):
+            cancelled.append((session_arg, expected_turn_id))
+            return True
+
+        def unsubscribe_completion(self, session_id, queue_arg) -> None:
+            unsubscribed.append((session_id, queue_arg))
+
+    async def fake_dispatch(
+        tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        await queue.put(
+            AgentStreamEvent(
+                stream_sequence=2,
+                session_id=session.id,
+                tab_id=tab_id,
+                agent_type=AgentType.CODEX,
+                type=AgentStreamEventType.APPROVAL_REQUIRED,
+                turn_id=payload.client_turn_id,
+                call_id="question-1",
+                payload={"questions": [{"id": "q1", "question": "Continue?"}]},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        return payload.client_turn_id
+
+    manager = FakeManager()
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    with pytest.raises(stream_api.ExternalInteractionRequired, match="approval or answer"):
+        await asyncio.wait_for(
+            stream_api.dispatch_tab_chat_and_wait("tab-1", "provider text", "feishu-question-turn"),
+            timeout=0.5,
+        )
+
+    assert cancelled == [(session, "feishu-question-turn")]
+    assert unsubscribed == [(session.id, queue)]
+
+
+@pytest.mark.asyncio
 async def test_external_goal_input_does_not_consume_pending_question(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

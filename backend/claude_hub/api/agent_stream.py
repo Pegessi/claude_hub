@@ -1394,6 +1394,10 @@ class ExternalDispatchRetired(asyncio.CancelledError):
     """Cancellation after the matching turn is stopped or never started."""
 
 
+class ExternalInteractionRequired(RuntimeError):
+    """The external turn was stopped because it needs Web Chat input."""
+
+
 def _map_send_exception(exc: Exception) -> HTTPException:
     """Map provider send errors to explicit HTTP status codes.
 
@@ -1635,6 +1639,27 @@ async def dispatch_tab_chat_and_wait(
                     ) from exc
             if event.turn_id != expected_turn_id:
                 continue
+            if event.type == AgentStreamEventType.APPROVAL_REQUIRED:
+                # Feishu cannot submit the structured answer required by this
+                # provider turn. Leaving the card open would permanently own
+                # the per-Chat FIFO, so stop the exact turn and direct the user
+                # to Web Chat instead.
+                try:
+                    cancelled = await asyncio.wait_for(
+                        manager.cancel_turn(session, expected_turn_id=expected_turn_id),
+                        timeout=_EXTERNAL_CANCEL_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Chat turn requires Web Chat interaction and could not be stopped"
+                    ) from exc
+                if not cancelled:
+                    raise RuntimeError(
+                        "Chat turn requires Web Chat interaction but is no longer active"
+                    )
+                raise ExternalInteractionRequired(
+                    "Chat turn requires an approval or answer in Web Chat"
+                )
             if event.type == AgentStreamEventType.ERROR:
                 message = event.payload.get("message")
                 if isinstance(message, str):
@@ -2172,6 +2197,7 @@ async def get_tab_quoted_image(
 __all__ = [
     "CHAT_ERROR_REASON_HEADER",
     "ExternalDispatchRetired",
+    "ExternalInteractionRequired",
     "dispatch_tab_chat_and_wait",
     "router",
     "_reset_tailer_manager",

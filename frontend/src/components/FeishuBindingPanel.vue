@@ -16,8 +16,10 @@
       @click="toggle"
     >
       <img
+        :key="identityImageKey"
         class="trigger-icon"
         :src="identityImageUrl"
+        :data-avatar-key="activeAvatarKey || undefined"
         alt=""
         data-testid="feishu-binding-identity"
         @error="useBrandFallback"
@@ -44,7 +46,9 @@
             aria-hidden="true"
           >
             <img
+              :key="identityImageKey"
               :src="identityImageUrl"
+              :data-avatar-key="activeAvatarKey || undefined"
               alt=""
               @error="useBrandFallback"
             >
@@ -109,8 +113,10 @@
       <template v-else-if="viewState === 'bound-current' && currentBot && binding">
         <section class="connected-card">
           <img
+            :key="identityImageKey"
             class="connected-card__icon"
             :src="identityImageUrl"
+            :data-avatar-key="activeAvatarKey || undefined"
             alt=""
             aria-hidden="true"
             @error="useBrandFallback"
@@ -284,21 +290,43 @@ const root = ref<HTMLElement | null>(null)
 const open = ref(false)
 const copyError = ref<string | null>(null)
 const confirmDisconnect = ref(false)
-const avatarFailed = ref(false)
+const failedAvatarKey = ref<string | null>(null)
 const {
   bots, binding, currentBot, selectedBotId, selectedBot, pendingCode, claim, confirmWord, error,
   needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, refresh, selectBot,
   generateCode, activate, disconnect, resume, pause,
 } = useFeishuBinding(toRef(props, 'tabId'))
+const activeAvatarUrl = computed(() => {
+  if (viewState.value !== 'bound-current') return null
+  return trustedFeishuAvatarUrl(currentBot.value?.feishu_avatar_url)
+})
+const activeAvatarKey = computed(() => {
+  const botId = currentBot.value?.bot_id
+  const avatarUrl = activeAvatarUrl.value
+  if (!botId || !avatarUrl) return null
+  return `${props.tabId}\n${botId}\n${avatarUrl}`
+})
+const identityImageKey = computed(() => activeAvatarKey.value ?? `feishu-brand:${props.tabId}`)
 const identityImageUrl = computed(() => {
-  if (viewState.value !== 'bound-current' || avatarFailed.value) return feishuLogoUrl
-  return trustedFeishuAvatarUrl(currentBot.value?.feishu_avatar_url) ?? feishuLogoUrl
+  const avatarKey = activeAvatarKey.value
+  return avatarKey && failedAvatarKey.value !== avatarKey
+    ? activeAvatarUrl.value ?? feishuLogoUrl
+    : feishuLogoUrl
 })
 
 function choose(event: Event) { selectBot((event.target as HTMLSelectElement).value) }
 function useBrandFallback(event: Event) {
-  avatarFailed.value = true
   const image = event.currentTarget as HTMLImageElement
+  const avatarKey = image.dataset.avatarKey ?? null
+  const avatarUrl = activeAvatarUrl.value
+  if (
+    avatarKey
+    && avatarKey === activeAvatarKey.value
+    && avatarUrl
+    && image.src === new URL(avatarUrl, window.location.href).href
+  ) {
+    failedAvatarKey.value = avatarKey
+  }
   if (image.src !== new URL(feishuLogoUrl, window.location.href).href) image.src = feishuLogoUrl
 }
 function toggle() { if (open.value) close(); else open.value = true }
@@ -337,7 +365,7 @@ onUnmounted(() => {
 onActivated(() => { void resume() })
 onDeactivated(() => { close(); pause() })
 watch(() => props.tabId, close, { flush: 'sync' })
-watch(() => currentBot.value?.feishu_avatar_url, () => { avatarFailed.value = false })
+watch(activeAvatarKey, () => { failedAvatarKey.value = null }, { flush: 'sync' })
 </script>
 
 <style scoped>

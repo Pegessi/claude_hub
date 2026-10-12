@@ -20,7 +20,10 @@ expand the accepted conversation or message-type surface.
   but the binding entry did not consume them. The entry, panel and connected
   card now use the official Bot avatar while bound and the bundled Feishu app
   mark otherwise. Source badges use the same brand fallback. Non-HTTPS and
-  broken remote avatar URLs never replace the fallback.
+  broken remote avatar URLs never replace the fallback. Avatar-load failures
+  are keyed by Chat, Bot and URL so a reused pane cannot carry one Bot's failure
+  into another Bot that happens to use the same profile URL; stale image errors
+  are ignored after the identity changes.
 - The external Chat bridge applied a 300-second deadline, cancelled the native
   turn at expiry, then let Feishu send a generic failure reply. WebSocket routes
   already have bounded ownership and shutdown retirement, so normal dispatches
@@ -29,7 +32,16 @@ expand the accepted conversation or message-type surface.
   for callers that opt into it. A dedicated completion subscription also
   receives a process-local failed terminal signal when the durable terminal
   write itself fails; this releases the Feishu FIFO without publishing a
-  non-durable event into the Web timeline.
+  non-durable event into the Web timeline. It also observes structured
+  approval requests: because Feishu cannot answer those Web Chat cards, the
+  bridge stops the turn and replies with an explicit instruction instead of
+  permanently holding the FIFO. The volatile terminal fallback covers failure
+  of either the explanatory error write or the final completion write.
+- Queue-watchdog regression tests keep their production semantics separate:
+  the live-queue cap case still exercises a 250ms cancellation bound, while
+  ready/output paths use a 5s test cap and wait for both durable completion and
+  release of the provider guard. This avoids loaded-runner scheduling races
+  without weakening the cap behavior under test.
 
 ## Current Feishu interaction boundary
 
@@ -69,5 +81,7 @@ Not supported by this bridge:
 Focused backend coverage exercises unbounded default waiting, explicit timeout
 compatibility, safe image previews and oversized-image fallback. Frontend unit
 and browser tests exercise the unbound brand mark, bound Bot avatar, broken
-avatar fallback, and a renderable Feishu timeline attachment. Final command
-results and independent-review findings are recorded in the task handoff.
+avatar fallback, cross-Chat same-URL retry isolation, and a renderable Feishu
+timeline attachment. The three queue-cap/ready-state regressions also pass 40
+consecutive repetitions (120 cases total). Final command results and
+independent-review findings are recorded in the task handoff.
