@@ -6,6 +6,8 @@ import asyncio
 import json
 import math
 import re
+import struct
+import zlib
 from pathlib import Path
 from typing import Any, cast
 
@@ -55,6 +57,16 @@ from claude_hub.services.feishu_bot_pool import (
 )
 
 CONFIRM_RE = re.compile(r"[A-HJ-NP-Z2-9]{6}")
+
+
+def _png(width: int = 1, height: int = 1, pad: int = 0) -> bytes:
+    signature = b"\x89PNG\r\n\x1a\n"
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    ihdr = struct.pack(">I", 13) + b"IHDR" + header
+    ihdr += struct.pack(">I", zlib.crc32(b"IHDR" + header) & 0xFFFFFFFF)
+    iend = struct.pack(">I", 0) + b"IEND"
+    iend += struct.pack(">I", zlib.crc32(b"IEND") & 0xFFFFFFFF)
+    return signature + ihdr + iend + (b"\x00" * pad)
 
 
 # ------------------------------------------------------------------- A. net
@@ -815,7 +827,7 @@ class _Wire:
         self.fail_reaction_create = False
         self.fail_reaction_delete = False
         self.token_calls = 0
-        self.message_images = {("om-post", "img_v3_input"): b"\x89PNG\r\n\x1a\nimage-bytes"}
+        self.message_images = {("om-post", "img_v3_input"): _png(48, 32)}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/tenant_access_token/internal"):
@@ -1026,6 +1038,7 @@ def test_rich_post_dispatches_images_with_official_bot_provenance(
         assert len(attachments) == 1
         assert attachments[0].mime_type == "image/png"
         assert attachments[0].data_url.startswith("data:image/png;base64,")
+        assert attachments[0].preview_is_original is True
         assert (
             dispatched[0]["turn_metadata"]["feishu"]
             | {
@@ -1244,8 +1257,8 @@ def test_coalesced_rich_posts_share_the_native_attachment_budget(
             return "收到"
 
         monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
-        api.wire.message_images[("om-post-1", "img_v3_input")] = b"\x89PNG\r\n\x1a\nfirst"
-        api.wire.message_images[("om-post-2", "img_v3_input")] = b"\x89PNG\r\n\x1a\nsecond"
+        api.wire.message_images[("om-post-1", "img_v3_input")] = _png(10, 10)
+        api.wire.message_images[("om-post-2", "img_v3_input")] = _png(20, 20)
         await asyncio.gather(
             bot_api._handle_sdk_event(
                 bot_id, _post_message("app-1", clock.value, message_id="om-post-1")
@@ -1258,6 +1271,31 @@ def test_coalesced_rich_posts_share_the_native_attachment_budget(
         assert len(dispatched) == 1
         assert len(dispatched[0]) == 1
         assert dispatched[0][0].filename == "feishu-image-1.png"
+
+    asyncio.run(scenario())
+
+
+def test_rich_post_still_dispatches_an_image_outside_preview_bounds(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        api.wire.message_images[("om-post", "img_v3_input")] = _png(8193, 1)
+        dispatched: list[list[Any]] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, attachments, **_kwargs):
+            async with admission_guard():
+                dispatched.append(attachments)
+            return "收到"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        await bot_api._handle_sdk_event(bot_id, _post_message("app-1", clock.value))
+
+        assert len(dispatched) == 1
+        assert len(dispatched[0]) == 1
+        assert dispatched[0][0].preview_is_original is False
+        assert dispatched[0][0].data_url.startswith("data:image/png;base64,")
 
     asyncio.run(scenario())
 
@@ -2388,14 +2426,14 @@ def test_completed_native_turn_is_not_replayed_after_route_cancellation(
         bridge_queue: asyncio.Queue[Any] = asyncio.Queue()
 
         class Manager:
-            async def subscribe(self, _session) -> asyncio.Queue[Any]:
+            async def subscribe_completion(self, _session) -> asyncio.Queue[Any]:
                 await tailer.start()
                 return bridge_queue
 
             async def retire_external_turn(self, _session, expected_turn_id: str):
                 return await tailer.retire_external_turn(expected_turn_id)
 
-            def unsubscribe(self, _session_id: str, _queue: asyncio.Queue[Any]) -> None:
+            def unsubscribe_completion(self, _session_id: str, _queue: asyncio.Queue[Any]) -> None:
                 pass
 
         async def dispatch(

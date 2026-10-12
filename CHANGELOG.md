@@ -16,7 +16,19 @@
 - Keep mixed messages responsive when one image cannot be downloaded or a
   coalesced burst exceeds the shared attachment budget: retain the text and
   image placeholders instead of dropping the whole turn.
+- Persist Feishu image originals as timeline previews only when they fit the
+  existing 8 MiB and 8192px cache boundary, so safe images render in Web Chat
+  while oversized images still reach the model without being cached.
+- Show the Feishu brand mark before pairing and the Feishu-managed Bot avatar
+  after pairing, with the same brand fallback on historical source badges.
+- Let Feishu dispatches follow the real Chat turn to completion instead of
+  cancelling a still-running turn after 300 seconds and replying with a false
+  processing failure. Explicit finite bridge deadlines remain available to
+  bounded internal callers and tests. If durable terminal persistence fails,
+  a process-local completion signal now releases the Feishu FIFO with a real
+  error instead of waiting forever.
 - See the [Feishu rich ingress notes](docs/working-logs/2026-10-12-feishu-rich-ingress.md).
+- See the [Feishu preview and long-turn notes](docs/working-logs/2026-10-12-feishu-preview-identity-and-long-turns.md).
 
 ### fix(chat): keep sent images at full quality in a 1 GiB LRU and show Cursor sub-agent reports
 

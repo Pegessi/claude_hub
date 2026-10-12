@@ -678,6 +678,7 @@ async def test_live_publish_observes_high_level_events_only(manager, workspace):
         _store=store,
         _is_live=True,
         _fanout=Mock(),
+        _fanout_completion=Mock(),
         _task_activity_observer=observer,
         _native_transport=SimpleNamespace(active_thread_id="main-thread"),
     )
@@ -691,6 +692,7 @@ async def test_live_publish_observes_high_level_events_only(manager, workspace):
     assert "_hub_main_thread_id" not in event.payload
     assert store.append.call_args.args[0] is event
     tailer._fanout.assert_called_once_with(event)
+    tailer._fanout_completion.assert_called_once_with(event)
     for event_type in (AgentStreamEventType.TEXT_DELTA, AgentStreamEventType.THINKING_DELTA):
         await SessionTailer._persist_and_fanout(tailer, _observed_event(11, type=event_type))
     assert observer.await_count == 1
@@ -712,12 +714,14 @@ async def test_observer_error_does_not_fail_completion_publish(caplog):
         _store=store,
         _is_live=True,
         _fanout=Mock(),
+        _fanout_completion=Mock(),
         _task_activity_observer=failed_observer,
         _native_transport=SimpleNamespace(active_thread_id="main-thread"),
     )
     await SessionTailer._persist_and_fanout(tailer, event)
     store.append.assert_awaited_once_with(event)
     tailer._fanout.assert_called_once_with(event)
+    tailer._fanout_completion.assert_called_once_with(event)
     assert event.payload == {"status": "completed"}
     assert "RuntimeError" in caplog.text
     assert "private-observer-detail" not in caplog.text

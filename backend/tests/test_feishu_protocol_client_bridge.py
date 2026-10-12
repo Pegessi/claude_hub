@@ -346,11 +346,11 @@ async def test_external_chat_bridge_preserves_feishu_source_metadata(
     unsubscribed: list[tuple[str, object]] = []
 
     class FakeManager:
-        async def subscribe(self, session_arg):
+        async def subscribe_completion(self, session_arg):
             assert session_arg is session
             return queue
 
-        def unsubscribe(self, session_id, queue_arg) -> None:
+        def unsubscribe_completion(self, session_id, queue_arg) -> None:
             unsubscribed.append((session_id, queue_arg))
 
     dispatched: list[tuple[str, str, str, dict[str, object]]] = []
@@ -424,6 +424,113 @@ async def test_external_chat_bridge_preserves_feishu_source_metadata(
 
 
 @pytest.mark.asyncio
+async def test_external_chat_bridge_default_wait_has_no_elapsed_time_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    completed = asyncio.Event()
+
+    class FakeManager:
+        async def subscribe_completion(self, _session_arg):
+            return queue
+
+        async def cancel_turn(self, *_args, **_kwargs):
+            raise AssertionError("the default bridge wait must not cancel a live turn")
+
+        def unsubscribe_completion(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(
+        tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        async def finish_after_the_legacy_deadline() -> None:
+            await completed.wait()
+            await queue.put(
+                AgentStreamEvent(
+                    stream_sequence=1,
+                    session_id=session.id,
+                    tab_id=tab_id,
+                    agent_type=AgentType.CLAUDE,
+                    type=AgentStreamEventType.TURN_COMPLETED,
+                    turn_id=payload.client_turn_id,
+                    payload={"status": "completed", "assistant_text": "late result"},
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+
+        asyncio.create_task(finish_after_the_legacy_deadline())
+        return payload.client_turn_id
+
+    class Clock:
+        def time(self) -> float:
+            raise AssertionError("an unbounded bridge wait must not establish a deadline")
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+    monkeypatch.setattr(stream_api.asyncio, "get_running_loop", lambda: Clock())
+
+    task = asyncio.create_task(
+        stream_api.dispatch_tab_chat_and_wait("tab-1", "provider text", "feishu-turn")
+    )
+    await asyncio.sleep(0)
+    assert not task.done()
+    completed.set()
+    assert await task == "late result"
+
+
+@pytest.mark.asyncio
+async def test_external_chat_bridge_fails_on_volatile_terminal_persistence_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(id="terminal-tab-tab-1")
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+
+    class FakeManager:
+        async def subscribe_completion(self, _session_arg):
+            return queue
+
+        def unsubscribe_completion(self, _session_id, _queue_arg) -> None:
+            pass
+
+    async def fake_dispatch(
+        tab_id: str, payload: stream_api.AgentStreamSendRequest, **_kwargs: object
+    ) -> str:
+        await queue.put(
+            AgentStreamEvent(
+                stream_sequence=-1,
+                session_id=session.id,
+                tab_id=tab_id,
+                agent_type=AgentType.CLAUDE,
+                type=AgentStreamEventType.TURN_COMPLETED,
+                turn_id=payload.client_turn_id,
+                payload={
+                    "status": "failed",
+                    "error_message": (
+                        "Chat turn completed but its final state could not be saved."
+                    ),
+                    "_hub_volatile_terminal_failure": True,
+                },
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        return payload.client_turn_id
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: FakeManager())
+    monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", fake_dispatch)
+
+    with pytest.raises(
+        RuntimeError, match="Chat turn completed but its final state could not be saved"
+    ):
+        await asyncio.wait_for(
+            stream_api.dispatch_tab_chat_and_wait("tab-1", "provider text", "feishu-turn"),
+            timeout=0.5,
+        )
+
+
+@pytest.mark.asyncio
 async def test_external_goal_input_does_not_consume_pending_question(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -479,11 +586,11 @@ async def test_external_chat_bridge_classifies_structured_source_failure(
     session = SimpleNamespace(id="terminal-tab-tab-1")
 
     class FailedManager:
-        async def subscribe(self, session_arg):
+        async def subscribe_completion(self, session_arg):
             assert session_arg is session
             raise stream_api.StructuredSourceUnavailable("native source unavailable")
 
-        def unsubscribe(self, _session_id, _queue_arg) -> None:
+        def unsubscribe_completion(self, _session_id, _queue_arg) -> None:
             raise AssertionError("a failed subscription must not be unsubscribed")
 
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
@@ -514,10 +621,10 @@ async def test_external_chat_bridge_preserves_unknown_conflict(
     unsubscribed: list[tuple[str, object]] = []
 
     class FakeManager:
-        async def subscribe(self, _session_arg):
+        async def subscribe_completion(self, _session_arg):
             return queue
 
-        def unsubscribe(self, session_id, queue_arg) -> None:
+        def unsubscribe_completion(self, session_id, queue_arg) -> None:
             unsubscribed.append((session_id, queue_arg))
 
     async def conflict(_tab_id, _payload, **_kwargs) -> str:
@@ -553,7 +660,7 @@ async def test_external_chat_bridge_cancellation_stops_the_matching_native_turn(
     unsubscribed: list[tuple[str, object]] = []
 
     class FakeManager:
-        async def subscribe(self, session_arg):
+        async def subscribe_completion(self, session_arg):
             assert session_arg is session
             return queue
 
@@ -561,7 +668,7 @@ async def test_external_chat_bridge_cancellation_stops_the_matching_native_turn(
             cancelled.append((session_arg, expected_turn_id))
             return ExternalTurnRetirement.CANCELLED_MATCHING
 
-        def unsubscribe(self, session_id, queue_arg) -> None:
+        def unsubscribe_completion(self, session_id, queue_arg) -> None:
             unsubscribed.append((session_id, queue_arg))
 
     async def fake_dispatch(
@@ -599,14 +706,14 @@ async def test_external_chat_bridge_cancellation_releases_when_turn_never_starte
     dispatched = asyncio.Event()
 
     class FakeManager:
-        async def subscribe(self, _session_arg):
+        async def subscribe_completion(self, _session_arg):
             return queue
 
         async def retire_external_turn(self, _session_arg, expected_turn_id=None):
             assert expected_turn_id == "feishu-turn"
             return ExternalTurnRetirement.NOT_STARTED
 
-        def unsubscribe(self, _session_id, _queue_arg) -> None:
+        def unsubscribe_completion(self, _session_id, _queue_arg) -> None:
             pass
 
     async def fake_dispatch(
@@ -649,14 +756,14 @@ async def test_external_chat_bridge_cancellation_preserves_non_retryable_turns(
     dispatched = asyncio.Event()
 
     class FakeManager:
-        async def subscribe(self, _session_arg):
+        async def subscribe_completion(self, _session_arg):
             return queue
 
         async def retire_external_turn(self, _session_arg, expected_turn_id=None):
             assert expected_turn_id == "feishu-turn"
             return retirement
 
-        def unsubscribe(self, _session_id, _queue_arg) -> None:
+        def unsubscribe_completion(self, _session_id, _queue_arg) -> None:
             pass
 
     async def fake_dispatch(
@@ -692,14 +799,14 @@ async def test_external_chat_bridge_cancellation_times_out_a_stalled_native_stop
     dispatched = asyncio.Event()
 
     class FakeManager:
-        async def subscribe(self, _session_arg):
+        async def subscribe_completion(self, _session_arg):
             return queue
 
         async def retire_external_turn(self, _session_arg, expected_turn_id=None):
             assert expected_turn_id == "feishu-turn"
             await asyncio.Future()
 
-        def unsubscribe(self, _session_id, _queue_arg) -> None:
+        def unsubscribe_completion(self, _session_id, _queue_arg) -> None:
             pass
 
     async def fake_dispatch(

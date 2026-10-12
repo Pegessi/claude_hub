@@ -27,6 +27,7 @@ from claude_hub.auth.dependencies import get_current_user
 from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services import ttyd_manager, workspace_manager
+from claude_hub.services.agent_stream.attachments import preview_within_cache_bounds
 from claude_hub.services.agent_stream.turn_source import (
     FEISHU_PROVIDER_TEXT_FORMAT_V2,
     format_feishu_provider_text_v2,
@@ -904,6 +905,7 @@ async def _event_attachments(
                 filename=f"feishu-image-{index}.{mime_type.split('/', 1)[1]}",
                 mime_type=mime_type,
                 data_url=f"data:{mime_type};base64,{encoded}",
+                preview_is_original=preview_within_cache_bounds(mime_type, content),
             )
         )
         used_bytes += len(content)

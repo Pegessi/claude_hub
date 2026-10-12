@@ -15,20 +15,13 @@
       :aria-expanded="open"
       @click="toggle"
     >
-      <svg
+      <img
         class="trigger-icon"
-        viewBox="0 0 24 24"
-        fill="none"
-        aria-hidden="true"
+        :src="identityImageUrl"
+        alt=""
+        data-testid="feishu-binding-identity"
+        @error="useBrandFallback"
       >
-        <path
-          d="m9.25 14.75-1.4 1.4a3.2 3.2 0 0 1-4.5-4.5l2.3-2.3a3.2 3.2 0 0 1 4.5 0m4.6-.1 1.4-1.4a3.2 3.2 0 0 1 4.5 4.5l-2.3 2.3a3.2 3.2 0 0 1-4.5 0m-3.7-3.7 3.7-3.7"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
       <span
         class="status-dot"
         aria-hidden="true"
@@ -49,7 +42,13 @@
           <span
             class="panel-mark"
             aria-hidden="true"
-          >飞</span>
+          >
+            <img
+              :src="identityImageUrl"
+              alt=""
+              @error="useBrandFallback"
+            >
+          </span>
           <div>
             <strong>Feishu connection</strong>
             <p>Connect this Chat to a shared Bot.</p>
@@ -109,14 +108,15 @@
 
       <template v-else-if="viewState === 'bound-current' && currentBot && binding">
         <section class="connected-card">
-          <div
+          <img
             class="connected-card__icon"
+            :src="identityImageUrl"
+            alt=""
             aria-hidden="true"
+            @error="useBrandFallback"
           >
-            ✓
-          </div>
           <div>
-            <strong>{{ currentBot.name }}</strong>
+            <strong>{{ currentBot.feishu_name || currentBot.name }}</strong>
             <p>New private messages enter this Chat.</p>
           </div>
         </section>
@@ -274,8 +274,9 @@
 </template>
 
 <script setup lang="ts">
-import { onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useFeishuBinding } from '@/composables/useFeishuBinding'
+import { feishuLogoUrl, trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
 import { writeClipboard } from '@/utils/clipboard'
 
 const props = defineProps<{ tabId: string }>()
@@ -283,13 +284,23 @@ const root = ref<HTMLElement | null>(null)
 const open = ref(false)
 const copyError = ref<string | null>(null)
 const confirmDisconnect = ref(false)
+const avatarFailed = ref(false)
 const {
   bots, binding, currentBot, selectedBotId, selectedBot, pendingCode, claim, confirmWord, error,
   needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, refresh, selectBot,
   generateCode, activate, disconnect, resume, pause,
 } = useFeishuBinding(toRef(props, 'tabId'))
+const identityImageUrl = computed(() => {
+  if (viewState.value !== 'bound-current' || avatarFailed.value) return feishuLogoUrl
+  return trustedFeishuAvatarUrl(currentBot.value?.feishu_avatar_url) ?? feishuLogoUrl
+})
 
 function choose(event: Event) { selectBot((event.target as HTMLSelectElement).value) }
+function useBrandFallback(event: Event) {
+  avatarFailed.value = true
+  const image = event.currentTarget as HTMLImageElement
+  if (image.src !== new URL(feishuLogoUrl, window.location.href).href) image.src = feishuLogoUrl
+}
 function toggle() { if (open.value) close(); else open.value = true }
 function close() {
   open.value = false
@@ -326,6 +337,7 @@ onUnmounted(() => {
 onActivated(() => { void resume() })
 onDeactivated(() => { close(); pause() })
 watch(() => props.tabId, close, { flush: 'sync' })
+watch(() => currentBot.value?.feishu_avatar_url, () => { avatarFailed.value = false })
 </script>
 
 <style scoped>
@@ -367,7 +379,7 @@ watch(() => props.tabId, close, { flush: 'sync' })
   box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
-.trigger-icon { width: 14px; height: 14px; }
+.trigger-icon { width: 18px; height: 18px; border-radius: 5px; object-fit: cover; }
 .status-dot {
   position: absolute;
   top: 3px;
@@ -417,11 +429,9 @@ watch(() => props.tabId, close, { flush: 'sync' })
   height: 30px;
   flex: 0 0 30px;
   border-radius: var(--ch-radius-md);
-  background: var(--ch-color-accent-soft);
-  color: var(--ch-color-accent);
-  font-size: 14px;
-  font-weight: 700;
+  overflow: hidden;
 }
+.panel-mark img { width: 100%; height: 100%; object-fit: cover; }
 .close-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 
 .connection-status {
@@ -481,7 +491,7 @@ watch(() => props.tabId, close, { flush: 'sync' })
 .confirmation-input { text-transform: uppercase; font-family: var(--ch-font-mono); font-weight: 700; letter-spacing: .14em; }
 
 .connected-card { align-items: center; gap: 10px; margin-bottom: 14px; padding: 12px; border: 1px solid color-mix(in srgb, var(--ch-color-success) 35%, var(--ch-color-border)); border-radius: var(--ch-radius-md); background: var(--ch-color-success-bg); }
-.connected-card__icon { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: 0 0 24px; border-radius: 50%; background: var(--ch-color-success); color: var(--ch-color-text-inverse); font-size: 12px; font-weight: 700; }
+.connected-card__icon { width: 28px; height: 28px; flex: 0 0 28px; border-radius: var(--ch-radius-md); object-fit: cover; }
 .connected-card strong { display: block; margin-bottom: 2px; color: var(--ch-color-text-strong); font-size: var(--ch-font-size-sm); }
 .connection-details { display: grid; gap: 8px; margin: 0 0 14px; padding: 0 2px; }
 .connection-details div { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 8px; }
