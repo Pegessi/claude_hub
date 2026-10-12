@@ -13,7 +13,9 @@
 - `task register` and initiator `task handoff` store the reporter key at
   `~/.claude_hub/reporter-keys/<task-id>.key` when no key file is given;
   `task progress` finds it by Task ID and `task context` shows the path, so a
-  later thread can still report completion.
+  later thread can still report completion. A retry that reuses a key keeps it
+  even when the Hub rejects the retry, because an earlier attempt may have
+  bound it.
 
 ### perf(mobile): hold working-session light while the drawer is shut or dragged
 
