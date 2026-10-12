@@ -424,7 +424,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import {
   createFeishuBot, deleteFeishuBot, FeishuBotRequestError,
@@ -444,8 +444,59 @@ const create = reactive({ name: '', app_id: '', app_secret: '' })
 const selected = computed(() => store.botById(selectedId.value))
 const secretComplete = computed(() => !!appSecret.value)
 const createComplete = computed(() => Object.values(create).every(Boolean))
+const CONNECTION_REFRESH_MS = 2_000
 let viewEpoch = 0
 let closed = false
+let connectionRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let connectionRefreshController: AbortController | null = null
+
+function awaitingConnectionUpdate(): boolean {
+  return store.bots.some(bot => bot.enabled && bot.configured
+    && (bot.connection_status === 'connecting' || bot.connection_status === 'failed'))
+}
+function stopConnectionRefresh() {
+  if (connectionRefreshTimer !== null) {
+    clearTimeout(connectionRefreshTimer)
+    connectionRefreshTimer = null
+  }
+  connectionRefreshController?.abort()
+  connectionRefreshController = null
+}
+function queueConnectionRefresh() {
+  connectionRefreshTimer = null
+  void refreshConnectionStatuses()
+}
+function syncConnectionRefresh() {
+  if (closed || !awaitingConnectionUpdate()) {
+    stopConnectionRefresh()
+    return
+  }
+  if (connectionRefreshTimer === null && connectionRefreshController === null) {
+    connectionRefreshTimer = setTimeout(queueConnectionRefresh, CONNECTION_REFRESH_MS)
+  }
+}
+async function refreshConnectionStatuses() {
+  if (closed || busy.value || store.loading || !awaitingConnectionUpdate()) {
+    syncConnectionRefresh()
+    return
+  }
+  const controller = new AbortController()
+  connectionRefreshController = controller
+  try {
+    await store.refresh(controller.signal)
+  } finally {
+    if (connectionRefreshController === controller) connectionRefreshController = null
+    syncConnectionRefresh()
+  }
+}
+
+watch(
+  () => store.bots.map(bot => [
+    bot.bot_id, bot.enabled, bot.configured, bot.connection_status,
+  ].join(':')).join('|'),
+  syncConnectionRefresh,
+  { immediate: true },
+)
 
 function occupancy(bot: FeishuBotSummary) {
   if (bot.binding) return `In use by Chat ${bot.binding.tab_id}`
@@ -560,6 +611,7 @@ async function removeBot() {
 }
 function clearLocalState() {
   closed = true; viewEpoch += 1; busy.value = false
+  stopConnectionRefresh()
   clearSecrets(); clearCreate()
 }
 function close() { clearLocalState(); emit('close') }

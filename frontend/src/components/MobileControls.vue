@@ -2,6 +2,7 @@
   <div
     v-if="isMobile"
     class="mobile-controls-overlay"
+    data-drawer-swipe-ignore
   >
     <Transition name="mobile-controls-panel">
       <div
@@ -455,7 +456,7 @@ onUnmounted(() => {
 
 .control-btn.active:active,
 .control-btn.active.pressed {
-  background-color: var(--ch-color-accent-hover);
+  background-color: var(--ch-color-accent-fill-hover);
   border-color: var(--ch-color-accent-strong);
 }
 

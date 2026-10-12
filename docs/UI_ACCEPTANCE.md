@@ -80,6 +80,11 @@ budgets remain 10s/12s. A scaled functional pass is not proof of an unscaled
 performance goal; keep that condition visible in the handoff.
 
 Other deliberate boundaries:
+- `browser_chat_queue_activation.py` is not in the owner's runner list. It
+  manages its own browser and emits only a business report, so the owner --
+  which requires lifecycle evidence and recorded cleanup -- cannot adopt it
+  as is. It passes when run directly. Converting it to `run_browser_main`
+  would bring it into the gate; until then it is not enforced.
 - Terminal replay is a blocking CI job with a `terminal-replay` verify
   target, after its width and shell assumptions were fixed.
 - `test_terminal_input_latency_perf.py` is a documented, on-demand measurement,

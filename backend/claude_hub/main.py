@@ -86,6 +86,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Startup
         logger.info("Starting Claude Hub Backend")
         try:
+            from .services.feishu_bot_websocket import prewarm_lark_sdk
+
+            prewarm_lark_sdk()
+        except Exception:
+            logger.exception("Feishu Bot SDK prewarm failed to start")
+        try:
             from .services.goal_run import get_goal_manager
 
             recovered = get_goal_manager().recover()

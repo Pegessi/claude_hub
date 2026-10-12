@@ -11,7 +11,7 @@ const source = readFileSync(
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 })
-const { groupChatsByCwd, cwdLabel, buildChatSidebarGroups, moveTabById, canDropChatInGroup, parsePinnedChatIds } = await import(
+const { groupChatsByCwd, cwdLabel, buildChatSidebarGroups, moveCwdGroup, moveTabById, canDropChatInGroup, parsePinnedChatIds } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
 
@@ -52,6 +52,15 @@ test('groupChatsByCwd preserves first directory appearance', () => {
     makeTab({ id: 'b', cwd: '/new-repo', created_at: '2026-09-01T00:00:00Z' }),
   ])
   assert.deepEqual(groups.map(g => g.cwd), ['/old-repo', '/new-repo'])
+})
+
+test('groupChatsByCwd can follow the Chat workspace order and append terminal-only groups', () => {
+  const groups = groupChatsByCwd([
+    makeTab({ id: 'terminal-only', cwd: '/terminal-only', session_kind: 'terminal' }),
+    makeTab({ id: 'chat-b', cwd: '/b' }),
+    makeTab({ id: 'chat-a', cwd: '/a' }),
+  ], ['/a', '/b'])
+  assert.deepEqual(groups.map(group => group.cwd), ['/a', '/b', '/terminal-only'])
 })
 
 test('groupChatsByCwd buckets tabs without a cwd into the "No directory" sentinel', () => {
@@ -114,14 +123,30 @@ test('active session beyond the preview replaces the sixth row and remains visib
   assert.equal(folded.collapsed, true)
 })
 
-test('pinned sessions are always expanded, excluded from normal groups, and keep persisted order', () => {
+test('pinned sessions start expanded, are excluded from normal groups, and keep persisted order', () => {
   const tabs = sessions(12)
   const pins = new Set(ids(tabs.slice(2, 10)).reverse())
   const groups = buildChatSidebarGroups(tabs, pins, sidebarOptions({ collapsed: new Set(['/repo']) }))
   assert.equal(groups[0].pinned, true)
+  assert.equal(groups[0].collapsed, false)
   assert.deepEqual(ids(groups[0].visibleTabs), ids(tabs.slice(2, 10)))
   assert.equal(groups[0].hiddenCount, 0)
   assert.deepEqual(ids(groups[1].tabs), ['tab-0', 'tab-1', 'tab-10', 'tab-11'])
+})
+
+test('a folded pinned section keeps its count and only the active pinned row, and search unfolds it', () => {
+  const tabs = sessions(6)
+  const pins = new Set(['tab-1', 'tab-3', 'tab-4'])
+  const folded = buildChatSidebarGroups(tabs, pins, sidebarOptions({ pinnedCollapsed: true }))[0]
+  assert.equal(folded.collapsed, true)
+  assert.deepEqual(folded.visibleTabs, [])
+  assert.equal(folded.tabs.length, 3)
+  assert.equal(folded.hiddenCount, 3)
+  const withActive = buildChatSidebarGroups(tabs, pins, sidebarOptions({ pinnedCollapsed: true, activeTabId: 'tab-3' }))[0]
+  assert.deepEqual(ids(withActive.visibleTabs), ['tab-3'])
+  const searched = buildChatSidebarGroups(tabs, pins, sidebarOptions({ pinnedCollapsed: true, query: 'Session' }))[0]
+  assert.equal(searched.collapsed, false)
+  assert.deepEqual(ids(searched.visibleTabs), ['tab-1', 'tab-3', 'tab-4'])
 })
 
 test('search reaches hidden and folded sessions by name and full directory path', () => {
@@ -158,6 +183,25 @@ test('moveTabById ignores deleted sources, deleted targets, self drops, and unch
     ['missing', 'tab-1', 'before'], ['tab-1', 'missing', 'after'],
     ['tab-1', 'tab-1', 'after'], ['tab-0', 'tab-1', 'before'],
   ]) assert.equal(moveTabById(tabs, source, target, position), tabs)
+})
+
+test('moveCwdGroup moves a whole workspace block and retains its internal tab order', () => {
+  const tabs = [
+    makeTab({ id: 'a-chat', cwd: '/a' }),
+    makeTab({ id: 'b-chat', cwd: '/b' }),
+    makeTab({ id: 'a-terminal', cwd: '/a', session_kind: 'terminal' }),
+    makeTab({ id: 'c-chat', cwd: '/c' }),
+  ]
+  assert.deepEqual(
+    ids(moveCwdGroup(tabs, '/a', '/c', 'after')),
+    ['b-chat', 'c-chat', 'a-chat', 'a-terminal'],
+  )
+  assert.deepEqual(
+    ids(moveCwdGroup(tabs, '/c', '/a', 'before')),
+    ['c-chat', 'a-chat', 'a-terminal', 'b-chat'],
+  )
+  assert.equal(moveCwdGroup(tabs, '/a', '/a', 'after'), tabs)
+  assert.equal(moveCwdGroup(tabs, '/missing', '/a', 'before'), tabs)
 })
 
 test('filtered drag IDs retain unrelated sessions and resolve against concurrently inserted rows', () => {

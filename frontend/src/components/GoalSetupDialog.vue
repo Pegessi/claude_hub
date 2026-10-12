@@ -138,7 +138,7 @@ textarea { resize: vertical; }
 .goal-dialog-error { color: var(--ch-color-danger, #e5484d); }
 .goal-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 button { padding: 7px 12px; color: var(--ch-color-text); background: transparent; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-sm); cursor: pointer; }
-button.primary { color: white; background: var(--ch-color-accent); border-color: var(--ch-color-accent); }
+button.primary { color: white; background: var(--ch-color-accent-strong); border-color: var(--ch-color-accent-strong); }
 button:disabled { cursor: default; opacity: .55; }
 textarea:focus-visible, button:focus-visible { outline: 2px solid var(--ch-color-accent-ring); outline-offset: 2px; }
 @media (max-width: 640px), (pointer: coarse) { button { min-height: 44px; } }

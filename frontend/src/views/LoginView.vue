@@ -93,7 +93,7 @@ function handleLogin() {
 
 .feishu-login-btn:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 8px 20px var(--ch-color-accent-ring);
+  box-shadow: 0 8px 20px var(--ch-color-accent-halo);
 }
 
 .feishu-login-btn:active:not(:disabled) {
@@ -102,7 +102,7 @@ function handleLogin() {
 
 .feishu-login-btn:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px var(--ch-color-accent-ring), 0 8px 20px var(--ch-color-accent-ring);
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring), 0 8px 20px var(--ch-color-accent-halo);
 }
 
 .feishu-icon {

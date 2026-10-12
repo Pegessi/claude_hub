@@ -218,6 +218,10 @@ async def main(browser_run: BrowserRun) -> None:
                 body = []
             elif method == "GET" and path == "/api/tabs/archived":
                 body = []
+            elif path.startswith("/api/tabs/sidebar-preferences"):
+                # Read, one-shot pin migration and per-tab pin updates all
+                # return the same shape; the composer never depends on pins.
+                body = {"pinned_tab_ids": []}
             elif method == "GET" and path == "/api/tabs/status":
                 # Background poll; the store iterates it, so it must be a list.
                 body = []

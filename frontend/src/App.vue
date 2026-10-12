@@ -101,9 +101,13 @@
       >
         <ChatSidebar
           class="terminal-sidebar"
+          :swipe-surface="terminalMainColumn"
           @open-archive="archivePanelOpen = true"
         />
-        <div class="terminal-main-column">
+        <div
+          ref="terminalMainColumn"
+          class="terminal-main-column"
+        >
           <TabBar v-if="isMobile" />
           <LayoutSelector />
           <div
@@ -177,6 +181,7 @@ const {
   scheduledTaskCreateRequest,
 } = storeToRefs(appStore)
 const archivePanelOpen = ref(false)
+const terminalMainColumn = ref<HTMLElement | null>(null)
 const { isMobile } = useViewport()
 
 // Clear all error-type notifications from the terminal store toast stack.
@@ -487,38 +492,54 @@ onUnmounted(() => {
   --visual-viewport-offset-top: 0px;
   --mobile-controls-viewport-shift: 0px;
   --keyboard-height: 0px;
-  --ch-color-app-bg: #1b1b1b;
-  --ch-color-canvas: #191919;
-  --ch-color-surface: #1f1f1f;
-  --ch-color-surface-raised: #222222;
-  --ch-color-surface-soft: #242424;
-  --ch-color-surface-muted: #252525;
-  --ch-color-surface-control: #272727;
-  --ch-color-surface-control-hover: #2e2e2e;
-  --ch-color-surface-control-active: #2a2a2a;
-  --ch-color-surface-pressed: #333333;
+  /* Maso-inspired carbon chrome: surfaces stay close and quiet, while the
+     current context uses the same clear blue family as Maso's main theme. */
+  --ch-color-app-bg: #1b1b1c;
+  --ch-color-main-bg: #181818;
+  --ch-color-sidebar-bg: #1c1c1c;
+  --ch-color-canvas: #171718;
+  --ch-color-surface: #1d1d1f;
+  --ch-color-surface-raised: #242426;
+  --ch-color-surface-soft: #202022;
+  --ch-color-surface-muted: #252527;
+  --ch-color-surface-control: #29292c;
+  --ch-color-surface-control-hover: #313135;
+  --ch-color-surface-control-active: #38383d;
+  --ch-color-surface-pressed: #414147;
   --ch-color-surface-selected: #2a2f36;
-  --ch-color-surface-sunken: #171717;
-  --ch-color-surface-glass: rgba(25, 25, 25, 0.96);
-  --ch-color-overlay: rgba(0, 0, 0, 0.6);
-  --ch-color-overlay-soft: rgba(0, 0, 0, 0.5);
-  --ch-color-border: #2a2a2a;
-  --ch-color-border-muted: #262626;
-  --ch-color-border-strong: #333333;
-  --ch-color-border-hover: #3f3f3f;
-  --ch-color-text: #e8e8e8;
-  --ch-color-text-strong: #f5f5f5;
-  --ch-color-text-muted: #9a9a9a;
-  --ch-color-text-subtle: #6e6e6e;
-  --ch-color-text-soft: #808080;
+  --ch-color-surface-sunken: #151516;
+  --ch-color-surface-glass: rgba(29, 29, 31, 0.97);
+  --ch-color-overlay: rgba(0, 0, 0, 0.68);
+  --ch-color-overlay-soft: rgba(0, 0, 0, 0.56);
+  --ch-color-border: #2f2f33;
+  --ch-color-border-muted: #28282c;
+  --ch-color-border-strong: #3a3a40;
+  --ch-color-border-hover: #4a4a52;
+  --ch-color-border-selected: #5a9cf0;
+  --ch-color-text: #ececef;
+  --ch-color-text-strong: #f9f9fa;
+  --ch-color-text-muted: #adadb5;
+  --ch-color-text-subtle: #88888f;
+  --ch-color-text-soft: #9a9aa2;
+  --ch-color-text-selected: #eef6ff;
   --ch-color-text-inverse: #ffffff;
-  --ch-color-text-code: #e0e0e0;
+  --ch-color-text-code: #dedee3;
   --ch-color-accent: #7cb7ff;
-  --ch-color-accent-strong: #5a9cf0;
+  --ch-color-accent-strong: #3276ba;
   --ch-color-accent-hover: #4a8ce0;
+  --ch-color-accent-fill-hover: #3478bb;
   --ch-color-accent-soft: rgba(90, 156, 240, 0.16);
-  --ch-color-accent-ring: rgba(124, 183, 255, 0.18);
-  --ch-color-accent-ring-strong: rgba(124, 183, 255, 0.5);
+  --ch-color-accent-ring: #7cb7ff;
+  --ch-color-accent-halo: rgba(90, 156, 240, 0.3);
+  --ch-color-accent-ring-strong: rgba(124, 183, 255, 0.58);
+  --ch-color-session-glow: #5a9cf0;
+  --ch-color-session-glow-strong: #9acbff;
+  --ch-color-session-star: #eaf4ff;
+  --ch-color-session-star-halo: rgba(124, 183, 255, 0.6);
+  --ch-color-message-user-bg: #3276ba;
+  --ch-color-message-user-muted: #f7fafc;
+  --ch-color-message-user-focus: #ffffff;
+  --ch-color-message-user-error: #fffafa;
   --ch-color-success: #4ade80;
   --ch-color-success-strong: #22c55e;
   --ch-color-success-hover: #16a34a;
@@ -538,13 +559,13 @@ onUnmounted(() => {
   --ch-color-danger-text: #fca5a5;
   --ch-color-discovery-bg: rgba(183, 148, 224, 0.1);
   --ch-color-discovery-border: rgba(183, 148, 224, 0.3);
-  --ch-color-chip-bg: rgba(255, 255, 255, 0.06);
-  --ch-color-chip-bg-muted: rgba(255, 255, 255, 0.04);
-  --ch-color-row-hover: rgba(255, 255, 255, 0.04);
-  --ch-shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.36);
-  --ch-shadow-dialog: 0 20px 60px rgba(0, 0, 0, 0.4);
-  --ch-shadow-soft: 0 2px 12px rgba(0, 0, 0, 0.3);
-  --ch-shadow-color-soft: rgba(0, 0, 0, 0.25);
+  --ch-color-chip-bg: rgba(240, 240, 244, 0.075);
+  --ch-color-chip-bg-muted: rgba(240, 240, 244, 0.045);
+  --ch-color-row-hover: rgba(240, 240, 244, 0.06);
+  --ch-shadow-popover: 0 14px 36px rgba(0, 0, 0, 0.46), 0 0 0 1px rgba(255, 255, 255, 0.02);
+  --ch-shadow-dialog: 0 24px 72px rgba(0, 0, 0, 0.5);
+  --ch-shadow-soft: 0 3px 14px rgba(0, 0, 0, 0.34);
+  --ch-shadow-color-soft: rgba(0, 0, 0, 0.3);
   --ch-radius-sm: 4px;
   --ch-radius-md: 6px;
   --ch-radius-lg: 8px;
@@ -555,19 +576,19 @@ onUnmounted(() => {
   --ch-motion-standard: 160ms cubic-bezier(0.2, 0, 0, 1);
   --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.15);
   --ch-shadow-button-hover: 0 2px 8px rgba(0, 0, 0, 0.2);
-  --ch-shadow-button-primary: 0 1px 4px rgba(90, 156, 240, 0.3);
+  --ch-shadow-button-primary: 0 1px 6px rgba(50, 118, 186, 0.4);
   --ch-font-size-xs: 11px;
   --ch-font-size-sm: 12px;
   --ch-font-size-base: 13px;
   --ch-font-size-md: 13px;
   --ch-font-size-lg: 14px;
-  --ch-tab-fade-start: #1f1f1f;
-  --ch-tab-fade-end: rgba(31, 31, 31, 0);
-  --ch-terminal-bg: #1f1f1f;
+  --ch-tab-fade-start: #1d1d1f;
+  --ch-tab-fade-end: rgba(29, 29, 31, 0);
+  --ch-terminal-bg: #1b1b1c;
   --ch-terminal-canvas-filter: none;
   --ch-terminal-fg: #e5e7eb;
   --ch-terminal-cursor: #f4f4f5;
-  --ch-terminal-selection: rgba(96, 165, 250, 0.28);
+  --ch-terminal-selection: rgba(90, 156, 240, 0.3);
   --ch-terminal-black: #1f2937;
   --ch-terminal-red: #c26b6b;
   --ch-terminal-green: #4f8f63;
@@ -607,37 +628,54 @@ onUnmounted(() => {
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --ch-color-app-bg: #f5f5f3;
-  --ch-color-canvas: #f8f8f6;
-  --ch-color-surface: #fbfbfa;
-  --ch-color-surface-raised: #fdfdfc;
-  --ch-color-surface-soft: #f0f0ee;
-  --ch-color-surface-muted: #ebebe8;
-  --ch-color-surface-control: #f0f0ee;
-  --ch-color-surface-control-hover: #e6e6e3;
-  --ch-color-surface-control-active: #dededb;
-  --ch-color-surface-pressed: #d6d6d2;
-  --ch-color-surface-selected: #f2f4f7;
-  --ch-color-surface-sunken: #eeeeec;
-  --ch-color-surface-glass: rgba(251, 251, 250, 0.96);
-  --ch-color-overlay: rgba(24, 24, 24, 0.4);
-  --ch-color-overlay-soft: rgba(24, 24, 24, 0.3);
-  --ch-color-border: #e0e0dc;
-  --ch-color-border-muted: #e8e8e5;
-  --ch-color-border-strong: #d0d0cb;
-  --ch-color-border-hover: #b8b8b2;
-  --ch-color-text: #2a2a2a;
-  --ch-color-text-strong: #181818;
-  --ch-color-text-muted: #6a6a6a;
-  --ch-color-text-subtle: #969690;
-  --ch-color-text-soft: #787872;
-  --ch-color-text-code: #242424;
-  --ch-color-accent: #4a8ce0;
-  --ch-color-accent-strong: #3a7cd0;
-  --ch-color-accent-hover: #2a6cc0;
-  --ch-color-accent-soft: rgba(74, 140, 224, 0.12);
-  --ch-color-accent-ring: rgba(74, 140, 224, 0.16);
-  --ch-color-accent-ring-strong: rgba(74, 140, 224, 0.4);
+  /* Light keeps the same neutral geometry with a muted clay-orange
+     interaction family, separated from saturated amber warnings and red errors. */
+  --ch-color-app-bg: #f4f4f5;
+  --ch-color-main-bg: #ffffff;
+  --ch-color-sidebar-bg: #f5f5f5;
+  --ch-color-canvas: #f0f0f2;
+  --ch-color-surface: #fafafa;
+  --ch-color-surface-raised: #ffffff;
+  --ch-color-surface-soft: #f4f5f6;
+  --ch-color-surface-muted: #e8eaed;
+  --ch-color-surface-control: #f0f1f3;
+  --ch-color-surface-control-hover: #e4e7ea;
+  --ch-color-surface-control-active: #d9dde1;
+  --ch-color-surface-pressed: #cdd2d7;
+  --ch-color-surface-selected: #f4eae3;
+  --ch-color-surface-sunken: #e9ebee;
+  --ch-color-surface-glass: rgba(251, 251, 252, 0.97);
+  --ch-color-overlay: rgba(32, 30, 27, 0.42);
+  --ch-color-overlay-soft: rgba(32, 30, 27, 0.32);
+  --ch-color-border: #d6d9dd;
+  --ch-color-border-muted: #e1e3e6;
+  --ch-color-border-strong: #c5c9ce;
+  --ch-color-border-hover: #9ca3ab;
+  --ch-color-border-selected: #a9795d;
+  --ch-color-text: #25282d;
+  --ch-color-text-strong: #15171a;
+  --ch-color-text-muted: #5e646c;
+  --ch-color-text-subtle: #6a7079;
+  --ch-color-text-soft: #62686f;
+  --ch-color-text-selected: #523622;
+  --ch-color-text-inverse: #ffffff;
+  --ch-color-text-code: #1d2329;
+  --ch-color-accent: #976549;
+  --ch-color-accent-strong: #82533a;
+  --ch-color-accent-hover: #86583f;
+  --ch-color-accent-fill-hover: #754a33;
+  --ch-color-accent-soft: rgba(151, 101, 73, 0.1);
+  --ch-color-accent-ring: #976549;
+  --ch-color-accent-halo: rgba(151, 101, 73, 0.2);
+  --ch-color-accent-ring-strong: rgba(151, 101, 73, 0.46);
+  --ch-color-session-glow: #a9795d;
+  --ch-color-session-glow-strong: #c69b82;
+  --ch-color-session-star: #8a5a40;
+  --ch-color-session-star-halo: rgba(198, 155, 130, 0.26);
+  --ch-color-message-user-bg: #82533a;
+  --ch-color-message-user-muted: #e4d9d4;
+  --ch-color-message-user-focus: #ffffff;
+  --ch-color-message-user-error: #ffdada;
   --ch-color-success: #16a34a;
   --ch-color-success-strong: #15803d;
   --ch-color-success-hover: #166534;
@@ -657,13 +695,13 @@ onUnmounted(() => {
   --ch-color-danger-text: #991b1b;
   --ch-color-discovery-bg: #eae4f0;
   --ch-color-discovery-border: #c0b4d0;
-  --ch-color-chip-bg: rgba(38, 38, 38, 0.05);
-  --ch-color-chip-bg-muted: rgba(38, 38, 38, 0.03);
-  --ch-color-row-hover: rgba(38, 38, 38, 0.04);
-  --ch-shadow-popover: 0 12px 32px rgba(24, 24, 24, 0.1);
-  --ch-shadow-dialog: 0 20px 60px rgba(24, 24, 24, 0.12);
-  --ch-shadow-soft: 0 2px 12px rgba(24, 24, 24, 0.07);
-  --ch-shadow-color-soft: rgba(24, 24, 24, 0.07);
+  --ch-color-chip-bg: rgba(37, 40, 45, 0.06);
+  --ch-color-chip-bg-muted: rgba(37, 40, 45, 0.04);
+  --ch-color-row-hover: rgba(37, 40, 45, 0.055);
+  --ch-shadow-popover: 0 14px 36px rgba(32, 30, 27, 0.13), 0 0 0 1px rgba(32, 30, 27, 0.02);
+  --ch-shadow-dialog: 0 24px 72px rgba(32, 30, 27, 0.16);
+  --ch-shadow-soft: 0 3px 14px rgba(32, 30, 27, 0.09);
+  --ch-shadow-color-soft: rgba(32, 30, 27, 0.08);
   --ch-radius-sm: 4px;
   --ch-radius-md: 6px;
   --ch-radius-lg: 8px;
@@ -674,19 +712,19 @@ onUnmounted(() => {
   --ch-motion-standard: 160ms cubic-bezier(0.2, 0, 0, 1);
   --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.06);
   --ch-shadow-button-hover: 0 2px 8px rgba(0, 0, 0, 0.1);
-  --ch-shadow-button-primary: 0 1px 4px rgba(74, 140, 224, 0.25);
+  --ch-shadow-button-primary: 0 1px 5px rgba(130, 83, 58, 0.24);
   --ch-font-size-xs: 11px;
   --ch-font-size-sm: 12px;
   --ch-font-size-base: 13px;
   --ch-font-size-md: 13px;
   --ch-font-size-lg: 14px;
-  --ch-tab-fade-start: #fbfbfa;
-  --ch-tab-fade-end: rgba(251, 251, 250, 0);
-  --ch-terminal-bg: #f6f6f4;
+  --ch-tab-fade-start: #fbfbfc;
+  --ch-tab-fade-end: rgba(251, 251, 252, 0);
+  --ch-terminal-bg: #f3f4f6;
   --ch-terminal-canvas-filter: contrast(0.78) saturate(0.55) brightness(1.22);
   --ch-terminal-fg: #262626;
   --ch-terminal-cursor: #33455a;
-  --ch-terminal-selection: rgba(77, 102, 128, 0.18);
+  --ch-terminal-selection: rgba(151, 101, 73, 0.2);
   --ch-terminal-black: #ececea;
   --ch-terminal-red: #f0d4d0;
   --ch-terminal-green: #dcecdf;
@@ -694,7 +732,7 @@ onUnmounted(() => {
   --ch-terminal-blue: #d8e3ec;
   --ch-terminal-magenta: #e4ddec;
   --ch-terminal-cyan: #dce9ec;
-  --ch-terminal-white: #f6f6f4;
+  --ch-terminal-white: #f3f2ef;
   --ch-terminal-bright-black: #777771;
   --ch-terminal-bright-red: #9f3636;
   --ch-terminal-bright-green: #2f6543;
@@ -702,7 +740,7 @@ onUnmounted(() => {
   --ch-terminal-bright-blue: #3f536b;
   --ch-terminal-bright-magenta: #5f4f7d;
   --ch-terminal-bright-cyan: #4e7185;
-  --ch-terminal-bright-white: #fdfdfc;
+  --ch-terminal-bright-white: #fffefb;
 
   /* Syntax highlighting (highlight.js token colours). */
   --ch-code-keyword: #cf222e;
@@ -860,13 +898,13 @@ textarea {
 }
 
 .ch-btn--primary:hover:not(:disabled) {
-  background: var(--ch-color-accent-hover);
-  border-color: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
+  border-color: var(--ch-color-accent-fill-hover);
   box-shadow: var(--ch-shadow-button-primary);
 }
 
 .ch-btn--primary:active:not(:disabled) {
-  background: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
@@ -975,9 +1013,9 @@ textarea {
 }
 
 .ch-segmented__btn.active {
-  background: var(--ch-color-surface-control-hover);
-  border-color: var(--ch-color-accent-ring-strong);
-  color: var(--ch-color-text);
+  background: var(--ch-color-surface-selected);
+  border-color: var(--ch-color-border-selected);
+  color: var(--ch-color-text-selected);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
@@ -1131,9 +1169,9 @@ textarea {
 }
 
 .mode-button.active {
-  background: var(--ch-color-surface-control-hover);
-  border-color: var(--ch-color-accent-ring-strong);
-  color: var(--ch-color-text);
+  background: var(--ch-color-surface-selected);
+  border-color: var(--ch-color-border-selected);
+  color: var(--ch-color-text-selected);
   box-shadow: 0 1px 3px var(--ch-shadow-color-soft);
 }
 
@@ -1252,6 +1290,7 @@ textarea {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  background: var(--ch-color-main-bg);
 }
 
 .empty-state {
