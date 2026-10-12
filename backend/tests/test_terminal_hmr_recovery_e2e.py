@@ -34,6 +34,50 @@ from .conftest import (
 )
 from .test_terminal_replay import normalize_xterm_lines
 
+
+def _chromium_can_launch() -> bool:
+    """Report whether Playwright can actually launch a browser here.
+
+    The per-fixture tmux/ttyd and node_modules guards run too late to help:
+    pytest-playwright's session-scoped ``browser`` fixture launches first, so a
+    machine without the browser binary reports a collection error rather than a
+    skip. The backend CI job installs tmux and ttyd but no browsers, which is
+    exactly that case.
+
+    Launching is the only honest probe. ``executable_path`` names the full
+    chromium build, while these tests run through the separate headless shell,
+    so a path check would pass on a machine that still cannot start a browser.
+
+    The probe must use the same browser the tests will, which is the one
+    ``browser_type_launch_args`` selects. Probing Playwright's default cache
+    instead would skip the whole module on a machine that has an explicitly
+    selected browser and no default cache -- and ``terminal-hmr`` rejects a
+    run with skips, so that silent mismatch fails the target.
+    """
+    from playwright.sync_api import sync_playwright
+
+    launch_kwargs: dict[str, Any] = {}
+    selected = os.environ.get("CLAUDE_HUB_BROWSER_EXECUTABLE")
+    if selected:
+        executable = Path(selected)
+        if not executable.is_absolute() or not executable.is_file():
+            return False
+        launch_kwargs["executable_path"] = str(executable.resolve(strict=True))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(**launch_kwargs)
+            browser.close()
+            return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _chromium_can_launch(),
+    reason="Playwright cannot launch chromium here; run: playwright install chromium",
+)
+
 _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 _HARNESS_HTML = "/test/harness/terminal-hmr-harness.html"
 
@@ -531,9 +575,11 @@ def _restart_hmr_stack(ctx: dict[str, Any], tmp_path: Path) -> None:
     _stop_harness_vite(ctx)
     _stop_backend(ctx)
     backend = _start_isolated_backend(tmp_path)
-    vite = _start_harness_vite(backend["base_url"], tmp_path)
+    # Publish the new backend before starting Vite so the fixture's finally
+    # block can stop it even if the Vite restart raises.
     ctx.clear()
-    ctx.update({**backend, **vite})
+    ctx.update(backend)
+    ctx.update(_start_harness_vite(backend["base_url"], tmp_path))
 
 
 def _install_harness_content_pending_observer(page: Page) -> None:
@@ -901,10 +947,13 @@ def _trigger_harness_iframe_reload(page: Page) -> None:
 
 @pytest.fixture
 def isolated_hmr_stack(tmp_path: Path) -> Generator[dict[str, Any], None, None]:
+    # The backend must be inside the cleanup scope the moment it exists: Vite
+    # startup can fail or time out, and a backend started outside try/finally
+    # would survive the failure still holding its port.
     backend = _start_isolated_backend(tmp_path)
-    vite = _start_harness_vite(backend["base_url"], tmp_path)
-    ctx: dict[str, Any] = {**backend, **vite}
+    ctx: dict[str, Any] = {**backend}
     try:
+        ctx.update(_start_harness_vite(backend["base_url"], tmp_path))
         yield ctx
     finally:
         _stop_harness_vite(ctx)

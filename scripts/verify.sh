@@ -21,8 +21,10 @@ Targets:
   frontend-tests   Run the Node unit tests
   frontend-build   Build the Vite bundle
   terminal-hmr     Run all isolated terminal HMR cases (explicit only)
-  browser-mocks    Run the five isolated mocked browser checks (explicit only)
-  all              Run standard targets; browser-mocks and terminal-hmr remain explicit
+  terminal-replay  Run the ttyd/tmux replay E2E suite (needs ttyd, tmux and a
+                   Playwright browser; explicit only)
+  browser-mocks    Run the isolated mocked browser checks (explicit only)
+  all              Run standard targets; the three explicit targets stay opt-in
 
 Only backend-tests accepts focused pytest arguments after --. The default and
 all/CI retain the default scope; focused results are labeled, not a default-suite pass.
@@ -97,7 +99,11 @@ run_backend_tests() {
   check_backend_tools
   local scope
   local -a pytest_args
-  if [[ $# -eq 0 ]]; then
+  if [[ "${1:-}" == "--terminal-replay" ]]; then
+    shift
+    scope=terminal-replay
+    pytest_args=(tests/test_terminal_replay.py -v --reruns 1 --reruns-delay 5)
+  elif [[ $# -eq 0 ]]; then
     scope=default
     pytest_args=(-xvs
       --ignore=tests/test_terminal_replay.py
@@ -206,14 +212,10 @@ run_browser_mocks() {
 }
 
 run_one() {
+  local _scenario
+  local -a browser_scenarios=()
   local -a browser_tools=(
     "$ROOT/scripts/verify_browser_mocks.py" "$ROOT/frontend/tests/browser_lifecycle.py")
-  local -a browser_scenarios=(
-    "$ROOT/frontend/tests/browser_task_execution_panel.py"
-    "$ROOT/frontend/tests/browser_agent_workspace_task_create.py"
-    "$ROOT/frontend/tests/browser_chat_subagent_region.py"
-    "$ROOT/frontend/tests/browser_feishu_provenance.py"
-    "$ROOT/frontend/tests/browser_feishu_bot_components.py")
   case "$1" in
     browser-mocks) run_browser_mocks ;;
     terminal-hmr) run_terminal_hmr ;;
@@ -222,6 +224,17 @@ run_one() {
       ;;
     backend-format)
       check_backend_tools
+      # Discovered, not listed: a hard-coded list silently drops every
+      # scenario added later, which is how the Chat composer gate escaped
+      # the formatter. browser_lifecycle.py is shared tooling, listed above.
+      while IFS= read -r _scenario; do
+        browser_scenarios+=("$_scenario")
+      done < <(find "$ROOT/frontend/tests" -maxdepth 1 -name 'browser_*.py' \
+        ! -name 'browser_lifecycle.py' | sort)
+      if [ ${#browser_scenarios[@]} -eq 0 ]; then
+        echo "ERROR: no browser scenarios discovered" >&2
+        return 1
+      fi
       (cd "$ROOT/backend" && uv run --offline --no-sync black --config pyproject.toml --check . "${browser_tools[@]}" "${browser_scenarios[@]}" \
         && uv run --offline --no-sync isort --settings-path pyproject.toml --check . "${browser_tools[@]}" "${browser_scenarios[@]}")
       ;;
@@ -239,6 +252,9 @@ run_one() {
         frontend-build) script=build:bundle ;;
       esac
       (cd "$ROOT/frontend" && pnpm run "$script")
+      ;;
+    terminal-replay)
+      run_backend_tests --terminal-replay
       ;;
     *) usage; fail "unknown target: $1" ;;
   esac

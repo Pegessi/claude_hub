@@ -7,7 +7,7 @@ from claude_hub.api import agent_stream as stream_api
 from claude_hub.api import goal_runs as goal_api
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.main import app
-from claude_hub.models import GoalRunCreate, GoalRunStatus, SessionKind, User
+from claude_hub.models import GoalDispatchState, GoalRunCreate, GoalRunStatus, SessionKind, User
 from claude_hub.services.goal_run import GoalRunController, GoalRunStore
 
 
@@ -136,6 +136,7 @@ async def test_goal_runtime_callbacks_use_direct_chat_transport(monkeypatch, tmp
     assert sent[0][1].client_turn_id == "step-1"
     assert sent[0][1].text == "continue safely"
     assert sent[0][2] is manager
+    assert sent[0][1].delivery == "normal"
     assert sent[0][3] == {
         "visible_text": "Continue active Goal",
         "turn_metadata": {
@@ -210,7 +211,7 @@ def test_active_goal_accepts_only_pending_question_answer(goal_client, monkeypat
     assert answered == ["initial-turn", "initial-turn"]
 
 
-def test_goal_create_and_resume_reject_plan_and_busy_without_failing_goal(goal_client, monkeypatch):
+def test_goal_resume_rejects_plan_and_defers_while_chat_turn_runs(goal_client, monkeypatch):
     session = SimpleNamespace(id="terminal-tab-tab-1", chat_mode="plan")
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda tab_id: session)
     body = {"objective": "Finish it", "client_request_id": "create"}
@@ -221,47 +222,236 @@ def test_goal_create_and_resume_reject_plan_and_busy_without_failing_goal(goal_c
     session.chat_mode = "plan"
     url = f"/api/goals/{goal['id']}/resume"
     assert goal_client.post(url, json={"client_request_id": "resume"}).status_code == 409
+    assert goal_client.get(f"/api/goals/{goal['id']}").json()["status"] == "paused"
     session.chat_mode = "default"
     monkeypatch.setattr(
         stream_api,
         "_get_tab_tailer_manager",
-        lambda: SimpleNamespace(
-            turn_in_flight=lambda session: _return_true(),
-        ),
+        lambda: SimpleNamespace(turn_in_flight=lambda session: _return_true()),
     )
-    assert goal_client.post(url, json={"client_request_id": "resume"}).status_code == 409
-    assert goal_client.get(f"/api/goals/{goal['id']}").json()["status"] == "paused"
+    deferred = goal_client.post(url, json={"client_request_id": "resume"})
+    assert deferred.status_code == 200, deferred.text
+    assert deferred.json()["status"] == "active"
+    assert deferred.json()["dispatch_state"] == "idle"
+    assert deferred.json()["resume_after_turn"] is True
 
 
-def test_goal_question_followup_pauses_before_manual_send(goal_client, monkeypatch):
-    monkeypatch.setattr("claude_hub.services.goal_run.get_goal_manager", goal_api.get_goal_manager)
+def test_goal_resume_releases_when_chat_turn_ends_during_deferral(goal_client, monkeypatch):
+    goal = goal_client.post(
+        "/api/tabs/tab-1/goal", json={"objective": "Finish it", "client_request_id": "create"}
+    ).json()
+    goal_client.post(f"/api/goals/{goal['id']}/pause", json={"client_request_id": "pause"})
+    in_flight = iter([True, False])
+
+    async def turn_in_flight(session):
+        return next(in_flight)
+
+    monkeypatch.setattr(
+        stream_api,
+        "_get_tab_tailer_manager",
+        lambda: SimpleNamespace(turn_in_flight=turn_in_flight),
+    )
+    resumed = goal_client.post(
+        f"/api/goals/{goal['id']}/resume", json={"client_request_id": "resume"}
+    ).json()
+    assert resumed["resume_after_turn"] is False
+    assert resumed["dispatch_state"] == "dispatched"
+
+
+def test_second_resume_during_deferral_waits_for_the_turn_or_releases_it(goal_client, monkeypatch):
+    goal = goal_client.post(
+        "/api/tabs/tab-1/goal", json={"objective": "Finish it", "client_request_id": "create"}
+    ).json()
+    goal_client.post(f"/api/goals/{goal['id']}/pause", json={"client_request_id": "pause"})
+    in_flight = {"value": True}
+
+    async def turn_in_flight(session):
+        return in_flight["value"]
+
+    monkeypatch.setattr(
+        stream_api,
+        "_get_tab_tailer_manager",
+        lambda: SimpleNamespace(turn_in_flight=turn_in_flight),
+    )
+    url = f"/api/goals/{goal['id']}/resume"
+    assert goal_client.post(url, json={"client_request_id": "resume-1"}).json()["resume_after_turn"]
+
+    stale = goal_client.post(url, json={"client_request_id": "resume-2"})
+    assert stale.status_code == 200, stale.text
+    assert stale.json()["status"] == "active"
+    assert stale.json()["resume_after_turn"] is True
+    assert stale.json()["dispatch_state"] == "idle"
+
+    in_flight["value"] = False
+    released = goal_client.post(url, json={"client_request_id": "resume-3"}).json()
+    assert released["resume_after_turn"] is False
+    assert released["dispatch_state"] == "dispatched"
+
+
+def _steerable_goal(monkeypatch, tmp_path, **stream_methods):
+    """Use the real Goal transport callback with a recorded native send."""
+    manager = GoalRunController(
+        GoalRunStore(tmp_path / "steer-goals.json"), goal_api._dispatch_goal_turn
+    )
+    monkeypatch.setattr(goal_api, "get_goal_manager", lambda: manager)
+    monkeypatch.setattr("claude_hub.services.goal_run.get_goal_manager", lambda: manager)
+    resolved: list[str] = []
+
+    async def resolve(session, text):
+        resolved.append(text)
+
+    stream_manager = SimpleNamespace(
+        turn_in_flight=lambda session: _return_false(),
+        answer_pending_question=lambda *args: _return_false(),
+        accepts_question_followup=lambda *args: _return_false(),
+        resolve_answered_questions=resolve,
+    )
+    for name, value in stream_methods.items():
+        setattr(stream_manager, name, value)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: stream_manager)
+    sent: list[tuple[stream_api.AgentStreamSendRequest, dict[str, object]]] = []
+
+    async def send(session, payload, manager_arg, **kwargs):
+        sent.append((payload, kwargs))
+
+    monkeypatch.setattr(stream_api, "_send_to_native", send)
+    return manager, sent, resolved
+
+
+def test_goal_question_followup_becomes_next_goal_turn(goal_client, monkeypatch, tmp_path):
+    manager, sent, resolved = _steerable_goal(
+        monkeypatch, tmp_path, accepts_question_followup=lambda *args: _return_true()
+    )
     goal = goal_client.post(
         "/api/tabs/tab-1/goal",
         json={"objective": "Finish it", "client_request_id": "create"},
     ).json()
-    monkeypatch.setattr(
-        stream_api,
-        "_get_tab_tailer_manager",
-        lambda: SimpleNamespace(
-            answer_pending_question=lambda *args: _return_false(),
-            accepts_question_followup=lambda *args: _return_true(),
-        ),
-    )
-    sent = []
+    answer = '{"type":"ask_question_response","answers":[{"questionId":"q1","selected":["A"]}]}'
+    url = "/api/workspaces/tabs/tab-1/stream/send"
+    body = {"text": answer, "client_turn_id": "answer"}
 
-    async def send(session, payload, manager, *, visible_text=None, turn_metadata=None):
-        current = goal_api.get_goal_manager().get(goal["id"])
-        assert current.status == GoalRunStatus.PAUSED
-        assert current.current_turn_id is None
-        sent.append(payload.text)
+    result = goal_client.post(url, json=body)
 
-    monkeypatch.setattr(stream_api, "_send_to_native", send)
-    result = goal_client.post(
-        "/api/workspaces/tabs/tab-1/stream/send",
+    assert result.status_code == 200, result.text
+    payload, kwargs = sent[-1]
+    assert payload.client_turn_id == "answer"
+    assert payload.delivery == "steer"
+    assert answer in payload.text
+    assert kwargs["visible_text"] == answer
+    assert kwargs["turn_metadata"] == {"origin": "goal", "protocol": "goal-continuation-v1"}
+    assert resolved == [answer]
+    current = manager.get(goal["id"])
+    assert current.status == GoalRunStatus.ACTIVE
+    assert current.current_turn_id == "answer"
+    assert current.pending_input is None
+    # A retried POST replays the steer without delivering it twice.
+    assert goal_client.post(url, json=body).status_code == 200
+    assert len(sent) == 2
+
+
+def test_active_goal_steer_and_blocked_reply_route_into_goal(goal_client, monkeypatch, tmp_path):
+    manager, sent, resolved = _steerable_goal(monkeypatch, tmp_path)
+    goal = goal_client.post(
+        "/api/tabs/tab-1/goal",
+        json={"objective": "Finish it", "client_request_id": "create"},
+    ).json()
+    url = "/api/workspaces/tabs/tab-1/stream/send"
+    # Plain Enter while a Goal is active is still refused by the backend.
+    plain = goal_client.post(url, json={"text": "later", "client_turn_id": "plain"})
+    assert plain.status_code == 409
+    image = goal_client.post(
+        url,
         json={
-            "text": '{"type":"ask_question_response","answers":[{"questionId":"q1","selected":["A"]}]}',
-            "client_turn_id": "answer",
+            "text": "look",
+            "client_turn_id": "image",
+            "delivery": "steer",
+            "attachments": [
+                {
+                    "filename": "a.png",
+                    "mime_type": "image/png",
+                    "data_url": "data:image/png;base64,AA==",
+                }
+            ],
         },
     )
-    assert result.status_code == 200, result.text
-    assert len(sent) == 1
+    assert image.status_code == 409
+    oversized = goal_client.post(
+        url, json={"text": "x" * 32_001, "client_turn_id": "huge", "delivery": "steer"}
+    )
+    assert oversized.status_code == 422
+    assert resolved == []
+    assert manager.get(goal["id"]).pending_input is None
+
+    steer = goal_client.post(
+        url, json={"text": "Prefer option B", "client_turn_id": "steer-1", "delivery": "steer"}
+    )
+    assert steer.status_code == 200, steer.text
+    assert sent[-1][0].delivery == "steer"
+    assert "Prefer option B" in sent[-1][0].text
+    assert manager.get(goal["id"]).current_turn_id == "steer-1"
+
+    blocked = manager.get(goal["id"])
+    blocked.status = GoalRunStatus.BLOCKED
+    blocked.current_turn_id = None
+    blocked.dispatch_state = GoalDispatchState.IDLE
+    manager.store.put(blocked)
+    reply = goal_client.post(url, json={"text": "Use staging", "client_turn_id": "reply"})
+    assert reply.status_code == 200, reply.text
+    assert sent[-1][1]["visible_text"] == "Use staging"
+    current = manager.get(goal["id"])
+    assert current.status == GoalRunStatus.ACTIVE
+    assert current.current_turn_id == "reply"
+
+
+def test_blocked_goal_reply_waits_for_running_chat_turn(goal_client, monkeypatch, tmp_path):
+    manager, sent, _ = _steerable_goal(
+        monkeypatch, tmp_path, turn_in_flight=lambda session: _return_true()
+    )
+    goal = manager.create("tab-1", GoalRunCreate(objective="Finish it", client_request_id="c"))
+    goal.status = GoalRunStatus.BLOCKED
+    manager.store.put(goal)
+    url = "/api/workspaces/tabs/tab-1/stream/send"
+    busy = goal_client.post(url, json={"text": "Use staging", "client_turn_id": "reply"})
+    assert busy.status_code == 409
+    assert busy.headers["X-Claude-Hub-Error-Reason"] == "chat_busy"
+    assert sent == []
+
+
+def test_failed_goal_steer_reports_error_and_keeps_input(goal_client, monkeypatch, tmp_path):
+    manager, sent, _ = _steerable_goal(monkeypatch, tmp_path)
+    goal = goal_client.post(
+        "/api/tabs/tab-1/goal",
+        json={"objective": "Finish it", "client_request_id": "create"},
+    ).json()
+
+    async def broken_send(session, payload, manager_arg, **kwargs):
+        raise RuntimeError("transport offline")
+
+    monkeypatch.setattr(stream_api, "_send_to_native", broken_send)
+    result = goal_client.post(
+        "/api/workspaces/tabs/tab-1/stream/send",
+        json={"text": "Keep me", "client_turn_id": "steer-1", "delivery": "steer"},
+    )
+    assert result.status_code == 503
+    assert "transport offline" in result.json()["detail"]
+    current = manager.get(goal["id"])
+    assert current.status == GoalRunStatus.PAUSED
+    assert current.pending_input == "Keep me"
+
+
+def test_manual_turn_in_goal_chat_strips_goal_protocol(goal_client, monkeypatch, tmp_path):
+    manager, sent, _ = _steerable_goal(monkeypatch, tmp_path)
+    url = "/api/workspaces/tabs/tab-1/stream/send"
+    assert goal_client.post(url, json={"text": "hi", "client_turn_id": "before"}).status_code == 200
+    assert sent[-1][1]["strip_goal_protocol"] is False
+    goal = goal_client.post(
+        "/api/tabs/tab-1/goal",
+        json={"objective": "Finish it", "client_request_id": "create"},
+    ).json()
+    goal_client.post(f"/api/goals/{goal['id']}/pause", json={"client_request_id": "pause"})
+    goal_client.post(f"/api/goals/{goal['id']}/clear", json={"client_request_id": "clear"})
+    assert (
+        goal_client.post(url, json={"text": "next", "client_turn_id": "after"}).status_code == 200
+    )
+    assert sent[-1][0].delivery == "normal"
+    assert sent[-1][1]["strip_goal_protocol"] is True

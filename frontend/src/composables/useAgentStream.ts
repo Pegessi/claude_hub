@@ -58,6 +58,8 @@ export interface UseAgentStreamApi {
   start: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Replace a failed provider transport, then hydrate its resumed stream. */
   retry: (sourceId: string, source?: StreamSource) => Promise<void>
+  /** Refresh active-session capabilities without restarting timeline delivery. */
+  refreshCapabilities: () => Promise<void>
   /** Update the active provider mode; the new mode applies to the next turn. */
   setMode: (mode: string) => Promise<void>
   /** Tear down the stream (SSE / long-poll). Safe to call repeatedly. */
@@ -122,8 +124,8 @@ export function useAgentStream(): UseAgentStreamApi {
   let waitRequestAbort: AbortController | null = null
   /** Aborts the in-flight capabilities / events hydration fetches. */
   let hydrationAbort: AbortController | null = null
-  /** Aborts a mode update when its source is switched or unmounted. */
-  let modeAbort: AbortController | null = null
+  /** Latest-wins owner for requests that replace active capabilities. */
+  let capabilitiesUpdateAbort: AbortController | null = null
   // Stream sequences are zero-based and cursors are exclusive. SSE is only an
   // accelerator: future events stay buffered until long-poll fills every gap.
   const sequenceBuffer = createContiguousEventBuffer<AgentStreamEvent>()
@@ -194,10 +196,10 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
-  function abortModeUpdate() {
-    if (modeAbort) {
-      modeAbort.abort()
-      modeAbort = null
+  function abortCapabilitiesUpdate() {
+    if (capabilitiesUpdateAbort) {
+      capabilitiesUpdateAbort.abort()
+      capabilitiesUpdateAbort = null
     }
   }
 
@@ -528,6 +530,29 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
+  async function refreshCapabilities() {
+    const sourceId = currentSessionId
+    const streamPath = currentStreamPath
+    if (stopped || !sourceId || !streamPath) {
+      throw new Error('Structured source is unavailable.')
+    }
+
+    abortCapabilitiesUpdate()
+    const controller = new AbortController()
+    capabilitiesUpdateAbort = controller
+    try {
+      const nextCapabilities = await fetchCapabilities(streamPath, controller.signal)
+      if (
+        stopped
+        || currentSessionId !== sourceId
+        || currentStreamPath !== streamPath
+      ) return
+      capabilities.value = nextCapabilities
+    } finally {
+      if (capabilitiesUpdateAbort === controller) capabilitiesUpdateAbort = null
+    }
+  }
+
   async function setMode(mode: string) {
     const sourceId = currentSessionId
     const streamPath = currentStreamPath
@@ -535,9 +560,9 @@ export function useAgentStream(): UseAgentStreamApi {
       throw new Error('Structured source is unavailable.')
     }
 
-    abortModeUpdate()
+    abortCapabilitiesUpdate()
     const controller = new AbortController()
-    modeAbort = controller
+    capabilitiesUpdateAbort = controller
 
     try {
       const res = await fetchWithTimeout(
@@ -568,7 +593,7 @@ export function useAgentStream(): UseAgentStreamApi {
       if (stopped || currentSessionId !== sourceId || currentStreamPath !== streamPath) return
       capabilities.value = nextCapabilities
     } finally {
-      if (modeAbort === controller) modeAbort = null
+      if (capabilitiesUpdateAbort === controller) capabilitiesUpdateAbort = null
     }
   }
 
@@ -580,7 +605,7 @@ export function useAgentStream(): UseAgentStreamApi {
     closeSse()
     abortLongPoll()
     abortHydration()
-    abortModeUpdate()
+    abortCapabilitiesUpdate()
     stateMachine.stop()
     connectionState.value = 'idle'
   }
@@ -596,6 +621,7 @@ export function useAgentStream(): UseAgentStreamApi {
     errorMessage,
     start,
     retry,
+    refreshCapabilities,
     setMode,
     stop,
     nudge,

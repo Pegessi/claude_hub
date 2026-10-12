@@ -16,7 +16,7 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "python-multipart>=0.0.12",
     "click>=8.1.0",
-    "cryptography>=43.0.0",
+    "lark-oapi==1.5.3",
 ]
 
 [project.scripts]

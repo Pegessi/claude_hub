@@ -3341,6 +3341,50 @@ async def test_cursor_prepare_capabilities_populates_models() -> None:
 
 
 @pytest.mark.asyncio
+async def test_claude_prepare_capabilities_uses_unique_tab_env_models() -> None:
+    session = _session(AgentType.CLAUDE)
+    session.env = {
+        "ANTHROPIC_MODEL": "model_hub/current",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "model_hub/current",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "model_hub/sonnet",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "model_hub/haiku",
+    }
+    native = ClaudeNativeSession(session)
+
+    await native.prepare_capabilities()
+
+    assert [model.id for model in native.capabilities().available_models] == [
+        "model_hub/current",
+        "model_hub/sonnet",
+        "model_hub/haiku",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_prepare_capabilities_reloads_updated_tab_env() -> None:
+    native = ClaudeNativeSession(
+        _session(AgentType.CLAUDE).model_copy(update={"env": {"ANTHROPIC_MODEL": "gateway/first"}})
+    )
+    await native.prepare_capabilities()
+
+    native.update_env({"ANTHROPIC_MODEL": "gateway/second"})
+    await native.prepare_capabilities()
+
+    assert [model.id for model in native.capabilities().available_models] == ["gateway/second"]
+
+
+@pytest.mark.asyncio
+async def test_claude_prepare_capabilities_keeps_static_fallback_without_env() -> None:
+    native = ClaudeNativeSession(_session(AgentType.CLAUDE))
+
+    await native.prepare_capabilities()
+
+    assert [model.id for model in native.capabilities().available_models] == (
+        native_module._STATIC_MODELS["claude"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_cursor_probe_failure_falls_back_to_static() -> None:
     """A probe error returns the curated static list, cached with the short
     negative TTL so recovery is quick."""

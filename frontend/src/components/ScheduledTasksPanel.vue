@@ -395,6 +395,39 @@
         </div>
 
         <div
+          v-if="draft.kind === 'new_session' || draft.kind === 'hub_task'"
+          class="form-group"
+        >
+          <label for="st-env-preset">Env preset</label>
+          <select
+            id="st-env-preset"
+            v-model="draft.env_preset"
+            class="ch-select"
+          >
+            <option value="">
+              Agent default
+            </option>
+            <option
+              v-for="preset in envPresetOptions"
+              :key="preset.id"
+              :value="preset.id"
+            >
+              {{ preset.name }}
+            </option>
+            <option
+              v-if="missingEnvPreset"
+              :value="draft.env_preset"
+              disabled
+            >
+              {{ draft.env_preset }} (no longer available)
+            </option>
+          </select>
+          <p class="form-hint">
+            Launch environment for the worker session created on each fire.
+          </p>
+        </div>
+
+        <div
           v-if="draft.kind === 'hub_task'"
           class="form-group"
         >
@@ -455,6 +488,7 @@ import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useScheduledTasksStore } from '@/stores/scheduledTasksStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { useLaunchEnvPresets } from '@/composables/useLaunchEnvPresets'
 import type { AgentType, ScheduledTask, ScheduledTaskCreate, ScheduledTaskKind } from '@/types'
 
 const props = defineProps<{
@@ -467,6 +501,35 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const store = useScheduledTasksStore()
 const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
+const { envPresets, ensureLoaded } = useLaunchEnvPresets()
+
+const envPresetOptions = computed(() => envPresets.value.filter(preset => preset.id !== 'none'))
+
+// Schedules created via CLI may store a preset name while the UI options use
+// ids; resolve either. The built-in 'none' preset is represented by the empty
+// "Agent default" option. A stored value matching neither is shown as a
+// disabled "(no longer available)" option rather than silently blanked.
+function resolveEnvPresetId(stored: string): string {
+  if (!stored || stored === 'none') return ''
+  const preset = envPresets.value.find(p => p.id === stored || p.name === stored)
+  if (!preset) return stored
+  return preset.id === 'none' ? '' : preset.id
+}
+
+const missingEnvPreset = computed(
+  () => !!draft.env_preset && !envPresetOptions.value.some(p => p.id === draft.env_preset),
+)
+
+// Presets can finish loading after the edit modal opened (or the stored value
+// is a CLI-supplied name); re-map name -> id once the options arrive so a
+// valid preset is not stuck showing "(no longer available)".
+watch(envPresetOptions, () => {
+  if (!draft.env_preset || mode.value !== 'edit') return
+  const match = envPresetOptions.value.find(
+    p => p.id === draft.env_preset || p.name === draft.env_preset,
+  )
+  if (match) draft.env_preset = match.id
+})
 
 type Mode = 'list' | 'edit'
 type ScheduleType = 'run_at' | 'cron' | 'interval'
@@ -487,6 +550,7 @@ const draft = reactive({
   agent_type: 'claude' as AgentType,
   message: '',
   task_title: '',
+  env_preset: '',
 })
 
 const scheduleTypeOptions: { value: ScheduleType; label: string }[] = [
@@ -570,6 +634,7 @@ watch(
       if (terminalStore.tabs.length === 0) {
         void terminalStore.fetchTabs()
       }
+      void ensureLoaded()
       pollTimer = window.setInterval(() => void store.fetchTasks({ silent: true }), 10000)
     } else {
       if (pollTimer !== undefined) {
@@ -758,6 +823,7 @@ function resetDraft() {
   draft.agent_type = 'claude'
   draft.message = ''
   draft.task_title = ''
+  draft.env_preset = ''
   formError.value = ''
 }
 
@@ -788,6 +854,7 @@ function startEdit(task: ScheduledTask) {
   draft.agent_type = task.agent_type ?? 'claude'
   draft.message = task.message ?? ''
   draft.task_title = task.task_title ?? ''
+  draft.env_preset = resolveEnvPresetId(task.env_preset ?? '')
   mode.value = 'edit'
 }
 
@@ -844,6 +911,13 @@ function buildPayload(): ScheduledTaskCreate {
   } else {
     payload.workspace_id = draft.workspace_id
     payload.agent_type = draft.agent_type
+    if (editingId.value) {
+      // Send an explicit null when "Agent default" is chosen while editing so
+      // a previously configured preset can be cleared.
+      payload.env_preset = draft.env_preset || null
+    } else if (draft.env_preset) {
+      payload.env_preset = draft.env_preset
+    }
   }
   if (draft.kind === 'hub_task') {
     payload.task_title = draft.task_title.trim()

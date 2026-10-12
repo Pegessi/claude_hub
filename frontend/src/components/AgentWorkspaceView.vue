@@ -5732,7 +5732,7 @@ function openTaskModal(): void {
 .agent-status-delete:focus-visible,
 .agent-status-refresh:focus-visible,
 .agent-status-view-switch button:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline: 2px solid var(--ch-color-accent-ring);
   outline-offset: 2px;
 }
 
@@ -6166,8 +6166,8 @@ function openTaskModal(): void {
 }
 
 .primary-button:hover {
-  background: var(--ch-color-accent-hover);
-  border-color: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
+  border-color: var(--ch-color-accent-fill-hover);
   box-shadow: var(--ch-shadow-button-primary);
 }
 
@@ -6601,7 +6601,7 @@ function openTaskModal(): void {
 .task-card.selected {
   border-color: var(--ch-color-accent);
   background: var(--ch-color-surface-selected);
-  box-shadow: 0 0 0 1px var(--ch-color-accent-ring), 0 8px 20px var(--ch-shadow-color-soft);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-halo), 0 8px 20px var(--ch-shadow-color-soft);
 }
 
 .task-card--todo::before {
@@ -6928,7 +6928,7 @@ function openTaskModal(): void {
   color: var(--ch-color-text);
   padding: 0 10px;
   transition: all var(--ch-motion-fast);
-  -webkit-tap-highlight-color: var(--ch-color-accent-ring);
+  -webkit-tap-highlight-color: var(--ch-color-accent-halo);
 }
 
 .task-actions button {
@@ -7065,7 +7065,7 @@ function openTaskModal(): void {
 }
 
 .lang-toggle-btn.active {
-  background: var(--ch-color-accent);
+  background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent, #fff);
 }
 
@@ -8298,7 +8298,7 @@ function openTaskModal(): void {
 }
 
 .periodic-task-enable:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring-strong);
+  outline: 2px solid var(--ch-color-accent-ring);
   outline-offset: 2px;
   border-radius: 2px;
 }
@@ -8486,8 +8486,25 @@ function openTaskModal(): void {
   white-space: nowrap;
 }
 
-.modal-actions .workspace-delete-button {
+.modal-actions .workspace-delete-button,
+.modal-actions .modal-actions-leading {
   margin-right: auto;
+}
+
+.task-create-recovery {
+  margin-top: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+}
+
+.task-create-recovery-title {
+  margin: 0;
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .resident-agent-section {
@@ -9096,7 +9113,7 @@ function openTaskModal(): void {
     font-weight: 500;
     padding: 0 8px;
     cursor: pointer;
-    -webkit-tap-highlight-color: var(--ch-color-accent-ring);
+    -webkit-tap-highlight-color: var(--ch-color-accent-halo);
     transition: all var(--ch-motion-fast);
   }
 

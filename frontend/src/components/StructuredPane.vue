@@ -6,8 +6,6 @@
     @dragleave="handleDragLeave"
     @drop="handleDrop"
   >
-    <FeishuBindingPanel :tab-id="props.tabId" />
-
     <!-- Chat sessions fail closed on this surface. A stream failure never
          mounts a hidden raw terminal; users can retry or create a Terminal. -->
     <div
@@ -122,7 +120,15 @@
                 <span
                   class="conversation-message-source__mark"
                   aria-hidden="true"
-                >飞</span>
+                >
+                  飞
+                  <img
+                    v-if="messageSourceAvatarUrl(turn)"
+                    :src="messageSourceAvatarUrl(turn) || undefined"
+                    alt=""
+                    @error="hideBrokenSourceAvatar"
+                  >
+                </span>
                 <span class="conversation-message-source__label">{{ messageSourceLabel(turn) }}</span>
               </div>
               <!-- Inline edit mode -->
@@ -218,6 +224,8 @@
                         :src="attachmentUrl(att.id)"
                         class="turn-attachment-img"
                         alt="attached image"
+                        loading="lazy"
+                        decoding="async"
                         @error="onAttachmentError($event, att)"
                       >
                     </button>
@@ -325,7 +333,7 @@
               >✦</span>
               <div class="conversation-bubble conversation-bubble--assistant">
                 <MarkdownContent
-                  :text="part.text"
+                  :text="stripTrailingGoalProtocol(part.text)"
                   :tab-id="props.tabId"
                   compact
                   :complete="turn.completed"
@@ -1076,8 +1084,8 @@
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
-            :disabled="isSending || connectionState !== 'live' || goalComposerLocked"
-            :title="goalComposerReason || undefined"
+            :disabled="isSending || connectionState !== 'live' || goalInputBlocked"
+            :title="goalInputBlocked ? goalComposerReason || undefined : undefined"
             @compositionstart="isComposing = true"
             @compositionend="isComposing = false"
             @keydown.enter.exact="handleComposerEnter"
@@ -1156,7 +1164,7 @@
             <div
               v-if="isModelPickerAvailable"
               ref="modelPickerEl"
-              class="composer-mode-picker"
+              class="composer-mode-picker composer-model-picker"
             >
               <button
                 ref="modelTriggerEl"
@@ -1293,18 +1301,23 @@
             type="button"
             class="composer-send-btn"
             :disabled="!canSend || isSending"
-            :title="goalComposerReason || undefined"
-            @click="() => submit('normal')"
+            :title="goalSteerOnly ? 'Send now as the next Goal turn' : goalComposerReason || undefined"
+            @click="() => submit(goalSteerOnly ? 'steer' : 'normal')"
           >
-            {{ isSending ? 'Sending…' : (turnInFlight ? 'Queue' : 'Send') }}
+            {{ isSending ? 'Sending…' : (goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
           </button>
         </div>
         <div
           v-if="!isMobileViewport"
           class="composer-hints"
         >
-          <template v-if="goalComposerLocked">
+          <template v-if="goalInputBlocked">
             <span>{{ goalComposerReason }}</span>
+          </template>
+          <template v-else-if="goalSteerOnly">
+            <span>Enter queue until the Goal stops</span>
+            <span>⌘/Ctrl+Enter steer Goal</span>
+            <span>Shift+Enter newline</span>
           </template>
           <template v-else>
             <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
@@ -1356,15 +1369,21 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
+import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStreamAttachments'
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceAvatarUrl, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { subagentProviderLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
-import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
+import {
+  goalBlocksPlan,
+  goalPlanLockReason,
+  isGoalTerminal,
+  stripTrailingGoalProtocol,
+} from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
@@ -1377,18 +1396,27 @@ import {
   hasAuthoritativeTerminalFor,
   withOptimisticCancelled,
 } from '@/utils/agentStreamStopReset'
-import { useTerminalStore } from '@/stores/terminalStore'
+import {
+  useTerminalStore,
+  type QueuedChatDraftAttachment,
+} from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
+function hideBrokenSourceAvatar(event: Event): void {
+  const image = event.currentTarget
+  if (image instanceof HTMLImageElement) image.hidden = true
+}
+
 const props = defineProps<{
   /** A top-level Chat tab owns its transcript directly. */
   tabId: string
+  /** Keep queued drafts attached to the pane whose KeepAlive owns this instance. */
+  paneId: string
 }>()
 
 const terminalStore = useTerminalStore()
@@ -1416,6 +1444,9 @@ const goalComposerLocked = computed(() => goalBlocksPlan(goal.value))
 const goalComposerReason = computed(() => goalComposerLocked.value
   ? 'Pause or complete the active Goal before sending messages'
   : null)
+// An active Goal accepts text steers as its next turn; Enter queues instead.
+const goalSteerOnly = computed(() => goalComposerLocked.value && goal.value?.status === 'active')
+const goalInputBlocked = computed(() => goalComposerLocked.value && !goalSteerOnly.value)
 
 async function startGoal(input: { objective: string }) {
   if (goalSetupDisabledReason.value) {
@@ -1432,6 +1463,7 @@ const {
   capabilities,
   start,
   retry: retryStream,
+  refreshCapabilities,
   setMode,
   stop,
   nudge,
@@ -1638,10 +1670,10 @@ const REASONING_EFFORT_ENV: Record<string, string> = {
 }
 const LEGACY_TRAEX_REASONING_EFFORT_ENV = 'TRAEX_REASONING_EFFORT'
 
-// Models are discovered at runtime by the backend (cursor via
-// ``agent --list-models``; claude/codex via a curated static list) and
-// surfaced on the session capabilities. The user can still type a custom
-// model id into the picker's text input.
+// Models are surfaced on the session capabilities. Cursor is discovered via
+// ``agent --list-models``; Claude reflects the selected tab's Anthropic model
+// env (with a curated fallback); Codex uses its provider/static catalog. The
+// user can still type a custom model id into the picker's text input.
 const currentTab = computed(() =>
   terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
 )
@@ -1798,6 +1830,7 @@ async function selectModelAndEffort(model: StreamModelOption, effort: string) {
     // Errors surface via the store's notifyError toast; swallow so the
     // rejection is not unhandled.
     await terminalStore.switchEnv(tab.id, { env })
+    await refreshCapabilities()
   } catch {
     // Swallow: error feedback comes from terminalStore.switchEnv's toast.
   } finally {
@@ -1861,11 +1894,7 @@ const pendingTurns = computed(() => {
 // Declared before any ``immediate`` watchers so ``turnInFlight`` / ``draftQueue``
 // are initialized when Vue runs the first callback (TDZ-safe).
 
-interface DraftAttachment extends WorkspaceAttachmentCreate {
-  id: string
-  preview_url: string
-  size_bytes: number
-}
+type DraftAttachment = QueuedChatDraftAttachment
 
 const draftMessage = ref('')
 const attachments = ref<DraftAttachment[]>([])
@@ -1882,12 +1911,23 @@ function handleViewportResize() {
   isMobileViewport.value = window.innerWidth <= 768
 }
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
-const draftQueue = ref<Array<{ message: string; attachments: DraftAttachment[] }>>([])
+const queuedChatState = terminalStore.getQueuedChatState(props.paneId, props.tabId)
+const draftQueue = toRef(queuedChatState, 'drafts')
+// Queue data lives in the store so bounded KeepAlive eviction cannot lose it.
+// QueuedChatObserver supplies the hidden completion edge; this full pane only
+// sends after its owning pane and Chat are active in the foreground.
+const isPaneActivated = ref(false)
+const isQueueSendInProgress = toRef(queuedChatState, 'sendInProgress')
 // A queued POST failure is delivery-uncertain: the provider may have accepted
 // it even when the browser did not receive the acknowledgement. Keep later
 // queued messages paused until the user deliberately sends the restored draft
 // and that explicit send succeeds.
-const isDraftQueuePaused = ref(false)
+const isDraftQueuePaused = toRef(queuedChatState, 'paused')
+const queueAutoActivationBlock = toRef(queuedChatState, 'autoActivationBlock')
+const isWaitingForQueuedChatActivation = computed(() =>
+  terminalStore.hasQueuedChatActivationRequest(props.paneId, props.tabId)
+  && !terminalStore.isQueuedChatActivationOwner(props.paneId, props.tabId)
+)
 const isPreparingAttachments = ref(false)
 const turnInFlight = computed(() => isChatModeLocked(
   pendingDirectTurns.value.length > 0,
@@ -2005,12 +2045,14 @@ onMounted(() => {
 // KeepAlive lifecycle. The pane is keyed by tabId (see TerminalPane), so each
 // chat tab owns a stable instance and the tabId prop never changes for a given
 // instance — the old tabId watcher that wiped the composer on every switch is
-// gone. The stream is owned by the *active* pane: on deactivate we stop it
-// (caching history) so cached panes don't hold open SSE/long-poll connections;
-// on activate we resume from the cached snapshot (reconciling, no full reload).
+// gone. The full stream is owned by the *active* pane. On deactivate we stop
+// it (caching history); a separate minimal observer watches any hidden queued
+// draft until it can reactivate this Chat. On activate we resume from the
+// cached snapshot (reconciling, no full reload).
 // onActivated also fires on the initial mount, so it replaces the startStream()
 // call that used to live in onMounted.
 onActivated(() => {
+  isPaneActivated.value = true
   timelineDisposed = false
   timelineVisit++
   visibleHistoryStart.value = null
@@ -2024,12 +2066,13 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
+  isPaneActivated.value = false
   isAddMenuOpen.value = false
   isGoalSetupOpen.value = false
   goalRefreshEpoch++
   timelineDisposed = true
   timelineVisit++
-  stop()
+  suspendStreamForDeactivation()
   timelineResizeObserver?.disconnect()
   timelineResizeObserver = null
   cancelScheduledTimelineScroll()
@@ -2037,6 +2080,11 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
+  // A minimal QueuedChatObserver may still own a ready FIFO request after this
+  // full pane is evicted from the bounded KeepAlive cache. Do not release that
+  // store-owned request here: send completion, an explicit failure yield, or
+  // archive/delete owns its retirement.
+  terminalStore.pruneQueuedChatState(props.paneId, props.tabId)
   goalRefreshEpoch++
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
@@ -2183,13 +2231,15 @@ const isSubmissionReady = computed(() => connectionState.value === 'live' &&
   !isUpdatingReasoningEffort.value)
 
 const canSend = computed(() => isSubmissionReady.value &&
-  !goalComposerLocked.value &&
-  (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
+  !goalInputBlocked.value &&
+  (goalSteerOnly.value
+    ? draftMessage.value.trim().length > 0 && attachments.value.length === 0
+    : draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
 const attachmentDisabledReason = computed(() => {
   if (!supportsImages.value) return 'This chat does not support image attachments'
-  if (goalComposerLocked.value) return goalComposerReason.value
+  if (goalComposerLocked.value) return 'Pause or complete the active Goal before attaching images'
   if (isSending.value || isPreparingAttachments.value) return 'Wait for the current upload or send to finish'
   return null
 })
@@ -2271,12 +2321,11 @@ function triggerFilePicker() {
 }
 
 const MAX_ATTACHMENTS = 10
-// Backend enforces a 40 MiB total decoded cap per send request (originals +
-// previews). We enforce it conservatively client-side: sum of original file
-// sizes plus 512 KiB reserved per selected preview must stay <= 40 MiB. The
-// backend remains authoritative.
+// Backend enforces a 40 MiB total decoded cap per send request (originals plus
+// re-encoded previews). The backend remains authoritative.
 const MAX_TOTAL_REQUEST_BYTES = 40 * 1024 * 1024
-const PREVIEW_RESERVED_BYTES = 512 * 1024
+const TOTAL_REQUEST_LIMIT_ERROR =
+  `Total attachment size exceeds the ${MAX_TOTAL_REQUEST_BYTES / 1024 / 1024} MiB request limit.`
 
 async function addFiles(files: FileList | File[]) {
   // Capture the epoch BEFORE any state mutation. If the source switches
@@ -2288,6 +2337,11 @@ async function addFiles(files: FileList | File[]) {
   composerError.value = null
   if (!supportsImages.value) {
     composerError.value = 'This chat does not support image attachments.'
+    return
+  }
+  // Pasted or dropped images would leave a steer unsendable.
+  if (goalComposerLocked.value) {
+    composerError.value = 'Pause or complete the active Goal before attaching images.'
     return
   }
   // Serialize preparation batches: reject new input while a previous batch is
@@ -2311,15 +2365,13 @@ async function addFiles(files: FileList | File[]) {
     composerError.value = `You can attach up to ${MAX_ATTACHMENTS} images.`
   }
 
-  // Enforce the total request byte cap before reading: sum of existing draft
-  // originals + new originals + 512 KiB per preview must stay <= 40 MiB.
-  const existingBytes = attachments.value.reduce((sum, a) => sum + (a.size_bytes || 0), 0)
+  // Enforce the total request byte cap before reading: existing draft bytes
+  // plus the new originals must fit. A re-encoded preview is counted once it
+  // exists (below).
+  const existingBytes = attachments.value.reduce((sum, a) => sum + attachmentRequestBytes(a), 0)
   const newBytes = accepted.reduce((sum, f) => sum + f.size, 0)
-  const totalPreviews = attachments.value.length + accepted.length
-  const projected = existingBytes + newBytes + totalPreviews * PREVIEW_RESERVED_BYTES
-  if (projected > MAX_TOTAL_REQUEST_BYTES) {
-    const mb = (MAX_TOTAL_REQUEST_BYTES / 1024 / 1024).toFixed(0)
-    composerError.value = `Total attachment size exceeds the ${mb} MiB request limit.`
+  if (existingBytes + newBytes > MAX_TOTAL_REQUEST_BYTES) {
+    composerError.value = TOTAL_REQUEST_LIMIT_ERROR
     return
   }
 
@@ -2376,12 +2428,22 @@ async function addFiles(files: FileList | File[]) {
         if (preparationEpoch.value !== epoch || isSending.value) return
         const idx = attachments.value.findIndex((a) => a.id === provisionalId)
         if (idx < 0) continue // removed by the user while preparing
-        attachments.value[idx] = {
+        const prepared: DraftAttachment = {
           ...provisional,
           preview_data_url: previewDataUrl,
           // Replace the provisional thumbnail with the bounded preview.
           preview_url: previewDataUrl,
         }
+        const total = attachments.value.reduce(
+          (sum, a) => sum + attachmentRequestBytes(a.id === provisionalId ? prepared : a),
+          0,
+        )
+        if (total > MAX_TOTAL_REQUEST_BYTES) {
+          attachments.value = attachments.value.filter((a) => a.id !== provisionalId)
+          composerError.value = TOTAL_REQUEST_LIMIT_ERROR
+          continue
+        }
+        attachments.value[idx] = prepared
       } catch (e) {
         // Preview generation failed. Only mutate state if this batch still
         // owns the composer; otherwise leave the new source's state alone.
@@ -2506,7 +2568,7 @@ function syncComposerTextareaHeight() {
 }
 
 function handleComposerEnter(event: KeyboardEvent) {
-  if (goalComposerLocked.value) {
+  if (goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return
   }
@@ -2516,7 +2578,7 @@ function handleComposerEnter(event: KeyboardEvent) {
     metaKey: event.metaKey,
     ctrlKey: event.ctrlKey,
     altKey: event.altKey,
-    turnInFlight: turnInFlight.value,
+    turnInFlight: turnInFlight.value || goalSteerOnly.value,
     hasDraft: draftMessage.value.trim().length > 0 || attachments.value.length > 0,
     isMobile: isMobileViewport.value,
   })
@@ -2530,7 +2592,7 @@ function handleComposerEnter(event: KeyboardEvent) {
 }
 
 function enqueueDraft() {
-  if (goalComposerLocked.value) {
+  if (goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return
   }
@@ -2545,6 +2607,10 @@ function enqueueDraft() {
   void nextTick(() => syncComposerTextareaHeight())
 }
 
+function suspendStreamForDeactivation() {
+  stop()
+}
+
 async function flushDraftQueue() {
   while (
     draftQueue.value.length > 0
@@ -2554,24 +2620,56 @@ async function flushDraftQueue() {
     && !isSending.value
     && !goalComposerLocked.value
   ) {
-    const next = draftQueue.value.shift()
-    if (!next) break
-    draftMessage.value = next.message
-    attachments.value = next.attachments
-    const sent = await submit('normal', undefined, 'queue')
+    const activationRequestId = terminalStore.queuedChatActivationRequestId(
+      props.paneId,
+      props.tabId,
+    )
+    isQueueSendInProgress.value = true
+    let sent = false
+    try {
+      const next = draftQueue.value.shift()
+      if (!next) break
+      draftMessage.value = next.message
+      attachments.value = next.attachments
+      sent = await submit('normal', undefined, 'queue')
+    } finally {
+      isQueueSendInProgress.value = false
+      // The next ready hidden Chat may activate only after this one has
+      // completed its foreground send attempt (including POST acknowledgement
+      // or the existing delivery-uncertain pause path). Settle by the globally
+      // unique tab ID because the Chat may have moved panes during the POST.
+      terminalStore.settleQueuedChatActivation(props.tabId, activationRequestId)
+    }
     if (!sent) break
   }
 }
 
 function requestDraftQueueFlush() {
+  if (!isPaneActivated.value) {
+    terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+    return
+  }
+  if (
+    draftQueue.value.length > 0
+    && (connectionState.value === 'failed' || goalComposerLocked.value)
+  ) {
+    queueAutoActivationBlock.value = connectionState.value === 'failed'
+      ? 'stream-failed'
+      : 'goal-locked'
+    terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
+    return
+  }
   if (
     isSubmissionReady.value
+    && isPaneActivated.value
+    && !isWaitingForQueuedChatActivation.value
     && !isDraftQueuePaused.value
     && !turnInFlight.value
     && draftQueue.value.length > 0
     && !isSending.value
     && !goalComposerLocked.value
   ) {
+    queueAutoActivationBlock.value = null
     void flushDraftQueue()
   }
 }
@@ -2584,6 +2682,9 @@ watch(
     goalComposerLocked,
     isSubmissionReady,
     isDraftQueuePaused,
+    queueAutoActivationBlock,
+    isPaneActivated,
+    isWaitingForQueuedChatActivation,
   ],
   requestDraftQueueFlush,
 )
@@ -2939,24 +3040,36 @@ async function sendToStream(
   atts: WorkspaceAttachmentCreate[],
   clientTurnId: string,
   delivery: 'normal' | 'steer' = 'normal',
+  timeoutMs: number | null = null,
 ) {
   const base = `/api/workspaces/tabs/${props.tabId}/stream/send`
-  const res = await fetch(base, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
-    body: JSON.stringify({
-      client_turn_id: clientTurnId,
-      text: message,
-      delivery,
-      attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
-        filename,
-        mime_type,
-        data_url,
-        preview_data_url,
-      })),
-    }),
-  })
+  const controller = new AbortController()
+  const timer = timeoutMs === null ? null : setTimeout(() => controller.abort(), timeoutMs)
+  let res: Response
+  try {
+    res = await fetch(base, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      signal: controller.signal,
+      body: JSON.stringify({
+        client_turn_id: clientTurnId,
+        text: message,
+        delivery,
+        attachments: atts.map(toStreamSendAttachment),
+      }),
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw Object.assign(
+        new Error('Send timed out. Delivery is uncertain; review the Chat before retrying.'),
+        { cause: error },
+      )
+    }
+    throw error
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
   if (!res.ok) {
     let detail = `HTTP ${res.status}`
     try {
@@ -3060,7 +3173,7 @@ async function submit(
   source: 'user' | 'queue' = 'user',
 ): Promise<boolean> {
   if (isSending.value) return false
-  if (!messageOverride && goalComposerLocked.value) {
+  if (!messageOverride && goalInputBlocked.value) {
     composerError.value = goalComposerReason.value
     return false
   }
@@ -3075,7 +3188,7 @@ async function submit(
   const message = messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || attachments.value.length > 0
   if (!hasContent) return false
-  if (delivery === 'normal' && turnInFlight.value && !messageOverride) {
+  if (delivery === 'normal' && (turnInFlight.value || goalSteerOnly.value) && !messageOverride) {
     enqueueDraft()
     return false
   }
@@ -3087,8 +3200,8 @@ async function submit(
   // preview_data_url, size_bytes) so we can restore the composer exactly on
   // send failure — no reconstructed ids, no zeroed sizes.
   const draftAtts: DraftAttachment[] = messageOverride ? [] : [...attachments.value]
-  // Wire payload carries the original data_url (for the provider) and the
-  // bounded preview_data_url (for the cache) separately.
+  // The original data_url goes to the provider; preview_data_url is the
+  // stored image (sendToStream flags it instead when it is the original).
   const atts: WorkspaceAttachmentCreate[] = draftAtts.map(
     ({ filename, mime_type, data_url, preview_data_url }) => ({
       filename,
@@ -3131,7 +3244,7 @@ async function submit(
       ]
     }
     requestLatestAnchor(true)
-    await sendToStream(message, atts, clientTurnId, delivery)
+    await sendToStream(message, atts, clientTurnId, delivery, source === 'queue' ? 15_000 : null)
     if (messageOverride) await hydrateGoal()
     // A successful explicit send resolves a previously uncertain queued item.
     // Automatic queue sends never clear this flag; only deliberate user input
@@ -3319,7 +3432,7 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background-color: var(--ch-color-app-bg);
+  background-color: var(--ch-color-main-bg);
   color: var(--ch-color-text);
   font-size: 13px;
   line-height: 1.5;
@@ -3758,17 +3871,29 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+/* A zero flex basis keeps the tools out of the row's wrap decision, so Stop and
+   Send/Queue always share the toolbar line; the model label truncates instead. */
 .composer-tools {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  flex: 0 0 auto;
-  margin-right: auto;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .composer-mode-picker {
   position: relative;
   flex: 0 0 auto;
+}
+
+.composer-mode-picker.composer-model-picker {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 210px;
+}
+
+.composer-model-picker .composer-mode-trigger {
+  max-width: 100%;
 }
 
 .composer-mode-trigger {
@@ -4059,7 +4184,7 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 500;
   color: #fff;
-  background-color: var(--ch-color-accent);
+  background-color: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);
   cursor: pointer;
@@ -4067,7 +4192,7 @@ onUnmounted(() => {
 }
 
 .composer-send-btn:hover:not(:disabled) {
-  background-color: var(--ch-color-accent-hover);
+  background-color: var(--ch-color-accent-fill-hover);
 }
 
 .composer-send-btn:disabled {
@@ -4218,7 +4343,7 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 500;
   color: #fff;
-  background: var(--ch-color-accent);
+  background: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);
   cursor: pointer;
@@ -4236,7 +4361,7 @@ onUnmounted(() => {
 .structured-pane {
   background:
     radial-gradient(circle at 50% -22%, var(--ch-color-surface-soft), transparent 44%),
-    var(--ch-color-app-bg);
+    var(--ch-color-main-bg);
 }
 
 .structured-timeline {
@@ -4313,12 +4438,17 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
-.conversation-bubble--user {
-  --paseo-user-bubble: #3268a8;
+/* Chat reads at a larger size than compact Markdown in dense Workspace panels;
+   `.compact` keeps this rule more specific than MarkdownContent's own. */
+.conversation-bubble :deep(.markdown-content.compact) {
+  font-size: 14px;
+  line-height: 1.65;
+}
 
+.conversation-bubble--user {
   position: relative;
-  background: var(--paseo-user-bubble);
-  color: #fff;
+  background: var(--ch-color-message-user-bg);
+  color: var(--ch-color-text-inverse);
   border-bottom-right-radius: var(--ch-radius-sm);
 }
 
@@ -4328,13 +4458,14 @@ onUnmounted(() => {
   gap: 5px;
   min-width: 0;
   margin-bottom: 6px;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--ch-color-message-user-muted);
   font-size: 11px;
   font-weight: 600;
   line-height: 16px;
 }
 
 .conversation-message-source__mark {
+  position: relative;
   display: inline-grid;
   width: 16px;
   height: 16px;
@@ -4343,6 +4474,15 @@ onUnmounted(() => {
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.18);
   font-size: 9px;
+  overflow: hidden;
+}
+
+.conversation-message-source__mark img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .conversation-message-source__label {
@@ -4427,11 +4567,16 @@ onUnmounted(() => {
   display: grid;
   place-items: center;
   padding: 10px;
-  border: 1px dashed color-mix(in srgb, #fff 36%, transparent);
+  border: 1px dashed var(--ch-color-border-strong);
   border-radius: var(--ch-radius-sm);
-  color: color-mix(in srgb, #fff 78%, transparent);
+  color: var(--ch-color-text-muted);
   font-size: 11px;
   text-align: center;
+}
+
+.conversation-bubble--user .turn-attachment-placeholder {
+  border-color: color-mix(in srgb, #fff 36%, transparent);
+  color: var(--ch-color-message-user-muted);
 }
 
 /* ---- Edit-resend UI ---- */
@@ -4467,7 +4612,7 @@ onUnmounted(() => {
 }
 
 /* Inline editing: the message itself becomes the input. The form used to force
-   ``min-width: 320px`` and draw a bordered dark box inside the blue bubble, so
+   ``min-width: 320px`` and draw a bordered dark box inside the user bubble, so
    a two-character message opened a wide bubble holding an empty-looking form.
    Now the bubble sizes to its content and the textarea reads as the message. */
 .edit-resend-form {
@@ -4492,16 +4637,13 @@ onUnmounted(() => {
 }
 
 .edit-resend-textarea:focus-visible {
-  /* 2px at 65%: the earlier 1px/45% ring measured 2.43:1 against the bubble
-     blue, under the 3:1 the focus indicator needs — weaker than the border it
-     replaced. */
-  outline: 2px solid color-mix(in srgb, #fff 65%, transparent);
+  outline: 2px solid var(--ch-color-message-user-focus);
   outline-offset: 3px;
   border-radius: 2px;
 }
 
 .edit-resend-textarea::placeholder {
-  color: color-mix(in srgb, #fff 50%, transparent);
+  color: var(--ch-color-message-user-muted);
 }
 
 .edit-resend-actions {
@@ -4550,7 +4692,7 @@ onUnmounted(() => {
 }
 
 .edit-resend-error {
-  color: #ffb4b4;
+  color: var(--ch-color-message-user-error);
   font-size: 12px;
 }
 
@@ -4617,19 +4759,22 @@ onUnmounted(() => {
   justify-content: center;
   flex: 0 0 auto;
   border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-accent-soft);
-  color: var(--ch-color-accent);
+  border: 1px solid var(--ch-color-border-selected);
+  background: var(--ch-color-surface-selected);
+  color: var(--ch-color-text-selected);
   font-size: 11px;
   font-weight: 600;
 }
 
 .conversation-avatar--tool {
+  border-color: var(--ch-color-border-muted);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text-muted);
   font-size: 10px;
 }
 
 .conversation-avatar--waiting {
+  border-color: var(--ch-color-border-muted);
   color: var(--ch-color-text-subtle);
   background: var(--ch-color-surface-control);
 }
@@ -5208,7 +5353,8 @@ onUnmounted(() => {
   box-shadow: none;
 }
 
-.composer-send-btn {
+.composer-send-btn,
+.composer-stop-btn {
   height: 34px;
   border-radius: var(--ch-radius-sm);
 }
@@ -5246,6 +5392,10 @@ onUnmounted(() => {
   .composer-mode-trigger {
     max-width: 170px;
     padding: 0 7px;
+  }
+
+  .composer-mode-picker.composer-model-picker {
+    max-width: 170px;
   }
 
   .composer-mode-menu {

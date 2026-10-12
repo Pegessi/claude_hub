@@ -46,7 +46,6 @@ def no_live_http(monkeypatch):
 def env(monkeypatch, tmp_path):
     for name in BOT_ENV_KEYS:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("CLAUDE_HUB_PUBLIC_BASE_URL", "https://hub.example.test")
     clock = [1_800_000_000.0]
     pool = FeishuBotPoolStore(
         path=tmp_path / "secrets" / "pool.json",
@@ -56,8 +55,6 @@ def env(monkeypatch, tmp_path):
     config = FeishuBotConfig(
         app_id="cli-bot",
         app_secret="test-secret",
-        verification_token="test-token",
-        encrypt_key="test-encrypt",
     )
     bot_id = pool.create_bot(name="test Bot", config=config)
     owner = OwnerIdentity(open_id="ou-hub", email="hub@example.test", kind=OWNER_KIND_OAUTH)
@@ -183,7 +180,9 @@ def install_stream(monkeypatch, on_send, *, subscribe_release=None, goal_lock=No
     monkeypatch.setattr(stream_api, "_send_to_native", send)
     monkeypatch.setattr(goal_run, "get_goal_admission_lock", lambda tab_id: lock)
     monkeypatch.setattr(
-        goal_run, "get_goal_manager", lambda: SimpleNamespace(current=lambda tab_id: None)
+        goal_run,
+        "get_goal_manager",
+        lambda: SimpleNamespace(current=lambda tab_id: None, has_goal_history=lambda tab_id: False),
     )
     return SimpleNamespace(
         queue=queue, subscribed=subscribed, unsubscribed=unsubscribed, goal_lock=lock
@@ -226,8 +225,6 @@ async def test_revocation_during_preflight_prevents_native_submission(
                     env.bot_id,
                     expected_revision=revision(env),
                     app_secret="new-secret",
-                    verification_token="new-token",
-                    encrypt_key="new-encrypt",
                 )
             else:
                 env.authorized[0] = False

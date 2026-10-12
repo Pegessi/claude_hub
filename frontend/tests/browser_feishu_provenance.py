@@ -5,6 +5,7 @@ No Hub backend, provider, or real Feishu application is contacted.
 """
 
 import asyncio
+import base64
 import json
 import sys
 from pathlib import Path
@@ -39,6 +40,8 @@ def bot_pool(binding: dict | None, pool_revision: int) -> dict:
             {
                 "bot_id": "bot-provenance",
                 "name": "Provenance Bot",
+                "feishu_name": "Hub 助手",
+                "feishu_avatar_url": "https://avatar.example.test/hub-bot.png",
                 "app_id": "cli-bot",
                 "source": "stored",
                 "enabled": True,
@@ -48,9 +51,7 @@ def bot_pool(binding: dict | None, pool_revision: int) -> dict:
                 "generation": 1,
                 "configured": True,
                 "app_secret_configured": True,
-                "verification_token_configured": True,
-                "encrypt_key_configured": True,
-                "event_url": "https://hub.example.test/api/feishu/bot/events/bot-provenance",
+                "connection_status": "connected",
                 "updated_at": "2026-10-06T08:00:00Z",
                 "binding": binding,
                 "my_claims": [],
@@ -79,6 +80,8 @@ def history():
                 "origin": "feishu",
                 "feishu": {
                     "app_id": "cli-bot",
+                    "bot_name": "Hub 助手",
+                    "bot_avatar_url": "https://avatar.example.test/hub-bot.png",
                     "chat_id": "oc-chat",
                     "message_id": "om-source-message",
                     "sender_open_id": "ou-feishu-sender",
@@ -179,6 +182,16 @@ async def main(browser_run: BrowserRun) -> None:
                     method = request.method
                     path = url.path
                     query = parse_qs(url.query, keep_blank_values=True)
+                    if request.url == "https://avatar.example.test/hub-bot.png":
+                        await route.fulfill(
+                            status=200,
+                            content_type="image/png",
+                            body=base64.b64decode(
+                                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                                "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                            ),
+                        )
+                        return
                     if origin(request.url) != origin(base):
                         report["blocked_external_requests"].append(request.url)
                         if url.scheme != "https" or url.hostname not in {
@@ -206,6 +219,10 @@ async def main(browser_run: BrowserRun) -> None:
                         and not query
                     ):
                         body = []
+                    elif path.startswith("/api/tabs/sidebar-preferences"):
+                        # Read, one-shot pin migration and per-tab pin updates
+                        # share one shape; provenance never depends on pins.
+                        body = {"pinned_tab_ids": []}
                     elif method == "GET" and path == "/api/env-presets" and not query:
                         body = {"custom_presets": [], "hidden_builtin_ids": []}
                     elif method == "GET" and path == "/api/feishu/bot/bots" and not query:
@@ -295,7 +312,13 @@ async def main(browser_run: BrowserRun) -> None:
                     await expect(labels).to_have_count(1)
                     await expect(
                         labels.locator(".conversation-message-source__label")
-                    ).to_have_text("Feishu · ou-feishu-sender")
+                    ).to_have_text("Hub 助手")
+                    avatar = labels.locator(".conversation-message-source__mark img")
+                    await expect(avatar).to_have_count(1)
+                    await expect(avatar).to_have_attribute(
+                        "src", "https://avatar.example.test/hub-bot.png"
+                    )
+                    await expect(avatar).to_be_visible()
                     assert await page.evaluate(
                         "document.documentElement.scrollWidth <= innerWidth + 1"
                     )
@@ -311,7 +334,10 @@ async def main(browser_run: BrowserRun) -> None:
                     trigger_box = await trigger.bounding_box()
                     assert pane_box is not None and name_box is not None and trigger_box is not None
                     assert name_box["x"] >= pane_box["x"] + 7
-                    assert name_box["x"] + name_box["width"] <= trigger_box["x"] - 6
+                    # The name pill and the Feishu control share one flex
+                    # row, so the only requirement is that they do not
+                    # overlap; the row's own gap sets the exact spacing.
+                    assert name_box["x"] + name_box["width"] <= trigger_box["x"]
                     assert (
                         trigger_box["x"] + trigger_box["width"]
                         <= pane_box["x"] + pane_box["width"] + 1

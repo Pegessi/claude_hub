@@ -39,11 +39,18 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
     if not turn_id:
         raise RuntimeError("Goal dispatch is missing its durable step id")
     session = _terminal_tab_session_or_404(goal.tab_id)
+    # A steered turn shows the user's message and may replace whatever Chat
+    # turn is still running; a plain continuation never interrupts anything.
+    steered = goal.pending_input is not None
     await _send_to_native(
         session,
-        AgentStreamSendRequest(text=prompt, client_turn_id=turn_id),
+        AgentStreamSendRequest(
+            text=prompt,
+            client_turn_id=turn_id,
+            delivery="steer" if steered else "normal",
+        ),
         _get_tab_tailer_manager(),
-        visible_text="Continue active Goal",
+        visible_text=goal.pending_input if steered else "Continue active Goal",
         turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
     )
     return turn_id
@@ -160,11 +167,29 @@ async def resume_goal(
         goal = manager.get(goal_id)
         async with get_goal_admission_lock(goal.tab_id):
             goal = manager.get(goal_id)
-            if body.client_request_id not in goal.idempotency and goal.status.value != "active":
-                await _ensure_goal_ready(
-                    goal.tab_id, check_busy=goal.dispatch_state.value == "idle"
-                )
-            return await manager.resume(goal_id, body.client_request_id)
+            if body.client_request_id in goal.idempotency or (
+                goal.status.value == "active" and not goal.resume_after_turn
+            ):
+                return await manager.resume(goal_id, body.client_request_id)
+            await _ensure_goal_ready(goal.tab_id, check_busy=False)
+            if goal.dispatch_state.value != "idle":
+                return await manager.resume(goal_id, body.client_request_id)
+            from .agent_stream import _get_tab_tailer_manager, _terminal_tab_session_or_404
+
+            session = _terminal_tab_session_or_404(goal.tab_id)
+            stream_manager = _get_tab_tailer_manager()
+            if not await stream_manager.turn_in_flight(session):
+                if goal.resume_after_turn:
+                    return await manager.release_deferred_resume(goal_id)
+                return await manager.resume(goal_id, body.client_request_id)
+            if goal.resume_after_turn:
+                # Already resuming once the running Chat turn ends.
+                return goal
+            goal = await manager.resume(goal_id, body.client_request_id, after_current_turn=True)
+            # The running turn may have ended before the deferral was stored.
+            if not await stream_manager.turn_in_flight(session):
+                goal = await manager.release_deferred_resume(goal_id)
+            return goal
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
     except (ValueError, GoalPolicyError) as exc:

@@ -171,7 +171,10 @@ def _stub_goal(monkeypatch: MonkeyPatch, goal_ref: dict[str, Any] | None = None)
     monkeypatch.setattr(
         goal_module,
         "get_goal_manager",
-        lambda: SimpleNamespace(current=lambda _tab_id: state.get("goal")),
+        lambda: SimpleNamespace(
+            current=lambda _tab_id: state.get("goal"),
+            has_goal_history=lambda _tab_id: state.get("goal") is not None,
+        ),
     )
     monkeypatch.setattr(
         goal_module,
@@ -1714,6 +1717,275 @@ async def test_fire_hub_task_publishes_internal_task_and_dispatches(
     assert internal.title == "Nightly lint"
     assert internal.prompt == "Run the lint sweep"
     assert internal.agent_type == AgentType.CLAUDE
+
+
+async def test_fire_hub_task_passes_env_preset_to_worker(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    new_session = _make_session(workspace, session_id="orch-preset", caller_owned_ephemeral=True)
+    captured_req: List[EnsureWorkspaceAgentRequest] = []
+
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
+        captured_req.append(payload)
+        manager.sessions[new_session.id] = new_session
+        return new_session
+
+    async def fake_dispatch(task: Any, session: ManagedSession) -> None:
+        return None
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+    monkeypatch.setattr(manager, "_dispatch_task_to_session", fake_dispatch)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="preset task",
+            kind=ScheduledTaskKind.HUB_TASK,
+            cron="0 3 * * *",
+            workspace_id=workspace.id,
+            task_title="Preset run",
+            message="go",
+            env_preset="none",
+        )
+    )
+    assert task.env_preset == "none"
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+
+    assert len(captured_req) == 1
+    assert captured_req[0].env_preset == "none"
+
+
+async def test_fire_new_session_passes_env_preset_to_worker(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    new_session = _make_session(workspace, session_id="new-preset", caller_owned_ephemeral=True)
+    captured_req: List[EnsureWorkspaceAgentRequest] = []
+
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
+        captured_req.append(payload)
+        manager.sessions[new_session.id] = new_session
+        return new_session
+
+    async def fake_send(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="preset one-shot",
+            kind=ScheduledTaskKind.NEW_SESSION,
+            run_at=datetime.now() + timedelta(hours=1),
+            workspace_id=workspace.id,
+            message="do a thing",
+            env_preset="none",
+        )
+    )
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+
+    assert len(captured_req) == 1
+    assert captured_req[0].env_preset == "none"
+
+
+def test_create_rejects_env_preset_for_chat_kind(manager: WorkspaceManager) -> None:
+    # Validation of the kind-specific rule runs before the tab lookup, so no
+    # real tab is required.
+    with pytest.raises(ValueError, match="env_preset"):
+        manager.create_scheduled_task(
+            ScheduledTaskCreate(
+                name="bad preset",
+                kind=ScheduledTaskKind.CHAT_TURN,
+                cron="0 3 * * *",
+                tab_id="tab-does-not-exist",
+                message="hi",
+                env_preset="none",
+            )
+        )
+
+
+def test_create_rejects_unknown_env_preset(manager: WorkspaceManager, tmp_path: Path) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    with pytest.raises(ValueError, match="Unknown env preset"):
+        manager.create_scheduled_task(
+            ScheduledTaskCreate(
+                name="bad preset id",
+                kind=ScheduledTaskKind.HUB_TASK,
+                cron="0 3 * * *",
+                workspace_id=workspace.id,
+                task_title="x",
+                message="y",
+                env_preset="does-not-exist-preset",
+            )
+        )
+
+
+def test_update_env_preset_validates_and_persists(
+    manager: WorkspaceManager, tmp_path: Path
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="edit preset",
+            kind=ScheduledTaskKind.HUB_TASK,
+            cron="0 3 * * *",
+            workspace_id=workspace.id,
+            task_title="x",
+            message="y",
+        )
+    )
+    assert task.env_preset is None
+
+    updated = manager.update_scheduled_task(task.id, ScheduledTaskUpdate(env_preset=" none "))
+    assert updated.env_preset == "none"
+
+    with pytest.raises(ValueError, match="Unknown env preset"):
+        manager.update_scheduled_task(
+            task.id, ScheduledTaskUpdate(env_preset="does-not-exist-preset")
+        )
+
+    # An explicit null in the raw payload clears the preset.
+    cleared = ScheduledTaskUpdate.model_validate({"env_preset": None})
+    assert cleared.model_dump(exclude_unset=True) == {"env_preset": None}
+    updated = manager.update_scheduled_task(task.id, cleared)
+    assert updated.env_preset is None
+
+
+def test_update_strips_stale_preset_on_non_session_kind(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # A preset on a non-session kind can only come from a hand-edited
+    # persistence file. It must not lock out unrelated edits such as
+    # disabling the schedule, and validation heals the stale value.
+    session = _make_session(_make_workspace(manager, tmp_path))
+    manager.sessions[session.id] = session
+    _stub_known_tabs(monkeypatch, session.tab_id)
+
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="tab automation",
+            kind=ScheduledTaskKind.TAB_MESSAGE,
+            cron="0 3 * * *",
+            tab_id=session.tab_id,
+            message="hi",
+        )
+    )
+    manager.scheduled_tasks[task.id] = task.model_copy(update={"env_preset": "none"})
+
+    updated = manager.update_scheduled_task(task.id, ScheduledTaskUpdate(enabled=False))
+    assert updated.enabled is False
+    assert updated.env_preset is None
+
+
+def test_create_normalizes_env_preset_whitespace(manager: WorkspaceManager, tmp_path: Path) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="padded preset",
+            kind=ScheduledTaskKind.HUB_TASK,
+            cron="0 3 * * *",
+            workspace_id=workspace.id,
+            task_title="x",
+            message="y",
+            env_preset="  none  ",
+        )
+    )
+    assert task.env_preset == "none"
+
+
+def test_create_rejects_env_preset_for_tab_message_kind(manager: WorkspaceManager) -> None:
+    # A preset is meaningless when no session is created; validation runs
+    # before the tab lookup so no real tab is required.
+    with pytest.raises(ValueError, match="env_preset"):
+        manager.create_scheduled_task(
+            ScheduledTaskCreate(
+                name="bad preset",
+                kind=ScheduledTaskKind.TAB_MESSAGE,
+                cron="0 3 * * *",
+                tab_id="tab-does-not-exist",
+                message="hi",
+                env_preset="none",
+            )
+        )
+
+
+async def test_fire_hub_task_missing_preset_records_error_and_creates_no_task(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # A custom preset can be deleted after the schedule is saved. The fire path
+    # re-validates and must record a clear error without spawning a worker or
+    # leaking an internal hub task.
+    from claude_hub.services import env_preset_resolver
+
+    workspace = _make_workspace(manager, tmp_path)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="vanished preset",
+            kind=ScheduledTaskKind.HUB_TASK,
+            cron="0 3 * * *",
+            workspace_id=workspace.id,
+            task_title="Preset run",
+            message="go",
+            env_preset="none",
+        )
+    )
+
+    def fake_resolve(name_or_id: str) -> Any:
+        raise env_preset_resolver.EnvPresetNotFoundError("preset was deleted")
+
+    async def fake_ensure(workspace_id: str, payload: EnsureWorkspaceAgentRequest) -> Any:
+        raise AssertionError("no worker should be spawned for a missing preset")
+
+    monkeypatch.setattr(env_preset_resolver, "resolve_env_preset", fake_resolve)
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+
+    tasks_before = set(manager.tasks)
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+
+    stored = manager.scheduled_tasks[task.id]
+    assert stored.last_status == "error"
+    assert "no longer available" in (stored.last_error or "")
+    assert "none" in (stored.last_error or "")
+    assert set(manager.tasks) == tasks_before
+
+
+async def test_fire_new_session_missing_preset_records_error(
+    manager: WorkspaceManager, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.services import env_preset_resolver
+
+    workspace = _make_workspace(manager, tmp_path)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="vanished preset",
+            kind=ScheduledTaskKind.NEW_SESSION,
+            run_at=datetime.now() + timedelta(hours=1),
+            workspace_id=workspace.id,
+            message="do a thing",
+            env_preset="none",
+        )
+    )
+
+    def fake_resolve(name_or_id: str) -> Any:
+        raise env_preset_resolver.EnvPresetNotFoundError("preset was deleted")
+
+    async def fake_ensure(workspace_id: str, payload: EnsureWorkspaceAgentRequest) -> Any:
+        raise AssertionError("no session should be created for a missing preset")
+
+    monkeypatch.setattr(env_preset_resolver, "resolve_env_preset", fake_resolve)
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+
+    stored = manager.scheduled_tasks[task.id]
+    assert stored.last_status == "error"
+    assert "no longer available" in (stored.last_error or "")
 
 
 async def test_run_scheduled_task_fires_immediately(

@@ -12,11 +12,11 @@ const response=(body,status=200)=>new Response(JSON.stringify(body),{status,head
 
 const cases=[
   ['loadFeishuBotPool',[], 'GET','/api/feishu/bot/bots',undefined,pool],
-  ['createFeishuBot',[{name:'A',app_id:'id',app_secret:'s',verification_token:'v',encrypt_key:'e'}], 'POST','/api/feishu/bot/bots',{name:'A',app_id:'id',app_secret:'s',verification_token:'v',encrypt_key:'e'},pool],
-  ['replaceFeishuBotSecrets',['bot/1',{app_secret:'s2',verification_token:'v2',encrypt_key:'e2',expected_revision:3}], 'PUT','/api/feishu/bot/bots/bot%2F1/secrets',{app_secret:'s2',verification_token:'v2',encrypt_key:'e2',expected_revision:3},pool],
+  ['createFeishuBot',[{name:'A',app_id:'id',app_secret:'s'}], 'POST','/api/feishu/bot/bots',{name:'A',app_id:'id',app_secret:'s'},pool],
+  ['replaceFeishuBotSecrets',['bot/1',{app_secret:'s2',expected_revision:3}], 'PUT','/api/feishu/bot/bots/bot%2F1/secrets',{app_secret:'s2',expected_revision:3},pool],
   ['updateFeishuBot',['b',{name:'B',enabled:false,expected_revision:4}], 'PATCH','/api/feishu/bot/bots/b',{name:'B',enabled:false,expected_revision:4},pool],
   ['deleteFeishuBot',['b',5], 'DELETE','/api/feishu/bot/bots/b',{expected_revision:5},pool],
-  ['startFeishuPairing',['b',{tab_id:'t',expected_revision:6}], 'POST','/api/feishu/bot/bots/b/pair/start',{tab_id:'t',expected_revision:6},{bot_id:'b',revision:7,code:'123456',expires_at:'2026-01-01T00:00:00Z',event_url:'https://h/events/b'}],
+  ['startFeishuPairing',['b',{tab_id:'t',expected_revision:6}], 'POST','/api/feishu/bot/bots/b/pair/start',{tab_id:'t',expected_revision:6},{bot_id:'b',revision:7,code:'123456',expires_at:'2026-01-01T00:00:00Z'}],
   ['activateFeishuPairing',['b',{pairing_id:'p',confirm_word:'654321',expected_revision:7}], 'POST','/api/feishu/bot/bots/b/pair/activate',{pairing_id:'p',confirm_word:'654321',expected_revision:7},pool],
   ['disconnectFeishuPairing',['b',8], 'DELETE','/api/feishu/bot/bots/b/pairing',{expected_revision:8},pool],
 ]

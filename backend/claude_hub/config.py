@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     ttyd_base_port: int = 10000
     default_command: str = "claude"
 
+    # Keep the long-lived backend log bounded. RotatingFileHandler retains the
+    # active file plus ``backend_log_backup_count`` numbered backups.
+    backend_log_max_bytes: int = 10 * 1024 * 1024
+    backend_log_backup_count: int = 5
+
     # Serve the built frontend (frontend/dist) from FastAPI at the same origin
     # as the API. start.sh sets SERVE_FRONTEND=true in production mode so the
     # backend serves the SPA directly — no vite dev server, no HMR WebSocket
@@ -38,14 +43,15 @@ class Settings(BaseSettings):
     auth_allowed_emails: Optional[str] = None  # Comma-separated list
     auth_allowed_open_ids: Optional[str] = None  # Comma-separated list
 
-    # Agent-stream attachment preview cache limits.
-    # The cache stores only browser-generated bounded previews (never the
-    # original image bytes). All limits are enforced with FIFO eviction.
-    attachment_max_preview_bytes: int = 512 * 1024  # 512 KiB per preview
-    attachment_max_session_count: int = 200
-    attachment_max_session_bytes: int = 64 * 1024 * 1024  # 64 MiB per session
-    attachment_max_global_count: int = 2000
-    attachment_max_global_bytes: int = 512 * 1024 * 1024  # 512 MiB global
+    # Agent-stream Chat image cache limits, enforced least-recently-used first.
+    # The composer stores the original image when it fits the per-image cap
+    # (its own 8 MiB upload limit), so sent images keep their quality. The
+    # session limits default to the global ones: one 1 GiB LRU pool.
+    attachment_max_preview_bytes: int = 8 * 1024 * 1024  # 8 MiB per image
+    attachment_max_session_count: int = 5000
+    attachment_max_session_bytes: int = 1024 * 1024 * 1024  # 1 GiB
+    attachment_max_global_count: int = 5000
+    attachment_max_global_bytes: int = 1024 * 1024 * 1024  # 1 GiB
     # Optional age-based eviction. None disables age TTL.
     attachment_max_age_seconds: Optional[float] = None
 
@@ -56,9 +62,14 @@ class Settings(BaseSettings):
     max_forks_per_tab: int = 12
     max_total_tabs: int = 200
 
-    @field_validator("max_forks_per_tab", "max_total_tabs")
+    @field_validator(
+        "max_forks_per_tab",
+        "max_total_tabs",
+        "backend_log_max_bytes",
+        "backend_log_backup_count",
+    )
     @classmethod
-    def _growth_limit_positive(cls, v: int) -> int:
+    def _positive_limit(cls, v: int) -> int:
         if v <= 0:
             raise ValueError(f"must be positive, got {v}")
         return v

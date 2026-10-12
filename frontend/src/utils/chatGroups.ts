@@ -6,6 +6,10 @@ export interface ChatCwdGroup {
   tabs: TerminalTab[]
 }
 
+function cwdKey(tab: Pick<TerminalTab, 'cwd'>): string {
+  return tab.cwd || 'No directory'
+}
+
 /**
  * Group chat tabs by their working directory.
  *
@@ -13,10 +17,13 @@ export interface ChatCwdGroup {
  * the first appearance of each directory. Sorting by creation time here would
  * undo every user reorder as soon as the computed runs.
  */
-export function groupChatsByCwd(tabs: TerminalTab[]): ChatCwdGroup[] {
+export function groupChatsByCwd(
+  tabs: TerminalTab[],
+  preferredCwds: readonly string[] = [],
+): ChatCwdGroup[] {
   const byCwd = new Map<string, TerminalTab[]>()
   for (const tab of tabs) {
-    const cwd = tab.cwd || 'No directory'
+    const cwd = cwdKey(tab)
     const bucket = byCwd.get(cwd)
     if (bucket) {
       bucket.push(tab)
@@ -25,7 +32,14 @@ export function groupChatsByCwd(tabs: TerminalTab[]): ChatCwdGroup[] {
     }
   }
 
-  return [...byCwd].map(([cwd, groupTabs]) => ({ cwd, tabs: groupTabs }))
+  const orderedCwds: string[] = []
+  for (const cwd of preferredCwds) {
+    if (byCwd.has(cwd) && !orderedCwds.includes(cwd)) orderedCwds.push(cwd)
+  }
+  for (const cwd of byCwd.keys()) {
+    if (!orderedCwds.includes(cwd)) orderedCwds.push(cwd)
+  }
+  return orderedCwds.map(cwd => ({ cwd, tabs: byCwd.get(cwd)! }))
 }
 
 export const CHAT_GROUP_PREVIEW_SIZE = 6
@@ -48,6 +62,7 @@ export function buildChatSidebarGroups(
     activeTabId: string | null
     collapsed: ReadonlySet<string>
     expanded: ReadonlySet<string>
+    pinnedCollapsed?: boolean
   },
 ): ChatSidebarGroup[] {
   const query = options.query.trim().toLowerCase()
@@ -57,9 +72,12 @@ export function buildChatSidebarGroups(
   const groups: ChatSidebarGroup[] = []
   const pinned = tabs.filter(tab => pinnedIds.has(tab.id) && matches(tab))
   if (pinned.length) {
+    const collapsed = !query && Boolean(options.pinnedCollapsed)
+    const active = pinned.find(tab => tab.id === options.activeTabId)
+    const visibleTabs = collapsed ? (active ? [active] : []) : pinned
     groups.push({
-      key: 'pinned', cwd: '', pinned: true, tabs: pinned, visibleTabs: pinned,
-      collapsed: false, expanded: true, hiddenCount: 0,
+      key: 'pinned', cwd: '', pinned: true, tabs: pinned, visibleTabs,
+      collapsed, expanded: true, hiddenCount: pinned.length - visibleTabs.length,
     })
   }
   for (const group of groupChatsByCwd(tabs.filter(tab => !pinnedIds.has(tab.id)))) {
@@ -102,6 +120,27 @@ export function moveTabById<T extends { id: string }>(
   const next = tabs.filter(tab => tab.id !== sourceId)
   const targetIndex = next.findIndex(tab => tab.id === targetId)
   next.splice(targetIndex + (position === 'after' ? 1 : 0), 0, source)
+  return next.every((tab, index) => tab === tabs[index]) ? tabs : next
+}
+
+/** Move every manual tab in one cwd as a block relative to another cwd. */
+export function moveCwdGroup<T extends Pick<TerminalTab, 'cwd'>>(
+  tabs: T[], sourceCwd: string, targetCwd: string, position: 'before' | 'after',
+): T[] {
+  if (sourceCwd === targetCwd) return tabs
+  const groups = new Map<string, T[]>()
+  for (const tab of tabs) {
+    const cwd = cwdKey(tab)
+    const group = groups.get(cwd)
+    if (group) group.push(tab)
+    else groups.set(cwd, [tab])
+  }
+  if (!groups.has(sourceCwd) || !groups.has(targetCwd)) return tabs
+
+  const orderedCwds = [...groups.keys()].filter(cwd => cwd !== sourceCwd)
+  const targetIndex = orderedCwds.indexOf(targetCwd)
+  orderedCwds.splice(targetIndex + (position === 'after' ? 1 : 0), 0, sourceCwd)
+  const next = orderedCwds.flatMap(cwd => groups.get(cwd)!)
   return next.every((tab, index) => tab === tabs[index]) ? tabs : next
 }
 

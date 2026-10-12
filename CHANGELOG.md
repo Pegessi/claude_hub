@@ -20,6 +20,322 @@
   align the browser harness with the application's global styles.
 - Record the current Task state/UI boundaries in the architecture guide. See the
   [stage-three record](docs/working-logs/2026-10-09-task-boundaries.md).
+### test(ui): enforce the three unrun scenarios and guide new gates
+
+- Convert `browser_chat_queue_activation.py`, `browser_chat_goal_steer.py`
+  and `browser_chat_image_quality.py` to the shared `run_browser_main`
+  lifecycle and register them. Each drove its own browser and produced no
+  lifecycle evidence, so the gate owner could not run them; all three had
+  sat unexecuted, and one failed the first time it was ever run. The gate
+  now covers nine scenarios.
+- Make registry drift a startup failure: the owner compares the discovered
+  scenario files against `RUNNERS` and refuses to start when they disagree,
+  naming the files. A scenario added and forgotten can no longer go unrun.
+- Document when user-visible work warrants a browser gate and when it does
+  not, how to write an assertion that survives refactoring, and why a gate
+  must be seen to fail once before it is trusted. Linked from the entry
+  guide and the agent workflow.
+
+### test(chat): gate the Chat composer and align merged acceptance checks
+
+- Add a sixth browser scenario covering the Chat composer: send and clear,
+  local queueing while a turn is live, Stop draining the queue, a failed send
+  keeping the user's text, retry under a new client turn id, and mobile
+  reachability of both controls.
+- Probe the browser the tests actually use when deciding whether to skip the
+  terminal HMR module. Probing Playwright's default cache skipped the whole
+  module where an explicitly selected browser was available, which the
+  no-skip `terminal-hmr` target then failed.
+- Discover browser scenarios for the format target instead of listing them,
+  so a newly added scenario can no longer escape the formatter.
+- Drop the Chat-only `right: 56px` offset: the name pill and the Feishu
+  control now share one flex row, which prevents the overlap structurally.
+- Restore the full secret request-body assertion and update the provenance
+  mock to the WebSocket contract (`connection_status`).
+### feat(scheduling): env preset for session-creating scheduled tasks
+
+- `new_session` / `hub_task` schedules accept an `env_preset` (built-in or
+  saved custom preset id/name) used to launch the worker session, instead of
+  always inheriting the agent type's built-in default launch environment.
+- Presets are resolved at create/update time, so an unknown or malformed
+  preset fails the request immediately rather than breaking every fire.
+- `claude-hub schedule create/update --env-preset` exposes the option and the
+  Scheduled Tasks panel gains an Env preset picker for the two session kinds.
+- Fixes recurring `hub_task` schedules (e.g. the QFO4ALL 512890 daily push)
+  that could only ever spawn workers on the expired Volcengine Coding Plan
+  default endpoint and failed every run with provider 400 errors.
+
+### fix(feishu): preserve rich inbound messages and Bot identity
+
+- Fetch each Bot's Feishu-managed name and HTTPS avatar during credential
+  validation, persist them with the pool, and stamp them into immutable turn
+  provenance so Chat history shows the Bot identity that received the message.
+- Accept Feishu rich-text `post` events alongside plain text, convert supported
+  text, links, mentions, code blocks and separators to bounded Markdown, and
+  deliver embedded images to image-capable Chat providers as native attachments.
+- Keep mixed messages responsive when one image cannot be downloaded or a
+  coalesced burst exceeds the shared attachment budget: retain the text and
+  image placeholders instead of dropping the whole turn.
+- See the [Feishu rich ingress notes](docs/working-logs/2026-10-12-feishu-rich-ingress.md).
+
+### fix(chat): keep sent images at full quality in a 1 GiB LRU and show Cursor sub-agent reports
+
+- A sent image is now shown from its original when it fits 8 MiB and an
+  8192px edge, instead of a 1024px JPEG squeezed into 512 KiB. Larger images
+  are scaled to fit and re-encoded as PNG, or high-quality WebP/JPEG when PNG
+  is too big. The provider still receives the original, and the request
+  carries it once. The local cache now holds these originals.
+- The Chat image cache evicts least recently used images first (reads refresh
+  recency at most hourly) within one 1 GiB pool by default, instead of
+  creation-order FIFO in 64 MiB per Chat and 512 MiB overall.
+- Cursor `Task` cards show the sub-agent type again (Cursor now sends it as
+  `{explore: {}}`) and the child's report from its completion record. The
+  Cursor CLI does not stream a sub-agent's own steps, so those still do not
+  appear live.
+- See the [image quality and Cursor sub-agent notes](docs/working-logs/2026-10-12-chat-image-quality-and-cursor-subagent.md).
+
+### fix(task): calm create recovery and keep reporter keys findable
+
+- **Add Task** no longer shows the recovery message during a normal create.
+  An unconfirmed request gets a titled notice, **Retry saved request**, and a
+  separate **Discard and start over** button.
+- `task register` and initiator `task handoff` store the reporter key at
+  `~/.claude_hub/reporter-keys/<task-id>.key` when no key file is given;
+  `task progress` finds it by Task ID and `task context` shows the path, so a
+  later thread can still report completion. A retry that reuses a key keeps it
+  even when the Hub rejects the retry, because an earlier attempt may have
+  bound it.
+
+### fix(goal): steer running Goals and resume after question answers
+
+- ⌘/Ctrl+Enter (or **Steer**) during an active Goal becomes the next Goal turn:
+  the running Goal turn is replaced and the agent addresses the message first
+  while keeping the objective. Enter queues the draft until the Goal stops.
+- Claude/Cursor question answers and replies to a blocked Goal continue the
+  Goal instead of pausing it; answered cards close immediately.
+- Resume while an ordinary Chat turn runs no longer fails with 409; the Goal
+  resumes when that turn finishes.
+- Ordinary replies in a Chat that had a Goal no longer show the trailing
+  checkpoint JSON and status block; protocol examples elsewhere in a reply
+  stay intact.
+
+### perf(mobile): hold working-session light while the drawer is shut or dragged
+
+- The working-row beam and stars animate on the main thread every frame, and a
+  closed mobile drawer is only `visibility: hidden`, so they kept running
+  behind every page. They now pause, frozen on their current frame, until the
+  drawer is open and at rest, and pause again while a drag follows the finger.
+- Measured at 4x CPU throttle with four working Chats: a closed drawer now
+  costs 1ms of main thread per second instead of 148ms, and each drag move
+  6.6ms instead of 20.3ms (4.5ms with no light at all). Desktop is unchanged.
+- See the [mobile drawer polish notes](docs/working-logs/2026-10-12-mobile-drawer-polish.md).
+
+### fix(chat): keep Stop and Queue on one composer line on phones
+
+- The composer tools no longer take part in the toolbar's wrap decision, so
+  Stop and Send/Queue stay side by side; on narrow screens the model label
+  truncates (the full name stays in its menu) instead of pushing Queue onto
+  another line. Verified at 320, 360, and 440px wide; desktop is unchanged.
+- Stop now matches the Send/Queue button's 34px height and corner radius.
+
+### fix(sidebar): fold the Pinned section and stop it covering the mobile drawer
+
+- Tapping the Pinned header now folds or unfolds the pinned Chats, with the
+  same chevron, count, and active-row retention as workspace headers; a search
+  still shows every matching pin.
+- In the mobile drawer the Pinned section scrolls with the list. On a
+  phone-height screen its sticky 40vh block covered the workspace header and
+  the active Chat scrolled beneath it. Desktop keeps the sticky section.
+
+### feat(mobile): open the Chat drawer with a swipe anywhere on the main view
+
+- A clearly rightward single-finger swipe anywhere on the mobile main column
+  now follows the finger and opens the Chat drawer with the existing commit
+  rules. It needs 12px of travel and a 1.5:1 horizontal bias, so taps,
+  vertical scrolling, diagonal drags and leftward swipes stay with the content.
+- Editable fields, horizontal scrollers that can still scroll back, the
+  terminal key bar, and TabBar dialogs keep their own gestures. Terminal panes
+  run inside an iframe, so they keep opening the drawer from the left edge band.
+
+### style(theme): raise text contrast and Chat reading size
+
+- Brighten the Dark text ladder to Maso's reading level: body text moves from
+  `#c7c7cc` to `#ececef` (10.5:1 to 15.1:1 on the main plane), with the muted,
+  soft, and subtle roles raised in the same order.
+- Lift the faintest text role in both themes above WCAG AA (4.5:1) on the main,
+  sidebar, and surface planes; Light body text was already at 14.8:1.
+- Render Chat user and assistant messages at 14px with a 1.65 line height,
+  measured against Maso's body text, while dense Workspace panels keep 12px
+  compact Markdown.
+- Follow Maso's sidebar hierarchy: workspace headers use body text, unselected
+  sessions use the muted role (7.6:1 in Dark) and brighten on hover, and the
+  selected session keeps its selected text color with a semibold name.
+
+### style(chat): refine session actions and Maso-inspired themes
+
+- Add a destructive **Delete** action to the shared session menu with a focused
+  confirmation dialog, failure-safe state, and cleanup of stale pinned ids.
+- Remove **Move up** / **Move down** and their keyboard shortcut from the Chat
+  sidebar while preserving its direct pointer-drag reordering interaction.
+- Rebuild Dark around Maso's carbon surface ladder and current main-branch blue,
+  pair Light with a muted clay-orange accent, and keep selected, focus, and
+  primary-action roles separate with accessible contrast.
+- Theme user-message bubbles alongside the surrounding Dark and Light chrome
+  instead of retaining a hard-coded blue fill in Light mode.
+- Match Maso's sidebar/main surface split (`#1c1c1c` / `#181818` in Dark and
+  `#f5f5f5` / white in Light) without repainting unrelated application surfaces.
+- Replace the blue completion ripple around idle session dots with a restrained
+  sheen contained inside the existing status light.
+- Mark only genuinely working Chat sessions with a Maso-style light pulse that
+  orbits the row border and fades smoothly at both ends, while dim stars inside
+  the row brighten as it passes; working rows no longer gain a lit outline.
+- Give Chat rows and workspace groups more breathing room, allow dragging a
+  workspace header to persist the whole directory block without reordering
+  pinned Chats, and keep Terminal Status workspace groups in the same order as
+  the Chat sidebar.
+- Persist Chat pins in the Hub runtime instead of per-origin browser storage,
+  using per-user atomic updates so browsers and devices share one state without
+  lost updates. Valid legacy local pins migrate once and are then removed.
+- See the [Chat session menu and theme notes](docs/working-logs/2026-10-10-chat-menu-codex-theme.md).
+
+### fix(chat): activate queued conversations before sending
+
+- Keep only Chats with an actionable local queue observing their hidden turn,
+  so the queue receives the authoritative completion edge without leaving every
+  cached Chat stream connected.
+- When that turn finishes, restore the queue's owning pane and Chat, wait for
+  its structured stream to become active and live, then send the next message
+  exactly once instead of leaving it on `Waiting for response…`.
+- Serialize simultaneous hidden-Chat completions and protect queued component
+  instances from cache eviction or pane-layout removal until their foreground
+  send attempt retires; migrate queue ownership when a cached Chat moves panes,
+  including while its automatic send is awaiting acknowledgement, without
+  allowing an old send to retire a same-Chat request recreated after archive.
+- Keep the full Chat `KeepAlive` cache bounded by storing only queued drafts in
+  Pinia and using a minimal hidden completion observer, and retire invalid
+  activation owners when a Chat is removed or cannot send without dropping a
+  ready observer request when its full cached pane is evicted.
+- Bound automatic queued POSTs so an unacknowledged request enters the existing
+  delivery-uncertain recovery path instead of monopolizing the activation FIFO.
+- Release hidden streams for empty or delivery-uncertain queues, preserving the
+  existing explicit-resend recovery boundary. See the
+  [queued Chat activation notes](docs/working-logs/2026-10-11-chat-queue-activation.md).
+
+### fix(chat): match Claude model options to each tab environment
+
+- Build the Claude Chat model picker from the selected tab's
+  `ANTHROPIC_MODEL` and default Opus, Sonnet, and Haiku model variables,
+  preserving first-seen order and removing duplicate ids.
+- Keep the curated Claude catalog only when the tab does not configure any
+  model ids, so custom gateways no longer show stale, incompatible choices.
+- Refresh capabilities in place after a model change, without restarting the
+  timeline stream, so the open picker immediately reflects the updated env.
+- See the [Claude model picker notes](docs/working-logs/2026-10-10-claude-model-picker-env.md).
+
+### fix(logging): bound backend log retention
+
+- Rotate `~/.claude_hub/logs/backend.log` at 10 MiB with five backups by
+  default, with environment overrides for deployments that need a different
+  retention budget.
+- Stop writing complete tab ID and name collections at INFO level for every
+  `list_tabs` poll. On a local Hub with about 200 saved tabs, those two messages
+  accounted for 98.8% of a recent 10,000-line sample and drove roughly 29 KB/s
+  of log writes.
+- See the [backend log growth notes](docs/working-logs/2026-10-10-backend-log-growth.md).
+
+### fix(test): stop the backend suite idling through agent-prompt waits
+
+- Bootstrap waits up to 25s for a real agent TUI prompt. Fake terminals never
+  print one, so every agent creation spent the full budget idling: a single
+  test creating two agents cost 50s, and ~20 such tests dominated the suite.
+  Shorten the budget for tests only; the wait loop, its readiness check and
+  its fail-closed handling of the Codex update dialog are unchanged.
+- The default backend scope now finishes in about 5 minutes instead of 24.
+- Put the isolated HMR backend inside its cleanup scope as soon as it starts,
+  so a failing Vite startup can no longer leave it running and holding a port.
+- Skip the HMR suite when Playwright cannot launch a browser instead of
+  failing collection. The backend CI job installs tmux and ttyd but no
+  browsers, so this one test turned an otherwise green run red.
+- Scale the two fixed 10s restart deadlines by the E2E timeout factor and
+  print the measured time, so a loaded runner no longer fails them outright.
+
+### feat(feishu): make Bot conversations responsive and richly formatted
+
+- Prewarm the Feishu SDK once per backend process, time connection stages without
+  exposing credentials, and keep the Bot settings view refreshed while a connection
+  is starting or retrying.
+- Coalesce same-Chat messages received within a one-second quiet window (with a
+  five-second maximum wait) into one ordered model request. Messages arriving
+  after a turn starts become one follow-up batch instead of interrupting the
+  active turn; bounded backpressure and per-message deduplication remain intact.
+- Show a best-effort received reaction while a message is being coalesced or
+  queued, then a typing reaction when its batch starts, without letting reaction
+  network latency delay native model dispatch; repeated shutdown cancellation
+  still waits for the bounded reaction cleanup it owns.
+- Anchor a combined response to the newest message in its batch, and only label
+  later input as a follow-up after an earlier Feishu turn passed Chat admission.
+- Deliver assistant Markdown as Feishu rich-text posts with code-block support and
+  versioned provider guidance, while preserving historical `feishu-v1` turns and
+  preventing model-authored mention tags from notifying users implicitly.
+- Bound backend file logs with rotation and stop INFO-level tab-list dumps from
+  obscuring connection diagnostics. See the
+  [Feishu interaction v2 notes](docs/working-logs/2026-10-10-feishu-interaction-v2.md).
+
+### feat(runtime): rebuild frontend during supervised restart
+
+- Make the production menu restart run the committed frontend build after
+  backend dependency synchronization and before interrupting the current
+  backend.
+- Build into a launcher-owned staging directory and promote only a complete
+  asset tree, keeping the current backend and SPA available when preparation
+  fails or times out.
+- Rename the action to **Build and restart** and explain its preparation and
+  interruption phases in the confirmation dialog. See the
+  [frontend-aware restart notes](docs/working-logs/2026-10-09-frontend-aware-restart.md).
+
+### fix(test): make the terminal replay E2E suite pass deterministically
+
+- Pin the tmux pane and the browser terminal to the same width before
+  producing or reading history. ttyd resizes the pane to each client, and
+  tmux re-wraps existing lines on resize, so a capture taken at 80 columns
+  could never match a buffer rendered at 156 — a mismatch no timeout could
+  resolve.
+- Stop requesting `/bin/zsh` for the four agent-TUI tabs. It is installed
+  neither on CI runners nor on a stock developer machine, so those tests
+  failed before reaching their assertions.
+- Add an explicit `terminal-replay` verification target so the suite can be
+  run locally; it was previously excluded from every local entrypoint and
+  could only fail in CI.
+- The suite now passes at `CLAUDE_HUB_E2E_TIMEOUT_SCALE=1`, so the CI job
+  gates `main` again instead of being permanently non-blocking.
+
+### feat(feishu): receive Bot events over WebSocket long connections
+
+- Fix connection reconciliation so pairing and other business-state revisions
+  no longer invalidate unchanged transports, and bound/drain accepted message
+  routes during final backend shutdown with retry-safe dedup release that
+  preserves claims for completed, superseded, or unknown Chat turns.
+- Replace public HTTP event callbacks with one supervised Feishu WebSocket
+  connection per enabled Bot, with bounded endpoint discovery and reconciliation
+  on startup and after pool changes.
+- Reduce Bot credentials and management forms to name, App ID, and App Secret;
+  expose connected, connecting, failed, and stopped states in the existing UI.
+- Remove callback URLs, Verification Token, Encrypt Key, and the callback-only
+  public URL resolver. Read version 2 pool files safely, then rewrite them as
+  version 3 without retired callback secrets on the next mutation.
+- Preserve pairing, admission checks, deduplication, Chat routing, and outbound
+  replies. See the [WebSocket migration notes](docs/working-logs/2026-10-09-feishu-websocket.md).
+
+### style(feishu): align Chat header controls
+
+- Place the Chat-scoped Feishu status action in the existing pane chrome beside
+  the session-name pill instead of positioning both controls over the same
+  top-right coordinates.
+- Give the name and Feishu controls one 24 px geometry and the same raised pill
+  surface, border, radius, shadow, spacing, and vertical alignment. Preserve the
+  accessible connection state and the existing pairing popover.
+- Pin the parallel layout with real-component desktop/mobile geometry checks.
+  See the [header control validation notes](docs/working-logs/2026-10-09-feishu-header-controls.md).
 
 ### test(ui): add isolated behavioral acceptance and fix Chat control overlap
 

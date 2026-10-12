@@ -1,11 +1,7 @@
-"""Feishu callback verification, outbound API client and persistent deduplication."""
+"""Feishu Bot credentials, outbound API client and persistent deduplication."""
 
 from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
-import hmac
 import json
 import math
 import os
@@ -18,17 +14,19 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote
 
 import httpx
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
 _EVENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _LEGACY_CLAIM_RETENTION_SECONDS = 60 * 60
-MAX_FEISHU_EVENT_BYTES = 256 * 1024
-_MAX_INPUT_CHARS = 4_000
 _MAX_REPLY_CHARS = 20_000
-_EVENT_MAX_AGE_SECONDS = 300
+_MAX_INBOUND_IMAGE_BYTES = 20 * 1024 * 1024
+_IMAGE_MIME_PREFIXES = {
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/gif": (b"GIF87a", b"GIF89a"),
+    "image/webp": (b"RIFF",),
+}
 
 
 class FeishuBotError(RuntimeError):
@@ -39,22 +37,20 @@ class FeishuBotConfigurationError(FeishuBotError):
     """Raised when required Bot settings are absent or inconsistent."""
 
 
-class FeishuEventVerificationError(FeishuBotError):
-    """Raised when an inbound callback cannot be authenticated."""
+@dataclass(frozen=True)
+class FeishuBotProfile:
+    """Public identity returned by Feishu for the authenticated Bot app."""
 
-
-class FeishuEventPayloadError(FeishuBotError):
-    """Raised when an authenticated callback has an unsupported payload."""
+    name: str
+    avatar_url: str | None
 
 
 @dataclass(frozen=True)
 class FeishuBotConfig:
-    """Explicit environment configuration for one Feishu Bot application."""
+    """Credentials for one Feishu Bot long connection."""
 
     app_id: str
     app_secret: str
-    verification_token: str
-    encrypt_key: str | None = None
     api_base_url: str = "https://open.feishu.cn"
 
     @classmethod
@@ -63,7 +59,6 @@ class FeishuBotConfig:
         values = {
             "app_id": env.get("CLAUDE_HUB_FEISHU_BOT_APP_ID", "").strip(),
             "app_secret": env.get("CLAUDE_HUB_FEISHU_BOT_APP_SECRET", "").strip(),
-            "verification_token": env.get("CLAUDE_HUB_FEISHU_BOT_VERIFICATION_TOKEN", "").strip(),
         }
         missing = [name for name, value in values.items() if not value]
         if missing:
@@ -72,8 +67,7 @@ class FeishuBotConfig:
                 + ", ".join(missing)
             )
         base_url = env.get("CLAUDE_HUB_FEISHU_API_BASE_URL", "https://open.feishu.cn").rstrip("/")
-        encrypt_key = env.get("CLAUDE_HUB_FEISHU_BOT_ENCRYPT_KEY", "").strip() or None
-        return cls(api_base_url=base_url, encrypt_key=encrypt_key, **values)
+        return cls(api_base_url=base_url, **values)
 
 
 @dataclass(frozen=True)
@@ -93,7 +87,7 @@ class FeishuBinding:
 
 @dataclass(frozen=True)
 class FeishuMessageEvent:
-    """Validated text message fields from ``im.message.receive_v1``."""
+    """Validated message fields from ``im.message.receive_v1``."""
 
     event_id: str
     message_id: str
@@ -102,6 +96,7 @@ class FeishuMessageEvent:
     chat_id: str
     text: str
     message_created_at_ms: int
+    image_keys: tuple[str, ...] = ()
 
 
 class FeishuBotClient:
@@ -143,11 +138,19 @@ class FeishuBotClient:
         self._token_expires_at = now + max(60, ttl - 60)
         return self._tenant_token
 
-    async def send_text(self, chat_id: str, text: str) -> None:
+    @staticmethod
+    def _message_content(content: Any) -> str:
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise FeishuBotError("Feishu Bot message content is not JSON serializable") from exc
+
+    async def send_message(
+        self, chat_id: str, msg_type: str, content: Mapping[str, object]
+    ) -> None:
+        """Send one Feishu message whose content follows ``msg_type``'s schema."""
+
         token = await self.get_tenant_token()
-        bounded = text.strip() or "Claude Hub completed without a text response."
-        if len(bounded) > _MAX_REPLY_CHARS:
-            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
         response = await self._request(
             "POST",
             "/open-apis/im/v1/messages",
@@ -155,8 +158,8 @@ class FeishuBotClient:
             headers={"Authorization": f"Bearer {token}"},
             json={
                 "receive_id": chat_id,
-                "msg_type": "text",
-                "content": json.dumps({"text": bounded}, ensure_ascii=False),
+                "msg_type": msg_type,
+                "content": self._message_content(content),
             },
         )
         response.raise_for_status()
@@ -164,24 +167,32 @@ class FeishuBotClient:
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot message")
 
-    async def reply_text(
-        self, message_id: str, text: str, *, access_token: str | None = None
+    async def send_text(self, chat_id: str, text: str) -> None:
+        bounded = text.strip() or "Claude Hub completed without a text response."
+        if len(bounded) > _MAX_REPLY_CHARS:
+            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
+        await self.send_message(chat_id, "text", {"text": bounded})
+
+    async def reply_message(
+        self,
+        message_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        access_token: str | None = None,
     ) -> None:
-        """Reply to one exact inbound message instead of a mutable chat target."""
+        """Reply to one exact inbound message with any supported Feishu type."""
 
         token = await self.get_tenant_token() if access_token is None else access_token
         if not token.strip():
             raise FeishuBotError("Feishu Bot tenant token is empty")
-        bounded = text.strip() or "Claude Hub completed without a text response."
-        if len(bounded) > _MAX_REPLY_CHARS:
-            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
         response = await self._request(
             "POST",
             f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "msg_type": "text",
-                "content": json.dumps({"text": bounded}, ensure_ascii=False),
+                "msg_type": msg_type,
+                "content": self._message_content(content),
             },
         )
         response.raise_for_status()
@@ -189,99 +200,150 @@ class FeishuBotClient:
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot reply")
 
-    async def validate_credentials(self) -> None:
-        """Validate app credentials without returning or persisting the token."""
+    async def reply_text(
+        self, message_id: str, text: str, *, access_token: str | None = None
+    ) -> None:
+        """Reply to one exact inbound message instead of a mutable chat target."""
 
-        await self.get_tenant_token()
+        bounded = text.strip() or "Claude Hub completed without a text response."
+        if len(bounded) > _MAX_REPLY_CHARS:
+            bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
+        await self.reply_message(message_id, "text", {"text": bounded}, access_token=access_token)
 
+    async def add_reaction(
+        self, message_id: str, emoji_type: str, *, access_token: str | None = None
+    ) -> str:
+        """Add a reaction and return its id for an exact later deletion."""
 
-def _parse_json_object(raw_body: bytes) -> dict[str, Any]:
-    if len(raw_body) > MAX_FEISHU_EVENT_BYTES:
-        raise FeishuEventPayloadError(f"Feishu event exceeds {MAX_FEISHU_EVENT_BYTES} byte limit")
-    try:
-        payload = json.loads(raw_body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise FeishuEventPayloadError("Feishu event body is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise FeishuEventPayloadError("Feishu event body must be a JSON object")
-    return payload
+        token = await self.get_tenant_token() if access_token is None else access_token
+        if not token.strip():
+            raise FeishuBotError("Feishu Bot tenant token is empty")
+        response = await self._request(
+            "POST",
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reactions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"reaction_type": {"emoji_type": emoji_type}},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data")
+        reaction_id = data.get("reaction_id") if isinstance(data, dict) else None
+        if payload.get("code") != 0 or not isinstance(reaction_id, str) or not reaction_id.strip():
+            raise FeishuBotError("Feishu rejected the Bot reaction")
+        return reaction_id
 
+    async def delete_reaction(
+        self,
+        message_id: str,
+        reaction_id: str,
+        *,
+        access_token: str | None = None,
+    ) -> None:
+        token = await self.get_tenant_token() if access_token is None else access_token
+        if not token.strip():
+            raise FeishuBotError("Feishu Bot tenant token is empty")
+        response = await self._request(
+            "DELETE",
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reactions/"
+            f"{quote(reaction_id, safe='')}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("code") != 0:
+            raise FeishuBotError("Feishu rejected deleting the Bot reaction")
 
-def _verify_signature(
-    raw_body: bytes,
-    headers: Mapping[str, str],
-    encrypt_key: str,
-    now: float,
-) -> None:
-    try:
-        timestamp = int(headers.get("x-lark-request-timestamp", ""))
-    except ValueError as exc:
-        raise FeishuEventVerificationError("Invalid Feishu request timestamp") from exc
-    nonce = headers.get("x-lark-request-nonce", "")
-    signature = headers.get("x-lark-signature", "")
-    if not nonce or not signature:
-        raise FeishuEventVerificationError("Missing Feishu request signature headers")
-    if abs(now - timestamp) > _EVENT_MAX_AGE_SECONDS:
-        raise FeishuEventVerificationError("Feishu request timestamp is outside replay window")
-    signed = str(timestamp).encode() + nonce.encode() + encrypt_key.encode() + raw_body
-    expected = hashlib.sha256(signed).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        raise FeishuEventVerificationError("Invalid Feishu request signature")
+    async def get_bot_profile(self) -> FeishuBotProfile:
+        """Return the authenticated Bot's Feishu-managed name and avatar."""
 
+        token = await self.get_tenant_token()
+        response = await self._request(
+            "GET",
+            "/open-apis/bot/v3/info/",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        bot = payload.get("bot") if isinstance(payload, dict) else None
+        name = bot.get("app_name") if isinstance(bot, dict) else None
+        avatar_url = bot.get("avatar_url") if isinstance(bot, dict) else None
+        if payload.get("code") != 0 or not isinstance(name, str) or not name.strip():
+            raise FeishuBotError("Feishu rejected the Bot info request")
+        if avatar_url is not None and (
+            not isinstance(avatar_url, str)
+            or not avatar_url.strip()
+            or not avatar_url.startswith("https://")
+        ):
+            avatar_url = None
+        return FeishuBotProfile(
+            name=name.strip(),
+            avatar_url=avatar_url.strip() if isinstance(avatar_url, str) else None,
+        )
 
-def _decrypt_callback(encrypted_value: Any, encrypt_key: str) -> bytes:
-    if not isinstance(encrypted_value, str) or not encrypted_value:
-        raise FeishuEventPayloadError("Encrypted Feishu event is missing ciphertext")
-    try:
-        ciphertext = base64.b64decode(encrypted_value, validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise FeishuEventVerificationError("Encrypted Feishu event is not valid base64") from exc
-    if len(ciphertext) < 32 or len(ciphertext) % 16 != 0:
-        raise FeishuEventVerificationError("Encrypted Feishu event has invalid ciphertext length")
-    iv, encrypted_body = ciphertext[:16], ciphertext[16:]
-    key = hashlib.sha256(encrypt_key.encode("utf-8")).digest()
-    decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
-    padded = decryptor.update(encrypted_body) + decryptor.finalize()
-    unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
-    try:
-        plaintext = unpadder.update(padded) + unpadder.finalize()
-    except ValueError as exc:
-        raise FeishuEventVerificationError("Encrypted Feishu event has invalid padding") from exc
-    plaintext = bytes(plaintext)
-    if len(plaintext) > MAX_FEISHU_EVENT_BYTES:
-        raise FeishuEventPayloadError(f"Feishu event exceeds {MAX_FEISHU_EVENT_BYTES} byte limit")
-    return plaintext
+    async def validate_credentials(self) -> FeishuBotProfile:
+        """Validate credentials and return the authenticated public identity."""
 
+        return await self.get_bot_profile()
 
-def _event_created_seconds(value: Any) -> float:
-    try:
-        timestamp = int(str(value))
-    except ValueError as exc:
-        raise FeishuEventVerificationError("Invalid Feishu event create_time") from exc
-    if timestamp >= 100_000_000_000_000:
-        return timestamp / 1_000_000
-    if timestamp >= 100_000_000_000:
-        return timestamp / 1_000
-    return float(timestamp)
+    async def download_message_image(self, message_id: str, image_key: str) -> bytes:
+        """Download and validate an image embedded in one inbound message."""
+
+        token = await self.get_tenant_token()
+        path = (
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/resources/"
+            f"{quote(image_key, safe='')}"
+        )
+        if self._client is not None:
+            async with self._client.stream(
+                "GET",
+                path,
+                params={"type": "image"},
+                headers={"Authorization": f"Bearer {token}"},
+            ) as response:
+                return await self._read_message_image(response)
+        async with httpx.AsyncClient(base_url=self._config.api_base_url, timeout=15.0) as client:
+            async with client.stream(
+                "GET",
+                path,
+                params={"type": "image"},
+                headers={"Authorization": f"Bearer {token}"},
+            ) as response:
+                return await self._read_message_image(response)
+
+    @staticmethod
+    async def _read_message_image(response: httpx.Response) -> bytes:
+        """Read at most the accepted body size before validating its magic."""
+
+        response.raise_for_status()
+        mime_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        prefixes = _IMAGE_MIME_PREFIXES.get(mime_type)
+        if prefixes is None:
+            raise FeishuBotError("Feishu returned an invalid message image")
+        raw_length = response.headers.get("content-length")
+        try:
+            content_length = int(raw_length) if raw_length is not None else None
+        except ValueError:
+            content_length = None
+        if content_length is not None and (
+            content_length <= 0 or content_length > _MAX_INBOUND_IMAGE_BYTES
+        ):
+            raise FeishuBotError("Feishu returned an invalid message image")
+        content_buffer = bytearray()
+        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+            remaining = _MAX_INBOUND_IMAGE_BYTES + 1 - len(content_buffer)
+            content_buffer.extend(chunk[:remaining])
+            if len(content_buffer) > _MAX_INBOUND_IMAGE_BYTES:
+                raise FeishuBotError("Feishu returned an invalid message image")
+        content = bytes(content_buffer)
+        valid_magic = bool(prefixes and any(content.startswith(prefix) for prefix in prefixes))
+        if mime_type == "image/webp":
+            valid_magic = content.startswith(b"RIFF") and content[8:12] == b"WEBP"
+        if not content or not valid_magic:
+            raise FeishuBotError("Feishu returned an invalid message image")
+        return content
 
 
 _MAX_FEISHU_MESSAGE_TIME_MS = 4_102_444_800_000
-
-
-def _message_created_millis(value: Any) -> int:
-    # The event schema defines this field as a decimal string in milliseconds.
-    # Never infer units or replace it with the event header/receipt time.
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= 13
-        or not value.isascii()
-        or not value.isdecimal()
-    ):
-        raise FeishuEventPayloadError("Invalid Feishu message create_time")
-    timestamp = int(value)
-    if timestamp > _MAX_FEISHU_MESSAGE_TIME_MS:
-        raise FeishuEventPayloadError("Invalid Feishu message create_time")
-    return timestamp
 
 
 def feishu_message_time_is_valid(created_at_ms: int, *, activated_at: float, now: float) -> bool:
@@ -309,106 +371,6 @@ def feishu_message_time_is_valid(created_at_ms: int, *, activated_at: float, now
         ratios.append(seconds.as_integer_ratio())
     (lower_n, lower_d), (upper_n, upper_d) = ratios
     return created_at_ms * lower_d >= lower_n * 1000 and created_at_ms * upper_d <= upper_n * 1000
-
-
-def parse_feishu_callback(
-    raw_body: bytes,
-    headers: Mapping[str, str],
-    config: FeishuBotConfig,
-    now: float | None = None,
-) -> tuple[str, str | FeishuMessageEvent]:
-    """Authenticate and parse URL verification or a p2p text message event."""
-
-    outer_payload = _parse_json_object(raw_body)
-    current_time = time.time() if now is None else now
-    encrypted_value = outer_payload.get("encrypt")
-    if encrypted_value is not None:
-        if config.encrypt_key is None:
-            raise FeishuEventPayloadError("Encrypted Feishu event received without an Encrypt Key")
-        normalized_headers = {key.lower(): value for key, value in headers.items()}
-        _verify_signature(raw_body, normalized_headers, config.encrypt_key, current_time)
-        payload = _parse_json_object(_decrypt_callback(encrypted_value, config.encrypt_key))
-    else:
-        if config.encrypt_key is not None:
-            raise FeishuEventPayloadError(
-                "Plaintext Feishu event is not accepted while an Encrypt Key is configured"
-            )
-        payload = outer_payload
-
-    if payload.get("type") == "url_verification":
-        token = payload.get("token")
-        challenge = payload.get("challenge")
-        if not isinstance(token, str) or not hmac.compare_digest(token, config.verification_token):
-            raise FeishuEventVerificationError("Invalid Feishu verification token")
-        if not isinstance(challenge, str) or not challenge:
-            raise FeishuEventPayloadError("Feishu challenge is missing")
-        return "challenge", challenge
-
-    header = payload.get("header")
-    event = payload.get("event")
-    if not isinstance(header, dict) or not isinstance(event, dict):
-        raise FeishuEventPayloadError("Feishu event header or event body is missing")
-    token = header.get("token")
-    if not isinstance(token, str) or not hmac.compare_digest(token, config.verification_token):
-        raise FeishuEventVerificationError("Invalid Feishu verification token")
-    if header.get("event_type") != "im.message.receive_v1":
-        raise FeishuEventPayloadError("Unsupported Feishu event type")
-    app_id = header.get("app_id")
-    if not isinstance(app_id, str) or not hmac.compare_digest(app_id, config.app_id):
-        raise FeishuEventVerificationError("Feishu event app_id does not match this Bot")
-    create_seconds = _event_created_seconds(header.get("create_time", ""))
-    if abs(current_time - create_seconds) > _EVENT_MAX_AGE_SECONDS:
-        raise FeishuEventVerificationError("Feishu event is outside replay window")
-
-    sender = event.get("sender")
-    message = event.get("message")
-    if not isinstance(sender, dict) or not isinstance(message, dict):
-        raise FeishuEventPayloadError("Feishu sender or message is missing")
-    message_created_at_ms = _message_created_millis(message.get("create_time"))
-    if not feishu_message_time_is_valid(message_created_at_ms, activated_at=0.0, now=current_time):
-        raise FeishuEventVerificationError(
-            "Feishu message timestamp is outside the trusted time range"
-        )
-    sender_id = sender.get("sender_id")
-    if sender.get("sender_type") != "user" or not isinstance(sender_id, dict):
-        raise FeishuEventPayloadError("Only Feishu user messages are supported")
-    sender_open_id = sender_id.get("open_id")
-    if not isinstance(sender_open_id, str) or not sender_open_id:
-        raise FeishuEventPayloadError("Feishu sender open_id is missing")
-    if message.get("chat_type") != "p2p":
-        raise FeishuEventPayloadError("Only Feishu p2p messages are supported")
-    if message.get("message_type") != "text":
-        raise FeishuEventPayloadError("Only Feishu text messages are supported")
-    try:
-        content = json.loads(message.get("content", ""))
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise FeishuEventPayloadError("Feishu text message content is invalid") from exc
-    text = content.get("text") if isinstance(content, dict) else None
-    if not isinstance(text, str) or not text.strip():
-        raise FeishuEventPayloadError("Feishu text message is empty")
-    text = text.strip()
-    if len(text) > _MAX_INPUT_CHARS:
-        raise FeishuEventPayloadError(
-            f"Feishu text message exceeds {_MAX_INPUT_CHARS} character limit"
-        )
-    event_id = header.get("event_id")
-    message_id = message.get("message_id")
-    chat_id = message.get("chat_id")
-    if not isinstance(event_id, str) or not event_id:
-        raise FeishuEventPayloadError("Feishu event_id is missing")
-    if not isinstance(message_id, str) or not message_id:
-        raise FeishuEventPayloadError("Feishu message_id is missing")
-    if not isinstance(chat_id, str) or not chat_id:
-        raise FeishuEventPayloadError("Feishu chat_id is missing")
-    return "message", FeishuMessageEvent(
-        event_id=event_id,
-        message_id=message_id,
-        app_id=app_id,
-        sender_open_id=sender_open_id,
-        chat_id=chat_id,
-        text=text,
-        message_created_at_ms=message_created_at_ms,
-    )
 
 
 _MAX_DEDUP_TIMESTAMP = 4_102_444_800.0
@@ -543,6 +505,15 @@ class FeishuMessageDedupStore:
                 value["finished_at"] = _dedup_timestamp(self._now())
                 self._save(state)
 
+    def release(self, key: str) -> None:
+        """Release a cancelled claim after its native Chat turn is stopped."""
+
+        _dedup_message_id(key)
+        with self._lock:
+            state = self._load()
+            if state["events"].pop(key, None) is not None:
+                self._save(state)
+
 
 __all__ = [
     "FeishuMessageDedupStore",
@@ -550,11 +521,8 @@ __all__ = [
     "FeishuBotClient",
     "FeishuBotConfig",
     "FeishuBotConfigurationError",
+    "FeishuBotProfile",
     "FeishuBotError",
-    "FeishuEventPayloadError",
-    "FeishuEventVerificationError",
     "FeishuMessageEvent",
-    "MAX_FEISHU_EVENT_BYTES",
     "feishu_message_time_is_valid",
-    "parse_feishu_callback",
 ]

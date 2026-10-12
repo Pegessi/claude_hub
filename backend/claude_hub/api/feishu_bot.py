@@ -1,44 +1,45 @@
-"""Feishu Bot pool administration, pairing, and per-Bot event callbacks."""
+"""Feishu Bot pool administration, pairing, and long-connection routing."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
-import os
 import re
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from claude_hub.api.agent_stream import CHAT_ERROR_REASON_HEADER, dispatch_tab_chat_and_wait
+from claude_hub.api.agent_stream import (
+    CHAT_ERROR_REASON_HEADER,
+    AgentStreamAttachment,
+    ExternalDispatchRetired,
+    dispatch_tab_chat_and_wait,
+)
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.agent_stream.turn_source import (
-    FEISHU_PROVIDER_TEXT_FORMAT_V1,
-    format_feishu_provider_text_v1,
+    FEISHU_PROVIDER_TEXT_FORMAT_V2,
+    format_feishu_provider_text_v2,
 )
 from claude_hub.services.feishu_bot import (
-    MAX_FEISHU_EVENT_BYTES,
     FeishuBotClient,
     FeishuBotConfig,
-    FeishuEventPayloadError,
-    FeishuEventVerificationError,
+    FeishuBotProfile,
     FeishuMessageDedupStore,
     FeishuMessageEvent,
     feishu_message_time_is_valid,
-    parse_feishu_callback,
 )
 from claude_hub.services.feishu_bot_pool import (
-    ENV_BOT_ID,
     MAX_BOTS,
     OWNER_KIND_LOCAL,
     OWNER_KIND_OAUTH,
@@ -66,11 +67,13 @@ from claude_hub.services.feishu_bot_pool import (
     PairingClaim,
     PoolSnapshot,
     dedup_key,
-    deprecated_env_present,
-    environment_present,
     turn_id_for,
 )
-from claude_hub.services.public_base_url import get_public_base_url
+from claude_hub.services.feishu_bot_websocket import (
+    FeishuBotWebSocketSupervisor,
+    message_event_from_sdk,
+)
+from claude_hub.services.feishu_message_format import build_feishu_message_payload
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/feishu/bot", tags=["feishu-bot"])
@@ -83,11 +86,15 @@ _now: Callable[[], float] = time.time
 _BODY_BYTES = 16 * 1024
 _GATE_TIMEOUT_SECONDS = 20.0
 _OUTBOUND_POST_TIMEOUT_SECONDS = 20.0
+_REACTION_POST_TIMEOUT_SECONDS = 2.0
+_BATCH_RETIREMENT_WAIT_SECONDS = 12.0
 _MAX_GATES = 256
-_PUBLIC_URL_ENV_NAMES = (
-    "CLAUDE_HUB_PUBLIC_BASE_URL",
-    "CLAUDE_HUB_PROVIDER_PUBLIC_URL",
-)
+_MAX_TAB_DISPATCH_QUEUES = 256
+_MAX_TAB_QUEUE_WAITERS = 8
+_MESSAGE_COALESCE_QUIET_SECONDS = 1.0
+_MESSAGE_COALESCE_MAX_WAIT_SECONDS = 5.0
+_MAX_BATCH_IMAGE_ATTACHMENTS = 10
+_MAX_BATCH_IMAGE_BYTES = 40 * 1024 * 1024
 
 
 @dataclass
@@ -101,6 +108,121 @@ _bot_gates: dict[str, _BotGate] = {}
 # Creation has no bot_id yet, so it uses one dedicated lock instead of mixing
 # app_ids into the per-Bot registry key space.
 _create_gate = asyncio.Lock()
+
+
+class _TabDispatchQueueFull(RuntimeError):
+    """The bounded Feishu-only queue cannot retain another message."""
+
+
+@dataclass
+class _TabDispatchItem:
+    bot_id: str
+    event: FeishuMessageEvent
+    effective: EffectiveBot
+    binding: BotBinding
+    client: FeishuBotClient
+    arrived_at: float
+    start: asyncio.Future[None]
+    outcome: asyncio.Future[str]
+    reaction_dispatch_started: asyncio.Event = field(default_factory=asyncio.Event)
+    reaction_finished: asyncio.Event = field(default_factory=asyncio.Event)
+    reaction_task: asyncio.Task[None] | None = None
+    queued_reaction_id: str | None = None
+    processing_reaction_id: str | None = None
+    dispatch_started: bool = False
+    native_bridge_started: bool = False
+    cancelled: bool = False
+
+
+@dataclass
+class _TabDispatchQueue:
+    pending: list[_TabDispatchItem]
+    active: list[_TabDispatchItem]
+    processor: _TabDispatchItem | None
+    changed: asyncio.Event
+    has_dispatched: bool = False
+
+    @property
+    def waiters(self) -> list[asyncio.Future[None]]:
+        """Compatibility view used by queue lifecycle tests."""
+
+        return [item.start for item in self.pending if item is not self.processor]
+
+
+_tab_dispatch_queues: dict[str, _TabDispatchQueue] = {}
+
+
+def _promote_tab_dispatch(tab_id: str, queue: _TabDispatchQueue) -> None:
+    if queue.processor is not None or queue.active:
+        return
+    queue.pending[:] = [item for item in queue.pending if not item.cancelled]
+    if queue.pending:
+        queue.processor = queue.pending[0]
+        if not queue.processor.start.done():
+            queue.processor.start.set_result(None)
+        queue.changed.set()
+    elif not queue.active and _tab_dispatch_queues.get(tab_id) is queue:
+        del _tab_dispatch_queues[tab_id]
+
+
+def _reserve_tab_dispatch(
+    tab_id: str,
+    *,
+    bot_id: str,
+    event: FeishuMessageEvent,
+    effective: EffectiveBot,
+    binding: BotBinding,
+    client: FeishuBotClient,
+) -> _TabDispatchItem:
+    queue = _tab_dispatch_queues.get(tab_id)
+    if queue is None:
+        if len(_tab_dispatch_queues) >= _MAX_TAB_DISPATCH_QUEUES:
+            raise _TabDispatchQueueFull("Feishu tab dispatch registry is at capacity")
+        queue = _TabDispatchQueue(
+            pending=[],
+            active=[],
+            processor=None,
+            changed=asyncio.Event(),
+        )
+        _tab_dispatch_queues[tab_id] = queue
+    # One active/coalescing batch plus at most eight later inbound messages.
+    waiting_limit = _MAX_TAB_QUEUE_WAITERS if queue.active else _MAX_TAB_QUEUE_WAITERS + 1
+    if len(queue.pending) >= waiting_limit:
+        raise _TabDispatchQueueFull("Feishu tab dispatch queue is at capacity")
+    item = _TabDispatchItem(
+        bot_id=bot_id,
+        event=event,
+        effective=effective,
+        binding=binding,
+        client=client,
+        arrived_at=asyncio.get_running_loop().time(),
+        start=asyncio.get_running_loop().create_future(),
+        outcome=asyncio.get_running_loop().create_future(),
+    )
+    queue.pending.append(item)
+    queue.changed.set()
+    _promote_tab_dispatch(tab_id, queue)
+    return item
+
+
+def _cancel_tab_dispatch(tab_id: str, item: _TabDispatchItem) -> None:
+    queue = _tab_dispatch_queues.get(tab_id)
+    if queue is None or item.cancelled:
+        return
+    item.cancelled = True
+    item.reaction_finished.set()
+    if not item.dispatch_started:
+        try:
+            queue.pending.remove(item)
+        except ValueError:
+            try:
+                queue.active.remove(item)
+            except ValueError:
+                pass
+    if queue.processor is item:
+        queue.processor = None
+    queue.changed.set()
+    _promote_tab_dispatch(tab_id, queue)
 
 
 def _enter_gate_registry(bot_id: str) -> _BotGate:
@@ -214,6 +336,8 @@ class FeishuPairingView(BaseModel):
 class FeishuBotSummary(BaseModel):
     bot_id: str
     name: str
+    feishu_name: str | None
+    feishu_avatar_url: str | None
     app_id: str
     source: str
     enabled: bool
@@ -223,9 +347,7 @@ class FeishuBotSummary(BaseModel):
     generation: int
     configured: bool
     app_secret_configured: bool
-    verification_token_configured: bool
-    encrypt_key_configured: bool
-    event_url: str | None
+    connection_status: str
     updated_at: datetime | None
     binding: FeishuPairingView | None
     my_claims: list[FeishuPairingView]
@@ -243,7 +365,6 @@ class FeishuPairStartResponse(BaseModel):
     bot_id: str
     code: str
     expires_at: datetime
-    event_url: str
     revision: int
 
 
@@ -283,17 +404,6 @@ def _snapshot() -> PoolSnapshot:
         return _pool.snapshot()
     except FeishuBotPoolError as exc:
         raise _pool_http_error(exc) from exc
-
-
-def _event_url(entry: BotEntry) -> str | None:
-    if not entry.configured:
-        return None
-    if not any(os.environ.get(name, "").strip() for name in _PUBLIC_URL_ENV_NAMES):
-        return None
-    try:
-        return f"{get_public_base_url()}/api/feishu/bot/events/{entry.bot_id}"
-    except ValueError as exc:
-        raise HTTPException(status_code=503, detail="public_url_invalid") from exc
 
 
 def _pairing_view(
@@ -345,6 +455,8 @@ def _summary(entry: BotEntry, actor: OwnerIdentity) -> FeishuBotSummary:
     return FeishuBotSummary(
         bot_id=entry.bot_id,
         name=entry.name,
+        feishu_name=entry.feishu_name,
+        feishu_avatar_url=entry.feishu_avatar_url,
         app_id=entry.app_id,
         source=entry.source,
         enabled=entry.enabled,
@@ -354,13 +466,19 @@ def _summary(entry: BotEntry, actor: OwnerIdentity) -> FeishuBotSummary:
         generation=entry.generation,
         configured=entry.configured,
         app_secret_configured=bool(config and config.app_secret),
-        verification_token_configured=bool(config and config.verification_token),
-        encrypt_key_configured=bool(config and config.encrypt_key),
-        event_url=_event_url(entry),
+        connection_status=_ws_supervisor.status(entry.bot_id),
         updated_at=_utc(entry.updated_at),
         binding=binding,
         my_claims=claims,
     )
+
+
+def _validated_profile(value: object, fallback_name: str) -> FeishuBotProfile:
+    """Keep simple test adapters compatible while production returns a profile."""
+
+    if isinstance(value, FeishuBotProfile):
+        return value
+    return FeishuBotProfile(name=fallback_name, avatar_url=None)
 
 
 def _pool_response(user: User, *, focus_bot_id: str | None = None) -> FeishuBotPoolResponse:
@@ -458,11 +576,22 @@ async def _in_pool(action: Callable[[], Any]) -> Any:
         raise _pool_http_error(exc) from exc
 
 
+async def _reconcile_ws() -> None:
+    """Apply pool mutations immediately; the monitor remains the retry path."""
+
+    try:
+        await _ws_supervisor.reconcile()
+    except Exception:
+        logger.exception("Feishu WebSocket reconciliation failed after a pool mutation")
+
+
 # ------------------------------------------------------------ pool routes
 
 
 @router.get("/bots", response_model=FeishuBotPoolResponse)
-async def list_feishu_bots(user: User = Depends(require_hub_user)) -> FeishuBotPoolResponse:
+async def list_feishu_bots(
+    user: User = Depends(require_hub_user),
+) -> FeishuBotPoolResponse:
     return _pool_response(user)
 
 
@@ -471,12 +600,10 @@ async def create_feishu_bot(
     request: Request, user: User = Depends(require_hub_user)
 ) -> FeishuBotPoolResponse:
     value = await _read_json(request)
-    _exact_keys(value, {"name", "app_id", "app_secret", "verification_token", "encrypt_key"})
+    _exact_keys(value, {"name", "app_id", "app_secret"})
     candidate = FeishuBotConfig(
         app_id=_secret(value, "app_id"),
         app_secret=_secret(value, "app_secret"),
-        verification_token=_secret(value, "verification_token"),
-        encrypt_key=_secret(value, "encrypt_key"),
     )
     name = _name(value, "name")
     snapshot = _snapshot()
@@ -486,11 +613,19 @@ async def create_feishu_bot(
         raise HTTPException(status_code=409, detail="app_id_already_in_pool")
     # Credential validation reaches Feishu and must never hold a gate.
     try:
-        await FeishuBotClient(candidate).validate_credentials()
+        profile = _validated_profile(await FeishuBotClient(candidate).validate_credentials(), name)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="feishu_credentials_rejected") from exc
     async with _create_gate:
-        bot_id = await _in_pool(lambda: _pool.create_bot(name=name, config=candidate))
+        bot_id = await _in_pool(
+            lambda: _pool.create_bot(
+                name=name,
+                config=candidate,
+                feishu_name=profile.name,
+                feishu_avatar_url=profile.avatar_url,
+            )
+        )
+    await _reconcile_ws()
     return _pool_response(user, focus_bot_id=bot_id)
 
 
@@ -499,7 +634,7 @@ async def rotate_feishu_bot_secrets(
     bot_id: str, request: Request, user: User = Depends(require_hub_user)
 ) -> FeishuBotPoolResponse:
     value = await _read_json(request)
-    _exact_keys(value, {"app_secret", "verification_token", "encrypt_key", "expected_revision"})
+    _exact_keys(value, {"app_secret", "expected_revision"})
     expected_revision = _revision(value)
     snapshot = _snapshot()
     entry = snapshot.get(bot_id)
@@ -510,11 +645,11 @@ async def rotate_feishu_bot_secrets(
     candidate = FeishuBotConfig(
         app_id=entry.app_id,
         app_secret=_secret(value, "app_secret"),
-        verification_token=_secret(value, "verification_token"),
-        encrypt_key=_secret(value, "encrypt_key"),
     )
     try:
-        await FeishuBotClient(candidate).validate_credentials()
+        profile = _validated_profile(
+            await FeishuBotClient(candidate).validate_credentials(), entry.name
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail="feishu_credentials_rejected") from exc
     async with _gate(bot_id):
@@ -522,11 +657,12 @@ async def rotate_feishu_bot_secrets(
             lambda: _pool.rotate_secrets(
                 bot_id,
                 app_secret=candidate.app_secret,
-                verification_token=candidate.verification_token,
-                encrypt_key=candidate.encrypt_key or "",
+                feishu_name=profile.name,
+                feishu_avatar_url=profile.avatar_url,
                 expected_revision=expected_revision,
             )
         )
+    await _reconcile_ws()
     return _pool_response(user, focus_bot_id=bot_id)
 
 
@@ -553,6 +689,7 @@ async def update_feishu_bot(
                 bot_id, expected_revision=expected_revision, name=name, enabled=enabled
             )
         )
+    await _reconcile_ws()
     return _pool_response(user, focus_bot_id=bot_id)
 
 
@@ -567,6 +704,7 @@ async def delete_feishu_bot(
         raise HTTPException(status_code=404, detail="bot_not_found")
     async with _gate(bot_id):
         await _in_pool(lambda: _pool.delete_bot(bot_id, expected_revision=expected_revision))
+    await _reconcile_ws()
     return _pool_response(user, focus_bot_id=None)
 
 
@@ -598,9 +736,6 @@ async def start_feishu_pairing(
         if not _owner_is_authorized(owner):
             raise HTTPException(status_code=403, detail="hub_identity_revoked")
         workspace_id = _validate_bind_target(tab_id, requested_workspace)
-        event_url = _event_url(entry)
-        if event_url is None:
-            raise HTTPException(status_code=503, detail="public_url_invalid")
         code, expires_at, revision = await _in_pool(
             lambda: _pool.issue_code(
                 bot_id,
@@ -612,9 +747,7 @@ async def start_feishu_pairing(
         )
     issued = _utc(expires_at)
     assert issued is not None
-    return FeishuPairStartResponse(
-        bot_id=bot_id, code=code, expires_at=issued, event_url=event_url, revision=revision
-    )
+    return FeishuPairStartResponse(bot_id=bot_id, code=code, expires_at=issued, revision=revision)
 
 
 @router.post("/bots/{bot_id}/pair/activate", response_model=FeishuBotPoolResponse)
@@ -691,21 +824,179 @@ def _binding_code(text: str) -> str | None:
     return match.group(1).upper() if match is not None else None
 
 
-def _turn_metadata(bot_id: str, event: FeishuMessageEvent) -> dict[str, Any]:
+def _turn_metadata(effective: EffectiveBot, event: FeishuMessageEvent) -> dict[str, Any]:
     """Additive only: ``bot_id`` joins the existing ``feishu`` sub-object so no
     Task schema or frontend reader has to change."""
 
     return {
         "origin": "feishu",
-        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V1,
+        "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V2,
         "feishu": {
-            "bot_id": bot_id,
+            "bot_id": effective.bot_id,
             "app_id": event.app_id,
+            "bot_name": effective.feishu_name,
+            "bot_avatar_url": effective.feishu_avatar_url,
             "chat_id": event.chat_id,
             "message_id": event.message_id,
             "sender_open_id": event.sender_open_id,
         },
     }
+
+
+def _image_mime(content: bytes) -> str | None:
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+async def _event_attachments(
+    client: FeishuBotClient,
+    event: FeishuMessageEvent,
+    *,
+    remaining_count: int,
+    remaining_bytes: int,
+) -> tuple[list[AgentStreamAttachment], int, list[int]]:
+    """Download one event's images within the shared native-turn budget."""
+
+    attachments: list[AgentStreamAttachment] = []
+    used_bytes = 0
+    omitted: list[int] = []
+    for index, image_key in enumerate(event.image_keys, start=1):
+        if len(attachments) >= remaining_count:
+            logger.info(
+                "Feishu message image omitted for %s item %d: batch count limit",
+                event.message_id,
+                index,
+            )
+            omitted.append(index)
+            continue
+        try:
+            content = await client.download_message_image(event.message_id, image_key)
+            mime_type = _image_mime(content)
+            if mime_type is None:
+                raise ValueError("unsupported image bytes")
+        except Exception as exc:
+            logger.info(
+                "Feishu message image unavailable for %s item %d: %s",
+                event.message_id,
+                index,
+                type(exc).__name__,
+            )
+            omitted.append(index)
+            continue
+        if len(content) > remaining_bytes - used_bytes:
+            logger.info(
+                "Feishu message image omitted for %s item %d: batch byte limit",
+                event.message_id,
+                index,
+            )
+            omitted.append(index)
+            continue
+        encoded = base64.b64encode(content).decode("ascii")
+        attachments.append(
+            AgentStreamAttachment(
+                filename=f"feishu-image-{index}.{mime_type.split('/', 1)[1]}",
+                mime_type=mime_type,
+                data_url=f"data:{mime_type};base64,{encoded}",
+            )
+        )
+        used_bytes += len(content)
+    return attachments, used_bytes, omitted
+
+
+async def _refresh_missing_profile(
+    effective: EffectiveBot, client: FeishuBotClient
+) -> EffectiveBot:
+    if effective.feishu_name is not None:
+        return effective
+    try:
+        profile = await client.get_bot_profile()
+    except Exception as exc:
+        logger.info(
+            "Feishu Bot profile refresh unavailable for %s: %s",
+            effective.bot_id,
+            type(exc).__name__,
+        )
+        profile = None
+
+    if profile is not None:
+        profile_target = effective
+        for _attempt in range(2):
+            try:
+                _pool.update_profile(
+                    effective.bot_id,
+                    feishu_name=profile.name,
+                    feishu_avatar_url=profile.avatar_url,
+                    expected_revision=profile_target.revision,
+                )
+            except FeishuBotRevisionConflict:
+                try:
+                    current = _pool.effective(effective.bot_id)
+                except FeishuBotPoolError:
+                    return effective
+                if (
+                    current.app_id != effective.app_id
+                    or current.config != effective.config
+                    or current.generation != effective.generation
+                ):
+                    return effective
+                profile_target = current
+                continue
+            except Exception as exc:
+                logger.info(
+                    "Feishu Bot profile refresh unavailable for %s: %s",
+                    effective.bot_id,
+                    type(exc).__name__,
+                )
+                break
+            try:
+                current = _pool.effective(effective.bot_id)
+            except FeishuBotPoolError:
+                return effective
+            if (
+                current.app_id != effective.app_id
+                or current.config != effective.config
+                or current.generation != effective.generation
+            ):
+                return effective
+            return current
+        return EffectiveBot(
+            bot_id=profile_target.bot_id,
+            app_id=profile_target.app_id,
+            config=profile_target.config,
+            revision=profile_target.revision,
+            generation=profile_target.generation,
+            feishu_name=profile.name,
+            feishu_avatar_url=profile.avatar_url,
+        )
+
+    try:
+        fallback = _pool.snapshot().get(effective.bot_id)
+    except FeishuBotPoolError:
+        fallback = None
+    if (
+        fallback is not None
+        and fallback.config is not None
+        and fallback.app_id == effective.app_id
+        and fallback.config == effective.config
+        and fallback.generation == effective.generation
+    ):
+        return EffectiveBot(
+            bot_id=effective.bot_id,
+            app_id=fallback.app_id,
+            config=fallback.config,
+            revision=fallback.revision,
+            generation=fallback.generation,
+            feishu_name=fallback.feishu_name or fallback.name,
+            feishu_avatar_url=fallback.feishu_avatar_url,
+        )
+    return effective
 
 
 def _binding_still_routes(effective: EffectiveBot, binding: BotBinding) -> bool:
@@ -748,6 +1039,20 @@ async def _admit_binding_dispatch(
         yield
 
 
+@asynccontextmanager
+async def _admit_batch_dispatch(
+    queue: _TabDispatchQueue,
+    effective: EffectiveBot,
+    binding: BotBinding,
+    event: FeishuMessageEvent,
+) -> AsyncIterator[None]:
+    """Mark follow-up history only after native delivery is accepted."""
+
+    async with _admit_binding_dispatch(effective, binding, event):
+        yield
+    queue.has_dispatched = True
+
+
 def _claim_still_live(bot_id: str, claim: PairingClaim) -> bool:
     try:
         entry = _pool.snapshot().get(bot_id)
@@ -768,6 +1073,7 @@ async def _reply_if_current(
     text: str,
     *,
     still_valid: Callable[[], bool] | None = None,
+    formatted: bool = False,
 ) -> bool:
     try:
         # Token acquisition can block on Feishu and must stay outside the gate.
@@ -778,14 +1084,338 @@ async def _reply_if_current(
             if still_valid is not None and not still_valid():
                 return False
             # An already-sent request cannot be recalled, so a timeout is never retried.
-            await asyncio.wait_for(
-                client.reply_text(event.message_id, text, access_token=token),
-                timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
-            )
+            if formatted:
+                payload = build_feishu_message_payload(text)
+                outbound = client.reply_message(
+                    event.message_id,
+                    payload.msg_type,
+                    payload.content,
+                    access_token=token,
+                )
+            else:
+                outbound = client.reply_text(event.message_id, text, access_token=token)
+            await asyncio.wait_for(outbound, timeout=_OUTBOUND_POST_TIMEOUT_SECONDS)
             return True
     except Exception as exc:
         logger.warning("Feishu Bot reply failed: %s", type(exc).__name__)
         return False
+
+
+async def _add_processing_reaction(
+    client: FeishuBotClient, event: FeishuMessageEvent, emoji_type: str = "Typing"
+) -> str | None:
+    """Best-effort hint; legacy Bots may not have the reaction scope."""
+
+    try:
+        # ``wait_for`` creates a child task and then waits for its cancellation
+        # handshake when the route is cancelled. Keeping the HTTP await in this
+        # task lets shutdown cancellation release its FIFO reservation promptly.
+        async with asyncio.timeout(_REACTION_POST_TIMEOUT_SECONDS):
+            return await client.add_reaction(event.message_id, emoji_type)
+    except Exception as exc:
+        logger.info("Feishu Bot processing reaction unavailable: %s", type(exc).__name__)
+        return None
+
+
+async def _delete_processing_reaction(
+    client: FeishuBotClient, event: FeishuMessageEvent, reaction_id: str | None
+) -> None:
+    if reaction_id is None:
+        return
+    try:
+        async with asyncio.timeout(_REACTION_POST_TIMEOUT_SECONDS):
+            await client.delete_reaction(event.message_id, reaction_id)
+    except Exception as exc:
+        logger.info("Feishu Bot processing reaction cleanup unavailable: %s", type(exc).__name__)
+
+
+async def _wait_for_reaction_dispatch(item: _TabDispatchItem) -> bool:
+    """Wait for dispatch or completion without coupling either to Feishu I/O."""
+
+    dispatch = asyncio.create_task(item.reaction_dispatch_started.wait())
+    finished = asyncio.create_task(item.reaction_finished.wait())
+    try:
+        await asyncio.wait({dispatch, finished}, return_when=asyncio.FIRST_COMPLETED)
+        return item.reaction_dispatch_started.is_set() and not item.reaction_finished.is_set()
+    finally:
+        for waiter in (dispatch, finished):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(dispatch, finished, return_exceptions=True)
+
+
+async def _maintain_processing_reaction(item: _TabDispatchItem) -> None:
+    """Run the optional reaction lifecycle outside the native dispatch path."""
+
+    try:
+        item.queued_reaction_id = await _add_processing_reaction(
+            item.client, item.event, "OneSecond"
+        )
+        if not await _wait_for_reaction_dispatch(item):
+            return
+        await _delete_processing_reaction(item.client, item.event, item.queued_reaction_id)
+        item.queued_reaction_id = None
+        if item.reaction_finished.is_set():
+            return
+        item.processing_reaction_id = await _add_processing_reaction(item.client, item.event)
+        await item.reaction_finished.wait()
+    finally:
+        await _delete_processing_reaction(
+            item.client,
+            item.event,
+            item.processing_reaction_id or item.queued_reaction_id,
+        )
+        item.processing_reaction_id = None
+        item.queued_reaction_id = None
+
+
+async def _finish_processing_reaction(item: _TabDispatchItem) -> None:
+    """Finish the owned reaction task even if route cancellation repeats."""
+
+    task = item.reaction_task
+    if task is None:
+        return
+    item.reaction_finished.set()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # A second shutdown cancellation must not orphan the shielded task
+            # or replace the precise ExternalDispatchRetired already propagating
+            # from the route. Reaction I/O is bounded by its own timeouts.
+            continue
+    await task
+
+
+def _batch_visible_text(items: list[_TabDispatchItem], *, followup: bool) -> str:
+    if len(items) == 1 and not followup:
+        return items[0].event.text
+    intro = (
+        "用户在你处理上一条消息期间补充了以下信息，请结合已有上下文统一处理："
+        if followup
+        else "用户在短时间内连续发送了以下消息，请作为一次请求统一处理："
+    )
+    messages = "\n\n".join(
+        f"[消息 {index}]\n{item.event.text}" for index, item in enumerate(items, start=1)
+    )
+    return f"{intro}\n\n{messages}"
+
+
+def _batch_matches(first: _TabDispatchItem, candidate: _TabDispatchItem) -> bool:
+    return (
+        candidate.bot_id == first.bot_id
+        and candidate.binding.pairing_id == first.binding.pairing_id
+        and candidate.effective.generation == first.effective.generation
+        and candidate.effective.revision == first.effective.revision
+    )
+
+
+async def _collect_tab_dispatch_batch(
+    queue: _TabDispatchQueue, leader: _TabDispatchItem
+) -> tuple[list[_TabDispatchItem], bool]:
+    """Wait for a short quiet period and identify one ordered batch."""
+
+    loop = asyncio.get_running_loop()
+    first_arrival = leader.arrived_at
+    while True:
+        # Clear before taking the snapshot: an arrival after this point sets
+        # the event, while an earlier arrival is already represented below.
+        # Clearing after the snapshot would lose a wake-up in between and
+        # could dispatch before the intended quiet period elapsed.
+        queue.changed.clear()
+        live = [item for item in queue.pending if not item.cancelled]
+        matching: list[_TabDispatchItem] = []
+        for item in live:
+            if matching and not _batch_matches(leader, item):
+                break
+            if _batch_matches(leader, item):
+                matching.append(item)
+        last_arrival = matching[-1].arrived_at if matching else first_arrival
+        deadline = min(
+            first_arrival + _MESSAGE_COALESCE_MAX_WAIT_SECONDS,
+            last_arrival + _MESSAGE_COALESCE_QUIET_SECONDS,
+        )
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(queue.changed.wait(), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+
+    candidates: list[_TabDispatchItem] = []
+    for item in list(queue.pending):
+        if item.cancelled:
+            queue.pending.remove(item)
+            continue
+        if candidates and not _batch_matches(leader, item):
+            break
+        if not _batch_matches(leader, item):
+            break
+        candidates.append(item)
+    return candidates, queue.has_dispatched
+
+
+def _claim_tab_dispatch_batch(
+    queue: _TabDispatchQueue, candidates: list[_TabDispatchItem]
+) -> list[_TabDispatchItem]:
+    """Synchronously commit candidates immediately before native dispatch."""
+
+    batch = [item for item in candidates if item in queue.pending and not item.cancelled]
+    for item in batch:
+        queue.pending.remove(item)
+    queue.processor = None
+    queue.active = batch
+    for item in batch:
+        item.dispatch_started = True
+        if not item.start.done():
+            item.start.set_result(None)
+    return batch
+
+
+def _finish_tab_dispatch_batch(
+    tab_id: str, queue: _TabDispatchQueue, batch: list[_TabDispatchItem], status: str
+) -> None:
+    for item in batch:
+        if not item.outcome.done():
+            item.outcome.set_result(status)
+        item.reaction_finished.set()
+    queue.active = []
+    _promote_tab_dispatch(tab_id, queue)
+
+
+async def _dispatch_tab_batch(
+    tab_id: str, queue: _TabDispatchQueue, leader: _TabDispatchItem
+) -> str:
+    batch: list[_TabDispatchItem] = []
+    status = "failed"
+    try:
+        try:
+            candidates, followup = await _collect_tab_dispatch_batch(queue, leader)
+            if not candidates:
+                raise ExternalDispatchRetired(turn_id_for(leader.bot_id, leader.event.message_id))
+            batch = _claim_tab_dispatch_batch(queue, candidates)
+            if not batch:
+                raise ExternalDispatchRetired(turn_id_for(leader.bot_id, leader.event.message_id))
+            batch[0].reaction_dispatch_started.set()
+            visible_text = _batch_visible_text(batch, followup=followup)
+            attachments: list[AgentStreamAttachment] = []
+            attachment_bytes = 0
+            omitted_images: list[str] = []
+            for message_index, item in enumerate(batch, start=1):
+                event_attachments, event_bytes, omitted = await _event_attachments(
+                    item.client,
+                    item.event,
+                    remaining_count=_MAX_BATCH_IMAGE_ATTACHMENTS - len(attachments),
+                    remaining_bytes=_MAX_BATCH_IMAGE_BYTES - attachment_bytes,
+                )
+                attachments.extend(event_attachments)
+                attachment_bytes += event_bytes
+                omitted_images.extend(
+                    (
+                        f"消息 {message_index} 的图片 {image_index}"
+                        if len(batch) > 1
+                        else f"图片 {image_index}"
+                    )
+                    for image_index in omitted
+                )
+            if omitted_images:
+                visible_text += (
+                    "\n\n[系统提示：以下图片未能转发给模型："
+                    + "、".join(omitted_images)
+                    + "。请勿假设已经看到这些图片；如需分析，请提示用户重新发送。]"
+                )
+            for item in batch:
+                item.native_bridge_started = True
+            assistant_text = await dispatch_tab_chat_and_wait(
+                tab_id,
+                format_feishu_provider_text_v2(
+                    visible_text,
+                    app_id=leader.event.app_id,
+                    chat_id=leader.event.chat_id,
+                    message_id=leader.event.message_id,
+                    sender_open_id=leader.event.sender_open_id,
+                ),
+                turn_id_for(leader.bot_id, leader.event.message_id),
+                visible_text=visible_text,
+                turn_metadata={
+                    **_turn_metadata(leader.effective, leader.event),
+                    "feishu_message_ids": [item.event.message_id for item in batch],
+                    "feishu_coalesced": len(batch) > 1,
+                    "feishu_followup": followup,
+                },
+                attachments=attachments,
+                admission_guard=lambda: _admit_batch_dispatch(
+                    queue, leader.effective, leader.binding, leader.event
+                ),
+            )
+            status = (
+                "completed"
+                if await _reply_if_current(
+                    batch[-1].client,
+                    batch[-1].event,
+                    batch[-1].effective,
+                    assistant_text,
+                    still_valid=lambda: _binding_still_routes(
+                        batch[-1].effective, batch[-1].binding
+                    ),
+                    formatted=True,
+                )
+                else "failed"
+            )
+        except ExternalDispatchRetired:
+            status = "retired"
+        except HTTPException as exc:
+            logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
+            reason = (
+                (exc.headers or {}).get(CHAT_ERROR_REASON_HEADER)
+                if exc.status_code == 409
+                else None
+            )
+            if reason == "message_outside_binding_period":
+                status = "failed"
+            else:
+                if reason == "chat_busy":
+                    message = "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"
+                elif exc.status_code == 409 and reason != "binding_target_missing":
+                    message = (
+                        "Claude Hub Chat 当前不可用，本条消息尚未执行。"
+                        "请在网页检查 Chat 状态后重试。"
+                    )
+                else:
+                    message = "Claude Hub 目标当前不可用，请在网页重新配对。"
+                target = batch[-1] if batch else leader
+                await _reply_if_current(
+                    target.client,
+                    target.event,
+                    target.effective,
+                    message,
+                    still_valid=lambda: _binding_still_routes(target.effective, target.binding),
+                )
+                status = "failed"
+        except asyncio.CancelledError:
+            if batch and not any(item.native_bridge_started for item in batch):
+                status = "retired"
+                return status
+            raise
+        except Exception:
+            logger.exception("Feishu Bot message dispatch failed")
+            target = batch[-1] if batch else leader
+            await _reply_if_current(
+                target.client,
+                target.event,
+                target.effective,
+                "Claude Hub 处理消息失败，请稍后重试。",
+                still_valid=lambda: _binding_still_routes(target.effective, target.binding),
+            )
+            status = "failed"
+        return status
+    finally:
+        # This outer finally also runs when cancellation strikes while an error
+        # reply is being posted from one of the handlers above. No path may
+        # leave a claimed batch in ``queue.active`` with unresolved followers.
+        if batch:
+            _finish_tab_dispatch_batch(tab_id, queue, batch, status)
 
 
 _PAIRING_FAILURE_TEXT = {
@@ -807,7 +1437,10 @@ async def _handle_pairing_code(
             if not _pool.is_current(effective):
                 return False
             claim, word = _pool.claim_code(
-                bot_id, code=code, sender_open_id=event.sender_open_id, chat_id=event.chat_id
+                bot_id,
+                code=code,
+                sender_open_id=event.sender_open_id,
+                chat_id=event.chat_id,
             )
             # Consuming the code advances this Bot's revision, so the pre-claim
             # snapshot is now deliberately stale. Re-read it instead of
@@ -837,7 +1470,9 @@ async def _handle_message_event(
     client = FeishuBotClient(effective.config)
     status_value = "failed"
     binding: BotBinding | None = None
+    item: _TabDispatchItem | None = None
     try:
+        effective = await _refresh_missing_profile(effective, client)
         if not _pool.is_current(effective):
             return
         code = _binding_code(event.text)
@@ -864,57 +1499,67 @@ async def _handle_message_event(
                     _pool.drop_binding(bot_id, binding.pairing_id)
             return
         _validate_saved_target(binding)
-        dispatch_binding = binding
-        assistant_text = await dispatch_tab_chat_and_wait(
-            binding.tab_id,
-            format_feishu_provider_text_v1(
-                event.text,
-                app_id=event.app_id,
-                chat_id=event.chat_id,
-                message_id=event.message_id,
-                sender_open_id=event.sender_open_id,
-            ),
-            turn_id_for(bot_id, event.message_id),
-            visible_text=event.text,
-            turn_metadata=_turn_metadata(bot_id, event),
-            admission_guard=lambda: _admit_binding_dispatch(effective, dispatch_binding, event),
-        )
-        if await _reply_if_current(
-            client,
-            event,
-            effective,
-            assistant_text,
-            still_valid=(
-                (lambda: binding is not None and _binding_still_routes(effective, binding))
-                if binding is not None
-                else None
-            ),
-        ):
-            status_value = "completed"
-    except HTTPException as exc:
-        logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
-        reason = (
-            (exc.headers or {}).get(CHAT_ERROR_REASON_HEADER) if exc.status_code == 409 else None
-        )
-        if reason == "message_outside_binding_period":
+        try:
+            item = _reserve_tab_dispatch(
+                binding.tab_id,
+                bot_id=bot_id,
+                event=event,
+                effective=effective,
+                binding=binding,
+                client=client,
+            )
+        except _TabDispatchQueueFull:
+            reaction_id = await _add_processing_reaction(client, event, "OneSecond")
+            await _reply_if_current(
+                client,
+                event,
+                effective,
+                "Claude Hub 消息队列已满，本条消息未执行，请稍后重试。",
+                still_valid=lambda: binding is not None
+                and _binding_still_routes(effective, binding),
+            )
+            await _delete_processing_reaction(client, event, reaction_id)
             return
-        if reason == "chat_busy":
-            message = "Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"
-        elif exc.status_code == 409 and reason != "binding_target_missing":
-            message = "Claude Hub Chat 当前不可用，本条消息尚未执行。请在网页检查 Chat 状态后重试。"
+        item.reaction_task = asyncio.create_task(_maintain_processing_reaction(item))
+        await item.start
+        queue = _tab_dispatch_queues.get(binding.tab_id)
+        if queue is None:
+            # The batch leader may complete and retire the queue before a
+            # coalesced follower resumes from ``item.start``. Its per-item
+            # outcome remains the authoritative result channel.
+            status_value = await asyncio.shield(item.outcome)
+        elif queue.processor is item:
+            status_value = await _dispatch_tab_batch(binding.tab_id, queue, item)
         else:
-            message = "Claude Hub 目标当前不可用，请在网页重新配对。"
-        await _reply_if_current(
-            client,
-            event,
-            effective,
-            message,
-            still_valid=(
-                (lambda: binding is not None and _binding_still_routes(effective, binding))
-                if binding is not None
-                else None
-            ),
-        )
+            status_value = await asyncio.shield(item.outcome)
+        if status_value == "retired":
+            raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id))
+    except asyncio.CancelledError:
+        if item is None or not item.dispatch_started:
+            # A queued message cancelled during shutdown never entered the Chat
+            # bridge, so its durable at-most-once claim must remain retryable.
+            # The outer WebSocket intake releases only this explicit retirement
+            # signal after the reservation/reaction cleanup below has completed.
+            raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id)) from None
+        if not item.outcome.done():
+            # A coalesced follower does not own the shared native turn. During
+            # shutdown its route task may be cancelled before the batch leader
+            # has proved whether that turn stopped safely. Shielding ``outcome``
+            # keeps the leader's result channel alive; wait slightly longer
+            # than the bridge's bounded retirement so every constituent claim
+            # follows the same retry decision.
+            try:
+                status_value = await asyncio.wait_for(
+                    asyncio.shield(item.outcome),
+                    timeout=_BATCH_RETIREMENT_WAIT_SECONDS,
+                )
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        if item.outcome.done() and not item.outcome.cancelled():
+            status_value = item.outcome.result()
+        if status_value == "retired":
+            raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id)) from None
+        raise
     except Exception:
         logger.exception("Feishu Bot message dispatch failed")
         await _reply_if_current(
@@ -929,67 +1574,52 @@ async def _handle_message_event(
             ),
         )
     finally:
-        _dedup.finish(dedup_key(bot_id, event.message_id), status_value)
+        if binding is not None and item is not None:
+            _cancel_tab_dispatch(binding.tab_id, item)
+        try:
+            if item is not None:
+                await _finish_processing_reaction(item)
+        finally:
+            _dedup.finish(dedup_key(bot_id, event.message_id), status_value)
 
 
-async def _read_bounded_event_body(request: Request) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > MAX_FEISHU_EVENT_BYTES:
-            raise HTTPException(status_code=413, detail="event_too_large")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-async def _intake(
-    bot_id: str, request: Request, background_tasks: BackgroundTasks
-) -> dict[str, Any]:
-    raw_body = await _read_bounded_event_body(request)
+async def _handle_sdk_event(bot_id: str, data: Any) -> None:
     try:
         effective = _pool.effective(bot_id)
-    except FeishuBotRevoked:
-        # A deleted or disabled Bot answers 2xx so Feishu stops retrying, and
-        # replies to nothing. A tombstone is what makes this distinguishable
-        # from a mistyped callback URL.
-        return {"ok": True, "ignored": True}
-    except FeishuBotNotFound as exc:
-        raise HTTPException(status_code=404, detail="bot_not_found") from exc
-    except FeishuBotPoolError as exc:
-        raise _pool_http_error(exc) from exc
+        event = message_event_from_sdk(data, expected_app_id=effective.app_id)
+    except FeishuBotPoolError:
+        return
+    except ValueError as exc:
+        logger.info("Ignored unsupported Feishu WebSocket event for Bot %s: %s", bot_id, exc)
+        return
+    if not _dedup.claim(dedup_key(bot_id, event.message_id)):
+        return
+    key = dedup_key(bot_id, event.message_id)
     try:
-        kind, value = parse_feishu_callback(raw_body, request.headers, effective.config, now=_now())
-    except FeishuEventVerificationError as exc:
-        raise HTTPException(status_code=401, detail="event_verification_failed") from exc
-    except FeishuEventPayloadError as exc:
-        raise HTTPException(status_code=400, detail="event_payload_rejected") from exc
-    if kind == "challenge":
-        return {"challenge": value}
-    if not isinstance(value, FeishuMessageEvent):
-        raise HTTPException(status_code=400, detail="event_payload_rejected")
-    if not _dedup.claim(dedup_key(bot_id, value.message_id)):
-        return {"ok": True, "duplicate": True}
-    background_tasks.add_task(_handle_message_event, bot_id, value, effective)
-    return {"ok": True}
+        await _handle_message_event(bot_id, event, effective)
+    except ExternalDispatchRetired:
+        # Final shutdown cancels only after its bounded drain. The Chat bridge
+        # proved the matching turn was stopped or never started, so releasing
+        # the claim lets a same-ID replay recover without duplicating a
+        # completed or superseded turn.
+        _dedup.release(key)
+        raise
 
 
-@router.post("/events/{bot_id}")
-async def receive_feishu_event(
-    bot_id: str, request: Request, background_tasks: BackgroundTasks
-) -> dict[str, Any]:
-    return await _intake(bot_id, request, background_tasks)
+_ws_supervisor = FeishuBotWebSocketSupervisor(_pool, _handle_sdk_event)
 
 
-@router.post("/events")
-async def receive_legacy_feishu_event(
-    request: Request, background_tasks: BackgroundTasks
-) -> dict[str, Any]:
-    """Kept only for the environment Bot's already-configured callback URL."""
-
-    if not environment_present():
-        raise HTTPException(status_code=404, detail="bot_not_found")
-    return await _intake(ENV_BOT_ID, request, background_tasks)
+async def start_feishu_websockets() -> None:
+    await _ws_supervisor.start()
 
 
-__all__ = ["require_hub_user", "router"]
+async def stop_feishu_websockets() -> None:
+    await _ws_supervisor.stop()
+
+
+__all__ = [
+    "require_hub_user",
+    "router",
+    "start_feishu_websockets",
+    "stop_feishu_websockets",
+]

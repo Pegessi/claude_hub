@@ -4,7 +4,13 @@ import path from 'path'
 
 const apiTarget = process.env.VITE_API_TARGET || 'http://localhost:8173'
 const systemApiTarget = process.env.VITE_SYSTEM_API_TARGET || apiTarget
+// A feature preview can exercise a new preference API against its isolated
+// backend while all live tabs, streams, statuses and workspace data continue
+// to come from the main Hub. Production leaves this unset and uses apiTarget.
+const sidebarPreferencesApiTarget =
+  process.env.VITE_SIDEBAR_PREFERENCES_API_TARGET || apiTarget
 const devPort = Number(process.env.VITE_PORT || process.env.PORT || 5173)
+const buildOutDir = process.env.CLAUDE_HUB_FRONTEND_OUT_DIR || 'dist'
 
 /**
  * SharedArrayBuffer (used by the terminal input fast path) requires the
@@ -36,6 +42,10 @@ function coopCoepHeadersPlugin(): import('vite').Plugin {
 
 export default defineConfig({
   plugins: [vue(), coopCoepHeadersPlugin()],
+  build: {
+    outDir: buildOutDir,
+    emptyOutDir: true,
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -47,6 +57,10 @@ export default defineConfig({
     strictPort: true,
     allowedHosts: true,
     proxy: {
+      '/api/tabs/sidebar-preferences': {
+        target: sidebarPreferencesApiTarget,
+        changeOrigin: true,
+      },
       '/api/system': {
         target: systemApiTarget,
         changeOrigin: true,

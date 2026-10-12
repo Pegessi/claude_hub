@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +22,9 @@ from uuid import uuid4
 from .services.backend_instance_lock import BackendInstanceLock
 from .services.runtime_isolation import resolve_runtime_home
 from .services.service_restart import ACTIVE_STATUSES, RestartStore
+
+FRONTEND_BUILD_TERMINATE_TIMEOUT = 1.0
+FRONTEND_BUILD_KILL_TIMEOUT = 5.0
 
 
 class ServiceLauncher:
@@ -35,6 +39,10 @@ class ServiceLauncher:
         dependency_sync_command: list[str] | None = None,
         dependency_sync_cwd: Path | None = None,
         dependency_sync_timeout: float = 120,
+        frontend_build_command: list[str] | None = None,
+        frontend_build_cwd: Path | None = None,
+        frontend_dist_directory: Path | None = None,
+        frontend_build_timeout: float = 120,
     ) -> None:
         self.store = store
         self.command = command
@@ -44,6 +52,10 @@ class ServiceLauncher:
         self.dependency_sync_command = dependency_sync_command
         self.dependency_sync_cwd = dependency_sync_cwd
         self.dependency_sync_timeout = dependency_sync_timeout
+        self.frontend_build_command = frontend_build_command
+        self.frontend_build_cwd = frontend_build_cwd
+        self.frontend_dist_directory = frontend_dist_directory
+        self.frontend_build_timeout = frontend_build_timeout
         self.launcher_id = str(uuid4())
         self.instance_id = ""
         self.child: subprocess.Popen[bytes] | None = None
@@ -121,16 +133,185 @@ class ServiceLauncher:
                 "Run `uv sync --locked --inexact` from backend and try again."
             )
 
+    @staticmethod
+    def _process_group_exists(process_group_id: int) -> bool:
+        try:
+            os.killpg(process_group_id, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    @classmethod
+    def _stop_build_process_group(cls, process: subprocess.Popen[bytes]) -> None:
+        process_group_id = process.pid
+        for sig, timeout in (
+            (signal.SIGTERM, FRONTEND_BUILD_TERMINATE_TIMEOUT),
+            (signal.SIGKILL, FRONTEND_BUILD_KILL_TIMEOUT),
+        ):
+            try:
+                os.killpg(process_group_id, sig)
+            except ProcessLookupError:
+                process.wait()
+                return
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                process.poll()  # Reap the group leader as soon as it exits.
+                if not cls._process_group_exists(process_group_id):
+                    process.wait()
+                    return
+                time.sleep(0.05)
+
+        if cls._process_group_exists(process_group_id):
+            raise RuntimeError(
+                "Frontend build timed out and its process group could not be stopped."
+            )
+        process.wait()
+
+    def build_frontend(self) -> Path | None:
+        if self.frontend_build_command is None:
+            return None
+        if self.frontend_build_cwd is None or self.frontend_dist_directory is None:
+            raise RuntimeError("Frontend build paths are not configured.")
+
+        build_directory = Path(
+            tempfile.mkdtemp(prefix=".claude-hub-build-", dir=self.frontend_build_cwd)
+        )
+        build_env = {
+            **self.env,
+            # vite.config.ts reads this fixed launcher-owned destination. The
+            # live dist remains intact until a complete build is available.
+            "CLAUDE_HUB_FRONTEND_OUT_DIR": str(build_directory),
+        }
+        try:
+            try:
+                process = subprocess.Popen(
+                    self.frontend_build_command,
+                    cwd=self.frontend_build_cwd,
+                    env=build_env,
+                    start_new_session=True,
+                )
+                try:
+                    returncode = process.wait(timeout=self.frontend_build_timeout)
+                except subprocess.TimeoutExpired:
+                    self._stop_build_process_group(process)
+                    raise
+                except BaseException:
+                    # An external launcher stop or Ctrl+C must not orphan the
+                    # pnpm/vue-tsc/Vite group while unwinding the supervisor.
+                    if self._process_group_exists(process.pid):
+                        self._stop_build_process_group(process)
+                    raise
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    "Frontend build timed out. Run `pnpm build` from frontend and try again."
+                ) from exc
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Frontend build could not start: {exc}. "
+                    "Run `pnpm build` from frontend and try again."
+                ) from exc
+            if returncode != 0:
+                raise RuntimeError(
+                    f"Frontend build failed (exit {returncode}). "
+                    "Run `pnpm build` from frontend and try again."
+                )
+            if not (build_directory / "index.html").is_file():
+                raise RuntimeError(
+                    "Frontend build did not produce index.html. "
+                    "Run `pnpm build` from frontend and try again."
+                )
+            return build_directory
+        except BaseException:
+            shutil.rmtree(build_directory, ignore_errors=True)
+            raise
+
+    def promote_frontend(self, build_directory: Path | None) -> None:
+        if build_directory is None:
+            return
+        if self.frontend_build_cwd is None or self.frontend_dist_directory is None:
+            shutil.rmtree(build_directory, ignore_errors=True)
+            raise RuntimeError("Frontend build paths are not configured.")
+
+        backup_directory = self.frontend_build_cwd / f".claude-hub-dist-{uuid4()}"
+        promoted = False
+        try:
+            # Promotion happens only after the old backend stops, keeping the
+            # old SPA/API pair intact throughout preparation. Adjacent renames
+            # keep rollback on the same filesystem.
+            if self.frontend_dist_directory.exists():
+                self.frontend_dist_directory.replace(backup_directory)
+            build_directory.replace(self.frontend_dist_directory)
+            promoted = True
+        except BaseException as promote_error:
+            # Derive ownership from actual paths instead of process-local flags:
+            # SIGTERM/KeyboardInterrupt can arrive between a successful rename
+            # and the next Python assignment. Restore the old tree before
+            # propagating either an ordinary filesystem failure or cancellation.
+            if backup_directory.exists():
+                if self.frontend_dist_directory.exists():
+                    shutil.rmtree(self.frontend_dist_directory, ignore_errors=True)
+                try:
+                    backup_directory.replace(self.frontend_dist_directory)
+                except OSError as restore_error:
+                    raise RuntimeError(
+                        "Frontend build promotion failed and the previous frontend "
+                        f"could not be restored from {backup_directory}."
+                    ) from restore_error
+            if isinstance(promote_error, OSError):
+                if self.frontend_dist_directory.exists():
+                    raise RuntimeError(
+                        "Frontend build promotion failed. The previous frontend was restored."
+                    ) from promote_error
+                raise RuntimeError("Frontend build promotion failed.") from promote_error
+            raise
+        finally:
+            if not promoted and build_directory.exists():
+                shutil.rmtree(build_directory, ignore_errors=True)
+            if promoted and backup_directory.exists():
+                shutil.rmtree(backup_directory, ignore_errors=True)
+
     def restart(self) -> None:
         started = time.monotonic()
+        build_directory: Path | None = None
         try:
+            if self.dependency_sync_command is not None:
+                self.store.update_operation(
+                    "preparing",
+                    "Synchronizing backend dependencies. The current service is still available…",
+                )
             self.synchronize_dependencies()
+            if self.frontend_build_command is not None:
+                self.store.update_operation(
+                    "preparing",
+                    "Building the frontend. The current service is still available…",
+                )
+            build_directory = self.build_frontend()
             self.store.update_operation(
-                "restarting", "Restarting the service. Waiting for it to reconnect…"
+                "restarting",
+                (
+                    "Frontend built. Restarting the service and waiting for it to reconnect…"
+                    if self.frontend_build_command is not None
+                    else "Restarting the service. Waiting for it to reconnect…"
+                ),
             )
             self.stop_backend()
             stopped = time.monotonic()
             print(f"Restart: backend stopped in {stopped - started:.2f}s", flush=True)
+            candidate = build_directory
+            try:
+                self.promote_frontend(candidate)
+                build_directory = None
+            except RuntimeError as promotion_error:
+                # Promotion restores the previous dist whenever possible. Bring
+                # the API/status endpoint back before reporting the failure.
+                try:
+                    self.start_backend()
+                    self.wait_healthy()
+                except (OSError, RuntimeError) as recovery_error:
+                    raise RuntimeError(
+                        f"{promotion_error} Backend recovery also failed: {recovery_error}"
+                    ) from recovery_error
+                raise promotion_error
             self.start_backend()
             self.wait_healthy()
         except (OSError, RuntimeError) as exc:
@@ -145,6 +326,9 @@ class ServiceLauncher:
                 flush=True,
             )
             self.store.update_operation("succeeded", "The service is back online.")
+        finally:
+            if build_directory is not None:
+                shutil.rmtree(build_directory, ignore_errors=True)
 
     def run(self) -> int:
         with BackendInstanceLock(self.store.directory / "launcher.lock"):
@@ -182,6 +366,11 @@ def main() -> int:
     if uv is None:
         print("Error: uv is required to run the supervised backend.", file=sys.stderr)
         return 1
+    pnpm = shutil.which("pnpm")
+    if pnpm is None:
+        print("Error: pnpm is required to build the frontend during restart.", file=sys.stderr)
+        return 1
+    frontend_directory = backend_directory.parent / "frontend"
     launcher = ServiceLauncher(
         RestartStore(resolve_runtime_home()),
         [
@@ -198,6 +387,10 @@ def main() -> int:
         dependency_sync_command=[uv, "sync", "--locked", "--inexact"],
         dependency_sync_cwd=backend_directory,
         dependency_sync_timeout=20,
+        frontend_build_command=[pnpm, "build"],
+        frontend_build_cwd=frontend_directory,
+        frontend_dist_directory=frontend_directory / "dist",
+        frontend_build_timeout=90,
     )
 
     def stop(signum: int, frame: Any) -> None:

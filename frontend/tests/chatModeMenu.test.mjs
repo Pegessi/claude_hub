@@ -26,6 +26,14 @@ test('mode picker lives beside the add menu and opens an upward menu', () => {
   assert.match(menuRule[0], /max-width:\s*min\(/)
 })
 
+test('Stop and Send/Queue share the toolbar line while the model label truncates', () => {
+  assert.match(structuredPane, /\.composer-tools \{[^}]*flex: 1 1 0;[^}]*min-width: 0;/)
+  assert.match(structuredPane, /class="composer-mode-picker composer-model-picker"/)
+  assert.match(structuredPane, /\.composer-mode-picker\.composer-model-picker \{[^}]*flex-shrink: 1;[^}]*min-width: 0;/)
+  assert.match(structuredPane, /\.composer-model-picker \.composer-mode-trigger \{\s*max-width: 100%;/)
+  assert.match(structuredPane, /\.composer-send-btn,\s*\.composer-stop-btn \{\s*height: 34px;/)
+})
+
 test('mode menu exposes radio semantics and capability-driven options', () => {
   assert.match(structuredPane, /role="menu"/)
   assert.match(structuredPane, /v-for="option in modeOptions"/)
@@ -85,4 +93,5 @@ test('model picker presents model and thinking effort as a unified two-level men
     structuredPane,
     /:disabled="modeInteractionLocked \|\| isUpdatingModel \|\| isUpdatingReasoningEffort"/,
   )
+  assert.match(structuredPane, /await terminalStore\.switchEnv[\s\S]*?await refreshCapabilities\(\)/)
 })
