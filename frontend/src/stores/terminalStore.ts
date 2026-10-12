@@ -46,6 +46,16 @@ interface QueuedChatState {
   autoActivationBlock: 'stream-failed' | 'goal-locked' | null
 }
 
+async function tabRequestError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const detail = (await response.json())?.detail
+    if (typeof detail === 'string' && detail) return new Error(`${fallback}: ${detail}`)
+  } catch {
+    // Non-JSON error bodies keep the generic message.
+  }
+  return new Error(fallback)
+}
+
 function generatePaneId(): string {
   return 'pane-' + Math.random().toString(36).substr(2, 9)
 }
@@ -724,7 +734,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       })
-      if (!response.ok) throw new Error('Failed to create tab')
+      if (!response.ok) throw await tabRequestError(response, 'Failed to create tab')
       const newTab = await response.json()
       tabs.value.unshift(newTab)
       activeTabId.value = newTab.id
@@ -746,7 +756,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       const response = await fetch(`${API_BASE}/tabs/${tabId}/duplicate`, {
         method: 'POST',
       })
-      if (!response.ok) throw new Error('Failed to duplicate tab')
+      if (!response.ok) throw await tabRequestError(response, 'Failed to duplicate tab')
       const newTab = await response.json()
       tabs.value.unshift(newTab)
       activeTabId.value = newTab.id
@@ -781,7 +791,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         body: JSON.stringify({ ordinal }),
         signal: controller.signal,
       })
-      if (!response.ok) throw new Error('Failed to fork tab')
+      if (!response.ok) throw await tabRequestError(response, 'Failed to fork tab')
       const newTab = await response.json()
       tabs.value.unshift(newTab)
       // Is the user still looking at the source tab? The active pane's tab is
@@ -935,7 +945,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       const response = await fetch(`${API_BASE}/tabs/${tabId}/unarchive`, {
         method: 'POST',
       })
-      if (!response.ok) throw new Error('Failed to unarchive tab')
+      if (!response.ok) throw await tabRequestError(response, 'Failed to unarchive tab')
       await fetchTabs({ force: true })
       setActiveTab(tabId)
       void fetchArchivedTabs()

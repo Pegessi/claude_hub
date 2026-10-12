@@ -235,9 +235,19 @@ async def duplicate_tab(
     tab_id: str,
     current_user: User = Depends(get_current_user),
 ) -> TerminalTab:
-    """Duplicate a terminal tab, preserving launch configuration like solo mode."""
+    """Duplicate a terminal tab, preserving launch configuration like solo mode.
+
+    Returns 404 if the source tab is missing and 429 at the live tab limit.
+    """
     logger.info(f"Duplicating tab {tab_id}, user={current_user.email}")
-    tab = await ttyd_manager.duplicate_tab(tab_id)
+    try:
+        tab = await ttyd_manager.duplicate_tab(tab_id)
+    except TabLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
+    except TabStartupTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
     return tab
@@ -343,9 +353,15 @@ async def unarchive_tab(
     tab_id: str,
     current_user: User = Depends(get_current_user),
 ) -> TerminalTab:
-    """Restore an archived tab and best-effort restart its runtime."""
+    """Restore an archived tab and best-effort restart its runtime.
+
+    Returns 404 if the tab is missing and 429 at the live tab limit.
+    """
     logger.info(f"Unarchiving tab {tab_id}, user={current_user.email}")
-    tab = await ttyd_manager.unarchive_tab(tab_id)
+    try:
+        tab = await ttyd_manager.unarchive_tab(tab_id)
+    except TabLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
     return tab
