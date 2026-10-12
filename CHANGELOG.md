@@ -5,6 +5,14 @@
 
 ## Unreleased
 
+### style(feishu): redraw connection controls with the Feishu bird silhouette
+
+- Replace the separate chain and stacked-chevron glyphs with one local,
+  monochrome outline SVG traced from the current Feishu bird silhouette.
+- Reuse the same component in the pane entry and connection-panel heading so
+  their geometry cannot drift while status dots and Bot avatars keep their
+  existing behavior.
+
 ### fix(feishu): load Bot avatars under production COEP
 
 - Request trusted HTTPS Bot avatars with anonymous CORS mode so Feishu CDN

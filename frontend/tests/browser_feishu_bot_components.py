@@ -346,7 +346,9 @@ async def main(browser_run: BrowserRun) -> None:
         assert name_box["x"] + name_box["width"] < trigger_box["x"]
         assert trigger_box["x"] - name_box["x"] - name_box["width"] == 5
         assert 7 <= 1280 - trigger_box["x"] - trigger_box["width"] <= 9
-        assert await trigger.locator("svg.trigger-icon").count() == 1
+        trigger_mark = trigger.locator("svg.trigger-icon.feishu-brand-mark")
+        await expect(trigger_mark).to_be_visible()
+        await expect(trigger_mark).to_have_attribute("data-feishu-brand-mark", "bird")
         await page.screenshot(path=str(output / "feishu-status-entry-desktop.png"))
 
         # Pool create: response is summary-only; submitted credentials clear.
@@ -446,7 +448,16 @@ async def main(browser_run: BrowserRun) -> None:
         await trigger.click()
         binding_panel = page.get_by_role("dialog", name="Feishu connection")
         await expect(binding_panel).to_be_visible()
-        await expect(binding_panel.locator(".panel-mark.feishu-brand-mark")).to_be_visible()
+        panel_mark = binding_panel.locator(".panel-mark.feishu-brand-mark")
+        await expect(panel_mark).to_be_visible()
+        await expect(panel_mark).to_have_attribute("data-feishu-brand-mark", "bird")
+        assert await trigger_mark.locator("path").count() == 3
+        assert await panel_mark.locator("path").count() == 3
+        assert await trigger_mark.locator("path").evaluate_all(
+            "paths => paths.map(path => path.getAttribute('d'))"
+        ) == await panel_mark.locator("path").evaluate_all(
+            "paths => paths.map(path => path.getAttribute('d'))"
+        )
         bot_select = binding_panel.get_by_label("Bot", exact=True)
         await expect(bot_select.locator('option[value="bot-occupied"]')).to_have_js_property(
             "disabled", True
