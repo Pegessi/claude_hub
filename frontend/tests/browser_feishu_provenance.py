@@ -5,6 +5,7 @@ No Hub backend, provider, or real Feishu application is contacted.
 """
 
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -29,6 +30,8 @@ def history():
                 "origin": "feishu",
                 "feishu": {
                     "app_id": "cli-bot",
+                    "bot_name": "Hub 助手",
+                    "bot_avatar_url": "https://avatar.example.test/hub-bot.png",
                     "chat_id": "oc-chat",
                     "message_id": "om-source-message",
                     "sender_open_id": "ou-feishu-sender",
@@ -45,7 +48,10 @@ def history():
         for event_type, body in (
             ("turn_started", payload),
             ("text_delta", {"text": "Fixture reply"}),
-            ("turn_completed", {"status": "completed", "assistant_text": "Fixture reply"}),
+            (
+                "turn_completed",
+                {"status": "completed", "assistant_text": "Fixture reply"},
+            ),
         ):
             events.append(
                 {
@@ -56,7 +62,9 @@ def history():
                     "type": event_type,
                     "run_epoch": index + 1,
                     "turn_id": turn_id,
-                    "message_id": f"{turn_id}:user" if event_type == "turn_started" else None,
+                    "message_id": (
+                        f"{turn_id}:user" if event_type == "turn_started" else None
+                    ),
                     "payload": body,
                     "created_at": "2026-10-06T08:00:00Z",
                     "redacted": False,
@@ -80,11 +88,15 @@ async def main():
         or parsed.query
         or parsed.fragment
     ):
-        raise SystemExit("Use an owned numeric-loopback static server, not a shared Hub")
+        raise SystemExit(
+            "Use an owned numeric-loopback static server, not a shared Hub"
+        )
     output = Path(sys.argv[2]).resolve()
     executable = Path(sys.argv[3]).resolve(strict=True)
     if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise SystemExit("An existing executable browser is required; this script never downloads")
+        raise SystemExit(
+            "An existing executable browser is required; this script never downloads"
+        )
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
     tab = dict(
         id="ui-tab-1",
@@ -138,6 +150,16 @@ async def main():
             async def route_all(route):
                 request = route.request
                 url = urlparse(request.url)
+                if request.url == "https://avatar.example.test/hub-bot.png":
+                    await route.fulfill(
+                        status=200,
+                        content_type="image/png",
+                        body=base64.b64decode(
+                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                            "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                        ),
+                    )
+                    return
                 if origin(request.url) != origin(base):
                     report["blocked_external_requests"].append(request.url)
                     await route.abort("blockedbyclient")
@@ -151,8 +173,34 @@ async def main():
                     body = {"auth_required": False, "user": None}
                 elif path == "/api/tabs":
                     body = [tab]
-                elif path == "/api/feishu/bot/binding":
-                    body = {"binding": binding}
+                elif path == "/api/feishu/bot/bots":
+                    body = {
+                        "pool_revision": 1,
+                        "bots": [
+                            {
+                                "bot_id": "bot-1",
+                                "name": "Hub Bot",
+                                "feishu_name": "Hub 助手",
+                                "feishu_avatar_url": "https://avatar.example.test/hub-bot.png",
+                                "app_id": "cli-bot",
+                                "source": "stored",
+                                "enabled": True,
+                                "credentials_editable": True,
+                                "deletable": True,
+                                "revision": 1,
+                                "generation": 1,
+                                "configured": True,
+                                "app_secret_configured": True,
+                                "connection_status": "connected",
+                                "updated_at": tab["created_at"],
+                                "binding": binding,
+                                "my_claims": [],
+                            }
+                        ],
+                        "pool_editable": True,
+                        "deprecated_env": [],
+                        "focus_bot_id": None,
+                    }
                 elif path.endswith("/goal/current"):
                     body = None
                 elif path.endswith("/capabilities"):
@@ -168,7 +216,9 @@ async def main():
                     if path.endswith("/wait"):
                         await asyncio.sleep(0.25)
                     since = int(parse_qs(url.query).get("since_sequence", ["-1"])[0])
-                    rows = [event for event in events if event["stream_sequence"] > since]
+                    rows = [
+                        event for event in events if event["stream_sequence"] > since
+                    ]
                     body = dict(
                         events=rows,
                         next_sequence=rows[-1]["stream_sequence"] if rows else since,
@@ -196,7 +246,9 @@ async def main():
             page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
 
             async def check_sources():
-                await expect(page.get_by_role("log", name="Chat conversation")).to_be_visible()
+                await expect(
+                    page.get_by_role("log", name="Chat conversation")
+                ).to_be_visible()
                 for kind, text in (
                     ("web", "Direct browser message"),
                     ("feishu", "Remote message"),
@@ -209,27 +261,43 @@ async def main():
                     await expect(bubble).to_contain_text(text)
                 labels = page.get_by_test_id("conversation-message-source")
                 await expect(labels).to_have_count(1)
-                await expect(labels.locator(".conversation-message-source__label")).to_have_text(
-                    "Feishu · ou-feishu-sender"
+                await expect(
+                    labels.locator(".conversation-message-source__label")
+                ).to_have_text("Hub 助手")
+                avatar = labels.locator(".conversation-message-source__mark img")
+                await expect(avatar).to_have_count(1)
+                await expect(avatar).to_have_attribute(
+                    "src", "https://avatar.example.test/hub-bot.png"
                 )
-                assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+                await expect(avatar).to_be_visible()
+                assert await page.evaluate(
+                    "document.documentElement.scrollWidth <= innerWidth + 1"
+                )
 
-            for state, current_binding in (
-                ("bound-current", initial_binding),
-                ("bound-other", {**initial_binding, "tab_id": "ui-tab-other"}),
-                ("unbound", None),
+            for state, expected_state, current_binding in (
+                ("bound-current", "bound-current", initial_binding),
+                (
+                    "bound-other",
+                    "unbound",
+                    {**initial_binding, "tab_id": "ui-tab-other"},
+                ),
+                ("unbound", "unbound", None),
             ):
                 binding = current_binding
                 if state == "bound-current":
-                    await page.goto(base + "/?tab=ui-tab-1", wait_until="domcontentloaded")
+                    await page.goto(
+                        base + "/?tab=ui-tab-1", wait_until="domcontentloaded"
+                    )
                 else:
                     await page.reload(wait_until="domcontentloaded")
                 await check_sources()
                 await page.get_by_test_id("feishu-binding-trigger").click()
-                await expect(page.get_by_test_id("feishu-binding-status")).to_have_attribute(
-                    "data-state", state
-                )
-                await page.keyboard.press("Escape")
+                await expect(
+                    page.get_by_test_id("feishu-binding-status")
+                ).to_have_attribute("data-state", expected_state)
+                await page.get_by_test_id("feishu-binding-panel").get_by_role(
+                    "button", name="Close", exact=True
+                ).click()
                 await expect(page.get_by_test_id("feishu-binding-panel")).to_be_hidden()
                 filename = f"desktop-{state}.png"
                 await page.screenshot(path=str(output / filename), full_page=True)
@@ -240,7 +308,9 @@ async def main():
                 "return !d || d.getBoundingClientRect().right <= 0 }"
             )
             await check_sources()
-            await page.screenshot(path=str(output / "mobile-unbound.png"), full_page=True)
+            await page.screenshot(
+                path=str(output / "mobile-unbound.png"), full_page=True
+            )
             report["screenshots"].append("mobile-unbound.png")
             assert not report["page_errors"], report["page_errors"]
             report["result"] = "PASS"
@@ -249,7 +319,9 @@ async def main():
             report["error_type"] = type(exc).__name__
             if page is not None:
                 try:
-                    await page.screenshot(path=str(output / "failure.png"), full_page=True)
+                    await page.screenshot(
+                        path=str(output / "failure.png"), full_page=True
+                    )
                 except Exception:
                     pass
         finally:
