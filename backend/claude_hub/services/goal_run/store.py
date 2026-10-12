@@ -84,6 +84,11 @@ class GoalRunStore:
             except KeyError:
                 raise KeyError(f"goal '{goal_id}' not found") from None
 
+    def has_goal_history(self, tab_id: str) -> bool:
+        """Whether this Chat ever ran a Goal, including cleared ones."""
+        with self._lock:
+            return any(goal.tab_id == tab_id for goal in self._goals.values())
+
     def current_for_tab(self, tab_id: str) -> GoalRun | None:
         with self._lock:
             candidates = [goal for goal in self._goals.values() if goal.tab_id == tab_id]

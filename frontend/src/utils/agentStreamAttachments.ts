@@ -8,9 +8,12 @@
 const SUPPORTED_IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/i
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024 // 8 MB
 
-/** Bounded preview constraints enforced by the browser before upload. */
-export const MAX_PREVIEW_EDGE = 1024
-export const MAX_PREVIEW_BYTES = 512 * 1024 // 512 KiB
+/**
+ * Stored-image bounds; they must match the backend attachment cache
+ * (``MAX_PREVIEW_EDGE`` and ``attachment_max_preview_bytes``).
+ */
+export const MAX_PREVIEW_EDGE = 8192
+export const MAX_PREVIEW_BYTES = 8 * 1024 * 1024 // 8 MiB
 
 /**
  * Validate an image attachment for the structured composer.
@@ -68,17 +71,39 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   })
 }
 
+// iOS Safari cannot draw into a canvas larger than 16,777,216 pixels.
+const MAX_CANVAS_PIXELS = 4096 * 4096
+
+// Near-lossless encodings tried in order when the original cannot be stored.
+// A browser that cannot encode a type returns PNG instead, so results are
+// accepted only when the blob has the requested type.
+const REENCODE_STEPS: ReadonlyArray<readonly [string, number | undefined]> = [
+  ['image/png', undefined],
+  ['image/webp', 0.95],
+  ['image/jpeg', 0.92],
+  ['image/webp', 0.85],
+  ['image/jpeg', 0.85],
+]
+
+async function encodeWithinCap(canvas: HTMLCanvasElement): Promise<Blob | null> {
+  for (const [type, quality] of REENCODE_STEPS) {
+    const blob = await canvasToBlob(canvas, type, quality)
+    if (blob && blob.type === type && blob.size <= MAX_PREVIEW_BYTES) return blob
+  }
+  return null
+}
+
 /**
- * Generate a bounded preview data URL for an image attachment.
+ * Produce the display image that the Chat stores for an attachment.
  *
- * The preview is downscaled so its longest edge does not exceed
- * ``MAX_PREVIEW_EDGE`` (1024px) and encoded as JPEG. If the resulting blob
- * still exceeds ``MAX_PREVIEW_BYTES`` (512 KiB), the JPEG quality is reduced
- * in steps until it fits. The preview MIME may differ from the original
- * (e.g. a PNG original is transcoded to JPEG) — the backend accepts this.
+ * An original within ``MAX_PREVIEW_BYTES`` and ``MAX_PREVIEW_EDGE`` is
+ * returned unchanged (byte-identical, so GIF animation survives). Larger
+ * images are scaled to fit ``MAX_PREVIEW_EDGE`` (and the canvas pixel limit
+ * of mobile Safari) and re-encoded as PNG when it
+ * fits, otherwise as high-quality WebP/JPEG; the size is halved only as a last
+ * resort.
  *
- * The original ``data_url`` is sent to the provider; only this bounded
- * ``preview_data_url`` is persisted to the attachment cache.
+ * The original ``data_url`` is always what the provider receives.
  *
  * @param file The original image file.
  * @param dataUrl Optional pre-read data URL of the original. When supplied,
@@ -88,46 +113,68 @@ export async function generatePreviewDataUrl(file: File, dataUrl?: string): Prom
   const originalDataUrl = dataUrl ?? await fileToDataUrl(file)
   const img = await loadImage(originalDataUrl)
 
-  // Scale so the longest edge <= MAX_PREVIEW_EDGE.
   const longestEdge = Math.max(img.naturalWidth, img.naturalHeight)
-  const scale = longestEdge > MAX_PREVIEW_EDGE ? MAX_PREVIEW_EDGE / longestEdge : 1
-  const width = Math.round(img.naturalWidth * scale)
-  const height = Math.round(img.naturalHeight * scale)
-
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    throw new Error('Canvas 2D context unavailable for preview generation')
-  }
-  ctx.drawImage(img, 0, 0, width, height)
-
-  // Encode as JPEG; reduce quality until the blob fits under MAX_PREVIEW_BYTES.
-  let quality = 0.85
-  let blob = await canvasToBlob(canvas, 'image/jpeg', quality)
-  while (blob && blob.size > MAX_PREVIEW_BYTES && quality > 0.1) {
-    quality -= 0.1
-    blob = await canvasToBlob(canvas, 'image/jpeg', quality)
+  if (file.size <= MAX_PREVIEW_BYTES && longestEdge <= MAX_PREVIEW_EDGE) {
+    return originalDataUrl
   }
 
-  if (!blob) {
-    throw new Error('Failed to encode preview image')
-  }
-  if (blob.size > MAX_PREVIEW_BYTES) {
-    // Last-resort: scale the canvas down by half and retry. This should be
-    // extremely rare for a 1024px JPEG.
-    const half = document.createElement('canvas')
-    half.width = Math.max(1, Math.round(width / 2))
-    half.height = Math.max(1, Math.round(height / 2))
-    const hctx = half.getContext('2d')
-    if (!hctx) throw new Error('Canvas 2D context unavailable for preview generation')
-    hctx.drawImage(canvas, 0, 0, half.width, half.height)
-    blob = await canvasToBlob(half, 'image/jpeg', 0.6)
-    if (!blob || blob.size > MAX_PREVIEW_BYTES) {
-      throw new Error('Preview exceeds 512 KiB after downscaling')
+  const scale = Math.min(
+    1,
+    MAX_PREVIEW_EDGE / longestEdge,
+    Math.sqrt(MAX_CANVAS_PIXELS / (img.naturalWidth * img.naturalHeight)),
+  )
+  // Floor so the product cannot round past the canvas limit; the epsilon only
+  // absorbs floating-point error on edges that are exact integers.
+  let width = Math.max(1, Math.floor(img.naturalWidth * scale + 1e-6))
+  let height = Math.max(1, Math.floor(img.naturalHeight * scale + 1e-6))
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      throw new Error('Canvas 2D context unavailable for preview generation')
     }
+    ctx.drawImage(img, 0, 0, width, height)
+    const blob = await encodeWithinCap(canvas)
+    if (blob) return blobToDataUrl(blob)
+    width = Math.max(1, Math.round(width / 2))
+    height = Math.max(1, Math.round(height / 2))
   }
+  throw new Error('Image exceeds the 8 MiB stored-image limit after downscaling')
+}
 
-  return blobToDataUrl(blob)
+interface StreamAttachmentDraft {
+  filename: string
+  mime_type: string
+  data_url: string
+  preview_data_url?: string
+}
+
+/** Decoded byte length of a base64 ``data:`` URL. */
+export function dataUrlDecodedBytes(dataUrl: string): number {
+  const payload = dataUrl.slice(dataUrl.indexOf(',') + 1)
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - padding)
+}
+
+/**
+ * Decoded bytes an attachment adds to a ``/stream/send`` request: the original
+ * plus a re-encoded preview. A preview that is the original adds nothing.
+ */
+export function attachmentRequestBytes(att: StreamAttachmentDraft & { size_bytes: number }): number {
+  const preview = att.preview_data_url
+  return att.size_bytes + (preview && preview !== att.data_url ? dataUrlDecodedBytes(preview) : 0)
+}
+
+/** ``/stream/send`` wire form; a preview that is the original is flagged, not resent. */
+export function toStreamSendAttachment({
+  filename,
+  mime_type,
+  data_url,
+  preview_data_url,
+}: StreamAttachmentDraft) {
+  return preview_data_url === data_url
+    ? { filename, mime_type, data_url, preview_is_original: true }
+    : { filename, mime_type, data_url, preview_data_url }
 }

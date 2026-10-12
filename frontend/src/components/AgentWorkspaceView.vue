@@ -2035,18 +2035,24 @@
               Retry local storage
             </button>
           </section>
-          <section
-            v-else-if="pendingTaskCreateAttempt"
+          <p
+            v-else-if="pendingTaskCreateAttempt && taskCreateInFlight"
             class="modal-hint"
             role="status"
           >
-            Saved request: {{ pendingTaskCreateAttempt.payload.title }}. A saved create request needs confirmation. Recover the exact saved request, or
-            <button
-              type="button"
-              @click="discardPendingTaskCreateAttempt"
-            >
-              discard it and edit a new Task
-            </button>.
+            Creating “{{ pendingTaskCreateAttempt.payload.title }}”…
+          </p>
+          <section
+            v-else-if="pendingTaskCreateAttempt"
+            class="task-create-recovery"
+            role="status"
+          >
+            <p class="task-create-recovery-title">
+              “{{ pendingTaskCreateAttempt.payload.title }}” was not confirmed
+            </p>
+            <p class="modal-hint">
+              Retry sends the identical saved request, so the Task is never created twice. Discard it to edit a new Task instead.
+            </p>
           </section>
           <template v-if="!pendingTaskCreateAttempt && !createdReporterRecovery">
             <div class="modal-field">
@@ -2292,6 +2298,14 @@
           </template>
           <div class="modal-actions">
             <button
+              v-if="pendingTaskCreateAttempt && !taskCreateInFlight && !createdReporterRecovery"
+              type="button"
+              class="tool-button modal-actions-leading"
+              @click="discardPendingTaskCreateAttempt"
+            >
+              Discard and start over
+            </button>
+            <button
               type="button"
               class="tool-button"
               @click="closeTaskModal"
@@ -2303,10 +2317,10 @@
               type="submit"
               class="primary-button"
               :disabled="taskCreateSubmitBlocked || !activeWorkspaceId || isLoading || (!pendingTaskCreateAttempt && (!taskForm.title.trim() || (!taskForm.prompt.trim() && taskForm.attachments.length === 0)))"
-              :loading="isPending(taskCreateActionKey())"
+              :loading="taskCreateInFlight"
               loading-label="Adding task"
             >
-              {{ pendingTaskCreateAttempt ? 'Recover saved create request' : 'Create Task' }}
+              {{ taskCreateInFlight ? 'Creating Task' : (pendingTaskCreateAttempt ? 'Retry saved request' : 'Create Task') }}
             </LoadingButton>
           </div>
         </form>
@@ -3403,6 +3417,7 @@ const taskCreateCapabilitiesReady = computed(() =>
   taskModalCapabilitiesStatus.value === 'supported' ||
   taskModalCapabilitiesStatus.value === 'unsupported',
 )
+const taskCreateInFlight = computed(() => isPending(taskCreateActionKey()))
 const taskCreateSubmitBlocked = computed(() =>
   !taskCreateCapabilitiesReady.value ||
   (Boolean(pendingTaskCreateAttempt.value) &&
@@ -9357,8 +9372,25 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.modal-actions .workspace-delete-button {
+.modal-actions .workspace-delete-button,
+.modal-actions .modal-actions-leading {
   margin-right: auto;
+}
+
+.task-create-recovery {
+  margin-top: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+}
+
+.task-create-recovery-title {
+  margin: 0;
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .resident-agent-section {

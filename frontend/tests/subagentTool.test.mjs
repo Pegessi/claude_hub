@@ -19,6 +19,7 @@ const mod = await import(
 const {
   isSubagentTool,
   parseSubagent,
+  subagentResultText,
   subagentStatusLabel,
   subagentProviderLabel,
 } = mod
@@ -98,6 +99,35 @@ test('parseSubagent projects the Cursor Task view (camelCase type)', () => {
   assert.equal(view.description, '比对两次评测差异')
   assert.equal(view.prompt, CURSOR_TASK_ARGS.prompt)
   assert.equal(view.background, false)
+})
+
+test('parseSubagent reads the Cursor protobuf oneof sub-agent type', () => {
+  const explore = parseSubagent('Task', { ...CURSOR_TASK_ARGS, subagentType: { explore: {} } })
+  assert.equal(explore.agentType, 'explore')
+  const unspecified = parseSubagent('Task', { ...CURSOR_TASK_ARGS, subagentType: { unspecified: {} } })
+  assert.equal(unspecified.provider, 'cursor')
+  assert.equal(unspecified.agentType, null)
+})
+
+test('subagentResultText shows the Cursor child report instead of the raw record', () => {
+  const view = parseSubagent('Task', CURSOR_TASK_ARGS)
+  const result = {
+    success: {
+      conversationSteps: [
+        { assistantMessage: { text: 'Checked both runs.' } },
+        { toolCall: { shellToolCall: {} } },
+        { assistantMessage: { text: ' Run B regressed on 3 cases. ' } },
+      ],
+      agentId: CURSOR_TASK_ARGS.agentId,
+      durationMs: 1200,
+    },
+  }
+  assert.equal(subagentResultText(view, result), 'Checked both runs.\n\nRun B regressed on 3 cases.')
+  assert.equal(subagentResultText(view, { error: { message: 'model unavailable' } }), 'model unavailable')
+  assert.equal(subagentResultText(view, { success: { conversationSteps: [] } }), '')
+  assert.equal(subagentResultText(view, 'plain'), null)
+  assert.equal(subagentResultText(parseSubagent('Agent', CLAUDE_ARGS), result), null)
+  assert.equal(subagentResultText(undefined, result), null)
 })
 
 test('parseSubagent projects the TraeX spawnAgent view (thread target, no type)', () => {

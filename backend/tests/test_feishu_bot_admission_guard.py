@@ -180,7 +180,9 @@ def install_stream(monkeypatch, on_send, *, subscribe_release=None, goal_lock=No
     monkeypatch.setattr(stream_api, "_send_to_native", send)
     monkeypatch.setattr(goal_run, "get_goal_admission_lock", lambda tab_id: lock)
     monkeypatch.setattr(
-        goal_run, "get_goal_manager", lambda: SimpleNamespace(current=lambda tab_id: None)
+        goal_run,
+        "get_goal_manager",
+        lambda: SimpleNamespace(current=lambda tab_id: None, has_goal_history=lambda tab_id: False),
     )
     return SimpleNamespace(
         queue=queue, subscribed=subscribed, unsubscribed=unsubscribed, goal_lock=lock

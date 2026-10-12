@@ -69,6 +69,15 @@ function optionalTypeField(record: Record<string, unknown>, key: string): string
   return nonEmptyString(value) ? value.trim() : null
 }
 
+// Current Cursor CLI encodes ``subagentType`` as a protobuf oneof object,
+// e.g. ``{explore: {}}``; older builds sent a plain string.
+function oneofTypeField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  if (!isRecord(value)) return optionalTypeField(record, key)
+  const keys = Object.keys(value)
+  return keys.length === 1 && keys[0] !== 'unspecified' ? keys[0] : null
+}
+
 function threadIdList(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
@@ -109,7 +118,7 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
       if (!record) return null
       const prompt = stringField(record, 'prompt')
       if (!nonEmptyString(prompt)) return null
-      const agentType = optionalTypeField(record, 'subagentType')
+      const agentType = oneofTypeField(record, 'subagentType')
       const agentId = optionalTypeField(record, 'agentId')
       if (!agentType && !agentId) return null
       return {
@@ -146,6 +155,31 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
     default:
       return null
   }
+}
+
+/**
+ * Readable report for a completed sub-agent whose provider returns a record,
+ * or ``null`` to keep the plain string result.
+ *
+ * Cursor's ``Task`` result is ``{success: {conversationSteps: [{assistantMessage:
+ * {text}}, ...], agentId, durationMs, ...}}``; the assistant messages are the
+ * child's report. Failures carry ``error``/``failure``/``rejected`` instead.
+ */
+export function subagentResultText(view: SubagentView | undefined, result: unknown): string | null {
+  if (view?.provider !== 'cursor' || !isRecord(result)) return null
+  const success = isRecord(result.success) ? result.success : null
+  const steps = success && Array.isArray(success.conversationSteps) ? success.conversationSteps : []
+  const texts = steps.flatMap((step) => {
+    const message = isRecord(step) && isRecord(step.assistantMessage) ? step.assistantMessage : null
+    return message && nonEmptyString(message.text) ? [message.text.trim()] : []
+  })
+  if (texts.length > 0) return texts.join('\n\n')
+  for (const key of ['error', 'failure', 'rejected']) {
+    const detail = result[key]
+    if (nonEmptyString(detail)) return detail
+    if (isRecord(detail) && nonEmptyString(detail.message)) return detail.message
+  }
+  return ''
 }
 
 /** Whether a tool call spawns a renderable sub-agent. */

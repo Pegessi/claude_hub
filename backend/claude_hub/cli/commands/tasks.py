@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
+import shlex
 import stat
 import sys
 import uuid
@@ -1362,6 +1364,102 @@ def _prepare_reporter_key(path: Path, reuse: bool) -> str:
     return _read_reporter_key(path) if reuse else _create_reporter_key(path)
 
 
+REPORTER_KEY_DIR_ENV = "CLAUDE_HUB_REPORTER_KEY_DIR"
+_KEY_FILE_TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+
+
+def _reporter_key_dir() -> Path:
+    # Client-side and checkout-independent, so every later thread finds the key.
+    configured = os.environ.get(REPORTER_KEY_DIR_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".claude_hub" / "reporter-keys"
+
+
+def _default_reporter_key_file(task_id: str) -> Path:
+    if not _KEY_FILE_TASK_ID.fullmatch(task_id):
+        raise click.ClickException(
+            "This Task ID cannot name a default key file; pass the key-file option."
+        )
+    return _reporter_key_dir() / f"{task_id}.key"
+
+
+def _staged_reporter_key_file() -> Path:
+    directory = _reporter_key_dir()
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise click.ClickException(f"Cannot create reporter key directory: {directory}") from exc
+    return directory / f"pending-{uuid.uuid4().hex}.key"
+
+
+def _staged_key_or_none(path: Path) -> Path | None:
+    """Recognize a staged key passed back explicitly for a retry."""
+    if not (path.name.startswith("pending-") and path.suffix == ".key"):
+        return None
+    try:
+        same_dir = path.parent.resolve() == _reporter_key_dir().resolve()
+    except OSError:
+        return None
+    return path if same_dir else None
+
+
+def _install_reporter_key(staged: Path, task_id: Any) -> Path:
+    """Move a staged key to the Task's default file once the Task is known."""
+    if not (isinstance(task_id, str) and _KEY_FILE_TASK_ID.fullmatch(task_id)):
+        raise click.ClickException(
+            f"The Task changed, but its reporter key is still at {staged}; "
+            "pass that file with --reporter-key-file."
+        )
+    final = _default_reporter_key_file(task_id)
+    try:
+        os.replace(staged, final)
+    except OSError as exc:
+        raise click.ClickException(
+            f"The Task changed, but its reporter key is still at {staged}; move it to {final}."
+        ) from exc
+    return final
+
+
+def _drop_superseded_default_key(task_id: str, current: Path) -> None:
+    """Remove the default key file once a handoff bound the Task to another file."""
+    if not _KEY_FILE_TASK_ID.fullmatch(task_id):
+        return
+    default = _default_reporter_key_file(task_id)
+    try:
+        if not default.exists() or default.resolve() == current.resolve():
+            return
+        default.unlink()
+    except OSError:
+        click.echo(f"Warning: {default} holds the previous execution's key; remove it.", err=True)
+
+
+def _settle_staged_key(
+    error: click.ClickException,
+    exc: HubError,
+    staged: Path | None,
+    *,
+    fresh: bool,
+    retry_flags: Callable[[Path], str],
+) -> click.ClickException:
+    """Drop a fresh staged key the Hub rejected; keep any key an earlier attempt sent."""
+    if staged is None or not staged.exists():
+        return error
+    if exc.status is not None and 400 <= exc.status < 500:
+        if fresh:
+            staged.unlink(missing_ok=True)
+            return error
+        return click.ClickException(
+            f"{error.message}. An earlier attempt with this key may have succeeded, so "
+            f"{shlex.quote(str(staged))} was kept; repeat that earlier request unchanged, "
+            "as its outcome-unknown message printed it."
+        )
+    return click.ClickException(
+        f"{error.message}. The outcome is unknown; to retry the same request, pass "
+        f"{retry_flags(staged)}."
+    )
+
+
 def _registration_request_key(reporter_key: str) -> str:
     return hashlib.sha256(
         b"claude-hub-task-register-v1\0" + reporter_key.encode("utf-8")
@@ -1502,9 +1600,19 @@ def _context_summary(
 ) -> Dict[str, Any]:
     task = task_value or {}
     caps = capabilities if isinstance(capabilities, dict) else {}
+    task_id = task.get("id")
+    key_file = None
+    if (
+        task.get("execution_control") == "initiator"
+        and isinstance(task_id, str)
+        and _KEY_FILE_TASK_ID.fullmatch(task_id)
+    ):
+        candidate = _default_reporter_key_file(task_id)
+        key_file = str(candidate) if candidate.is_file() else None
     return {
         "workspace_id": workspace_id,
-        "task_id": task.get("id"),
+        "task_id": task_id,
+        "reporter_key_file": key_file,
         "status": task.get("status"),
         "task_mode": task.get("task_mode"),
         "execution_control": task.get("execution_control"),
@@ -1537,9 +1645,12 @@ def _execution_ref_options(function: Callable[..., Any]) -> Callable[..., Any]:
 @click.option("--prompt", required=True, help="Task goal and acceptance context.")
 @click.option(
     "--reporter-key-file",
-    required=True,
+    default=None,
     type=click.Path(path_type=Path, dir_okay=False),
-    help="New private file used for this Task's progress credential.",
+    help=(
+        "New private file for this Task's progress credential. Defaults to "
+        "~/.claude_hub/reporter-keys/<task-id>.key, which task progress finds by Task ID."
+    ),
 )
 @click.option(
     "--reuse-reporter-key-file",
@@ -1563,7 +1674,7 @@ def task_register(
     workspace_id: str,
     title: str,
     prompt: str,
-    reporter_key_file: Path,
+    reporter_key_file: Optional[Path],
     reuse_reporter_key_file: bool,
     source_kind: Optional[str],
     source_tab_id: Optional[str],
@@ -1582,6 +1693,8 @@ def task_register(
     Run task context first and pass any execution reference explicitly;
     retries must repeat the same values.
     """
+    if reuse_reporter_key_file and reporter_key_file is None:
+        raise click.UsageError("--reuse-reporter-key-file requires --reporter-key-file")
     source = _source_reference(source_kind, source_tab_id, source_agent_id)
     execution_ref = _execution_reference(
         execution_provider,
@@ -1604,6 +1717,7 @@ def task_register(
         body["parent_task_id"] = parent_task_id
     if depends_on:
         body["depends_on_task_ids"] = list(depends_on)
+    staged: Path | None = None
     try:
         with cli_main.get_client(ctx) as client:
             try:
@@ -1617,14 +1731,32 @@ def task_register(
             )
             if "initiator" not in controls:
                 raise click.ClickException("initiator_task_registration_unavailable")
-            reporter_key = _prepare_reporter_key(reporter_key_file, reuse_reporter_key_file)
+            if reporter_key_file is None:
+                staged = key_path = _staged_reporter_key_file()
+            else:
+                key_path = reporter_key_file
+                staged = _staged_key_or_none(reporter_key_file)
+            reporter_key = _prepare_reporter_key(key_path, reuse_reporter_key_file)
             body["reporter_key"] = reporter_key
             body["request_key"] = _registration_request_key(reporter_key)
             data = client.register_task(workspace_id, body)
     except HubError as exc:
-        raise _safe_task_operation_error("register", exc) from exc
+        raise _settle_staged_key(
+            _safe_task_operation_error("register", exc),
+            exc,
+            staged,
+            fresh=not reuse_reporter_key_file,
+            retry_flags=lambda path: (
+                f"--reporter-key-file {shlex.quote(str(path))} --reuse-reporter-key-file"
+            ),
+        ) from exc
+    if staged is not None:
+        envelope = data if isinstance(data, dict) else {}
+        task_obj = envelope.get("task", envelope)
+        task_id = task_obj.get("id") if isinstance(task_obj, dict) else None
+        key_path = _install_reporter_key(staged, task_id)
     emit(
-        _action_summary(data, reporter_key_file=reporter_key_file),
+        _action_summary(data, reporter_key_file=key_path),
         cli_main.as_json(ctx),
     )
 
@@ -1634,8 +1766,9 @@ def task_register(
 @click.argument("task_id")
 @click.option(
     "--reporter-key-file",
-    required=True,
-    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    default=None,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Private credential file. Defaults to ~/.claude_hub/reporter-keys/<task-id>.key.",
 )
 @click.option(
     "--state",
@@ -1657,7 +1790,7 @@ def task_progress(
     ctx: click.Context,
     workspace_id: str,
     task_id: str,
-    reporter_key_file: Path,
+    reporter_key_file: Optional[Path],
     state: str,
     summary: str,
     expected_execution_epoch: int,
@@ -1677,6 +1810,13 @@ def task_progress(
     Run task context first and pass any execution reference explicitly;
     retries must repeat the same values.
     """
+    if reporter_key_file is None:
+        reporter_key_file = _default_reporter_key_file(task_id)
+        if not reporter_key_file.exists():
+            raise click.ClickException(
+                f"No reporter key at {reporter_key_file}. Pass --reporter-key-file with this "
+                "Task's key; never try another Task's key."
+            )
     reporter_key = _read_reporter_key(reporter_key_file)
     resolved_call_id = _resolve_call_id(call_id)
     _echo_call_id(resolved_call_id)
@@ -1724,7 +1864,11 @@ def task_progress(
     "--new-reporter-key-file",
     type=click.Path(path_type=Path, dir_okay=False),
     default=None,
-    help="New private credential file required when handing to an initiator.",
+    help=(
+        "New private credential file for an initiator handoff. Defaults to replacing "
+        "~/.claude_hub/reporter-keys/<task-id>.key after the handoff succeeds; another "
+        "file supersedes that default file, which is then removed."
+    ),
 )
 @click.option(
     "--reuse-new-reporter-key-file",
@@ -1750,8 +1894,6 @@ def task_handoff(
     execution_run_epoch: Optional[int],
 ) -> None:
     """Transfer the same Task without starting its next executor."""
-    if execution_control == "initiator" and new_reporter_key_file is None:
-        raise click.UsageError("--new-reporter-key-file is required for initiator handoff")
     if execution_control == "workspace" and (
         new_reporter_key_file is not None or reuse_new_reporter_key_file
     ):
@@ -1768,6 +1910,13 @@ def task_handoff(
         "expected_progress_revision": expected_progress_revision,
         "execution_control": execution_control,
     }
+    staged: Path | None = None
+    if execution_control == "initiator" and new_reporter_key_file is None:
+        # The previous epoch's key stays usable until the handoff succeeds.
+        _default_reporter_key_file(task_id)
+        staged = new_reporter_key_file = _staged_reporter_key_file()
+    elif new_reporter_key_file is not None:
+        staged = _staged_key_or_none(new_reporter_key_file)
     if new_reporter_key_file is not None:
         body["new_reporter_key"] = _prepare_reporter_key(
             new_reporter_key_file, reuse_new_reporter_key_file
@@ -1785,7 +1934,23 @@ def task_handoff(
         with cli_main.get_client(ctx) as client:
             data = client.handoff_task_execution(workspace_id, task_id, body)
     except HubError as exc:
-        raise _safe_task_operation_error("handoff", exc) from exc
+        raise _settle_staged_key(
+            _safe_task_operation_error("handoff", exc),
+            exc,
+            staged,
+            fresh=not reuse_new_reporter_key_file,
+            retry_flags=lambda path: (
+                f"--call-id {shlex.quote(resolved_call_id)} "
+                f"--new-reporter-key-file {shlex.quote(str(path))} "
+                "--reuse-new-reporter-key-file "
+                f"--expected-execution-epoch {expected_execution_epoch} "
+                f"--expected-progress-revision {expected_progress_revision}"
+            ),
+        ) from exc
+    if staged is not None:
+        new_reporter_key_file = _install_reporter_key(staged, task_id)
+    elif execution_control == "initiator" and new_reporter_key_file is not None:
+        _drop_superseded_default_key(task_id, new_reporter_key_file)
     emit(
         _action_summary(data, reporter_key_file=new_reporter_key_file),
         cli_main.as_json(ctx),

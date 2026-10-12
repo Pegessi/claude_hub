@@ -45,6 +45,13 @@ def clear_ambient_tab_id(monkeypatch):
     monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def key_dir(monkeypatch, tmp_path):
+    path = tmp_path / "reporter-keys"
+    monkeypatch.setenv("CLAUDE_HUB_REPORTER_KEY_DIR", str(path))
+    return path
+
+
 def patch_client(monkeypatch, handler):
     captured = []
 
@@ -677,3 +684,271 @@ def test_context_without_identity_fails_before_http(monkeypatch):
     result = CliRunner().invoke(cli, ["task", "context"])
     assert result.exit_code != 0 and "Pass --workspace-id/--task-id" in result.output
     assert captured == []
+
+
+def _without_key_option(args):
+    index = args.index("--reporter-key-file")
+    return args[:index] + args[index + 2 :]
+
+
+def test_register_defaults_key_to_task_file_found_by_progress(key_dir, monkeypatch):
+    posted = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=CAPABILITIES)
+        if request.url.path.endswith("/tasks"):
+            posted.append(body(request)["reporter_key"])
+            return httpx.Response(201, json=TASK)
+        assert request.headers["X-Task-Reporter-Key"] == posted[0]
+        return httpx.Response(200, json=envelope())
+
+    patch_client(monkeypatch, handler)
+    result = CliRunner().invoke(cli, _without_key_option(register_args(key_dir / "unused")))
+    assert result.exit_code == 0, result.output
+    final = key_dir / "task-1.key"
+    assert json.loads(result.stdout)["reporter_key_file"] == str(final)
+    assert final.read_text() == posted[0] and posted[0] not in result.output
+    assert stat.S_IMODE(final.stat().st_mode) == 0o600
+    assert sorted(p.name for p in key_dir.iterdir()) == ["task-1.key"]
+
+    progress = CliRunner().invoke(cli, _without_key_option(progress_args(final)))
+    assert progress.exit_code == 0, progress.output
+
+
+def test_register_default_key_keeps_unknown_outcome_retryable(key_dir, monkeypatch):
+    mode = {"status": 503}
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=CAPABILITIES)
+        if mode["status"] != 201:
+            return httpx.Response(mode["status"], json={"detail": "busy"})
+        return httpx.Response(200, json=TASK, headers={"X-Task-Replayed": "true"})
+
+    captured = patch_client(monkeypatch, handler)
+    first = CliRunner().invoke(cli, _without_key_option(register_args(key_dir / "unused")))
+    assert first.exit_code != 0
+    [staged] = list(key_dir.iterdir())
+    assert staged.name.startswith("pending-")
+    assert f"--reporter-key-file {staged} --reuse-reporter-key-file" in first.output
+    assert staged.read_text() not in first.output
+
+    mode["status"] = 201
+    retry = CliRunner().invoke(cli, register_args(staged) + ["--reuse-reporter-key-file"])
+    assert retry.exit_code == 0, retry.output
+    assert body(captured[1]) == body(captured[3])
+    assert sorted(p.name for p in key_dir.iterdir()) == ["task-1.key"]
+    assert json.loads(retry.stdout)["reporter_key_file"] == str(key_dir / "task-1.key")
+
+
+def test_register_retry_rejected_after_unknown_outcome_keeps_the_key(key_dir, monkeypatch):
+    mode = {"status": 503}
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=CAPABILITIES)
+        return httpx.Response(mode["status"], json={"detail": "task_create_request_key_conflict"})
+
+    patch_client(monkeypatch, handler)
+    first = CliRunner().invoke(cli, _without_key_option(register_args(key_dir / "unused")))
+    assert first.exit_code != 0
+    [staged] = list(key_dir.iterdir())
+
+    mode["status"] = 409
+    changed = register_args(staged) + ["--reuse-reporter-key-file"]
+    changed[changed.index("--title") + 1] = "Edited goal"
+    retry = CliRunner().invoke(cli, changed)
+    assert retry.exit_code != 0
+    assert list(key_dir.iterdir()) == [staged]
+    assert f"may have succeeded, so {staged} was kept" in retry.output
+    assert staged.read_text() not in retry.output
+
+
+def test_register_default_key_without_task_id_names_the_staged_file(key_dir, monkeypatch):
+    patch_client(
+        monkeypatch,
+        lambda r: (
+            httpx.Response(200, json=CAPABILITIES)
+            if r.method == "GET"
+            else httpx.Response(201, json={"task": {"status": "working"}})
+        ),
+    )
+    result = CliRunner().invoke(cli, _without_key_option(register_args(key_dir / "unused")))
+    assert result.exit_code != 0
+    [staged] = list(key_dir.iterdir())
+    assert staged.name.startswith("pending-")
+    assert f"still at {staged}" in result.output
+    assert staged.read_text() not in result.output
+
+
+def test_register_default_key_is_dropped_when_hub_rejects(key_dir, monkeypatch):
+    patch_client(
+        monkeypatch,
+        lambda r: (
+            httpx.Response(200, json=CAPABILITIES)
+            if r.method == "GET"
+            else httpx.Response(422, json={"detail": "bad"})
+        ),
+    )
+    result = CliRunner().invoke(cli, _without_key_option(register_args(key_dir / "unused")))
+    assert result.exit_code != 0 and "invalid_task_register" in result.output
+    assert "--reuse-reporter-key-file" not in result.output
+    assert list(key_dir.iterdir()) == []
+    assert (
+        CliRunner()
+        .invoke(
+            cli,
+            [
+                "task",
+                "register",
+                "ws1",
+                "--title",
+                "t",
+                "--prompt",
+                "p",
+                "--reuse-reporter-key-file",
+            ],
+        )
+        .exit_code
+        != 0
+    )
+
+
+def test_progress_without_default_key_names_path_and_sends_nothing(key_dir, monkeypatch):
+    captured = patch_client(monkeypatch, lambda r: httpx.Response(200, json=envelope()))
+    result = CliRunner().invoke(cli, _without_key_option(progress_args(key_dir / "unused")))
+    assert result.exit_code != 0
+    assert str(key_dir / "task-1.key") in result.output
+    assert captured == []
+
+
+def test_handoff_default_replaces_task_key_only_after_success(key_dir, monkeypatch):
+    key_dir.mkdir()
+    final = key_dir / "task-1.key"
+    final.write_text("o" * 43)
+    final.chmod(0o600)
+    mode = {"status": 503}
+    sent = []
+
+    def handler(request):
+        sent.append(body(request)["new_reporter_key"])
+        if mode["status"] != 200:
+            return httpx.Response(mode["status"], json={})
+        data = envelope()
+        data["task"]["execution_epoch"] = 2
+        return httpx.Response(200, json=data)
+
+    patch_client(monkeypatch, handler)
+    first = CliRunner().invoke(cli, handoff_args() + ["--call-id", "handoff-1"])
+    assert first.exit_code != 0
+    assert final.read_text() == "o" * 43
+    [staged] = [p for p in key_dir.iterdir() if p.name.startswith("pending-")]
+    assert (
+        f"--call-id handoff-1 --new-reporter-key-file {staged} --reuse-new-reporter-key-file"
+        in first.output
+    )
+
+    mode["status"] = 200
+    retry = CliRunner().invoke(
+        cli,
+        handoff_args()
+        + [
+            "--call-id",
+            "handoff-1",
+            "--new-reporter-key-file",
+            str(staged),
+            "--reuse-new-reporter-key-file",
+        ],
+    )
+    assert retry.exit_code == 0, retry.output
+    assert sent[0] == sent[1] == final.read_text()
+    assert sorted(p.name for p in key_dir.iterdir()) == ["task-1.key"]
+    assert json.loads(retry.stdout)["reporter_key_file"] == str(final)
+    assert sent[0] not in retry.output
+
+
+def test_handoff_retry_with_new_revision_keeps_the_sent_key(key_dir, monkeypatch):
+    key_dir.mkdir()
+    final = key_dir / "task-1.key"
+    final.write_text("o" * 43)
+    final.chmod(0o600)
+    mode = {"status": 503}
+    patch_client(monkeypatch, lambda r: httpx.Response(mode["status"], json={}))
+    first = CliRunner().invoke(cli, handoff_args() + ["--call-id", "retry-{1}"])
+    assert first.exit_code != 0 and "Traceback" not in first.output
+    [staged] = [p for p in key_dir.iterdir() if p.name.startswith("pending-")]
+    assert (
+        f"--call-id 'retry-{{1}}' --new-reporter-key-file {staged} "
+        "--reuse-new-reporter-key-file --expected-execution-epoch 1 "
+        "--expected-progress-revision 0" in first.output
+    )
+
+    mode["status"] = 409
+    changed = handoff_args() + [
+        "--call-id",
+        "retry-{1}",
+        "--new-reporter-key-file",
+        str(staged),
+        "--reuse-new-reporter-key-file",
+    ]
+    changed[changed.index("--expected-progress-revision") + 1] = "1"
+    retry = CliRunner().invoke(cli, changed)
+    assert retry.exit_code != 0
+    assert staged.exists() and final.read_text() == "o" * 43
+    assert f"may have succeeded, so {staged} was kept" in retry.output
+
+
+def test_handoff_to_explicit_file_removes_the_superseded_default(key_dir, tmp_path, monkeypatch):
+    key_dir.mkdir()
+    stale = key_dir / "task-1.key"
+    stale.write_text("o" * 43)
+    stale.chmod(0o600)
+    new = tmp_path / "new.key"
+
+    def handler(request):
+        if request.url.path.endswith("/board"):
+            return httpx.Response(200, json={"tasks": [TASK]})
+        if request.method == "GET":
+            return httpx.Response(200, json=CAPABILITIES)
+        data = envelope()
+        data["task"]["execution_epoch"] = 2
+        return httpx.Response(200, json=data)
+
+    patch_client(monkeypatch, handler)
+    result = CliRunner().invoke(cli, handoff_args() + ["--new-reporter-key-file", str(new)])
+    assert result.exit_code == 0, result.output
+    assert not stale.exists() and new.exists()
+    context = CliRunner().invoke(
+        cli, ["--json", "task", "context", "--workspace-id", "ws1", "--task-id", "task-1"]
+    )
+    assert json.loads(context.stdout)["reporter_key_file"] is None
+
+    stale.write_text("o" * 43)
+    stale.chmod(0o600)
+    same = CliRunner().invoke(
+        cli,
+        handoff_args()
+        + ["--new-reporter-key-file", str(stale), "--reuse-new-reporter-key-file"]
+        + ["--call-id", "handoff-2"],
+    )
+    assert same.exit_code == 0, same.output
+    assert stale.exists()
+
+
+def test_context_reports_only_the_default_key_path(key_dir, monkeypatch):
+    def handler(request):
+        if request.url.path.endswith("/board"):
+            return httpx.Response(200, json={"tasks": [TASK]})
+        return httpx.Response(200, json=CAPABILITIES)
+
+    patch_client(monkeypatch, handler)
+    args = ["--json", "task", "context", "--workspace-id", "ws1", "--task-id", "task-1"]
+    missing = CliRunner().invoke(cli, args)
+    assert missing.exit_code == 0, missing.output
+    assert json.loads(missing.stdout)["reporter_key_file"] is None
+    key_dir.mkdir()
+    (key_dir / "task-1.key").write_text("k" * 43)
+    present = CliRunner().invoke(cli, args)
+    assert json.loads(present.stdout)["reporter_key_file"] == str(key_dir / "task-1.key")
+    assert "k" * 43 not in present.output

@@ -21,6 +21,47 @@
   control now share one flex row, which prevents the overlap structurally.
 - Restore the full secret request-body assertion and update the provenance
   mock to the WebSocket contract (`connection_status`).
+### fix(chat): keep sent images at full quality in a 1 GiB LRU and show Cursor sub-agent reports
+
+- A sent image is now shown from its original when it fits 8 MiB and an
+  8192px edge, instead of a 1024px JPEG squeezed into 512 KiB. Larger images
+  are scaled to fit and re-encoded as PNG, or high-quality WebP/JPEG when PNG
+  is too big. The provider still receives the original, and the request
+  carries it once. The local cache now holds these originals.
+- The Chat image cache evicts least recently used images first (reads refresh
+  recency at most hourly) within one 1 GiB pool by default, instead of
+  creation-order FIFO in 64 MiB per Chat and 512 MiB overall.
+- Cursor `Task` cards show the sub-agent type again (Cursor now sends it as
+  `{explore: {}}`) and the child's report from its completion record. The
+  Cursor CLI does not stream a sub-agent's own steps, so those still do not
+  appear live.
+- See the [image quality and Cursor sub-agent notes](docs/working-logs/2026-10-12-chat-image-quality-and-cursor-subagent.md).
+
+### fix(task): calm create recovery and keep reporter keys findable
+
+- **Add Task** no longer shows the recovery message during a normal create.
+  An unconfirmed request gets a titled notice, **Retry saved request**, and a
+  separate **Discard and start over** button.
+- `task register` and initiator `task handoff` store the reporter key at
+  `~/.claude_hub/reporter-keys/<task-id>.key` when no key file is given;
+  `task progress` finds it by Task ID and `task context` shows the path, so a
+  later thread can still report completion. A retry that reuses a key keeps it
+  even when the Hub rejects the retry, because an earlier attempt may have
+  bound it.
+
+### fix(goal): steer running Goals and resume after question answers
+
+- ⌘/Ctrl+Enter (or **Steer**) during an active Goal becomes the next Goal turn:
+  the running Goal turn is replaced and the agent addresses the message first
+  while keeping the objective. Enter queues the draft until the Goal stops.
+- Claude/Cursor question answers and replies to a blocked Goal continue the
+  Goal instead of pausing it; answered cards close immediately.
+- Resume while an ordinary Chat turn runs no longer fails with 409; the Goal
+  resumes when that turn finishes.
+- Ordinary replies in a Chat that had a Goal no longer show the trailing
+  checkpoint JSON and status block; protocol examples elsewhere in a reply
+  stay intact.
+
 ### perf(mobile): hold working-session light while the drawer is shut or dragged
 
 - The working-row beam and stars animate on the main thread every frame, and a

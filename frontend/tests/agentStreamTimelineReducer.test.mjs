@@ -742,6 +742,26 @@ test('Cursor keeps its fallback card while a correlated native spawn uses the re
   assert.equal(regions[0].threads[0].lifecycleStatus, 'unknown')
 })
 
+test('a Cursor Task card shows the child report from its record result', () => {
+  const reducer = new IncrementalTimelineReducer()
+  const turns = reducer.reduce([
+    makeEvent(0, 'turn_started', { summary: 'explore' }, { turn_id: 't1' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'k1',
+      name: 'Task',
+      args: { description: 'd', prompt: 'p', subagentType: { explore: {} }, agentId: 'ag' },
+    }, { turn_id: 't1', agent_type: 'cursor' }),
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'k1',
+      status: 'completed',
+      result: { success: { conversationSteps: [{ assistantMessage: { text: 'Found it.' } }] } },
+    }, { turn_id: 't1', agent_type: 'cursor' }),
+  ])
+  const sub = turns[0].parts.find(part => part.kind === 'subagent')
+  assert.equal(sub.tool.subagent.agentType, 'explore')
+  assert.equal(sub.tool.resultText, 'Found it.')
+})
+
 test('a sub-agent mid-turn (before completion) reads as running', () => {
   const reducer = new IncrementalTimelineReducer()
   const turns = reducer.reduce([
