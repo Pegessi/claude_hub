@@ -848,8 +848,9 @@ def test_decode_uses_a_flagged_original_as_its_own_preview_once(
 def test_decode_rejects_ambiguous_or_mixed_flagged_previews(
     preview_fields: Dict[str, Any],
 ) -> None:
-    import claude_hub.api.agent_stream as api
     from fastapi import HTTPException
+
+    import claude_hub.api.agent_stream as api
 
     url = _data_url("image/png", _png())
     payloads = [
