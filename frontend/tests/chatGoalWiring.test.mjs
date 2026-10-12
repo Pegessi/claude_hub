@@ -83,9 +83,13 @@ test('active Goal accepts steers while queued drafts wait for the Goal to stop',
   assert.ok(pane.includes("(turnInFlight.value || goalSteerOnly.value) && !messageOverride"))
   assert.ok(pane.includes("submit(goalSteerOnly ? 'steer' : 'normal')"))
   assert.ok(pane.includes('⌘/Ctrl+Enter steer Goal'))
-  // Goal turns cannot carry images.
+  // Goal turns cannot carry images, including pasted or dropped ones.
   assert.ok(pane.includes('draftMessage.value.trim().length > 0 && attachments.value.length === 0'))
   assert.ok(pane.includes('Pause or complete the active Goal before sending messages'))
+  assert.match(
+    pane,
+    /async function addFiles\([\s\S]*?if \(goalComposerLocked\.value\) \{\s*composerError\.value = 'Pause or complete the active Goal before attaching images\.'\s*return/,
+  )
 })
 
 test('assistant text hides an unsanitized trailing Goal envelope', () => {
