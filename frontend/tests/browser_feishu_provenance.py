@@ -136,9 +136,7 @@ def history():
                     "type": event_type,
                     "run_epoch": index + 1,
                     "turn_id": turn_id,
-                    "message_id": (
-                        f"{turn_id}:user" if event_type == "turn_started" else None
-                    ),
+                    "message_id": (f"{turn_id}:user" if event_type == "turn_started" else None),
                     "payload": body,
                     "created_at": "2026-10-06T08:00:00Z",
                     "redacted": False,
@@ -162,9 +160,7 @@ async def main(browser_run: BrowserRun) -> None:
         or parsed.query
         or parsed.fragment
     ):
-        raise SystemExit(
-            "Use an owned numeric-loopback static server, not a shared Hub"
-        )
+        raise SystemExit("Use an owned numeric-loopback static server, not a shared Hub")
     output = Path(sys.argv[2]).resolve()
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
     tab = dict(
@@ -230,18 +226,14 @@ async def main(browser_run: BrowserRun) -> None:
                         await route.abort("blockedbyclient")
                         return
                     if path.endswith(f"/attachments/{PREVIEW_ID}"):
-                        await route.fulfill(
-                            status=200, content_type="image/png", body=PREVIEW_PNG
-                        )
+                        await route.fulfill(status=200, content_type="image/png", body=PREVIEW_PNG)
                         return
                     if not path.startswith("/api/"):
                         if method in {"GET", "HEAD"}:
                             await route.continue_()
                         else:
                             report["unknown_api_requests"].append([method, request.url])
-                            await route.fulfill(
-                                status=405, body="blocked static method"
-                            )
+                            await route.fulfill(status=405, body="blocked static method")
                         return
                     report["api_requests"].append([method, request.url])
                     if method == "GET" and path == "/api/auth/check" and not query:
@@ -260,9 +252,7 @@ async def main(browser_run: BrowserRun) -> None:
                         body = {"pinned_tab_ids": []}
                     elif method == "GET" and path == "/api/env-presets" and not query:
                         body = {"custom_presets": [], "hidden_builtin_ids": []}
-                    elif (
-                        method == "GET" and path == "/api/feishu/bot/bots" and not query
-                    ):
+                    elif method == "GET" and path == "/api/feishu/bot/bots" and not query:
                         body = bot_pool(binding, pool_revision)
                     elif method == "GET" and path == goal_current_path and not query:
                         body = None
@@ -272,11 +262,7 @@ async def main(browser_run: BrowserRun) -> None:
                             await route.fulfill(status=422, body="unexpected view body")
                             return
                         body = {"ok": True}
-                    elif (
-                        method == "GET"
-                        and path == f"{stream_base}/capabilities"
-                        and not query
-                    ):
+                    elif method == "GET" and path == f"{stream_base}/capabilities" and not query:
                         body = {
                             "structured": True,
                             "send_message": True,
@@ -300,9 +286,7 @@ async def main(browser_run: BrowserRun) -> None:
                             "next_sequence": final_sequence,
                             "has_more": False,
                         }
-                    elif (
-                        method == "POST" and path == f"{stream_base}/wait" and not query
-                    ):
+                    elif method == "POST" and path == f"{stream_base}/wait" and not query:
                         try:
                             submitted = json.loads(request.post_data or "")
                         except json.JSONDecodeError:
@@ -312,9 +296,7 @@ async def main(browser_run: BrowserRun) -> None:
                             "timeout_seconds": 30,
                         }:
                             report["unknown_api_requests"].append([method, request.url])
-                            await route.fulfill(
-                                status=422, body="unexpected wait cursor"
-                            )
+                            await route.fulfill(status=422, body="unexpected wait cursor")
                             return
                         await asyncio.sleep(0.25)
                         body = {
@@ -338,9 +320,7 @@ async def main(browser_run: BrowserRun) -> None:
                         await route.fulfill(
                             status=501,
                             content_type="application/json",
-                            body=json.dumps(
-                                {"detail": f"unmocked API: {method} {request.url}"}
-                            ),
+                            body=json.dumps({"detail": f"unmocked API: {method} {request.url}"}),
                         )
                         return
                     await route.fulfill(
@@ -352,14 +332,10 @@ async def main(browser_run: BrowserRun) -> None:
                 await context.route_web_socket("**/*", block_websocket)
                 await context.route("**/*", route_all)
                 page = await context.new_page()
-                page.on(
-                    "pageerror", lambda error: report["page_errors"].append(str(error))
-                )
+                page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
 
                 async def check_sources():
-                    await expect(
-                        page.get_by_role("log", name="Chat conversation")
-                    ).to_be_visible()
+                    await expect(page.get_by_role("log", name="Chat conversation")).to_be_visible()
                     for kind, text in (
                         ("web", LONG_FIRST_MESSAGE),
                         ("feishu", "Remote message"),
@@ -403,11 +379,7 @@ async def main(browser_run: BrowserRun) -> None:
                     pane_box = await pane.bounding_box()
                     name_box = await name.bounding_box()
                     trigger_box = await trigger.bounding_box()
-                    assert (
-                        pane_box is not None
-                        and name_box is not None
-                        and trigger_box is not None
-                    )
+                    assert pane_box is not None and name_box is not None and trigger_box is not None
                     assert name_box["x"] >= pane_box["x"] + 7
                     # The name pill and the Feishu control share one flex
                     # row, so the only requirement is that they do not
@@ -434,9 +406,7 @@ async def main(browser_run: BrowserRun) -> None:
                     binding = current_binding
                     pool_revision += 1
                     if state == "bound-current":
-                        await page.goto(
-                            base + "/?tab=ui-tab-1", wait_until="domcontentloaded"
-                        )
+                        await page.goto(base + "/?tab=ui-tab-1", wait_until="domcontentloaded")
                     else:
                         await page.reload(wait_until="domcontentloaded")
                     await check_sources()
@@ -456,31 +426,23 @@ async def main(browser_run: BrowserRun) -> None:
                             'option[value="bot-provenance"]'
                         )
                         await expect(option).to_have_js_property("disabled", True)
-                        await expect(option).to_contain_text(
-                            "In use by Chat ui-tab-other"
-                        )
+                        await expect(option).to_contain_text("In use by Chat ui-tab-other")
                         await expect(
-                            panel.get_by_role(
-                                "button", name="Generate pairing code", exact=True
-                            )
+                            panel.get_by_role("button", name="Generate pairing code", exact=True)
                         ).to_be_disabled()
                     elif state == "unbound":
+                        await expect(panel.get_by_label("Bot", exact=True)).to_have_value(
+                            "bot-provenance"
+                        )
                         await expect(
-                            panel.get_by_label("Bot", exact=True)
-                        ).to_have_value("bot-provenance")
-                        await expect(
-                            panel.get_by_role(
-                                "button", name="Generate pairing code", exact=True
-                            )
+                            panel.get_by_role("button", name="Generate pairing code", exact=True)
                         ).to_be_enabled()
                     await panel.get_by_role("button", name="Close", exact=True).click()
                     await expect(panel).to_be_hidden()
                     filename = f"desktop-{state}.png"
                     await page.screenshot(path=str(output / filename), full_page=True)
                     report["screenshots"].append(filename)
-                await page.evaluate(
-                    "localStorage.setItem('claude_hub_layout_type', '3x1')"
-                )
+                await page.evaluate("localStorage.setItem('claude_hub_layout_type', '3x1')")
                 await page.reload(wait_until="domcontentloaded")
                 await check_sources()
                 await assert_chat_chrome_clearance()
@@ -489,13 +451,9 @@ async def main(browser_run: BrowserRun) -> None:
                 await expect(panel).to_be_visible()
                 await panel.get_by_role("button", name="Close", exact=True).click()
                 await expect(panel).to_be_hidden()
-                await page.screenshot(
-                    path=str(output / "desktop-grid.png"), full_page=True
-                )
+                await page.screenshot(path=str(output / "desktop-grid.png"), full_page=True)
                 report["screenshots"].append("desktop-grid.png")
-                await page.evaluate(
-                    "localStorage.setItem('claude_hub_layout_type', '1x1')"
-                )
+                await page.evaluate("localStorage.setItem('claude_hub_layout_type', '1x1')")
                 await page.reload(wait_until="domcontentloaded")
                 await page.set_viewport_size({"width": 390, "height": 844})
                 await page.wait_for_function(
@@ -542,20 +500,15 @@ async def main(browser_run: BrowserRun) -> None:
                 report["first_message_clearance"] = overlap
                 assert not overlap["missing"] and overlap["textRects"], overlap
                 assert not overlap["intersections"], overlap
-                await page.screenshot(
-                    path=str(output / "mobile-unbound.png"), full_page=True
-                )
+                await page.screenshot(path=str(output / "mobile-unbound.png"), full_page=True)
                 report["screenshots"].append("mobile-unbound.png")
-                assert not report["unknown_api_requests"], report[
-                    "unknown_api_requests"
-                ]
+                assert not report["unknown_api_requests"], report["unknown_api_requests"]
                 assert not report["unexpected_external_requests"], report[
                     "unexpected_external_requests"
                 ]
                 assert not report["page_errors"], report["page_errors"]
                 assert (
-                    "https://avatar.example.test/hub-bot.png"
-                    in report["blocked_external_requests"]
+                    "https://avatar.example.test/hub-bot.png" in report["blocked_external_requests"]
                 )
                 report["result"] = "PASS"
             except BaseException as exc:
@@ -578,9 +531,7 @@ async def main(browser_run: BrowserRun) -> None:
             or browser_run.signal_number is not None
         ):
             report["result"] = "FAIL"
-        (output / "report.json").write_text(
-            json.dumps(report, indent=2), encoding="utf-8"
-        )
+        (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps(report, indent=2))
 
 

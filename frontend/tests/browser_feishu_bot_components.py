@@ -76,9 +76,7 @@ async def main(browser_run: BrowserRun) -> None:
         or parsed_base.password is not None
         or parsed_base.path != "/tests/feishu_bot_components_harness.html"
     ):
-        raise SystemExit(
-            "Use an owned numeric-loopback Vite server and the Bot harness path"
-        )
+        raise SystemExit("Use an owned numeric-loopback Vite server and the Bot harness path")
 
     output = Path(output_arg)
     output.mkdir(parents=True, exist_ok=True)
@@ -243,9 +241,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await fulfill_json(route, pool("bot-created"), status=201)
                 return
 
-            secrets_match = re.fullmatch(
-                r"/api/feishu/bot/bots/(bot-created)/secrets", path
-            )
+            secrets_match = re.fullmatch(r"/api/feishu/bot/bots/(bot-created)/secrets", path)
             if method == "PUT" and secrets_match:
                 assert isinstance(submitted, dict)
                 bot = bot_by_id(secrets_match.group(1))
@@ -259,9 +255,7 @@ async def main(browser_run: BrowserRun) -> None:
                 pool_revision += 1
                 await fulfill_json(route, pool(bot["bot_id"]))
                 return
-            start_match = re.fullmatch(
-                r"/api/feishu/bot/bots/(bot-created)/pair/start", path
-            )
+            start_match = re.fullmatch(r"/api/feishu/bot/bots/(bot-created)/pair/start", path)
             if method == "POST" and start_match:
                 assert isinstance(submitted, dict)
                 bot = bot_by_id(start_match.group(1))
@@ -283,9 +277,7 @@ async def main(browser_run: BrowserRun) -> None:
                 )
                 return
 
-            activate_match = re.fullmatch(
-                r"/api/feishu/bot/bots/(bot-created)/pair/activate", path
-            )
+            activate_match = re.fullmatch(r"/api/feishu/bot/bots/(bot-created)/pair/activate", path)
             if method == "POST" and activate_match:
                 assert isinstance(submitted, dict)
                 bot = bot_by_id(activate_match.group(1))
@@ -313,9 +305,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await fulfill_json(route, pool(bot["bot_id"]))
                 return
 
-            pairing_match = re.fullmatch(
-                r"/api/feishu/bot/bots/(bot-created)/pairing", path
-            )
+            pairing_match = re.fullmatch(r"/api/feishu/bot/bots/(bot-created)/pairing", path)
             if method == "DELETE" and pairing_match:
                 assert isinstance(submitted, dict)
                 bot = bot_by_id(pairing_match.group(1))
@@ -358,27 +348,19 @@ async def main(browser_run: BrowserRun) -> None:
         assert trigger_box["x"] - name_box["x"] - name_box["width"] == 5
         assert 7 <= 1280 - trigger_box["x"] - trigger_box["width"] <= 9
         assert await trigger.locator("svg").count() == 0
-        await expect(identity).to_have_attribute(
-            "src", re.compile(r"^data:image/png;base64,")
-        )
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
         await page.screenshot(path=str(output / "feishu-status-entry-desktop.png"))
 
         # Pool create: response is summary-only; submitted credentials clear.
         await page.get_by_role("button", name="Open Bot settings", exact=True).click()
         settings = page.get_by_test_id("feishu-bot-settings-dialog")
         await expect(settings).to_be_visible()
-        await expect(
-            settings.get_by_text("Loading Bot pool…", exact=True)
-        ).to_have_count(0)
-        await expect(
-            settings.get_by_role("heading", name="Add Bot", exact=True)
-        ).to_be_visible()
+        await expect(settings.get_by_text("Loading Bot pool…", exact=True)).to_have_count(0)
+        await expect(settings.get_by_role("heading", name="Add Bot", exact=True)).to_be_visible()
         await settings.get_by_label("Name", exact=True).fill("Primary Bot")
         await settings.get_by_label("App ID", exact=True).fill("app-created")
         await settings.get_by_label("App Secret", exact=True).fill("create-secret")
-        await settings.get_by_role(
-            "button", name="Validate and add", exact=True
-        ).click()
+        await settings.get_by_role("button", name="Validate and add", exact=True).click()
         await expect(
             settings.get_by_role("heading", name="Primary Bot", exact=True)
         ).to_be_visible()
@@ -391,29 +373,19 @@ async def main(browser_run: BrowserRun) -> None:
         assert 230 <= sidebar_box["width"] <= 270
         assert detail_box["width"] > sidebar_box["width"]
         await expect(
-            settings.locator('[aria-label="Bots"] button').filter(
-                has_text="Primary Bot"
-            )
+            settings.locator('[aria-label="Bots"] button').filter(has_text="Primary Bot")
         ).to_have_attribute("aria-pressed", "true")
-        await expect(settings.locator(".credential-state")).to_contain_text(
-            "Secret set"
-        )
-        await expect(
-            settings.get_by_role("status").filter(has_text="Bot added.")
-        ).to_be_visible()
+        await expect(settings.locator(".credential-state")).to_contain_text("Secret set")
+        await expect(settings.get_by_role("status").filter(has_text="Bot added.")).to_be_visible()
         await expect(settings.get_by_label("App Secret", exact=True)).to_have_value("")
         await expect(settings.locator(".connection-card")).to_contain_text("Connected")
         for retired_label in ("Verification Token", "Encrypt Key", "Callback URL"):
-            await expect(settings.get_by_text(retired_label, exact=True)).to_have_count(
-                0
-            )
+            await expect(settings.get_by_text(retired_label, exact=True)).to_have_count(0)
 
         for row in await settings.locator('[aria-label="Bots"] > button').all():
             box = await row.bounding_box()
             assert box is not None and box["height"] <= 80
-        await page.screenshot(
-            path=str(output / "feishu-bot-pool-desktop.png"), full_page=True
-        )
+        await page.screenshot(path=str(output / "feishu-bot-pool-desktop.png"), full_page=True)
         create_call = next(
             call
             for call in api_calls
@@ -428,9 +400,7 @@ async def main(browser_run: BrowserRun) -> None:
         # Replacing credentials uses the selected revision and clears the
         # secret draft on success.
         await settings.get_by_label("App Secret", exact=True).fill("replace-secret")
-        await settings.get_by_role(
-            "button", name="Validate and replace", exact=True
-        ).click()
+        await settings.get_by_role("button", name="Validate and replace", exact=True).click()
         await expect(
             settings.get_by_role("status").filter(has_text="Credentials replaced")
         ).to_be_visible()
@@ -446,16 +416,12 @@ async def main(browser_run: BrowserRun) -> None:
         # Closing with dirty secret drafts unmounts the real dialog. A fresh
         # mount and selection must not recover those secrets.
         await settings.get_by_label("App Secret", exact=True).fill("close-secret")
-        await settings.locator("footer").get_by_role(
-            "button", name="Close", exact=True
-        ).click()
+        await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
         await page.get_by_role("button", name="Open Bot settings", exact=True).click()
         settings = page.get_by_test_id("feishu-bot-settings-dialog")
         await expect(settings).to_be_visible()
-        await expect(
-            settings.get_by_text("Loading Bot pool…", exact=True)
-        ).to_have_count(0)
+        await expect(settings.get_by_text("Loading Bot pool…", exact=True)).to_have_count(0)
         await settings.locator('[aria-label="Bots"]').locator("button").filter(
             has_text="Primary Bot"
         ).click()
@@ -470,36 +436,26 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(
             settings.get_by_role("heading", name="Replace credentials", exact=True)
         ).to_have_count(0)
-        await expect(
-            settings.get_by_role("button", name="Delete Bot", exact=True)
-        ).to_have_count(0)
+        await expect(settings.get_by_role("button", name="Delete Bot", exact=True)).to_have_count(0)
         await expect(
             settings.locator('[aria-label="Bots"]')
             .locator("button")
             .filter(has_text="Occupied Bot")
         ).to_contain_text("In use by Chat tab-other")
-        await settings.locator("footer").get_by_role(
-            "button", name="Close", exact=True
-        ).click()
+        await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
         # Binding: occupied Bot is disabled; available Bot produces a code.
         await trigger.click()
         binding_panel = page.get_by_role("dialog", name="Feishu connection")
         await expect(binding_panel).to_be_visible()
         bot_select = binding_panel.get_by_label("Bot", exact=True)
-        await expect(
-            bot_select.locator('option[value="bot-occupied"]')
-        ).to_have_js_property("disabled", True)
+        await expect(bot_select.locator('option[value="bot-occupied"]')).to_have_js_property(
+            "disabled", True
+        )
         await bot_select.select_option("bot-created")
-        await binding_panel.get_by_role(
-            "button", name="Generate pairing code", exact=True
-        ).click()
-        await expect(page.get_by_test_id("feishu-binding-code")).to_have_text(
-            "CH-ABCDEF1234"
-        )
-        start_call = next(
-            call for call in api_calls if call["path"].endswith("/pair/start")
-        )
+        await binding_panel.get_by_role("button", name="Generate pairing code", exact=True).click()
+        await expect(page.get_by_test_id("feishu-binding-code")).to_have_text("CH-ABCDEF1234")
+        start_call = next(call for call in api_calls if call["path"].endswith("/pair/start"))
         assert start_call["body"] == {"tab_id": "tab-1", "expected_revision": 2}
 
         # Simulate the callback claim only in mock server state, then run the
@@ -529,49 +485,29 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(confirm_input).to_have_value("")
         assert CONFIRM_WORD not in await binding_panel.inner_text()
 
-        await page.screenshot(
-            path=str(output / "feishu-pairing-desktop.png"), full_page=True
-        )
+        await page.screenshot(path=str(output / "feishu-pairing-desktop.png"), full_page=True)
         # The confirmation word is manually entered. The request uses the
         # revision from the claimed pool snapshot; no response may echo it.
         await confirm_input.fill(CONFIRM_WORD)
-        await binding_panel.get_by_role(
-            "button", name="Activate pairing", exact=True
-        ).click()
+        await binding_panel.get_by_role("button", name="Activate pairing", exact=True).click()
         await expect(page.get_by_test_id("feishu-binding-status")).to_have_text(
             "Connected with Primary Bear"
         )
-        await expect(identity).to_have_attribute(
-            "src", re.compile(r"^data:image/png;base64,")
-        )
-        await expect(
-            binding_panel.get_by_text("Primary Bear", exact=True)
-        ).to_be_visible()
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+        await expect(binding_panel.get_by_text("Primary Bear", exact=True)).to_be_visible()
         for avatar in await binding_panel.locator("img").all():
-            await expect(avatar).to_have_attribute(
-                "src", re.compile(r"^data:image/png;base64,")
-            )
-        activate_call = next(
-            call for call in api_calls if call["path"].endswith("/pair/activate")
-        )
+            await expect(avatar).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
+        activate_call = next(call for call in api_calls if call["path"].endswith("/pair/activate"))
         assert activate_call["body"] == {
             "pairing_id": "pair-created",
             "confirm_word": CONFIRM_WORD,
             "expected_revision": 4,
         }
 
-        await binding_panel.get_by_role(
-            "button", name="Disconnect Feishu", exact=True
-        ).click()
-        await binding_panel.get_by_role(
-            "button", name="Confirm disconnect", exact=True
-        ).click()
-        await expect(page.get_by_test_id("feishu-binding-status")).to_have_text(
-            "Not connected"
-        )
-        await expect(identity).to_have_attribute(
-            "src", re.compile(r"^data:image/png;base64,")
-        )
+        await binding_panel.get_by_role("button", name="Disconnect Feishu", exact=True).click()
+        await binding_panel.get_by_role("button", name="Confirm disconnect", exact=True).click()
+        await expect(page.get_by_test_id("feishu-binding-status")).to_have_text("Not connected")
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
         disconnect_call = next(
             call
             for call in api_calls
@@ -623,9 +559,7 @@ async def main(browser_run: BrowserRun) -> None:
                 break
             await asyncio.sleep(0.01)
         assert shared_avatar_requests == 1
-        await expect(identity).to_have_attribute(
-            "src", re.compile(r"^data:image/png;base64,")
-        )
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
 
         await page.evaluate("window.__FEISHU_BOT_TEST__.setTabId('tab-avatar-b')")
         await expect(trigger).to_have_attribute(
@@ -642,12 +576,8 @@ async def main(browser_run: BrowserRun) -> None:
         )
 
         await page.evaluate("window.__FEISHU_BOT_TEST__.setTabId('tab-1')")
-        await expect(trigger).to_have_attribute(
-            "aria-label", re.compile(r"Not connected$")
-        )
-        await expect(identity).to_have_attribute(
-            "src", re.compile(r"^data:image/png;base64,")
-        )
+        await expect(trigger).to_have_attribute("aria-label", re.compile(r"Not connected$"))
+        await expect(identity).to_have_attribute("src", re.compile(r"^data:image/png;base64,"))
 
         for forbidden in (
             CONFIRM_WORD,
@@ -670,9 +600,7 @@ async def main(browser_run: BrowserRun) -> None:
         await page.get_by_role("button", name="Open Bot settings", exact=True).click()
         settings = page.get_by_test_id("feishu-bot-settings-dialog")
         await expect(settings).to_be_visible()
-        await expect(
-            settings.get_by_text("Loading Bot pool…", exact=True)
-        ).to_have_count(0)
+        await expect(settings.get_by_text("Loading Bot pool…", exact=True)).to_have_count(0)
         settings_box = await settings.bounding_box()
         assert settings_box is not None
         assert settings_box["x"] >= 0
@@ -682,9 +610,7 @@ async def main(browser_run: BrowserRun) -> None:
         mobile_sidebar_box = await settings.locator(".bot-sidebar").bounding_box()
         mobile_detail_box = await settings.locator(".detail").bounding_box()
         assert mobile_sidebar_box is not None and mobile_detail_box is not None
-        await page.screenshot(
-            path=str(output / "feishu-bot-pool-mobile.png"), full_page=True
-        )
+        await page.screenshot(path=str(output / "feishu-bot-pool-mobile.png"), full_page=True)
         assert mobile_sidebar_box["y"] < mobile_detail_box["y"]
         for region_box in (mobile_sidebar_box, mobile_detail_box):
             assert region_box["x"] >= settings_box["x"]
@@ -695,9 +621,7 @@ async def main(browser_run: BrowserRun) -> None:
         assert await settings.locator(".layout").evaluate(
             "element => getComputedStyle(element).overflowY === 'auto'"
         )
-        await settings.locator("footer").get_by_role(
-            "button", name="Close", exact=True
-        ).click()
+        await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
 
         await trigger.click()
@@ -707,19 +631,13 @@ async def main(browser_run: BrowserRun) -> None:
         assert panel_box is not None
         assert panel_box["x"] >= 0
         assert panel_box["x"] + panel_box["width"] <= 391
-        await page.screenshot(
-            path=str(output / "feishu-pairing-mobile.png"), full_page=True
-        )
+        await page.screenshot(path=str(output / "feishu-pairing-mobile.png"), full_page=True)
         await binding_panel.get_by_label("Bot", exact=True).select_option("bot-created")
         await expect(
-            binding_panel.get_by_role(
-                "button", name="Generate pairing code", exact=True
-            )
+            binding_panel.get_by_role("button", name="Generate pairing code", exact=True)
         ).to_be_enabled()
         await binding_panel.get_by_role("button", name="Close", exact=True).click()
-        assert await page.evaluate(
-            "document.documentElement.scrollWidth <= innerWidth + 1"
-        )
+        assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
 
         await page.screenshot(
             path=str(output / "feishu-bot-components-mobile.png"),
@@ -734,9 +652,7 @@ async def main(browser_run: BrowserRun) -> None:
 
     report = {
         "result": "PASS",
-        "api_calls": [
-            {"method": call["method"], "path": call["path"]} for call in api_calls
-        ],
+        "api_calls": [{"method": call["method"], "path": call["path"]} for call in api_calls],
         "blocked_requests": blocked_requests,
         "unknown_requests": unknown_requests,
         "page_errors": page_errors,
