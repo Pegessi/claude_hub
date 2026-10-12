@@ -99,6 +99,23 @@
 
 ---
 
+## Bug #7: Duplicate and Fork Fail with "Failed to duplicate tab"
+
+**Symptom**: Every Chat duplicate, fork and new session fails with a generic toast; the backend log shows `Duplicating tab …` or `Forking tab …` with no traceback and no following `create_tab called with` line.
+
+**Root Cause**: `create_tab` compared `len(self.processes)` with `max_total_tabs` (200). Archived sessions stay in `processes` and `tabs.json` after releasing their runtime, so 170 archived plus 30 live sessions reached the limit. The duplicate route did not map `TabLimitExceededError`, and the store discarded the response body, so the reason never reached the user.
+
+**Fix**: Count only non-archived sessions, check the same limit before unarchiving, return 429 with the reason from duplicate and unarchive, and include the server's `detail` in the store's error toasts.
+
+**Files Changed**:
+- `backend/claude_hub/services/ttyd_manager.py`
+- `backend/claude_hub/api/tabs.py`
+- `frontend/src/stores/terminalStore.ts`
+
+**Key Lesson**: A resource limit must count only the records that hold that resource. When a request fails before its first log line, check guards that run before that line.
+
+---
+
 ## Environment Notes
 
 - **System proxy** (`http_proxy=127.0.0.1:7890`) was active on the dev machine. The backend already handles this by clearing proxy env vars at import time and using `trust_env=False` on httpx. But `curl` commands during debugging needed `--noproxy '*'` to avoid false 502 errors.

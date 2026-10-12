@@ -19,7 +19,11 @@ from claude_hub.api.tabs import router as tabs_router
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.models import AgentType, ExecutionTarget, SessionKind, TerminalTab, User
 from claude_hub.services.chat_sidebar_preferences import ChatSidebarPreferencesStore
-from claude_hub.services.ttyd_manager import TabStartupTimeoutError, TTYDManager
+from claude_hub.services.ttyd_manager import (
+    TabLimitExceededError,
+    TabStartupTimeoutError,
+    TTYDManager,
+)
 
 api_tabs_module = importlib.import_module("claude_hub.api.tabs")
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
@@ -496,6 +500,22 @@ async def test_duplicate_tab_route_returns_404_for_missing_tab(
     response = await client.post("/api/tabs/missing-id/duplicate")
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["duplicate", "unarchive"])
+async def test_tab_routes_return_429_with_reason_at_live_tab_limit(
+    client: AsyncClient, monkeypatch: MonkeyPatch, action: str
+) -> None:
+    async def fake_at_limit(tab_id: str) -> None:
+        raise TabLimitExceededError("live tab limit reached (200)")
+
+    monkeypatch.setattr(f"claude_hub.api.tabs.ttyd_manager.{action}_tab", fake_at_limit)
+
+    response = await client.post(f"/api/tabs/source-id/{action}")
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "live tab limit reached (200)"
 
 
 @pytest.mark.asyncio
