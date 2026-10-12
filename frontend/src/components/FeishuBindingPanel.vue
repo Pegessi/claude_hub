@@ -15,15 +15,20 @@
       :aria-expanded="open"
       @click="toggle"
     >
-      <img
-        :key="identityImageKey"
+      <svg
         class="trigger-icon"
-        :src="identityImageUrl"
-        :data-avatar-key="activeAvatarKey || undefined"
-        alt=""
-        data-testid="feishu-binding-identity"
-        @error="useBrandFallback"
+        viewBox="0 0 24 24"
+        fill="none"
+        aria-hidden="true"
       >
+        <path
+          d="m9.25 14.75-1.4 1.4a3.2 3.2 0 0 1-4.5-4.5l2.3-2.3a3.2 3.2 0 0 1 4.5 0m4.6-.1 1.4-1.4a3.2 3.2 0 0 1 4.5 4.5l-2.3 2.3a3.2 3.2 0 0 1-4.5 0m-3.7-3.7 3.7-3.7"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
       <span
         class="status-dot"
         aria-hidden="true"
@@ -41,18 +46,9 @@
     >
       <header class="panel-header">
         <div class="panel-heading">
-          <span
+          <FeishuBrandMark
             class="panel-mark"
-            aria-hidden="true"
-          >
-            <img
-              :key="identityImageKey"
-              :src="identityImageUrl"
-              :data-avatar-key="activeAvatarKey || undefined"
-              alt=""
-              @error="useBrandFallback"
-            >
-          </span>
+          />
           <div>
             <strong>Feishu connection</strong>
             <p>Connect this Chat to a shared Bot.</p>
@@ -112,15 +108,12 @@
 
       <template v-else-if="viewState === 'bound-current' && currentBot && binding">
         <section class="connected-card">
-          <img
-            :key="identityImageKey"
+          <FeishuIdentityMark
             class="connected-card__icon"
-            :src="identityImageUrl"
-            :data-avatar-key="activeAvatarKey || undefined"
-            alt=""
-            aria-hidden="true"
-            @error="useBrandFallback"
-          >
+            :avatar-url="activeAvatarUrl"
+            :identity-key="activeAvatarKey || `feishu-brand:${props.tabId}`"
+            data-testid="feishu-binding-identity"
+          />
           <div>
             <strong>{{ currentBot.feishu_name || currentBot.name }}</strong>
             <p>New private messages enter this Chat.</p>
@@ -281,8 +274,10 @@
 
 <script setup lang="ts">
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
+import FeishuBrandMark from '@/components/FeishuBrandMark.vue'
+import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import { useFeishuBinding } from '@/composables/useFeishuBinding'
-import { feishuLogoUrl, trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
+import { trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
 import { writeClipboard } from '@/utils/clipboard'
 
 const props = defineProps<{ tabId: string }>()
@@ -290,7 +285,6 @@ const root = ref<HTMLElement | null>(null)
 const open = ref(false)
 const copyError = ref<string | null>(null)
 const confirmDisconnect = ref(false)
-const failedAvatarKey = ref<string | null>(null)
 const {
   bots, binding, currentBot, selectedBotId, selectedBot, pendingCode, claim, confirmWord, error,
   needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, refresh, selectBot,
@@ -306,29 +300,7 @@ const activeAvatarKey = computed(() => {
   if (!botId || !avatarUrl) return null
   return `${props.tabId}\n${botId}\n${avatarUrl}`
 })
-const identityImageKey = computed(() => activeAvatarKey.value ?? `feishu-brand:${props.tabId}`)
-const identityImageUrl = computed(() => {
-  const avatarKey = activeAvatarKey.value
-  return avatarKey && failedAvatarKey.value !== avatarKey
-    ? activeAvatarUrl.value ?? feishuLogoUrl
-    : feishuLogoUrl
-})
-
 function choose(event: Event) { selectBot((event.target as HTMLSelectElement).value) }
-function useBrandFallback(event: Event) {
-  const image = event.currentTarget as HTMLImageElement
-  const avatarKey = image.dataset.avatarKey ?? null
-  const avatarUrl = activeAvatarUrl.value
-  if (
-    avatarKey
-    && avatarKey === activeAvatarKey.value
-    && avatarUrl
-    && image.src === new URL(avatarUrl, window.location.href).href
-  ) {
-    failedAvatarKey.value = avatarKey
-  }
-  if (image.src !== new URL(feishuLogoUrl, window.location.href).href) image.src = feishuLogoUrl
-}
 function toggle() { if (open.value) close(); else open.value = true }
 function close() {
   open.value = false
@@ -365,7 +337,6 @@ onUnmounted(() => {
 onActivated(() => { void resume() })
 onDeactivated(() => { close(); pause() })
 watch(() => props.tabId, close, { flush: 'sync' })
-watch(activeAvatarKey, () => { failedAvatarKey.value = null }, { flush: 'sync' })
 </script>
 
 <style scoped>
@@ -407,7 +378,7 @@ watch(activeAvatarKey, () => { failedAvatarKey.value = null }, { flush: 'sync' }
   box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 
-.trigger-icon { width: 18px; height: 18px; border-radius: 5px; object-fit: cover; }
+.trigger-icon { width: 14px; height: 14px; }
 .status-dot {
   position: absolute;
   top: 3px;
@@ -450,16 +421,11 @@ watch(activeAvatarKey, () => { failedAvatarKey.value = null }, { flush: 'sync' }
 .panel-heading strong { display: block; color: var(--ch-color-text-strong); font-size: var(--ch-font-size-lg); font-weight: 600; }
 .panel-heading p { margin: 2px 0 0; color: var(--ch-color-text-muted); font-size: var(--ch-font-size-xs); }
 .panel-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   width: 30px;
   height: 30px;
   flex: 0 0 30px;
-  border-radius: var(--ch-radius-md);
-  overflow: hidden;
+  color: var(--ch-color-text-muted);
 }
-.panel-mark img { width: 100%; height: 100%; object-fit: cover; }
 .close-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 
 .connection-status {
@@ -519,7 +485,7 @@ watch(activeAvatarKey, () => { failedAvatarKey.value = null }, { flush: 'sync' }
 .confirmation-input { text-transform: uppercase; font-family: var(--ch-font-mono); font-weight: 700; letter-spacing: .14em; }
 
 .connected-card { align-items: center; gap: 10px; margin-bottom: 14px; padding: 12px; border: 1px solid color-mix(in srgb, var(--ch-color-success) 35%, var(--ch-color-border)); border-radius: var(--ch-radius-md); background: var(--ch-color-success-bg); }
-.connected-card__icon { width: 28px; height: 28px; flex: 0 0 28px; border-radius: var(--ch-radius-md); object-fit: cover; }
+.connected-card__icon { width: 28px; height: 28px; flex: 0 0 28px; border-radius: var(--ch-radius-md); background: var(--ch-color-surface-raised); color: var(--ch-color-text-muted); }
 .connected-card strong { display: block; margin-bottom: 2px; color: var(--ch-color-text-strong); font-size: var(--ch-font-size-sm); }
 .connection-details { display: grid; gap: 8px; margin: 0 0 14px; padding: 0 2px; }
 .connection-details div { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 8px; }
