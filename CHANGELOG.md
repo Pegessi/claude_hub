@@ -5,6 +5,12 @@
 
 ## Unreleased
 
+### fix(ui): preserve the extracted Task dialog's hover theme
+
+- Apply main's contrast-safe primary-button hover fill to the extracted Task
+  creation dialog. Extend the theme-role regression across discovered Vue sources
+  so moving this control does not silently remove its hover checks.
+
 ### refactor(quality): make Task persistence scope and creation flow explicit
 
 - Commit Task, report and Mailbox transactions through an explicit single-workspace

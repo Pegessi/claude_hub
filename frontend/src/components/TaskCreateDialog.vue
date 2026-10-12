@@ -448,8 +448,8 @@ const {
 }
 
 .primary-button:hover {
-  background: var(--ch-color-accent-hover);
-  border-color: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
+  border-color: var(--ch-color-accent-fill-hover);
   box-shadow: var(--ch-shadow-button-primary);
 }
 
