@@ -2031,6 +2031,30 @@ def test_external_web_busy_remains_an_accurate_rejection(
     assert bot_api._tab_dispatch_queues == {}
 
 
+def test_external_web_interaction_request_releases_fifo_with_specific_reply(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    _pair(api.pool, bot_id, owner=LOCAL, environ={})
+
+    async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, **_kwargs):
+        async with admission_guard():
+            pass
+        raise bot_api.ExternalInteractionRequired("approval required")
+
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id, _message("app-1", "hello", clock.value, message_id="om-web-question")
+        )
+    )
+
+    assert api.wire.reply_texts() == [
+        "本次处理需要在 Claude Hub 网页确认或回答，已停止等待。请在网页处理后重试。"
+    ]
+    assert bot_api._tab_dispatch_queues == {}
+
+
 def test_dispatch_queue_cancellation_releases_waiters_and_registry(
     api, clock: Clock, monkeypatch: pytest.MonkeyPatch
 ) -> None:

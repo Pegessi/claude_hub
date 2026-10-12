@@ -21,6 +21,7 @@ from claude_hub.api.agent_stream import (
     CHAT_ERROR_REASON_HEADER,
     AgentStreamAttachment,
     ExternalDispatchRetired,
+    ExternalInteractionRequired,
     dispatch_tab_chat_and_wait,
 )
 from claude_hub.auth.dependencies import get_current_user
@@ -1367,6 +1368,16 @@ async def _dispatch_tab_batch(
             )
         except ExternalDispatchRetired:
             status = "retired"
+        except ExternalInteractionRequired:
+            target = batch[-1] if batch else leader
+            await _reply_if_current(
+                target.client,
+                target.event,
+                target.effective,
+                "本次处理需要在 Claude Hub 网页确认或回答，已停止等待。请在网页处理后重试。",
+                still_valid=lambda: _binding_still_routes(target.effective, target.binding),
+            )
+            status = "failed"
         except HTTPException as exc:
             logger.warning("Feishu Bot target rejected: status=%s", exc.status_code)
             reason = (

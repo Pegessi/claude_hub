@@ -5280,10 +5280,12 @@ async def test_codex_turn_completed_ack_after_persistence_no_turn_ahead() -> Non
 @pytest.mark.asyncio
 async def test_terminal_append_failure_wakes_live_completion_owner(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A failed durable terminal write cannot strand a direct waiter."""
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 
+    _isolate_state_root(monkeypatch, tmp_path)
     transport = _FakeNativeTransport()
     session = _native_session()
     tailer = SessionTailer(
@@ -5309,6 +5311,60 @@ async def test_terminal_append_failure_wakes_live_completion_owner(
     failure = await asyncio.wait_for(queue.get(), timeout=0.5)
     assert failure.type == AgentStreamEventType.TURN_COMPLETED
     assert failure.turn_id == "turn-store-failure"
+    assert failure.stream_sequence == -1
+    assert failure.payload == {
+        "status": "failed",
+        "error_message": "Chat turn completed but its final state could not be saved.",
+        "_hub_volatile_terminal_failure": True,
+    }
+    assert transport.turn_in_flight is False
+    assert tailer._active_turn_id is None
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_error_append_failure_wakes_live_completion_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed pre-terminal ERROR write cannot strand a direct waiter."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    queue = await tailer.subscribe_completion()
+    await tailer.send_message("hello", [], client_turn_id="turn-error-store-failure")
+
+    append = tailer.store.append
+
+    async def fail_error_append(event: AgentStreamEvent) -> AgentStreamEvent:
+        if event.type == AgentStreamEventType.ERROR:
+            raise OSError("disk full")
+        return await append(event)
+
+    monkeypatch.setattr(tailer.store, "append", fail_error_append)
+    assert tailer.native_transport is not None
+    with pytest.raises(
+        RuntimeError, match="turn stopped but its cancelled state could not be persisted"
+    ):
+        async with tailer._send_lock:
+            await tailer._cancel_active_turn_locked(
+                tailer.native_transport,
+                error_message="boom",
+                await_teardown=True,
+            )
+
+    failure = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert failure.type == AgentStreamEventType.TURN_COMPLETED
+    assert failure.turn_id == "turn-error-store-failure"
     assert failure.stream_sequence == -1
     assert failure.payload == {
         "status": "failed",

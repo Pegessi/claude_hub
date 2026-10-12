@@ -1161,6 +1161,10 @@ class SessionTailer:
             run_epoch=run_epoch,
             turn_id=turn_id,
         )
+        completed = ctx.event(
+            AgentStreamEventType.TURN_COMPLETED,
+            {"status": status},
+        )
         # Runtime loss is not a user-requested cancellation. Persist a visible
         # terminal error before the completion so the reconstructed timeline
         # explains why output stopped. ``error`` is itself terminal on the
@@ -1171,11 +1175,17 @@ class SessionTailer:
                 AgentStreamEventType.ERROR,
                 {"message": error_message},
             )
-            await self._publish(redact_event(interrupted))
-        completed = ctx.event(
-            AgentStreamEventType.TURN_COMPLETED,
-            {"status": status},
-        )
+            try:
+                await self._publish(redact_event(interrupted))
+            except Exception:
+                # The provider turn is already being retired. If even the
+                # explanatory ERROR cannot be saved, no later provider record
+                # can release a direct completion owner such as the Feishu
+                # FIFO. Wake that process-local owner without inventing a
+                # non-durable timeline edge.
+                if self._is_live:
+                    self._fanout_volatile_terminal_failure(completed)
+                raise
         await self._publish(redact_event(completed))
         self._turn_completed_seen = True
         self._terminalize_native_runtime(status)
@@ -1681,7 +1691,7 @@ class SessionTailer:
         return queue
 
     async def subscribe_completion(self) -> "asyncio.Queue[AgentStreamEvent]":
-        """Subscribe to future error/terminal events without timeline traffic."""
+        """Subscribe to future approval/error/terminal events without timeline traffic."""
         if self._hard_failed:
             raise StructuredSourceUnavailable(
                 self._last_error or "structured transcript source unavailable"
@@ -2872,7 +2882,11 @@ class SessionTailer:
         event = await self._store.append(event)
         if self._is_live:
             self._fanout(event)
-            if event.type in {AgentStreamEventType.ERROR, AgentStreamEventType.TURN_COMPLETED}:
+            if event.type in {
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                AgentStreamEventType.ERROR,
+                AgentStreamEventType.TURN_COMPLETED,
+            }:
                 self._fanout_completion(event)
         if (
             self._is_live
@@ -2915,8 +2929,8 @@ class SessionTailer:
             return  # buffered; the coalescer will flush it
         # Non-coalescable: drain pending text before emitting so ordering is
         # preserved (no text after a terminal event).
-        await self._coalescer.flush_async()
         try:
+            await self._coalescer.flush_async()
             await self._persist_and_fanout(event)
         except Exception:
             if event.type == AgentStreamEventType.TURN_COMPLETED and self._is_live:
