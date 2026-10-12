@@ -280,19 +280,22 @@ async def main() -> None:
                     await asyncio.sleep(0.05)
                 assert len(send_payloads) == expected, send_payloads
                 [attachment] = send_payloads[-1]["attachments"]
-                preview = attachment["preview_data_url"]
+                preview = attachment.get("preview_data_url") or attachment["data_url"]
                 report["sends"].append(
                     {
                         "file": name,
-                        "preview_is_original": preview == attachment["data_url"],
+                        "preview_is_original": attachment.get("preview_is_original", False),
+                        "sends_preview_bytes": "preview_data_url" in attachment,
+                        "original_size": png_size(attachment["data_url"]),
                         "preview_mime": preview.split(";", 1)[0],
                         "preview_size": png_size(preview),
                     }
                 )
 
             screen, wide = report["sends"]
-            assert screen["preview_is_original"], screen
-            assert not wide["preview_is_original"], wide
+            assert screen["preview_is_original"] and not screen["sends_preview_bytes"], screen
+            assert screen["original_size"] == (1600, 1000), screen
+            assert not wide["preview_is_original"] and wide["sends_preview_bytes"], wide
             assert wide["preview_mime"] == "data:image/png", wide
             assert wide["preview_size"][0] == 8192, wide
 

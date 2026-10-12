@@ -1361,6 +1361,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
+import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStreamAttachments'
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
@@ -2307,12 +2308,11 @@ function triggerFilePicker() {
 }
 
 const MAX_ATTACHMENTS = 10
-// Backend enforces a 40 MiB total decoded cap per send request (originals +
-// previews; a preview that is the original itself counts once). Only images
-// over the stored-image edge get a separate re-encoded preview, so 512 KiB
-// per preview stays reserved as a margin. The backend remains authoritative.
+// Backend enforces a 40 MiB total decoded cap per send request (originals plus
+// re-encoded previews). The backend remains authoritative.
 const MAX_TOTAL_REQUEST_BYTES = 40 * 1024 * 1024
-const PREVIEW_RESERVED_BYTES = 512 * 1024
+const TOTAL_REQUEST_LIMIT_ERROR =
+  `Total attachment size exceeds the ${MAX_TOTAL_REQUEST_BYTES / 1024 / 1024} MiB request limit.`
 
 async function addFiles(files: FileList | File[]) {
   // Capture the epoch BEFORE any state mutation. If the source switches
@@ -2347,15 +2347,13 @@ async function addFiles(files: FileList | File[]) {
     composerError.value = `You can attach up to ${MAX_ATTACHMENTS} images.`
   }
 
-  // Enforce the total request byte cap before reading: sum of existing draft
-  // originals + new originals + 512 KiB per preview must stay <= 40 MiB.
-  const existingBytes = attachments.value.reduce((sum, a) => sum + (a.size_bytes || 0), 0)
+  // Enforce the total request byte cap before reading: existing draft bytes
+  // plus the new originals must fit. A re-encoded preview is counted once it
+  // exists (below).
+  const existingBytes = attachments.value.reduce((sum, a) => sum + attachmentRequestBytes(a), 0)
   const newBytes = accepted.reduce((sum, f) => sum + f.size, 0)
-  const totalPreviews = attachments.value.length + accepted.length
-  const projected = existingBytes + newBytes + totalPreviews * PREVIEW_RESERVED_BYTES
-  if (projected > MAX_TOTAL_REQUEST_BYTES) {
-    const mb = (MAX_TOTAL_REQUEST_BYTES / 1024 / 1024).toFixed(0)
-    composerError.value = `Total attachment size exceeds the ${mb} MiB request limit.`
+  if (existingBytes + newBytes > MAX_TOTAL_REQUEST_BYTES) {
+    composerError.value = TOTAL_REQUEST_LIMIT_ERROR
     return
   }
 
@@ -2412,12 +2410,22 @@ async function addFiles(files: FileList | File[]) {
         if (preparationEpoch.value !== epoch || isSending.value) return
         const idx = attachments.value.findIndex((a) => a.id === provisionalId)
         if (idx < 0) continue // removed by the user while preparing
-        attachments.value[idx] = {
+        const prepared: DraftAttachment = {
           ...provisional,
           preview_data_url: previewDataUrl,
           // Replace the provisional thumbnail with the bounded preview.
           preview_url: previewDataUrl,
         }
+        const total = attachments.value.reduce(
+          (sum, a) => sum + attachmentRequestBytes(a.id === provisionalId ? prepared : a),
+          0,
+        )
+        if (total > MAX_TOTAL_REQUEST_BYTES) {
+          attachments.value = attachments.value.filter((a) => a.id !== provisionalId)
+          composerError.value = TOTAL_REQUEST_LIMIT_ERROR
+          continue
+        }
+        attachments.value[idx] = prepared
       } catch (e) {
         // Preview generation failed. Only mutate state if this batch still
         // owns the composer; otherwise leave the new source's state alone.
@@ -3029,12 +3037,7 @@ async function sendToStream(
         client_turn_id: clientTurnId,
         text: message,
         delivery,
-        attachments: atts.map(({ filename, mime_type, data_url, preview_data_url }) => ({
-          filename,
-          mime_type,
-          data_url,
-          preview_data_url,
-        })),
+        attachments: atts.map(toStreamSendAttachment),
       }),
     })
   } catch (error) {
@@ -3178,8 +3181,8 @@ async function submit(
   // preview_data_url, size_bytes) so we can restore the composer exactly on
   // send failure — no reconstructed ids, no zeroed sizes.
   const draftAtts: DraftAttachment[] = messageOverride ? [] : [...attachments.value]
-  // Wire payload carries the original data_url (for the provider) and the
-  // bounded preview_data_url (for the cache) separately.
+  // The original data_url goes to the provider; preview_data_url is the
+  // stored image (sendToStream flags it instead when it is the original).
   const atts: WorkspaceAttachmentCreate[] = draftAtts.map(
     ({ filename, mime_type, data_url, preview_data_url }) => ({
       filename,
