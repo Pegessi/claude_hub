@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix(chat): fence MASO cancellation and persisted session identity
+
+- Await MASO session exit and live resume before reuse, so a deferred aborted
+  run cannot complete the next Hub turn; bound cancelled stream accumulators.
+- Freeze the service endpoint across restart/model changes and reject working
+  directory changes and unsupported Plan execution before remote work.
+- Persist confirmation retirement on Stop and crash recovery, and reject stale
+  answers instead of sending their JSON as a new prompt.
+- Independently cross-review the HTTP contract and validate the real browser,
+  isolated Hub backend and installed MASO chain.
+
 ### feat(chat): connect MASO models through the session HTTP API
 
 - Add a MASO Chat provider with runtime model discovery and thinking variants,

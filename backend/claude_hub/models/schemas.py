@@ -560,6 +560,8 @@ class TerminalTabCreate(TerminalTabBase):
 
     @model_validator(mode="after")
     def _reject_chat_remote(self) -> "TerminalTabCreate":
+        if self.agent_type == AgentType.MASO and self.chat_mode != ChatMode.DEFAULT:
+            raise ValueError("MASO Chat only supports default mode")
         # Native Chat owns a local ProviderSession. The remote SSH launcher is
         # Terminal-only; combining the two would persist target=remote while
         # still running the model on the Hub host.

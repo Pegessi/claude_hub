@@ -47,6 +47,11 @@ class MasoEventAdapter(AgentStreamAdapter):
             return []
         child = agent if agent != root else None
         key = (ctx.session_id, ctx.run_epoch, agent)
+        # Stop fences SSE before a terminal record can clean up this adapter.
+        # Retain only the current epoch when the next turn begins.
+        for item in list(self._messages):
+            if item[0] == ctx.session_id and item[1] != ctx.run_epoch:
+                self._messages.pop(item, None)
         state = self._messages.setdefault(key, _Message())
 
         def event(

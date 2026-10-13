@@ -1128,6 +1128,18 @@ class SessionTailer:
 
     async def _terminalize_orphaned_turn_locked(self, orphan: AgentStreamEvent) -> None:
         """Persist one already-identified orphan's interrupted terminal edge."""
+        if orphan.agent_type == AgentType.MASO:
+            # A fresh tailer has no in-memory cards. Rebuild only the orphan's
+            # pending confirmations from durable events before retiring them.
+            sequence = orphan.stream_sequence
+            while True:
+                page = await self._store.read_since(sequence, 500, compact=False)
+                for event in page.events:
+                    if event.turn_id == orphan.turn_id and event.run_epoch == orphan.run_epoch:
+                        self._record_approval_card(event)
+                if not page.has_more:
+                    break
+                sequence = page.next_sequence
         # The terminal edges are persisted by ``_publish_turn_completion``, but
         # persistence alone does not wake completion owners: Goal admission and
         # scheduled Chat runs only advance through the post-persist observers.
@@ -2938,6 +2950,10 @@ class SessionTailer:
 
         Raises if persistence of a non-coalescable event fails.
         """
+        if event.type == AgentStreamEventType.TURN_COMPLETED and event.agent_type == AgentType.MASO:
+            # Retire service confirmations with their owning turn, durably, so
+            # reload cannot present an actionable card after Stop or failure.
+            await self._emit_approval_resolved([])
         if await self._coalescer.handle(event):
             return  # buffered; the coalescer will flush it
         # Non-coalescable: drain pending text before emitting so ordering is
