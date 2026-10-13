@@ -1,8 +1,19 @@
 <template>
   <div class="codex-session-selector">
     <div class="codex-session-selector__header">
-      <label class="codex-session-selector__label">Codex Session</label>
       <button
+        type="button"
+        class="codex-session-selector__toggle"
+        :aria-expanded="expanded"
+        aria-controls="codex-session-options"
+        @click="toggleExpanded"
+      >
+        <span class="codex-session-selector__chevron">{{ expanded ? '▾' : '▸' }}</span>
+        <span class="codex-session-selector__label">Codex Session</span>
+        <span class="codex-session-selector__summary">{{ selectedId ? 'Resume selected session' : 'Start a fresh session' }}</span>
+      </button>
+      <button
+        v-if="expanded"
         type="button"
         class="codex-session-selector__refresh"
         :disabled="loading"
@@ -13,96 +24,106 @@
     </div>
 
     <div
-      v-if="error"
-      class="codex-session-selector__error"
+      v-if="expanded"
+      id="codex-session-options"
     >
-      {{ error }}
-    </div>
-
-    <div
-      v-if="!loading && !error && groups.length === 0"
-      class="codex-session-selector__empty"
-    >
-      No local Codex sessions found.
-    </div>
-
-    <div
-      v-else
-      class="codex-session-selector__body"
-    >
-      <!-- Left: workspace list -->
-      <div class="codex-session-selector__workspaces">
-        <label
-          class="codex-session-selector__workspace codex-session-selector__workspace--fresh"
-          :class="{ 'is-selected': selectedId === '' }"
-        >
-          <input
-            type="radio"
-            name="codex-session"
-            :checked="selectedId === ''"
-            value=""
-            @change="$emit('update:sessionId', '')"
-          >
-          <span class="codex-session-selector__workspace-body">
-            <span class="codex-session-selector__workspace-name">Start a fresh session</span>
-          </span>
-        </label>
-
-        <label
-          v-for="group in groups"
-          :key="group.cwd"
-          class="codex-session-selector__workspace"
-          :class="{ 'is-selected': isGroupActive(group) }"
-          @click="selectGroup(group)"
-        >
-          <span class="codex-session-selector__workspace-body">
-            <span class="codex-session-selector__workspace-name">{{ workspaceLabel(group.cwd) }}</span>
-            <span class="codex-session-selector__workspace-path">{{ group.cwd }}</span>
-          </span>
-          <span class="codex-session-selector__workspace-count">{{ group.sessions.length }}</span>
-        </label>
+      <div
+        v-if="loading"
+        class="codex-session-selector__empty"
+        role="status"
+      >
+        Loading local Codex sessions…
       </div>
-
-      <!-- Right: sessions for the selected workspace -->
-      <div class="codex-session-selector__sessions">
-        <div
-          v-if="selectedId === ''"
-          class="codex-session-selector__hint"
-        >
-          Starts a brand-new Codex session in the tab's working directory.
-        </div>
-
-        <template v-else>
+      <div
+        v-else-if="error"
+        class="codex-session-selector__error"
+      >
+        {{ error }}
+      </div>
+      <div
+        v-else-if="groups.length === 0"
+        class="codex-session-selector__empty"
+      >
+        No local Codex sessions found. A fresh session will start.
+      </div>
+      <div
+        v-else
+        class="codex-session-selector__body"
+      >
+        <!-- Left: workspace list -->
+        <div class="codex-session-selector__workspaces">
           <label
-            v-for="session in activeGroup.sessions"
-            :key="session.session_id"
-            class="codex-session-selector__session"
-            :class="{ 'is-selected': selectedId === session.session_id }"
+            class="codex-session-selector__workspace codex-session-selector__workspace--fresh"
+            :class="{ 'is-selected': selectedId === '' }"
           >
             <input
               type="radio"
               name="codex-session"
-              :checked="selectedId === session.session_id"
-              :value="session.session_id"
-              @change="$emit('update:sessionId', session.session_id)"
+              :checked="selectedId === ''"
+              value=""
+              @change="$emit('update:sessionId', '')"
             >
-            <span class="codex-session-selector__session-body">
-              <span class="codex-session-selector__session-title">
-                {{ session.title || '(untitled session)' }}
-              </span>
-              <span class="codex-session-selector__session-meta">
-                {{ formatTime(session.start_time) }}
-              </span>
+            <span class="codex-session-selector__workspace-body">
+              <span class="codex-session-selector__workspace-name">Start a fresh session</span>
             </span>
           </label>
-        </template>
+
+          <label
+            v-for="group in groups"
+            :key="group.cwd"
+            class="codex-session-selector__workspace"
+            :class="{ 'is-selected': isGroupActive(group) }"
+            @click="selectGroup(group)"
+          >
+            <span class="codex-session-selector__workspace-body">
+              <span class="codex-session-selector__workspace-name">{{ workspaceLabel(group.cwd) }}</span>
+              <span class="codex-session-selector__workspace-path">{{ group.cwd }}</span>
+            </span>
+            <span class="codex-session-selector__workspace-count">{{ group.sessions.length }}</span>
+          </label>
+        </div>
+
+        <!-- Right: sessions for the selected workspace -->
+        <div class="codex-session-selector__sessions">
+          <div
+            v-if="selectedId === ''"
+            class="codex-session-selector__hint"
+          >
+            Starts a brand-new Codex session in the tab's working directory.
+          </div>
+
+          <template v-else>
+            <label
+              v-for="session in activeGroup?.sessions ?? []"
+              :key="session.session_id"
+              class="codex-session-selector__session"
+              :class="{ 'is-selected': selectedId === session.session_id }"
+            >
+              <input
+                type="radio"
+                name="codex-session"
+                :checked="selectedId === session.session_id"
+                :value="session.session_id"
+                @change="$emit('update:sessionId', session.session_id)"
+              >
+              <span class="codex-session-selector__session-body">
+                <span class="codex-session-selector__session-title">
+                  {{ session.title || '(untitled session)' }}
+                </span>
+                <span class="codex-session-selector__session-meta">
+                  {{ formatTime(session.start_time) }}
+                </span>
+              </span>
+            </label>
+          </template>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 interface CodexSession {
   session_id: string
@@ -131,6 +152,8 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const selectedId = ref(props.sessionId)
 const activeCwd = ref<string>('')
+const expanded = ref(false)
+const loaded = ref(false)
 
 // Keep local selection in sync if the parent resets the value (e.g. modal close).
 watch(
@@ -183,12 +206,14 @@ function workspaceLabel(cwd: string): string {
 }
 
 async function fetchSessions() {
+  if (loading.value) return
   loading.value = true
   error.value = null
   try {
     const response = await fetch(`${API_BASE}/codex/sessions`)
     if (!response.ok) throw new Error('Failed to list Codex sessions')
     groups.value = (await response.json()) as CodexSessionGroup[]
+    loaded.value = true
     syncActiveCwd()
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to list Codex sessions'
@@ -197,13 +222,17 @@ async function fetchSessions() {
   }
 }
 
+function toggleExpanded() {
+  expanded.value = !expanded.value
+  if (expanded.value && !loaded.value) void fetchSessions()
+}
+
 function formatTime(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
   return d.toLocaleString()
 }
 
-onMounted(fetchSessions)
 </script>
 
 <style scoped>
@@ -216,6 +245,37 @@ onMounted(fetchSessions)
   align-items: center;
   justify-content: space-between;
   margin-bottom: 6px;
+}
+
+.codex-session-selector__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ch-color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.codex-session-selector__toggle:focus-visible {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: 2px;
+}
+
+.codex-session-selector__chevron {
+  width: 12px;
+  color: var(--ch-color-text-muted);
+}
+
+.codex-session-selector__summary {
+  overflow: hidden;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .codex-session-selector__label {

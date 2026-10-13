@@ -264,22 +264,37 @@
           </div>
           <div class="form-group">
             <label for="tabCwd">Working Directory (optional)</label>
-            <div class="cwd-input-wrapper">
+            <div
+              ref="cwdInputWrapperRef"
+              class="cwd-input-wrapper"
+              @focusout="handleCwdFocusOut"
+            >
               <input
                 id="tabCwd"
                 v-model="form.cwd"
                 type="text"
-                list="tab-cwd-history"
                 :placeholder="form.target === 'remote' ? '~/workspace/project' : 'e.g., ~/Project/my-app'"
                 autocomplete="off"
+                role="combobox"
+                aria-autocomplete="list"
+                :aria-controls="visibleCwdChoices.length ? 'tab-cwd-choices' : undefined"
+                :aria-expanded="cwdDropdownOpen && visibleCwdChoices.length > 0"
+                :aria-activedescendant="activeCwdChoice >= 0 ? `tab-cwd-choice-${activeCwdChoice}` : undefined"
+                @focus="openCwdDropdown"
+                @input="handleCwdInput"
+                @keydown="handleCwdKeydown"
               >
-              <datalist id="tab-cwd-history">
-                <option
-                  v-for="cwd in recentCwds"
-                  :key="cwd"
-                  :value="cwd"
-                />
-              </datalist>
+              <button
+                type="button"
+                class="cwd-choices-btn"
+                aria-label="Choose a working directory"
+                :aria-expanded="cwdDropdownOpen && visibleCwdChoices.length > 0"
+                :aria-controls="visibleCwdChoices.length ? 'tab-cwd-choices' : undefined"
+                :disabled="cwdChoices.length === 0"
+                @click="openCwdDropdown"
+              >
+                ▾
+              </button>
               <LoadingButton
                 type="button"
                 class="cwd-dropdown-btn"
@@ -290,12 +305,36 @@
               >
                 Browse
               </LoadingButton>
+              <div
+                v-if="cwdDropdownOpen && visibleCwdChoices.length"
+                id="tab-cwd-choices"
+                ref="cwdChoicesRef"
+                class="cwd-choices"
+                role="listbox"
+                aria-label="Working directories"
+              >
+                <button
+                  v-for="(cwd, index) in visibleCwdChoices"
+                  :id="`tab-cwd-choice-${index}`"
+                  :key="cwd"
+                  type="button"
+                  role="option"
+                  class="cwd-choice"
+                  :class="{ 'is-active': activeCwdChoice === index }"
+                  :aria-selected="form.cwd === cwd"
+                  tabindex="-1"
+                  @mousedown.prevent
+                  @click="selectCwdChoice(cwd)"
+                >
+                  {{ cwd }}
+                </button>
+              </div>
             </div>
             <p
-              v-if="recentCwds.length > 0"
+              v-if="cwdChoices.length > 0"
               class="form-hint"
             >
-              Pick a recent directory from the dropdown or type a new one.
+              Choose a recent or open directory, or type a new one.
             </p>
           </div>
           <AgentConfigFields
@@ -593,8 +632,13 @@ const editingTabName = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
 const mobileAppMenuRef = ref<HTMLDetailsElement | null>(null)
 const tabsContainerRef = ref<HTMLDivElement | null>(null)
+const cwdInputWrapperRef = ref<HTMLDivElement | null>(null)
+const cwdChoicesRef = ref<HTMLDivElement | null>(null)
 const showLeftFade = ref(false)
 const showRightFade = ref(false)
+const cwdDropdownOpen = ref(false)
+const cwdFilterActive = ref(false)
+const activeCwdChoice = ref(-1)
 const form = reactive({
   name: '',
   cwd: '',
@@ -636,6 +680,19 @@ const cwdHistoryScope = computed(() =>
   form.target === 'remote' ? `remote:${form.remote_profile_id || 'none'}` : 'local'
 )
 const { recentCwds, mostRecentCwd, addCwd } = useCwdHistory(cwdHistoryScope)
+const cwdChoices = computed(() => {
+  const openPaths = tabs.value
+    .filter(tab => !tab.archived && (form.target === 'remote'
+      ? tab.target === 'remote' && tab.remote_profile_id === form.remote_profile_id
+      : tab.target !== 'remote'))
+    .map(tab => form.target === 'remote' ? tab.remote_cwd || tab.cwd : tab.cwd)
+  return [...new Set([...recentCwds.value, ...openPaths].filter((path): path is string => Boolean(path?.trim())))]
+})
+const visibleCwdChoices = computed(() => {
+  if (!cwdFilterActive.value) return cwdChoices.value
+  const query = form.cwd.trim().toLowerCase()
+  return cwdChoices.value.filter(path => path.toLowerCase().includes(query))
+})
 const isCreateDisabled = computed(
   () =>
     isLoading.value ||
@@ -646,6 +703,58 @@ const isCreateDisabled = computed(
 
 function tabActionKey(action: string, tabId: string | null | undefined) {
   return `tab:${tabId || 'none'}:${action}`
+}
+
+function openCwdDropdown() {
+  cwdFilterActive.value = false
+  activeCwdChoice.value = -1
+  cwdDropdownOpen.value = true
+}
+
+function handleCwdInput() {
+  cwdFilterActive.value = true
+  activeCwdChoice.value = -1
+  cwdDropdownOpen.value = true
+}
+
+function selectCwdChoice(path: string) {
+  form.cwd = path
+  cwdDropdownOpen.value = false
+  cwdFilterActive.value = false
+  activeCwdChoice.value = -1
+}
+
+function handleCwdKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    cwdDropdownOpen.value = false
+    return
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    if (!cwdDropdownOpen.value) openCwdDropdown()
+    const count = visibleCwdChoices.value.length
+    if (count) {
+      if (activeCwdChoice.value < 0) {
+        activeCwdChoice.value = event.key === 'ArrowDown' ? 0 : count - 1
+      } else {
+        activeCwdChoice.value = (activeCwdChoice.value + (event.key === 'ArrowDown' ? 1 : -1) + count) % count
+      }
+      const index = activeCwdChoice.value
+      void nextTick(() => {
+        const choice = cwdChoicesRef.value?.children.item(index)
+        if (choice instanceof HTMLElement) choice.scrollIntoView({ block: 'nearest' })
+      })
+    }
+  } else if (event.key === 'Enter' && cwdDropdownOpen.value && activeCwdChoice.value >= 0) {
+    event.preventDefault()
+    selectCwdChoice(visibleCwdChoices.value[activeCwdChoice.value])
+  }
+}
+
+function handleCwdFocusOut(event: FocusEvent) {
+  if (!cwdInputWrapperRef.value?.contains(event.relatedTarget as Node | null)) {
+    cwdDropdownOpen.value = false
+  }
 }
 
 function resetEnvForAgentType(agentType: AgentType) {
@@ -852,6 +961,7 @@ function selectCurrentDirectory() {
 }
 
 async function toggleFileBrowser() {
+  cwdDropdownOpen.value = false
   if (showFileBrowser.value) {
     showFileBrowser.value = false
   } else {
@@ -947,11 +1057,15 @@ function handleDocumentPointerDown(event: PointerEvent) {
   if (mobileAppMenuRef.value && !mobileAppMenuRef.value.contains(target)) {
     closeMobileAppMenu()
   }
+  if (cwdInputWrapperRef.value && !cwdInputWrapperRef.value.contains(target)) {
+    cwdDropdownOpen.value = false
+  }
 }
 
 function closeCreateModal() {
   showModal.value = false
   showFileBrowser.value = false
+  cwdDropdownOpen.value = false
 }
 
 watch(showModal, (newVal) => {
@@ -968,6 +1082,7 @@ watch(showModal, (newVal) => {
     form.agent_session_id = ''
     resetEnvForAgentType(form.agent_type)
     showFileBrowser.value = false
+    cwdDropdownOpen.value = false
   }
 })
 
@@ -997,6 +1112,11 @@ watch(
     }
   }
 )
+
+watch(cwdHistoryScope, () => {
+  cwdDropdownOpen.value = false
+  cwdFilterActive.value = false
+})
 
 watch(
   () => form.remote_profile_id,
@@ -1792,8 +1912,66 @@ async function handleCreateTab() {
 
 .cwd-input-wrapper input {
   flex: 1;
+  min-width: 0;
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
+}
+
+.cwd-choices-btn {
+  width: 34px;
+  flex-shrink: 0;
+  background-color: var(--ch-color-surface-control-hover);
+  border: 1px solid var(--ch-color-border-strong);
+  border-left: none;
+  color: var(--ch-color-text);
+  cursor: pointer;
+}
+
+.cwd-choices-btn:hover,
+.cwd-choices-btn:focus-visible {
+  background-color: var(--ch-color-surface-pressed);
+}
+
+.cwd-choices-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cwd-choices {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 5;
+  max-height: 228px;
+  overflow-y: auto;
+  padding: 4px;
+  background-color: var(--ch-color-surface);
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  box-shadow: 0 10px 24px var(--ch-color-overlay-soft);
+}
+
+.cwd-choice {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  overflow: hidden;
+  border: none;
+  border-radius: var(--ch-radius-md);
+  background: transparent;
+  color: var(--ch-color-text);
+  font: inherit;
+  font-size: var(--ch-font-size-sm);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cwd-choice:hover,
+.cwd-choice.is-active {
+  background-color: var(--ch-color-surface-control-hover);
 }
 
 .cwd-dropdown-btn {
