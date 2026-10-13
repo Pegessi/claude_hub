@@ -122,6 +122,7 @@ async def test_client_reads_official_bot_profile_and_message_image(
                     "bot": {
                         "app_name": "Hub 助手",
                         "avatar_url": "https://example.test/bot.png",
+                        "open_id": "ou-hub-bot",
                     },
                 },
             )
@@ -138,7 +139,11 @@ async def test_client_reads_official_bot_profile_and_message_image(
         profile = await client.validate_credentials()
         image = await client.download_message_image("om-post", "img_v3_key")
 
-    assert profile == FeishuBotProfile(name="Hub 助手", avatar_url="https://example.test/bot.png")
+    assert profile == FeishuBotProfile(
+        name="Hub 助手",
+        avatar_url="https://example.test/bot.png",
+        open_id="ou-hub-bot",
+    )
     assert image == png
     assert [request.url.path for request in requests] == [
         "/open-apis/auth/v3/tenant_access_token/internal",
@@ -271,7 +276,12 @@ async def test_client_supports_structured_messages_and_reaction_lifecycle(
     ) as http_client:
         client = FeishuBotClient(bot_config, client=http_client)
         await client.send_message("oc-chat", "interactive", {"elements": []})
-        await client.reply_message("om-inbound", "post", {"zh_cn": {"title": "T"}})
+        await client.reply_message(
+            "om-inbound",
+            "post",
+            {"zh_cn": {"title": "T"}},
+            reply_in_thread=True,
+        )
         reaction_id = await client.add_reaction("om-inbound", "Typing")
         await client.delete_reaction("om-inbound", reaction_id)
 
@@ -291,6 +301,7 @@ async def test_client_supports_structured_messages_and_reaction_lifecycle(
     assert json.loads(requests[1].content)["msg_type"] == "interactive"
     assert json.loads(json.loads(requests[1].content)["content"]) == {"elements": []}
     assert json.loads(requests[2].content)["msg_type"] == "post"
+    assert json.loads(requests[2].content)["reply_in_thread"] is True
 
 
 @pytest.mark.parametrize("bad_token", ["", "   "])
