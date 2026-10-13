@@ -5,6 +5,13 @@
 
 ## Unreleased
 
+### fix(verify): allow local checks with a noncanonical toolchain
+
+- Warn and continue on local uv, Python, Node or pnpm version drift so standard
+  checks can still provide feedback; CI, explicit strict mode and browser-mocks
+  keep exact pins.
+- Continue to fail for missing tools or dependencies and for check failures.
+
 ### style(feishu): redraw connection controls with the Feishu bird silhouette
 
 - Replace the separate chain and stacked-chevron glyphs with one local,

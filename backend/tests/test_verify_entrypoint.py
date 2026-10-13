@@ -36,6 +36,8 @@ keys = (
 with open(os.environ["VERIFY_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps({"tool": name, "args": args, "cwd": os.getcwd(),
                              "env": {key: os.environ.get(key) for key in keys}}) + "\n")
+if args == ["--version"] and os.environ.get("FAIL_VERSION_TOOL") == name:
+    raise SystemExit(23)
 operation = name
 if name == "uv":
     if args == ["--version"]:
@@ -251,12 +253,111 @@ def test_types_include_tests(verify_fixture: VerifyFixture) -> None:
         ("frontend-lint", "TEST_PNPM_VERSION", "lint:check"),
     ],
 )
-def test_mismatched_tools_do_not_run_checks(
+def test_local_version_mismatch_warns_and_runs_checks(
     verify_fixture: VerifyFixture, target: str, key: str, operation: str
 ) -> None:
     result = verify_fixture.run(target, **{key: "0.0.0"})
+    assert result.returncode == 0, result.stderr
+    assert "noncanonical toolchain" in result.stderr
+    assert len(verify_fixture.calls(operation)) == 1
+
+
+@pytest.mark.parametrize(
+    ("target", "key", "operation"),
+    [
+        ("backend-types", "TEST_UV_VERSION", "mypy"),
+        ("backend-types", "TEST_PYTHON_VERSION", "mypy"),
+        ("frontend-lint", "TEST_NODE_VERSION", "lint:check"),
+        ("frontend-lint", "TEST_PNPM_VERSION", "lint:check"),
+    ],
+)
+@pytest.mark.parametrize(
+    "strict_env",
+    [
+        {"CI": "true"},
+        {"CI": "1"},
+        {"GITHUB_ACTIONS": "true"},
+        {"CLAUDE_HUB_VERIFY_STRICT_VERSIONS": "1"},
+    ],
+)
+def test_strict_version_mismatch_does_not_run_checks(
+    verify_fixture: VerifyFixture,
+    target: str,
+    key: str,
+    operation: str,
+    strict_env: dict[str, str],
+) -> None:
+    result = verify_fixture.run(target, **{key: "0.0.0", **strict_env})
     assert result.returncode != 0
     assert not verify_fixture.calls(operation)
+
+
+def test_local_version_warning_does_not_hide_failed_check(
+    verify_fixture: VerifyFixture,
+) -> None:
+    result = verify_fixture.run(
+        "backend-types", TEST_UV_VERSION="0.0.0", FAIL_CHECK="mypy", FAIL_STATUS="7"
+    )
+    assert result.returncode == 7
+    assert "noncanonical toolchain" in result.stderr
+    assert len(verify_fixture.calls("mypy")) == 1
+
+
+def test_all_local_version_mismatch_runs_checks(verify_fixture: VerifyFixture) -> None:
+    result = verify_fixture.run("all", TEST_UV_VERSION="0.0.0", TEST_NODE_VERSION="0.0.0")
+    assert result.returncode == 0, result.stderr
+    assert "noncanonical toolchain" in result.stderr
+    for operation in ("black", "isort", "mypy", "pytest", "lint:check", "typecheck"):
+        assert len(verify_fixture.calls(operation)) == 1
+
+
+def test_all_ci_version_mismatch_does_not_run_language_checks(
+    verify_fixture: VerifyFixture,
+) -> None:
+    result = verify_fixture.run(
+        "all", CI="true", TEST_UV_VERSION="0.0.0", TEST_NODE_VERSION="0.0.0"
+    )
+    assert result.returncode != 0
+    assert "<== PASS docs" in result.stdout
+    assert not verify_fixture.calls("mypy")
+    assert not verify_fixture.calls("lint:check")
+
+
+def test_missing_backend_environment_still_fails_locally(
+    verify_fixture: VerifyFixture,
+) -> None:
+    (verify_fixture.root / "backend/.venv/bin/python").unlink()
+    result = verify_fixture.run("backend-types", TEST_UV_VERSION="0.0.0")
+    assert result.returncode != 0
+    assert "backend/.venv is missing" in result.stderr
+    assert not verify_fixture.calls("mypy")
+
+
+@pytest.mark.parametrize(
+    ("target", "tool", "operation"),
+    [
+        ("backend-types", "uv", "mypy"),
+        ("frontend-lint", "node", "lint:check"),
+        ("frontend-lint", "pnpm", "lint:check"),
+    ],
+)
+def test_failed_version_probe_is_not_treated_as_local_drift(
+    verify_fixture: VerifyFixture, target: str, tool: str, operation: str
+) -> None:
+    result = verify_fixture.run(target, FAIL_VERSION_TOOL=tool)
+    assert result.returncode != 0
+    assert f"could not read {tool} version" in result.stderr
+    assert not verify_fixture.calls(operation)
+
+
+@pytest.mark.parametrize("key", ["TEST_PYTHON_VERSION", "TEST_NODE_VERSION"])
+def test_browser_mocks_remains_strict_on_runtime_versions(
+    verify_fixture: VerifyFixture, key: str
+) -> None:
+    result = verify_fixture.run("browser-mocks", **{key: "0.0.0"})
+    assert result.returncode != 0
+    assert "ERROR: " in result.stderr and "version mismatch" in result.stderr
+    assert "WARNING: " not in result.stderr
 
 
 def test_runtime_isolation_and_failure_evidence(verify_fixture: VerifyFixture) -> None:
