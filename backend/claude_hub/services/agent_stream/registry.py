@@ -19,12 +19,14 @@ from .base import AgentStreamAdapter
 from .claude_jsonl import ClaudeJsonlAdapter
 from .codex_jsonl import CodexJsonlAdapter, TraexJsonlAdapter
 from .cursor_cli_transcript import CursorCliTranscriptAdapter
+from .maso_events import MasoEventAdapter
 
 _ADAPTERS: Dict[AgentType, Type[AgentStreamAdapter]] = {
     AgentType.CLAUDE: ClaudeJsonlAdapter,
     AgentType.CODEX: CodexJsonlAdapter,
     AgentType.TRAEX: TraexJsonlAdapter,
     AgentType.CURSOR: CursorCliTranscriptAdapter,
+    AgentType.MASO: MasoEventAdapter,
 }
 
 

@@ -305,6 +305,7 @@
             v-model:env-text="form.env_text"
             variant="form"
             :allow-terminal="form.session_kind === 'terminal'"
+            :allow-maso="form.session_kind === 'chat'"
             :type-label="form.session_kind === 'chat' ? 'Chat Provider' : 'Terminal Profile'"
             solo-label="Solo Mode"
           />
@@ -655,6 +656,10 @@ function resetEnvForAgentType(agentType: AgentType) {
 
 function setSessionKind(kind: SessionKind) {
   form.session_kind = kind
+  if (kind === 'terminal' && form.agent_type === 'maso') {
+    form.agent_type = 'claude'
+    resetEnvForAgentType(form.agent_type)
+  }
   if (kind === 'chat') {
     form.target = 'local'
     if (form.agent_type === 'terminal') {
@@ -670,6 +675,8 @@ function agentTypeLabel(agentType: AgentType): string {
       return 'Codex'
     case 'traex':
       return 'TraeX'
+    case 'maso':
+      return 'MASO'
     case 'cursor':
       return 'Cursor'
     case 'terminal':

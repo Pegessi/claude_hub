@@ -404,19 +404,22 @@ async def update_tab(
     current_user: User = Depends(get_current_user),
 ) -> TerminalTab:
     """Update a terminal tab."""
-    tab = await ttyd_manager.update_tab(
-        tab_id,
-        tab_update.name,
-        tab_update.shell,
-        tab_update.cwd,
-        tab_update.solo_mode,
-        tab_update.agent_type,
-        tab_update.target,
-        tab_update.remote_profile_id,
-        tab_update.remote_cwd,
-        tab_update.remote_reconnect,
-        tab_update.env,
-    )
+    try:
+        tab = await ttyd_manager.update_tab(
+            tab_id,
+            tab_update.name,
+            tab_update.shell,
+            tab_update.cwd,
+            tab_update.solo_mode,
+            tab_update.agent_type,
+            tab_update.target,
+            tab_update.remote_profile_id,
+            tab_update.remote_cwd,
+            tab_update.remote_reconnect,
+            tab_update.env,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
     return tab

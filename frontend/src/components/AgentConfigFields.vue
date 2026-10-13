@@ -49,6 +49,12 @@
           TraeX
         </option>
         <option
+          v-if="allowMaso && !excludeTypes.includes('maso')"
+          value="maso"
+        >
+          MASO
+        </option>
+        <option
           v-if="!excludeTypes.includes('cursor')"
           value="cursor"
         >
@@ -139,6 +145,7 @@ interface Props {
   envText: string
   variant?: 'modal' | 'form'
   allowTerminal?: boolean
+  allowMaso?: boolean
   // Workspace launchers exclude providers without managed-worker support.
   excludeTypes?: AgentType[]
   typeLabel?: string
@@ -149,6 +156,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   variant: 'modal',
   allowTerminal: true,
+  allowMaso: false,
   excludeTypes: () => [],
   typeLabel: 'Agent Type',
   soloLabel: 'YOLO mode',
@@ -169,7 +177,7 @@ const uid = `acf-${Math.random().toString(36).slice(2, 9)}`
 const showEnvManager = ref(false)
 
 const supportsSoloMode = computed(
-  () => props.agentType !== 'cursor' && props.agentType !== 'terminal'
+  () => !['cursor', 'terminal', 'maso'].includes(props.agentType)
 )
 
 const yoloHint = computed(() => {
@@ -230,7 +238,7 @@ function onAgentTypeChange(value: string) {
   // User-driven type change: reset solo for unsupported types and re-apply the
   // type's default env preset/text. Programmatic prop updates (e.g. populating
   // an existing config) do NOT pass through here, so they are not clobbered.
-  if (agentType === 'cursor' || agentType === 'terminal') {
+  if (agentType === 'cursor' || agentType === 'terminal' || agentType === 'maso') {
     emit('update:soloMode', false)
   }
   emit('update:envPreset', defaultLaunchEnvPresetForAgent(agentType))
