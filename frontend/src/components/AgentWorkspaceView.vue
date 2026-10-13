@@ -8418,10 +8418,6 @@ function openTaskModal(): void {
   padding: 3px;
 }
 
-.segmented-control--three {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
 .segment-button {
   border: 1px solid transparent;
   border-radius: var(--ch-radius-md);
@@ -8452,13 +8448,6 @@ function openTaskModal(): void {
   opacity: 0.55;
 }
 
-.autonomy-form {
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-sunken);
-  padding: 12px;
-}
-
 .path-input-row {
   display: flex;
   gap: 8px;
@@ -8486,25 +8475,8 @@ function openTaskModal(): void {
   white-space: nowrap;
 }
 
-.modal-actions .workspace-delete-button,
-.modal-actions .modal-actions-leading {
+.modal-actions .workspace-delete-button {
   margin-right: auto;
-}
-
-.task-create-recovery {
-  margin-top: 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-sunken);
-}
-
-.task-create-recovery-title {
-  margin: 0;
-  color: var(--ch-color-text);
-  font-size: var(--ch-font-size-sm);
-  font-weight: 600;
-  overflow-wrap: anywhere;
 }
 
 .resident-agent-section {
