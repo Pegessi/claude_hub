@@ -7,9 +7,9 @@
 
 ### style(chat): clarify unread completed sessions
 
-- Replace the subtle sheen inside an 8px idle light with an explicit green
-  completion badge, persistent unread outline and restrained pulse in the Chat
-  sidebar.
+- Replace the subtle sheen inside an 8px idle light with a legible completion
+  badge in the Chat sidebar. Its muted mixed-surface fill, green checkmark and
+  close outline keep the unread result clear without reading like an alert.
 - Keep a static checkmark and outline when reduced motion is requested, and
   expose the state as `Completed, unread` to assistive technology and tooltips.
 - See the [unread completion indicator notes](docs/working-logs/2026-10-13-unread-completion-indicator.md).

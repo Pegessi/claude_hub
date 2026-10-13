@@ -1314,18 +1314,14 @@ watch(mobileDrawerOpen, isOpen => {
   background: var(--ch-color-text-subtle);
 }
 
-/* A completed turn that has not been opened becomes an explicit success
-   badge. The checkmark says "completed" even in a still frame; the green
-   outline and pulse say the result is still waiting to be viewed. */
+/* A completed turn that has not been opened becomes a quiet success badge.
+   The checkmark keeps "completed" legible in a still frame; the restrained
+   outline breath only reinforces that the result is still unread. */
 .chat-sidebar__item-status[data-status='idle'][data-unread='true'] {
   width: 12px;
   height: 12px;
   margin-inline: -2px;
-  border: 1px solid var(--ch-color-success);
-  background: var(--ch-color-success-strong);
-  box-shadow:
-    0 0 0 2px color-mix(in srgb, var(--ch-color-success) 26%, transparent),
-    0 0 10px var(--ch-color-success-bg);
+  background: color-mix(in srgb, var(--ch-color-success) 14%, var(--ch-color-sidebar-bg));
 }
 
 .chat-sidebar__item-status[data-status='idle'][data-unread='true']::before {
@@ -1334,7 +1330,7 @@ watch(mobileDrawerOpen, isOpen => {
   inset: 0;
   display: grid;
   place-items: center;
-  color: var(--ch-color-sidebar-bg);
+  color: var(--ch-color-success-strong);
   font-size: 8px;
   font-weight: 800;
   line-height: 1;
@@ -1343,16 +1339,16 @@ watch(mobileDrawerOpen, isOpen => {
 .chat-sidebar__item-status[data-status='idle'][data-unread='true']::after {
   content: '';
   position: absolute;
-  inset: -4px;
-  border: 1px solid var(--ch-color-success);
+  inset: -2px;
+  border: 1px solid color-mix(in srgb, var(--ch-color-success) 58%, var(--ch-color-sidebar-bg));
   border-radius: 50%;
   pointer-events: none;
-  animation: sidebar-complete-unread-pulse 1.8s cubic-bezier(0.2, 0, 0, 1) infinite;
+  animation: sidebar-complete-unread-breathe 2.6s ease-in-out infinite;
 }
 
-@keyframes sidebar-complete-unread-pulse {
-  0% { transform: scale(0.72); opacity: 0.9; }
-  72%, 100% { transform: scale(1.28); opacity: 0; }
+@keyframes sidebar-complete-unread-breathe {
+  0%, 100% { transform: scale(0.96); opacity: 0.28; }
+  50% { transform: scale(1.06); opacity: 0.55; }
 }
 
 @media (prefers-reduced-motion: reduce) {

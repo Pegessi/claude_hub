@@ -66,7 +66,7 @@ test('a status light in the sidebar shows working, idle, attention, and offline'
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='offline'\]/)
 })
 
-test('an unread completed turn shows an explicit completion badge and unread pulse', () => {
+test('an unread completed turn shows a quiet completion badge and unread breath', () => {
   // the status light carries an unread flag
   assert.match(chatSidebar, /:data-unread="tab\.is_unread \? 'true' : 'false'"/)
   // Completion is legible from a checkmark and persistent outline; animation
@@ -76,10 +76,12 @@ test('an unread completed turn shows an explicit completion badge and unread pul
   assert.match(chatSidebar, /return 'Completed, unread'/)
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::before/)
   assert.match(chatSidebar, /content:\s*'✓'/)
-  assert.match(chatSidebar, /color:\s*var\(--ch-color-sidebar-bg\)/)
+  assert.match(chatSidebar, /color:\s*var\(--ch-color-success-strong\)/)
+  assert.match(chatSidebar, /background:\s*color-mix\(in srgb, var\(--ch-color-success\) 14%, var\(--ch-color-sidebar-bg\)\)/)
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::after/)
-  assert.match(chatSidebar, /@keyframes sidebar-complete-unread-pulse/)
-  assert.match(chatSidebar, /border:\s*1px solid var\(--ch-color-success\)/)
+  assert.match(chatSidebar, /@keyframes sidebar-complete-unread-breathe/)
+  assert.match(chatSidebar, /border:\s*1px solid color-mix\(in srgb, var\(--ch-color-success\) 58%, var\(--ch-color-sidebar-bg\)\)/)
+  assert.doesNotMatch(chatSidebar, /0 0 10px var\(--ch-color-success-bg\)/)
   assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::after[\s\S]*?animation: none;[\s\S]*?opacity:\s*0\.55;/)
 })
 
