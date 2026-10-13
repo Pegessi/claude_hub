@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "152934bfd5b0fe15a99ca195f17e867f798e1167",
+  "parents": [
+    "607dda54c6462a3fbf5cda1418e55fd94e30b09f",
+    "30869b12d5e782741a06c3e952da4e978a9553c5"
+  ],
+  "base": "86f75f72bd1c0a5d01855bb3214cd76cc8455e97",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "34f84ecd82f169f3bf53e44782dce6b820640518",
+  "reconstructed_tree": "3aae7f1476e58a4696eb6982bf09fb981fb9c8c6",
+  "conflicts": [
+    "frontend/tests/browser_chat_composer.py"
+  ],
+  "decisions": [
+    {
+      "path": "frontend/tests/browser_chat_composer.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "83db9ad519258d3fa759d3601f042f4877934c4f"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a9782a703720af896e4202b93cfcc33f03f40d5b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9bb85c081370d70f60b6265c16d6cd256435ddb4"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "739f1eb2e2cdcd9bace8616d2f83a527937aa799"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d2da10fc82f88f3b47e26954b5633647f7352375"
+      },
+      "reason": "Retain both parent acceptance scopes: MASO condensation/model variants/preflight/retry/mobile/existing-Chat loss plus origin unowned Codex warning and directory/open-workspace/lazy-Codex-picker checks. Keep the warning event explicitly Codex while the active fixture is MASO, combine the fixture cwd/workspace rows and HTTP routes, renumber events monotonically, and execute the service-loss reload before directory checks. Combined real Vue mocked browser scenario passes with every original behavior assertion preserved.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

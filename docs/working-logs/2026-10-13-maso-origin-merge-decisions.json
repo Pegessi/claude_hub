@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "607dda54c6462a3fbf5cda1418e55fd94e30b09f",
+  "parents": [
+    "86f75f72bd1c0a5d01855bb3214cd76cc8455e97",
+    "30d2e33d042480b7202018156d9d0f9f0c2816b7"
+  ],
+  "base": "b56f9a283d02e19b2f67cafe0e3886a844cac6e3",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "27a39e56414cd5bbd6e24b317b4ae167afbed8d1",
+  "reconstructed_tree": "76cd6f40f7da68efe418869d9b30c20327a7cc5a",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9c0a9badcb4a5b6f3f1872b18dd43e17899c826c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "86c86b2d6d00bb8b245cf85d867211169dd6ec6e"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ebe04cf6c63f709c6d2295b89ee23566f9764c37"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2faef277dbfe8cc038aa003aad58b405041b3c2f"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c61a8689ba297ab49dab9011083ba2c9e135641d"
+      },
+      "reason": "Preserve both the unpublished local main stage-three/attachment validation entries and origin session-directory/Codex-picker/unowned-warning entries. No release behavior is dropped; concatenate the independent Unreleased additions.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
