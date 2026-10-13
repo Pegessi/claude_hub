@@ -53,6 +53,25 @@
   align the browser harness with the application's global styles.
 - Record the current Task state/UI boundaries in the architecture guide. See the
   [stage-three record](docs/working-logs/2026-10-09-task-boundaries.md).
+### feat(session): make working directories easy to pick and Codex history opt-in
+
+- Show recent and open working directories in a scrollable list when the Create
+  Session path field is opened, even when it contains a different prefilled path.
+  Typed text filters by substring; local and remote server choices stay scoped.
+- Start the Codex Session section collapsed. Fetch local Codex sessions only
+  when opened, and reuse the loaded list when the section is reopened.
+- Cover mouse, keyboard, lazy loading and mobile reachability in the Chat
+  browser scenario. See the [session creation UI notes](docs/working-logs/2026-10-13-session-create-choices.md).
+
+### fix(chat): ignore unowned provider status after a completed turn
+
+- Keep text-bearing TraeX/Codex status notices without a turn ID out of the
+  Chat timeline. An idle warning previously created an unfinished phantom turn,
+  changing Send to Queue while Stop had no real turn to cancel.
+- Preserve statuses attached to an active turn and legacy null-turn behavior for
+  one-shot providers. Cover the completed-turn warning in reducer and Chat
+  composer browser checks.
+- See the [unowned warning incident notes](docs/working-logs/2026-10-13-chat-unowned-warning.md).
 
 ### style(chat): clarify unread completed sessions
 

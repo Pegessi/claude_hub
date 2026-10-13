@@ -46,11 +46,22 @@ def event(sequence, event_type, payload, *, turn_id=TURN_ONE, message_id=None):
     }
 
 
-# One finished turn, so the page has history but no turn in flight on load.
+# A finished turn followed by the incident's text-only, unowned warning shape.
+# This Codex fixture covers the other persistent app-server path as well.
 EVENTS = [
     event(1, "turn_started", {"summary": "First question"}),
     event(2, "text_delta", {"text": "First answer."}, message_id=f"{TURN_ONE}:assistant"),
     event(3, "turn_completed", {"status": "completed"}, message_id=TURN_ONE),
+    event(
+        4,
+        "status",
+        {
+            "text": "---------------------------------------------------------------",
+            "provider_status": "warning",
+            "snapshot": True,
+        },
+        turn_id=None,
+    ),
 ]
 
 
@@ -76,6 +87,7 @@ async def main(browser_run: BrowserRun) -> None:
     unexpected_external: list[str] = []
     sends: list[dict] = []
     interrupts: list[dict] = []
+    codex_session_requests = 0
     # Mutable stream state: sending appends events the way the backend would.
     # Keyed by text, not by call order: flushing the queue also issues a send,
     # and an order-based flag would be spent on the wrong request.
@@ -87,6 +99,7 @@ async def main(browser_run: BrowserRun) -> None:
             await socket.close(code=1000, reason="mocked Chat composer smoke")
 
         async def api(route) -> None:
+            nonlocal codex_session_requests
             request = route.request
             parsed = urlparse(request.url)
             if (parsed.scheme, parsed.hostname, parsed.port) != (
@@ -120,13 +133,29 @@ async def main(browser_run: BrowserRun) -> None:
                         "name": "Composer fixture",
                         "agent_type": "codex",
                         "session_kind": "chat",
+                        "target": "local",
+                        "cwd": "/fixture/current",
                         "is_active": True,
                         "created_at": NOW,
                         "workspace_id": None,
                         "workspace_name": None,
                         "workspace_role": None,
                         "archived": False,
-                    }
+                    },
+                    {
+                        "id": "fixture-managed-tab",
+                        "name": "Workspace fixture",
+                        "agent_type": "codex",
+                        "session_kind": "chat",
+                        "target": "local",
+                        "cwd": "/fixture/workspace",
+                        "is_active": False,
+                        "created_at": NOW,
+                        "workspace_id": "fixture-workspace",
+                        "workspace_name": "Fixture workspace",
+                        "workspace_role": "agent",
+                        "archived": False,
+                    },
                 ]
             elif method == "GET" and path == f"{BASE}/capabilities":
                 body = {
@@ -175,7 +204,10 @@ async def main(browser_run: BrowserRun) -> None:
                     )
                 )
                 state["turn_open"] = True
-                body = {"client_turn_id": payload.get("client_turn_id"), "turn_id": turn_id}
+                body = {
+                    "client_turn_id": payload.get("client_turn_id"),
+                    "turn_id": turn_id,
+                }
             elif method == "POST" and path == f"{BASE}/cancel":
                 interrupts.append(json.loads(request.post_data or "{}"))
                 sequence = len(state["events"])
@@ -212,6 +244,23 @@ async def main(browser_run: BrowserRun) -> None:
                 }
             elif method == "GET" and path == f"/api/tabs/{TAB}/network":
                 body = {"hostname": "fixture", "addresses": []}
+            elif method == "GET" and path == "/api/remote/profiles":
+                body = []
+            elif method == "GET" and path == "/api/codex/sessions":
+                codex_session_requests += 1
+                body = [
+                    {
+                        "cwd": "/fixture/current",
+                        "sessions": [
+                            {
+                                "session_id": "fixture-codex-session",
+                                "cwd": "/fixture/current",
+                                "start_time": NOW,
+                                "title": "Existing Codex session",
+                            }
+                        ],
+                    }
+                ]
             elif method == "GET" and path == "/api/auth/check":
                 body = {"auth_required": False, "user": None}
             elif method == "GET" and path == "/api/env-presets":
@@ -247,6 +296,7 @@ async def main(browser_run: BrowserRun) -> None:
         send_button = page.locator(".composer-send-btn")
         await expect(composer).to_be_visible()
         await expect(send_button).to_be_visible()
+        await expect(page.locator(".structured-turn")).to_have_count(1)
 
         # An empty composer cannot send: the control is disabled rather than
         # accepting a click that silently does nothing.
@@ -335,6 +385,80 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(send_button).to_be_enabled()
         await page.screenshot(path=str(output / "chat-composer-mobile.png"), full_page=True)
 
+        # The create dialog must show common directories even when the input
+        # starts with a different path. Codex history stays unloaded until the
+        # user expands its section.
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.evaluate(
+            "localStorage.setItem('claude-hub:cwd-history:local', "
+            "JSON.stringify(['/fixture/recent', '/fixture/other', "
+            "'/fixture/three', '/fixture/four', '/fixture/five', "
+            "'/fixture/six', '/fixture/seven', '/fixture/eight']))"
+        )
+        await page.locator(".add-tab").click()
+        cwd = page.locator("#tabCwd")
+        await expect(cwd).to_have_value("/fixture/recent")
+        await cwd.click()
+        choices = page.locator(".cwd-choice")
+        await expect(choices).to_have_count(10)
+        await expect(choices.nth(8)).to_have_text("/fixture/current")
+        await expect(choices.nth(9)).to_have_text("/fixture/workspace")
+        await page.screenshot(path=str(output / "create-session-directory-choices.png"))
+        await cwd.fill("CURRENT")
+        await expect(choices).to_have_count(1)
+        await choices.click()
+        await expect(cwd).to_have_value("/fixture/current")
+        await cwd.click()
+        await cwd.press("ArrowUp")
+        await expect(choices.last).to_have_class("cwd-choice is-active")
+        assert await page.locator(".cwd-choices").evaluate("el => el.scrollTop") > 0
+        await cwd.press("Enter")
+        await expect(cwd).to_have_value("/fixture/workspace")
+        await cwd.click()
+        await cwd.press("ArrowDown")
+        await cwd.press("Enter")
+        await expect(cwd).to_have_value("/fixture/recent")
+        await page.locator(".cwd-choices-btn").click()
+        await expect(choices).to_have_count(10)
+        await choices.nth(1).click()
+        await expect(cwd).to_have_value("/fixture/other")
+
+        await page.get_by_label("Chat Provider").select_option("codex")
+        toggle = page.locator(".codex-session-selector__toggle")
+        await expect(toggle).to_have_attribute("aria-expanded", "false")
+        await expect(page.locator(".codex-session-selector__body")).to_have_count(0)
+        assert codex_session_requests == 0, "Codex sessions loaded before expansion"
+        await toggle.click()
+        await expect(toggle).to_have_attribute("aria-expanded", "true")
+        await expect(page.locator(".codex-session-selector__workspace-path")).to_have_text(
+            "/fixture/current"
+        )
+        await page.locator(".codex-session-selector__workspace").last.click()
+        await expect(page.get_by_text("Existing Codex session")).to_be_visible()
+        assert codex_session_requests == 1
+        await toggle.click()
+        await expect(toggle).to_have_attribute("aria-expanded", "false")
+        await toggle.click()
+        await expect(page.get_by_text("Existing Codex session")).to_be_visible()
+        assert codex_session_requests == 1, "reopening should reuse loaded sessions"
+        await page.screenshot(path=str(output / "create-session-choices.png"), full_page=True)
+
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.locator(".add-tab").click()
+        await expect(cwd).to_have_value("/fixture/recent")
+        await page.get_by_label("Chat Provider").select_option("codex")
+        toggle = page.locator(".codex-session-selector__toggle")
+        await expect(toggle).to_have_attribute("aria-expanded", "false")
+        assert codex_session_requests == 1, "mobile Codex picker loaded while collapsed"
+        modal_box = await page.locator(".modal").bounding_box()
+        assert modal_box is not None
+        assert modal_box["x"] >= 0 and modal_box["x"] + modal_box["width"] <= 390
+        await page.screenshot(path=str(output / "create-session-mobile.png"))
+        await cwd.click()
+        await expect(choices).to_have_count(10)
+        await choices.last.click()
+        await expect(cwd).to_have_value("/fixture/workspace")
+
         assert not errors, errors
         assert not unexpected_external, unexpected_external
         assert not unknown_requests, unknown_requests
@@ -345,6 +469,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "result": "PASS",
                     "sends": len(sends),
                     "interrupts": len(interrupts),
+                    "codex_session_requests": codex_session_requests,
                     "unknown_requests": unknown_requests,
                     "blocked_external_requests": len(blocked),
                     "unexpected_external_requests": unexpected_external,
