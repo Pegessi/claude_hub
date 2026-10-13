@@ -687,9 +687,9 @@ const cwdChoices = computed(() => {
   return [...new Set([...recentCwds.value, ...openPaths].filter((path): path is string => Boolean(path?.trim())))]
 })
 const visibleCwdChoices = computed(() => {
-  if (!cwdFilterActive.value) return cwdChoices.value.slice(0, 6)
+  if (!cwdFilterActive.value) return cwdChoices.value
   const query = form.cwd.trim().toLowerCase()
-  return cwdChoices.value.filter(path => path.toLowerCase().includes(query)).slice(0, 6)
+  return cwdChoices.value.filter(path => path.toLowerCase().includes(query))
 })
 const isCreateDisabled = computed(
   () =>
