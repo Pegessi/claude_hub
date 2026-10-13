@@ -362,7 +362,7 @@ export function useAgentStream(): UseAgentStreamApi {
         const caps = JSON.parse(ev.data) as StreamCapabilities
         capabilities.value = caps
         if (!caps.structured) {
-          const message = 'structured observation unavailable for this session'
+          const message = caps.unavailable_reason || 'structured observation unavailable for this session'
           if (stateMachine.fail(generationId, message)) {
             errorMessage.value = message
             connectionState.value = 'failed'
@@ -430,7 +430,7 @@ export function useAgentStream(): UseAgentStreamApi {
       capabilities.value = caps
       if (!caps.structured) {
         agentStreamHistoryCache.delete(streamPath)
-        const message = 'structured observation unavailable for this session'
+        const message = caps.unavailable_reason || 'structured observation unavailable for this session'
         if (stateMachine.fail(generationId, message)) {
           errorMessage.value = message
           connectionState.value = 'failed'

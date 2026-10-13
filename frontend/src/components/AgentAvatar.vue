@@ -45,6 +45,18 @@
       />
     </svg>
 
+    <svg
+      v-else-if="kind === 'maso'"
+      viewBox="0 0 24 24"
+      class="agent-avatar__glyph"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 19V5h3l5 7 5-7h3v14h-3V10l-5 7-5-7v9H4Z"
+        fill="currentColor"
+      />
+    </svg>
+
     <!-- cursor: pointer arrow mark -->
     <svg
       v-else-if="kind === 'cursor'"
@@ -95,6 +107,7 @@ const kind = computed<AvatarKind>(() => {
     raw === 'claude' ||
     raw === 'codex' ||
     raw === 'traex' ||
+    raw === 'maso' ||
     raw === 'cursor' ||
     raw === 'terminal'
   )
@@ -160,6 +173,11 @@ const resolvedTitle = computed(() => props.title?.trim() || `${kind.value} agent
 
 .agent-avatar--traex {
   background: linear-gradient(135deg, #5b6cff 0%, #3a48c9 100%);
+  color: #fff;
+}
+
+.agent-avatar--maso {
+  background: #285b53;
   color: #fff;
 }
 

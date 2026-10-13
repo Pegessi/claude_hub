@@ -5,6 +5,37 @@
 
 ## Unreleased
 
+### feat(chat): check MASO service availability before creation
+
+- Probe MASO from the Hub host when selected; show an explicit warning and
+  disable creation while checking or unavailable, with retry and preset recovery.
+- Recheck the service before allocating a Chat and explain service loss in an
+  existing Chat. Read-only checks have a bounded timeout and invoke no model.
+- Preserve drafts and ignore stale readiness results after service changes or
+  dialog closure; validate desktop/mobile behavior and failure recovery.
+
+### fix(chat): fence MASO cancellation and persisted session identity
+
+- Await MASO session exit and live resume before reuse, so a deferred aborted
+  run cannot complete the next Hub turn; bound cancelled stream accumulators.
+- Freeze the service endpoint across restart/model changes and reject working
+  directory changes and unsupported Plan execution before remote work.
+- Persist confirmation retirement on Stop and crash recovery, and reject stale
+  answers instead of sending their JSON as a new prompt.
+- Independently cross-review the HTTP contract and validate the real browser,
+  isolated Hub backend and installed MASO chain.
+
+### feat(chat): connect MASO models through the session HTTP API
+
+- Add a MASO Chat provider with runtime model discovery and thinking variants,
+  HTTP message delivery, SSE text/tool output, confirmations and session resume.
+- Preserve Hub display history when MASO condenses its model context; complete
+  turns only when the main agent ends, with offset-based stream deduplication.
+- Fence cancelled streams, remove owned pending messages before abort, and retain
+  uncertain HTTP delivery identity across restarts without retrying a prompt.
+- Keep MASO on the local Chat surface and document its configuration and initial
+  capability boundaries in [MASO HTTP Chat](docs/MASO.md).
+
 ### test(task): cover attachment creation recovery after the boundary extraction
 
 - Exercise image paste, decoded previews and title-only Task creation through the

@@ -50,7 +50,7 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 | Task execution panel | Recording versus managed controls; progress/handoff and retry identity |
 | Workspace Task creation | Unknown outcome/replay; dialog closure and credential recovery; workspace changes; image paste, decoded preview, attachment-only payload and exact replay |
 | Native subagents | Full thread identity, parent-turn grouping, lifecycle display and English controls |
-| Chat composer in the full Chat page | Send/queue/stop against a live turn; failed send keeps the text and retries under a new identity; mobile reachability |
+| Chat composer in the full Chat page | MASO Chat-only selection, unavailable-service warning/create refusal, retry and preset recovery, existing-Chat service-loss explanation and model/effort provider keys; condensation retains visible output; send/queue/stop against a live turn; failed send keeps the text and retries under a new identity; mobile reachability |
 | Message provenance in the full Chat page | Persisted Web/Feishu/unknown origins after binding changes; desktop/mobile/grid operation and text clearance |
 | Bot components | Settings/binding behavior, secret clearing and desktop/mobile layout |
 | Queued chat activation | A hidden queued Chat activates before its draft is sent |
