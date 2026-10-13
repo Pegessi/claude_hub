@@ -219,7 +219,9 @@ def _post_link(text: str, href: Any) -> str:
     return f"[{label}]({href.replace(')', '%29')})"
 
 
-def _post_text(content: Any) -> tuple[str, tuple[str, ...]]:
+def _post_text(
+    content: Any, *, ignored_at_user_id: str | None = None
+) -> tuple[str, tuple[str, ...]]:
     """Convert Feishu ``post`` rows to bounded, deterministic Markdown."""
 
     if not isinstance(content, dict):
@@ -256,6 +258,8 @@ def _post_text(content: Any) -> tuple[str, tuple[str, ...]]:
             elif tag == "a":
                 pieces.append(_post_link(text, element.get("href")))
             elif tag == "at":
+                if ignored_at_user_id is not None and element.get("user_id") == ignored_at_user_id:
+                    continue
                 name = element.get("user_name") or element.get("name") or text
                 pieces.append(f"@{name}" if isinstance(name, str) and name else "@用户")
             elif tag == "img":
@@ -294,7 +298,44 @@ def _post_text(content: Any) -> tuple[str, tuple[str, ...]]:
     return text, tuple(image_keys)
 
 
-def message_event_from_sdk(data: Any, *, expected_app_id: str) -> FeishuMessageEvent:
+def _mentioned_bot_key(message: Any, expected_bot_open_id: str) -> tuple[str, tuple[str, ...]]:
+    mentions = getattr(message, "mentions", None)
+    if not isinstance(mentions, list):
+        raise ValueError("Feishu group message does not mention this Bot")
+    keys = tuple(
+        key.strip()
+        for mention in mentions
+        if isinstance((key := getattr(mention, "key", None)), str) and key.strip()
+    )
+    for mention in mentions:
+        mention_id = getattr(mention, "id", None)
+        if getattr(mention_id, "open_id", None) == expected_bot_open_id:
+            key = _required_text(getattr(mention, "key", None), "mention key")
+            return key, keys
+    raise ValueError("Feishu group message does not mention this Bot")
+
+
+def _strip_mention_key(text: str, key: str, mention_keys: tuple[str, ...]) -> str:
+    # Feishu placeholders share prefixes (for example ``@_user_1`` and
+    # ``@_user_10``). Match all known placeholders longest-first so removing
+    # this Bot's key cannot consume the prefix of another person's mention.
+    pattern = re.compile(
+        "|".join(re.escape(item) for item in sorted(set(mention_keys), key=len, reverse=True))
+    )
+    stripped = pattern.sub(
+        lambda match: "" if match.group(0) == key else match.group(0), text
+    ).strip()
+    if not stripped:
+        raise ValueError("Feishu message has no content after the Bot mention")
+    return stripped
+
+
+def message_event_from_sdk(
+    data: Any,
+    *,
+    expected_app_id: str,
+    expected_bot_open_id: str | None = None,
+) -> FeishuMessageEvent:
     """Normalize the SDK model after the long connection authenticated it."""
 
     header = getattr(data, "header", None)
@@ -307,8 +348,15 @@ def message_event_from_sdk(data: Any, *, expected_app_id: str) -> FeishuMessageE
         raise ValueError("Feishu message app_id does not match this Bot")
     if getattr(sender, "sender_type", None) != "user":
         raise ValueError("Only Feishu user messages are supported")
-    if getattr(message, "chat_type", None) != "p2p":
-        raise ValueError("Only Feishu p2p messages are supported")
+    chat_type = getattr(message, "chat_type", None)
+    if chat_type not in {"p2p", "group"}:
+        raise ValueError("Only Feishu p2p and mentioned group messages are supported")
+    mention_key = None
+    mention_keys: tuple[str, ...] = ()
+    if chat_type == "group":
+        if expected_bot_open_id is None:
+            raise ValueError("Feishu Bot open_id is unavailable for group messages")
+        mention_key, mention_keys = _mentioned_bot_key(message, expected_bot_open_id)
     message_type = getattr(message, "message_type", None)
     if message_type not in {"text", "post"}:
         raise ValueError("Only Feishu text and post messages are supported")
@@ -320,10 +368,15 @@ def message_event_from_sdk(data: Any, *, expected_app_id: str) -> FeishuMessageE
     if message_type == "text":
         text = content.get("text") if isinstance(content, dict) else None
         text = _required_text(text, "text")
+        if mention_key is not None:
+            text = _strip_mention_key(text, mention_key, mention_keys)
         if len(text) > _MAX_INPUT_CHARS:
             raise ValueError("Feishu text message is too long")
     else:
-        text, image_keys = _post_text(content)
+        text, image_keys = _post_text(
+            content,
+            ignored_at_user_id=expected_bot_open_id if chat_type == "group" else None,
+        )
     raw_created_at = getattr(message, "create_time", None)
     if (
         not isinstance(raw_created_at, str)
@@ -344,6 +397,13 @@ def message_event_from_sdk(data: Any, *, expected_app_id: str) -> FeishuMessageE
         text=text,
         message_created_at_ms=created_at,
         image_keys=image_keys,
+        chat_type=chat_type,
+        thread_id=(
+            getattr(message, "thread_id").strip()
+            if isinstance(getattr(message, "thread_id", None), str)
+            and getattr(message, "thread_id").strip()
+            else None
+        ),
     )
 
 
