@@ -9,6 +9,7 @@ import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -93,6 +94,7 @@ _BATCH_RETIREMENT_WAIT_SECONDS = 12.0
 _MAX_GATES = 256
 _MAX_TAB_DISPATCH_QUEUES = 256
 _MAX_TAB_QUEUE_WAITERS = 8
+_MAX_TAB_DISPATCH_CONTEXTS = 64
 _MESSAGE_COALESCE_QUIET_SECONDS = 1.0
 _MESSAGE_COALESCE_MAX_WAIT_SECONDS = 5.0
 _MAX_BATCH_IMAGE_ATTACHMENTS = 10
@@ -142,7 +144,9 @@ class _TabDispatchQueue:
     active: list[_TabDispatchItem]
     processor: _TabDispatchItem | None
     changed: asyncio.Event
-    dispatched_contexts: set[tuple[str, str, str, str | None]] = field(default_factory=set)
+    dispatched_contexts: OrderedDict[tuple[str, str, str, str | None], None] = field(
+        default_factory=OrderedDict
+    )
 
     @property
     def waiters(self) -> list[asyncio.Future[None]]:
@@ -1065,9 +1069,11 @@ async def _admit_batch_dispatch(
 
     async with _admit_binding_dispatch(effective, binding, event):
         yield
-    queue.dispatched_contexts.add(
-        (effective.bot_id, binding.pairing_id, event.chat_id, event.thread_id)
-    )
+    context = (effective.bot_id, binding.pairing_id, event.chat_id, event.thread_id)
+    queue.dispatched_contexts[context] = None
+    queue.dispatched_contexts.move_to_end(context)
+    while len(queue.dispatched_contexts) > _MAX_TAB_DISPATCH_CONTEXTS:
+        queue.dispatched_contexts.popitem(last=False)
 
 
 def _claim_still_live(bot_id: str, claim: PairingClaim) -> bool:

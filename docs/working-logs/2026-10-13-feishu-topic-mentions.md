@@ -43,6 +43,10 @@ selection, binding resolution or Chat dispatch.
   described as continuations of each other. Text mention placeholders are
   matched longest-first so keys such as `@_user_1` cannot corrupt
   `@_user_10`.
+- A tab queue keeps at most 64 successfully dispatched context identities in
+  least-recently-dispatched order. Re-dispatching the same context refreshes its
+  position. This keeps follow-up behavior useful across recent private chats and
+  topics while bounding memory even if a queue remains non-empty indefinitely.
 
 ## Verification
 
@@ -53,8 +57,11 @@ selection, binding resolution or Chat dispatch.
   and separation of different topics.
 - Independent review found and the implementation fixes two P2 edge cases:
   prefix-colliding plain-text mention keys and tab-wide follow-up state leaking
-  across topics. Final test counts and repository verification are recorded in
-  the task handoff.
+  across topics. A later concurrency review found one P3 unbounded-history case;
+  a continuous `topic A -> B -> A` FIFO regression now confirms correct context
+  isolation and follow-up semantics while additional topics exercise the 64-entry
+  LRU bound. Final test counts and repository verification are recorded in the
+  task handoff.
 
 ## Remaining limits
 

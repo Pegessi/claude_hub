@@ -1250,6 +1250,95 @@ def test_messages_from_different_group_topics_are_not_coalesced(
     asyncio.run(scenario())
 
 
+def test_continuous_topic_fifo_keeps_followups_and_bounds_context_history(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.001)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.004)
+        monkeypatch.setattr(bot_api, "_MAX_TAB_DISPATCH_CONTEXTS", 3, raising=False)
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        started: asyncio.Queue[int] = asyncio.Queue()
+        releases = [asyncio.Event() for _ in range(6)]
+        submitted: list[tuple[str, bool]] = []
+
+        async def dispatch(
+            _tab_id, _text, _turn_id, *, admission_guard, visible_text, turn_metadata, **_kwargs
+        ):
+            index = len(submitted)
+            async with admission_guard():
+                submitted.append((visible_text, turn_metadata["feishu_followup"]))
+                started.put_nowait(index)
+            await releases[index].wait()
+            return "received"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        topics = ("omt-a", "omt-b", "omt-a", "omt-c", "omt-d", "omt-a")
+
+        def start_route(index: int) -> asyncio.Task[None]:
+            thread_id = topics[index]
+            return asyncio.create_task(
+                bot_api._handle_sdk_event(
+                    bot_id,
+                    _message(
+                        "app-1",
+                        f"topic-{thread_id}",
+                        clock.value,
+                        message_id=f"om-context-{index}",
+                        chat_id="oc-topic-group",
+                        chat_type="group",
+                        thread_id=thread_id,
+                        mentioned_bot_open_id="ou-current-bot",
+                    ),
+                )
+            )
+
+        routes = [start_route(0)]
+        for index in range(len(topics)):
+            assert await asyncio.wait_for(started.get(), timeout=1) == index
+            if index + 1 < len(topics):
+                next_index = index + 1
+                routes.append(start_route(next_index))
+                for _ in range(100):
+                    queue = bot_api._tab_dispatch_queues.get("tab-1")
+                    if queue is not None and len(queue.waiters) == 1:
+                        break
+                    await asyncio.sleep(0)
+                else:
+                    pytest.fail("next topic never entered the continuously non-empty queue")
+                releases[index].set()
+
+        queue = bot_api._tab_dispatch_queues["tab-1"]
+        assert submitted[:3] == [
+            ("topic-omt-a", False),
+            ("topic-omt-b", False),
+            (
+                "用户在你处理上一条消息期间补充了以下信息，请结合已有上下文统一处理："
+                "\n\n[消息 1]\ntopic-omt-a",
+                True,
+            ),
+        ]
+        assert submitted[-1] == (
+            "用户在你处理上一条消息期间补充了以下信息，请结合已有上下文统一处理："
+            "\n\n[消息 1]\ntopic-omt-a",
+            True,
+        )
+        assert len(queue.dispatched_contexts) <= 3
+
+        releases[-1].set()
+        await asyncio.gather(*routes)
+        assert bot_api._tab_dispatch_queues == {}
+
+    asyncio.run(scenario())
+
+
 def test_websocket_event_for_a_deleted_bot_is_dropped_silently(api, clock: Clock) -> None:
     bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
     entry = api.pool.snapshot({}).get(bot_id)
