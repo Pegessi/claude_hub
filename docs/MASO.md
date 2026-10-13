@@ -4,7 +4,9 @@ Create a **Chat** and choose **MASO** as its provider. Hub connects directly to
 the existing MASO service; it does not launch a MASO CLI or a second agent runtime.
 The default endpoint is `http://127.0.0.1:9796`. Set `MASO_BASE_URL` in the new
 Chat's environment to use another HTTP(S) endpoint. Keep the endpoint fixed for
-that Chat; create a new Chat to change services or providers.
+that Chat; Hub freezes its resolved address at creation, including when the
+backend's default later changes. Create a new Chat to change services,
+providers or working directories.
 
 The model picker discovers `/api/models` and `/api/models/default`, groups the
 service's advertised thinking variants and sends their exact provider keys.
@@ -19,6 +21,8 @@ directory and `isolation=shared`. This preserves the chosen checkout rather than
 asking MASO to allocate its own Git worktree. Hub persists the returned session
 ID and resumes that same model context after a backend restart. There is no
 implicit import of existing MASO conversations or local trajectory files.
+An existing verified session without a persisted service address is refused;
+create a new Chat rather than guessing which service owns its opaque ID.
 
 ## Condensation and streaming
 
@@ -44,7 +48,14 @@ can continue on the same session after cleanup succeeds.
 ## Stop and request uncertainty
 
 Stop immediately retires the stream generation, removes this turn's pending
-message UUID, requests abort and checks that execution has become inactive.
+message UUID, requests abort and exits the owned MASO session tree. Exit waits
+for cancellation finalizers and context persistence; an idle status alone cannot
+prove completion because MASO can emit an old `agent_end` afterwards. Hub confirms
+a live resume of the same saved session before accepting another prompt. This
+clears that session tree's remaining queued work and pauses its MASO automatic
+objective; it leaves other sessions and the shared working directory intact.
+Pending confirmation cards are retired with their turn, including on crash
+recovery; stale card answers are rejected before message delivery.
 Abort alone does not remove MASO broker messages. A small delivery sidecar beside
 the Hub event log preserves the owned UUID and session identity across crashes.
 Failed cleanup must succeed before a new prompt can be submitted.

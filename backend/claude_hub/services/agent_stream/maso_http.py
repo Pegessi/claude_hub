@@ -101,6 +101,8 @@ class MasoHttpSession(ProviderSession):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        if self._conversation_id_verified and not self.session.env.get("MASO_BASE_URL"):
+            raise ValueError("MASO session endpoint is unverified; create a new MASO Chat")
         self._base = maso_base_url(self.session.env)
         self._client: Optional[httpx.AsyncClient] = None
         self._root_agent_id: Optional[str] = None
@@ -166,6 +168,8 @@ class MasoHttpSession(ProviderSession):
         self._started = True
 
     async def _prepare_for_send(self) -> None:
+        if self._current_mode != "default":
+            raise ValueError("MASO Chat only supports default mode")
         if self._delivery_uncertain:
             raise RuntimeError(_UNCERTAIN_MESSAGE)
         if self._needs_abort:
@@ -239,7 +243,7 @@ class MasoHttpSession(ProviderSession):
             if not isinstance(created, dict) or not isinstance(created.get("session_id"), str):
                 raise RuntimeError("MASO returned an invalid session identity")
             self._persist_conversation_id(created["session_id"])
-        status = await self._request("GET", self._path("status"))
+        status: Dict[str, Any] = await self._request("GET", self._path("status"))
         if not isinstance(status, dict) or not isinstance(status.get("agent_id"), str):
             raise RuntimeError("MASO returned an invalid session status")
         self._root_agent_id = status["agent_id"]
@@ -247,11 +251,11 @@ class MasoHttpSession(ProviderSession):
         # After a Hub crash the old display turn is interrupted by the tailer.
         # Stop its still-running service-side execution before a new prompt.
         if status.get("status") in {"running", "waiting", "aborting"} or self._message_id:
-            await self._abort_and_wait()
+            status = await self._abort_and_wait()
         self._handshake_complete = True
         return status
 
-    async def _abort_and_wait(self) -> None:
+    async def _abort_and_wait(self) -> Dict[str, Any]:
         self._needs_abort = True
         # MASO abort leaves broker messages queued and can re-wake them. Remove
         # this Hub-owned message before aborting; UUID correlation is not POST
@@ -261,21 +265,25 @@ class MasoHttpSession(ProviderSession):
                 "DELETE", self._path(f"messages/pending/{quote(self._message_id, safe='')}")
             )
         await self._request("POST", self._path("control"), json={"action": "abort"})
-        deadline = asyncio.get_running_loop().time() + 10.0
-        while True:
-            status = await self._request("GET", self._path("status"))
-            if (
-                isinstance(status, dict)
-                and status.get("is_running") is False
-                and status.get("status") not in {"running", "waiting", "aborting"}
-            ):
-                if not self._delivery_uncertain:
-                    self._clear_delivery()
-                self._needs_abort = False
-                return
-            if asyncio.get_running_loop().time() >= deadline:
-                raise RuntimeError("MASO did not confirm that execution stopped")
-            await asyncio.sleep(0.1)
+        # MASO sets registry IDLE before its deferred cancellation finalizer
+        # emits agent_end. Polling status (including indicator.running) cannot
+        # fence that event from the next turn. exit closes the old SSE plugin
+        # and awaits despawn's cancellation finalizers and persistence. The
+        # next status request resumes this same saved session, with a fresh
+        # plugin. A failed exit keeps recovery blocked before any new POST.
+        await self._request("POST", self._path("exit"))
+        status = await self._request("GET", self._path("status"))
+        # A concurrent exit can return 200 while an earlier close is still
+        # draining. Successful resume cannot register this same agent ID until
+        # its old finalizers finish. An ended/non-live fallback is not proof.
+        if not isinstance(status, dict) or not isinstance(status.get("agent_id"), str):
+            raise RuntimeError("MASO did not confirm a live resumed session after exit")
+        self._root_agent_id = status["agent_id"]
+        self._effective_model = status.get("preferred_model") or status.get("model")
+        if not self._delivery_uncertain:
+            self._clear_delivery()
+        self._needs_abort = False
+        return status
 
     def _save_delivery(self, message_id: str, *, uncertain: bool = False) -> None:
         self._delivery_path.parent.mkdir(parents=True, exist_ok=True)
@@ -455,7 +463,9 @@ class MasoHttpSession(ProviderSession):
 
     async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
         if not self._pending_confirmations:
-            return False
+            # Structured card answers must never fall through as new prompts,
+            # including after Stop, completion, or a backend restart.
+            raise ValueError("This MASO tool confirmation is no longer pending")
         decisions: List[Tuple[str, bool]] = []
         if not answers:
             decisions = [(call_id, False) for call_id in self._pending_confirmations]
@@ -510,6 +520,9 @@ class MasoHttpSession(ProviderSession):
             self._end_turn()
 
     def update_env(self, env: Dict[str, str]) -> None:
+        env = dict(env)
+        if not env.get("MASO_BASE_URL"):
+            env["MASO_BASE_URL"] = self._base
         if maso_base_url(env) != self._base:
             raise ValueError("Create a new MASO Chat to change MASO_BASE_URL")
         super().update_env(env)

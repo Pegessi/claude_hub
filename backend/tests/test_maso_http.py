@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from claude_hub.models import (
     AgentStreamEventType,
     AgentType,
+    ChatMode,
     ManagedSession,
     ManagedSessionStatus,
     SessionKind,
@@ -46,6 +47,7 @@ def session(**updates: Any) -> ManagedSession:
         tmux_session="inert",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
+        env={"MASO_BASE_URL": "http://127.0.0.1:9796"},
     ).model_copy(update=updates)
 
 
@@ -85,6 +87,9 @@ class MasoServer:
         self.delayed_message: dict | None = None
         self.send_entered: asyncio.Event | None = None
         self.send_release: asyncio.Event | None = None
+        self.exit_entered: asyncio.Event | None = None
+        self.exit_release: asyncio.Event | None = None
+        self.fail_exit = False
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
@@ -135,6 +140,18 @@ class MasoServer:
         if request.method == "DELETE" and "/messages/pending/" in path:
             self.pending.pop(path.rsplit("/", 1)[-1], None)
             return httpx.Response(204)
+        if path.endswith("/exit"):
+            if self.fail_exit:
+                return httpx.Response(503, json={"error": "exit unavailable"})
+            if self.exit_entered is not None and self.exit_release is not None:
+                self.exit_entered.set()
+                await self.exit_release.wait()
+            # The old finalizer may emit after registry idle, but never after
+            # this session's close has awaited its finalizers.
+            for stream in self.streams:
+                stream.emit("agent_end", {"agent_id": "main", "stop_reason": "aborted"})
+            self.running = False
+            return httpx.Response(200, json={"status": "exit"})
         if path.endswith("/confirm"):
             return httpx.Response(200, json={"result": "confirmed"})
         if path.endswith("/stream"):
@@ -409,6 +426,75 @@ async def test_stop_fences_late_events_before_abort_is_confirmed(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_next_turn_waits_for_cancel_finalizers_after_registry_is_idle() -> None:
+    server = MasoServer()
+    server.exit_entered = asyncio.Event()
+    server.exit_release = asyncio.Event()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    queue = await tailer.subscribe_completion()
+    second = None
+    try:
+        await tailer.send_message("first", [], "first")
+        assert await tailer.cancel_turn("first")
+        await asyncio.wait_for(server.exit_entered.wait(), 2)
+        assert not server.running  # idle is observable before old agent_end
+        second = asyncio.create_task(tailer.send_message("second", [], "second"))
+        await asyncio.sleep(0)
+        assert not second.done()
+        assert len(server.streams) == 1
+        server.exit_release.set()
+        await asyncio.wait_for(second, 2)
+        assert len(server.streams) == 2
+        await asyncio.sleep(0)
+        assert provider.turn_in_flight and server.running
+        server.streams[-1].emit("turn_end", {"agent_id": "main", "content": "second answer"})
+        server.running = False
+        server.streams[-1].emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        while True:
+            event = await asyncio.wait_for(queue.get(), 2)
+            if event.type == AgentStreamEventType.TURN_COMPLETED and event.turn_id == "second":
+                assert event.payload["status"] == "completed"
+                break
+        page = await tailer._store.read_since(0, 100)
+        assert len([e for e in page.events if e.type == AgentStreamEventType.TURN_COMPLETED]) == 2
+    finally:
+        server.exit_release.set()
+        if second is not None:
+            await asyncio.gather(second, return_exceptions=True)
+        tailer.unsubscribe_completion(queue)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_exit_blocks_new_prompt_until_finalizer_fence_succeeds() -> None:
+    server = MasoServer()
+    provider = transport(server)
+    try:
+        await provider.send_message("first", [])
+        server.fail_exit = True
+        with pytest.raises(RuntimeError, match="HTTP 503"):
+            await provider.cancel_active_turn()
+        assert not server.running and provider._needs_abort and provider._delivery_path.exists()
+        with pytest.raises(RuntimeError, match="HTTP 503"):
+            await provider.send_message("blocked", [])
+        assert len([1 for _, path, _ in server.calls if path.endswith("/messages")]) == 1
+        server.fail_exit = False
+        await provider.send_message("second", [])
+        assert len([1 for _, path, _ in server.calls if path.endswith("/messages")]) == 2
+    finally:
+        server.fail_exit = False
+        await provider.stop()
+
+
+@pytest.mark.asyncio
 async def test_tool_confirmation_routes_to_http_without_another_prompt() -> None:
     server = MasoServer()
     provider = transport(server)
@@ -489,6 +575,236 @@ async def test_chat_only_and_unsupported_edit_are_rejected_before_mutation() -> 
     with pytest.raises(TranscriptForkError, match="MASO HTTP"):
         await tailers.edit_resend(session(), "edit", "new", "old")
     assert not tailers._tailers  # unsupported edit must never stop/create a transport
+
+
+@pytest.mark.asyncio
+async def test_maso_cwd_and_plan_rejected_before_remote_execution() -> None:
+    with pytest.raises(ValidationError, match="default mode"):
+        TerminalTabCreate(
+            name="bad",
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            chat_mode=ChatMode.PLAN,
+        )
+    process = TTYDProcess(
+        "id",
+        12345,
+        "unchanged",
+        cwd="/checkout/a",
+        agent_type=AgentType.MASO,
+        session_kind=SessionKind.CHAT,
+    )
+    manager = TTYDManager.__new__(TTYDManager)
+    manager.processes = {"id": process}
+    manager._start_locks = {}
+    with pytest.raises(ValueError, match="working directory"):
+        await manager.update_tab("id", name="changed", cwd="/checkout/b")
+    assert process.name == "unchanged" and process.cwd == "/checkout/a"
+    provider = transport(MasoServer(), session(chat_mode=ChatMode.PLAN))
+    try:
+        with pytest.raises(ValueError, match="default mode"):
+            await provider.send_message("must not run", [])
+        assert provider._client is not None
+        assert not provider.turn_in_flight
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_maso_creation_pins_endpoint_across_backend_default_change(
+    tmp_path, monkeypatch
+) -> None:
+    import importlib
+
+    module = importlib.import_module("claude_hub.services.ttyd_manager")
+
+    monkeypatch.setattr(module, "STATE_FILE", tmp_path / "tabs.json")
+    monkeypatch.setattr(TTYDManager, "_load_order", lambda _self: None)
+    monkeypatch.setattr(TTYDManager, "_ensure_tab_in_order", lambda *_args: None)
+
+    async def inert_start(_self):
+        return False
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", inert_start)
+    monkeypatch.setattr(TTYDProcess, "start", inert_start)
+    monkeypatch.setenv("MASO_BASE_URL", "http://maso-a.test:9796")
+    manager = TTYDManager()
+    tab = await manager.create_tab(
+        name="pinned",
+        agent_type=AgentType.MASO,
+        session_kind=SessionKind.CHAT,
+    )
+    assert tab.env["MASO_BASE_URL"] == "http://maso-a.test:9796"
+    manager.processes[tab.id].agent_session_id = "opaque-sid"
+    manager.processes[tab.id].agent_session_id_verified = True
+    manager._save_state()
+    monkeypatch.setenv("MASO_BASE_URL", "http://maso-b.test:9796")
+    restored = TTYDManager().processes[tab.id]
+    await restored.switch_env({"MASO_MODEL": "seed-high", "MASO_BASE_URL": ""})
+    assert restored.env == {"MASO_BASE_URL": "http://maso-a.test:9796", "MASO_MODEL": "seed-high"}
+    provider = transport(
+        MasoServer(),
+        session(
+            env=restored.env,
+            agent_session_id="opaque-sid",
+            agent_session_id_verified=True,
+        ),
+    )
+    try:
+        assert provider._base == "http://maso-a.test:9796"
+        provider.update_env({"MASO_MODEL": "seed", "MASO_BASE_URL": ""})
+        assert provider.session.env["MASO_BASE_URL"] == "http://maso-a.test:9796"
+    finally:
+        await provider.stop()
+    with pytest.raises(ValueError, match="endpoint is unverified"):
+        transport(
+            MasoServer(),
+            session(
+                env={},
+                agent_session_id="opaque-sid",
+                agent_session_id_verified=True,
+            ),
+        )
+
+    # A legacy unsupported mode is still serializable for GET/list. Creation
+    # and execution reject it without silently changing its persisted mode.
+    manager.processes[tab.id].chat_mode = ChatMode.PLAN
+    manager._save_state()
+    legacy = TTYDManager()
+    assert legacy.list_tabs()[0].chat_mode == ChatMode.PLAN
+    with pytest.raises(ValueError, match="default mode"):
+        await legacy.create_tab(
+            name="bad plan",
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            chat_mode=ChatMode.PLAN,
+        )
+
+
+@pytest.mark.asyncio
+async def test_stop_retires_confirmation_card_and_refuses_stale_answer() -> None:
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    queue = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("work", [], "owned-turn")
+        server.streams[-1].emit(
+            "confirmation_required",
+            {
+                "agent_id": "main",
+                "tool_call_id": "call-stale",
+                "tool": "bash",
+                "args": {},
+            },
+        )
+        while (
+            await asyncio.wait_for(queue.get(), 2)
+        ).type != AgentStreamEventType.APPROVAL_REQUIRED:
+            pass
+        assert await tailer.cancel_turn("owned-turn")
+        await tailer._await_turn_teardown()
+        answer = json.dumps(
+            {
+                "type": "ask_question_response",
+                "answers": [
+                    {
+                        "questionId": "maso-confirm:call-stale",
+                        "selected": ["Approve"],
+                    }
+                ],
+            }
+        )
+        with pytest.raises(ValueError, match="no longer pending"):
+            await tailer.send_message(answer, [], "stale-answer")
+        page = await tailer._store.read_since(0, 100)
+        resolved = [e for e in page.events if e.type == AgentStreamEventType.APPROVAL_RESOLVED]
+        assert len(resolved) == 1 and resolved[0].turn_id == "owned-turn"
+        assert len([1 for _, path, _ in server.calls if path.endswith("/messages")]) == 1
+        assert not any(path.endswith("/confirm") for _, path, _ in server.calls)
+    finally:
+        tailer.unsubscribe_completion(queue)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_cold_orphan_recovery_retires_only_unresolved_confirmation_cards() -> None:
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    ctx = NormalizeContext(
+        session_id=record.id,
+        tab_id=record.tab_id,
+        agent_type=AgentType.MASO,
+        run_epoch=7,
+        turn_id="crashed-turn",
+    )
+    await tailer._store.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"text": "old"}))
+    adapter = MasoEventAdapter()
+    for call_id in ("answered", "pending"):
+        card = adapter.normalize_line(
+            raw(
+                "confirmation_required",
+                tool_call_id=call_id,
+                tool="bash",
+                args={},
+            ),
+            ctx,
+        )[0]
+        await tailer._store.append(card)
+    await tailer._store.append(
+        ctx.event(
+            AgentStreamEventType.APPROVAL_RESOLVED,
+            {"tool_call_id": "answered"},
+            call_id="answered",
+        )
+    )
+    try:
+        assert not tailer._pending_approvals
+        await tailer.start()
+        page = await tailer._store.read_since(0, 100)
+        resolutions = [e for e in page.events if e.type == AgentStreamEventType.APPROVAL_RESOLVED]
+        assert [e.call_id for e in resolutions] == ["answered", "pending"]
+        assert all(e.turn_id == "crashed-turn" and e.run_epoch == 7 for e in resolutions)
+        completion = next(e for e in page.events if e.type == AgentStreamEventType.TURN_COMPLETED)
+        assert completion.payload["status"] == "cancelled"
+        assert resolutions[-1].stream_sequence < completion.stream_sequence
+        assert not server.calls and not tailer._pending_approvals
+        await tailer.start()
+        assert (await tailer._store.read_since(0, 100)).events == page.events
+    finally:
+        await tailer.stop()
+
+
+def test_cancelled_adapter_epochs_do_not_accumulate() -> None:
+    adapter = MasoEventAdapter()
+    for epoch in range(1, 5):
+        ctx = NormalizeContext(
+            session_id="s",
+            tab_id="t",
+            agent_type=AgentType.MASO,
+            run_epoch=epoch,
+            turn_id=f"cancelled-{epoch}",
+        )
+        adapter.normalize_line(raw("llm_token", content="x" * 4096, content_offset=0), ctx)
+        assert len(adapter._messages) == 1
+        assert next(iter(adapter._messages))[1] == epoch
+    adapter.normalize_line(raw("agent_end", stop_reason="completed"), ctx)
+    assert not adapter._messages
 
 
 @pytest.mark.asyncio

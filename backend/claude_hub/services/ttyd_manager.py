@@ -2499,6 +2499,9 @@ asyncio.run(_main())
             if self.agent_type == AgentType.MASO:
                 from .agent_stream.maso_http import maso_base_url
 
+                new_env = dict(new_env)
+                if not new_env.get("MASO_BASE_URL"):
+                    new_env["MASO_BASE_URL"] = maso_base_url(self.env)
                 if maso_base_url(new_env) != maso_base_url(self.env):
                     raise ValueError("Create a new MASO Chat to change MASO_BASE_URL")
             # The native transport reads ``self.session.env`` on every turn
@@ -3593,7 +3596,12 @@ class TTYDManager:
         if agent_type == AgentType.MASO:
             from .agent_stream.maso_http import maso_base_url
 
-            maso_base_url(env or {})
+            if chat_mode != ChatMode.DEFAULT:
+                raise ValueError("MASO Chat only supports default mode")
+            # A persisted opaque session belongs to one service, even when the
+            # backend's global default changes before a later restart.
+            env = dict(env or {})
+            env["MASO_BASE_URL"] = maso_base_url(env)
         if session_kind == SessionKind.CHAT and target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
         if target == ExecutionTarget.REMOTE:
@@ -4564,6 +4572,8 @@ class TTYDManager:
                 raise ValueError("Create a new Chat to change the MASO provider")
             if process.agent_type == AgentType.MASO and env is not None and env != process.env:
                 raise ValueError("Use switch-env to change a MASO Chat's model")
+            if process.agent_type == AgentType.MASO and cwd is not None and cwd != process.cwd:
+                raise ValueError("Create a new MASO Chat to change its working directory")
 
             # Validate the resulting surface before mutating any existing tab.
             if (agent_type or process.agent_type) == AgentType.MASO and (
