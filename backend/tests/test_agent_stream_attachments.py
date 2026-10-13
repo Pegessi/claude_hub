@@ -740,9 +740,7 @@ def test_decode_accepts_independent_bounded_preview_mime() -> None:
     assert previews == [preview]
 
 
-def test_decode_rejects_mixed_preview_presence() -> None:
-    from fastapi import HTTPException
-
+def test_decode_allows_mixed_preview_presence() -> None:
     from claude_hub.api.agent_stream import AgentStreamAttachment, _decode_attachments
 
     with_preview = AgentStreamAttachment(
@@ -757,9 +755,10 @@ def test_decode_rejects_mixed_preview_presence() -> None:
         data_url=_data_url("image/png", _png()),
     )
 
-    with pytest.raises(HTTPException, match="all include previews") as exc_info:
-        _decode_attachments([with_preview, without_preview])
-    assert exc_info.value.status_code == 400
+    originals, previews = _decode_attachments([with_preview, without_preview])
+
+    assert originals == [_png(), _png()]
+    assert previews == [_jpeg(), None]
 
 
 @pytest.mark.parametrize(
@@ -838,16 +837,7 @@ def test_decode_uses_a_flagged_original_as_its_own_preview_once(
     assert previews == [original, resized]
 
 
-@pytest.mark.parametrize(
-    "preview_fields",
-    [
-        {"preview_is_original": True, "preview_data_url": "data:image/png;base64,AA=="},
-        {},
-    ],
-)
-def test_decode_rejects_ambiguous_or_mixed_flagged_previews(
-    preview_fields: Dict[str, Any],
-) -> None:
+def test_decode_rejects_both_preview_forms_on_one_attachment() -> None:
     from fastapi import HTTPException
 
     import claude_hub.api.agent_stream as api
@@ -855,16 +845,42 @@ def test_decode_rejects_ambiguous_or_mixed_flagged_previews(
     url = _data_url("image/png", _png())
     payloads = [
         api.AgentStreamAttachment(
-            filename="a.png", mime_type="image/png", data_url=url, preview_is_original=True
-        ),
-        api.AgentStreamAttachment(
-            filename="b.png", mime_type="image/png", data_url=url, **preview_fields
-        ),
+            filename="a.png",
+            mime_type="image/png",
+            data_url=url,
+            preview_is_original=True,
+            preview_data_url=url,
+        )
     ]
 
     with pytest.raises(HTTPException) as excinfo:
         api._decode_attachments(payloads)
     assert excinfo.value.status_code == 400
+
+
+def test_decode_keeps_safe_previews_when_another_image_has_no_preview() -> None:
+    import claude_hub.api.agent_stream as api
+
+    previewed = _png(width=32, height=24)
+    original_only = _png(width=9000, height=1)
+    payloads = [
+        api.AgentStreamAttachment(
+            filename="previewed.png",
+            mime_type="image/png",
+            data_url=_data_url("image/png", previewed),
+            preview_is_original=True,
+        ),
+        api.AgentStreamAttachment(
+            filename="original-only.png",
+            mime_type="image/png",
+            data_url=_data_url("image/png", original_only),
+        ),
+    ]
+
+    originals, previews = api._decode_attachments(payloads)
+
+    assert originals == [previewed, original_only]
+    assert previews == [previewed, None]
 
 
 def test_attachment_read_is_scoped_to_workspace_and_session(state_root: Path) -> None:

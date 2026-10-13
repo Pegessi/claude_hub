@@ -157,6 +157,7 @@ QUEUE_HEARTBEAT_STALL_S = float(os.environ.get("CLAUDE_HUB_QUEUE_HEARTBEAT_STALL
 GOAL_TERMINAL_GRACE_S = 60.0
 DISCOVERY_GRACE_S = 30.0
 SUBSCRIBER_QUEUE_MAX = 2000
+COMPLETION_QUEUE_MAX = 8
 _STOP_JOIN_TIMEOUT_S = 5.0
 _RUNTIME_INTERRUPTED_MESSAGE = (
     "Turn interrupted because its backend runtime was no longer available."
@@ -179,6 +180,9 @@ _QUEUE_CAP_TIMEOUT_MESSAGE = (
 # A turn was declared queued but the queue heartbeats then stopped: the runtime
 # went away mid-wait, so it is reaped and resumed like any other dead turn.
 _QUEUE_STALL_MESSAGE = "Turn stopped while queued after the provider stopped responding."
+_TERMINAL_PERSISTENCE_FAILURE_MESSAGE = (
+    "Chat turn completed but its final state could not be saved."
+)
 # Turn-interior event types that only have meaning attributed to a live Hub
 # turn. A record of one of these arriving with no owning turn (``turn_id`` is
 # null AND no turn is active) is an unreferenceable replay/background record —
@@ -569,6 +573,7 @@ class SessionTailer:
 
         self._task: Optional[asyncio.Task[Any]] = None
         self._subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
+        self._completion_subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
         self._last_subscriber_at = time.monotonic()
         # Wall-clock stamp of when the current in-flight turn was first
         # observed active; ``None`` when no turn is in flight. Used to clear
@@ -768,7 +773,7 @@ class SessionTailer:
         images: List[bytes],
         client_turn_id: str,
         *,
-        previews: Optional[List[bytes]] = None,
+        previews: Optional[List[Optional[bytes]]] = None,
         delivery: str = "normal",
         reuse_attachments: Optional[List[Dict[str, Any]]] = None,
         visible_text: Optional[str] = None,
@@ -902,9 +907,20 @@ class SessionTailer:
                     # failure does not delete the (already-existing) previews.
                     attachment_metas = [dict(m) for m in reuse_attachments if isinstance(m, dict)]
                 elif previews is not None:
-                    for prev in previews:
-                        mime = _detect_image_mime(prev) or "image/png"
-                        meta = await self.attachment_store.save(mime, prev)
+                    for image, preview in zip(images, previews):
+                        if preview is None:
+                            attachment_metas.append(
+                                {
+                                    "id": None,
+                                    "mime_type": _detect_image_mime(image) or "image/png",
+                                    "bytes": len(image),
+                                    "width": None,
+                                    "height": None,
+                                }
+                            )
+                            continue
+                        mime = _detect_image_mime(preview) or "image/png"
+                        meta = await self.attachment_store.save(mime, preview)
                         saved_ids.append(meta["id"])
                         attachment_metas.append(meta)
                 else:
@@ -1145,6 +1161,10 @@ class SessionTailer:
             run_epoch=run_epoch,
             turn_id=turn_id,
         )
+        completed = ctx.event(
+            AgentStreamEventType.TURN_COMPLETED,
+            {"status": status},
+        )
         # Runtime loss is not a user-requested cancellation. Persist a visible
         # terminal error before the completion so the reconstructed timeline
         # explains why output stopped. ``error`` is itself terminal on the
@@ -1155,11 +1175,17 @@ class SessionTailer:
                 AgentStreamEventType.ERROR,
                 {"message": error_message},
             )
-            await self._publish(redact_event(interrupted))
-        completed = ctx.event(
-            AgentStreamEventType.TURN_COMPLETED,
-            {"status": status},
-        )
+            try:
+                await self._publish(redact_event(interrupted))
+            except Exception:
+                # The provider turn is already being retired. If even the
+                # explanatory ERROR cannot be saved, no later provider record
+                # can release a direct completion owner such as the Feishu
+                # FIFO. Wake that process-local owner without inventing a
+                # non-durable timeline edge.
+                if self._is_live:
+                    self._fanout_volatile_terminal_failure(completed)
+                raise
         await self._publish(redact_event(completed))
         self._turn_completed_seen = True
         self._terminalize_native_runtime(status)
@@ -1661,11 +1687,37 @@ class SessionTailer:
         queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX)
         self._subscribers.add(queue)
         self._last_subscriber_at = time.monotonic()
-        await self.start()
+        try:
+            await self.start()
+        except BaseException:
+            self._subscribers.discard(queue)
+            self._last_subscriber_at = time.monotonic()
+            raise
+        return queue
+
+    async def subscribe_completion(self) -> "asyncio.Queue[AgentStreamEvent]":
+        """Subscribe to future approval/error/terminal events without timeline traffic."""
+        if self._hard_failed:
+            raise StructuredSourceUnavailable(
+                self._last_error or "structured transcript source unavailable"
+            )
+        queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue(maxsize=COMPLETION_QUEUE_MAX)
+        self._completion_subscribers.add(queue)
+        self._last_subscriber_at = time.monotonic()
+        try:
+            await self.start()
+        except BaseException:
+            self._completion_subscribers.discard(queue)
+            self._last_subscriber_at = time.monotonic()
+            raise
         return queue
 
     def unsubscribe(self, queue: "asyncio.Queue[AgentStreamEvent]") -> None:
         self._subscribers.discard(queue)
+        self._last_subscriber_at = time.monotonic()
+
+    def unsubscribe_completion(self, queue: "asyncio.Queue[AgentStreamEvent]") -> None:
+        self._completion_subscribers.discard(queue)
         self._last_subscriber_at = time.monotonic()
 
     async def start(self) -> None:
@@ -1764,7 +1816,11 @@ class SessionTailer:
                 )
             if self._hard_failed:
                 break
-            if not self._subscribers and (time.monotonic() - self._last_subscriber_at > IDLE_TTL_S):
+            if (
+                not self._subscribers
+                and not self._completion_subscribers
+                and time.monotonic() - self._last_subscriber_at > IDLE_TTL_S
+            ):
                 break
             await asyncio.sleep(POLL_INTERVAL_S)
 
@@ -1964,7 +2020,11 @@ class SessionTailer:
             # viewers vanished (e.g. mobile backgrounding kills SSE and the
             # long-poll self-expires) — it completes on its own and the next
             # idle check reaps it.
-            if not self._subscribers and (time.monotonic() - self._last_subscriber_at > IDLE_TTL_S):
+            if (
+                not self._subscribers
+                and not self._completion_subscribers
+                and time.monotonic() - self._last_subscriber_at > IDLE_TTL_S
+            ):
                 # A headless background turn (a scheduled chat_turn with no
                 # viewer attached) must survive exactly like a watched one.
                 # Re-check liveness UNDER the send lock: a concurrent send may
@@ -2351,8 +2411,10 @@ class SessionTailer:
                 if active is None and transport.turn_in_flight:
                     transport.acknowledge_turn_complete()
                 return False
+            persisted = False
             try:
                 await self._publish(event)
+                persisted = True
             except Exception:
                 logger.exception(
                     "agent_stream store append failed for turn_completed session %s",
@@ -2379,7 +2441,8 @@ class SessionTailer:
             self._waiting_for_model_capacity = False
             self._goal_terminal_at = None
             transport.acknowledge_turn_complete()
-            self._notify_post_persist(observer_event)
+            if persisted:
+                self._notify_post_persist(observer_event)
             self._assistant_text = ""
             self._visible_assistant_text = ""
             self._goal_protocol_sanitizer = None
@@ -2832,6 +2895,12 @@ class SessionTailer:
         event = await self._store.append(event)
         if self._is_live:
             self._fanout(event)
+            if event.type in {
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                AgentStreamEventType.ERROR,
+                AgentStreamEventType.TURN_COMPLETED,
+            }:
+                self._fanout_completion(event)
         if (
             self._is_live
             and self._task_activity_observer is not None
@@ -2873,8 +2942,59 @@ class SessionTailer:
             return  # buffered; the coalescer will flush it
         # Non-coalescable: drain pending text before emitting so ordering is
         # preserved (no text after a terminal event).
-        await self._coalescer.flush_async()
-        await self._persist_and_fanout(event)
+        try:
+            await self._coalescer.flush_async()
+            await self._persist_and_fanout(event)
+        except Exception:
+            if event.type == AgentStreamEventType.TURN_COMPLETED and self._is_live:
+                self._fanout_volatile_terminal_failure(event)
+            raise
+
+    def _fanout_volatile_terminal_failure(self, event: AgentStreamEvent) -> None:
+        """Wake live completion owners when a terminal write fails.
+
+        A provider turn is already over at this point, so waiting for another
+        record can never converge.  The dedicated completion subscription
+        keeps this process-local failure out of durable SSE/long-poll
+        timelines, while direct owners such as the Feishu bridge can fail and
+        release their FIFO.
+
+        Terminal delivery is forced even when a completion-owner queue is
+        full; non-terminal errors may be dropped because the authoritative
+        terminal event remains queued behind them.
+        """
+        failure = event.model_copy(
+            deep=True,
+            update={
+                "stream_sequence": -1,
+                "payload": {
+                    **event.payload,
+                    "status": "failed",
+                    "error_message": _TERMINAL_PERSISTENCE_FAILURE_MESSAGE,
+                    "_hub_volatile_terminal_failure": True,
+                },
+            },
+        )
+        self._fanout_completion(failure)
+
+    def _fanout_completion(self, event: AgentStreamEvent) -> None:
+        for queue in list(self._completion_subscribers):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                if event.type not in {
+                    AgentStreamEventType.APPROVAL_REQUIRED,
+                    AgentStreamEventType.TURN_COMPLETED,
+                }:
+                    continue
+                # Queue operations are synchronous on this event loop: after
+                # removing one stale item the blocking approval or terminal
+                # signal is guaranteed to fit in the bounded queue.
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                queue.put_nowait(event)
 
     def _fanout(self, event: AgentStreamEvent) -> None:
         for queue in list(self._subscribers):
@@ -3095,6 +3215,12 @@ class TailerManager:
         tailer = await self._get_or_create(session)
         return await tailer.subscribe()
 
+    async def subscribe_completion(
+        self, session: ManagedSession
+    ) -> "asyncio.Queue[AgentStreamEvent]":
+        tailer = await self._get_or_create(session)
+        return await tailer.subscribe_completion()
+
     async def send_message(
         self,
         session: ManagedSession,
@@ -3102,7 +3228,7 @@ class TailerManager:
         images: List[bytes],
         client_turn_id: str,
         *,
-        previews: Optional[List[bytes]] = None,
+        previews: Optional[List[Optional[bytes]]] = None,
         delivery: str = "normal",
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
@@ -3490,6 +3616,13 @@ class TailerManager:
         tailer = self._tailers.get(session_id)
         if tailer is not None:
             tailer.unsubscribe(queue)
+
+    def unsubscribe_completion(
+        self, session_id: str, queue: "asyncio.Queue[AgentStreamEvent]"
+    ) -> None:
+        tailer = self._tailers.get(session_id)
+        if tailer is not None:
+            tailer.unsubscribe_completion(queue)
 
     def hard_failed(self, session_id: str) -> bool:
         tailer = self._tailers.get(session_id)

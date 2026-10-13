@@ -2876,6 +2876,70 @@ async def test_external_retirement_distinguishes_not_started_and_matching_active
 
 
 @pytest.mark.asyncio
+async def test_external_retirement_waits_for_provider_teardown(
+    store: AgentStreamStore,
+) -> None:
+    """External delivery is not retired until provider cancellation finishes."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    transport = _FakeNativeTransport()
+    cancel_started = asyncio.Event()
+    release_cancel = asyncio.Event()
+
+    async def delayed_cancel() -> None:
+        cancel_started.set()
+        await release_cancel.wait()
+        transport._turn_in_flight = False
+
+    transport.cancel_active_turn = delayed_cancel  # type: ignore[method-assign]
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=cast(ProviderSession, transport),
+    )
+    await tailer.send_message("hello", [], client_turn_id="turn-active")
+
+    retirement = asyncio.create_task(tailer.retire_external_turn("turn-active"))
+    await asyncio.wait_for(cancel_started.wait(), timeout=0.5)
+    assert not retirement.done()
+
+    release_cancel.set()
+    assert await retirement == ExternalTurnRetirement.CANCELLED_MATCHING
+
+
+@pytest.mark.asyncio
+async def test_external_retirement_propagates_provider_teardown_failure(
+    store: AgentStreamStore,
+) -> None:
+    """A failed provider stop cannot be reported as a safe external retirement."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    session = _native_session()
+    transport = _FakeNativeTransport()
+
+    async def fail_cancel() -> None:
+        raise RuntimeError("provider still running")
+
+    transport.cancel_active_turn = fail_cancel  # type: ignore[method-assign]
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=cast(ProviderSession, transport),
+    )
+    await tailer.send_message("hello", [], client_turn_id="turn-active")
+
+    with pytest.raises(RuntimeError, match="native provider turn cancellation failed"):
+        await tailer.retire_external_turn("turn-active")
+
+
+@pytest.mark.asyncio
 async def test_external_retirement_preserves_different_active_turn(
     store: AgentStreamStore,
 ) -> None:
@@ -5274,6 +5338,189 @@ async def test_codex_turn_completed_ack_after_persistence_no_turn_ahead() -> Non
     started2 = await asyncio.wait_for(queue.get(), timeout=0.5)
     assert started2.type == AgentStreamEventType.TURN_STARTED
     assert started2.turn_id == "turn-codex-3"
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_failure_wakes_live_completion_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed durable terminal write cannot strand a direct waiter."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    observed: List[AgentStreamEvent] = []
+
+    async def observer(event: AgentStreamEvent) -> None:
+        observed.append(event)
+
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+        post_persist_observers=[observer],
+    )
+    queue = await tailer.subscribe_completion()
+    await tailer.send_message("hello", [], client_turn_id="turn-store-failure")
+
+    append = tailer.store.append
+
+    async def fail_terminal_append(event: AgentStreamEvent) -> AgentStreamEvent:
+        if event.type == AgentStreamEventType.TURN_COMPLETED:
+            raise OSError("disk full")
+        return await append(event)
+
+    monkeypatch.setattr(tailer.store, "append", fail_terminal_append)
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+
+    failure = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert failure.type == AgentStreamEventType.TURN_COMPLETED
+    assert failure.turn_id == "turn-store-failure"
+    assert failure.stream_sequence == -1
+    assert failure.payload == {
+        "status": "failed",
+        "error_message": "Chat turn completed but its final state could not be saved.",
+        "_hub_volatile_terminal_failure": True,
+    }
+    assert transport.turn_in_flight is False
+    assert tailer._active_turn_id is None
+    await asyncio.sleep(0)
+    assert observed == []
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_approval_forces_delivery_to_a_full_completion_queue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A full error backlog cannot hide a blocking approval forever."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(_FakeNativeTransport()),
+    )
+    queue = await tailer.subscribe_completion()
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=1,
+        turn_id="turn-approval",
+    )
+    error = ctx.event(AgentStreamEventType.ERROR, {"message": "transient"})
+    for _ in range(queue.maxsize):
+        tailer._fanout_completion(error)
+    approval = ctx.event(
+        AgentStreamEventType.APPROVAL_REQUIRED,
+        {"questions": [{"id": "q1", "question": "Continue?"}]},
+        call_id="question-1",
+    )
+
+    tailer._fanout_completion(approval)
+
+    delivered = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert approval in delivered
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subscribe_method", "subscriber_attr"),
+    [("subscribe", "_subscribers"), ("subscribe_completion", "_completion_subscribers")],
+)
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_subscribe_rolls_back_queue_when_start_does_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    subscribe_method: str,
+    subscriber_attr: str,
+    cancelled: bool,
+) -> None:
+    """A failed or cancelled start cannot leak an unreachable subscriber."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(_FakeNativeTransport()),
+    )
+    failure: BaseException = asyncio.CancelledError() if cancelled else RuntimeError("start failed")
+    monkeypatch.setattr(tailer, "start", AsyncMock(side_effect=failure))
+
+    expected = asyncio.CancelledError if cancelled else RuntimeError
+    with pytest.raises(expected):
+        await getattr(tailer, subscribe_method)()
+
+    assert getattr(tailer, subscriber_attr) == set()
+
+
+@pytest.mark.asyncio
+async def test_error_append_failure_wakes_live_completion_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed pre-terminal ERROR write cannot strand a direct waiter."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    queue = await tailer.subscribe_completion()
+    await tailer.send_message("hello", [], client_turn_id="turn-error-store-failure")
+
+    append = tailer.store.append
+
+    async def fail_error_append(event: AgentStreamEvent) -> AgentStreamEvent:
+        if event.type == AgentStreamEventType.ERROR:
+            raise OSError("disk full")
+        return await append(event)
+
+    monkeypatch.setattr(tailer.store, "append", fail_error_append)
+    assert tailer.native_transport is not None
+    with pytest.raises(
+        RuntimeError, match="turn stopped but its cancelled state could not be persisted"
+    ):
+        async with tailer._send_lock:
+            await tailer._cancel_active_turn_locked(
+                tailer.native_transport,
+                error_message="boom",
+                await_teardown=True,
+            )
+
+    failure = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert failure.type == AgentStreamEventType.TURN_COMPLETED
+    assert failure.turn_id == "turn-error-store-failure"
+    assert failure.stream_sequence == -1
+    assert failure.payload == {
+        "status": "failed",
+        "error_message": "Chat turn completed but its final state could not be saved.",
+        "_hub_volatile_terminal_failure": True,
+    }
+    assert transport.turn_in_flight is False
+    assert tailer._active_turn_id is None
     await tailer.stop()
 
 

@@ -156,6 +156,7 @@
       import FeishuBotSettingsDialog from '/src/components/FeishuBotSettingsDialog.vue'
       import FeishuBindingPanel from '/src/components/FeishuBindingPanel.vue'
 
+      const activeTabId = ref('tab-1')
       const Root = {
         setup() {
           const showSettings = ref(false)
@@ -167,7 +168,7 @@
             }, 'Open Bot settings'),
             h('div', { class: 'pane-chrome' }, [
               h('span', { class: 'pane-session-name' }, 'ch'),
-              h(FeishuBindingPanel, { tabId: 'tab-1' }),
+              h(FeishuBindingPanel, { tabId: activeTabId.value }),
             ]),
             showSettings.value
               ? h(FeishuBotSettingsDialog, {
@@ -182,7 +183,10 @@
       const app = createApp(Root)
       app.use(createPinia())
       app.mount('#app')
-      window.__FEISHU_BOT_TEST__ = { app }
+      window.__FEISHU_BOT_TEST__ = {
+        app,
+        setTabId(value) { activeTabId.value = value },
+      }
     </script>
   </body>
 </html>

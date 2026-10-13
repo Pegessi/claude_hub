@@ -43,12 +43,31 @@ Install locked dependencies explicitly before running checks. Verification does
 not install dependencies or browsers. Backend tests use a private runtime and
 retain evidence, including on failure. Existing tests may start their own helper
 processes; their fixtures own cleanup. This script never restarts the main Hub.
+Standard local targets warn on version mismatches and continue with noncanonical
+results. CI and CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 require exact versions.
+browser-mocks also retains exact Python/Node/Playwright requirements. Missing
+tools and dependencies still fail in every mode.
 EOF
 }
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 read_version() { tr -d '[:space:]' < "$ROOT/$1"; }
+
+check_tool_version() {
+  local tool="$1" expected="$2" actual="$3" strict_ci=0
+  [[ "$actual" == "$expected" ]] && return 0
+  case "${CI:-}" in
+    ""|0|[Ff][Aa][Ll][Ss][Ee]) ;;
+    *) strict_ci=1 ;;
+  esac
+  if [[ "$strict_ci" == 1 || "${GITHUB_ACTIONS:-}" == true ||
+    "${CLAUDE_HUB_VERIFY_STRICT_VERSIONS:-}" == 1 ]]; then
+    fail "$tool version mismatch: expected $expected, found $actual"
+  fi
+  printf 'WARNING: %s version mismatch (expected %s, found %s); continuing with a noncanonical toolchain. Results are not CI-equivalent.\n' \
+    "$tool" "$expected" "$actual" >&2
+}
 
 backend_python() (
   unset PYTHONPATH PYTHONHOME PYTHONUSERBASE UV_ENV_FILE
@@ -84,25 +103,39 @@ check_backend_tools() {
   BACKEND_TOOL_ROOT="$(mktemp -d /tmp/ch-verify-tools.XXXXXX)"
   mkdir -p "$BACKEND_TOOL_ROOT"/{home,tmp,config,state,cache,hub,hub-state,cwd}
   printf 'Backend provenance evidence: %s\n' "$BACKEND_TOOL_ROOT"
-  local expected_uv actual_uv
+  local expected_uv expected_python actual_uv actual_python
+  local version_reader='import json, sys; value = json.load(sys.stdin)["python"]; print(value.strip() if isinstance(value, str) else "")'
   expected_uv="$(read_version .uv-version)"
-  actual_uv="$(backend_tool_command "$BACKEND_TOOL_ROOT/cwd" uv --version)"
-  [[ "$(printf '%s\n' "$actual_uv" | awk '{print $2}')" == "$expected_uv" ]] || fail "use uv $expected_uv"
+  actual_uv="$(backend_tool_command "$BACKEND_TOOL_ROOT/cwd" uv --version | awk '{print $2}')" || fail \
+    "could not read uv version"
+  [[ -n "$actual_uv" ]] || fail "could not read uv version"
+  check_tool_version uv "$expected_uv" "$actual_uv"
   backend_tool_command "$BACKEND_TOOL_ROOT/cwd" backend_python \
     "$ROOT/scripts/check_backend_environment.py" --root "$ROOT" \
     > "$BACKEND_TOOL_ROOT/provenance.json" || fail \
     "backend environment provenance failed; see $BACKEND_TOOL_ROOT"
+  expected_python="$(read_version .python-test-version)"
+  actual_python="$(backend_tool_command "$BACKEND_TOOL_ROOT/cwd" backend_python \
+    -c "$version_reader" < "$BACKEND_TOOL_ROOT/provenance.json")" || fail \
+    "could not read Python version"
+  [[ -n "$actual_python" ]] || fail "could not read Python version"
+  check_tool_version Python "$expected_python" "$actual_python"
 }
 
 check_frontend_tools() {
   require_command node
   require_command pnpm
-  local expected_node expected_pnpm
+  local expected_node expected_pnpm actual_node actual_pnpm
   expected_node="$(read_version .node-test-version)"
-  [[ "$(node --version)" == "v$expected_node" ]] || fail "use Node $expected_node"
+  actual_node="$(node --version)" || fail "could not read node version"
+  [[ -n "$actual_node" ]] || fail "could not read node version"
+  check_tool_version Node "v$expected_node" "$actual_node"
   expected_pnpm="$(node -p "require(process.argv[1]).packageManager.split('@').at(-1)" \
-    "$ROOT/frontend/package.json")"
-  [[ "$(pnpm --version)" == "$expected_pnpm" ]] || fail "use pnpm $expected_pnpm"
+    "$ROOT/frontend/package.json")" || fail "could not read declared pnpm version"
+  [[ -n "$expected_pnpm" ]] || fail "could not read declared pnpm version"
+  actual_pnpm="$(pnpm --version)" || fail "could not read pnpm version"
+  [[ -n "$actual_pnpm" ]] || fail "could not read pnpm version"
+  check_tool_version pnpm "$expected_pnpm" "$actual_pnpm"
   [[ -d "$ROOT/frontend/node_modules" ]] || fail "install locked frontend dependencies first"
 }
 
@@ -229,8 +262,11 @@ run_terminal_hmr() {
 }
 
 run_browser_mocks() {
-  check_backend_tools
-  check_frontend_tools
+  # The Python browser runner also enforces exact Python/Node/Playwright pins.
+  # Reject drift here so local users get one consistent gate, not a warning
+  # followed by a failure in the Python browser runner.
+  CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 check_backend_tools
+  CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 check_frontend_tools
   [[ -n "${CLAUDE_HUB_BROWSER_EXECUTABLE:-}" ]] || fail \
     "set CLAUDE_HUB_BROWSER_EXECUTABLE to an existing absolute browser executable"
   local parent evidence

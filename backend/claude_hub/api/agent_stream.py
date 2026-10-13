@@ -57,6 +57,7 @@ from ..models import (
 from ..models.schemas import TaskExecutionControl, TaskExecutionReference
 from ..services import ttyd_manager, workspace_manager
 from ..services.agent_stream import (
+    ExternalTurnRetirement,
     StructuredSourceUnavailable,
     TailerManager,
     get_adapter_for_session,
@@ -1147,15 +1148,15 @@ def _parse_data_url(data_url: str) -> Tuple[str, bytes]:
 
 def _decode_attachments(
     attachments: List[AgentStreamAttachment],
-) -> Tuple[List[bytes], Optional[List[bytes]]]:
+) -> Tuple[List[bytes], Optional[List[Optional[bytes]]]]:
     """Decode data-URL attachments into ``(originals, previews)``.
 
-    Returns a list of original bytes and either a list of preview bytes (one
-    per original) or ``None`` if no previews were supplied.
+    Returns a list of original bytes and either a list of optional preview
+    bytes (one slot per original) or ``None`` if no previews were supplied.
 
-    Previews are all-or-nothing: either every attachment has a
-    ``preview_data_url`` or ``preview_is_original``, or none do. Mixed
-    presence, or both on one attachment, is rejected with 400.
+    Preview presence may be mixed so an oversized image does not suppress
+    safe previews for the other images in the turn. Setting both preview
+    forms on one attachment is rejected with 400.
     When previews are absent, ``previews`` is ``None`` so the tailer emits
     placeholder metadata and never persists original bytes.
 
@@ -1184,7 +1185,7 @@ def _decode_attachments(
         )
 
     originals: List[bytes] = []
-    previews: List[bytes] = []
+    previews: List[Optional[bytes]] = []
     for att in attachments:
         if att.preview_is_original and att.preview_data_url is not None:
             raise HTTPException(
@@ -1195,11 +1196,6 @@ def _decode_attachments(
                 ),
             )
     has_previews = [a.preview_data_url is not None or a.preview_is_original for a in attachments]
-    if any(has_previews) and not all(has_previews):
-        raise HTTPException(
-            status_code=400,
-            detail="attachments must either all include previews or none",
-        )
     any_preview = any(has_previews)
 
     total_bytes = 0
@@ -1255,7 +1251,7 @@ def _decode_attachments(
         # different format to meet the size cap.
         if att.preview_is_original:
             previews.append(original)
-        elif any_preview:
+        elif att.preview_data_url is not None:
             prev_mime, preview = _parse_data_url(att.preview_data_url)  # type: ignore[arg-type]
             if len(preview) > _MAX_ATTACHMENT_BYTES:
                 raise HTTPException(
@@ -1293,6 +1289,8 @@ def _decode_attachments(
                     ),
                 )
             previews.append(preview)
+        elif any_preview:
+            previews.append(None)
 
     return originals, (previews if any_preview else None)
 
@@ -1388,13 +1386,17 @@ async def _send_to_native(
 
 
 CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
-_EXTERNAL_CANCEL_TIMEOUT_SECONDS = 10.0
+_EXTERNAL_SHUTDOWN_CANCEL_TIMEOUT_SECONDS = 10.0
 
 _ChatAdmissionGuard = Callable[[], AbstractAsyncContextManager[None]]
 
 
 class ExternalDispatchRetired(asyncio.CancelledError):
     """Cancellation after the matching turn is stopped or never started."""
+
+
+class ExternalInteractionRequired(RuntimeError):
+    """The external turn was stopped because it needs Web Chat input."""
 
 
 def _map_send_exception(exc: Exception) -> HTTPException:
@@ -1562,7 +1564,7 @@ async def dispatch_tab_chat_and_wait(
     visible_text: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
     attachments: Optional[List[AgentStreamAttachment]] = None,
-    timeout_seconds: float = 300.0,
+    timeout_seconds: float | None = None,
     admission_guard: Optional[_ChatAdmissionGuard] = None,
 ) -> str:
     """Send through an existing Chat tab and return its completed assistant text.
@@ -1583,7 +1585,7 @@ async def dispatch_tab_chat_and_wait(
     last_error = ""
     try:
         try:
-            queue = await manager.subscribe(session)
+            queue = await manager.subscribe_completion(session)
             dispatch_options: Dict[str, Any] = {
                 "visible_text": visible_text,
                 "turn_metadata": turn_metadata,
@@ -1610,24 +1612,58 @@ async def dispatch_tab_chat_and_wait(
             raise
         except Exception as exc:
             raise _map_send_exception(exc) from exc
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
+        if timeout_seconds is None:
+            loop = None
+            deadline = None
+        else:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout_seconds
         while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                await manager.cancel_turn(session, expected_turn_id=expected_turn_id)
-                raise TimeoutError(
-                    f"Chat turn {expected_turn_id} did not complete within {timeout_seconds} seconds"
-                )
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=remaining)
-            except asyncio.TimeoutError as exc:
-                await manager.cancel_turn(session, expected_turn_id=expected_turn_id)
-                raise TimeoutError(
-                    f"Chat turn {expected_turn_id} did not complete within {timeout_seconds} seconds"
-                ) from exc
+            if deadline is None:
+                event = await queue.get()
+            else:
+                assert loop is not None
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    await manager.cancel_turn(session, expected_turn_id=expected_turn_id)
+                    raise TimeoutError(
+                        f"Chat turn {expected_turn_id} did not complete within "
+                        f"{timeout_seconds} seconds"
+                    )
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError as exc:
+                    await manager.cancel_turn(session, expected_turn_id=expected_turn_id)
+                    raise TimeoutError(
+                        f"Chat turn {expected_turn_id} did not complete within "
+                        f"{timeout_seconds} seconds"
+                    ) from exc
             if event.turn_id != expected_turn_id:
                 continue
+            if event.type == AgentStreamEventType.APPROVAL_REQUIRED:
+                # Feishu cannot submit the structured answer required by this
+                # provider turn. Leaving the card open would permanently own
+                # the per-Chat FIFO, so stop the exact turn and direct the user
+                # to Web Chat instead. Provider-native interruption already
+                # bounds each RPC and may need its full grace period before a
+                # kill/restart fallback. Do not wrap the whole retirement in
+                # that same deadline or cancel the recovery just as it starts.
+                try:
+                    retirement = await manager.retire_external_turn(
+                        session, expected_turn_id=expected_turn_id
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Chat turn requires Web Chat interaction and could not be stopped"
+                    ) from exc
+                if retirement != ExternalTurnRetirement.CANCELLED_MATCHING:
+                    raise RuntimeError(
+                        "Chat turn requires Web Chat interaction but its provider "
+                        f"stop was not confirmed ({retirement.value})"
+                    )
+                raise ExternalInteractionRequired(
+                    "Chat turn requires an approval or answer in Web Chat"
+                )
             if event.type == AgentStreamEventType.ERROR:
                 message = event.payload.get("message")
                 if isinstance(message, str):
@@ -1637,7 +1673,12 @@ async def dispatch_tab_chat_and_wait(
                 continue
             status_value = event.payload.get("status")
             if status_value not in {None, "completed", "success"}:
-                raise RuntimeError(last_error or f"Chat turn ended with status {status_value}")
+                error_message = event.payload.get("error_message")
+                raise RuntimeError(
+                    last_error
+                    or (error_message if isinstance(error_message, str) else "")
+                    or f"Chat turn ended with status {status_value}"
+                )
             assistant_text = event.payload.get("assistant_text")
             if not isinstance(assistant_text, str) or not assistant_text.strip():
                 raise RuntimeError(last_error or "Chat turn completed without assistant text")
@@ -1651,7 +1692,7 @@ async def dispatch_tab_chat_and_wait(
             try:
                 retirement = await asyncio.wait_for(
                     manager.retire_external_turn(session, expected_turn_id=expected_turn_id),
-                    timeout=_EXTERNAL_CANCEL_TIMEOUT_SECONDS,
+                    timeout=_EXTERNAL_SHUTDOWN_CANCEL_TIMEOUT_SECONDS,
                 )
             except Exception:
                 logger.exception(
@@ -1669,7 +1710,7 @@ async def dispatch_tab_chat_and_wait(
         raise
     finally:
         if queue is not None:
-            manager.unsubscribe(session.id, queue)
+            manager.unsubscribe_completion(session.id, queue)
 
 
 @router.post("/tabs/{tab_id}/stream/send")
@@ -2160,6 +2201,7 @@ async def get_tab_quoted_image(
 __all__ = [
     "CHAT_ERROR_REASON_HEADER",
     "ExternalDispatchRetired",
+    "ExternalInteractionRequired",
     "dispatch_tab_chat_and_wait",
     "router",
     "_reset_tailer_manager",

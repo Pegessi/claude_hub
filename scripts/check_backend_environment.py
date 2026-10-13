@@ -22,14 +22,12 @@ PACKAGES = {
 
 
 def inspect_environment(root: Path) -> dict[str, Any]:
+    """Validate source locations; verify.sh owns declared-version policy."""
     root = root.resolve(strict=True)
     backend = root / "backend"
     expected_prefix = (backend / ".venv").resolve(strict=True)
     prefix = Path(sys.prefix).resolve(strict=True)
     executable = Path(sys.executable)
-    expected_python = (root / ".python-test-version").read_text().strip()
-    if platform.python_version() != expected_python:
-        raise ValueError(f"use declared Python {expected_python}")
     if not sys.flags.isolated:
         raise ValueError("backend provenance must run with Python -I")
     if prefix != expected_prefix or prefix == Path(sys.base_prefix).resolve():

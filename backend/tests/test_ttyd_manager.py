@@ -5604,6 +5604,42 @@ async def test_fork_tab_rejected_when_fork_cap_reached(
 
 
 @pytest.mark.asyncio
+async def test_create_tab_limit_counts_only_live_tabs(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Archived tabs hold no runtime, so they do not block new live tabs."""
+    from claude_hub.config import settings
+
+    manager = _make_fork_test_manager(monkeypatch, tmp_path, start_port=13050)
+    monkeypatch.setattr(settings, "max_total_tabs", 2)
+    for index in range(3):
+        archived = await manager.create_tab(
+            name=f"Archived {index}",
+            shell="/bin/zsh",
+            cwd=str(tmp_path),
+            session_kind=SessionKind.CHAT,
+        )
+        manager.processes[archived.id].archived = True
+
+    for index in range(2):
+        assert await manager.create_tab(
+            name=f"Live {index}",
+            shell="/bin/zsh",
+            cwd=str(tmp_path),
+            session_kind=SessionKind.CHAT,
+        )
+
+    with pytest.raises(TabLimitExceededError, match="live tab limit reached"):
+        await manager.create_tab(
+            name="Over limit",
+            shell="/bin/zsh",
+            cwd=str(tmp_path),
+            session_kind=SessionKind.CHAT,
+        )
+    assert len(manager.processes) == 5
+
+
+@pytest.mark.asyncio
 async def test_fork_tab_cleans_up_orphan_on_replace_all_failure(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -5785,6 +5821,36 @@ async def test_unarchive_tab_clears_flag(monkeypatch: MonkeyPatch, tmp_path: Pat
     assert result.archived_at is None
     assert process.archived is False
     assert process.archived_at is None
+
+
+@pytest.mark.asyncio
+async def test_unarchive_tab_rejected_at_live_tab_limit(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.config import settings
+
+    manager, process = _make_archive_test_manager(monkeypatch, tmp_path, archived=True)
+    process.archived_at = datetime.now()
+    live = TTYDProcess(
+        tab_id="live-tab",
+        port=14002,
+        name="Live",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    manager.processes[live.tab_id] = live
+    monkeypatch.setattr(settings, "max_total_tabs", 1)
+
+    async def fail_ensure_tab_running(self: TTYDManager, tab_id: str) -> None:
+        raise AssertionError("a rejected unarchive must not start the runtime")
+
+    monkeypatch.setattr(TTYDManager, "ensure_tab_running", fail_ensure_tab_running)
+
+    with pytest.raises(TabLimitExceededError, match="live tab limit reached"):
+        await manager.unarchive_tab("archive-tab")
+
+    assert process.archived is True
+    assert process.archived_at is not None
 
 
 @pytest.mark.asyncio
