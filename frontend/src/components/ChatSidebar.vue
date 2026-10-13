@@ -1314,14 +1314,17 @@ watch(mobileDrawerOpen, isOpen => {
   background: var(--ch-color-text-subtle);
 }
 
-/* A completed turn that has not been opened becomes a quiet success badge.
-   The checkmark keeps "completed" legible in a still frame; the restrained
-   outline breath only reinforces that the result is still unread. */
+/* An unread completed turn keeps the explicit success treatment, but occupies
+   the same 8px slot as every other status light. The compact checkmark carries
+   "completed" while the tight pulse reinforces that it is still unread. */
 .chat-sidebar__item-status[data-status='idle'][data-unread='true'] {
-  width: 12px;
-  height: 12px;
-  margin-inline: -2px;
-  background: color-mix(in srgb, var(--ch-color-success) 14%, var(--ch-color-sidebar-bg));
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--ch-color-success);
+  background: var(--ch-color-success-strong);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--ch-color-success) 36%, transparent),
+    0 0 8px color-mix(in srgb, var(--ch-color-success) 42%, transparent);
 }
 
 .chat-sidebar__item-status[data-status='idle'][data-unread='true']::before {
@@ -1330,25 +1333,25 @@ watch(mobileDrawerOpen, isOpen => {
   inset: 0;
   display: grid;
   place-items: center;
-  color: var(--ch-color-success-strong);
-  font-size: 8px;
-  font-weight: 800;
+  color: var(--ch-color-sidebar-bg);
+  font-size: 6px;
+  font-weight: 900;
   line-height: 1;
 }
 
 .chat-sidebar__item-status[data-status='idle'][data-unread='true']::after {
   content: '';
   position: absolute;
-  inset: -2px;
-  border: 1px solid color-mix(in srgb, var(--ch-color-success) 58%, var(--ch-color-sidebar-bg));
+  inset: -3px;
+  border: 1px solid color-mix(in srgb, var(--ch-color-success) 72%, transparent);
   border-radius: 50%;
   pointer-events: none;
-  animation: sidebar-complete-unread-breathe 2.6s ease-in-out infinite;
+  animation: sidebar-complete-unread-pulse 1.8s cubic-bezier(0.2, 0, 0, 1) infinite;
 }
 
-@keyframes sidebar-complete-unread-breathe {
-  0%, 100% { transform: scale(0.96); opacity: 0.28; }
-  50% { transform: scale(1.06); opacity: 0.55; }
+@keyframes sidebar-complete-unread-pulse {
+  0% { transform: scale(0.78); opacity: 0.9; }
+  72%, 100% { transform: scale(1.18); opacity: 0.08; }
 }
 
 @media (prefers-reduced-motion: reduce) {
