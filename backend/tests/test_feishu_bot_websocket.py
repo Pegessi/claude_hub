@@ -602,6 +602,145 @@ def test_sdk_message_is_normalized_without_callback_secrets() -> None:
     assert event.chat_id == "oc-1"
     assert event.text == "hello"
     assert event.message_created_at_ms == 1_700_000_000_000
+    assert event.chat_type == "p2p"
+
+
+def test_sdk_group_topic_message_requires_and_strips_the_current_bot_mention() -> None:
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="evt-topic", app_id="cli-a"),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user", sender_id=SimpleNamespace(open_id="ou-user")
+            ),
+            message=SimpleNamespace(
+                message_id="om-topic",
+                chat_id="oc-topic-group",
+                chat_type="group",
+                thread_id="omt-topic",
+                message_type="text",
+                create_time="1700000000000",
+                content=json.dumps({"text": "@_user_1 请继续执行"}, ensure_ascii=False),
+                mentions=[
+                    SimpleNamespace(
+                        key="@_user_1",
+                        id=SimpleNamespace(open_id="ou-current-bot"),
+                        name="包老师",
+                    )
+                ],
+            ),
+        ),
+    )
+
+    event = message_event_from_sdk(
+        data,
+        expected_app_id="cli-a",
+        expected_bot_open_id="ou-current-bot",
+    )
+
+    assert event.chat_type == "group"
+    assert event.text == "请继续执行"
+
+    with pytest.raises(ValueError, match="mention this Bot"):
+        message_event_from_sdk(
+            data,
+            expected_app_id="cli-a",
+            expected_bot_open_id="ou-another-bot",
+        )
+
+
+def test_sdk_group_text_does_not_strip_a_longer_other_user_mention_key() -> None:
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="evt-topic-prefix", app_id="cli-a"),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user", sender_id=SimpleNamespace(open_id="ou-user")
+            ),
+            message=SimpleNamespace(
+                message_id="om-topic-prefix",
+                chat_id="oc-topic-group",
+                chat_type="group",
+                thread_id="omt-topic",
+                message_type="text",
+                create_time="1700000000000",
+                content=json.dumps({"text": "@_user_1 请与 @_user_10 协作"}, ensure_ascii=False),
+                mentions=[
+                    SimpleNamespace(
+                        key="@_user_1",
+                        id=SimpleNamespace(open_id="ou-current-bot"),
+                        name="包老师",
+                    ),
+                    SimpleNamespace(
+                        key="@_user_10",
+                        id=SimpleNamespace(open_id="ou-colleague"),
+                        name="同事",
+                    ),
+                ],
+            ),
+        ),
+    )
+
+    event = message_event_from_sdk(
+        data, expected_app_id="cli-a", expected_bot_open_id="ou-current-bot"
+    )
+
+    assert event.text == "请与 @_user_10 协作"
+
+
+def test_sdk_group_topic_post_strips_only_the_current_bot_at_node() -> None:
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="evt-topic-post", app_id="cli-a"),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user", sender_id=SimpleNamespace(open_id="ou-user")
+            ),
+            message=SimpleNamespace(
+                message_id="om-topic-post",
+                chat_id="oc-topic-group",
+                chat_type="group",
+                thread_id="omt-topic",
+                message_type="post",
+                create_time="1700000000000",
+                content=json.dumps(
+                    {
+                        "title": "",
+                        "content": [
+                            [
+                                {
+                                    "tag": "at",
+                                    "user_id": "ou-current-bot",
+                                    "user_name": "包老师",
+                                },
+                                {"tag": "text", "text": " 请和 "},
+                                {
+                                    "tag": "at",
+                                    "user_id": "ou-colleague",
+                                    "user_name": "同事",
+                                },
+                                {"tag": "text", "text": " 一起排查"},
+                            ]
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                mentions=[
+                    SimpleNamespace(
+                        key="@_user_1",
+                        id=SimpleNamespace(open_id="ou-current-bot"),
+                        name="包老师",
+                    )
+                ],
+            ),
+        ),
+    )
+
+    event = message_event_from_sdk(
+        data,
+        expected_app_id="cli-a",
+        expected_bot_open_id="ou-current-bot",
+    )
+
+    assert event.text == "请和 @同事 一起排查"
+    assert event.thread_id == "omt-topic"
 
 
 def test_sdk_post_message_preserves_rich_text_and_image_order() -> None:
@@ -623,6 +762,8 @@ def test_sdk_post_message_preserves_rich_text_and_image_order() -> None:
                         "content": [
                             [
                                 {"tag": "text", "text": "请看 "},
+                                {"tag": "at", "user_name": "同事"},
+                                {"tag": "text", "text": " 的 "},
                                 {
                                     "tag": "a",
                                     "text": "说明",
@@ -645,7 +786,8 @@ def test_sdk_post_message_preserves_rich_text_and_image_order() -> None:
     event = message_event_from_sdk(data, expected_app_id="cli-a")
 
     assert event.text == (
-        "# 排查请求\n\n请看 [说明](https://example.test/guide)\n" "【图片 1】 和这张图【图片 2】"
+        "# 排查请求\n\n请看 @同事 的 [说明](https://example.test/guide)\n"
+        "【图片 1】 和这张图【图片 2】"
     )
     assert event.image_keys == ("img_v3_first", "img_v3_second")
 

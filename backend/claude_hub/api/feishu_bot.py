@@ -9,6 +9,7 @@ import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -93,6 +94,7 @@ _BATCH_RETIREMENT_WAIT_SECONDS = 12.0
 _MAX_GATES = 256
 _MAX_TAB_DISPATCH_QUEUES = 256
 _MAX_TAB_QUEUE_WAITERS = 8
+_MAX_TAB_DISPATCH_CONTEXTS = 64
 _MESSAGE_COALESCE_QUIET_SECONDS = 1.0
 _MESSAGE_COALESCE_MAX_WAIT_SECONDS = 5.0
 _MAX_BATCH_IMAGE_ATTACHMENTS = 10
@@ -142,7 +144,9 @@ class _TabDispatchQueue:
     active: list[_TabDispatchItem]
     processor: _TabDispatchItem | None
     changed: asyncio.Event
-    has_dispatched: bool = False
+    dispatched_contexts: OrderedDict[tuple[str, str, str, str | None], None] = field(
+        default_factory=OrderedDict
+    )
 
     @property
     def waiters(self) -> list[asyncio.Future[None]]:
@@ -480,7 +484,7 @@ def _validated_profile(value: object, fallback_name: str) -> FeishuBotProfile:
 
     if isinstance(value, FeishuBotProfile):
         return value
-    return FeishuBotProfile(name=fallback_name, avatar_url=None)
+    return FeishuBotProfile(name=fallback_name, avatar_url=None, open_id=None)
 
 
 def _pool_response(user: User, *, focus_bot_id: str | None = None) -> FeishuBotPoolResponse:
@@ -625,6 +629,7 @@ async def create_feishu_bot(
                 config=candidate,
                 feishu_name=profile.name,
                 feishu_avatar_url=profile.avatar_url,
+                feishu_open_id=profile.open_id,
             )
         )
     await _reconcile_ws()
@@ -661,6 +666,7 @@ async def rotate_feishu_bot_secrets(
                 app_secret=candidate.app_secret,
                 feishu_name=profile.name,
                 feishu_avatar_url=profile.avatar_url,
+                feishu_open_id=profile.open_id,
                 expected_revision=expected_revision,
             )
         )
@@ -841,6 +847,8 @@ def _turn_metadata(effective: EffectiveBot, event: FeishuMessageEvent) -> dict[s
             "chat_id": event.chat_id,
             "message_id": event.message_id,
             "sender_open_id": event.sender_open_id,
+            "chat_type": event.chat_type,
+            "thread_id": event.thread_id,
         },
     }
 
@@ -914,9 +922,14 @@ async def _event_attachments(
 
 
 async def _refresh_missing_profile(
-    effective: EffectiveBot, client: FeishuBotClient
+    effective: EffectiveBot,
+    client: FeishuBotClient,
+    *,
+    require_open_id: bool = False,
 ) -> EffectiveBot:
-    if effective.feishu_name is not None:
+    if effective.feishu_name is not None and (
+        not require_open_id or effective.feishu_open_id is not None
+    ):
         return effective
     try:
         profile = await client.get_bot_profile()
@@ -936,6 +949,7 @@ async def _refresh_missing_profile(
                     effective.bot_id,
                     feishu_name=profile.name,
                     feishu_avatar_url=profile.avatar_url,
+                    feishu_open_id=profile.open_id,
                     expected_revision=profile_target.revision,
                 )
             except FeishuBotRevisionConflict:
@@ -977,6 +991,7 @@ async def _refresh_missing_profile(
             generation=profile_target.generation,
             feishu_name=profile.name,
             feishu_avatar_url=profile.avatar_url,
+            feishu_open_id=profile.open_id,
         )
 
     try:
@@ -998,6 +1013,7 @@ async def _refresh_missing_profile(
             generation=fallback.generation,
             feishu_name=fallback.feishu_name or fallback.name,
             feishu_avatar_url=fallback.feishu_avatar_url,
+            feishu_open_id=fallback.feishu_open_id,
         )
     return effective
 
@@ -1053,7 +1069,11 @@ async def _admit_batch_dispatch(
 
     async with _admit_binding_dispatch(effective, binding, event):
         yield
-    queue.has_dispatched = True
+    context = (effective.bot_id, binding.pairing_id, event.chat_id, event.thread_id)
+    queue.dispatched_contexts[context] = None
+    queue.dispatched_contexts.move_to_end(context)
+    while len(queue.dispatched_contexts) > _MAX_TAB_DISPATCH_CONTEXTS:
+        queue.dispatched_contexts.popitem(last=False)
 
 
 def _claim_still_live(bot_id: str, claim: PairingClaim) -> bool:
@@ -1089,14 +1109,28 @@ async def _reply_if_current(
             # An already-sent request cannot be recalled, so a timeout is never retried.
             if formatted:
                 payload = build_feishu_message_payload(text)
-                outbound = client.reply_message(
-                    event.message_id,
-                    payload.msg_type,
-                    payload.content,
-                    access_token=token,
-                )
+                if event.thread_id is not None:
+                    outbound = client.reply_message(
+                        event.message_id,
+                        payload.msg_type,
+                        payload.content,
+                        access_token=token,
+                        reply_in_thread=True,
+                    )
+                else:
+                    outbound = client.reply_message(
+                        event.message_id,
+                        payload.msg_type,
+                        payload.content,
+                        access_token=token,
+                    )
             else:
-                outbound = client.reply_text(event.message_id, text, access_token=token)
+                if event.thread_id is not None:
+                    outbound = client.reply_text(
+                        event.message_id, text, access_token=token, reply_in_thread=True
+                    )
+                else:
+                    outbound = client.reply_text(event.message_id, text, access_token=token)
             await asyncio.wait_for(outbound, timeout=_OUTBOUND_POST_TIMEOUT_SECONDS)
             return True
     except Exception as exc:
@@ -1210,6 +1244,8 @@ def _batch_matches(first: _TabDispatchItem, candidate: _TabDispatchItem) -> bool
         and candidate.binding.pairing_id == first.binding.pairing_id
         and candidate.effective.generation == first.effective.generation
         and candidate.effective.revision == first.effective.revision
+        and candidate.event.chat_id == first.event.chat_id
+        and candidate.event.thread_id == first.event.thread_id
     )
 
 
@@ -1256,7 +1292,13 @@ async def _collect_tab_dispatch_batch(
         if not _batch_matches(leader, item):
             break
         candidates.append(item)
-    return candidates, queue.has_dispatched
+    context = (
+        leader.bot_id,
+        leader.binding.pairing_id,
+        leader.event.chat_id,
+        leader.event.thread_id,
+    )
+    return candidates, context in queue.dispatched_contexts
 
 
 def _claim_tab_dispatch_batch(
@@ -1488,15 +1530,19 @@ async def _handle_message_event(
         effective = await _refresh_missing_profile(effective, client)
         if not _pool.is_current(effective):
             return
-        code = _binding_code(event.text)
+        code = _binding_code(event.text) if event.chat_type == "p2p" else None
         if code is not None:
             if await _handle_pairing_code(bot_id, event, effective, client, code):
                 status_value = "completed"
             return
-        binding = _pool.routed_binding(
-            bot_id, sender_open_id=event.sender_open_id, chat_id=event.chat_id
+        binding = (
+            _pool.routed_binding(bot_id, sender_open_id=event.sender_open_id, chat_id=event.chat_id)
+            if event.chat_type == "p2p"
+            else _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
         )
         if binding is None:
+            if event.chat_type == "group":
+                return
             await _reply_if_current(
                 client,
                 event,
@@ -1599,7 +1645,16 @@ async def _handle_message_event(
 async def _handle_sdk_event(bot_id: str, data: Any) -> None:
     try:
         effective = _pool.effective(bot_id)
-        event = message_event_from_sdk(data, expected_app_id=effective.app_id)
+        message = getattr(getattr(data, "event", None), "message", None)
+        if getattr(message, "chat_type", None) == "group":
+            effective = await _refresh_missing_profile(
+                effective, FeishuBotClient(effective.config), require_open_id=True
+            )
+        event = message_event_from_sdk(
+            data,
+            expected_app_id=effective.app_id,
+            expected_bot_open_id=effective.feishu_open_id,
+        )
     except FeishuBotPoolError:
         return
     except ValueError as exc:

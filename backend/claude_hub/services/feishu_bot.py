@@ -43,6 +43,7 @@ class FeishuBotProfile:
 
     name: str
     avatar_url: str | None
+    open_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,8 @@ class FeishuMessageEvent:
     text: str
     message_created_at_ms: int
     image_keys: tuple[str, ...] = ()
+    chat_type: str = "p2p"
+    thread_id: str | None = None
 
 
 class FeishuBotClient:
@@ -180,6 +183,7 @@ class FeishuBotClient:
         content: Mapping[str, object],
         *,
         access_token: str | None = None,
+        reply_in_thread: bool = False,
     ) -> None:
         """Reply to one exact inbound message with any supported Feishu type."""
 
@@ -193,6 +197,7 @@ class FeishuBotClient:
             json={
                 "msg_type": msg_type,
                 "content": self._message_content(content),
+                **({"reply_in_thread": True} if reply_in_thread else {}),
             },
         )
         response.raise_for_status()
@@ -201,14 +206,25 @@ class FeishuBotClient:
             raise FeishuBotError("Feishu rejected the Bot reply")
 
     async def reply_text(
-        self, message_id: str, text: str, *, access_token: str | None = None
+        self,
+        message_id: str,
+        text: str,
+        *,
+        access_token: str | None = None,
+        reply_in_thread: bool = False,
     ) -> None:
         """Reply to one exact inbound message instead of a mutable chat target."""
 
         bounded = text.strip() or "Claude Hub completed without a text response."
         if len(bounded) > _MAX_REPLY_CHARS:
             bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
-        await self.reply_message(message_id, "text", {"text": bounded}, access_token=access_token)
+        await self.reply_message(
+            message_id,
+            "text",
+            {"text": bounded},
+            access_token=access_token,
+            reply_in_thread=reply_in_thread,
+        )
 
     async def add_reaction(
         self, message_id: str, emoji_type: str, *, access_token: str | None = None
@@ -267,6 +283,7 @@ class FeishuBotClient:
         bot = payload.get("bot") if isinstance(payload, dict) else None
         name = bot.get("app_name") if isinstance(bot, dict) else None
         avatar_url = bot.get("avatar_url") if isinstance(bot, dict) else None
+        open_id = bot.get("open_id") if isinstance(bot, dict) else None
         if payload.get("code") != 0 or not isinstance(name, str) or not name.strip():
             raise FeishuBotError("Feishu rejected the Bot info request")
         if avatar_url is not None and (
@@ -275,9 +292,12 @@ class FeishuBotClient:
             or not avatar_url.startswith("https://")
         ):
             avatar_url = None
+        if open_id is not None and (not isinstance(open_id, str) or not open_id.strip()):
+            open_id = None
         return FeishuBotProfile(
             name=name.strip(),
             avatar_url=avatar_url.strip() if isinstance(avatar_url, str) else None,
+            open_id=open_id.strip() if isinstance(open_id, str) else None,
         )
 
     async def validate_credentials(self) -> FeishuBotProfile:

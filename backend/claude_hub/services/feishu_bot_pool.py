@@ -189,6 +189,7 @@ class BotEntry:
     name: str
     feishu_name: str | None
     feishu_avatar_url: str | None
+    feishu_open_id: str | None
     app_id: str
     source: str
     enabled: bool
@@ -228,6 +229,7 @@ class EffectiveBot:
     generation: int
     feishu_name: str | None
     feishu_avatar_url: str | None
+    feishu_open_id: str | None
 
 
 def _state_error(name: str) -> FeishuBotPoolStateError:
@@ -664,6 +666,9 @@ class FeishuBotPoolStore:
                 "feishu_avatar_url",
                 limit=_MAX_SECRET_CHARS,
             ),
+            feishu_open_id=_as_optional_text(
+                raw.get("feishu_open_id"), "feishu_open_id", limit=_MAX_ID_CHARS
+            ),
             app_id=(config.app_id if config is not None else str(raw.get("app_id") or "")),
             source=source,
             enabled=_as_bool(raw.get("enabled"), "enabled"),
@@ -731,6 +736,7 @@ class FeishuBotPoolStore:
             generation=entry.generation,
             feishu_name=entry.feishu_name,
             feishu_avatar_url=entry.feishu_avatar_url,
+            feishu_open_id=entry.feishu_open_id,
         )
 
     def is_current(self, effective: EffectiveBot, environ: Mapping[str, str] | None = None) -> bool:
@@ -820,6 +826,7 @@ class FeishuBotPoolStore:
         raw["app_id"] = app_id
         raw["feishu_name"] = None
         raw["feishu_avatar_url"] = None
+        raw["feishu_open_id"] = None
         self._advance_generation(raw)
         self._touch(raw, now)
         return True
@@ -875,6 +882,7 @@ class FeishuBotPoolStore:
         config: FeishuBotConfig,
         feishu_name: str | None = None,
         feishu_avatar_url: str | None = None,
+        feishu_open_id: str | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> str:
         now = self._now()
@@ -892,6 +900,7 @@ class FeishuBotPoolStore:
             raw["credentials"] = {"app_secret": config.app_secret}
             raw["feishu_name"] = feishu_name
             raw["feishu_avatar_url"] = feishu_avatar_url
+            raw["feishu_open_id"] = feishu_open_id
             state["bots"][bot_id] = raw
             self._save(state)
             return bot_id
@@ -903,6 +912,7 @@ class FeishuBotPoolStore:
         app_secret: str,
         feishu_name: str | None = None,
         feishu_avatar_url: str | None = None,
+        feishu_open_id: str | None = None,
         expected_revision: int,
         environ: Mapping[str, str] | None = None,
     ) -> None:
@@ -925,6 +935,7 @@ class FeishuBotPoolStore:
             raw["credentials"] = {"app_secret": app_secret}
             raw["feishu_name"] = feishu_name
             raw["feishu_avatar_url"] = feishu_avatar_url
+            raw["feishu_open_id"] = feishu_open_id
             self._touch(raw, now)
             self._save(state)
 
@@ -934,6 +945,7 @@ class FeishuBotPoolStore:
         *,
         feishu_name: str,
         feishu_avatar_url: str | None,
+        feishu_open_id: str | None = None,
         expected_revision: int,
         environ: Mapping[str, str] | None = None,
     ) -> None:
@@ -949,10 +961,12 @@ class FeishuBotPoolStore:
             if (
                 raw.get("feishu_name") == feishu_name
                 and raw.get("feishu_avatar_url") == feishu_avatar_url
+                and raw.get("feishu_open_id") == feishu_open_id
             ):
                 return
             raw["feishu_name"] = feishu_name
             raw["feishu_avatar_url"] = feishu_avatar_url
+            raw["feishu_open_id"] = feishu_open_id
             raw["updated_at"] = now
             self._save(state)
 
@@ -1230,6 +1244,37 @@ class FeishuBotPoolStore:
         if not hmac.compare_digest(binding.sender_open_id, sender_open_id):
             return None
         if not hmac.compare_digest(binding.chat_id, chat_id):
+            return None
+        return binding
+
+    def routed_binding_for_sender(
+        self,
+        bot_id: str,
+        *,
+        sender_open_id: str,
+        environ: Mapping[str, str] | None = None,
+    ) -> BotBinding | None:
+        """Resolve a group mention through the sender's existing p2p binding.
+
+        A Bot has at most one active binding, so an exact sender match is
+        unambiguous. The group ``chat_id`` is deliberately not persisted or
+        trusted as pairing authority.
+        """
+
+        now = self._now()
+        env_config = environment_config(environ)
+        with self._lock:
+            state = self._load_synced(environ, now)
+            raw = state["bots"].get(bot_id)
+        if not isinstance(raw, dict) or raw.get("revoked_at"):
+            return None
+        entry = self._entry_view(
+            bot_id, raw, env_config, now, env_seen=environment_present(environ)
+        )
+        binding = entry.binding
+        if binding is None or not entry.enabled:
+            return None
+        if not hmac.compare_digest(binding.sender_open_id, sender_open_id):
             return None
         return binding
 
