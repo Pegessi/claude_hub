@@ -453,7 +453,6 @@ const {
   box-shadow: var(--ch-shadow-button-primary);
 }
 
-.form-row > label,
 .form-row > .modal-field {
   flex: 1;
 }
@@ -532,8 +531,7 @@ const {
 }
 
 .attachment-meta strong,
-.attachment-meta span,
-.attachment-meta code {
+.attachment-meta span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -545,8 +543,7 @@ const {
   font-size: 12px;
 }
 
-.attachment-meta span,
-.attachment-meta code {
+.attachment-meta span {
   color: var(--ch-color-text-muted);
   font-size: 11px;
 }
@@ -648,17 +645,6 @@ const {
   line-height: 1.35;
 }
 
-.modal-field .env-textarea-preview {
-  margin-top: 8px;
-  width: 100%;
-  resize: none;
-  min-height: 60px;
-  opacity: 0.75;
-  cursor: default;
-  white-space: pre-wrap;
-  font-family: var(--ch-font-mono) !important;
-}
-
 .segmented-control {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -739,10 +725,6 @@ const {
 
 .modal-actions button {
   white-space: nowrap;
-}
-
-.modal-actions .workspace-delete-button {
-  margin-right: auto;
 }
 
 @media (max-width: 760px) {

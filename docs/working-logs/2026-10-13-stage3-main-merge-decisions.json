@@ -1,0 +1,253 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "e2dc06de3ec7906c24f8ab7b53cb8fa1c7e801c0",
+  "parents": [
+    "c8d57876e6724f4ff816445197df7200425afca9",
+    "77c13c018ca9d68ece96979e94c141d1f1472d52"
+  ],
+  "base": "7971b727815822e49953739d85ea7987923982b6",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "f171164f1d886351340db22f8549bc289f5707c0",
+  "reconstructed_tree": "e0b4d3a1b47c8dd7c26ab2eaf7a6a50a87a9c5fc",
+  "conflicts": [
+    "CHANGELOG.md",
+    "scripts/verify.sh"
+  ],
+  "decisions": [
+    {
+      "path": "AGENTS.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fff321649d3cb4424019226853f79e9d09a0a86a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d1ae621d46f23f47a98750a7b6ad36f3926fa60b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fff321649d3cb4424019226853f79e9d09a0a86a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d1ae621d46f23f47a98750a7b6ad36f3926fa60b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "61f9d6a5cff9c27a6a120411b0dd98be2eff98c0"
+      },
+      "reason": "Retain the Stage 3 navigation and checks; clarify that CI and explicit strict mode, rather than all local runs, enforce declared versions.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "811d1f05efe58168b50a1f61f1d39bce1c1a6c4c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "65f2c3d2d4b28d1a346acb3967cef95b91617aee"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2f52bd6cef931ae984e6112304a650185290f326"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1ed91c868b91fe49e92b62a339a01eaf798c82a8"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "999aae390fc27fae2dd07e36155222fd61a470db"
+      },
+      "reason": "Retain both parents' Unreleased entries; resolve only their overlapping insertion point.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "CLAUDE.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fff321649d3cb4424019226853f79e9d09a0a86a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d1ae621d46f23f47a98750a7b6ad36f3926fa60b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fff321649d3cb4424019226853f79e9d09a0a86a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d1ae621d46f23f47a98750a7b6ad36f3926fa60b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "61f9d6a5cff9c27a6a120411b0dd98be2eff98c0"
+      },
+      "reason": "Keep the entry guide byte-identical to AGENTS.md, including the merged strict-version policy.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2068ec5521ce2c73586b29294204c63eefc7774d"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2553cacac773fde8de1f67458d74e42ed648741b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "248b4e7e494a60a35f0086d4434d95921ccd152d"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3cfdfd9f43c579d150d0d0e72ae45116147d24b6"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "32d8c94291a84e1a1aab2bd008bdc01b8a8b9d9a"
+      },
+      "reason": "Preserve upstream local-warning and strict-mode guidance plus Stage 3 provenance and fixed-merge instructions; state that version drift never relaxes source checks.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_check_backend_environment.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "15dac8b41eb164cfa1be6b6940daf73d0358add2"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "15dac8b41eb164cfa1be6b6940daf73d0358add2"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "34e702232d29f5612a33461c7a8bd61cd0c47bb6"
+      },
+      "reason": "Move the version-policy expectation out of the source checker. Exercise every source-location rejection at matching and drifting versions, and verify actual drift is reported.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_verify_entrypoint.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6559a05e024b55e53be5206e1118eb46c9589f12"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b4b7adf9cc5cd04eb7ecee015489c36ef487dd99"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1d9790c1dc1a301732f39c9076945785aee977f2"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2616d595636a56461437ca3968b01193c31a3d9e"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5f81aa13746a24a97fe13e4d8ad813ba012279e4"
+      },
+      "reason": "Combine upstream version-mode tests with Stage 3 isolated invocation and evidence tests. Model the shared JSON version reader, reject invalid reports, and retain strict pnpm preflight for the HOME-isolation case.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "scripts/check_backend_environment.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0bf725d5523e067ec53a8c4fd4d7372006f07662"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0bf725d5523e067ec53a8c4fd4d7372006f07662"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5b8aee93c639d06ccc110254687d392c70d6023b"
+      },
+      "reason": "Report actual Python version while preserving every source-ownership check; the shared shell version policy now decides whether drift warns or fails.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "scripts/verify.sh",
+      "base": {
+        "mode": "100755",
+        "type": "blob",
+        "oid": "91c2194e1ccebabe40cb8e53d7e1559af74c9100"
+      },
+      "parent1": {
+        "mode": "100755",
+        "type": "blob",
+        "oid": "9e0d1f2ce1a299062563676119426f7b44e04ca6"
+      },
+      "parent2": {
+        "mode": "100755",
+        "type": "blob",
+        "oid": "5a5493c452f4d024c59b151b1a6265bb7297a778"
+      },
+      "reconstructed": {
+        "mode": "100755",
+        "type": "blob",
+        "oid": "10a77719ef1a018613012a804e32d0cf0b76d9a0"
+      },
+      "merged": {
+        "mode": "100755",
+        "type": "blob",
+        "oid": "a2ba40a438e2a0464fbb62f52cac4eef0b4a61a8"
+      },
+      "reason": "Keep upstream check_tool_version and strict browser policy together with Stage 3 private runtimes, -I, source checks, and explicit Git checks. Read Python version from the successful provenance report using the same isolated interpreter entry.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

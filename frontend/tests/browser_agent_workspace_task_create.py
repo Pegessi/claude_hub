@@ -7,6 +7,7 @@ Usage:
 """
 
 import asyncio
+import base64
 import json
 import re
 import sys
@@ -17,6 +18,19 @@ from browser_lifecycle import BrowserRun, run_browser_main
 from playwright.async_api import expect
 
 NOW = "2026-10-08T00:00:00Z"
+ATTACHMENT_FILENAME = "task-proof.png"
+ATTACHMENT_MIME_TYPE = "image/png"
+ATTACHMENT_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8A"
+    "AQUBAScY42YAAAAASUVORK5CYII="
+)
+ATTACHMENT_DATA_URL = f"data:{ATTACHMENT_MIME_TYPE};base64,{ATTACHMENT_BASE64}"
+ATTACHMENT_BYTES = base64.b64decode(ATTACHMENT_BASE64, validate=True)
+EXPECTED_ATTACHMENT_CREATE = {
+    "filename": ATTACHMENT_FILENAME,
+    "mime_type": ATTACHMENT_MIME_TYPE,
+    "data_url": ATTACHMENT_DATA_URL,
+}
 CAPABILITIES = {
     "supported_execution_controls": ["workspace", "initiator"],
     "progress_states": [
@@ -153,16 +167,34 @@ async def main(browser_run: BrowserRun) -> None:
 
     def task_from_create(workspace_id: str, body: dict) -> dict:
         nonlocal next_task_id
+        task_id = f"created-{next_task_id}"
         task = task_fixture(
-            f"created-{next_task_id}",
+            task_id,
             workspace_id,
             body["title"],
             execution_control=body.get("execution_control", "workspace"),
             source=body.get("source"),
         )
         next_task_id += 1
+        persisted_attachments = []
+        for index, attachment in enumerate(body.get("attachments") or [], start=1):
+            prefix, separator, encoded = attachment["data_url"].partition(",")
+            assert separator == ","
+            assert prefix == f"data:{attachment['mime_type']};base64"
+            content = base64.b64decode(encoded, validate=True)
+            attachment_id = f"{task_id}-attachment-{index}"
+            persisted_attachments.append(
+                {
+                    "id": attachment_id,
+                    "filename": attachment["filename"],
+                    "mime_type": attachment["mime_type"],
+                    "path": f"/fixture/attachments/{attachment_id}-{attachment['filename']}",
+                    "size_bytes": len(content),
+                }
+            )
         task.update(
             prompt=body["prompt"],
+            attachments=persisted_attachments,
             agent_type=body.get("agent_type", "codex"),
             task_mode=body.get("task_mode", "reviewed"),
             execution_complexity=body.get("execution_complexity", "auto"),
@@ -352,6 +384,9 @@ async def main(browser_run: BrowserRun) -> None:
                         if item["workspace_id"] == workspace_id
                         and item["body"].get("request_key") == request_key
                     ]
+                    if mode == "network_error_once" and len(matching_calls) == 1:
+                        await route.abort("connectionreset")
+                        return
                     if mode == "malformed_once" and len(matching_calls) == 1:
                         await route.fulfill(
                             status=201,
@@ -365,6 +400,7 @@ async def main(browser_run: BrowserRun) -> None:
                         "success",
                         "success_board_failure",
                         "malformed_once",
+                        "network_error_once",
                         "deferred",
                     }:
                         raise AssertionError(f"unknown create mode: {mode}")
@@ -453,6 +489,45 @@ async def main(browser_run: BrowserRun) -> None:
                 f"Description for {title}"
             )
 
+        async def paste_task_attachment(modal):
+            result = await modal.get_by_label("Task description", exact=True).evaluate(
+                """(textarea, attachment) => {
+                  const binary = atob(attachment.base64)
+                  const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+                  const file = new File([bytes], attachment.filename, {
+                    type: attachment.mimeType, lastModified: 0,
+                  })
+                  const transfer = new DataTransfer()
+                  transfer.items.add(file)
+                  const event = new ClipboardEvent('paste', {
+                    clipboardData: transfer, bubbles: true, cancelable: true,
+                  })
+                  textarea.dispatchEvent(event)
+                  return { defaultPrevented: event.defaultPrevented, fileSize: file.size }
+                }""",
+                {
+                    "base64": ATTACHMENT_BASE64,
+                    "filename": ATTACHMENT_FILENAME,
+                    "mimeType": ATTACHMENT_MIME_TYPE,
+                },
+            )
+            assert result == {"defaultPrevented": True, "fileSize": len(ATTACHMENT_BYTES)}
+            row = modal.locator(".attachment-row")
+            await expect(row).to_have_count(1)
+            await expect(row.locator("strong")).to_have_text(ATTACHMENT_FILENAME)
+            await expect(row.locator(".attachment-meta span")).to_have_text(
+                f"{ATTACHMENT_MIME_TYPE} · {len(ATTACHMENT_BYTES)} B"
+            )
+            image = row.locator("img")
+            await expect(image).to_have_attribute("src", ATTACHMENT_DATA_URL)
+            await expect(image).to_be_visible()
+            natural_size = await image.evaluate("""async element => {
+                await element.decode()
+                return [element.naturalWidth, element.naturalHeight]
+            }""")
+            assert natural_size == [1, 1], natural_size
+            return row
+
         async def switch_workspace(workspace_id: str) -> None:
             await workspace_select.select_option(workspace_id)
             await expect(workspace_select).to_have_value(workspace_id)
@@ -502,6 +577,90 @@ async def main(browser_run: BrowserRun) -> None:
             )
         ).to_be_visible()
         assert len(create_calls) == before + 1
+
+        # Exercise the real paste listener. Draft previews are cleared on close;
+        # the frozen request keeps its attachment through an uncertain result.
+        create_mode = "success"
+        modal = await open_add_task()
+        await modal.get_by_label("Title", exact=True).fill("Attachment draft closes cleanly")
+        description = modal.get_by_label("Task description", exact=True)
+        await expect(description).to_have_value("")
+        await paste_task_attachment(modal)
+        await expect(modal.get_by_role("button", name="Create Task", exact=True)).to_be_enabled()
+        draft_create_count = len(create_calls)
+        assert await load_create_attempt("ws-1") is None
+        await modal.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)
+        assert len(create_calls) == draft_create_count
+
+        modal = await open_add_task()
+        await expect(modal.get_by_label("Title", exact=True)).to_have_value("")
+        await expect(modal.get_by_label("Task description", exact=True)).to_have_value("")
+        await expect(modal.locator(".attachment-row")).to_have_count(0)
+        assert await load_create_attempt("ws-1") is None
+
+        await modal.get_by_label("Title", exact=True).fill("Attachment-only uncertain create")
+        await paste_task_attachment(modal)
+        await expect(modal.get_by_label("Task description", exact=True)).to_have_value("")
+        create_mode = "network_error_once"
+        before = len(create_calls)
+        await modal.get_by_role("button", name="Create Task", exact=True).click()
+        retry = modal.get_by_role("button", name="Retry saved request", exact=True)
+        await expect(retry).to_be_visible()
+        assert len(create_calls) == before + 1
+        first_attachment_call = create_calls[-1]
+        assert first_attachment_call["body"]["title"] == "Attachment-only uncertain create"
+        assert first_attachment_call["body"]["prompt"] == ""
+        assert first_attachment_call["body"]["attachments"] == [EXPECTED_ATTACHMENT_CREATE]
+        attachment_request_key = first_attachment_call["body"]["request_key"]
+        assert isinstance(attachment_request_key, str) and attachment_request_key
+        assert await load_create_attempt("ws-1") == {
+            "workspace_id": "ws-1",
+            "payload": first_attachment_call["body"],
+        }
+
+        await modal.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)
+        modal = await open_add_task()
+        await expect(
+            modal.get_by_text(
+                "“Attachment-only uncertain create” was not confirmed",
+                exact=True,
+            )
+        ).to_be_visible()
+        await expect(modal.locator(".attachment-row")).to_have_count(0)
+        assert await load_create_attempt("ws-1") == {
+            "workspace_id": "ws-1",
+            "payload": first_attachment_call["body"],
+        }
+
+        await modal.get_by_role("button", name="Retry saved request", exact=True).click()
+        await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)
+        assert len(create_calls) == before + 2
+        assert create_calls[-1]["body"] == first_attachment_call["body"]
+        assert create_calls[-1]["raw_body"] == first_attachment_call["raw_body"]
+        assert create_calls[-1]["body"]["request_key"] == attachment_request_key
+        assert create_calls[-1]["body"]["attachments"] == [EXPECTED_ATTACHMENT_CREATE]
+        assert await load_create_attempt("ws-1") is None
+
+        attachment_receipt = created_by_key[("ws-1", attachment_request_key)]
+        attachment_id = f"{attachment_receipt['id']}-attachment-1"
+        assert attachment_receipt["attachments"] == [
+            {
+                "id": attachment_id,
+                "filename": ATTACHMENT_FILENAME,
+                "mime_type": ATTACHMENT_MIME_TYPE,
+                "path": f"/fixture/attachments/{attachment_id}-{ATTACHMENT_FILENAME}",
+                "size_bytes": len(ATTACHMENT_BYTES),
+            }
+        ]
+        assert sum(task["id"] == attachment_receipt["id"] for task in board_tasks["ws-1"]) == 1
+        # Related-task options mention other titles; match the card's own heading.
+        attachment_card = page.locator(".task-card").filter(
+            has=page.get_by_role("heading", name="Attachment-only uncertain create", exact=True)
+        )
+        await expect(attachment_card).to_have_count(1)
+        await expect(attachment_card).to_be_visible()
 
         # A malformed success response leaves the modern request frozen.
         # Explicit recovery must send the byte-identical body and call key.
