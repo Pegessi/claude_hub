@@ -404,6 +404,7 @@ inferred from either field.
 | `claude` | Claude CLI terminal launch and native Chat transport |
 | `codex` | Codex CLI terminal launch and native app-server Chat transport |
 | `traex` | TraeX CLI launch and its Codex-compatible native Chat transport |
+| `maso` | Chat-only MASO session HTTP/SSE transport; no provider CLI process |
 | `cursor` | Cursor CLI terminal launch and native Chat transport; not GUI-only |
 | `terminal` | Plain shell; no native provider Chat transport |
 
@@ -419,7 +420,9 @@ Workspace-managed Task → workspace_manager dispatch/report/review lifecycle
 Initiator-managed Task → explicit progress/handoff; no implicit dispatch
 ```
 
-For provider behavior read `services/agent_stream/native.py`, the corresponding
+For MASO's HTTP session and condensation contract, read [MASO HTTP Chat](docs/MASO.md)
+and `services/agent_stream/maso_http.py` / `maso_events.py`.
+For other provider behavior read `services/agent_stream/native.py`, the corresponding
 adapter, and `tailer.py`; for Task control read `workspace_manager/_task_execution.py`.
 These are separate lifecycle owners even when they share a Workspace or tab.
 

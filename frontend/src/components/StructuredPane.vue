@@ -1678,6 +1678,7 @@ const MODEL_ENV_VAR: Record<string, string> = {
   // the collaborationMode.settings.model channel keyed off CODEX_MODEL.
   traex: 'CODEX_MODEL',
   cursor: 'CURSOR_MODEL',
+  maso: 'MASO_MODEL',
 }
 const REASONING_EFFORT_ENV: Record<string, string> = {
   codex: 'CODEX_REASONING_EFFORT',
@@ -1699,7 +1700,7 @@ const modelEnvVar = computed(() => {
 // Edit-resend truncates the provider's on-disk transcript, which is only wired
 // for providers whose rollout Hub can locate. TraeX transcripts live under
 // ~/.trae and are not wired this wave, so the control is hidden (it would 409).
-const supportsEditResend = computed(() => currentTab.value?.agent_type !== 'traex')
+const supportsEditResend = computed(() => ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? ''))
 const currentModel = computed(() => {
   const env = currentTab.value?.env ?? {}
   const key = modelEnvVar.value
@@ -1715,8 +1716,8 @@ const effectiveCurrentModel = computed(() => {
 const currentModelOption = computed(() =>
   modelOptions.value.find(model =>
     model.id === effectiveCurrentModel.value
-    || model.provider_model_id === currentModel.value
-    || model.supported_reasoning_efforts.some(effort => effort.provider_model_id === currentModel.value),
+    || model.provider_model_id === effectiveCurrentModel.value
+    || model.supported_reasoning_efforts.some(effort => effort.provider_model_id === effectiveCurrentModel.value),
   ) ?? null,
 )
 const currentModelLabel = computed(() => {
@@ -1734,6 +1735,11 @@ const reasoningEffortEnvVar = computed(() => {
   return at ? REASONING_EFFORT_ENV[at] ?? null : null
 })
 const currentReasoningEffort = computed(() => {
+  if (currentTab.value?.agent_type === 'maso') {
+    return currentModelOption.value?.supported_reasoning_efforts.find(
+      effort => effort.provider_model_id === effectiveCurrentModel.value,
+    )?.id ?? ''
+  }
   if (currentTab.value?.agent_type === 'cursor') {
     if (currentModel.value === currentModelOption.value?.provider_model_id) return ''
     return currentModelOption.value?.supported_reasoning_efforts.find(

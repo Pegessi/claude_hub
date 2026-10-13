@@ -130,6 +130,9 @@ class _SessionsMixin:
         if payload.ephemeral and payload.reuse_existing:
             raise ValueError("Cannot combine ephemeral with reuse_existing")
 
+        if payload.agent_type == AgentType.MASO:
+            raise ValueError("MASO is an HTTP Chat provider; open it as a standalone Chat")
+
         if payload.agent_type == AgentType.TRAEX:
             # TraeX is supported as a top-level terminal/Chat tab but not as a
             # managed workspace worker this wave (goal-packet / autonomous

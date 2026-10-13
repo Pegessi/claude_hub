@@ -36,6 +36,7 @@ class AgentType(str, Enum):
     CLAUDE = "claude"
     CODEX = "codex"
     TRAEX = "traex"
+    MASO = "maso"
     CURSOR = "cursor"
     TERMINAL = "terminal"
 
@@ -527,8 +528,12 @@ class TerminalTabBase(BaseModel):
 
     @model_validator(mode="after")
     def validate_session_kind(self) -> "TerminalTabBase":
+        if self.agent_type == AgentType.MASO and self.session_kind != SessionKind.CHAT:
+            raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
         if self.session_kind == SessionKind.CHAT and self.agent_type == AgentType.TERMINAL:
-            raise ValueError("Chat sessions require a Claude, Codex, TraeX, or Cursor provider")
+            raise ValueError(
+                "Chat sessions require a Claude, Codex, TraeX, Cursor, or MASO provider"
+            )
         if self.session_kind != SessionKind.CHAT and self.chat_mode != ChatMode.DEFAULT:
             raise ValueError("Chat modes are only available for Chat sessions")
         return self

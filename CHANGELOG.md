@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### feat(chat): connect MASO models through the session HTTP API
+
+- Add a MASO Chat provider with runtime model discovery and thinking variants,
+  HTTP message delivery, SSE text/tool output, confirmations and session resume.
+- Preserve Hub display history when MASO condenses its model context; complete
+  turns only when the main agent ends, with offset-based stream deduplication.
+- Fence cancelled streams, remove owned pending messages before abort, and retain
+  uncertain HTTP delivery identity across restarts without retrying a prompt.
+- Keep MASO on the local Chat surface and document its configuration and initial
+  capability boundaries in [MASO HTTP Chat](docs/MASO.md).
+
 ### test(task): cover attachment creation recovery after the boundary extraction
 
 - Exercise image paste, decoded previews and title-only Task creation through the

@@ -1,6 +1,6 @@
 """Full-app Chat composer acceptance with every API request mocked.
 
-Covers the interactions a user performs on the Chat page itself: typing and
+Covers MASO provider/model selection and the interactions a user performs on the Chat page itself: typing and
 sending a message, queueing a second one while a turn is in flight, stopping
 that turn, and recovering from a send that fails. The existing Chat scenarios
 check how finished conversations render; none of them drives the composer.
@@ -10,6 +10,7 @@ Run only with a dedicated Vite server, never 5173/8173:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -35,7 +36,7 @@ def event(sequence, event_type, payload, *, turn_id=TURN_ONE, message_id=None):
         "stream_sequence": sequence,
         "session_id": SESSION,
         "tab_id": TAB,
-        "agent_type": "codex",
+        "agent_type": "maso",
         "type": event_type,
         "turn_id": turn_id,
         "message_id": message_id,
@@ -50,7 +51,19 @@ def event(sequence, event_type, payload, *, turn_id=TURN_ONE, message_id=None):
 EVENTS = [
     event(1, "turn_started", {"summary": "First question"}),
     event(2, "text_delta", {"text": "First answer."}, message_id=f"{TURN_ONE}:assistant"),
-    event(3, "turn_completed", {"status": "completed"}, message_id=TURN_ONE),
+    event(
+        3,
+        "status",
+        {"text": "Condensing context…", "snapshot": True},
+        message_id="condense-1",
+    ),
+    event(
+        4,
+        "status",
+        {"text": "Context condensed", "snapshot": True},
+        message_id="condense-1",
+    ),
+    event(5, "turn_completed", {"status": "completed"}, message_id=TURN_ONE),
 ]
 
 
@@ -76,6 +89,20 @@ async def main(browser_run: BrowserRun) -> None:
     unexpected_external: list[str] = []
     sends: list[dict] = []
     interrupts: list[dict] = []
+    model_changes: list[dict] = []
+    tab = {
+        "id": TAB,
+        "name": "MASO composer fixture",
+        "agent_type": "maso",
+        "session_kind": "chat",
+        "is_active": True,
+        "created_at": NOW,
+        "workspace_id": None,
+        "workspace_name": None,
+        "workspace_role": None,
+        "archived": False,
+        "env": {},
+    }
     # Mutable stream state: sending appends events the way the backend would.
     # Keyed by text, not by call order: flushing the queue also issues a send,
     # and an order-based flag would be spent on the wrong request.
@@ -114,29 +141,42 @@ async def main(browser_run: BrowserRun) -> None:
 
             body: object
             if method == "GET" and path == "/api/tabs":
-                body = [
-                    {
-                        "id": TAB,
-                        "name": "Composer fixture",
-                        "agent_type": "codex",
-                        "session_kind": "chat",
-                        "is_active": True,
-                        "created_at": NOW,
-                        "workspace_id": None,
-                        "workspace_name": None,
-                        "workspace_role": None,
-                        "archived": False,
-                    }
-                ]
+                body = [tab]
             elif method == "GET" and path == f"{BASE}/capabilities":
                 body = {
                     "structured": True,
                     "send_message": True,
                     "supports_goals": False,
                     "supports_images": False,
-                    "agent_type": "codex",
+                    "agent_type": "maso",
                     "supports_mode_switch": False,
+                    "current_model": tab["env"].get("MASO_MODEL", "seed-high"),
+                    "available_models": [
+                        {
+                            "id": "seed",
+                            "label": "seed",
+                            "provider_model_id": "seed",
+                            "default_reasoning_effort": "none",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "none",
+                                    "label": "Disabled",
+                                    "provider_model_id": "seed",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "seed-high",
+                                },
+                            ],
+                        }
+                    ],
                 }
+            elif method == "POST" and path == f"/api/tabs/{TAB}/switch-env":
+                payload = json.loads(request.post_data or "{}")
+                model_changes.append(payload)
+                tab["env"] = payload["env"]
+                body = tab
             elif method == "GET" and path == f"{BASE}/events":
                 body = {
                     "events": state["events"],
@@ -175,7 +215,10 @@ async def main(browser_run: BrowserRun) -> None:
                     )
                 )
                 state["turn_open"] = True
-                body = {"client_turn_id": payload.get("client_turn_id"), "turn_id": turn_id}
+                body = {
+                    "client_turn_id": payload.get("client_turn_id"),
+                    "turn_id": turn_id,
+                }
             elif method == "POST" and path == f"{BASE}/cancel":
                 interrupts.append(json.loads(request.post_data or "{}"))
                 sequence = len(state["events"])
@@ -222,6 +265,8 @@ async def main(browser_run: BrowserRun) -> None:
                 # Read, one-shot pin migration and per-tab pin updates all
                 # return the same shape; the composer never depends on pins.
                 body = {"pinned_tab_ids": []}
+            elif method == "GET" and path == "/api/remote/profiles":
+                body = []
             elif method == "GET" and path == "/api/tabs/status":
                 # Background poll; the store iterates it, so it must be a list.
                 body = []
@@ -247,6 +292,41 @@ async def main(browser_run: BrowserRun) -> None:
         send_button = page.locator(".composer-send-btn")
         await expect(composer).to_be_visible()
         await expect(send_button).to_be_visible()
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        await expect(page.get_by_text("Context condensed", exact=True)).to_have_count(1)
+        await expect(page.get_by_text("Condensing context…", exact=True)).to_have_count(0)
+        await expect(page.locator(".edit-resend-hover-btn")).to_have_count(0)
+
+        # MASO can be selected for Chat, and switching to Terminal clears it.
+        await page.locator(".add-tab").click()
+        provider_picker = page.get_by_label("Chat Provider", exact=True)
+        await provider_picker.select_option("maso")
+        await expect(page.locator(".modal").get_by_text("Solo Mode", exact=True)).to_have_count(0)
+        await page.locator(".session-kind-control").get_by_role(
+            "button", name="Terminal", exact=True
+        ).click()
+        terminal_picker = page.get_by_label("Terminal Profile", exact=True)
+        await expect(terminal_picker).to_have_value("claude")
+        await expect(terminal_picker.locator('option[value="maso"]')).to_have_count(0)
+        await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
+
+        # Effort selection must send MASO's provider key, not Codex effort env.
+        trigger = page.locator(".composer-model-picker .composer-mode-trigger")
+        await expect(trigger).to_contain_text("seed · High")
+        await trigger.click()
+        await page.get_by_role("listbox", name="Thinking effort", exact=True).get_by_role(
+            "option", name=re.compile(r"^High")
+        ).click()
+        await expect(trigger).to_contain_text("High")
+        assert model_changes[-1]["env"] == {"MASO_MODEL": "seed-high"}, model_changes
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await trigger.click()
+        menu = page.get_by_role("dialog", name="Model and thinking effort", exact=True)
+        box = await menu.bounding_box()
+        assert box is not None and box["x"] >= 0 and box["x"] + box["width"] <= 390, box
+        await page.screenshot(path=str(output / "maso-model-mobile.png"), full_page=True)
+        await page.keyboard.press("Escape")
+        await page.set_viewport_size({"width": 1280, "height": 900})
 
         # An empty composer cannot send: the control is disabled rather than
         # accepting a click that silently does nothing.
@@ -345,6 +425,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "result": "PASS",
                     "sends": len(sends),
                     "interrupts": len(interrupts),
+                    "maso_model_changes": model_changes,
                     "unknown_requests": unknown_requests,
                     "blocked_external_requests": len(blocked),
                     "unexpected_external_requests": unexpected_external,

@@ -3343,6 +3343,8 @@ class TailerManager:
                 or the turn cannot be mapped to a provider user message.
             RuntimeError: If no structured adapter exists for the session.
         """
+        if session.agent_type == AgentType.MASO:
+            raise TranscriptForkError("Editing past turns is unavailable for MASO HTTP sessions")
         adapter = get_adapter_for_session(session)
         if adapter is None:
             raise RuntimeError("no structured adapter for session")
