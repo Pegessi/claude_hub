@@ -391,16 +391,18 @@ async def main(browser_run: BrowserRun) -> None:
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.evaluate(
             "localStorage.setItem('claude-hub:cwd-history:local', "
-            "JSON.stringify(['/fixture/recent', '/fixture/other']))"
+            "JSON.stringify(['/fixture/recent', '/fixture/other', "
+            "'/fixture/three', '/fixture/four', '/fixture/five', "
+            "'/fixture/six', '/fixture/seven', '/fixture/eight']))"
         )
         await page.locator(".add-tab").click()
         cwd = page.locator("#tabCwd")
         await expect(cwd).to_have_value("/fixture/recent")
         await cwd.click()
         choices = page.locator(".cwd-choice")
-        await expect(choices).to_have_count(4)
-        await expect(choices.nth(2)).to_have_text("/fixture/current")
-        await expect(choices.nth(3)).to_have_text("/fixture/workspace")
+        await expect(choices).to_have_count(10)
+        await expect(choices.nth(8)).to_have_text("/fixture/current")
+        await expect(choices.nth(9)).to_have_text("/fixture/workspace")
         await page.screenshot(path=str(output / "create-session-directory-choices.png"))
         await cwd.fill("CURRENT")
         await expect(choices).to_have_count(1)
@@ -411,7 +413,7 @@ async def main(browser_run: BrowserRun) -> None:
         await cwd.press("Enter")
         await expect(cwd).to_have_value("/fixture/recent")
         await page.locator(".cwd-choices-btn").click()
-        await expect(choices).to_have_count(4)
+        await expect(choices).to_have_count(10)
         await choices.nth(1).click()
         await expect(cwd).to_have_value("/fixture/other")
 
@@ -447,7 +449,7 @@ async def main(browser_run: BrowserRun) -> None:
         assert modal_box["x"] >= 0 and modal_box["x"] + modal_box["width"] <= 390
         await page.screenshot(path=str(output / "create-session-mobile.png"))
         await cwd.click()
-        await expect(choices).to_have_count(4)
+        await expect(choices).to_have_count(10)
         await choices.last.click()
         await expect(cwd).to_have_value("/fixture/workspace")
 
