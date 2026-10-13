@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### style(chat): clarify unread completed sessions
+
+- Replace the subtle sheen inside an 8px idle light with an explicit green
+  completion badge, persistent unread outline and restrained pulse in the Chat
+  sidebar.
+- Keep a static checkmark and outline when reduced motion is requested, and
+  expose the state as `Completed, unread` to assistive technology and tooltips.
+- See the [unread completion indicator notes](docs/working-logs/2026-10-13-unread-completion-indicator.md).
+
 ### fix(verify): allow local checks with a noncanonical toolchain
 
 - Warn and continue on local uv, Python, Node or pnpm version drift so standard
