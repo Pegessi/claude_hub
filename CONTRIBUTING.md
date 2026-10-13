@@ -93,6 +93,14 @@ dependencies from the feature checkout:
 (cd frontend && pnpm install --frozen-lockfile)
 ```
 
+Standard local `verify.sh` targets warn and continue when uv, Python, Node or
+pnpm versions differ from these pins; their results are useful feedback but are
+not equivalent to verification on the declared toolchain. CI remains strict.
+To require exact versions locally, set `CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1`.
+The explicit `browser-mocks` target retains exact Python, Node and Playwright
+requirements for its browser acceptance evidence. Missing tools, missing
+installed dependencies and failing checks still fail in every mode.
+
 Do not change the lockfiles or use a different interpreter merely to make a
 check pass. The verification script does not install dependencies, download a
 browser, or restart a service. Backend tests get private HOME/XDG/Hub paths and
@@ -114,7 +122,8 @@ Backend checks first probe the Python selected by the same `uv run` command used
 for the checks. The probe runs with `-I`, private runtime directories and a neutral
 cwd. It verifies the local editable project and the pytest/Black/isort/mypy module
 and distribution locations. Tools run through `python -I -m`, avoiding copied
-console-script shebangs. This is selected-module provenance, not a dependency-lock
+console-script shebangs. Version drift follows the policy above; it never relaxes
+source-location checks. This is selected-module provenance, not a dependency-lock
 or file-integrity audit. Recreate each worktree's environment with the locked setup
 above; do not copy a virtual environment. Verification refuses a backend `.env`
 rather than reading, moving or deleting it.

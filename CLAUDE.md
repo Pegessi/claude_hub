@@ -113,7 +113,7 @@ independent review and human-acceptance requirements.
 
 Run `./scripts/verify.sh all` from the task worktree before final handoff;
 `--help` lists individual targets for iteration. The backend type target includes
-tests. Local checks and CI share this entry point and the declared tool versions;
-see [setup and validation](CONTRIBUTING.md#5-run-validation). Record each result
+tests. Local checks and CI share this entry point; CI and explicit strict mode
+enforce the declared tool versions. See [setup and validation](CONTRIBUTING.md#5-run-validation). Record each result
 and any unrun checks rather than treating a partial pass as complete validation.
 `pnpm lint` writes fixes and must not be used for read-only review.

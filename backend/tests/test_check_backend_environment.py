@@ -107,7 +107,6 @@ def test_environment_sources_are_checked_without_importing_packages(
         "entry",
         "non-isolated",
         "checkout-cwd",
-        "python-version",
         "app-origin",
         "editable",
         "distribution",
@@ -116,10 +115,16 @@ def test_environment_sources_are_checked_without_importing_packages(
         "missing-tool",
     ],
 )
+@pytest.mark.parametrize("python_version", ["3.11.9", "3.12.99"])
 def test_environment_rejects_inconsistent_sources(
-    environment_case: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+    environment_case: SimpleNamespace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    python_version: str,
 ) -> None:
     case = environment_case
+    case.checker.platform.python_version = lambda: python_version
     foreign = tmp_path / "foreign"
     foreign.mkdir()
     if fault == "prefix":
@@ -130,8 +135,6 @@ def test_environment_rejects_inconsistent_sources(
         case.sys.flags.isolated = False
     elif fault == "checkout-cwd":
         monkeypatch.chdir(case.root)
-    elif fault == "python-version":
-        case.checker.platform.python_version = lambda: "0.0.0"
     elif fault == "app-origin":
         case.origins["claude_hub"] = case.source(foreign / "claude_hub" / "__init__.py")
     elif fault == "editable":
@@ -147,3 +150,14 @@ def test_environment_rejects_inconsistent_sources(
         case.origins["mypy"] = None
     with pytest.raises(ValueError):
         case.checker.inspect_environment(case.root)
+
+
+def test_environment_reports_version_drift_without_owning_version_policy(
+    environment_case: SimpleNamespace,
+) -> None:
+    case = environment_case
+    case.checker.platform.python_version = lambda: "3.12.99"
+    report = case.checker.inspect_environment(case.root)
+    assert report["python"] == "3.12.99"
+    assert report["prefix"] == str(case.prefix)
+    assert report["packages"]["claude-hub"]["editable_root"] == str(case.root / "backend")

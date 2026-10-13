@@ -43,6 +43,54 @@
   align the browser harness with the application's global styles.
 - Record the current Task state/UI boundaries in the architecture guide. See the
   [stage-three record](docs/working-logs/2026-10-09-task-boundaries.md).
+
+### fix(verify): allow local checks with a noncanonical toolchain
+
+- Warn and continue on local uv, Python, Node or pnpm version drift so standard
+  checks can still provide feedback; CI, explicit strict mode and browser-mocks
+  keep exact pins.
+- Continue to fail for missing tools or dependencies and for check failures.
+
+### style(feishu): redraw connection controls with the Feishu bird silhouette
+
+- Replace the separate chain and stacked-chevron glyphs with one local,
+  monochrome outline SVG traced from the current Feishu bird silhouette.
+- Reuse the same component in the pane entry and connection-panel heading so
+  their geometry cannot drift while status dots and Bot avatars keep their
+  existing behavior.
+
+### fix(feishu): load Bot avatars under production COEP
+
+- Request trusted HTTPS Bot avatars with anonymous CORS mode so Feishu CDN
+  images remain loadable while the Chat page enforces `COEP: require-corp`.
+- Cover the CORS image contract in both the Bot-card and message-provenance
+  browser scenarios.
+
+### style(feishu): separate the connection, brand and Bot identity icons
+
+- Restore the pane's original link glyph as the Feishu connection entry, and
+  replace the blurry embedded fallback bitmap with a theme-aware outline SVG
+  in the connection panel and unbound message provenance.
+- Show the matched Bot's current Feishu avatar on a bound connection card and
+  on Feishu message provenance. Historical messages match by exact App ID,
+  refresh when the Bot pool arrives, and fall back to the outline mark without
+  borrowing an unrelated Chat's Bot identity.
+- Scope failed avatar loads to the full message or Chat/Bot identity, so a bad
+  URL cannot hide another Bot's retry.
+- See the [Feishu icon identity notes](docs/working-logs/2026-10-12-feishu-icon-identity.md).
+
+### fix(tabs): stop archived sessions from exhausting the tab limit
+
+- The `max_total_tabs` backstop (default 200) now counts only live sessions.
+  Archived sessions have already released their ttyd port, process and tmux
+  session, but they used to count, so 170 archived plus 30 live Chats blocked
+  every new Chat, duplicate and fork.
+- Unarchiving checks the same limit before restoring, so live sessions still
+  never exceed it; a rejected unarchive leaves the session archived.
+- Duplicate returns 429 with the reason instead of a bare 500, unarchive
+  returns 429 at the limit, and the create, duplicate, fork and unarchive
+  toasts show the server's reason rather than only "Failed to duplicate tab".
+
 ### test(ui): enforce the three unrun scenarios and guide new gates
 
 - Convert `browser_chat_queue_activation.py`, `browser_chat_goal_steer.py`
@@ -99,7 +147,29 @@
 - Keep mixed messages responsive when one image cannot be downloaded or a
   coalesced burst exceeds the shared attachment budget: retain the text and
   image placeholders instead of dropping the whole turn.
+- Persist Feishu image originals as timeline previews only when they fit the
+  existing 8 MiB and 8192px cache boundary, so safe images render in Web Chat
+  while oversized images still reach the model without being cached.
+- Show the Feishu brand mark before pairing and the Feishu-managed Bot avatar
+  after pairing, with the same brand fallback on historical source badges. A
+  failed avatar is scoped to that Chat, Bot and URL, so switching Chats retries
+  another Bot even when Feishu serves both profiles from the same URL.
+- Let Feishu dispatches follow the real Chat turn to completion instead of
+  cancelling a still-running turn after 300 seconds and replying with a false
+  processing failure. Explicit finite bridge deadlines remain available to
+  bounded internal callers and tests. If durable terminal persistence fails,
+  a process-local completion signal now releases the Feishu FIFO with a real
+  error instead of waiting forever. A model request that needs a structured
+  Web Chat approval or answer is stopped with an explicit Feishu reply rather
+  than permanently holding that FIFO. That reply is sent only after the exact
+  provider turn confirms teardown; blocking approvals cannot be dropped from
+  a saturated completion queue, failed terminal writes do not notify durable
+  observers, and failed/cancelled subscriber startup rolls back its queue. The
+  approval teardown also keeps waiting through the provider's interrupt grace
+  so Codex/TraeX can finish their kill/restart fallback before the FIFO is
+  released; only bounded process shutdown retains the outer cancellation cap.
 - See the [Feishu rich ingress notes](docs/working-logs/2026-10-12-feishu-rich-ingress.md).
+- See the [Feishu preview and long-turn notes](docs/working-logs/2026-10-12-feishu-preview-identity-and-long-turns.md).
 
 ### fix(chat): keep sent images at full quality in a 1 GiB LRU and show Cursor sub-agent reports
 

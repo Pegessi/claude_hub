@@ -56,7 +56,7 @@ const claim = computed(() =>
     if (error.value) return 'error'
     return 'unbound'
   })
-  const statusText=computed(()=>({unbound:'Not connected',pending:'Waiting for Feishu',claimed:'Confirmation required','bound-current':`Connected with ${currentBot.value?.name??'Bot'}`,error:'Connection unavailable'}[viewState.value]))
+  const statusText=computed(()=>({unbound:'Not connected',pending:'Waiting for Feishu',claimed:'Confirmation required','bound-current':`Connected with ${currentBot.value?.feishu_name||currentBot.value?.name||'Bot'}`,error:'Connection unavailable'}[viewState.value]))
 
   function clearPollTimer() {
   if (pollTimer !== null) cancelTimer(pollTimer)

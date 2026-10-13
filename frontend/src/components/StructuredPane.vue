@@ -97,7 +97,7 @@
         <div
           v-for="{ turn, ordinal } in visibleTurns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, ordinal, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
+          v-memo="[turn.renderRevision, ordinal, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
           class="structured-turn"
           :data-turn-key="turn.key"
         >
@@ -117,18 +117,12 @@
                 class="conversation-message-source"
                 data-testid="conversation-message-source"
               >
-                <span
+                <FeishuIdentityMark
                   class="conversation-message-source__mark"
-                  aria-hidden="true"
-                >
-                  飞
-                  <img
-                    v-if="messageSourceAvatarUrl(turn)"
-                    :src="messageSourceAvatarUrl(turn) || undefined"
-                    alt=""
-                    @error="hideBrokenSourceAvatar"
-                  >
-                </span>
+                  :avatar-url="resolvedFeishuSourceAvatarUrl(turn)"
+                  :identity-key="feishuSourceIdentityKey(turn)"
+                  data-testid="conversation-message-source-avatar"
+                />
                 <span class="conversation-message-source__label">{{ messageSourceLabel(turn) }}</span>
               </div>
               <!-- Inline edit mode -->
@@ -1373,6 +1367,7 @@ import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStr
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceAvatarUrl, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
 import { subagentProviderLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
@@ -1401,16 +1396,13 @@ import {
   type QueuedChatDraftAttachment,
 } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
+import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
+import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
-
-function hideBrokenSourceAvatar(event: Event): void {
-  const image = event.currentTarget
-  if (image instanceof HTMLImageElement) image.hidden = true
-}
 
 const props = defineProps<{
   /** A top-level Chat tab owns its transcript directly. */
@@ -1421,6 +1413,29 @@ const props = defineProps<{
 
 const terminalStore = useTerminalStore()
 const appStore = useAppStore()
+const feishuBotPoolStore = useFeishuBotPoolStore()
+
+function resolvedFeishuSourceAvatarUrl(turn: TimelineTurn): string | null {
+  const matchingBot = feishuBotPoolStore.bots.find(
+    bot => bot.app_id === turn.feishu?.appId,
+  )
+  const currentBotAvatar = trustedFeishuAvatarUrl(matchingBot?.feishu_avatar_url)
+  if (currentBotAvatar) return currentBotAvatar
+  const eventAvatar = trustedFeishuAvatarUrl(messageSourceAvatarUrl(turn))
+  if (eventAvatar) return eventAvatar
+  if (turn.feishu?.appId) return null
+  return trustedFeishuAvatarUrl(
+    feishuBotPoolStore.activeBotForTab(props.tabId)?.feishu_avatar_url,
+  )
+}
+
+function feishuSourceIdentityKey(turn: TimelineTurn): string {
+  return [
+    turn.key,
+    turn.feishu?.appId ?? 'unknown-app',
+    resolvedFeishuSourceAvatarUrl(turn) ?? 'feishu-brand',
+  ].join('\n')
+}
 const {
   goal,
   error: goalError,
@@ -4475,14 +4490,6 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.18);
   font-size: 9px;
   overflow: hidden;
-}
-
-.conversation-message-source__mark img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
 }
 
 .conversation-message-source__label {
