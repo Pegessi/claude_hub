@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "1c442c378a67c973421741b09ab1adbdd18530ed",
+  "parents": [
+    "2922d42b97451c5cb5e47f117a6a7cdd963c13c4",
+    "b56f9a283d02e19b2f67cafe0e3886a844cac6e3"
+  ],
+  "base": "2e2ec14e18bb432090577be93f21ee66aabe3702",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "1f4c3bb481168e00d7f5071089f2f53e890d424b",
+  "reconstructed_tree": "dd0949676a2799eaababc0e19fd4417647374ff6",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "95107f0f5bad4d745b03230fbb8ca2e20b488fb2"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "95c9022b7ae700be8c9848f64b98c89e74c45b91"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9c0a9badcb4a5b6f3f1872b18dd43e17899c826c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "67bd2984e4d8e5a2f55369a16ce57c3c607595ad"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "86c86b2d6d00bb8b245cf85d867211169dd6ec6e"
+      },
+      "reason": "Preserve both parents' Unreleased entries in order at the shared insertion point. No changelog entry is dropped.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/mergeTabbarTopbar.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9a1d45a5529b5e74de6fd21980eaefeb42bf912c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9a1d45a5529b5e74de6fd21980eaefeb42bf912c"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5992e05b8748af5700231fc28d3b5936bf82e18b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5992e05b8748af5700231fc28d3b5936bf82e18b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "82733757fb5e61c9a986ca6654d4cad9d8ca617f"
+      },
+      "reason": "Keep the new compact green completion-badge assertions and retain the two existing exclusions for the legacy blue border and ping animation. Product code remains identical to the upstream parent.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
