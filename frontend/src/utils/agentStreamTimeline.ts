@@ -679,13 +679,16 @@ function replayToolIdentity(event: AgentStreamEvent): string | null {
 }
 
 function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
-  // Provider control-plane notifications (for example
-  // ``thread/goal/cleared``) intentionally carry structured metadata without
-  // user-visible text or a turn id. They are persisted for reconciliation,
-  // but are not transcript rows. Resolving them as ordinary status events
-  // would create a new, never-completed legacy turn and permanently lock the
-  // composer after the real turn had already completed.
-  if (event.type === 'status' && !statusText(event)) return
+  // Persistent app-server statuses belong to a Chat turn only when the tailer
+  // stamps its turn id. Text-bearing notices can also arrive while idle (for
+  // example a TraeX warning after turn_completed); rendering one as a legacy
+  // turn would lock Queue/Stop around a turn that does not exist. Keep these
+  // persisted control-plane events out of the transcript, just like silent
+  // thread/goal notifications. One-shot providers retain legacy null-turn rows.
+  if (event.type === 'status' && (
+    !statusText(event) ||
+    (!event.turn_id && (event.agent_type === 'traex' || event.agent_type === 'codex'))
+  )) return
 
   // Provider replay guard: a persistent app-server (TraeX/Codex) can re-emit
   // an item record long after the turn it belonged to terminalized — the
