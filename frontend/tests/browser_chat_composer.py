@@ -409,6 +409,12 @@ async def main(browser_run: BrowserRun) -> None:
         await choices.click()
         await expect(cwd).to_have_value("/fixture/current")
         await cwd.click()
+        await cwd.press("ArrowUp")
+        await expect(choices.last).to_have_class("cwd-choice is-active")
+        assert await page.locator(".cwd-choices").evaluate("el => el.scrollTop") > 0
+        await cwd.press("Enter")
+        await expect(cwd).to_have_value("/fixture/workspace")
+        await cwd.click()
         await cwd.press("ArrowDown")
         await cwd.press("Enter")
         await expect(cwd).to_have_value("/fixture/recent")

@@ -7,7 +7,7 @@ history with directories from open sessions on the same local host or remote
 profile, deduplicates them, and shows them in a scrollable list. Opening the field
 shows the common paths regardless of its current value; typing filters by
 substring. Pointer and arrow/Enter selection keep manual path entry and the
-existing Browse action available.
+existing Browse action available; keyboard focus scrolls the long list.
 
 The Codex Session picker previously mounted expanded and immediately requested
 `/api/codex/sessions` whenever Codex was selected. It now starts collapsed
