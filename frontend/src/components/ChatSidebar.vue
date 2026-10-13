@@ -211,8 +211,8 @@
                   :data-status="getTabStatus(tab)"
                   :data-unread="tab.is_unread ? 'true' : 'false'"
                   role="img"
-                  :aria-label="`Session status: ${getTabStatusLabel(tab)}`"
-                  :title="`Session status: ${getTabStatusLabel(tab)}`"
+                  :aria-label="getTabStatusAriaLabel(tab)"
+                  :title="getTabStatusAriaLabel(tab)"
                 />
                 <span class="chat-sidebar__item-name">{{ tab.name || 'Untitled' }}</span>
                 <span class="chat-sidebar__item-time">{{ relativeTime(tab.created_at) }}</span>
@@ -429,6 +429,13 @@ const mobilePanelStyle = computed(() => {
 
 // Tab-status logic is shared with the TabBar via useTabStatus.
 const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
+
+function getTabStatusAriaLabel(tab: TerminalTab): string {
+  if (tab.is_unread && getTabStatus(tab) === 'idle') {
+    return 'Completed, unread'
+  }
+  return `Session status: ${getTabStatusLabel(tab)}`
+}
 
 const filterText = ref('')
 const collapsedGroups = ref<Set<string>>(new Set())
@@ -1307,41 +1314,52 @@ watch(mobileDrawerOpen, isOpen => {
   background: var(--ch-color-text-subtle);
 }
 
-/* A completed turn that has not been opened gets a small sheen contained
-   inside its existing status light. This keeps completion visible without
-   wrapping a green idle dot in an unrelated blue ring. */
-.chat-sidebar__item-status[data-unread='true'] {
-  overflow: hidden;
-}
-
+/* A completed turn that has not been opened becomes an explicit success
+   badge. The checkmark says "completed" even in a still frame; the green
+   outline and pulse say the result is still waiting to be viewed. */
 .chat-sidebar__item-status[data-status='idle'][data-unread='true'] {
-  box-shadow: 0 0 7px var(--ch-color-success-bg);
+  width: 12px;
+  height: 12px;
+  margin-inline: -2px;
+  border: 1px solid var(--ch-color-success);
+  background: var(--ch-color-success-strong);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--ch-color-success) 26%, transparent),
+    0 0 10px var(--ch-color-success-bg);
 }
 
-.chat-sidebar__item-status[data-unread='true']::after {
+.chat-sidebar__item-status[data-status='idle'][data-unread='true']::before {
+  content: '✓';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ch-color-sidebar-bg);
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.chat-sidebar__item-status[data-status='idle'][data-unread='true']::after {
   content: '';
   position: absolute;
-  inset: -2px;
-  border-radius: inherit;
-  background: linear-gradient(
-    105deg,
-    transparent 30%,
-    rgba(255, 255, 255, 0.88) 48%,
-    transparent 66%
-  );
-  transform: translateX(-125%);
-  animation: sidebar-complete-sheen 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  inset: -4px;
+  border: 1px solid var(--ch-color-success);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: sidebar-complete-unread-pulse 1.8s cubic-bezier(0.2, 0, 0, 1) infinite;
 }
 
-@keyframes sidebar-complete-sheen {
-  0%, 38% { transform: translateX(-125%); }
-  68%, 100% { transform: translateX(125%); }
+@keyframes sidebar-complete-unread-pulse {
+  0% { transform: scale(0.72); opacity: 0.9; }
+  72%, 100% { transform: scale(1.28); opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-sidebar__item-status[data-unread='true']::after {
+  .chat-sidebar__item-status[data-status='idle'][data-unread='true']::after {
     animation: none;
-    display: none;
+    transform: scale(1);
+    opacity: 0.55;
   }
 }
 
