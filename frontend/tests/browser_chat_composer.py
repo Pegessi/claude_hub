@@ -46,11 +46,22 @@ def event(sequence, event_type, payload, *, turn_id=TURN_ONE, message_id=None):
     }
 
 
-# One finished turn, so the page has history but no turn in flight on load.
+# A finished turn followed by the incident's text-only, unowned warning shape.
+# This Codex fixture covers the other persistent app-server path as well.
 EVENTS = [
     event(1, "turn_started", {"summary": "First question"}),
     event(2, "text_delta", {"text": "First answer."}, message_id=f"{TURN_ONE}:assistant"),
     event(3, "turn_completed", {"status": "completed"}, message_id=TURN_ONE),
+    event(
+        4,
+        "status",
+        {
+            "text": "---------------------------------------------------------------",
+            "provider_status": "warning",
+            "snapshot": True,
+        },
+        turn_id=None,
+    ),
 ]
 
 
@@ -247,6 +258,7 @@ async def main(browser_run: BrowserRun) -> None:
         send_button = page.locator(".composer-send-btn")
         await expect(composer).to_be_visible()
         await expect(send_button).to_be_visible()
+        await expect(page.locator(".structured-turn")).to_have_count(1)
 
         # An empty composer cannot send: the control is disabled rather than
         # accepting a click that silently does nothing.

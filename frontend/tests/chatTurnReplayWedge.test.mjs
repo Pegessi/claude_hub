@@ -96,6 +96,36 @@ test('goal/updated (turnId=null) alone never locks the composer', () => {
   assert.equal(isChatModeLocked(false, turns), false)
 })
 
+test('a warning after a completed TraeX turn does not create an uncancellable turn', () => {
+  const events = [
+    makeEvent(0, 'turn_started', { summary: 'done' }, { turn_id: 'turn-1' }),
+    makeEvent(1, 'turn_completed', { status: 'completed' }, { turn_id: 'turn-1' }),
+    makeEvent(2, 'status', {
+      text: '---------------------------------------------------------------',
+      provider_status: 'warning',
+      snapshot: true,
+    }, { turn_id: null }),
+  ]
+  const reducer = new IncrementalTimelineReducer()
+  reducer.reduce(events.slice(0, 2))
+
+  for (const turns of [groupEventsIntoTurns(events), reducer.reduce(events)]) {
+    assert.equal(turns.length, 1)
+    assert.equal(turns[0].completed, true)
+    assert.equal(isChatModeLocked(false, turns), false)
+  }
+})
+
+test('a warning attributed to the active turn remains visible', () => {
+  const turns = groupEventsIntoTurns([
+    makeEvent(0, 'turn_started', { summary: 'working' }, { turn_id: 'turn-1' }),
+    makeEvent(1, 'status', { text: 'Provider warning', provider_status: 'warning' }, { turn_id: 'turn-1' }),
+  ])
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0].statuses[0].text, 'Provider warning')
+  assert.equal(isChatModeLocked(false, turns), true)
+})
+
 test('an unrelated null-turn completion (unknown tool id) is still rendered', () => {
   // Only exact identity replays are suppressed; a genuinely novel orphan row
   // must not be silently swallowed (defense in depth is on the backend).

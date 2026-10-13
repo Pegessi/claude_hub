@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### fix(chat): ignore unowned provider status after a completed turn
+
+- Keep text-bearing TraeX/Codex status notices without a turn ID out of the
+  Chat timeline. An idle warning previously created an unfinished phantom turn,
+  changing Send to Queue while Stop had no real turn to cancel.
+- Preserve statuses attached to an active turn and legacy null-turn behavior for
+  one-shot providers. Cover the completed-turn warning in reducer and Chat
+  composer browser checks.
+- See the [unowned warning incident notes](docs/working-logs/2026-10-13-chat-unowned-warning.md).
+
 ### style(chat): clarify unread completed sessions
 
 - Replace the subtle sheen inside an idle light with a legible 8px completion
