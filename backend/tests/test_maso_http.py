@@ -627,6 +627,13 @@ async def test_maso_creation_pins_endpoint_across_backend_default_change(
 
     monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", inert_start)
     monkeypatch.setattr(TTYDProcess, "start", inert_start)
+
+    async def available_service(_env):
+        return [], "seed"
+
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.maso_http.check_maso_service", available_service
+    )
     monkeypatch.setenv("MASO_BASE_URL", "http://maso-a.test:9796")
     manager = TTYDManager()
     tab = await manager.create_tab(

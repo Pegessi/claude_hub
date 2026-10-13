@@ -757,6 +757,7 @@ export interface StreamReasoningEffortOption {
 
 export interface StreamCapabilities {
   structured: boolean
+  unavailable_reason?: string | null
   adapter_id: string
   schema_version: number
   sources: string[]

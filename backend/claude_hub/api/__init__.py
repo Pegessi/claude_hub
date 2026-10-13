@@ -9,6 +9,7 @@ from .feedback_automation import router as feedback_automation_router
 from .feishu_bot import router as feishu_bot_router
 from .filesystem import router as filesystem_router
 from .goal_runs import router as goal_runs_router
+from .maso import router as maso_router
 from .remote import router as remote_router
 from .scheduled_tasks import router as scheduled_tasks_router
 from .system import router as system_router
@@ -24,6 +25,7 @@ api_router.include_router(terminal_router)
 api_router.include_router(filesystem_router)
 api_router.include_router(feishu_bot_router)
 api_router.include_router(goal_runs_router)
+api_router.include_router(maso_router)
 api_router.include_router(remote_router)
 api_router.include_router(system_router)
 api_router.include_router(clipboard_router)

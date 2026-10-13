@@ -120,6 +120,7 @@ class StreamCapabilities(BaseModel):
     """
 
     structured: bool = False
+    unavailable_reason: Optional[str] = None
     adapter_id: str = "none"
     schema_version: int = 0
     sources: List[str] = Field(default_factory=list)

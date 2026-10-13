@@ -34,7 +34,14 @@ def maso_base_url(env: Dict[str, str]) -> str:
     value = (
         env.get("MASO_BASE_URL") or os.environ.get("MASO_BASE_URL") or DEFAULT_MASO_BASE_URL
     ).rstrip("/")
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+        httpx.URL(value)
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("invalid port")
+    except (ValueError, httpx.InvalidURL):
+        raise ValueError("MASO_BASE_URL must be a valid HTTP(S) URL") from None
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.hostname
@@ -90,6 +97,67 @@ def _model_options(rows: Any) -> List[StreamModelOption]:
             )
         )
     return options
+
+
+class MasoServiceUnavailable(RuntimeError):
+    """A bounded, read-only readiness check failed without creating a session."""
+
+
+async def maso_model_catalog(
+    client: httpx.AsyncClient,
+) -> Tuple[List[StreamModelOption], str]:
+    try:
+        # Bound the entire probe, not just each individual request. Neither
+        # endpoint invokes a model, creates a session, or changes MASO state.
+        async with asyncio.timeout(3.0):
+            response = await client.get("/api/models", timeout=2.0)
+            response.raise_for_status()
+            models = _model_options(response.json())
+            if not models:
+                raise MasoServiceUnavailable(
+                    "MASO has no usable models configured. Configure a model, then retry."
+                )
+            response = await client.get("/api/models/default", timeout=2.0)
+            response.raise_for_status()
+            default = response.json()
+            key = default.get("key") if isinstance(default, dict) else None
+            keys = {model.provider_model_id for model in models}
+            keys.update(
+                effort.provider_model_id
+                for model in models
+                for effort in model.supported_reasoning_efforts
+            )
+            if not isinstance(key, str) or not key or key not in keys:
+                raise MasoServiceUnavailable(
+                    "MASO has no usable default model. Configure a default model, then retry."
+                )
+            return models, key
+    except MasoServiceUnavailable:
+        raise
+    except httpx.HTTPStatusError as exc:
+        raise MasoServiceUnavailable(
+            f"MASO service is unavailable (HTTP {exc.response.status_code}). "
+            "Check the MASO service, then retry."
+        ) from None
+    except (httpx.HTTPError, TimeoutError):
+        raise MasoServiceUnavailable(
+            "MASO service is unavailable and cannot be used. "
+            "Start MASO or check its service address, then retry."
+        ) from None
+    except (ValueError, RuntimeError):
+        raise MasoServiceUnavailable(
+            "The configured endpoint is not a usable MASO service. "
+            "Check its address, then retry."
+        ) from None
+
+
+async def check_maso_service(
+    env: Dict[str, str],
+) -> Tuple[List[StreamModelOption], str]:
+    async with httpx.AsyncClient(
+        base_url=maso_base_url(env), trust_env=False, timeout=2.0
+    ) as client:
+        return await maso_model_catalog(client)
 
 
 class MasoHttpSession(ProviderSession):
@@ -179,9 +247,7 @@ class MasoHttpSession(ProviderSession):
 
     async def prepare_capabilities(self) -> None:
         try:
-            self._available_models = _model_options(await self._request("GET", "/api/models"))
-            default = await self._request("GET", "/api/models/default")
-            self._default_model = default.get("key") if isinstance(default, dict) else None
+            self._available_models, self._default_model = await maso_model_catalog(self._http())
             self._last_error = None
         except RuntimeError as exc:
             self._available_models = []
@@ -214,6 +280,7 @@ class MasoHttpSession(ProviderSession):
             current_mode=self._current_mode,
             current_model=self.current_model(),
             current_reasoning_effort=self.current_reasoning_effort(),
+            unavailable_reason=self._last_error,
         )
 
     async def _with_first_turn_prefixes(self, text: str) -> Tuple[str, bool]:
@@ -262,7 +329,8 @@ class MasoHttpSession(ProviderSession):
         # idempotency. Retain the delivery sidecar until both steps succeed.
         if self._message_id:
             await self._request(
-                "DELETE", self._path(f"messages/pending/{quote(self._message_id, safe='')}")
+                "DELETE",
+                self._path(f"messages/pending/{quote(self._message_id, safe='')}"),
             )
         await self._request("POST", self._path("control"), json={"action": "abort"})
         # MASO sets registry IDLE before its deferred cancellation finalizer
