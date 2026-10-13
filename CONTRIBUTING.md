@@ -93,6 +93,14 @@ dependencies from the feature checkout:
 (cd frontend && pnpm install --frozen-lockfile)
 ```
 
+Standard local `verify.sh` targets warn and continue when uv, Python, Node or
+pnpm versions differ from these pins; their results are useful feedback but are
+not equivalent to verification on the declared toolchain. CI remains strict.
+To require exact versions locally, set `CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1`.
+The explicit `browser-mocks` target retains exact Python, Node and Playwright
+requirements for its browser acceptance evidence. Missing tools, missing
+installed dependencies and failing checks still fail in every mode.
+
 Do not change the lockfiles or use a different interpreter merely to make a
 check pass. The verification script does not install dependencies, download a
 browser, or restart a service. Backend tests get private HOME/XDG/Hub paths and
