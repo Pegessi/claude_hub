@@ -308,6 +308,7 @@
               <div
                 v-if="cwdDropdownOpen && visibleCwdChoices.length"
                 id="tab-cwd-choices"
+                ref="cwdChoicesRef"
                 class="cwd-choices"
                 role="listbox"
                 aria-label="Working directories"
@@ -632,6 +633,7 @@ const renameInputRef = ref<HTMLInputElement | null>(null)
 const mobileAppMenuRef = ref<HTMLDetailsElement | null>(null)
 const tabsContainerRef = ref<HTMLDivElement | null>(null)
 const cwdInputWrapperRef = ref<HTMLDivElement | null>(null)
+const cwdChoicesRef = ref<HTMLDivElement | null>(null)
 const showLeftFade = ref(false)
 const showRightFade = ref(false)
 const cwdDropdownOpen = ref(false)
@@ -737,6 +739,11 @@ function handleCwdKeydown(event: KeyboardEvent) {
       } else {
         activeCwdChoice.value = (activeCwdChoice.value + (event.key === 'ArrowDown' ? 1 : -1) + count) % count
       }
+      const index = activeCwdChoice.value
+      void nextTick(() => {
+        const choice = cwdChoicesRef.value?.children.item(index)
+        if (choice instanceof HTMLElement) choice.scrollIntoView({ block: 'nearest' })
+      })
     }
   } else if (event.key === 'Enter' && cwdDropdownOpen.value && activeCwdChoice.value >= 0) {
     event.preventDefault()
