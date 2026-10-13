@@ -1,4 +1,4 @@
-export type AgentType = 'claude' | 'codex' | 'traex' | 'cursor' | 'terminal'
+export type AgentType = 'claude' | 'codex' | 'traex' | 'maso' | 'cursor' | 'terminal'
 export type SessionKind = 'chat' | 'terminal'
 export type ExecutionTarget = 'local' | 'remote'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'
@@ -757,6 +757,7 @@ export interface StreamReasoningEffortOption {
 
 export interface StreamCapabilities {
   structured: boolean
+  unavailable_reason?: string | null
   adapter_id: string
   schema_version: number
   sources: string[]

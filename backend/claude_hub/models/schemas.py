@@ -36,6 +36,7 @@ class AgentType(str, Enum):
     CLAUDE = "claude"
     CODEX = "codex"
     TRAEX = "traex"
+    MASO = "maso"
     CURSOR = "cursor"
     TERMINAL = "terminal"
 
@@ -119,6 +120,7 @@ class StreamCapabilities(BaseModel):
     """
 
     structured: bool = False
+    unavailable_reason: Optional[str] = None
     adapter_id: str = "none"
     schema_version: int = 0
     sources: List[str] = Field(default_factory=list)
@@ -527,8 +529,12 @@ class TerminalTabBase(BaseModel):
 
     @model_validator(mode="after")
     def validate_session_kind(self) -> "TerminalTabBase":
+        if self.agent_type == AgentType.MASO and self.session_kind != SessionKind.CHAT:
+            raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
         if self.session_kind == SessionKind.CHAT and self.agent_type == AgentType.TERMINAL:
-            raise ValueError("Chat sessions require a Claude, Codex, TraeX, or Cursor provider")
+            raise ValueError(
+                "Chat sessions require a Claude, Codex, TraeX, Cursor, or MASO provider"
+            )
         if self.session_kind != SessionKind.CHAT and self.chat_mode != ChatMode.DEFAULT:
             raise ValueError("Chat modes are only available for Chat sessions")
         return self
@@ -555,6 +561,8 @@ class TerminalTabCreate(TerminalTabBase):
 
     @model_validator(mode="after")
     def _reject_chat_remote(self) -> "TerminalTabCreate":
+        if self.agent_type == AgentType.MASO and self.chat_mode != ChatMode.DEFAULT:
+            raise ValueError("MASO Chat only supports default mode")
         # Native Chat owns a local ProviderSession. The remote SSH launcher is
         # Terminal-only; combining the two would persist target=remote while
         # still running the model on the Hub host.

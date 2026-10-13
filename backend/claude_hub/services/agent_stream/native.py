@@ -439,6 +439,10 @@ def native_provider_binary(agent_type: AgentType) -> Optional[str]:
 
 
 def native_provider_binary_available(agent_type: AgentType) -> bool:
+    # HTTP providers need no local executable. Their capabilities probe verifies
+    # connectivity; a cold tab can be opened before that asynchronous probe.
+    if agent_type == AgentType.MASO:
+        return True
     binary = native_provider_binary(agent_type)
     return binary is not None and shutil.which(binary) is not None
 
@@ -3626,4 +3630,8 @@ def create_native_session(
         return TraexNativeSession(session, **kwargs)
     if session.agent_type == AgentType.CURSOR:
         return CursorNativeSession(session, **kwargs)
+    if session.agent_type == AgentType.MASO:
+        from .maso_http import MasoHttpSession
+
+        return MasoHttpSession(session, **kwargs)
     raise ValueError(f"no native transport for agent_type={session.agent_type}")

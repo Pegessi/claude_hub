@@ -16,6 +16,7 @@ from ..models import (
     User,
 )
 from ..services import chat_sidebar_preferences, ttyd_manager
+from ..services.agent_stream.maso_http import MasoServiceUnavailable
 from ..services.ttyd_manager import TabLimitExceededError, TabStartupTimeoutError
 from .agent_stream import _get_tab_tailer_manager, _terminal_tab_stream_session
 
@@ -148,6 +149,8 @@ async def create_tab(
         raise HTTPException(status_code=429, detail=str(exc))
     except TabStartupTimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except MasoServiceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -404,19 +407,22 @@ async def update_tab(
     current_user: User = Depends(get_current_user),
 ) -> TerminalTab:
     """Update a terminal tab."""
-    tab = await ttyd_manager.update_tab(
-        tab_id,
-        tab_update.name,
-        tab_update.shell,
-        tab_update.cwd,
-        tab_update.solo_mode,
-        tab_update.agent_type,
-        tab_update.target,
-        tab_update.remote_profile_id,
-        tab_update.remote_cwd,
-        tab_update.remote_reconnect,
-        tab_update.env,
-    )
+    try:
+        tab = await ttyd_manager.update_tab(
+            tab_id,
+            tab_update.name,
+            tab_update.shell,
+            tab_update.cwd,
+            tab_update.solo_mode,
+            tab_update.agent_type,
+            tab_update.target,
+            tab_update.remote_profile_id,
+            tab_update.remote_cwd,
+            tab_update.remote_reconnect,
+            tab_update.env,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
     return tab
