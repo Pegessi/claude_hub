@@ -193,10 +193,11 @@ test('a failed session creation does not enter cwd history', () => {
 })
 
 test('the create-session dialog offers recent working directories and solo default-on', () => {
-  // cwd field is wired to a history datalist
-  assert.match(tabBar, /list="tab-cwd-history"/)
-  assert.match(tabBar, /<datalist id="tab-cwd-history">/)
-  assert.match(tabBar, /v-for="cwd in recentCwds"/)
+  // Recent and open directories share an explicit picker, so a prefilled
+  // value cannot make the browser hide non-prefix matches.
+  assert.match(tabBar, /v-for="\(cwd, index\) in visibleCwdChoices"/)
+  assert.match(tabBar, /\.\.\.recentCwds\.value, \.\.\.openPaths/)
+  assert.doesNotMatch(tabBar, /<datalist/)
   // history is persisted per launch scope (local / remote:<profile>)
   assert.match(useCwdHistory, /claude-hub:cwd-history:/)
   assert.match(useCwdHistory, /localStorage\.(getItem|setItem)/)
@@ -205,4 +206,3 @@ test('the create-session dialog offers recent working directories and solo defau
   const soloResets = tabBar.match(/form\.solo_mode = true/g) || []
   assert.ok(soloResets.length >= 2, 'solo_mode reset to true after close and create')
 })
-

@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### feat(session): make working directories easy to pick and Codex history opt-in
+
+- Show up to six recent or open working directories when the Create Session
+  path field is opened, even when it contains a different prefilled path.
+  Typed text filters by substring; local and remote server choices stay scoped.
+- Start the Codex Session section collapsed. Fetch local Codex sessions only
+  when opened, and reuse the loaded list when the section is reopened.
+- Cover mouse, keyboard, lazy loading and mobile reachability in the Chat
+  browser scenario. See the [session creation UI notes](docs/working-logs/2026-10-13-session-create-choices.md).
+
 ### fix(chat): ignore unowned provider status after a completed turn
 
 - Keep text-bearing TraeX/Codex status notices without a turn ID out of the
