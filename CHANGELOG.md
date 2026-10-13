@@ -22,6 +22,10 @@
   out of the same coalesced batch and follow-up context, strip only the
   receiving Bot's complete mention token from plain and rich input, and reply
   inside the originating topic.
+- Bound each continuously active tab queue to its 64 most recently dispatched
+  Feishu contexts, preventing topic history from growing indefinitely while
+  preserving follow-up classification for recently active private chats and
+  topics.
 - Persist each Bot's Feishu `open_id` from the official profile endpoint so
   older Bot records can refresh identity lazily before their first group event.
 - See the [Feishu topic mention notes](docs/working-logs/2026-10-13-feishu-topic-mentions.md).
