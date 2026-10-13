@@ -325,6 +325,7 @@ def test_environment_app_change_clears_the_previous_official_profile(
         ENV_BOT_ID,
         feishu_name="Bot A",
         feishu_avatar_url="https://example.test/a.png",
+        feishu_open_id="ou-bot-a",
         expected_revision=entry.revision,
         environ=original,
     )
@@ -335,6 +336,7 @@ def test_environment_app_change_clears_the_previous_official_profile(
     assert changed.app_id == "env-app-next"
     assert changed.feishu_name is None
     assert changed.feishu_avatar_url is None
+    assert changed.feishu_open_id is None
 
 
 def test_environment_app_restore_does_not_resurrect_the_old_binding(
@@ -762,22 +764,47 @@ async def test_reply_path_does_not_reacquire_the_gate(monkeypatch, wire) -> None
 # ------------------------------------------------ WebSocket event integration
 
 
-def _message(app_id: str, text: str, now: float, *, message_id: str = "om-1") -> Any:
+def _message(
+    app_id: str,
+    text: str,
+    now: float,
+    *,
+    message_id: str = "om-1",
+    chat_id: str = "oc-1",
+    chat_type: str = "p2p",
+    thread_id: str = "omt-topic",
+    mentioned_bot_open_id: str | None = None,
+    sender_open_id: str = "ou-sender",
+) -> Any:
     from types import SimpleNamespace
 
     return SimpleNamespace(
         header=SimpleNamespace(event_id=f"ev-{message_id}", app_id=app_id),
         event=SimpleNamespace(
             sender=SimpleNamespace(
-                sender_type="user", sender_id=SimpleNamespace(open_id="ou-sender")
+                sender_type="user", sender_id=SimpleNamespace(open_id=sender_open_id)
             ),
             message=SimpleNamespace(
-                chat_type="p2p",
+                chat_type=chat_type,
                 message_type="text",
                 message_id=message_id,
                 create_time=str(int(now * 1000)),
-                chat_id="oc-1",
-                content=json.dumps({"text": text}),
+                chat_id=chat_id,
+                thread_id=thread_id if chat_type == "group" else None,
+                mentions=(
+                    [
+                        SimpleNamespace(
+                            key="@_user_1",
+                            id=SimpleNamespace(open_id=mentioned_bot_open_id),
+                            name="Test Bot",
+                        )
+                    ]
+                    if mentioned_bot_open_id is not None
+                    else []
+                ),
+                content=json.dumps(
+                    {"text": (f"@_user_1 {text}" if mentioned_bot_open_id is not None else text)}
+                ),
             ),
         ),
     )
@@ -843,6 +870,7 @@ class _Wire:
                     "bot": {
                         "app_name": "Test Bot",
                         "avatar_url": "https://example.test/bot.png",
+                        "open_id": "ou-current-bot",
                     },
                 },
             )
@@ -981,6 +1009,245 @@ def test_unpaired_conversation_is_told_how_to_pair(api, clock: Clock) -> None:
     bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
     asyncio.run(bot_api._handle_sdk_event(bot_id, _message("app-1", "hello", clock.value)))
     assert any("尚未连接" in text for text in api.wire.reply_texts())
+
+
+def test_group_topic_mention_routes_through_the_senders_existing_binding(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        dispatched: list[tuple[str, str, str]] = []
+
+        async def dispatch(tab_id, text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                dispatched.append((tab_id, text, visible_text))
+            return "收到"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "请继续执行",
+                clock.value,
+                message_id="om-topic",
+                chat_id="oc-topic-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+            ),
+        )
+
+        assert len(dispatched) == 1
+        assert dispatched[0][0] == "tab-1"
+        assert dispatched[0][1].startswith("Claude Hub verified message source (feishu-v2): ")
+        assert dispatched[0][1].endswith("\n\n请继续执行")
+        assert dispatched[0][2] == "请继续执行"
+        assert api.wire.reply_message_ids == ["om-topic"]
+        assert len(api.wire.replies) == 1
+        assert api.wire.replies[0]["msg_type"] == "post"
+        assert api.wire.replies[0]["reply_in_thread"] is True
+        assert json.loads(api.wire.replies[0]["content"]) == {
+            "zh_cn": {"content": [[{"tag": "md", "text": "收到"}]]}
+        }
+
+    asyncio.run(scenario())
+
+
+def test_group_topic_message_for_another_bot_is_ignored(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    _pair(api.pool, bot_id, owner=LOCAL, environ={})
+
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "不该触发",
+                clock.value,
+                message_id="om-other-bot",
+                chat_id="oc-topic-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-another-bot",
+            ),
+        )
+    )
+
+    assert api.wire.replies == []
+    assert api.wire.reaction_creates == []
+
+
+def test_group_topic_mention_refreshes_a_legacy_bot_identity(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            environ={},
+        )
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        dispatched: list[str] = []
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                dispatched.append(visible_text)
+            return "收到"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "刷新后处理",
+                clock.value,
+                message_id="om-legacy-profile",
+                chat_id="oc-topic-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+            ),
+        )
+
+        assert dispatched == ["刷新后处理"]
+        assert api.pool.effective(bot_id, {}).feishu_open_id == "ou-current-bot"
+
+    asyncio.run(scenario())
+
+
+def test_group_topic_mention_from_an_unpaired_sender_is_ignored(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    _pair(api.pool, bot_id, owner=LOCAL, environ={})
+
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "不该触发",
+                clock.value,
+                message_id="om-unpaired-sender",
+                chat_id="oc-topic-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+                sender_open_id="ou-another-sender",
+            ),
+        )
+    )
+
+    assert api.wire.replies == []
+    assert api.wire.reaction_creates == []
+
+
+def test_group_topic_pairing_code_is_ignored(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    entry = api.pool.snapshot({}).get(bot_id)
+    code, _expires, _revision = api.pool.issue_code(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-1",
+        workspace_id=None,
+        expected_revision=entry.revision,
+        environ={},
+    )
+
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                code,
+                clock.value,
+                message_id="om-topic-pair",
+                chat_id="oc-topic-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+            ),
+        )
+    )
+
+    entry = api.pool.snapshot({}).get(bot_id)
+    assert entry.binding is None
+    assert entry.claims == ()
+    assert api.wire.replies == []
+
+
+def test_messages_from_different_group_topics_are_not_coalesced(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.01)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.04)
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        submitted: list[tuple[str, bool]] = []
+
+        async def dispatch(
+            _tab_id, _text, _turn_id, *, admission_guard, visible_text, turn_metadata, **_kwargs
+        ):
+            async with admission_guard():
+                submitted.append((visible_text, turn_metadata["feishu_followup"]))
+            return "收到"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        await asyncio.gather(
+            *(
+                bot_api._handle_sdk_event(
+                    bot_id,
+                    _message(
+                        "app-1",
+                        text,
+                        clock.value,
+                        message_id=message_id,
+                        chat_id="oc-topic-group",
+                        chat_type="group",
+                        thread_id=thread_id,
+                        mentioned_bot_open_id="ou-current-bot",
+                    ),
+                )
+                for text, message_id, thread_id in (
+                    ("话题一", "om-topic-one", "omt-one"),
+                    ("话题二", "om-topic-two", "omt-two"),
+                )
+            )
+        )
+
+        assert len(submitted) == 2
+        assert submitted[0] == ("话题一", False)
+        assert submitted[1] == ("话题二", False)
+        assert all(reply["reply_in_thread"] is True for reply in api.wire.replies)
+
+    asyncio.run(scenario())
 
 
 def test_websocket_event_for_a_deleted_bot_is_dropped_silently(api, clock: Clock) -> None:

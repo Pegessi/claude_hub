@@ -12,6 +12,20 @@
   keep exact pins.
 - Continue to fail for missing tools or dependencies and for check failures.
 
+### fix(feishu): route mentioned group topics to the paired Chat
+
+- Accept group and topic message events only when the event's mention identity
+  exactly matches the receiving Bot, while keeping the existing private-chat
+  pairing as the authorization source. Group messages cannot create or replace
+  a binding and unmatched Bot events stay silent.
+- Preserve topic identity through dispatch, keep messages from different topics
+  out of the same coalesced batch and follow-up context, strip only the
+  receiving Bot's complete mention token from plain and rich input, and reply
+  inside the originating topic.
+- Persist each Bot's Feishu `open_id` from the official profile endpoint so
+  older Bot records can refresh identity lazily before their first group event.
+- See the [Feishu topic mention notes](docs/working-logs/2026-10-13-feishu-topic-mentions.md).
+
 ### style(feishu): redraw connection controls with the Feishu bird silhouette
 
 - Replace the separate chain and stacked-chevron glyphs with one local,
