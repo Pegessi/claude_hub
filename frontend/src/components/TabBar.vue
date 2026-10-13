@@ -309,6 +309,29 @@
             :type-label="form.session_kind === 'chat' ? 'Chat Provider' : 'Terminal Profile'"
             solo-label="Solo Mode"
           />
+          <div
+            v-if="form.agent_type === 'maso'"
+            class="maso-preflight"
+            :class="{ 'maso-preflight--unavailable': masoPreflightState === 'unavailable' }"
+            :role="masoPreflightState === 'unavailable' ? 'alert' : 'status'"
+            aria-live="polite"
+          >
+            <p>{{ masoPreflightMessage }}</p>
+            <p
+              v-if="masoEndpoint"
+              class="form-hint"
+            >
+              Service: {{ masoEndpoint }}
+            </p>
+            <button
+              v-if="masoPreflightState === 'unavailable'"
+              type="button"
+              class="ch-btn ch-btn--sm"
+              @click="checkMasoService"
+            >
+              Retry check
+            </button>
+          </div>
           <CodexSessionSelector
             v-if="form.agent_type === 'codex' && form.target === 'local'"
             v-model:session-id="form.agent_session_id"
@@ -547,6 +570,7 @@ import {
 import AgentConfigFields from '@/components/AgentConfigFields.vue'
 import CodexSessionSelector from '@/components/CodexSessionSelector.vue'
 import { usePendingActions } from '@/composables/usePendingActions'
+import { useMasoPreflight } from '@/composables/useMasoPreflight'
 import { useTabStatus } from '@/composables/useTabStatus'
 import { remoteInteractive, remoteProfileBadge } from '@/utils/remoteProfiles'
 import { useCwdHistory } from '@/composables/useCwdHistory'
@@ -612,6 +636,14 @@ const form = reactive({
   agent_session_id: '',
 })
 
+const {
+  state: masoPreflightState, message: masoPreflightMessage,
+  endpoint: masoEndpoint, check: checkMasoService,
+} = useMasoPreflight(
+  () => showModal.value && form.agent_type === 'maso' && form.session_kind === 'chat',
+  () => parseLaunchEnv(form.env_text)?.MASO_BASE_URL,
+)
+
 const supportsSoloMode = computed(
   () => form.agent_type === 'claude' || form.agent_type === 'codex' || form.agent_type === 'traex'
 )
@@ -641,6 +673,7 @@ const isCreateDisabled = computed(
   () =>
     isLoading.value ||
     isPending('tab:create') ||
+    (form.agent_type === 'maso' && masoPreflightState.value !== 'available') ||
     (form.target === 'remote' && !form.remote_profile_id) ||
     (form.target === 'remote' && !remoteInteractive(selectedRemoteProfile.value))
 )
@@ -1048,6 +1081,7 @@ onUnmounted(() => {
 })
 
 async function handleCreateTab() {
+  if (form.agent_type === 'maso' && masoPreflightState.value !== 'available') return
   const defaultName = `Tab ${manualTabs.value.length + 1}`
   const name = form.name.trim() || defaultName
   const cwd = form.cwd.trim() || undefined
@@ -1123,6 +1157,24 @@ async function handleCreateTab() {
 </script>
 
 <style scoped>
+.maso-preflight {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  overflow-wrap: anywhere;
+}
+
+.maso-preflight p {
+  margin: 0 0 8px;
+}
+
+.maso-preflight--unavailable {
+  border-color: var(--ch-color-warning);
+  color: var(--ch-color-text);
+}
+
 .tab-bar {
   display: flex;
   align-items: flex-end;

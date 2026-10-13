@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### feat(chat): check MASO service availability before creation
+
+- Probe MASO from the Hub host when selected; show an explicit warning and
+  disable creation while checking or unavailable, with retry and preset recovery.
+- Recheck the service before allocating a Chat and explain service loss in an
+  existing Chat. Read-only checks have a bounded timeout and invoke no model.
+- Preserve drafts and ignore stale readiness results after service changes or
+  dialog closure; validate desktop/mobile behavior and failure recovery.
+
 ### fix(chat): fence MASO cancellation and persisted session identity
 
 - Await MASO session exit and live resume before reuse, so a deferred aborted

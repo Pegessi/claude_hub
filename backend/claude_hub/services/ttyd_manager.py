@@ -3594,7 +3594,7 @@ class TTYDManager:
         if agent_type == AgentType.MASO and session_kind != SessionKind.CHAT:
             raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
         if agent_type == AgentType.MASO:
-            from .agent_stream.maso_http import maso_base_url
+            from .agent_stream.maso_http import check_maso_service, maso_base_url
 
             if chat_mode != ChatMode.DEFAULT:
                 raise ValueError("MASO Chat only supports default mode")
@@ -3602,6 +3602,7 @@ class TTYDManager:
             # backend's global default changes before a later restart.
             env = dict(env or {})
             env["MASO_BASE_URL"] = maso_base_url(env)
+            await check_maso_service(env)
         if session_kind == SessionKind.CHAT and target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
         if target == ExecutionTarget.REMOTE:

@@ -8,6 +8,16 @@ that Chat; Hub freezes its resolved address at creation, including when the
 backend's default later changes. Create a new Chat to change services,
 providers or working directories.
 
+Choosing MASO checks the service from the Hub host before enabling Create.
+The check reads the model catalog and default model within a bounded timeout;
+it does not launch MASO, create a session or invoke a model. If the service is
+missing, unreachable or misconfigured, the dialog explains that MASO cannot be
+used and keeps the user's draft. Start/fix the service and use **Retry check**.
+Changing a service preset performs a fresh check. Creation rechecks availability
+before allocating a tab, and an existing unavailable Chat shows the service
+error with **Retry**. This checks advertised configuration, not upstream model
+credentials, quota or inference success.
+
 The model picker discovers `/api/models` and `/api/models/default`, groups the
 service's advertised thinking variants and sends their exact provider keys.
 `MASO_MODEL` selects a provider key, including a thinking variant. Model changes

@@ -54,7 +54,9 @@
         >
           Retry
         </button>
-        <span class="banner-guidance">Create a Terminal session for native TUI access.</span>
+        <span class="banner-guidance">{{ currentTab?.agent_type === 'maso'
+          ? 'Start the MASO HTTP service, then retry.'
+          : 'Create a Terminal session for native TUI access.' }}</span>
       </template>
     </div>
 
