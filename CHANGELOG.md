@@ -54,6 +54,16 @@
 - Record the current Task state/UI boundaries in the architecture guide. See the
   [stage-three record](docs/working-logs/2026-10-09-task-boundaries.md).
 
+### style(chat): clarify unread completed sessions
+
+- Replace the subtle sheen inside an idle light with a legible 8px completion
+  badge in the Chat sidebar. Its solid success fill and compact checkmark retain
+  the normal status-light footprint, while a larger pulse makes unread results
+  noticeable without enlarging the badge itself.
+- Keep a static checkmark and outline when reduced motion is requested, and
+  expose the state as `Completed, unread` to assistive technology and tooltips.
+- See the [unread completion indicator notes](docs/working-logs/2026-10-13-unread-completion-indicator.md).
+
 ### fix(verify): allow local checks with a noncanonical toolchain
 
 - Warn and continue on local uv, Python, Node or pnpm version drift so standard

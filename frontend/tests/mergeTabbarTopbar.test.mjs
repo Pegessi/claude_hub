@@ -66,18 +66,29 @@ test('a status light in the sidebar shows working, idle, attention, and offline'
   assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='offline'\]/)
 })
 
-test('an unread completed turn shows a contained sheen on the status light', () => {
+test('an unread completed turn shows a compact completion badge and tight unread pulse', () => {
   // the status light carries an unread flag
   assert.match(chatSidebar, /:data-unread="tab\.is_unread \? 'true' : 'false'"/)
-  // The completion cue stays inside the status light instead of drawing the
-  // old oversized blue ring around a green dot.
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-unread='true'\]::after/)
-  assert.match(chatSidebar, /@keyframes sidebar-complete-sheen/)
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-unread='true'\]\s*\{[^}]*overflow:\s*hidden/s)
-  assert.match(chatSidebar, /linear-gradient\(\s*105deg,[\s\S]*rgba\(255, 255, 255, 0\.88\)/)
+  // Completion is legible from a checkmark and persistent outline; animation
+  // only reinforces that the result is still unread.
+  assert.match(chatSidebar, /:aria-label="getTabStatusAriaLabel\(tab\)"/)
+  assert.match(chatSidebar, /function getTabStatusAriaLabel\(tab: TerminalTab\)/)
+  assert.match(chatSidebar, /return 'Completed, unread'/)
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]\s*\{[^}]*width:\s*8px;[^}]*height:\s*8px;/s)
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::before/)
+  assert.match(chatSidebar, /content:\s*'✓'/)
+  assert.match(chatSidebar, /color:\s*var\(--ch-color-sidebar-bg\)/)
+  assert.match(chatSidebar, /font-size:\s*6px/)
+  assert.match(chatSidebar, /background:\s*var\(--ch-color-success-strong\)/)
+  assert.match(chatSidebar, /border:\s*1px solid var\(--ch-color-success\)/)
+  assert.match(chatSidebar, /0 0 8px color-mix\(in srgb, var\(--ch-color-success\) 42%, transparent\)/)
+  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::after/)
+  assert.match(chatSidebar, /@keyframes sidebar-complete-unread-pulse/)
+  assert.match(chatSidebar, /inset:\s*-3px/)
   assert.doesNotMatch(chatSidebar, /@keyframes sidebar-unread-ping/)
   assert.doesNotMatch(chatSidebar, /border:\s*1\.5px solid var\(--ch-color-accent\)/)
-  assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item-status\[data-unread='true'\]::after[\s\S]*?display: none;/)
+  assert.doesNotMatch(chatSidebar, /0 0 10px var\(--ch-color-success-bg\)/)
+  assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::after[\s\S]*?animation: none;[\s\S]*?opacity:\s*0\.55;/)
 })
 
 test('Maso sidebar and main planes use distinct semantic background roles', () => {
