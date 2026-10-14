@@ -4,6 +4,7 @@ from .agent_stream import router as agent_stream_router
 from .auth import router as auth_router
 from .clipboard import router as clipboard_router
 from .codex import router as codex_router
+from .dot import router as dot_router
 from .env_presets import router as env_presets_router
 from .feedback_automation import router as feedback_automation_router
 from .feishu_bot import router as feishu_bot_router
@@ -34,5 +35,6 @@ api_router.include_router(codex_router)
 api_router.include_router(env_presets_router)
 api_router.include_router(scheduled_tasks_router)
 api_router.include_router(agent_stream_router)
+api_router.include_router(dot_router)
 
 __all__ = ["api_router"]
