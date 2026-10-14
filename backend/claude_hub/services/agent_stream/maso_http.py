@@ -31,9 +31,25 @@ _UNCERTAIN_MESSAGE = (
 
 
 def maso_base_url(env: Dict[str, str]) -> str:
-    value = (
-        env.get("MASO_BASE_URL") or os.environ.get("MASO_BASE_URL") or DEFAULT_MASO_BASE_URL
-    ).rstrip("/")
+    value = env.get("MASO_BASE_URL") or os.environ.get("MASO_BASE_URL")
+    if not value:
+        # Port shorthand is a startup setting; Chat presets use a URL so the
+        # existing UI preflight and admission select the same service.
+        port_value = os.environ.get("MASO_PORT")
+        if port_value:
+            try:
+                if (
+                    not port_value.isascii()
+                    or not port_value.isdecimal()
+                    or not 1 <= int(port_value) <= 65535
+                ):
+                    raise ValueError
+            except ValueError:
+                raise ValueError("MASO_PORT must be an integer from 1 to 65535") from None
+            value = f"http://127.0.0.1:{int(port_value)}"
+        else:
+            value = DEFAULT_MASO_BASE_URL
+    value = value.rstrip("/")
     try:
         parsed = urlsplit(value)
         port = parsed.port
