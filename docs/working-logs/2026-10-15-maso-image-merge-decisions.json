@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "9b77b049b07f2c3dd94f79770d5ac3979f1856ac",
+  "parents": [
+    "8079d3c19fdc057793a658615366b753967c92e4",
+    "96c11f03d3d4b296066dc6aae94f6c7a5b6ed7f3"
+  ],
+  "base": "2a43b616c65ce6dd15c78633ff48d7a4cea14883",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "0165bba0eec33a62a87eddf9cd7c0def81155d4b",
+  "reconstructed_tree": "0e014c4c88fd593a5f27b1e124f41f75f4521780",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "be2e561d78fc50da5d08b0864f5b3ea0dd481fbf"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2cf8472dfbcc796ad2c28350c8db9c221b7b7abc"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ba2c639f5b3a0f830f1d3bc9ea9abf66e19559ee"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "81dd20cbdbabcb91f63b385194cf7ad3d34beabd"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a542f77a12ca2d5d30854b83f71beaaa823f82fb"
+      },
+      "reason": "Retain the image-input release entry from parent 2 and both startup configuration/discovery entries from parent 1; remove only native conflict markers and place the new image entry first.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
