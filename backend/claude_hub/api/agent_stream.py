@@ -218,6 +218,13 @@ def _terminal_tab_stream_session_by_id(
     return _terminal_tab_stream_session(stream_session_id.removeprefix(_TAB_STREAM_SESSION_PREFIX))
 
 
+async def _notify_dot_turn_completed(event: AgentStreamEvent) -> None:
+    """Append completed Dot turns to Dot's journal (no-op for other tabs)."""
+    from ..services.dot import get_dot_service
+
+    await get_dot_service().on_stream_event(event)
+
+
 def _get_tab_tailer_manager() -> TailerManager:
     global _tab_tailer_manager
     if _tab_tailer_manager is None:
@@ -225,7 +232,7 @@ def _get_tab_tailer_manager() -> TailerManager:
             session_getter=_terminal_tab_stream_session_by_id,
             persist_session_id=_persist_tab_agent_session_id,
             persist_mode=_persist_tab_chat_mode,
-            post_persist_observers=[_notify_goal_turn_completed],
+            post_persist_observers=[_notify_goal_turn_completed, _notify_dot_turn_completed],
             task_activity_observer=_notify_task_activity,
         )
     return _tab_tailer_manager

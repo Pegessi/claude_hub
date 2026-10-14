@@ -144,6 +144,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await ttyd_manager.start_all_tabs()
         workspace_manager.start_background_monitor()
         try:
+            from .services.dot import get_dot_service
+
+            get_dot_service().start()
+        except Exception:
+            logger.exception("Dot work watcher failed to start")
+        try:
             from .api.feishu_bot import start_feishu_websockets
 
             await start_feishu_websockets()
@@ -161,6 +167,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await stop_feishu_websockets()
                 except Exception:
                     logger.exception("Failed to stop Feishu Bot WebSockets")
+                try:
+                    from .services.dot import get_dot_service
+
+                    await get_dot_service().stop()
+                except Exception:
+                    logger.exception("Failed to stop the Dot work watcher")
                 # Stop new scheduled dispatch before draining its transports.
                 await workspace_manager.stop_background_monitor()
             finally:

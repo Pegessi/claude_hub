@@ -290,17 +290,21 @@ _HUB_RUNTIME_MARKERS = (
 )
 
 
-def wrap_hub_runtime_guidance(text: str) -> str:
+def wrap_hub_runtime_guidance(
+    text: str, *, guidance: Optional[str] = HUB_RUNTIME_GUIDANCE, context: str = ""
+) -> str:
     """Prepend the sentinel-wrapped Hub runtime guidance to a Chat prompt.
 
     Applied once to the first user turn of every native Chat transport so the
     agent knows the lightweight execution policy and where to discover Hub
     work, scheduling and feedback commands when they are relevant.
-    The adapter strips the block on transcript read (see
-    :func:`strip_hub_runtime_guidance`) so it never reaches the persisted
-    timeline or the UI.
+    ``context`` carries an optional per-turn block (Dot's context pack) inside
+    the same hidden block, so one strip removes both. The adapter strips the
+    block on transcript read (see :func:`strip_hub_runtime_guidance`) so it
+    never reaches the persisted timeline or the UI.
     """
-    return f"{_HUB_RUNTIME_START}\n{HUB_RUNTIME_GUIDANCE}\n{_HUB_RUNTIME_END}\n\n{text}"
+    body = "\n\n".join(part for part in (guidance, context) if part)
+    return f"{_HUB_RUNTIME_START}\n{body}\n{_HUB_RUNTIME_END}\n\n{text}"
 
 
 def strip_hub_runtime_guidance(text: str) -> str:
@@ -1367,10 +1371,22 @@ class ProviderSession(ABC):
         if self._seed_history and not self._seed_history_injected:
             prefix = wrap_fork_seed_history(self._seed_history)
             seed_included = True
+        turn_context = await self._prepare_turn_context(text)
         if not self._hub_runtime_guidance_injected:
             self._hub_runtime_guidance_injected = True
-            text = wrap_hub_runtime_guidance(text)
+            text = wrap_hub_runtime_guidance(text, context=turn_context)
+        elif turn_context:
+            text = wrap_hub_runtime_guidance(text, guidance=None, context=turn_context)
         return prefix + text, seed_included
+
+    async def _prepare_turn_context(self, text: str) -> str:
+        """Per-turn hook run inside the send lock before the prompt is composed.
+
+        Returns an extra hidden context block for this turn ("" for none).
+        Subclasses may also adjust provider session state here (Claude uses it
+        for the Dot tab's context pack and session rotation).
+        """
+        return ""
 
     async def _mark_seed_delivered(self) -> None:
         """Record a successful first-turn seed delivery and drop its sidecar.
@@ -1814,6 +1830,8 @@ class ClaudeNativeSession(ProviderSession):
         )
         # Staged image bytes for the next turn's user message content blocks.
         self._staged_images: List[bytes] = []
+        # Dot tab only: the session pack appended to the system prompt.
+        self._dot_system_pack: str = ""
         self._network_settings_by_gen: Dict[int, Path] = {}
         self._validated_tab_settings_payload: Optional[Dict[str, Any]] = None
         self._validated_claude_launch_env: Optional[Dict[str, str]] = None
@@ -1931,7 +1949,11 @@ class ClaudeNativeSession(ProviderSession):
             # "the user declined". A system prompt (not a user message) so it
             # is not echoed into the transcript; persists on every --resume.
             "--append-system-prompt",
-            QUESTION_PROTOCOL_GUIDANCE,
+            (
+                f"{QUESTION_PROTOCOL_GUIDANCE}\n\n{self._dot_system_pack}"
+                if self._dot_system_pack
+                else QUESTION_PROTOCOL_GUIDANCE
+            ),
         ]
         if self.session.solo_mode and self._current_mode == ChatMode.DEFAULT.value:
             cmd.append("--dangerously-skip-permissions")
@@ -1953,6 +1975,29 @@ class ClaudeNativeSession(ProviderSession):
         if _help_confirms_plan_mode("claude", "--permission-mode"):
             return [_DEFAULT_MODE, _PLAN_MODE]
         return [_DEFAULT_MODE]
+
+    async def _prepare_turn_context(self, text: str) -> str:
+        """Dot tab only: fresh context pack, stable session pack and rotation."""
+        if not text:
+            return ""
+        from ..dot import get_dot_service
+
+        service = get_dot_service()
+        if not service.is_dot_tab(getattr(self.session, "tab_id", None)):
+            return ""
+        try:
+            plan = await asyncio.to_thread(service.prepare_turn, text, self._conversation_id)
+        except Exception:
+            logger.exception("Dot context preparation failed; sending the turn without it")
+            return ""
+        if plan.rotate and plan.conversation_id:
+            # Start a new provider conversation: ``--session-id`` creates it and
+            # the init record persists it, exactly like a fresh tab.
+            self._conversation_id = plan.conversation_id
+            self._conversation_id_verified = False
+            self._hub_runtime_guidance_injected = False
+        self._dot_system_pack = plan.system_pack
+        return plan.turn_pack
 
     def _resume_arg(self) -> List[str]:
         """Claude: ``--session-id`` creates the conversation; ``--resume``

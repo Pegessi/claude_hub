@@ -1,0 +1,289 @@
+"""Dot service: journal sync, task watching, health and the Claude Chat hook."""
+
+from __future__ import annotations
+
+import importlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Generator, Optional
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from pytest import MonkeyPatch
+
+from claude_hub.models import (
+    AgentStreamEvent,
+    AgentStreamEventType,
+    AgentType,
+    ExecutionTarget,
+    ManagedSession,
+    ManagedSessionStatus,
+    WorkspaceSessionRole,
+)
+from claude_hub.services import workspace_manager
+from claude_hub.services.agent_stream.native import ClaudeNativeSession
+from claude_hub.services.agent_stream.store import AgentStreamStore
+from claude_hub.services.dot import DotService, DotStore, reset_dot_service
+
+TAB_ID = "tab-1"
+
+
+@pytest.fixture()
+def service(tmp_path: Path) -> Generator[DotService, None, None]:
+    store = DotStore(tmp_path / "dot")
+    store.ensure()
+    store.update_state(tab_id=TAB_ID)
+    dot = DotService(store)
+    reset_dot_service(dot)
+    yield dot
+    reset_dot_service(None)
+
+
+# ── journal ────────────────────────────────────────────────────────────
+
+
+def _event(kind: AgentStreamEventType, turn_id: str, **payload: Any) -> AgentStreamEvent:
+    return AgentStreamEvent(
+        stream_sequence=0,
+        session_id=f"terminal-tab-{TAB_ID}",
+        tab_id=TAB_ID,
+        agent_type=AgentType.CLAUDE,
+        type=kind,
+        turn_id=turn_id,
+        payload=payload,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_journal_pairs_turns_once(
+    service: DotService, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+    stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{TAB_ID}")
+    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t1", summary="Remind me of FA3"))
+    await stream.append(_event(AgentStreamEventType.TEXT_DELTA, "t1", text="..."))
+    await stream.append(
+        _event(AgentStreamEventType.TURN_COMPLETED, "t1", assistant_text="FA3 is fast.")
+    )
+    await stream.append(
+        _event(AgentStreamEventType.TURN_STARTED, "t2", summary="[Dot wake] events")
+    )
+
+    assert await service.sync_journal() == 1
+    text = "\n".join(service.store.recent_journal())
+    assert "you] Remind me of FA3" in text and "dot] FA3 is fast." in text
+
+    # Nothing new: no duplicate entries.
+    assert await service.sync_journal() == 0
+    await stream.append(
+        _event(AgentStreamEventType.TURN_COMPLETED, "t2", assistant_text="Nothing needs you.")
+    )
+    # The open turn's start is re-read from the cursor, so the wake is tagged "hub".
+    assert await service.sync_journal() == 1
+    recent = service.store.recent_journal()
+    assert recent[-2].endswith("hub] [Dot wake] events")
+    assert recent[-1].endswith("dot] Nothing needs you.")
+
+
+@pytest.mark.asyncio
+async def test_stream_observer_ignores_other_tabs(service: DotService) -> None:
+    event = _event(AgentStreamEventType.TURN_COMPLETED, "t1").model_copy(update={"tab_id": "other"})
+    with patch.object(service, "sync_journal", AsyncMock()) as sync:
+        await service.on_stream_event(event)
+        sync.assert_not_awaited()
+        await service.on_stream_event(_event(AgentStreamEventType.TURN_COMPLETED, "t1"))
+        sync.assert_awaited_once()
+
+
+# ── task watcher ───────────────────────────────────────────────────────
+
+
+def _task(status: str) -> SimpleNamespace:
+    return SimpleNamespace(status=SimpleNamespace(value=status), title="Summarize paper")
+
+
+def _report(report_id: str, state: str, message: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=report_id,
+        state=SimpleNamespace(value=state),
+        message=message,
+        validation="checked 5 bullets",
+        risks="",
+        changed_files=["notes/fa3.md"],
+        artifact_refs=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_check_work_turns_transitions_into_events(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    tasks: dict[str, Any] = {"task-1": _task("working")}
+    reports: dict[str, list[Any]] = {"task-1": []}
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(
+        workspace_manager, "reports_for_task", lambda _ws, task_id: reports.get(task_id, [])
+    )
+    store = service.store
+    store.upsert_work(
+        "task-1", workspace_id="ws", title="Summarize paper", goal="5 bullets", status="working"
+    )
+    store.upsert_work("task-gone", workspace_id="ws", title="Lost task", status="working")
+
+    assert await service.check_work() == 1  # only the missing task
+    assert [e["kind"] for e in store.list_inbox()] == ["task_missing"]
+    assert await service.check_work() == 0
+
+    reports["task-1"].append(_report("r1", "needs_input", "Which paper version?"))
+    assert await service.check_work() == 1
+    assert await service.check_work() == 0, "the same report is not re-announced"
+
+    tasks["task-1"] = _task("review")
+    reports["task-1"].append(_report("r2", "done", "Summary written.\nMore lines."))
+    assert await service.check_work() == 1
+    ready = store.list_inbox()[-1]
+    assert ready["kind"] == "task_ready" and "Summary written." in ready["text"]
+    card = store.get_card(ready["card_id"])
+    assert card is not None and card.title == "Result: Summarize paper"
+    assert "notes/fa3.md" in card.body and "checked 5 bullets" in card.body
+
+    tasks["task-1"] = _task("done")
+    assert await service.check_work() == 0, "accepting a reviewed task is not news"
+    assert store.list_work() == []
+    assert store.get_work("task-1")["status"] == "done"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_watch_wakes_dot_through_schedule(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    run = AsyncMock()
+    monkeypatch.setattr(workspace_manager, "scheduled_tasks", {"sched-1": object()})
+    monkeypatch.setattr(workspace_manager, "run_scheduled_task", run)
+    assert not await service.wake()
+    service.store.update_state(wake_schedule_id="sched-1")
+    assert await service.wake()
+    run.assert_awaited_once_with("sched-1")
+
+
+@pytest.mark.asyncio
+async def test_delegate_registers_and_starts_task(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    created: dict[str, Any] = {}
+
+    async def fake_register(ws: str, payload: Any, actor_key: str) -> tuple[Any, bool]:
+        created.update(ws=ws, payload=payload, actor=actor_key)
+        return (
+            SimpleNamespace(id="task-9", title=payload.title, status=SimpleNamespace(value="todo")),
+            False,
+        )
+
+    async def fake_start(task_id: str, request: Any) -> Any:
+        return SimpleNamespace(id=task_id, title="Paper", status=SimpleNamespace(value="queued"))
+
+    monkeypatch.setattr(workspace_manager, "register_task", fake_register)
+    monkeypatch.setattr(workspace_manager, "start_task", fake_start)
+    item = await service.delegate(
+        workspace_id="ws",
+        title="Paper",
+        goal="Summarize FA3",
+        done_when="5 bullets in notes/fa3.md",
+        actor_key="actor",
+    )
+    assert item["task_id"] == "task-9" and item["status"] == "queued"
+    brief = created["payload"].prompt
+    assert "## Goal\nSummarize FA3" in brief and "## Done when\n5 bullets" in brief
+    assert created["payload"].source.tab_id == TAB_ID
+    with pytest.raises(ValueError):
+        await service.delegate(workspace_id="ws", title="x", goal=" ", done_when="y", actor_key="a")
+
+
+def test_health_flags_problems(service: DotService) -> None:
+    report = service.health()
+    by_name = {check["name"]: check for check in report["checks"]}
+    assert not report["ok"]
+    assert not by_name["focus_size"]["ok"]
+    assert not by_name["tidy"]["ok"]
+    assert by_name["git"]["ok"] and by_name["index"]["ok"]
+
+
+# ── Claude Chat hook ───────────────────────────────────────────────────
+
+
+def _session(tab_id: str) -> ManagedSession:
+    return ManagedSession(
+        id="sess-1",
+        workspace_id="terminal-tabs",
+        tab_id=tab_id,
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        status=ManagedSessionStatus.IDLE,
+        title="Dot",
+        workspace_path="/tmp",
+        tmux_session="tmux-1",
+        target=ExecutionTarget.LOCAL,
+        solo_mode=True,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+def _sent(mock_spawn: AsyncMock, index: int) -> tuple[list[str], str]:
+    cmd, stdin = mock_spawn.await_args_list[index].args[:2]
+    content = json.loads(stdin)["message"]["content"]
+    text = next(block["text"] for block in content if block.get("type") == "text")
+    return list(cmd), str(text)
+
+
+def _flag(cmd: list[str], name: str) -> Optional[str]:
+    return cmd[cmd.index(name) + 1] if name in cmd else None
+
+
+@pytest.mark.asyncio
+async def test_claude_hook_injects_packs_and_rotates(service: DotService) -> None:
+    service.store.add_focus("Ship Dot", priority=1)
+    transport = ClaudeNativeSession(_session(TAB_ID))
+    mock_spawn = AsyncMock()
+    with patch.object(transport, "_spawn_oneshot", mock_spawn):
+        await transport.send_message("hello Dot", [])
+        transport.acknowledge_turn_complete()
+        transport._conversation_id_verified = True
+        await transport.send_message("second", [])
+        transport.acknowledge_turn_complete()
+        service.request_rotation()
+        await transport.send_message("third", [])
+
+    cmd1, text1 = _sent(mock_spawn, 0)
+    cmd2, text2 = _sent(mock_spawn, 1)
+    cmd3, text3 = _sent(mock_spawn, 2)
+    first_id = _flag(cmd1, "--session-id")
+    assert first_id
+    assert "You are Dot" in (_flag(cmd1, "--append-system-prompt") or "")
+    assert "<claude_hub_instructions>" in text1 and "Ship Dot" in text1
+    assert text1.endswith("hello Dot")
+
+    assert _flag(cmd2, "--resume") == first_id
+    assert "You are Dot" in (_flag(cmd2, "--append-system-prompt") or "")
+    assert "session turn 2" in text2 and text2.endswith("second")
+
+    third_id = _flag(cmd3, "--session-id")
+    assert third_id and third_id != first_id
+    assert "session turn 1" in text3
+
+
+@pytest.mark.asyncio
+async def test_claude_hook_leaves_other_tabs_alone(service: DotService) -> None:
+    transport = ClaudeNativeSession(_session("tab-other"))
+    mock_spawn = AsyncMock()
+    with patch.object(transport, "_spawn_oneshot", mock_spawn):
+        await transport.send_message("hi", [])
+        transport.acknowledge_turn_complete()
+        await transport.send_message("again", [])
+    cmd, text = _sent(mock_spawn, 1)
+    assert "You are Dot" not in (_flag(cmd, "--append-system-prompt") or "")
+    assert text == "again"

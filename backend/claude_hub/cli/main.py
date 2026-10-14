@@ -190,6 +190,7 @@ def cli(
 
 def _register() -> None:
     """Attach subcommand groups. Imported here to avoid circular imports."""
+    from claude_hub.cli.commands.dot import dot
     from claude_hub.cli.commands.feedback import feedback
     from claude_hub.cli.commands.feishu import feishu
     from claude_hub.cli.commands.lessons import lessons
@@ -228,6 +229,7 @@ def _register() -> None:
     cli.add_command(feishu)
     cli.add_command(work)
     cli.add_command(feedback)
+    cli.add_command(dot)
 
 
 _register()
