@@ -1,0 +1,51 @@
+# Dot persistent personal agent (M1–M3)
+
+Branch `codex/dot-assistant`, checkout `~/claude_hub_worktree/dot-assistant`.
+Design: [docs/DOT.md](../DOT.md). Voice (M4) is deferred by the user.
+
+## Goal
+
+A Jarvis-like agent that answers simple things from memory, delegates real work
+to Hub Tasks, and keeps its own context small. It must avoid the long-running
+master-agent failures seen with MASO: losing priorities, micromanaging workers,
+drowning in detail, and imprecise briefs.
+
+## What shipped
+
+- M1: git-backed memory home (`<hub home>/dot`): cards with JSON frontmatter,
+  focus (max 7), work, inbox, journal, files and an FTS5 trigram index. A stable
+  session pack goes in the system prompt; a small turn pack goes in the hidden
+  hub block. Sessions rotate on turn count, age, tidy or request.
+- M2: `delegate` starts a Hub Task from a fixed brief template; a 15 s watcher
+  turns task transitions into result cards and inbox events and runs the "Dot
+  wake-up" Chat schedule. Dot never polls workers.
+- M3: nightly `[Dot tidy]` schedule, deterministic health checks, header
+  launcher and Dot panel (focus, work, memory, health), REST and CLI.
+
+## Problems found during a real run
+
+On an isolated backend (`CLAUDE_HUB_HOME=~/.claude_hub_dev/dot-assistant`,
+tmux socket `dotdev`, port 18731) the first real turn failed with 401.
+
+1. Dot's tab was created without provider env, so it fell back to the built-in
+   Claude env, which has no key. Fix: `POST /api/dot/setup` takes `env` /
+   `env_preset`; a new tab is created with it, and an existing tab still on
+   the empty or built-in fallback env is switched through the normal
+   `/api/tabs/{id}/switch-env` path, so a live Chat transport gets the new env
+   too. A user-chosen env is kept. The launcher borrows the env of the active
+   Claude tab (else the default Claude preset); the CLI uses `--env-preset` or
+   the CLI's Claude default preset.
+2. The journal recorded the 401 error text as Dot's answer. Fix: failed turns
+   are journaled as `hub (turn failed)`.
+
+After the fixes, a real turn on the fallback env failed as expected; setup
+seeded the env, and the next turn answered "Your top focus is P1: Ship Dot."
+from memory and was journaled. One retry was needed for a provider network
+timeout unrelated to Dot.
+
+## Risks
+
+- The built-in default Claude preset has no key. A user with no working Claude
+  tab must pick an env for the Dot tab once (normal tab env switcher).
+- The memory quality depends on the nightly tidy turn following its prompt;
+  health checks catch structural drift, not bad summaries.

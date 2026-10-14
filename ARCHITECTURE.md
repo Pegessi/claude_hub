@@ -422,6 +422,8 @@ Initiator-managed Task → explicit progress/handoff; no implicit dispatch
 
 For MASO's HTTP session and condensation contract, read [MASO HTTP Chat](docs/MASO.md)
 and `services/agent_stream/maso_http.py` / `maso_events.py`.
+For Dot, the persistent personal agent built on a Claude Chat tab with
+git-backed memory, read [Dot](docs/DOT.md) and `services/dot/`.
 For other provider behavior read `services/agent_stream/native.py`, the corresponding
 adapter, and `tailer.py`; for Task control read `workspace_manager/_task_execution.py`.
 These are separate lifecycle owners even when they share a Workspace or tab.

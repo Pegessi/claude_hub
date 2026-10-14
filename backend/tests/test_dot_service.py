@@ -88,6 +88,21 @@ async def test_sync_journal_pairs_turns_once(
     assert recent[-2].endswith("hub] [Dot wake] events")
     assert recent[-1].endswith("dot] Nothing needs you.")
 
+    # A failed turn's error text is not Dot's answer.
+    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t3", summary="Hi"))
+    await stream.append(
+        _event(
+            AgentStreamEventType.TURN_COMPLETED,
+            "t3",
+            status="failed",
+            assistant_text="API Error: 401",
+        )
+    )
+    assert await service.sync_journal() == 1
+    recent = service.store.recent_journal()
+    assert recent[-1].endswith("hub] (turn failed)")
+    assert not any("401" in line for line in recent)
+
 
 @pytest.mark.asyncio
 async def test_stream_observer_ignores_other_tabs(service: DotService) -> None:

@@ -51,10 +51,21 @@ def dot() -> None:
 
 
 @dot.command("setup")
+@click.option(
+    "--env-preset",
+    default=None,
+    help="Provider env preset for Dot's Chat tab (default: the Claude default preset).",
+)
 @click.pass_context
-def dot_setup(ctx: click.Context) -> None:
+def dot_setup(ctx: click.Context, env_preset: Optional[str]) -> None:
     """Create Dot's memory home, Chat tab and schedules (safe to repeat)."""
-    emit(_call(ctx, "POST", "/setup"), cli_main.as_json(ctx))
+    settings = ctx.obj
+    preset = (
+        env_preset
+        or settings.env_preset_for_agent_type("claude")
+        or getattr(settings, "default_env_preset", None)
+    )
+    emit(_call(ctx, "POST", "/setup", json={"env_preset": preset}), cli_main.as_json(ctx))
 
 
 @dot.command("status")

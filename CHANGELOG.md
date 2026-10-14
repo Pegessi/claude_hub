@@ -5,6 +5,20 @@
 
 ## Unreleased
 
+### feat(dot): add Dot, a persistent personal agent
+
+- Dot is a Claude Chat tab with git-backed memory: user, work, knowledge and
+  concept cards, a focus list (max 7), work tracking, a daily journal and
+  stored files, searched with an FTS5 index (CJK aware).
+- Each turn gets a small, stable memory pack; sessions rotate by turn count,
+  age, nightly tidy or request, so Dot starts fresh without forgetting.
+- Dot delegates work as Hub Tasks with a precise brief; a watcher turns task
+  results into result cards and inbox events and wakes Dot. A nightly tidy
+  turn compresses the journal into cards and concepts.
+- Header Dot button and panel (focus, work, memory, health), `/api/dot/*` and
+  `claude-hub dot` CLI. Setup passes the provider env; failed turns are not
+  journaled as answers. Voice is planned for later.
+
 ### fix(config): load the MASO service URL from backend startup settings
 
 - Add `MASO_BASE_URL` to the existing Settings / `backend/.env` configuration,

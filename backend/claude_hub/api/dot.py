@@ -7,7 +7,7 @@ import base64
 import binascii
 import hashlib
 import json
-from typing import Any, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -37,6 +37,15 @@ class CardWrite(BaseModel):
     links: List[str] = Field(default_factory=list, max_length=64)
     files: List[str] = Field(default_factory=list, max_length=32)
     source: str = Field(default="", max_length=500)
+
+
+class SetupRequest(BaseModel):
+    """Provider launch env for Dot's Chat tab, like a normal new Chat."""
+
+    model_config = {"extra": "forbid"}
+
+    env: Optional[Dict[str, str]] = None
+    env_preset: Optional[str] = Field(default=None, max_length=200)
 
 
 class FileUpload(BaseModel):
@@ -106,11 +115,25 @@ async def dot_status(current_user: User = Depends(get_current_user)) -> dict[str
 
 
 @router.post("/setup")
-async def dot_setup(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+async def dot_setup(
+    payload: Optional[SetupRequest] = None,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     """Create the memory home, the Dot Chat tab and its schedules (idempotent)."""
+    from ..models.schemas import SwitchEnvRequest
+    from ..services.env_preset_resolver import merge_env_with_preset
+    from .tabs import switch_tab_env
+
     service = _service()
     try:
-        await service.ensure_tab()
+        env = merge_env_with_preset(
+            preset=payload.env_preset if payload else None,
+            explicit_env=dict(payload.env or {}) if payload else {},
+        )
+        tab_id = await service.ensure_tab(env=env)
+        if service.env_seed_needed(env):
+            # Same path as the tab env switcher, so a live Chat picks it up too.
+            await switch_tab_env(tab_id, SwitchEnvRequest(env=env), current_user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return service.status()
