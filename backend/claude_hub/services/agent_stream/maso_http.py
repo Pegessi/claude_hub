@@ -19,6 +19,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from ...config import settings
 from ...models import StreamCapabilities, StreamModelOption, StreamReasoningEffortOption
 from .native import ProviderSession
 from .store import AgentStreamStore
@@ -30,8 +31,13 @@ _UNCERTAIN_MESSAGE = (
 )
 
 
+def configured_maso_base_url(env: Dict[str, str]) -> Optional[str]:
+    """Chat override > process override > service startup configuration."""
+    return env.get("MASO_BASE_URL") or os.environ.get("MASO_BASE_URL") or settings.maso_base_url
+
+
 def maso_base_url(env: Dict[str, str]) -> str:
-    value = env.get("MASO_BASE_URL") or os.environ.get("MASO_BASE_URL")
+    value = configured_maso_base_url(env)
     if not value:
         # Port shorthand is a startup setting; Chat presets use a URL so the
         # existing UI preflight and admission select the same service.

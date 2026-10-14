@@ -5,6 +5,13 @@
 
 ## Unreleased
 
+### fix(config): load the MASO service URL from backend startup settings
+
+- Add `MASO_BASE_URL` to the existing Settings / `backend/.env` configuration,
+  shared by startup diagnostics, preflight and new Chat admission.
+- Preserve process and Chat URL overrides, explicit-target failures and saved
+  Chat endpoints; document the actual service configuration file location.
+
 ### fix(chat): discover the actual local MASO endpoint
 
 - Honor explicit `MASO_BASE_URL` and `MASO_PORT`; otherwise validate local

@@ -3,7 +3,8 @@
 Create a **Chat** and choose **MASO** as its provider. Hub connects directly to
 the existing MASO service; it does not launch a MASO CLI or a second agent runtime.
 Endpoint selection uses the Chat's `MASO_BASE_URL`, then the Hub process's
-`MASO_BASE_URL`, then the Hub process's `MASO_PORT` (mapped to IPv4 loopback).
+`MASO_BASE_URL`, then the service setting in `backend/.env`, then the Hub
+process's `MASO_PORT` (mapped to IPv4 loopback).
 Port shorthand is a startup setting; Chat environment presets select a service
 with `MASO_BASE_URL` so UI readiness and creation use the same target.
 An explicit address or port is checked on its own; an unreachable configured
@@ -29,6 +30,22 @@ error with **Retry**. This checks advertised configuration, not upstream model
 credentials, quota or inference success.
 
 ## Startup check
+
+MASO's service-wide URL is part of the existing backend `Settings` configuration.
+To configure it once, add the intended URL to `backend/.env` (preserve the file's
+other settings), then use the normal authorized Hub startup path:
+
+```dotenv
+MASO_BASE_URL=http://127.0.0.1:11004
+```
+
+This is an example local address. `start.sh` runs the backend from `backend/`,
+where Settings reads `.env`; the repository root `.env.example` is the template.
+The process environment overrides the file, and a Chat URL overrides both.
+An absent/empty setting permits local discovery. Startup probe, preflight and
+Chat creation share this resolver, so a file-configured service is not replaced
+by whichever local instance discovery finds. Changes to this startup setting
+take effect when the backend starts again; existing Chats retain their saved URL.
 
 Production `start.sh` / `service_launcher` and development `start.sh --dev`
 report the selected MASO URL and model count at startup. MASO being absent or

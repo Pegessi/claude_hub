@@ -46,7 +46,7 @@ async def discover_maso_service(
     env: dict[str, str],
 ) -> tuple[str, list[StreamModelOption], str]:
     """Validate an explicit target, otherwise require one usable local target."""
-    if env.get("MASO_BASE_URL") or os.environ.get("MASO_BASE_URL") or os.environ.get("MASO_PORT"):
+    if maso_http.configured_maso_base_url(env) or os.environ.get("MASO_PORT"):
         base_url = maso_http.maso_base_url(env)
         models, default = await maso_http.check_maso_service({"MASO_BASE_URL": base_url})
         return base_url, models, default

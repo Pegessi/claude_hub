@@ -8,9 +8,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from claude_hub.config import Settings
 from claude_hub.main import app
 from claude_hub.maso_probe import main as probe_main
 from claude_hub.models import AgentType, SessionKind
+from claude_hub.services.agent_stream import maso_http
 from claude_hub.services.agent_stream.maso_http import MasoServiceUnavailable, maso_base_url
 from claude_hub.services.maso_discovery import discover_maso_service
 from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
@@ -20,6 +22,7 @@ from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
 def local_services(tmp_path, monkeypatch):
     monkeypatch.delenv("MASO_BASE_URL", raising=False)
     monkeypatch.delenv("MASO_PORT", raising=False)
+    monkeypatch.setattr(maso_http.settings, "maso_base_url", None)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     registry = tmp_path / ".maso" / "instances.json"
     registry.parent.mkdir()
@@ -220,3 +223,92 @@ def test_startup_probe_reports_address_and_missing_maso_does_not_block_hub(local
     assert "MASO unavailable" in capsys.readouterr().out
     assert probe_main([]) == 1
     assert json.loads(capsys.readouterr().out)["available"] is False
+
+
+@pytest.mark.asyncio
+async def test_dotenv_url_is_used_by_startup_preflight_and_chat_creation(
+    local_services, monkeypatch, capsys, tmp_path
+):
+    registry, state, calls = local_services
+    registry.write_text('{"a": {"port": 11004}}')
+    state["ready"].update({9796, 11004, 11006})
+    dotenv = tmp_path / "service.env"
+    dotenv.write_text("MASO_BASE_URL=http://127.0.0.1:11006\n")
+    monkeypatch.setattr(maso_http, "settings", Settings(_env_file=dotenv))
+
+    # A file-configured target wins over discovery even with several instances.
+    assert (await discover_maso_service({}))[0] == "http://127.0.0.1:11006"
+    with TestClient(app) as client:
+        assert (
+            client.post("/api/maso/preflight", json={}).json()["base_url"]
+            == "http://127.0.0.1:11006"
+        )
+
+    async def inert_start(_self):
+        return False
+
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", inert_start)
+    monkeypatch.setattr(TTYDProcess, "start", inert_start)
+    manager = TTYDManager()
+    tab = await manager.create_tab(
+        name="configured", agent_type=AgentType.MASO, session_kind=SessionKind.CHAT
+    )
+    assert tab.env["MASO_BASE_URL"] == "http://127.0.0.1:11006"
+    assert {httpx.URL(url).port for _method, url in calls} == {11006}
+
+    # The synchronous startup CLI shares the same settings in a fresh loop.
+    await asyncio.to_thread(probe_main, ["--startup"])
+    assert "MASO ready at http://127.0.0.1:11006" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_process_and_chat_urls_override_dotenv_and_saved_chat_stays_pinned(
+    local_services, tmp_path, monkeypatch
+):
+    _registry, state, _calls = local_services
+    state["ready"].update({11004, 11006, 11008})
+    dotenv = tmp_path / "service.env"
+    dotenv.write_text("MASO_BASE_URL=http://127.0.0.1:11006\n")
+    monkeypatch.setattr(maso_http, "settings", Settings(_env_file=dotenv))
+    monkeypatch.setenv("MASO_PORT", "11004")
+    assert (await discover_maso_service({}))[0] == "http://127.0.0.1:11006"
+    monkeypatch.setenv("MASO_BASE_URL", "http://127.0.0.1:11004")
+    assert (await discover_maso_service({}))[0] == "http://127.0.0.1:11004"
+    assert (await discover_maso_service({"MASO_BASE_URL": "http://127.0.0.1:11008"}))[
+        0
+    ] == "http://127.0.0.1:11008"
+    # A persisted Chat always supplies its own URL, including after config edits.
+    monkeypatch.setattr(maso_http.settings, "maso_base_url", "http://127.0.0.1:11006")
+    assert maso_base_url({"MASO_BASE_URL": "http://127.0.0.1:11008"}) == "http://127.0.0.1:11008"
+
+
+def test_unavailable_dotenv_target_never_falls_back_and_bad_url_is_nonfatal_at_startup(
+    local_services, tmp_path, monkeypatch, capsys
+):
+    registry, state, calls = local_services
+    registry.write_text('{"a": {"port": 11004}}')
+    state["ready"].add(11004)
+    dotenv = tmp_path / "service.env"
+    dotenv.write_text("MASO_BASE_URL=http://127.0.0.1:11006\n")
+    monkeypatch.setattr(maso_http, "settings", Settings(_env_file=dotenv))
+    assert probe_main([]) == 1
+    assert json.loads(capsys.readouterr().out)["available"] is False
+    assert {httpx.URL(url).port for _method, url in calls} == {11006}
+    calls.clear()
+    dotenv.write_text("MASO_BASE_URL=http://user:private@maso.test\n")
+    monkeypatch.setattr(maso_http, "settings", Settings(_env_file=dotenv))
+    assert probe_main(["--startup"]) == 0
+    output = capsys.readouterr().out
+    assert "MASO unavailable" in output and "private" not in output
+    assert not calls
+
+
+def test_empty_dotenv_url_keeps_automatic_discovery(local_services, tmp_path, monkeypatch, capsys):
+    registry, state, _calls = local_services
+    registry.write_text('{"a": {"port": 11004}}')
+    state["ready"].add(11004)
+    dotenv = tmp_path / "service.env"
+    dotenv.write_text("MASO_BASE_URL=\n")
+    monkeypatch.setattr(maso_http, "settings", Settings(_env_file=dotenv))
+    assert probe_main([]) == 0
+    assert json.loads(capsys.readouterr().out)["base_url"] == "http://127.0.0.1:11004"
