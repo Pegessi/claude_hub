@@ -9,9 +9,12 @@ Run only with a dedicated Vite server, never 5173/8173:
   python tests/browser_chat_composer.py http://127.0.0.1:5287 /tmp/chat-composer-ui [browser]
 """
 
+import asyncio
+import base64
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -23,6 +26,9 @@ SESSION = "fixture-composer-session"
 TURN_ONE = "fixture-turn-1"
 NOW = "2026-10-09T10:00:00Z"
 FAILING_TEXT = "Message that fails"
+PNG_IMAGE = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 # Paths are matched exactly against the tab they belong to. A stub that accepts
 # any path ending in "/events" would answer a request aimed at the wrong tab,
@@ -129,6 +135,7 @@ async def main(browser_run: BrowserRun) -> None:
         "turn_open": False,
         "maso_available": False,
         "existing_maso_available": True,
+        "previews": {},
     }
 
     async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
@@ -209,7 +216,7 @@ async def main(browser_run: BrowserRun) -> None:
                     ),
                     "send_message": True,
                     "supports_goals": False,
-                    "supports_images": False,
+                    "supports_images": True,
                     "agent_type": "maso",
                     "supports_mode_switch": False,
                     "current_model": tab["env"].get("MASO_MODEL", "seed-high"),
@@ -246,10 +253,14 @@ async def main(browser_run: BrowserRun) -> None:
                     "has_more": False,
                 }
             elif method == "POST" and path == f"{BASE}/wait":
-                # Long poll: return whatever the send handlers have appended.
+                # Return authoritative edges without advancing past events
+                # the client has not received, including after a reload.
+                since = json.loads(request.post_data or "{}").get("since_sequence", -1)
+                await asyncio.sleep(0.05)
+                fresh = [item for item in state["events"] if item["stream_sequence"] > since]
                 body = {
-                    "events": [],
-                    "next_sequence": len(state["events"]),
+                    "events": fresh,
+                    "next_sequence": fresh[-1]["stream_sequence"] if fresh else since,
                     "has_more": False,
                 }
             elif method == "POST" and path == f"{BASE}/send":
@@ -264,7 +275,27 @@ async def main(browser_run: BrowserRun) -> None:
                     )
                     return
                 sequence = len(state["events"])
-                turn_id = f"fixture-sent-turn-{len(sends)}"
+                # Hub uses the submitted client turn ID for its durable
+                # start/completion edges and acknowledgement.
+                turn_id = payload["client_turn_id"]
+                attachments = []
+                for index, attachment in enumerate(payload.get("attachments", [])):
+                    attachment_id = uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"fixture-image-{len(sends)}-{index}"
+                    ).hex
+                    preview = base64.b64decode(
+                        attachment.get("preview_data_url", attachment["data_url"]).split(",", 1)[1]
+                    )
+                    state["previews"][attachment_id] = preview
+                    attachments.append(
+                        {
+                            "id": attachment_id,
+                            "mime_type": "image/png",
+                            "byte_size": len(preview),
+                            "width": 1,
+                            "height": 1,
+                        }
+                    )
                 # Start the turn without completing it: the composer must now
                 # offer Stop, and a further send must queue rather than start a
                 # new turn.
@@ -272,7 +303,7 @@ async def main(browser_run: BrowserRun) -> None:
                     event(
                         sequence + 1,
                         "turn_started",
-                        {"summary": payload.get("text", "")},
+                        {"summary": payload.get("text", ""), "attachments": attachments},
                         turn_id=turn_id,
                     )
                 )
@@ -281,10 +312,22 @@ async def main(browser_run: BrowserRun) -> None:
                     "client_turn_id": payload.get("client_turn_id"),
                     "turn_id": turn_id,
                 }
+            elif method == "GET" and path.startswith(f"{BASE}/attachments/"):
+                preview = state["previews"].get(path.rsplit("/", 1)[-1])
+                if preview is None:
+                    unknown_requests.append((method, path))
+                    await route.fulfill(status=404)
+                else:
+                    await route.fulfill(status=200, content_type="image/png", body=preview)
+                return
             elif method == "POST" and path == f"{BASE}/cancel":
                 interrupts.append(json.loads(request.post_data or "{}"))
                 sequence = len(state["events"])
-                interrupted_turn = f"fixture-sent-turn-{len(sends)}"
+                interrupted_turn = next(
+                    item["turn_id"]
+                    for item in reversed(state["events"])
+                    if item["type"] == "turn_started"
+                )
                 state["events"].append(
                     event(
                         sequence + 1,
@@ -571,6 +614,58 @@ async def main(browser_run: BrowserRun) -> None:
         await banner.get_by_role("button", name="Retry", exact=True).click()
         await expect(banner).to_have_count(0)
 
+        # MASO accepts native image-only turns, retains multiple thumbnails,
+        # and queues original image data while another turn is still running.
+        await page.locator(".composer-stop-btn").click()
+        await expect(page.locator(".composer-stop-btn")).to_have_count(0)
+        await composer.fill("")
+        image_input = page.locator(".composer-file-input")
+        await image_input.set_input_files(
+            [
+                {"name": "first.png", "mimeType": "image/png", "buffer": PNG_IMAGE},
+                {"name": "second.png", "mimeType": "image/png", "buffer": PNG_IMAGE},
+            ]
+        )
+        await expect(page.locator(".attachment-chip")).to_have_count(2)
+        await expect(send_button).to_be_enabled()
+        await expect(page.locator(".composer-error")).to_have_count(0)
+        await send_button.click()
+        image_send = sends[-1]
+        assert image_send["text"] == "" and len(image_send["attachments"]) == 2
+        assert all(
+            base64.b64decode(att["data_url"].split(",", 1)[1]) == PNG_IMAGE
+            for att in image_send["attachments"]
+        )
+        await expect(page.locator(".attachment-chip")).to_have_count(0)
+        await expect(page.locator(".turn-attachments img")).to_have_count(2)
+        await composer.fill("Queued image")
+        await image_input.set_input_files(
+            {"name": "queued.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
+        )
+        await expect(page.locator(".attachment-chip")).to_have_count(1)
+        before_queue = len(sends)
+        await send_button.click()
+        await expect(page.locator(".composer-queue")).to_contain_text("1 message queued")
+        assert len(sends) == before_queue
+        await page.locator(".composer-stop-btn").click()
+        await expect(page.locator(".composer-queue")).to_have_count(0)
+        assert len(sends) == before_queue + 1
+        assert sends[-1]["text"] == "Queued image" and len(sends[-1]["attachments"]) == 1
+        assert (
+            base64.b64decode(sends[-1]["attachments"][0]["data_url"].split(",", 1)[1]) == PNG_IMAGE
+        )
+        await page.locator(".composer-stop-btn").click()
+        sends_before_reload = len(sends)
+        await page.reload()
+        await expect(page.locator(".turn-attachments img")).to_have_count(3)
+        await page.wait_for_function(
+            """() => [...document.querySelectorAll('.turn-attachments img')].every(img => img.complete && img.naturalWidth === 1)"""
+        )
+        assert (
+            len(sends) == sends_before_reload
+        ), "image history reload must not resend a provider turn"
+        await page.screenshot(path=str(output / "maso-image-history-mobile.png"), full_page=True)
+
         # The create dialog must show common directories even when the input
         # starts with a different path. Codex history stays unloaded until the
         # user expands its section.
@@ -658,6 +753,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "codex_session_requests": codex_session_requests,
                     "maso_model_changes": model_changes,
                     "maso_preflight_requests": preflight_requests,
+                    "image_turns": sum(bool(item.get("attachments")) for item in sends),
                     "unknown_requests": unknown_requests,
                     "blocked_external_requests": len(blocked),
                     "unexpected_external_requests": unexpected_external,

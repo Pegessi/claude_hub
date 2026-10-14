@@ -1,6 +1,7 @@
 """HTTP contract and condensation regressions; every provider request is mocked."""
 
 import asyncio
+import base64
 import json
 import uuid
 from datetime import datetime, timezone
@@ -31,6 +32,10 @@ from claude_hub.services.agent_stream.tailer import (
     TranscriptForkError,
 )
 from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
+
+PNG_IMAGE = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 
 def session(**updates: Any) -> ManagedSession:
@@ -90,10 +95,48 @@ class MasoServer:
         self.exit_entered: asyncio.Event | None = None
         self.exit_release: asyncio.Event | None = None
         self.fail_exit = False
+        self.image_uploads: list[dict[str, Any]] = []
+        self.image_buffers: dict[str, bytearray] = {}
+        self.uploaded_images: list[bytes] = []
+        self.image_refs: list[str] = []
+        self.fail_image_chunk: int | None = None
+        self.image_metadata: dict[str, Any] | None = None
+        self.image_upload_entered: asyncio.Event | None = None
+        self.image_upload_release: asyncio.Event | None = None
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else {}
         path = request.url.path
+        if path.endswith("/images/chunk"):
+            params = dict(request.url.params)
+            self.calls.append((request.method, path, params))
+            self.image_uploads.append(
+                {
+                    **params,
+                    "content": request.content,
+                    "host": request.url.host,
+                    "mime": request.headers.get("content-type"),
+                    "timeout": request.extensions.get("timeout"),
+                }
+            )
+            if self.image_upload_entered is not None and self.image_upload_release is not None:
+                self.image_upload_entered.set()
+                await self.image_upload_release.wait()
+            if self.fail_image_chunk == len(self.image_uploads):
+                raise httpx.ReadTimeout("image upload unavailable")
+            buffer = self.image_buffers.setdefault(params["upload_id"], bytearray())
+            buffer.extend(request.content)
+            if params["final"] != "1":
+                return httpx.Response(204)
+            image = bytes(buffer)
+            self.uploaded_images.append(image)
+            ref = params["upload_id"]
+            self.image_refs.append(ref)
+            mime = "image/png" if image.startswith(b"\x89PNG") else "image/gif"
+            metadata = {"ref": ref, "media_type": mime, "bytes": len(image)}
+            return httpx.Response(
+                200, json=self.image_metadata if self.image_metadata is not None else metadata
+            )
+        body = json.loads(request.content) if request.content else {}
         self.calls.append((request.method, path, body))
         if path == "/api/models":
             return httpx.Response(
@@ -199,6 +242,219 @@ def transport(server: MasoServer, record: ManagedSession | None = None) -> MasoH
 
 def raw(kind: str, **data: Any) -> dict:
     return {"type": kind, "root_agent_id": "main", "data": {"agent_id": "main", **data}}
+
+
+@pytest.mark.asyncio
+async def test_remote_images_are_uploaded_in_order_before_atomic_multimodal_message() -> None:
+    server = MasoServer()
+    provider = MasoHttpSession(
+        session(env={"MASO_BASE_URL": "https://remote-maso.example", "MASO_MODEL": "seed-high"})
+    )
+    provider._client = httpx.AsyncClient(
+        base_url="https://remote-maso.example",
+        transport=httpx.MockTransport(server.handle),
+        trust_env=False,
+    )
+    original = PNG_IMAGE + b"\0" * (1024 * 1024)
+    try:
+        await provider.prepare_capabilities()
+        assert provider.supports_images and provider.capabilities().supports_images
+        await provider.send_message("Inspect both images", [original, PNG_IMAGE])
+        assert server.uploaded_images == [original, PNG_IMAGE]
+        assert [chunk["seq"] for chunk in server.image_uploads] == ["0", "1", "2", "0"]
+        assert [chunk["final"] for chunk in server.image_uploads] == ["0", "0", "1", "1"]
+        assert all(len(chunk["content"]) <= 512 * 1024 for chunk in server.image_uploads)
+        assert all(
+            chunk["host"] == "remote-maso.example" and chunk["mime"] == "application/octet-stream"
+            for chunk in server.image_uploads
+        )
+        assert all(chunk["timeout"]["read"] == 30 for chunk in server.image_uploads)
+        assert len({chunk["upload_id"] for chunk in server.image_uploads}) == 2
+        uploads = [
+            i for i, (_, path, _) in enumerate(server.calls) if path.endswith("/images/chunk")
+        ]
+        stream = next(i for i, (_, path, _) in enumerate(server.calls) if path.endswith("/stream"))
+        assert max(uploads) < stream
+        sent = server.calls[-1][2]
+        assert sent["content"][0]["type"] == "text"
+        assert sent["content"][0]["text"].endswith("Inspect both images")
+        assert sent["content"][1:] == [
+            {"type": "image", "image_ref": ref} for ref in server.image_refs
+        ]
+        assert sent["send_timing"] == "next_turn" and sent["message_id"]
+        assert len(json.dumps(sent)) < 32 * 1024
+        assert "data:image/" not in json.dumps(sent)
+        assert "/feature/worktree" not in json.dumps(sent)
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_image_only_first_turn_defers_guidance_and_next_text_has_no_stale_images() -> None:
+    server = MasoServer()
+    provider = transport(server)
+    try:
+        await provider.send_message("", [PNG_IMAGE])
+        assert server.calls[-1][2]["content"] == [
+            {"type": "image", "image_ref": server.image_refs[0]}
+        ]
+        assert not provider._hub_runtime_guidance_injected
+        provider.acknowledge_turn_complete()
+        server.running = False
+        await provider.send_message("Next text", [])
+        sent = server.calls[-1][2]["content"]
+        assert isinstance(sent, str) and sent.endswith("Next text")
+        assert "CLAUDE_HUB_TAB_ID=maso-tab" in sent
+        assert len(server.uploaded_images) == 1
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_image,error",
+    [
+        (b"BM" + b"x" * 32, "PNG, JPEG, GIF or WebP"),
+        (PNG_IMAGE + b"x" * (8 * 1024 * 1024), "8 MiB"),
+        (b"not an image", "PNG, JPEG, GIF or WebP"),
+    ],
+)
+async def test_all_images_are_validated_before_any_provider_request(bad_image, error) -> None:
+    server = MasoServer()
+    provider = transport(server)
+    try:
+        with pytest.raises(ValueError, match=error):
+            await provider.send_message("Invalid second image", [PNG_IMAGE, bad_image])
+        assert not server.calls and not provider.turn_in_flight
+        assert not provider._staged_images and not provider._delivery_path.exists()
+        await provider.send_message("Text after rejection", [])
+        assert isinstance(server.calls[-1][2]["content"], str)
+        assert not server.image_uploads
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["first_chunk", "second_image", "metadata", "wrong_ref"])
+async def test_upload_failure_does_not_quarantine_or_deliver_a_partial_turn(failure) -> None:
+    server = MasoServer()
+    if failure in {"metadata", "wrong_ref"}:
+        server.image_metadata = {
+            "ref": "../invalid" if failure == "metadata" else uuid.uuid4().hex,
+            "media_type": "image/png",
+            "bytes": len(PNG_IMAGE),
+        }
+    else:
+        server.fail_image_chunk = 1 if failure == "first_chunk" else 2
+    provider = transport(server)
+    try:
+        with pytest.raises(RuntimeError, match="image upload metadata|POST request failed"):
+            await provider.send_message("Upload must finish", [PNG_IMAGE, PNG_IMAGE])
+        assert not any(path.endswith("/messages") for _, path, _ in server.calls)
+        assert not provider.turn_in_flight and not provider._delivery_uncertain
+        assert not provider._delivery_path.exists() and not provider._staged_images
+        server.fail_image_chunk = None
+        server.image_metadata = None
+        await provider.send_message("Safe retry", [])
+        assert isinstance(server.calls[-1][2]["content"], str)
+        assert "CLAUDE_HUB_TAB_ID=maso-tab" in server.calls[-1][2]["content"]
+        assert len([1 for _, path, _ in server.calls if path == "/api/sessions"]) == 1
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_transport_stop_during_upload_cannot_start_a_late_model_turn() -> None:
+    server = MasoServer()
+    server.image_upload_entered = asyncio.Event()
+    server.image_upload_release = asyncio.Event()
+    provider = transport(server)
+    send = asyncio.create_task(provider.send_message("Cancelled image", [PNG_IMAGE]))
+    try:
+        await asyncio.wait_for(server.image_upload_entered.wait(), 2)
+        await provider.cancel_active_turn()
+        server.image_upload_release.set()
+        with pytest.raises(RuntimeError, match="cancelled before message delivery"):
+            await asyncio.wait_for(send, 2)
+        assert not any(path.endswith("/messages") for _, path, _ in server.calls)
+        assert not provider._delivery_path.exists()
+        await provider.send_message("After Stop", [])
+        assert server.calls[-1][2]["content"].endswith("After Stop")
+    finally:
+        server.image_upload_release.set()
+        await provider.stop()
+        if not send.done():
+            send.cancel()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_upload_releases_guard_and_restores_first_turn_guidance() -> None:
+    server = MasoServer()
+    server.image_upload_entered = asyncio.Event()
+    server.image_upload_release = asyncio.Event()
+    provider = transport(server)
+    send = asyncio.create_task(provider.send_message("Interrupted upload", [PNG_IMAGE]))
+    try:
+        await asyncio.wait_for(server.image_upload_entered.wait(), 2)
+        send.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await send
+        assert not provider.turn_in_flight and not provider._delivery_path.exists()
+        assert not provider._hub_runtime_guidance_injected and not provider._staged_images
+        server.image_upload_release.set()
+        await provider.send_message("Safe next turn", [])
+        assert "CLAUDE_HUB_TAB_ID=maso-tab" in server.calls[-1][2]["content"]
+        assert len([1 for _, path, _ in server.calls if path.endswith("/messages")]) == 1
+    finally:
+        server.image_upload_release.set()
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_maso_tailer_retains_preview_and_sends_original_without_echo_duplication() -> None:
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    record = session()
+    server = MasoServer()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    original = PNG_IMAGE + b"\0" * (1024 * 1024)
+    try:
+        await tailer.send_message("Image preview", [original], "image-turn", previews=[PNG_IMAGE])
+        assert server.uploaded_images == [original]
+        page = await tailer._store.read_since(-1, 100)
+        started = [
+            event for event in page.events if event.type == AgentStreamEventType.TURN_STARTED
+        ]
+        assert len(started) == 1
+        metadata = started[0].payload["attachments"]
+        assert len(metadata) == 1 and metadata[0]["mime_type"] == "image/png"
+        cache = AgentStreamAttachmentStore(record.workspace_id, record.id)
+        assert await cache.read(metadata[0]["id"]) == (PNG_IMAGE, "image/png")
+        serialized = json.dumps([event.model_dump(mode="json") for event in page.events])
+        assert "data:image/" not in serialized and "image_ref" not in serialized
+        ctx = NormalizeContext(
+            session_id=record.id, tab_id=record.tab_id, agent_type=AgentType.MASO, run_epoch=1
+        )
+        assert (
+            MasoEventAdapter().normalize_line(
+                raw(
+                    "message_injected",
+                    images=["data:image/png;base64,echo"],
+                    content="Image preview",
+                ),
+                ctx,
+            )
+            == []
+        )
+    finally:
+        await tailer.stop()
 
 
 def test_offsets_snapshots_and_compression_are_not_new_turns() -> None:
