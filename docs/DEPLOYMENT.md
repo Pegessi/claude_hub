@@ -70,6 +70,12 @@
 不会自动获得 launcher。直接运行 uvicorn 或 `./start.sh --dev` 时该功能禁用。
 `CLAUDE_HUB_HOST`、`CLAUDE_HUB_PORT` 可覆盖生产启动的监听地址和端口。
 
+启动时还会只读检查本地 MASO，打印实际服务 URL 或不可用原因。显式
+`MASO_BASE_URL` 优先，其次是 `MASO_PORT`；未配置时，从本地实例登记和旧默认
+端口发现唯一可用服务。多个可用实例时需指定 URL，不自动选择。检查不会启动
+MASO 或调用模型；MASO 不可用不会阻止其他 Hub provider 启动。独立检查命令和
+已有 Chat 的地址绑定限制见 [MASO HTTP Chat](MASO.md#startup-check)。
+
 页面重启不拉取代码。停止旧后端前，launcher 会在 `backend/` 运行
 `uv sync --locked --inexact`，按已提交的 `uv.lock` 补齐后端依赖且不删除额外
 工具；随后在 `frontend/` 运行 `pnpm build`。新静态资源先写入同级临时目录，完整

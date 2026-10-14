@@ -114,6 +114,8 @@ trap cleanup SIGINT SIGTERM
 
 if [ "$DEV_MODE" = true ]; then
     # --- Dev mode: vite dev (HMR) + uvicorn --reload ----------------------
+    cd "$PROJECT_ROOT/backend"
+    uv run python -m claude_hub.maso_probe --startup
     echo -e "${YELLOW}Starting backend server (dev, --reload)...${NC}"
     cd "$PROJECT_ROOT/backend"
     uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173 &

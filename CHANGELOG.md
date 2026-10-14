@@ -5,6 +5,15 @@
 
 ## Unreleased
 
+### fix(chat): discover the actual local MASO endpoint
+
+- Honor explicit `MASO_BASE_URL` and `MASO_PORT`; otherwise validate local
+  instance registrations and the legacy endpoint, requiring one ready service.
+- Report the actual URL at startup and recheck before creating a MASO Chat;
+  preserve existing Chat endpoints and refuse ambiguous local instances.
+- Add a read-only JSON probe for deployment/skill checks, bounded without
+  scanning ports, starting services or invoking models.
+
 ### feat(chat): check MASO service availability before creation
 
 - Probe MASO from the Hub host when selected; show an explicit warning and
