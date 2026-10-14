@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     ttyd_base_port: int = 10000
     default_command: str = "claude"
 
+    # Service-wide MASO target, read from the environment or backend/.env.
+    # None/empty allows local discovery. Validate at readiness time so a bad
+    # MASO address does not prevent other providers from starting.
+    maso_base_url: Optional[str] = None
+
     # Keep the long-lived backend log bounded. RotatingFileHandler retains the
     # active file plus ``backend_log_backup_count`` numbered backups.
     backend_log_max_bytes: int = 10 * 1024 * 1024

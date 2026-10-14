@@ -8,7 +8,7 @@
 +An existing MASO Chat retains its saved endpoint; changing services requires a new Chat.
 --- /dev/null
 +++ b/references/maso-startup.md
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,103 @@
 +# MASO address checks
 +
 +Use this for MASO connection diagnosis and the MASO check before an already
@@ -38,6 +38,19 @@
 +host. This environment is inherited by the backend; exporting it only in an
 +unrelated shell does not update a running Hub.
 +
++When the current checkout's `Settings` defines `maso_base_url`, it also supports
++persistent service startup configuration in `backend/.env`. Preserve the file's
++other values and add/update `MASO_BASE_URL=<validated-url>` there. Normal
++`./start.sh` startup reads it from the backend working directory; there is no need
++to export the value on each launch. Process `MASO_BASE_URL` overrides the file,
++and a Chat URL overrides both. Startup probe, preflight and creation share this
++setting. File edits take effect on the next authorized backend start; do not
++restart a running shared service merely to apply this guidance.
++
++Check current code before claiming file support: older checkouts may read this
++variable only from process environment. CLI `~/.config/claude-hub/config.toml`
++and session environment presets are separate from server startup settings.
++
 +When no URL is configured and discovery has a single ready result, the controller
 +can derive the same environment value automatically. From the repository root,
 +before an authorized start, in Bash:
@@ -55,7 +68,8 @@
 +not replace the requested target. Starting Hub without MASO for other providers
 +remains possible within the authorized startup scope.
 +
-+Selection is: Chat `MASO_BASE_URL`, Hub `MASO_BASE_URL`, then startup `MASO_PORT`
++Selection is: Chat `MASO_BASE_URL`, Hub process `MASO_BASE_URL`, service
++`backend/.env` URL (when supported), then startup `MASO_PORT`
 +mapped to `http://127.0.0.1:<port>`. Explicit settings win and are not silently
 +replaced when unhealthy. Without them, check registered local ports in
 +`~/.maso/instances.json` and legacy port 9796. Select only a unique healthy MASO;
