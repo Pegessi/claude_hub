@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Generator
 
 import httpx
@@ -17,7 +18,9 @@ from claude_hub.cli.client import HubClient
 from claude_hub.cli.main import cli
 from claude_hub.main import app
 from claude_hub.models.schemas import User
+from claude_hub.services import ttyd_manager
 from claude_hub.services.dot import DotService, DotStore, reset_dot_service
+from claude_hub.services.ttyd_manager import DEFAULT_CLAUDE_LAUNCH_ENV
 
 
 @pytest.fixture()
@@ -91,6 +94,64 @@ def test_status_rotate_and_health(api: tuple[TestClient, DotService]) -> None:
     assert {check["name"] for check in health["checks"]} >= {"focus_size", "index", "git"}
 
 
+def test_setup_passes_provider_env_to_the_chat_tab(
+    api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, service = api
+    calls: list[tuple[str, Any]] = []
+    tabs: dict[str, SimpleNamespace] = {}
+
+    async def fake_create_tab(**kwargs: Any) -> SimpleNamespace:
+        calls.append(("create", kwargs["env"]))
+        tabs["t-1"] = SimpleNamespace(
+            id="t-1",
+            archived=False,
+            env=kwargs["env"] or {},
+            session_kind=SimpleNamespace(value="terminal"),
+        )
+        return tabs["t-1"]
+
+    async def fake_switch_env(tab_id: str, env: dict[str, str], **_: Any) -> SimpleNamespace:
+        calls.append(("switch", env))
+        tabs[tab_id].env = env
+        return tabs[tab_id]
+
+    monkeypatch.setattr(ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(ttyd_manager, "switch_env", fake_switch_env)
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: tabs.get(tab_id))
+    monkeypatch.setattr(service, "ensure_schedules", lambda tab_id: None)
+
+    first = client.post(
+        "/api/dot/setup",
+        json={"env_preset": "socks-proxy-1080", "env": {"ANTHROPIC_MODEL": "m"}},
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["tab_id"] == "t-1"
+    assert calls == [
+        (
+            "create",
+            {
+                "ALL_PROXY": "socks5://127.0.0.1:1080",
+                "NO_PROXY": "localhost,127.0.0.1,::1",
+                "ANTHROPIC_MODEL": "m",
+            },
+        )
+    ]
+
+    # A user-chosen env is kept; an empty or built-in fallback env gets seeded.
+    assert client.post("/api/dot/setup", json={"env": {"X": "1"}}).status_code == 200
+    assert len(calls) == 1
+    tabs["t-1"].env = {}
+    assert client.post("/api/dot/setup", json={"env": {"X": "1"}}).status_code == 200
+    assert calls[-1] == ("switch", {"X": "1"})
+    tabs["t-1"].env = dict(DEFAULT_CLAUDE_LAUNCH_ENV)
+    assert client.post("/api/dot/setup", json={"env": {"Y": "2"}}).status_code == 200
+    assert calls[-1] == ("switch", {"Y": "2"})
+    assert client.post("/api/dot/setup").status_code == 200
+    assert len(calls) == 3
+    assert client.post("/api/dot/setup", json={"env_preset": "no-such"}).status_code == 400
+
+
 def _route_to_app(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the CLI's HTTP client at the in-process FastAPI app."""
 
@@ -109,6 +170,23 @@ def _route_to_app(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
         return HubClient(base_url="http://testserver", transport=httpx.MockTransport(handler))
 
     monkeypatch.setattr(cli_main, "get_client", fake_get_client)
+
+
+def test_cli_setup_sends_the_env_preset(
+    api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, service = api
+    _route_to_app(client, monkeypatch)
+    seen: list[dict[str, str]] = []
+
+    async def fake_ensure_tab(env: dict[str, str]) -> str:
+        seen.append(env)
+        return "t-1"
+
+    monkeypatch.setattr(service, "ensure_tab", fake_ensure_tab)
+    result = CliRunner().invoke(cli, ["--json", "dot", "setup", "--env-preset", "socks-proxy-1080"])
+    assert result.exit_code == 0, result.output
+    assert seen == [{"ALL_PROXY": "socks5://127.0.0.1:1080", "NO_PROXY": "localhost,127.0.0.1,::1"}]
 
 
 def test_cli_remember_recall_and_merge(

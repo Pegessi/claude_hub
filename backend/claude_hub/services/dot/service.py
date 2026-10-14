@@ -103,8 +103,13 @@ class DotService:
 
     # ── setup ───────────────────────────────────────────────────────────
 
-    async def ensure_tab(self) -> str:
-        """Create (or reuse) the Dot Chat tab and its standing schedules."""
+    async def ensure_tab(self, env: Optional[dict[str, str]] = None) -> str:
+        """Create (or reuse) the Dot Chat tab and its standing schedules.
+
+        ``env`` is the provider launch env (API endpoint/key/model) for a new
+        tab, exactly like a normal new Chat. See ``env_seed_needed`` for an
+        existing tab.
+        """
         from ...models.schemas import AgentType, SessionKind
         from .. import ttyd_manager
 
@@ -120,6 +125,7 @@ class DotService:
                 solo_mode=True,
                 agent_type=AgentType.CLAUDE,
                 session_kind=SessionKind.CHAT,
+                env=env or None,
             )
             tab_id = created.id
             self.store.update_state(
@@ -133,6 +139,22 @@ class DotService:
         assert tab_id is not None
         self.ensure_schedules(tab_id)
         return tab_id
+
+    def env_seed_needed(self, env: Optional[dict[str, str]]) -> bool:
+        """True when the Dot tab still runs on the built-in fallback env.
+
+        Such a tab has no working provider yet, so setup may give it ``env``;
+        a tab whose env the user chose keeps it.
+        """
+        from .. import ttyd_manager
+        from ..ttyd_manager import DEFAULT_CLAUDE_LAUNCH_ENV
+
+        tab_id = self.tab_id()
+        tab = ttyd_manager.get_tab(tab_id) if tab_id and env else None
+        if tab is None:
+            return False
+        current = dict(getattr(tab, "env", None) or {})
+        return current in ({}, DEFAULT_CLAUDE_LAUNCH_ENV) and current != dict(env or {})
 
     def ensure_schedules(self, tab_id: str) -> None:
         """Keep the wake-up and nightly tidy Chat schedules pointing at the Dot tab."""
@@ -283,7 +305,12 @@ class DotService:
                             self.store.append_journal(
                                 who, asked[:_JOURNAL_TEXT_LIMIT], _parse_time(asked_at)
                             )
-                        if answer.strip():
+                        if payload.get("status") == "failed":
+                            # Error text is not something Dot said; keep a short note only.
+                            self.store.append_journal(
+                                "hub", "(turn failed)", _parse_time(event.created_at)
+                            )
+                        elif answer.strip():
                             self.store.append_journal(
                                 "dot",
                                 answer[:_JOURNAL_TEXT_LIMIT],

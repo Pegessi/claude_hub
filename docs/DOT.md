@@ -113,4 +113,11 @@ prune focus.
 - UI: Dot button in the header opens the Dot Chat; the Dot panel shows focus,
   work and memory.
 
+Setup is safe to repeat. It takes the provider env (API endpoint, key, model)
+like a normal new Chat: the UI borrows it from your active Claude tab (else the
+default Claude preset); `claude-hub dot setup --env-preset <name>` uses a preset.
+A Dot tab still on the built-in fallback env gets this env; an env you chose
+for the Dot tab is kept. Failed turns are journaled as `(turn failed)`, never
+as Dot's words.
+
 Voice (speak / listen) is planned for later.

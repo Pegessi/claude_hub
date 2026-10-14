@@ -68,6 +68,7 @@
         </div>
         <TabBar v-if="!isMobile && mode === 'terminal'" />
         <div class="app-mode-tools">
+          <DotLauncher />
           <AppExtensionsMenu v-if="!isMobile" />
           <button
             type="button"
@@ -158,6 +159,7 @@ import AgentWorkspaceView from '@/components/AgentWorkspaceView.vue'
 import ChatSidebar from '@/components/ChatSidebar.vue'
 import ArchivedSessionsPanel from '@/components/ArchivedSessionsPanel.vue'
 import AppExtensionsMenu from '@/components/AppExtensionsMenu.vue'
+import DotLauncher from '@/components/DotLauncher.vue'
 import ServiceRestartDialog from '@/components/ServiceRestartDialog.vue'
 import FeishuBotSettingsDialog from '@/components/FeishuBotSettingsDialog.vue'
 import ScheduledTasksPanel from '@/components/ScheduledTasksPanel.vue'
