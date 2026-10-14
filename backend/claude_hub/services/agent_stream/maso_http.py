@@ -21,10 +21,13 @@ import httpx
 
 from ...config import settings
 from ...models import StreamCapabilities, StreamModelOption, StreamReasoningEffortOption
-from .native import ProviderSession
+from .native import ProviderSession, _detect_image_mime
 from .store import AgentStreamStore
 
 DEFAULT_MASO_BASE_URL = "http://127.0.0.1:9796"
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_IMAGE_CHUNK_BYTES = 512 * 1024
+_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 _UNCERTAIN_MESSAGE = (
     "MASO message acceptance is uncertain. Further sends are refused for this Chat. "
     "The service may still execute the message; inspect and stop the session in MASO."
@@ -184,6 +187,7 @@ async def check_maso_service(
 
 class MasoHttpSession(ProviderSession):
     adapter_id = "maso_http"
+    supports_images = True
     supports_tool_timeline = True
     supports_approval_ui = True
     supports_goals = False
@@ -209,6 +213,8 @@ class MasoHttpSession(ProviderSession):
         ).path.with_suffix(".maso-delivery.json")
         self._message_id: Optional[str] = None
         self._delivery_uncertain = False
+        self._staged_images: List[bytes] = []
+        self._guidance_in_this_send = False
         if self._delivery_path.exists():
             try:
                 delivery = json.loads(self._delivery_path.read_text())
@@ -297,6 +303,7 @@ class MasoHttpSession(ProviderSession):
             schema_version=self.schema_version,
             supports_tool_timeline=True,
             supports_approval_ui=True,
+            supports_images=self.supports_images,
             available_models=self._available_models,
             available_modes=self.available_modes(),
             current_mode=self._current_mode,
@@ -306,6 +313,7 @@ class MasoHttpSession(ProviderSession):
         )
 
     async def _with_first_turn_prefixes(self, text: str) -> Tuple[str, bool]:
+        self._guidance_in_this_send = bool(text) and not self._hub_runtime_guidance_injected
         prompt, seeded = await super()._with_first_turn_prefixes(text)
         if prompt != text and text:
             # A service-side tool process cannot inherit this Hub tab's env.
@@ -416,20 +424,86 @@ class MasoHttpSession(ProviderSession):
             except asyncio.CancelledError:
                 pass
 
+    def _stage_images(self, images: List[bytes]) -> None:
+        # Validate the whole turn before creating a session or uploading any
+        # image. MASO's limits are narrower than Hub's original-image input.
+        for image in images:
+            if len(image) > _MAX_IMAGE_BYTES:
+                raise ValueError("MASO image input is limited to 8 MiB per image")
+            if _detect_image_mime(image) not in _IMAGE_MIME_TYPES:
+                raise ValueError("MASO image input requires PNG, JPEG, GIF or WebP")
+        self._staged_images = list(images)
+
+    def _clear_staged_images(self) -> None:
+        self._staged_images = []
+
+    async def _message_content(self, text: str, images: List[bytes]) -> Any:
+        if not images:
+            return text
+        parts: List[Dict[str, str]] = [{"type": "text", "text": text}] if text else []
+        try:
+            async with asyncio.timeout(120.0):
+                for image in images:
+                    upload_id = uuid.uuid4().hex
+                    uploaded: Any = None
+                    for sequence, offset in enumerate(range(0, len(image), _IMAGE_CHUNK_BYTES)):
+                        chunk = image[offset : offset + _IMAGE_CHUNK_BYTES]
+                        uploaded = await self._request(
+                            "POST",
+                            self._path("images/chunk"),
+                            params={
+                                "upload_id": upload_id,
+                                "seq": sequence,
+                                "final": int(offset + len(chunk) == len(image)),
+                            },
+                            headers={"Content-Type": "application/octet-stream"},
+                            content=chunk,
+                            timeout=30.0,
+                        )
+                    ref = uploaded.get("ref") if isinstance(uploaded, dict) else None
+                    if (
+                        ref != upload_id
+                        or uploaded.get("media_type") != _detect_image_mime(image)
+                        or uploaded.get("bytes") != len(image)
+                    ):
+                        raise RuntimeError("MASO returned invalid image upload metadata")
+                    parts.append({"type": "image", "image_ref": ref})
+        except TimeoutError:
+            raise RuntimeError("MASO image upload timed out") from None
+        return parts
+
     async def _send_text(self, text: str) -> None:
-        await self._ensure_session()
-        selected = self.session.env.get("MASO_MODEL")
-        if selected and selected != self._effective_model:
-            await self._request("PATCH", self._path("model"), json={"model": selected})
-            self._effective_model = selected
-        await self._close_stream()
-        generation = self._stdout_generation
+        images, self._staged_images = self._staged_images, []
+        try:
+            await self._ensure_session()
+            selected = self.session.env.get("MASO_MODEL")
+            if selected and selected != self._effective_model:
+                await self._request("PATCH", self._path("model"), json={"model": selected})
+                self._effective_model = selected
+            await self._close_stream()
+            generation = self._stdout_generation
+            if not self.turn_in_flight:
+                raise RuntimeError("MASO turn was cancelled before message delivery")
+            # Uploads cannot start a model turn. Finish them before subscribing
+            # or recording uncertain delivery. Unused refs expire in MASO.
+            content = await self._message_content(text, images)
+            if not self.turn_in_flight or generation != self._stdout_generation:
+                raise RuntimeError("MASO turn was cancelled before message delivery")
+        except BaseException:
+            # No prompt was posted, including when cancellation interrupts an
+            # upload. Release the guard and retry first-turn guidance later.
+            self._end_turn()
+            if self._guidance_in_this_send:
+                self._hub_runtime_guidance_injected = False
+            raise
         self._root_started = False
         self._stream_ready = asyncio.get_running_loop().create_future()
         self._reader_task = asyncio.create_task(self._consume_stream(generation))
         post_started = False
         try:
             await asyncio.wait_for(asyncio.shield(self._stream_ready), 10.0)
+            if not self.turn_in_flight or generation != self._stdout_generation:
+                raise RuntimeError("MASO turn was cancelled before message delivery")
             message_id = str(uuid.uuid4())
             # Until the response arrives, a crash cannot distinguish rejection
             # from a request still enqueueing on the service. Persist that fact.
@@ -440,7 +514,7 @@ class MasoHttpSession(ProviderSession):
                 "POST",
                 self._path("messages"),
                 json={
-                    "content": text,
+                    "content": content,
                     "message_id": message_id,
                     "send_timing": "next_turn",
                 },
@@ -463,6 +537,9 @@ class MasoHttpSession(ProviderSession):
                     pass
                 self._end_turn()
                 raise RuntimeError(_UNCERTAIN_MESSAGE) from None
+            self._end_turn()
+            if self._guidance_in_this_send:
+                self._hub_runtime_guidance_injected = False
             raise
 
     async def _consume_stream(self, generation: int) -> None:
