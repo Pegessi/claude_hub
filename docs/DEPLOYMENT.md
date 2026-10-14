@@ -70,6 +70,22 @@
 不会自动获得 launcher。直接运行 uvicorn 或 `./start.sh --dev` 时该功能禁用。
 `CLAUDE_HUB_HOST`、`CLAUDE_HUB_PORT` 可覆盖生产启动的监听地址和端口。
 
+MASO 的服务地址可作为持久化启动配置写入 `backend/.env`：
+
+```dotenv
+MASO_BASE_URL=http://127.0.0.1:11004
+```
+
+上面端口只是示例，以本机验证结果为准。服务端现有 `Settings` 读取该文件，
+进程环境中的同名变量可覆盖它，单个 Chat 的显式 URL 再覆盖服务默认值。
+启动探测和 Chat 连接读取同一份配置；修改文件后需在下一次授权启动/重启时生效。
+
+启动时会只读检查 MASO，打印实际服务 URL 或不可用原因。显式
+`MASO_BASE_URL`（进程环境或配置文件）优先，其次是进程中的 `MASO_PORT`；未配置时，从本地实例登记和旧默认
+端口发现唯一可用服务。多个可用实例时需指定 URL，不自动选择。检查不会启动
+MASO 或调用模型；MASO 不可用不会阻止其他 Hub provider 启动。独立检查命令和
+已有 Chat 的地址绑定限制见 [MASO HTTP Chat](MASO.md#startup-check)。
+
 页面重启不拉取代码。停止旧后端前，launcher 会在 `backend/` 运行
 `uv sync --locked --inexact`，按已提交的 `uv.lock` 补齐后端依赖且不删除额外
 工具；随后在 `frontend/` 运行 `pnpm build`。新静态资源先写入同级临时目录，完整
@@ -121,11 +137,19 @@
 
 ## 环境变量配置
 
-复制 `.env.example` 到 `.env` 并填写配置：
+服务端配置由 `backend/claude_hub/config.py` 中的 `Settings` 定义，支持进程环境
+和 `backend/.env`（同名进程环境优先）。生产和开发启动脚本都会从 `backend/`
+运行后端，所以应在该目录保存文件。首次配置时，从仓库根目录复制模板并填写；
+已有文件应只修改需要的配置项，保留其他值：
 
 ```bash
-cp .env.example .env
+cp .env.example backend/.env
 ```
+
+监听地址/端口仍通过启动脚本的 `CLAUDE_HUB_HOST`、`CLAUDE_HUB_PORT` 进程环境
+传入。CLI 的 `~/.config/claude-hub/config.toml` 配置客户端连接及默认 preset，
+会话环境 preset 配置单个 Chat/Agent；它们分别由自己的组件管理。目前没有统一
+的启动配置页面。
 
 ### 必需配置
 
@@ -353,6 +377,10 @@ services:
       - frontend
     restart: unless-stopped
 ```
+
+此 Docker Compose 示例及仓库的 `docker/docker-compose.yml` 通过 `env_file`
+读取根目录 `.env` 并注入容器进程；该路径由 Compose 配置管理。上面的
+`backend/.env` 路径适用于直接使用 `start.sh` 的本地服务启动。
 
 ### SSL 证书配置（使用 Let's Encrypt）
 

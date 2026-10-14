@@ -1,0 +1,114 @@
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -52,0 +53,5 @@
++
++For a MASO connectivity problem, or before an authorized Hub startup using MASO,
++read [references/maso-startup.md](references/maso-startup.md). Discover and validate
++the actual local URL; do not assume port 9796 or hardcode a machine's current port.
++An existing MASO Chat retains its saved endpoint; changing services requires a new Chat.
+--- /dev/null
++++ b/references/maso-startup.md
+@@ -0,0 +1,103 @@
++# MASO address checks
++
++Use this for MASO connection diagnosis and the MASO check before an already
++authorized Hub startup. The check itself is read-only; it grants no authority to
++start/restart either service, alter existing Chats, or switch a requested service.
++
++Read the current checkout's `docs/MASO.md` and startup code. When it contains
++`backend/claude_hub/maso_probe.py`, run from that checkout's `backend/`:
++
++```bash
++uv run python -m claude_hub.maso_probe
++```
++
++This returns the actual validated `base_url` and `model_count` as JSON, or an
++explanation with a nonzero exit status. It never creates a MASO session or invokes
++a model. New Hub startup paths print the same check automatically. For a feature
++checkout, keep its isolated Hub home/state/tmux overrides in place before imports.
++
++Prefer an explicit environment setting for normal deployments. For an already
++known and validated URL, pass it to the authorized startup process:
++
++```bash
++MASO_BASE_URL="$maso_url" ./start.sh
++```
++
++`maso_url` is the actual validated address, not a fixed port copied from another
++host. This environment is inherited by the backend; exporting it only in an
++unrelated shell does not update a running Hub.
++
++When the current checkout's `Settings` defines `maso_base_url`, it also supports
++persistent service startup configuration in `backend/.env`. Preserve the file's
++other values and add/update `MASO_BASE_URL=<validated-url>` there. Normal
++`./start.sh` startup reads it from the backend working directory; there is no need
++to export the value on each launch. Process `MASO_BASE_URL` overrides the file,
++and a Chat URL overrides both. Startup probe, preflight and creation share this
++setting. File edits take effect on the next authorized backend start; do not
++restart a running shared service merely to apply this guidance.
++
++Check current code before claiming file support: older checkouts may read this
++variable only from process environment. CLI `~/.config/claude-hub/config.toml`
++and session environment presets are separate from server startup settings.
++
++When no URL is configured and discovery has a single ready result, the controller
++can derive the same environment value automatically. From the repository root,
++before an authorized start, in Bash:
++
++```bash
++if maso_result=$(cd backend && uv run python -m claude_hub.maso_probe); then
++  if maso_url=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["base_url"])' <<< "$maso_result"); then
++    MASO_BASE_URL="$maso_url" ./start.sh
++  fi
++fi
++```
++
++Do not use this recipe as authorization to restart a running service. A failed or
++ambiguous result needs a reported diagnostic or an explicit URL; the recipe does
++not replace the requested target. Starting Hub without MASO for other providers
++remains possible within the authorized startup scope.
++
++Selection is: Chat `MASO_BASE_URL`, Hub process `MASO_BASE_URL`, service
++`backend/.env` URL (when supported), then startup `MASO_PORT`
++mapped to `http://127.0.0.1:<port>`. Explicit settings win and are not silently
++replaced when unhealthy. Without them, check registered local ports in
++`~/.maso/instances.json` and legacy port 9796. Select only a unique healthy MASO;
++multiple healthy instances require the intended `MASO_BASE_URL`. Registry public
++export URLs and saved version strings are not local readiness evidence.
++For Chat presets use `MASO_BASE_URL`; `MASO_PORT` is the Hub process's startup
++shorthand, not a per-Chat setting.
++
++## Older checkout without the probe
++
++Do not assume installed Hub code already has the helper. The controller can
++perform the same bounded checks before an authorized startup:
++
++1. Preserve an explicit `MASO_BASE_URL`. Otherwise validate `MASO_PORT` as an
++   integer in 1–65535 and derive its IPv4 loopback URL. A provider preset may
++   override the Hub-wide setting; inspect only the relevant keys, never dump env.
++2. With neither setting, read only `~/.maso/instances.json`. Its current format is
++   an object whose entries contain an integer `port`; treat entries as hints.
++   Deduplicate those ports and add legacy 9796. Limit the file to 64 KiB and the
++   candidate set to 16; malformed/unavailable registries leave only the legacy
++   candidate. Do not scan arbitrary ports, processes, logs, or MASO sessions.
++3. Probe each candidate's `GET /api/models` and `GET /api/models/default` with
++   proxies disabled and bounded timeouts. For an explicit local candidate:
++
++   ```bash
++   curl --noproxy '*' --fail --silent --show-error --max-time 2 "$maso_url/api/models"
++   curl --noproxy '*' --fail --silent --show-error --max-time 2 "$maso_url/api/models/default"
++   ```
++
++   An open socket or HTTP 200 alone is insufficient. Require a usable model
++   catalog and a default key advertised by that catalog (including selector
++   variants). Do not invoke a model to prove readiness.
++4. A unique usable target can be supplied to the authorized startup with
++   `MASO_BASE_URL=<validated-url> ./start.sh`. When no service is usable, report
++   the failed target/check; multiple usable services need explicit selection.
++   Other Hub providers can still start without MASO. Do not automatically start
++   MASO, change a selected URL, or restart the shared Hub.
++
++After an authorized Hub startup, use `POST /api/maso/preflight` with the intended
++`base_url` to verify the connection from the Hub host. Existing Chats freeze their
++endpoint at creation; create a new Chat to change it. Startup readiness does not
++prove upstream credentials, quota or successful inference.

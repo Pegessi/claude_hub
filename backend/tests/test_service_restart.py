@@ -679,6 +679,7 @@ def test_dependency_sync_timeout_keeps_current_backend_running(tmp_path):
 
 
 def test_launcher_main_wires_backend_sync_and_frontend_build(monkeypatch):
+    from claude_hub import maso_probe
     from claude_hub import service_launcher as launcher_module
 
     captured = {}
@@ -694,9 +695,11 @@ def test_launcher_main_wires_backend_sync_and_frontend_build(monkeypatch):
     binaries = {"uv": "/opt/bin/uv", "pnpm": "/opt/bin/pnpm"}
     monkeypatch.setattr(launcher_module.shutil, "which", binaries.get)
     monkeypatch.setattr(launcher_module.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(maso_probe, "main", lambda argv: captured.update(maso_probe_args=argv))
     monkeypatch.setattr(sys, "argv", ["service-launcher"])
 
     assert launcher_module.main() == 0
+    assert captured["maso_probe_args"] == ["--startup"]
     assert captured["dependency_sync_command"] == [
         "/opt/bin/uv",
         "sync",
