@@ -5,6 +5,16 @@
 
 ## Unreleased
 
+### feat(chat): accept image input in MASO conversations
+
+- Enable image attachments, including image-only turns and queued drafts, through
+  the existing Chat composer and durable preview history.
+- Send original PNG, JPEG, GIF and WebP bytes through MASO's session-scoped HTTP
+  chunk upload, then submit text and image references as one multimodal message.
+- Reject unsupported or oversized images before remote work; allow safe retry
+  after upload failure and fence transport cancellation before a delayed upload
+  can deliver a turn.
+
 ### feat(chat): check MASO service availability before creation
 
 - Probe MASO from the Hub host when selected; show an explicit warning and
