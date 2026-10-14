@@ -9,9 +9,9 @@ from ..auth.dependencies import get_current_user
 from ..models import User
 from ..services.agent_stream.maso_http import (
     MasoServiceUnavailable,
-    check_maso_service,
     maso_base_url,
 )
+from ..services.maso_discovery import discover_maso_service
 
 router = APIRouter(prefix="/api/maso", tags=["maso"])
 
@@ -34,7 +34,9 @@ async def preflight_maso(
 ) -> MasoPreflightResponse:
     try:
         base_url = maso_base_url({"MASO_BASE_URL": body.base_url} if body.base_url else {})
-        models, _default = await check_maso_service({"MASO_BASE_URL": base_url})
+        base_url, models, _default = await discover_maso_service(
+            {"MASO_BASE_URL": body.base_url} if body.base_url else {}
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except MasoServiceUnavailable as exc:

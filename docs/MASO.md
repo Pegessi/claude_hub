@@ -2,8 +2,19 @@
 
 Create a **Chat** and choose **MASO** as its provider. Hub connects directly to
 the existing MASO service; it does not launch a MASO CLI or a second agent runtime.
-The default endpoint is `http://127.0.0.1:9796`. Set `MASO_BASE_URL` in the new
-Chat's environment to use another HTTP(S) endpoint. Keep the endpoint fixed for
+Endpoint selection uses the Chat's `MASO_BASE_URL`, then the Hub process's
+`MASO_BASE_URL`, then the service setting in `backend/.env`, then the Hub
+process's `MASO_PORT` (mapped to IPv4 loopback).
+Port shorthand is a startup setting; Chat environment presets select a service
+with `MASO_BASE_URL` so UI readiness and creation use the same target.
+An explicit address or port is checked on its own; an unreachable configured
+service does not fall back to another instance. Without these settings, Hub
+checks local ports from `~/.maso/instances.json` and the legacy
+`http://127.0.0.1:9796` endpoint. It selects the sole usable service; multiple
+ready services require `MASO_BASE_URL`. Stale entries are ignored after probing,
+and public export URLs in the registry are never used for local discovery.
+Set `MASO_BASE_URL` in the new Chat's environment to select a particular HTTP(S)
+endpoint. Keep the endpoint fixed for
 that Chat; Hub freezes its resolved address at creation, including when the
 backend's default later changes. Create a new Chat to change services,
 providers or working directories.
@@ -17,6 +28,53 @@ Changing a service preset performs a fresh check. Creation rechecks availability
 before allocating a tab, and an existing unavailable Chat shows the service
 error with **Retry**. This checks advertised configuration, not upstream model
 credentials, quota or inference success.
+
+## Startup check
+
+MASO's service-wide URL is part of the existing backend `Settings` configuration.
+To configure it once, add the intended URL to `backend/.env` (preserve the file's
+other settings), then use the normal authorized Hub startup path:
+
+```dotenv
+MASO_BASE_URL=http://127.0.0.1:11004
+```
+
+This is an example local address. `start.sh` runs the backend from `backend/`,
+where Settings reads `.env`; the repository root `.env.example` is the template.
+The process environment overrides the file, and a Chat URL overrides both.
+An absent/empty setting permits local discovery. Startup probe, preflight and
+Chat creation share this resolver, so a file-configured service is not replaced
+by whichever local instance discovery finds. Changes to this startup setting
+take effect when the backend starts again; existing Chats retain their saved URL.
+
+Production `start.sh` / `service_launcher` and development `start.sh --dev`
+report the selected MASO URL and model count at startup. MASO being absent or
+ambiguous warns without preventing other Hub providers from starting. Selecting
+MASO and creating a new Chat repeat discovery/readiness checks; startup success
+is not an admission token. Existing Chats keep their saved endpoint even when
+the local registry changes.
+
+To inspect the address independently, from `backend/` run:
+
+```bash
+uv run python -m claude_hub.maso_probe
+```
+
+It emits JSON and exits nonzero if there is no unique usable target. `--startup`
+prints a diagnostic and exits zero for expected configuration/service failures.
+The probe reads only `/api/models` and `/api/models/default`, bypasses proxy
+environment variables and creates no session or model request. Automatic local
+discovery reads at most 64 KiB and probes at most 16 candidates concurrently
+within 3.5 seconds; each service check has its existing 3-second deadline.
+Unavailable discovery does not start MASO or scan processes or arbitrary ports.
+Remote services, multiple instances and an unreadable/unsupported registry can
+always be handled with an explicit `MASO_BASE_URL`.
+
+For example, when an intended local service listens on port `11004`, launch
+Hub with `MASO_PORT=11004` or `MASO_BASE_URL=http://127.0.0.1:11004`. The port is
+an example, not a universal default. To fix an existing Chat pinned to a different
+address, create a new MASO Chat with the intended URL; changing its provider
+endpoint in place is refused.
 
 The model picker discovers `/api/models` and `/api/models/default`, groups the
 service's advertised thinking variants and sends their exact provider keys.

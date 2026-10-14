@@ -370,6 +370,9 @@ def main() -> int:
     if pnpm is None:
         print("Error: pnpm is required to build the frontend during restart.", file=sys.stderr)
         return 1
+    from .maso_probe import main as probe_maso
+
+    probe_maso(["--startup"])
     frontend_directory = backend_directory.parent / "frontend"
     launcher = ServiceLauncher(
         RestartStore(resolve_runtime_home()),
