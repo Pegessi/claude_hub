@@ -1,9 +1,21 @@
 # Changelog
 
 > Each entry corresponds to a merge or significant commit on `main`.
+> Reaching `main` is what releases a change, so every entry below is released;
+> add new ones at the top of **Released**.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
-## Unreleased
+## Released
+
+### docs: hold the change log in one Released section
+
+- Merge three same-named `Unreleased` headings into one section, keeping all
+  408 entries and their order: a conflict resolved by keeping both sides'
+  headings had hidden 194 entries below a block readers never scrolled past.
+- Name the section `Released`, because reaching `main` is what releases a
+  change here, and point `CONTRIBUTING.md` and `docs/TASK_GRAPH.md` at it.
+- Fail `verify.sh docs` on a duplicate or renamed heading, so the next
+  conflict resolution cannot silently split the log again.
 
 ### fix(chat): explain a MASO failure instead of printing its provider frame
 
@@ -1065,7 +1077,6 @@
   Vue reuse wrong vnodes (dropped rows). It now keys on the reducer's unique
   `sub.key`.
 
-
 ### feat(mobile): left-edge swipe session drawer with pinned sessions
 
 - On phones (≤768px) the chat session list is no longer `display:none`. The
@@ -1275,8 +1286,6 @@
   env); reusing an existing idle reviewer and remote placement
   (target/profile/cwd) are unchanged.
 
-## Unreleased
-
 ### fix: forked Chat tab seeds its truncated history into the new provider session
 
 - "Fork from here" copied the structured UI history up to the chosen turn but
@@ -1321,9 +1330,6 @@
   sub-agents in one turn each get an independent card and split surrounding
   ordinary tool groups. Pure frontend; the backend stream protocol is
   unchanged and internal sub-agent activity is not streamed (future work).
-
-## Unreleased
-
 
 ### fix: keep sidebar launcher enabled during background tab refresh
 
