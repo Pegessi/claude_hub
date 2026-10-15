@@ -140,7 +140,9 @@ export type TimelinePart =
   // is the filesystem path the scoped agent-image endpoint serves.
   | { kind: 'agent_image'; key: string; tool: TimelineTool; path: string }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
-  | { kind: 'error'; key: string; message: string }
+  // ``detail`` is the provider's verbatim failure payload, kept beside the
+  // message because an adapter's summary of it is necessarily lossy.
+  | { kind: 'error'; key: string; message: string; detail?: string }
   | { kind: 'status'; key: string; text: string; messageId?: string | null }
   // Synthetic part produced by ``foldTurnParts`` — never emitted by the
   // reducer. It is the folded working region's header: the toggle that both
@@ -1037,9 +1039,10 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     }
     case 'error': {
       const message = payloadString(event, 'message') || 'An error occurred.'
+      const detail = payloadString(event, 'detail')
       const errKey = `error-${event.message_id ?? 'event'}-${event.stream_sequence}`
       turn.errors.push({ key: errKey, message })
-      turn.parts.push({ kind: 'error', key: errKey, message })
+      turn.parts.push({ kind: 'error', key: errKey, message, detail: detail || undefined })
       mutated = true
       break
     }
