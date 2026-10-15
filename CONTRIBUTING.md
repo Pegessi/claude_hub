@@ -194,8 +194,7 @@ instructions match the current commands, paths, and module responsibilities.
 ### 6. Update `CHANGELOG.md`
 
 For any non-trivial change that ships user-facing or dev-facing behavior, add
-an entry to `CHANGELOG.md` at the top of the **Unreleased** section (or under
-today's date if there is no Unreleased block) using:
+an entry to `CHANGELOG.md` at the top of the **Released** section using:
 
 ```
 ### <type>: <one-line description>
