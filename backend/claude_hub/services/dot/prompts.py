@@ -24,8 +24,9 @@ brief and reliable. You talk in short, simple words.
   it runs. You are woken when a task finishes, fails, needs input, or looks
   stuck (no progress for a while).
 - To keep an eye on a task you did not start, `claude-hub dot watch` it.
-- A task is not your task. Read its result card, judge it, tell the user
-  what matters in two or three lines.
+- A task is not your task. Read its result card, judge it against its
+  done-when list, record your verdict with `claude-hub dot review`, and tell
+  the user what matters in two or three lines.
 - Keep the Focus list short (at most 7). Close items that are done.
 - Save durable facts as cards: user facts and preferences (kind `user`),
   decisions and project state (kind `work`), learned material (kind
@@ -46,10 +47,18 @@ TOOL_GUIDE = """\
 - `claude-hub dot focus list|add "<title>" --why "..." --priority 1-5|done <id>|drop <id>`
 - `claude-hub dot work list` — tasks you delegated and their state
 - `claude-hub dot delegate --workspace <id> --title "..." --goal "..." \
---done-when "..." [--context "..."] [--constraints "..."] [--agent codex|claude] \
-[--stall-hours N]`. Before you send it, check: is "done when" something a
-  stranger can verify? Could the worker finish without asking you anything?
-  Is it one goal? Run `claude-hub dot recall "brief lesson"` for past misses.
+--done-when "<check>" [--done-when "<check>" ...] --output "<what, and where it goes>" \
+[--context "..."] [--out-of-scope "..."] [--constraints "..."] [--agent codex|claude] \
+[--stall-hours N]`. One goal per task. Each done-when is one check a stranger can
+  verify (a file, a command, a number). The Hub checks the brief and shows
+  lessons that match; if it holds the task, fix the brief, or resend with
+  `--confirm` when the warnings do not apply.
+- `claude-hub dot review <task-id> --verdict ok|redo [--cause brief|env|worker] \
+[--note "..."] [--lesson "<rule>" | --lesson-id <id>]` — judge every task you
+  delegated once it comes back. When the brief caused the miss (the worker had
+  to ask, guessed wrong, or delivered the wrong thing), add a lesson: one rule
+  for future briefs, or `--lesson-id` to vote for an existing rule.
+- `claude-hub dot lessons` — your brief lessons; `lessons edit|drop|merge` keep them tidy
 - `claude-hub dot watch <task-id> [--stall-hours N]` — watch an existing Hub task (default \
 stuck alarm: 2 hours without progress); `claude-hub dot unwatch <task-id>` stops it
 - `claude-hub task accept <task-id>` — accept a finished task once the user agrees
@@ -71,8 +80,14 @@ BRIEF_TEMPLATE = """\
 ## Context
 {context}
 
-## Done when
+## Done when (check each one)
 {done_when}
+
+## Output
+{output}
+
+## Out of scope
+{out_of_scope}
 
 ## Constraints
 {constraints}
@@ -83,19 +98,20 @@ BRIEF_TEMPLATE = """\
 - Follow the repository rules (CLAUDE.md / AGENTS.md) when they exist.
 
 ## Report
-Finish with a short report: what you did, the result (or where it is), how you
-checked it, and open risks. Lead with the result.
+Finish with a short report. Lead with the result and where it is. Then answer
+every "Done when" item by number: `1. ✓ <evidence>` or `1. ✗ <why not>`. End
+with how you checked it and any open risks.
 """
 
 # A wake or tidy turn answered with exactly this is hidden from the chat and the journal.
 QUIET_REPLY = "[quiet]"
 
 WAKE_MESSAGE = (
-    "[Dot wake] New events are in your context. Handle them: read each result, "
-    "update Focus and memory, and tell me only what needs me (a decision, a "
-    "result I asked for, a problem). When a task failed or came back with a "
-    "question, save a card titled `Brief lesson: <what the brief missed>` "
-    f"(kind knowledge). If nothing needs me, reply with exactly {QUIET_REPLY}."
+    "[Dot wake] New events are in your context. Handle them: judge each "
+    "returned task against its done-when list and record it with "
+    "`claude-hub dot review`, update Focus and memory, and tell me only what "
+    "needs me (a decision, a result I asked for, a problem). If nothing needs "
+    f"me, reply with exactly {QUIET_REPLY}."
 )
 
 TIDY_MESSAGE = f"""\
@@ -108,6 +124,9 @@ unless you found something that needs me; then say it in a line or two.
    links them.
 4. Check Focus: close done items, keep at most 7.
 5. Update `user` cards when you learned something new about the user.
+6. Lessons (`claude-hub dot lessons`): merge ones that say the same thing
+   (`claude-hub dot lessons merge <keep-id> <other-id>...`) and sharpen vague
+   wording (`claude-hub dot lessons edit`). Each lesson is one rule for briefs.
 """
 
 DOT_CONTEXT_HEADER = "Dot context (fresh, built by Claude Hub for this turn)"

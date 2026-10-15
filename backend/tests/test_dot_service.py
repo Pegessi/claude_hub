@@ -290,19 +290,24 @@ async def test_delegate_registers_and_starts_task(
 
     monkeypatch.setattr(workspace_manager, "register_task", fake_register)
     monkeypatch.setattr(workspace_manager, "start_task", fake_start)
-    item = await service.delegate(
+    result = await service.delegate(
         workspace_id="ws",
         title="Paper",
         goal="Summarize FA3",
-        done_when="5 bullets in notes/fa3.md",
+        done_when=["5 bullets in notes/fa3.md"],
+        output="notes/fa3.md",
+        context="arxiv 2407.08608",
         actor_key="actor",
     )
-    assert item["task_id"] == "task-9" and item["status"] == "queued"
+    item = result["work"]
+    assert not result["held"] and item["task_id"] == "task-9" and item["status"] == "queued"
     brief = created["payload"].prompt
-    assert "## Goal\nSummarize FA3" in brief and "## Done when\n5 bullets" in brief
+    assert "## Goal\nSummarize FA3" in brief and "\n1. 5 bullets in notes/fa3.md" in brief
     assert created["payload"].source.tab_id == TAB_ID
     with pytest.raises(ValueError):
-        await service.delegate(workspace_id="ws", title="x", goal=" ", done_when="y", actor_key="a")
+        await service.delegate(
+            workspace_id="ws", title="x", goal=" ", done_when=["y"], actor_key="a"
+        )
 
 
 def test_health_flags_problems(service: DotService) -> None:

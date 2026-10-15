@@ -34,7 +34,15 @@ def _card(kind: str, title: str, summary: str = "", body: str = "", **extra: obj
 
 
 def test_ensure_creates_layout_and_git(store: DotStore) -> None:
-    for name in ("DOT.md", "focus.json", "work.json", "inbox.json", "state.json", ".gitignore"):
+    for name in (
+        "DOT.md",
+        "focus.json",
+        "work.json",
+        "inbox.json",
+        "lessons.json",
+        "state.json",
+        ".gitignore",
+    ):
         assert (store.home / name).exists(), name
     for kind in ("user", "work", "knowledge", "concept"):
         assert (store.memory_dir / kind).is_dir()
@@ -201,7 +209,7 @@ def test_prepare_turn_rotation_rules(store: DotStore) -> None:
     first = service.prepare_turn("hello", None)
     assert first.rotate and first.conversation_id
     assert "You are Dot" in first.system_pack
-    assert 'recall "brief lesson"' in first.system_pack, "the brief self-check is in every session"
+    assert "dot review" in first.system_pack, "the review step is in every session"
     cid = first.conversation_id
 
     second = service.prepare_turn("next", cid)

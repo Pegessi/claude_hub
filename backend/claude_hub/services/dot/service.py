@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from .context import TurnPack, build_session_pack, build_turn_pack
 from .index import DotIndex
+from .lessons import lesson_score, lint_brief, match_lessons, session_rules
 from .prompts import BRIEF_TEMPLATE, QUIET_REPLY, TIDY_MESSAGE, WAKE_MESSAGE
 from .store import FOCUS_LIMIT, Card, DotStore, now_iso, utc_now
 
@@ -34,6 +35,10 @@ _TERMINAL_TASK_STATES = {"done", "failed"}
 _STALL_TASK_STATES = {"queued", "working"}
 _ATTENTION_REPORT_STATES = {"needs_input", "blocked"}
 _JOURNAL_TEXT_LIMIT = 20_000
+REVIEW_VERDICTS = ("ok", "redo")
+REVIEW_CAUSES = ("brief", "env", "worker")
+# First-pass rate covers the latest reviews only, so it shows the current trend.
+STATS_WINDOW = 20
 
 
 @dataclass
@@ -58,6 +63,15 @@ def _parse_time(value: Any) -> Optional[datetime]:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _checklist(value: Any) -> list[str]:
+    """Done-when items; work items from before checklists hold one string."""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return []
 
 
 def _first_line(text: str, limit: int = 200) -> str:
@@ -380,17 +394,25 @@ class DotService:
         workspace_id: str,
         title: str,
         goal: str,
-        done_when: str,
+        done_when: list[str],
+        output: str = "",
         context: str = "",
+        out_of_scope: str = "",
         constraints: str = "",
         agent_type: str = "codex",
         task_mode: Optional[str] = None,
         start: bool = True,
         request_key: Optional[str] = None,
         stall_hours: Optional[float] = None,
+        confirm: bool = False,
         actor_key: str,
     ) -> dict[str, Any]:
-        """Register (and start) one Hub Task with a Dot brief; track it in work.json."""
+        """Check the brief, then register (and start) one Hub Task and track it.
+
+        Returns ``held`` (nothing sent), the brief ``warnings``, the matching
+        ``lessons`` and the tracked ``work`` item. A brief with warnings or
+        matching lessons is held until Dot fixes it or sends ``confirm``.
+        """
         from ...models.schemas import (
             AgentType,
             StartTaskRequest,
@@ -400,13 +422,24 @@ class DotService:
         )
         from .. import workspace_manager
 
-        if not title.strip() or not goal.strip() or not done_when.strip():
+        checks = [" ".join(item.split()) for item in done_when if item.strip()]
+        if not title.strip() or not goal.strip() or not checks:
             raise ValueError("title, goal and done_when are required")
         self.store.ensure()
+        warnings = lint_brief(done_when=checks, context=context, output=output)
+        lessons = match_lessons(
+            self.store.list_lessons(),
+            " ".join([title, goal, context, output, out_of_scope, constraints, *checks]),
+            utc_now(),
+        )
+        if (warnings or lessons) and not confirm:
+            return {"held": True, "warnings": warnings, "lessons": lessons, "work": None}
         brief = BRIEF_TEMPLATE.format(
             goal=goal.strip(),
             context=context.strip() or "(none given)",
-            done_when=done_when.strip(),
+            done_when="\n".join(f"{number}. {item}" for number, item in enumerate(checks, 1)),
+            output=output.strip() or "(not given; say in the report where the result is)",
+            out_of_scope=out_of_scope.strip() or "(none given)",
             constraints=constraints.strip() or "(none)",
         )
         fields: dict[str, Any] = {
@@ -432,13 +465,120 @@ class DotService:
             workspace_id=workspace_id,
             title=task.title,
             goal=goal.strip(),
-            done_when=done_when.strip(),
+            done_when=checks,
+            output=output.strip() or None,
             agent_type=agent_type,
             status=task.status.value,
             stall_hours=stall_hours,
+            # Kept so a later review can see which warnings Dot sent past.
+            brief_warnings=warnings or None,
         )
         await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
-        return item
+        return {"held": False, "warnings": warnings, "lessons": lessons, "work": item}
+
+    # ── review and lessons ──────────────────────────────────────────────
+
+    async def review(
+        self,
+        task_id: str,
+        *,
+        verdict: str,
+        cause: Optional[str] = None,
+        note: str = "",
+        lesson: str = "",
+        lesson_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Record Dot's verdict on a returned task; a brief miss adds or votes a lesson.
+
+        Raises KeyError for an unknown task, ValueError for a bad combination.
+        """
+        item = self.store.get_work(task_id)
+        if item is None:
+            raise KeyError(task_id)
+        if verdict not in REVIEW_VERDICTS:
+            raise ValueError("verdict must be ok or redo")
+        if cause is not None and cause not in REVIEW_CAUSES:
+            raise ValueError("cause must be brief, env or worker")
+        if verdict == "redo" and cause is None:
+            raise ValueError("a redo needs a cause: brief, env or worker")
+        if not item.get("result_card"):
+            raise ValueError("the task has not come back yet")
+        if item.get("review") and not item.get("review_due"):
+            raise ValueError("already reviewed; nothing new came back since")
+        rule = lesson.strip()
+        if (rule or lesson_id) and cause != "brief":
+            raise ValueError("lessons are only for brief misses (cause brief)")
+        if rule and lesson_id:
+            raise ValueError("give a new lesson or a lesson id, not both")
+        if cause == "brief" and not (rule or lesson_id):
+            raise ValueError(
+                "a brief miss needs a lesson: a new rule, or the id of an old one it repeats"
+            )
+        saved = None
+        if lesson_id:
+            saved = self.store.vote_lesson(lesson_id, task_id)
+            if saved is None:
+                raise ValueError(f"lesson not found: {lesson_id}")
+        elif rule:
+            saved = self.store.add_lesson(rule, task_id)
+        record = {
+            "verdict": verdict,
+            "cause": cause,
+            "note": " ".join(note.split()) or None,
+            "lesson_id": saved["id"] if saved else None,
+            "at": now_iso(),
+        }
+        changes: dict[str, Any] = {
+            "review": {key: value for key, value in record.items() if value is not None},
+            "review_due": False,
+        }
+        # The first verdict decides first-pass success; later rounds do not rewrite it.
+        if not item.get("first_verdict"):
+            changes["first_verdict"] = verdict
+        updated = self.store.upsert_work(task_id, **changes)
+        await asyncio.to_thread(self.store.commit, f"dot: review {task_id} {verdict}")
+        return {"work": updated, "lesson": saved}
+
+    def lessons(self, *, include_dropped: bool = False) -> list[dict[str, Any]]:
+        """Lessons with their current score, strongest first."""
+        now = utc_now()
+        lessons = self.store.list_lessons(include_dropped=include_dropped)
+        in_session = {lesson.get("id") for lesson in session_rules(lessons, now)}
+        rows = [
+            {
+                **lesson,
+                "score": round(lesson_score(lesson, now), 2),
+                "in_session": lesson.get("id") in in_session,
+            }
+            for lesson in lessons
+        ]
+        return sorted(rows, key=lambda row: (bool(row.get("dropped")), -row["score"]))
+
+    def review_stats(self) -> dict[str, Any]:
+        """First-pass rate over the latest reviews: ok at the first verdict, no question asked."""
+        reviewed = [
+            item
+            for item in self.store.list_work(include_closed=True)
+            if isinstance(item.get("review"), dict)
+        ]
+        reviewed.sort(key=lambda item: str(item["review"].get("at") or ""))
+        window = reviewed[-STATS_WINDOW:]
+        first_pass = sum(
+            1 for item in window if item.get("first_verdict") == "ok" and not item.get("asked")
+        )
+        causes: dict[str, int] = {}
+        for item in window:
+            cause = item["review"].get("cause")
+            if cause:
+                causes[cause] = causes.get(cause, 0) + 1
+        return {
+            "reviewed": len(window),
+            "first_pass": first_pass,
+            "rate": round(first_pass / len(window), 2) if window else None,
+            "causes": causes,
+            "pending": len(self.store.pending_reviews()),
+            "window": STATS_WINDOW,
+        }
 
     async def watch(self, task_id: str, *, stall_hours: Optional[float] = None) -> dict[str, Any]:
         """Track an existing Hub task Dot did not start. Raises KeyError / ValueError."""
@@ -472,7 +612,7 @@ class DotService:
         """Stop tracking a task (watched or delegated). Returns None when unknown."""
         if self.store.get_work(task_id) is None:
             return None
-        item = self.store.upsert_work(task_id, closed=True, stopped=True)
+        item = self.store.upsert_work(task_id, closed=True, stopped=True, review_due=False)
         await asyncio.to_thread(self.store.commit, f"dot: unwatch {task_id}")
         return item
 
@@ -538,8 +678,16 @@ class DotService:
         lines = [f"Task `{item['task_id']}` in workspace `{item.get('workspace_id')}`: {status}."]
         if item.get("goal"):
             lines += ["", f"Goal: {item['goal']}"]
-        if item.get("done_when"):
-            lines.append(f"Done when: {item['done_when']}")
+        if item.get("output"):
+            lines.append(f"Output: {item['output']}")
+        checks = _checklist(item.get("done_when"))
+        if checks:
+            # Next to the report, so each check can be held against the worker's answer.
+            lines += [
+                "",
+                "## Done when",
+                *[f"{number}. {check}" for number, check in enumerate(checks, 1)],
+            ]
         lines += ["", "## Report", message]
         for label, attr in (("Validation", "validation"), ("Risks", "risks")):
             value = getattr(report, attr, None)
@@ -587,9 +735,12 @@ class DotService:
             changes: dict[str, Any] = {}
             if status != previous:
                 changes["status"] = status
+            # Dot judges what it delegated; a watched task's brief was not Dot's.
+            review_due = None if item.get("watched") else True
             if status in ("review", "failed") and status != previous:
                 card = self._result_card(item, status, report)
                 changes["result_card"] = card.id
+                changes["review_due"] = review_due
                 kind = "task_ready" if status == "review" else "task_failed"
                 summary = _first_line(str(getattr(report, "message", "") or ""), 300)
                 self.store.add_inbox(
@@ -602,6 +753,7 @@ class DotService:
             elif status == "done" and previous not in ("review", "done"):
                 card = self._result_card(item, status, report)
                 changes["result_card"] = card.id
+                changes["review_due"] = review_due
                 self.store.add_inbox(
                     "task_done",
                     f"{item.get('title') or task_id} — done",
@@ -620,6 +772,8 @@ class DotService:
                     f"{item.get('title') or task_id} — {_first_line(str(report.message), 300)}",
                     task_id=task_id,
                 )
+                # Not a first-pass success any more, whatever the final verdict.
+                changes["asked"] = True
                 events += 1
             elif status in _STALL_TASK_STATES and (
                 activity := self._last_activity(item, task, report)
@@ -728,6 +882,8 @@ class DotService:
         )
         unread = len(self.store.list_inbox())
         check("inbox", unread <= 5, f"{unread} unread event(s)")
+        pending = len(self.store.pending_reviews())
+        check("reviews", pending <= 3, f"{pending} returned task(s) waiting for a verdict")
         cards = self.store.list_cards()
         missing = [card.id for card in cards if not card.summary.strip()]
         check("summaries", not missing, f"{len(missing)} card(s) without a summary")
@@ -789,6 +945,7 @@ class DotService:
             "focus": len(self.store.list_focus()) if set_up else 0,
             "open_work": len(self.store.list_work()) if set_up else 0,
             "unread_events": len(self.store.list_inbox()) if set_up else 0,
+            "pending_reviews": len(self.store.pending_reviews()) if set_up else 0,
             "wake_schedule_id": state.get("wake_schedule_id"),
             "tidy_schedule_id": state.get("tidy_schedule_id"),
             "last_tidy_at": state.get("last_tidy_at"),

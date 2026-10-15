@@ -7,7 +7,7 @@ import base64
 import binascii
 import hashlib
 import json
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -78,14 +78,44 @@ class DelegateRequest(BaseModel):
     workspace_id: str = Field(min_length=1)
     title: str = Field(min_length=1, max_length=300)
     goal: str = Field(min_length=1, max_length=8000)
-    done_when: str = Field(min_length=1, max_length=4000)
+    # One verifiable check per item; the worker answers each by number.
+    done_when: List[Annotated[str, Field(min_length=1, max_length=1000)]] = Field(
+        min_length=1, max_length=20
+    )
+    output: str = Field(default="", max_length=4000)
     context: str = Field(default="", max_length=20_000)
+    out_of_scope: str = Field(default="", max_length=4000)
     constraints: str = Field(default="", max_length=4000)
     agent_type: Literal["codex", "claude", "cursor", "traex"] = "codex"
     task_mode: Optional[Literal["direct", "reviewed", "autonomous"]] = None
     start: bool = True
     request_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
     stall_hours: Optional[float] = Field(default=None, gt=0, le=720)
+    # Send even when the brief check has warnings or matching lessons.
+    confirm: bool = False
+
+
+class ReviewRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    verdict: Literal["ok", "redo"]
+    cause: Optional[Literal["brief", "env", "worker"]] = None
+    note: str = Field(default="", max_length=2000)
+    lesson: str = Field(default="", max_length=300)
+    lesson_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+
+
+class LessonWrite(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    rule: str = Field(min_length=1, max_length=300)
+
+
+class LessonMerge(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    keep: str = Field(min_length=1, max_length=64)
+    others: List[str] = Field(min_length=1, max_length=20)
 
 
 class WatchRequest(BaseModel):
@@ -414,6 +444,86 @@ async def dot_delegate(
         raise HTTPException(status_code=404, detail="Workspace not found") from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc) or "invalid_delegate") from None
+
+
+@router.post("/work/{task_id}/review")
+async def dot_review(
+    task_id: str, payload: ReviewRequest, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    try:
+        return await _service().review(task_id, **payload.model_dump())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Dot is not tracking this task") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+# ── lessons ─────────────────────────────────────────────────────────────
+
+
+@router.get("/lessons")
+async def dot_lessons(
+    include_all: bool = Query(default=False, alias="all"),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    service = _service()
+    return {
+        "lessons": service.lessons(include_dropped=include_all),
+        "stats": service.review_stats(),
+    }
+
+
+@router.post("/lessons")
+async def dot_add_lesson(
+    payload: LessonWrite, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    service = _service()
+    try:
+        lesson = service.store.add_lesson(payload.rule)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    await _commit(service, f"dot: lesson + {lesson['id']}")
+    return lesson
+
+
+@router.patch("/lessons/{lesson_id}")
+async def dot_edit_lesson(
+    lesson_id: str, payload: LessonWrite, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    service = _service()
+    try:
+        lesson = service.store.update_lesson(lesson_id, rule=payload.rule)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    await _commit(service, f"dot: lesson ~ {lesson_id}")
+    return lesson
+
+
+@router.delete("/lessons/{lesson_id}")
+async def dot_drop_lesson(
+    lesson_id: str, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    service = _service()
+    lesson = service.store.update_lesson(lesson_id, dropped=True)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    await _commit(service, f"dot: lesson - {lesson_id}")
+    return lesson
+
+
+@router.post("/lessons/merge")
+async def dot_merge_lessons(
+    payload: LessonMerge, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    service = _service()
+    try:
+        lesson = service.store.merge_lessons(payload.keep, payload.others)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Lesson not found: {exc.args[0]}") from None
+    await _commit(service, f"dot: merge lessons into {payload.keep}")
+    return lesson
 
 
 @router.post("/work/{task_id}/watch")

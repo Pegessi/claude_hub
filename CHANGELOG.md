@@ -24,7 +24,12 @@
   `claude-hub dot identity`. Phone layout: tab-bar launcher and full-screen panel.
 - Dot wakes only on task events (no daily wake-up). Wake and tidy turns where
   nothing needs the user reply `[quiet]` and are hidden from the chat and
-  journal. Dot self-checks briefs and keeps `Brief lesson` cards.
+  journal.
+- Brief, review, lesson loop: `done_when` is a checklist the worker answers
+  item by item; a brief check holds vague briefs (`--confirm` overrides);
+  `dot review` judges each returned task, and brief misses become fading
+  lesson rules shown in later sessions. The Lessons tab shows them with the
+  first-pass rate.
 
 ### fix(config): load the MASO service URL from backend startup settings
 
