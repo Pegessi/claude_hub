@@ -171,7 +171,7 @@ test('mobile image controls retain a touch target and keep the lightbox inside t
   const imageRule = structuredPane.match(/\.structured-image-lightbox-img\s*\{[\s\S]*?\}/)
   assert.ok(imageRule, 'lightbox image CSS must exist')
   assert.match(imageRule[0], /max-width:\s*min\([^;]*calc\(100vw\s*-\s*48px\)\)/)
-  assert.match(imageRule[0], /max-height:\s*calc\(100dvh\s*-\s*48px\)/)
+  assert.match(imageRule[0], /max-height:\s*calc\(100dvh\s*-\s*96px\)/)
 
   const closeRule = structuredPane.match(/\.structured-image-lightbox-close\s*\{[\s\S]*?\}/)
   assert.ok(closeRule, 'lightbox close button CSS must exist')
