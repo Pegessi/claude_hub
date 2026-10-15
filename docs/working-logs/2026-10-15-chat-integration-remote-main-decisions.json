@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "9d88e0c42a987995f83f50e9827b664bf7af0c9d",
+  "parents": [
+    "a89dd7870e256fb871ff9edb8bd94f9887479922",
+    "b63968b769d9305f6e5ff9a179b5454d9736a97d"
+  ],
+  "base": "45c552c60c7635efe2580accc875b8840a67cc90",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "8627a2df89c6188158f2bcee51cf91e79fb48220",
+  "reconstructed_tree": "2e74180b9af1ab1b0985debb3ae6837539f28cd0",
+  "conflicts": [
+    "backend/claude_hub/services/agent_stream/provider_network.py"
+  ],
+  "decisions": [
+    {
+      "path": "backend/claude_hub/services/agent_stream/provider_network.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ecfc626819dfd8f615c356b2be809356f999a39b"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0c47ccbb408a5215fb5bbf76f3ef5f640955f297"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "60e2d45f468d62c3245cc3d449b69626351add0d"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ecd96451a741d9f477d728c980dd75e8a99b41bc"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8ea7730fb5aca076518230da2a507d0720c0a39d"
+      },
+      "reason": "Preserve origin/main auto-mode timeout_inherit fallback while using local main shared bypasses_proxy rules. Explicit modes and non-timeout failures stay strict. Both parent test suites remain intact.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

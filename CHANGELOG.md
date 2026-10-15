@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(chat): fence image cache ownership and retry proven-unsent restart input
+
+- Prevent deleted or cancelled Chat image reads from restoring retired cache
+  entries, including background writes and reused managed session IDs. Disable
+  browser caching of managed image responses.
+- Keep shutdown admission rejection retryable only when provider input was not
+  submitted, including lazy manager creation and rejection after a recorded start.
+  Preserve the same mailbox call ID and retain ambiguous delivery evidence.
+- Finalize test-owned terminal resources on failures and preserve planned-restart
+  continuation behavior when integrating managed Workspace Chat.
+
 ### fix(workspace): preserve managed Chat ownership across controls and failures
 
 - Bind question answers to the active turn and exact provider request instead of
@@ -37,6 +48,58 @@
 - Reset native provider context for unrelated reviews while retaining display
   history, inherit the execution agent's Chat configuration for auto-created
   reviewers, and preserve existing review and human-acceptance requirements.
+
+### fix(chat): recheck restart continuation after provider preparation
+
+- Honor Stop, conversation/configuration changes and shutdown during asynchronous
+  provider preparation, before sending a continuation through stdin, RPC or HTTP.
+- Terminate an empty one-shot process if continuation is revoked while it starts,
+  and preserve manual follow-up after a rejected automatic attempt.
+- Skip a pending continuation if Retry replaces its original runtime.
+
+### feat(chat): continue working Chats after a planned service restart
+
+- Offer automatic continuation in the restart dialog, enabled by default. Send
+  `Please continue.` once in each eligible interrupted Chat's original provider
+  conversation, regardless of the task's language.
+- Preserve waiting Chats and managed recovery controls. Recheck conversation,
+  configuration, Stop and newer input before sending; uncertain attempts require
+  manual attention rather than automatic replay.
+- Reconnect Chat observation across a longer restart, preserving unsent drafts,
+  and report service recovery separately from Chat continuation results.
+
+### chore: remove unrelated presentation draft assets
+
+- Remove the unused root draft folder and its fifteen presentation assets.
+
+### fix(chat): retain streamed images and release inactive image viewers
+
+- Capture completed image references while assistant text streams, including
+  split links in long replies whose final summary is truncated.
+- Close an image viewer when its Chat becomes inactive and release its keyboard
+  focus trap without moving focus back into the hidden Chat.
+- Preserve fragment/query navigation, including HTML entities, when promoting
+  local image links; recapture expired source entries through normal cache eviction.
+
+### feat(chat): preview assistant images and retain original output in the shared LRU
+
+- Render local image links directly in Chat and open them in the image viewer,
+  with fit-to-window, actual-size and original-image controls.
+- Allow a tab's recorded image-view tools to display their exact temporary
+  screenshot, matching the frontend's existing Read/view_image recognition.
+- Save agent output as original bytes in the existing attachment cache and
+  shared quotas/LRU. Capture live image output before fanout, deduplicate
+  repeated reads, and keep retained images available after source cleanup.
+- Serialize updates to the same image and invalidate superseded versions so
+  concurrent reads or an uncacheable replacement cannot revive an older image.
+
+### feat(quota): color remaining balances by available share
+
+- Show remaining quota in green above 50%, amber at 50% or less, orange at
+  20% or less, and red at 10% or less. Match the percentage, progress bar and
+  row accent while preserving provider warnings and neutral missing readings.
+- Improve numeric alignment and remove insignificant decimal zeroes from
+  prepaid credit without rounding its value.
 
 ### docs: hold the change log in one Released section
 
@@ -92,6 +155,23 @@
 - Report the upstream Feishu code and support id when credential validation is
   rejected, and name access-control policy 21001 in the Bot pool UI instead of
   suggesting the operator retype a correct secret.
+
+### ci: initialize browser paths after runner assignment
+
+- Fix workflow rejection by setting browser installation and evidence paths
+  through `GITHUB_ENV` in each browser job's first step, using `RUNNER_TEMP`.
+- Preserve the existing runner-local paths, browser gates and artifact retention.
+
+### fix(chat): avoid blocking provider requests on inconclusive probe timeouts
+
+- In automatic network mode, preserve the existing subprocess environment when
+  the effective route's short HEAD probe times out, allowing the real provider
+  request to proceed without replaying the prompt.
+- Warn with redacted probe results and use the short failure-cache TTL so route
+  selection recovers promptly. Explicit routes and invalid configurations still
+  fail as before.
+- Preserve explicitly empty lowercase proxy settings when generating Claude
+  launch settings, so an inherited uppercase proxy cannot be restored by mistake.
 
 ### feat(chat): accept image input in MASO conversations
 

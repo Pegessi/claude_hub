@@ -84,6 +84,30 @@ async def test_restart_rejects_unmanaged_server(client: AsyncClient, monkeypatch
     assert response.status_code == 503
 
 
+async def test_continuation_choice_is_idempotent_with_restart_request(
+    client: AsyncClient, monkeypatch, tmp_path
+):
+    from claude_hub.services import service_restart as restart
+
+    store = restart.RestartStore(tmp_path)
+    store.initialize("choice-launcher")
+    monkeypatch.setenv("CLAUDE_HUB_LAUNCHER_ID", "choice-launcher")
+    monkeypatch.setattr(restart, "get_store", lambda: store)
+    body = {
+        "instance_id": restart.INSTANCE_ID,
+        "request_id": str(uuid4()),
+        "resume_running_chats": True,
+    }
+    headers = {"X-Claude-Hub-Restart": "1"}
+    accepted = await client.post("/api/system/restart", json=body, headers=headers)
+    assert accepted.status_code == 202
+    assert accepted.json()["operation"]["resume_running_chats"] is True
+    retry = await client.post(
+        "/api/system/restart", json={**body, "resume_running_chats": False}, headers=headers
+    )
+    assert retry.json()["operation"]["resume_running_chats"] is True
+
+
 def test_launcher_replaces_only_its_child_and_checks_new_identity(tmp_path):
     from claude_hub.service_launcher import ServiceLauncher
     from claude_hub.services.service_restart import RestartStore

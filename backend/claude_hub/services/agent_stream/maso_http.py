@@ -504,6 +504,7 @@ class MasoHttpSession(ProviderSession):
             await asyncio.wait_for(asyncio.shield(self._stream_ready), 10.0)
             if not self.turn_in_flight or generation != self._stdout_generation:
                 raise RuntimeError("MASO turn was cancelled before message delivery")
+            self.check_delivery_admission()
             message_id = str(uuid.uuid4())
             # Until the response arrives, a crash cannot distinguish rejection
             # from a request still enqueueing on the service. Persist that fact.

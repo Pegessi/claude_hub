@@ -3,6 +3,8 @@ export interface RestartOperation {
   instance_id: string
   status: 'preparing' | 'restarting' | 'succeeded' | 'failed'
   message: string
+  resume_running_chats?: boolean
+  continuation?: { total: number; pending: number; started: number; skipped: number; attention: number }
 }
 
 export interface RestartStatus {
@@ -35,7 +37,15 @@ export function restartOutcome(status: RestartStatus, pending: PendingRestart) {
   return 'waiting'
 }
 
-export async function fetchRestartStatus(body?: { instance_id: string; request_id: string }): Promise<RestartStatus> {
+export function restartCompletionMessage(operation: RestartOperation | null): string {
+  const summary = operation?.continuation
+  if (summary) {
+    return `The service restarted. Automatic continuation: ${summary.started} started, ${summary.skipped} skipped, ${summary.attention} need attention.`
+  }
+  return 'The service restarted. Continue any interrupted work that still needs attention.'
+}
+
+export async function fetchRestartStatus(body?: { instance_id: string; request_id: string; resume_running_chats?: boolean }): Promise<RestartStatus> {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), 4000)
   try {

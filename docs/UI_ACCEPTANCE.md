@@ -56,7 +56,8 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 | Bot components | Settings/binding behavior, secret clearing and desktop/mobile layout |
 | Queued chat activation | A hidden queued Chat activates before its draft is sent |
 | Goal steering | Steering a running Goal and resuming after a question is answered |
-| Chat image quality | An original image is sent once, sized from the real preview |
+| Chat image quality | An original image is sent once, sized from the real preview; assistant local links and Read screenshots render inline, open at actual size, and retain keyboard/mobile controls |
+| Service restart | Default automatic Chat continuation and explicit opt-out; desktop/mobile restart controls; a lost POST response retains request identity; pending continuation remains observable; stream recovery preserves the unsent draft without another send or provider replacement |
 
 These are real Vue/Pinia DOM checks served by a dedicated Vite process. Page
 APIs are mocked, unknown API routes fail, and WebSockets are blocked. This is
@@ -139,7 +140,7 @@ that has broken before. Prefer extending the scenario that already owns that
 surface; a new scenario is for a surface none of them covers.
 
 Do not add one for logic a unit test can pin down, for styling with no
-behavioral consequence, or to raise a count. Nine real browsers already cost
+behavioral consequence, or to raise a count. Ten real browsers already cost
 several minutes.
 
 Write the assertion against the requirement, in the user's terms. "Stop

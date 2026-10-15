@@ -53,12 +53,14 @@ from ...models import (
 from .attachments import AgentStreamAttachmentStore
 from .base import (
     AgentStreamAdapter,
+    NativeInputNotSubmittedError,
     NormalizeContext,
     discover_source_cached,
     invalidate_source,
 )
 from .coalescer import AgentStreamCoalescer
 from .fork_seed import discard_seed_sidecar, read_seed_sidecar
+from .local_images import ImageReferenceBuffer, cache_image_paths
 from .native import (
     ProviderSession,
     _detect_image_mime,
@@ -520,6 +522,7 @@ class SessionTailer:
         native_error: Optional[str] = None,
         post_persist_observers: Optional[List[PostPersistObserver]] = None,
         task_activity_observer: Optional[PostPersistObserver] = None,
+        send_admission: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.workspace_id = workspace_id
         self.session_id = session_id
@@ -537,6 +540,7 @@ class SessionTailer:
         )
         self._store = store or AgentStreamStore(workspace_id, session_id)
         self._attachment_store: Optional[AgentStreamAttachmentStore] = None
+        self._image_references = ImageReferenceBuffer()
         self._cursor_path = self._store.cursor_path
         self._native_transport = native_transport
         # When set, the agent session required a native transport but it could
@@ -545,6 +549,7 @@ class SessionTailer:
         self._native_error = native_error
         self._post_persist_observers = post_persist_observers or []
         self._task_activity_observer = task_activity_observer
+        self._send_admission = send_admission
 
         self._offset = 0
         self._inode: Optional[int] = None
@@ -854,6 +859,8 @@ class SessionTailer:
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
         strip_goal_protocol: bool = False,
+        before_send: Optional[Callable[[], Awaitable[None]]] = None,
+        before_delivery: Optional[Callable[[], None]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -911,6 +918,10 @@ class SessionTailer:
             raise RuntimeError("no native transport for this session; use the terminal send path")
         if self._native_error is not None:
             raise RuntimeError(self._native_error)
+        if self._send_admission is not None and not self._send_admission():
+            raise NativeInputNotSubmittedError(
+                "service is shutting down; try again after it reconnects"
+            )
         # A prior manual Stop may still be killing/relaunching the provider.
         # Wait for that bounded teardown BEFORE taking the send lock so the new
         # turn/start reaches the fresh app-server rather than the process being
@@ -946,6 +957,10 @@ class SessionTailer:
 
         async with self._send_lock:
             self._require_startable_incarnation()
+            if self._send_admission is not None and not self._send_admission():
+                raise NativeInputNotSubmittedError(
+                    "service is shutting down; try again after it reconnects"
+                )
             # 1. Busy check BEFORE any state mutation. If a turn is already in
             #    flight, fail fast so the in-flight turn's _active_turn_id and
             #    _run_epoch are never overwritten — unless the caller steers.
@@ -965,6 +980,8 @@ class SessionTailer:
             session = self._session_getter()
             if session is None:
                 raise RuntimeError("session no longer exists")
+            if before_send is not None:
+                await before_send()
 
             # 3. Preview count validation. When the frontend supplies previews,
             #    there must be exactly one per image. When previews is None,
@@ -1017,6 +1034,10 @@ class SessionTailer:
                                 "height": None,
                             }
                         )
+                if self._send_admission is not None and not self._send_admission():
+                    raise NativeInputNotSubmittedError(
+                        "service is shutting down; try again after it reconnects"
+                    )
             except Exception:
                 # Partial save failure: delete any previews already persisted
                 # in this turn so we don't leak unreferenced cache entries.
@@ -1088,6 +1109,12 @@ class SessionTailer:
             #    the user turn is durably recorded and must remain renderable
             #    even if the provider rejects the input.
             try:
+                if self._send_admission is not None and not self._send_admission():
+                    raise NativeInputNotSubmittedError(
+                        "service is shutting down; try again after it reconnects"
+                    )
+                if before_delivery is not None:
+                    before_delivery()
                 await transport.send_message(text, images)
             except Exception:
                 # The provider rejected or failed to start the turn. Publish an
@@ -1832,6 +1859,13 @@ class SessionTailer:
             self.session_id in _DELETION_FENCED_SESSION_IDS and id(self) not in _RETIRING_TAILER_IDS
         ):
             raise StructuredSourceUnavailable("structured runtime owner was deleted or replaced")
+
+    def _publishable_incarnation_is_current(self) -> bool:
+        try:
+            self._require_publishable_incarnation()
+        except StructuredSourceUnavailable:
+            return False
+        return True
 
     async def start(self) -> None:
         self._require_startable_incarnation()
@@ -3039,6 +3073,26 @@ class SessionTailer:
         """
         self._require_publishable_incarnation()
         event = await self._store.append(event)
+        image_paths = self._image_references.paths(event) if self._is_live else []
+        if image_paths:
+            # Store append can yield while deletion or friendly-id replacement
+            # retires this owner. Never capture files for a stale incarnation.
+            self._require_publishable_incarnation()
+            session = self._session_getter()
+            if session is not None:
+                try:
+                    await cache_image_paths(
+                        session,
+                        image_paths,
+                        owner_is_current=self._publishable_incarnation_is_current,
+                    )
+                except Exception:
+                    # Image retention cannot turn a successful agent event
+                    # into a failed turn or suppress delivery to the Chat.
+                    logger.warning("Could not retain agent image for session %s", self.session_id)
+            # Capture is awaited and may yield to deletion. Revalidate before
+            # any fanout or task observation derived from the old owner.
+            self._require_publishable_incarnation()
         if self._is_live:
             self._fanout(event)
             if event.type in {
@@ -3266,6 +3320,7 @@ class TailerManager:
         self._post_persist_observers = post_persist_observers or []
         self._task_activity_observer = task_activity_observer
         self._tailers: Dict[str, SessionTailer] = {}
+        self._accepting_sends = True
         self._lock = asyncio.Lock()
         # Per-session locks that serialize edit-resend attempts.  A second
         # edit_resend for a session waits for the first to complete rather
@@ -3285,13 +3340,23 @@ class TailerManager:
             and live.created_at == session.created_at
         )
 
-    async def _get_or_create(self, session: ManagedSession) -> SessionTailer:
+    def quiesce(self) -> None:
+        """Fence new dispatches before shutdown observers can schedule more work."""
+        self._accepting_sends = False
+
+    async def _get_or_create(
+        self, session: ManagedSession, *, required_conversation_id: Optional[str] = None
+    ) -> SessionTailer:
         existing: Optional[SessionTailer] = None
         async with self._lock:
             if not self.session_is_current(session):
                 raise StructuredSourceUnavailable("managed session was deleted or replaced")
             if session.id in _DELETION_FENCED_SESSION_IDS:
                 raise StructuredSourceUnavailable("structured runtime is fenced for deletion")
+            if not self._accepting_sends:
+                raise NativeInputNotSubmittedError(
+                    "service is shutting down; try again after it reconnects"
+                )
             tailer = self._tailers.get(session.id)
             if tailer is not None:
                 if not tailer.matches_session(session):
@@ -3360,8 +3425,14 @@ class TailerManager:
                     native_error=native_error,
                     post_persist_observers=self._post_persist_observers,
                     task_activity_observer=self._task_activity_observer,
+                    send_admission=lambda: self._accepting_sends,
                 )
                 self._tailers[session.id] = tailer
+            if required_conversation_id is not None:
+                transport = tailer.native_transport
+                if transport is None:
+                    raise RuntimeError("native provider is unavailable")
+                transport.require_resumed_conversation(required_conversation_id)
         if existing is not None:
             if existing.hard_failed:
                 await existing.poll_once()
@@ -3401,6 +3472,8 @@ class TailerManager:
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
         strip_goal_protocol: bool = False,
+        before_send: Optional[Callable[[], Awaitable[None]]] = None,
+        before_delivery: Optional[Callable[[], None]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
@@ -3423,6 +3496,8 @@ class TailerManager:
             visible_text=visible_text,
             turn_metadata=turn_metadata,
             strip_goal_protocol=strip_goal_protocol,
+            before_send=before_send,
+            before_delivery=before_delivery,
         )
 
     async def cancel_turn(
@@ -3774,8 +3849,10 @@ class TailerManager:
         transport.update_env(env)
         transport.session.solo_mode = session.solo_mode
 
-    async def ensure_started(self, session: ManagedSession) -> SessionTailer:
-        return await self._get_or_create(session)
+    async def ensure_started(
+        self, session: ManagedSession, *, required_conversation_id: Optional[str] = None
+    ) -> SessionTailer:
+        return await self._get_or_create(session, required_conversation_id=required_conversation_id)
 
     @staticmethod
     def _is_reusable(tailer: SessionTailer) -> bool:

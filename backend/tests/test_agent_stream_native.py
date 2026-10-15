@@ -48,6 +48,10 @@ from claude_hub.services.agent_stream.native import (
     wrap_image_attachment_guidance,
     wrap_question_protocol_guidance,
 )
+from claude_hub.services.agent_stream.provider_network import (
+    ProbeResult,
+    ProviderNetworkSelector,
+)
 
 
 def _session(agent_type: AgentType = AgentType.CLAUDE) -> ManagedSession:
@@ -662,6 +666,119 @@ async def test_claude_selection_reads_and_overrides_high_precedence_settings(
 
 
 @pytest.mark.asyncio
+async def test_claude_auto_probe_timeouts_launch_one_turn_with_existing_proxy(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    for key in (
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    env = {
+        "ANTHROPIC_BASE_URL": "https://provider.example",
+        "ANTHROPIC_MODEL": "configured-model",
+        "ANTHROPIC_API_KEY": "test-credential",
+        "HTTPS_PROXY": "http://proxy.example:7890",
+        "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "auto",
+    }
+    settings = launch_dir / "tab-1.settings.json"
+    settings.write_text(json.dumps({"env": env}), encoding="utf-8")
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+    probes: list[Optional[str]] = []
+
+    async def timeout_probe(endpoint: str, proxy: Optional[str]) -> ProbeResult:
+        probes.append(proxy)
+        return ProbeResult(False, "timeout")
+
+    selector = ProviderNetworkSelector(probe=timeout_probe)
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", selector.select)
+    session = _session(AgentType.CLAUDE)
+    session.env = dict(env)
+    native = ClaudeNativeSession(session)
+    launches: list[tuple[list[str], str]] = []
+
+    async def capture_spawn(cmd: list[str], stdin: str) -> None:
+        launches.append((cmd, stdin))
+        prepared = native._prepared_provider_env
+        assert prepared is not None
+        assert prepared["HTTPS_PROXY"] == env["HTTPS_PROXY"]
+        selected_settings = Path(cmd[cmd.index("--settings") + 1])
+        selected_env = json.loads(selected_settings.read_text())["env"]
+        for key, value in env.items():
+            assert selected_env[key] == value
+
+    monkeypatch.setattr(native, "_spawn_oneshot", capture_spawn)
+    try:
+        await native.send_message("test turn", [])
+        assert len(launches) == 1
+        envelope = json.loads(launches[0][1])
+        assert "test turn" in envelope["message"]["content"][-1]["text"]
+        assert probes == [None, env["HTTPS_PROXY"]]
+        assert native.last_error is None
+        assert json.loads(settings.read_text())["env"] == env
+    finally:
+        for path in launch_dir.glob("*.network-*.settings.json"):
+            path.unlink()
+        await native.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_timeout_fallback_keeps_explicitly_disabled_proxies_disabled(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    env = {
+        "ANTHROPIC_BASE_URL": "https://provider.example",
+        "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "auto",
+        "http_proxy": "",
+        "HTTP_PROXY": "http://disabled.example:7890",
+        "https_proxy": "",
+        "HTTPS_PROXY": "http://disabled.example:7890",
+        "all_proxy": "",
+        "ALL_PROXY": "http://disabled.example:7890",
+    }
+    (launch_dir / "tab-1.settings.json").write_text(json.dumps({"env": env}))
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+
+    async def timeout_probe(endpoint: str, proxy: Optional[str]) -> ProbeResult:
+        assert proxy is None
+        return ProbeResult(False, "timeout")
+
+    selector = ProviderNetworkSelector(probe=timeout_probe)
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", selector.select)
+    session = _session(AgentType.CLAUDE)
+    session.env = dict(env)
+    native = ClaudeNativeSession(session)
+
+    selected = await native._build_provider_env()
+    assert all(selected[key] == value for key, value in env.items())
+    selected_settings = native._write_selected_settings(selected)
+    assert selected_settings is not None
+    try:
+        settings_env = json.loads(selected_settings.read_text())["env"]
+        for key in (
+            "http_proxy",
+            "HTTP_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+        ):
+            assert settings_env[key] == ""
+    finally:
+        selected_settings.unlink()
+
+
+@pytest.mark.asyncio
 async def test_claude_uses_same_settings_snapshot_when_file_changes_after_probe(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -1088,6 +1205,52 @@ class _FakeProcess:
 
 def _codex_session() -> CodexNativeSession:
     return CodexNativeSession(_session(AgentType.CODEX))
+
+
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_codex_checks_automatic_admission_after_async_start(
+    monkeypatch: MonkeyPatch, revoke: bool
+) -> None:
+    native = _codex_session()
+    native._conversation_id = "original-thread"
+    native._conversation_id_verified = True
+    native._thread_id = "original-thread"
+    revoked = False
+
+    def admit() -> None:
+        if revoked:
+            raise RuntimeError("automatic continuation was stopped")
+
+    native.require_resumed_conversation("original-thread", before_delivery=admit)
+    proc = _FakeProcess(
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"turn": {"id": "turn"}}}).encode()
+            + b"\n"
+        ]
+    )
+
+    async def start() -> None:
+        nonlocal revoked
+        await asyncio.sleep(0)
+        revoked = revoke
+        native._started = True
+        native._process = cast(asyncio.subprocess.Process, proc)
+        native._reader_task = asyncio.create_task(native._drain_stdout())
+
+    monkeypatch.setattr(native, "start", start)
+    try:
+        if revoke:
+            with pytest.raises(RuntimeError, match="continuation was stopped"):
+                await native._send_text("Please continue.")
+            assert proc.stdin.written == []
+            assert native._pending_requests == {}
+        else:
+            await native._send_text("Please continue.")
+            requests = _written_requests(proc)
+            assert [request["method"] for request in requests] == ["turn/start"]
+            assert requests[0]["params"]["threadId"] == "original-thread"
+    finally:
+        await native.stop()
 
 
 def _written_requests(proc: _FakeProcess) -> List[Dict[str, Any]]:

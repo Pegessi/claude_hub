@@ -28,7 +28,6 @@ import logging
 import os
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import datetime
-from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Literal, NoReturn, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -44,7 +43,6 @@ from ..models import (
     AgentStreamEventType,
     AgentType,
     ChatMode,
-    ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
     ScheduledTask,
@@ -65,9 +63,8 @@ from ..services.agent_stream import (
     quoted_images,
 )
 from ..services.agent_stream.attachments import AgentStreamAttachmentStore
-from ..services.agent_stream.attachments import _magic_mime as sniff_image_mime
-from ..services.agent_stream.base import discover_source_cached
-from ..services.agent_stream.local_images import referenced_temporary_image
+from ..services.agent_stream.base import NativeInputNotSubmittedError, discover_source_cached
+from ..services.agent_stream.local_images import AgentImageUnavailable, read_cached_agent_image
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +84,7 @@ _SSE_HEARTBEAT_S = 15.0
 
 _tailer_manager: Optional[TailerManager] = None
 _tab_tailer_manager: Optional[TailerManager] = None
+_native_input_shutting_down = False
 
 
 async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
@@ -154,6 +152,10 @@ def _persist_tab_chat_mode(stream_session_id: str, mode: str) -> None:
 
 def _get_tailer_manager() -> TailerManager:
     global _tailer_manager
+    if _native_input_shutting_down:
+        raise NativeInputNotSubmittedError(
+            "service is shutting down; try again after it reconnects"
+        )
     if _tailer_manager is None:
         _tailer_manager = TailerManager(
             session_getter=lambda sid: workspace_manager.sessions.get(sid),
@@ -234,6 +236,10 @@ def _terminal_tab_stream_session_by_id(
 
 def _get_tab_tailer_manager() -> TailerManager:
     global _tab_tailer_manager
+    if _native_input_shutting_down:
+        raise NativeInputNotSubmittedError(
+            "service is shutting down; try again after it reconnects"
+        )
     if _tab_tailer_manager is None:
         _tab_tailer_manager = TailerManager(
             session_getter=_terminal_tab_stream_session_by_id,
@@ -390,8 +396,17 @@ async def _stop_all_tailer_managers() -> None:
             logger.exception("failed to stop an agent-stream tailer manager")
 
 
+def _quiesce_tailer_managers() -> None:
+    global _native_input_shutting_down
+    _native_input_shutting_down = True
+    for manager in (_tailer_manager, _tab_tailer_manager):
+        if manager is not None:
+            manager.quiesce()
+
+
 def _reset_tailer_manager() -> None:
-    global _tailer_manager, _tab_tailer_manager
+    global _tailer_manager, _tab_tailer_manager, _native_input_shutting_down
+    _native_input_shutting_down = False
     _tailer_manager = None
     _tab_tailer_manager = None
 
@@ -1993,7 +2008,13 @@ async def cancel_tab_stream_turn(
     payload: Optional[StreamCancelRequest] = None,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    from ..services.restart_continuation import cancel_pending_continuation
+
     session = _terminal_tab_session_or_404(tab_id)
+    expected = payload.expected_turn_id if payload is not None else None
+    continuation = cancel_pending_continuation(tab_id, expected)
+    if continuation is not None:
+        payload = StreamCancelRequest(expected_turn_id=continuation)
     return await _cancel_native_turn(session, _get_tab_tailer_manager(), payload)
 
 
@@ -2146,7 +2167,8 @@ async def get_tab_attachment(
 #   2. directory allowlist — the resolved real path must sit under the
 #      session's own working directory (``session.workspace_path`` / tab
 #      launch cwd). Absolute escapes, ``..`` traversal, and symlink escapes
-#      are rejected after full symlink resolution;
+#      are rejected after full symlink resolution. An assistant image link or
+#      recognized image-view call can grant one exact temporary image instead;
 #   3. content allowlist — the file is opened and its magic bytes must sniff as
 #      a whitelisted image (PNG/JPEG/GIF/WebP). A text file under cwd is
 #      refused regardless of its extension;
@@ -2155,7 +2177,6 @@ async def get_tab_attachment(
 #   5. no information leak — every rejection (bad path, traversal, missing,
 #      non-image, too large) returns the same opaque 404 with ``nosniff`` and
 #      ``no-store``.
-_AGENT_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB
 _AGENT_IMAGE_CACHE_CONTROL = "private, max-age=300"
 
 
@@ -2171,120 +2192,53 @@ def _agent_image_not_available() -> HTTPException:
     )
 
 
-def _agent_image_allowed_roots(session: ManagedSession) -> List[Path]:
-    """Resolved directories an agent image is permitted to live under.
+def _same_session_incarnation(expected: ManagedSession, live: Optional[ManagedSession]) -> bool:
+    return bool(
+        live is not None
+        and live.workspace_id == expected.workspace_id
+        and live.tab_id == expected.tab_id
+        and live.created_at == expected.created_at
+    )
 
-    Scope is the session/tab's own working area — never the whole disk. For a
-    terminal tab this is the launch ``cwd``; for a managed agent launched from
-    an isolated feature worktree (``--cwd .``) it is that worktree. Remote
-    sessions expose no local root and therefore cannot read through this path.
-    """
-    if getattr(session, "target", ExecutionTarget.LOCAL) != ExecutionTarget.LOCAL:
-        return []
-    root_raw = session.workspace_path
-    if not root_raw:
-        return []
+
+def _managed_image_owner_is_current(expected: ManagedSession) -> bool:
+    return _same_session_incarnation(expected, workspace_manager.sessions.get(expected.id))
+
+
+def _tab_image_owner_is_current(expected: ManagedSession) -> bool:
+    tab = ttyd_manager.get_tab(expected.tab_id)
+    if tab is None or (
+        tab.session_kind == SessionKind.CHAT
+        and (tab.managed_session_id or tab.workspace_role is not None)
+    ):
+        return False
+    live = _terminal_tab_stream_session(expected.tab_id)
+    return _same_session_incarnation(expected, live)
+
+
+async def _serve_agent_image(
+    session: ManagedSession,
+    path: str,
+    *,
+    owner_is_current: Callable[[], bool],
+    cache_control: str,
+) -> Response:
     try:
-        root = Path(root_raw).expanduser().resolve()
-    except (OSError, ValueError):
-        return []
-    return [root]
-
-
-def _resolve_agent_image(
-    session: ManagedSession, raw_path: str, *, referenced_image: Optional[Path] = None
-) -> Tuple[bytes, str]:
-    """Validate *raw_path* as an agent image and return ``(bytes, mime)``.
-
-    Raises the opaque 404 from :func:`_agent_image_not_available` for an empty
-    path, traversal/absolute/symlink escape, a missing file, a non-regular
-    file, an oversized file, or non-image bytes. All containment checks happen
-    after ``Path.resolve(strict=True)`` so symlinks are fully expanded before
-    the allowlist comparison.
-    """
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise _agent_image_not_available()
-    # Reject control characters / NULs before touching the filesystem.
-    if any(ord(ch) < 0x20 for ch in raw_path):
-        raise _agent_image_not_available()
-
-    roots = _agent_image_allowed_roots(session)
-    if not roots:
-        raise _agent_image_not_available()
-
-    try:
-        candidate = Path(raw_path).expanduser()
-    except (OSError, ValueError):
+        data, mime = await read_cached_agent_image(
+            session,
+            path,
+            owner_is_current=owner_is_current,
+        )
+    except AgentImageUnavailable:
         raise _agent_image_not_available() from None
-
-    try:
-        is_absolute = candidate.is_absolute()
-    except OSError:
-        is_absolute = False
-
-    # Relative paths are anchored at the session root only. An absolute path is
-    # accepted inside cwd or as an exact temporary file already authorized
-    # from this session's assistant output. Never authorize its parent root.
-    anchors = [candidate] if is_absolute else [root / candidate for root in roots]
-
-    resolved: Optional[Path] = None
-    for anchor in anchors:
-        try:
-            real = anchor.resolve(strict=True)
-        except (OSError, ValueError, RuntimeError):
-            continue
-        # Only regular files (resolve() follows symlinks, so a link that points
-        # outside the root fails the relative_to check that follows).
-        if not real.is_file():
-            continue
-        if referenced_image is not None and real == referenced_image:
-            resolved = real
-            break
-        for root in roots:
-            try:
-                real.relative_to(root)
-            except ValueError:
-                continue
-            resolved = real
-            break
-        if resolved is not None:
-            break
-
-    if resolved is None:
+    if not owner_is_current():
         raise _agent_image_not_available()
-
-    try:
-        with open(resolved, "rb") as handle:
-            data = handle.read(_AGENT_IMAGE_MAX_BYTES + 1)
-    except OSError:
-        raise _agent_image_not_available() from None
-
-    if len(data) > _AGENT_IMAGE_MAX_BYTES:
-        raise _agent_image_not_available()
-
-    mime = sniff_image_mime(data)
-    if mime is None:
-        raise _agent_image_not_available()
-    return data, mime
-
-
-async def _serve_agent_image(session: ManagedSession, path: str) -> Response:
-    def read_image() -> Tuple[bytes, str]:
-        try:
-            return _resolve_agent_image(session, path)
-        except HTTPException:
-            referenced = referenced_temporary_image(session, path)
-            if referenced is None:
-                raise
-            return _resolve_agent_image(session, path, referenced_image=referenced)
-
-    data, mime = await asyncio.to_thread(read_image)
     return Response(
         content=data,
         media_type=mime,
         headers={
             "X-Content-Type-Options": "nosniff",
-            "Cache-Control": _AGENT_IMAGE_CACHE_CONTROL,
+            "Cache-Control": cache_control,
         },
     )
 
@@ -2296,7 +2250,13 @@ async def get_session_agent_image(
     current_user: User = Depends(get_current_user),
 ) -> Response:
     """Serve an agent image scoped to a managed session's working directory."""
-    return await _serve_agent_image(_session_or_404(managed_session_id), path)
+    session = _session_or_404(managed_session_id)
+    return await _serve_agent_image(
+        session,
+        path,
+        owner_is_current=lambda: _managed_image_owner_is_current(session),
+        cache_control=_ATTACHMENT_NO_STORE,
+    )
 
 
 @router.get("/tabs/{tab_id}/stream/agent-image")
@@ -2308,9 +2268,15 @@ async def get_tab_agent_image(
     """Serve an image inside cwd or an assistant-quoted temporary image.
 
     Restricted reader for ``view_image``-style tool output — see
-    :func:`_resolve_agent_image` for the containment and content allowlist.
+    :func:`read_cached_agent_image` for containment, retention, and content validation.
     """
-    return await _serve_agent_image(_terminal_tab_session_or_404(tab_id), path)
+    session = _terminal_tab_session_or_404(tab_id)
+    return await _serve_agent_image(
+        session,
+        path,
+        owner_is_current=lambda: _tab_image_owner_is_current(session),
+        cache_control=_AGENT_IMAGE_CACHE_CONTROL,
+    )
 
 
 # ── Agent-quoted bare-token images (Lark ``img_v3_`` and future providers) ──

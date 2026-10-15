@@ -815,17 +815,37 @@ async def test_managed_agent_images_are_scoped_to_session_cwd_and_history(
     assert denied.value.status_code == 404
 
 
-@pytest.mark.asyncio
-async def test_managed_tab_rejects_direct_stream_and_destructive_tab_controls(
-    managed_workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manager, workspace = managed_workspace
+@pytest.fixture
+async def isolated_tab_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncGenerator[TTYDManager, None]:
     ttyd_module = importlib.import_module("claude_hub.services.ttyd_manager")
-
     monkeypatch.setattr(ttyd_module, "STATE_FILE", tmp_path / "guard-tabs.json")
     monkeypatch.setattr(ttyd_module, "ORDER_FILE", tmp_path / "guard-order.json")
     monkeypatch.setattr(ttyd_module, "LAUNCH_ENV_DIR", tmp_path / "guard-launch")
     tabs = TTYDManager()
+    try:
+        yield tabs
+    finally:
+        # Direct Chat still owns a ttyd process even when it only carries
+        # Workspace display metadata. Reap every test-owned tab on failures too.
+        results = await asyncio.gather(
+            *(tabs.delete_tab(tab_id) for tab_id in tuple(tabs.processes)),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            assert result
+        assert not tabs.processes
+
+
+@pytest.mark.asyncio
+async def test_managed_tab_rejects_direct_stream_and_destructive_tab_controls(
+    managed_workspace, isolated_tab_manager: TTYDManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, workspace = managed_workspace
+    tabs = isolated_tab_manager
     tab = await tabs.create_tab(
         name="Managed",
         cwd=workspace.path,
