@@ -27,6 +27,7 @@ from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotConfig,
     FeishuBotProfile,
+    FeishuBotRemoteError,
     FeishuMessageDedupStore,
 )
 from claude_hub.services.feishu_bot_pool import (
@@ -191,6 +192,45 @@ async def test_rejected_credentials_never_create_a_bot(pool, monkeypatch) -> Non
 
     assert response.status_code == 502
     assert response.json()["detail"] == "feishu_credentials_rejected"
+    assert not pool.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_access_control_rejection_is_actionable_and_never_persisted(
+    pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class AccessDenied:
+        def __init__(self, config: FeishuBotConfig) -> None:
+            self.config = config
+
+        async def validate_credentials(self) -> None:
+            raise FeishuBotRemoteError(
+                "the Bot tenant token request",
+                code=21001,
+                remote_message="Access denied by access control policy",
+                log_id="support-log-id",
+            )
+
+    monkeypatch.setattr(bot_api, "FeishuBotClient", AccessDenied)
+
+    async with _client() as client:
+        response = await client.post(
+            "/api/feishu/bot/bots",
+            json={
+                "name": "Bot",
+                "app_id": "cli_pool",
+                "app_secret": _SECRET,
+            },
+            cookies=_cookie(),
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == {
+        "code": "feishu_access_control_denied",
+        "upstream_code": "21001",
+        "request_id": "support-log-id",
+    }
+    assert _SECRET not in response.text
     assert not pool.path.exists()
 
 

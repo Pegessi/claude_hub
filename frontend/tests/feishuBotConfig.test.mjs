@@ -54,9 +54,13 @@ for (const [status, code, fragment] of [
   [409, 'chat_tab_workspace_changed', 'This Chat changed workspace'],
   [409, 'bot_credentials_read_only', 'environment credentials'],
   [404, 'chat_tab_not_found', 'This Chat no longer exists'],
+  [502, 'feishu_access_control_denied', 'access-control policy 21001'],
 ]) {
   test(`${code} keeps its specific recovery guidance`, async t => {
-    t.mock.method(globalThis, 'fetch', async () => response({ detail: code }, status))
+    const detail = code === 'feishu_access_control_denied'
+      ? { code, request_id: 'safe-support-id' }
+      : code
+    t.mock.method(globalThis, 'fetch', async () => response({ detail }, status))
     await assert.rejects(api.loadFeishuBotPool(), error => (
       error.status === status && error.code === code && error.message.includes(fragment)
     ))
