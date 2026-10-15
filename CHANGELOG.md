@@ -18,6 +18,10 @@
 - Header Dot button and panel (focus, work, memory, health), `/api/dot/*` and
   `claude-hub dot` CLI. Setup passes the provider env; failed turns are not
   journaled as answers. Voice is planned for later.
+- Dot can watch Hub Tasks it did not start (`dot watch` / Work tab), checks
+  every 60 s and alarms once when a task is stuck (default 2 h, `--stall-hours`).
+- Dot's name and avatar (emoji or picture) can be changed from the panel or
+  `claude-hub dot identity`. Phone layout: tab-bar launcher and full-screen panel.
 
 ### fix(config): load the MASO service URL from backend startup settings
 

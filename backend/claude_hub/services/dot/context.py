@@ -18,7 +18,7 @@ from typing import Any, Iterable, Optional
 
 from .index import DotIndex
 from .prompts import DOT_CONTEXT_HEADER, TOOL_GUIDE
-from .store import Card, DotStore
+from .store import DEFAULT_NAME, Card, DotStore
 
 SESSION_PACK_CHARS = 9000
 TURN_PACK_CHARS = 5000
@@ -54,8 +54,12 @@ def _ranked(cards: list[Card]) -> list[Card]:
 
 
 def build_session_pack(store: DotStore) -> str:
-    """Role + tools + user profile + concepts, capped at ``SESSION_PACK_CHARS``."""
-    parts = [store.read_role().strip(), TOOL_GUIDE.strip()]
+    """Role + name + tools + user profile + concepts, capped at ``SESSION_PACK_CHARS``."""
+    parts = [store.read_role().strip()]
+    name = store.read_identity()["name"]
+    if name != DEFAULT_NAME:
+        parts.append(f'## Your name\nThe user named you "{name}". Use this name instead of Dot.')
+    parts.append(TOOL_GUIDE.strip())
     profile = _take_lines(
         (_card_line(card) for card in _ranked(store.list_cards("user"))), _PROFILE_CHARS
     )

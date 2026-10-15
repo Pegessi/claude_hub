@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Generator, Optional
@@ -22,10 +22,11 @@ from claude_hub.models import (
     ManagedSessionStatus,
     WorkspaceSessionRole,
 )
-from claude_hub.services import workspace_manager
+from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.agent_stream.native import ClaudeNativeSession
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.dot import DotService, DotStore, reset_dot_service
+from claude_hub.services.dot import service as service_module
 
 TAB_ID = "tab-1"
 
@@ -302,3 +303,107 @@ async def test_claude_hook_leaves_other_tabs_alone(service: DotService) -> None:
     cmd, text = _sent(mock_spawn, 1)
     assert "You are Dot" not in (_flag(cmd, "--append-system-prompt") or "")
     assert text == "again"
+
+
+# ── watch and stall alarm ──────────────────────────────────────────────
+
+
+def _hub_task(status: str, updated_at: datetime) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="task-5",
+        workspace_id="ws",
+        title="Long training run",
+        agent_type=SimpleNamespace(value="claude"),
+        status=SimpleNamespace(value=status),
+        updated_at=updated_at,
+        latest_progress=None,
+        runtime_observation=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_watch_an_existing_task_and_alarm_once_per_stall(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    start = datetime.now(timezone.utc)
+    clock = {"now": start}
+    monkeypatch.setattr(service_module, "utc_now", lambda: clock["now"])
+    tasks: dict[str, Any] = {"task-5": _hub_task("working", start - timedelta(hours=5))}
+    old_report = _report("r0", "needs_input", "An old question")
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _id: [old_report])
+
+    item = await service.watch("task-5")
+    assert item["watched"] and item["last_report_id"] == "r0" and item["status"] == "working"
+    assert await service.check_work() == 0, "old reports and the old update are history"
+
+    clock["now"] = start + timedelta(hours=3)
+    assert await service.check_work() == 1
+    stalled = service.store.list_inbox()[-1]
+    assert stalled["kind"] == "task_stalled" and "no progress for 3.0h" in stalled["text"]
+    assert await service.check_work() == 0, "one alarm per stall"
+
+    # A sign of life re-arms the alarm.
+    tasks["task-5"] = _hub_task("working", start + timedelta(hours=3, minutes=30))
+    assert await service.check_work() == 0
+    clock["now"] = start + timedelta(hours=6)
+    assert await service.check_work() == 1
+
+    # Review waits on a person: never "stuck".
+    tasks["task-5"] = _hub_task("review", start)
+    service.store.upsert_work("task-5", status="review")
+    clock["now"] = start + timedelta(days=2)
+    assert await service.check_work() == 0
+
+    assert (await service.unwatch("task-5"))["closed"]  # type: ignore[index]
+    assert service.store.list_work() == []
+    assert await service.unwatch("no-such-task") is None
+
+    tasks["task-6"] = _hub_task("done", start)
+    with pytest.raises(ValueError):
+        await service.watch("task-6")
+    with pytest.raises(KeyError):
+        await service.watch("missing")
+
+
+@pytest.mark.asyncio
+async def test_custom_stall_hours(service: DotService, monkeypatch: MonkeyPatch) -> None:
+    start = datetime.now(timezone.utc)
+    monkeypatch.setattr(service_module, "utc_now", lambda: start + timedelta(minutes=45))
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-5": _hub_task("queued", start)})
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _id: [])
+    await service.watch("task-5", stall_hours=0.5)
+    assert await service.check_work() == 1
+
+
+# ── name and avatar ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rename_renames_tab_and_rotates(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    renamed: list[tuple[str, str]] = []
+
+    def rename_tab(tab_id: str, name: str) -> bool:
+        renamed.append((tab_id, name))
+        return True
+
+    monkeypatch.setattr(ttyd_manager, "rename_tab", rename_tab)
+    assert service.store.read_identity() == {"name": "Dot", "avatar": "", "avatar_image": None}
+
+    identity = await service.update_identity(name="  Jarvis  ", avatar="🤖")
+    assert identity["name"] == "Jarvis" and identity["avatar"] == "🤖"
+    assert renamed == [(TAB_ID, "Jarvis")]
+    assert service.store.read_state()["rotate_requested"] is True
+    assert 'named you "Jarvis"' in service.prepare_turn("hi", None).system_pack
+
+    service.store.update_state(rotate_requested=None)
+    await service.update_identity(avatar="")
+    assert renamed == [(TAB_ID, "Jarvis")], "no rename without a new name"
+    assert "rotate_requested" not in service.store.read_state()
+    for bad in ("", "x" * 41, "a\x07b"):
+        with pytest.raises(ValueError):
+            await service.update_identity(name=bad)
+    with pytest.raises(ValueError):
+        await service.update_identity(avatar_image="DOT.md")

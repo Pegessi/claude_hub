@@ -25,6 +25,13 @@ const cases = [
   ['loadDotWork', [], 'GET', '/api/dot/work', undefined],
   ['loadDotInbox', [], 'GET', '/api/dot/inbox', undefined],
   ['ackDotInbox', [], 'POST', '/api/dot/inbox/ack', { ids: null }],
+  ['loadDotIdentity', [], 'GET', '/api/dot/identity', undefined],
+  ['updateDotIdentity', [{ name: 'Jarvis', avatar: '🤖' }], 'PATCH', '/api/dot/identity', { name: 'Jarvis', avatar: '🤖' }],
+  ['uploadDotAvatar', [new Blob([new Uint8Array([137, 80, 78, 71])])], 'POST', '/api/dot/identity/avatar', { data_base64: 'iVBORw==' }],
+  ['clearDotAvatar', [], 'DELETE', '/api/dot/identity/avatar', undefined],
+  ['watchDotTask', ['t/1', 4], 'POST', '/api/dot/work/t%2F1/watch', { stall_hours: 4 }],
+  ['watchDotTask', ['t-1'], 'POST', '/api/dot/work/t-1/watch', { stall_hours: null }],
+  ['unwatchDotTask', ['t-1'], 'POST', '/api/dot/work/t-1/unwatch', undefined],
 ]
 for (const [name, args, method, url, body] of cases) {
   test(`${name}(${JSON.stringify(args)}) calls ${method} ${url}`, async t => {
@@ -46,7 +53,10 @@ test('Dot API errors surface the server detail', async t => {
 test('Dot launcher sits in the app bar and opens the Dot Chat tab', () => {
   const app = read('../src/App.vue')
   const launcher = read('../src/components/DotLauncher.vue')
-  assert.match(app, /<div class="app-mode-tools">\s*<DotLauncher \/>/)
+  const tabBar = read('../src/components/TabBar.vue')
+  // Desktop: app bar. Phones hide the app bar, so the mobile TabBar carries a compact launcher.
+  assert.match(app, /<div class="app-mode-tools">\s*<DotLauncher v-if="!isMobile" \/>/)
+  assert.match(tabBar, /<DotLauncher\s+v-if="isMobile"\s+compact\s+\/>/)
   assert.ok(launcher.includes('await setupDot(providerEnv())'))
   // Borrow a working Claude tab's env (active first), else the default preset.
   assert.match(launcher, /tab\.agent_type === 'claude' && tab\.env/)
@@ -67,4 +77,36 @@ test('Dot panel covers focus, work, memory and health', () => {
     assert.ok(panel.includes(call), call)
   }
   assert.ok(panel.includes("event.key === 'Escape'"))
+})
+
+test('Dot name and avatar are shared and editable', () => {
+  const launcher = read('../src/components/DotLauncher.vue')
+  const panel = read('../src/components/DotPanel.vue')
+  const avatar = read('../src/components/DotAvatar.vue')
+  assert.ok(launcher.includes('{{ identity.name }}') && panel.includes('{{ identity.name }}'))
+  assert.ok(launcher.includes('<DotAvatar') && panel.includes('<DotAvatar'))
+  for (const call of ['updateDotIdentity(', 'uploadDotAvatar(', 'clearDotAvatar(']) {
+    assert.ok(panel.includes(call), call)
+  }
+  // Raster images only: no SVG (it can carry script).
+  assert.ok(panel.includes('accept="image/png,image/jpeg,image/gif,image/webp"'))
+  assert.ok(avatar.includes('dotFileUrl(props.identity.avatar_image)'))
+  assert.equal(api.dotFileUrl('files/ab c.png'), '/api/dot/files/ab%20c.png')
+})
+
+test('Dot panel can watch and stop watching tasks', () => {
+  const panel = read('../src/components/DotPanel.vue')
+  assert.ok(panel.includes('watchDotTask(taskId, watchStallHours.value)'))
+  assert.ok(panel.includes('unwatchDotTask(taskId)'))
+  assert.ok(panel.includes("'task_stalled'"))
+})
+
+test('Dot panel is a full-screen sheet with touch-sized targets on phones', () => {
+  const panel = read('../src/components/DotPanel.vue')
+  const mobile = panel.slice(panel.indexOf('@media (max-width: 768px)'))
+  assert.ok(mobile.length > 30, 'mobile media query exists')
+  assert.match(mobile, /\.dot-panel \{\s*width: 100%;/)
+  assert.ok(mobile.includes('env(safe-area-inset-bottom)'))
+  assert.ok(mobile.includes('font-size: 16px'), 'no iOS zoom on focus')
+  assert.ok(mobile.includes('min-height: 40px'))
 })

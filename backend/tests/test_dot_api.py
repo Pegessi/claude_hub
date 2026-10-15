@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -238,3 +239,68 @@ def test_cli_remember_recall_and_merge(
     assert missing.exit_code != 0 and "--title is required" in missing.output
     gone = runner.invoke(cli, ["dot", "show", "no-such-card"])
     assert gone.exit_code != 0
+
+
+def test_identity_and_avatar_routes(
+    api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client, service = api
+    monkeypatch.setattr(ttyd_manager, "rename_tab", lambda tab_id, name: True)
+    assert client.get("/api/dot/identity").json()["name"] == "Dot"
+    renamed = client.patch("/api/dot/identity", json={"name": "Jarvis", "avatar": "🤖"})
+    assert renamed.status_code == 200, renamed.text
+    assert client.get("/api/dot/status").json()["identity"]["name"] == "Jarvis"
+    assert client.patch("/api/dot/identity", json={"name": " "}).status_code == 400
+
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+    upload = client.post(
+        "/api/dot/identity/avatar", json={"data_base64": base64.b64encode(png).decode()}
+    )
+    image = upload.json()["avatar_image"]
+    assert client.get(f"/api/dot/{image}").content == png
+    svg = base64.b64encode(b"<svg/>").decode()
+    assert client.post("/api/dot/identity/avatar", json={"data_base64": svg}).status_code == 400
+    assert client.delete("/api/dot/identity/avatar").json()["avatar_image"] is None
+
+    _route_to_app(client, monkeypatch)
+    picture = tmp_path / "me.png"
+    picture.write_bytes(png)
+    result = CliRunner().invoke(
+        cli, ["--json", "dot", "identity", "--name", "Friday", "--avatar-image", str(picture)]
+    )
+    assert result.exit_code == 0, result.output
+    shown = json.loads(result.output)
+    assert shown["name"] == "Friday" and shown["avatar_image"] == image
+
+
+def test_watch_routes_and_cli(
+    api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services import workspace_manager
+
+    client, service = api
+    task = SimpleNamespace(
+        id="task-1",
+        workspace_id="ws",
+        title="Old job",
+        agent_type=SimpleNamespace(value="codex"),
+        status=SimpleNamespace(value="working"),
+    )
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-1": task})
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _id: [])
+
+    assert client.post("/api/dot/work/nope/watch").status_code == 404
+    watched = client.post("/api/dot/work/task-1/watch", json={"stall_hours": 4})
+    assert watched.status_code == 200, watched.text
+    assert watched.json()["stall_hours"] == 4
+    assert client.post("/api/dot/work/task-1/watch", json={"stall_hours": 0}).status_code == 422
+    assert client.post("/api/dot/work/task-1/unwatch").json()["closed"]
+    assert client.post("/api/dot/work/nope/unwatch").status_code == 404
+
+    _route_to_app(client, monkeypatch)
+    result = CliRunner().invoke(cli, ["dot", "watch", "task-1", "--stall-hours", "1.5"])
+    assert result.exit_code == 0, result.output
+    assert "watching task-1" in result.output
+    assert service.store.get_work("task-1")["stall_hours"] == 1.5  # type: ignore[index]
+    assert CliRunner().invoke(cli, ["dot", "unwatch", "task-1"]).exit_code == 0
+    assert service.store.list_work() == []

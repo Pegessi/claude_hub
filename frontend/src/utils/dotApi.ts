@@ -2,8 +2,17 @@
 
 export type DotCardKind = 'user' | 'work' | 'knowledge' | 'concept'
 
+export interface DotIdentity {
+  name: string
+  // Short emoji or text; '' means the default dot mark.
+  avatar: string
+  // Home-relative path under files/, served by /api/dot/files.
+  avatar_image: string | null
+}
+
 export interface DotStatus {
   set_up: boolean
+  identity: DotIdentity
   home: string
   tab_id: string | null
   tab_exists: boolean
@@ -60,6 +69,9 @@ export interface DotWorkItem {
   status?: string
   result_card?: string
   closed?: boolean
+  // Set for an existing task the user asked Dot to watch (not delegated by Dot).
+  watched?: boolean
+  stall_hours?: number
   created: string
   updated: string
 }
@@ -157,4 +169,34 @@ export function loadDotInbox(): Promise<DotInboxEvent[]> {
 }
 export function ackDotInbox(ids?: string[]): Promise<{ acked: number }> {
   return requestJson('/inbox/ack', jsonRequest('POST', { ids: ids ?? null }))
+}
+export function loadDotIdentity(): Promise<DotIdentity> {
+  return requestJson('/identity')
+}
+export function updateDotIdentity(changes: { name?: string, avatar?: string }): Promise<DotIdentity> {
+  return requestJson('/identity', jsonRequest('PATCH', changes))
+}
+// PNG, JPEG, GIF or WebP, at most 2 MB (checked again by the server).
+export async function uploadDotAvatar(file: Blob): Promise<DotIdentity> {
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  let binary = ''
+  for (let start = 0; start < bytes.length; start += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000))
+  }
+  return requestJson('/identity/avatar', jsonRequest('POST', { data_base64: btoa(binary) }))
+}
+export function clearDotAvatar(): Promise<DotIdentity> {
+  return requestJson('/identity/avatar', { method: 'DELETE' })
+}
+export function dotFileUrl(path: string): string {
+  return `${ROOT}/${path.split('/').map(encodeURIComponent).join('/')}`
+}
+export function watchDotTask(taskId: string, stallHours?: number): Promise<DotWorkItem> {
+  return requestJson(
+    `/work/${encodeURIComponent(taskId)}/watch`,
+    jsonRequest('POST', { stall_hours: stallHours ?? null }),
+  )
+}
+export function unwatchDotTask(taskId: string): Promise<DotWorkItem> {
+  return requestJson(`/work/${encodeURIComponent(taskId)}/unwatch`, { method: 'POST' })
 }

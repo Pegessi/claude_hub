@@ -17,7 +17,6 @@ from .store import FOCUS_LIMIT, Card, DotStore, now_iso, utc_now
 
 logger = logging.getLogger(__name__)
 
-TAB_NAME = "Dot"
 TAB_STREAM_WORKSPACE_ID = "terminal-tabs"
 TAB_STREAM_SESSION_PREFIX = "terminal-tab-"
 # Rotate the provider session before raw history piles up.
@@ -25,8 +24,12 @@ MAX_SESSION_TURNS = 24
 MAX_SESSION_AGE = timedelta(hours=18)
 WAKE_CRON = "3 9 * * *"
 TIDY_CRON = "17 3 * * *"
-WATCH_INTERVAL_SECONDS = 15.0
+# Task state changes are rare; one cheap in-memory pass a minute is enough.
+WATCH_INTERVAL_SECONDS = 60.0
+DEFAULT_STALL_HOURS = 2.0
 _TERMINAL_TASK_STATES = {"done", "failed"}
+# Only running tasks can look stuck; review waits on a person, todo was never started.
+_STALL_TASK_STATES = {"queued", "working"}
 _ATTENTION_REPORT_STATES = {"needs_input", "blocked"}
 _JOURNAL_TEXT_LIMIT = 20_000
 
@@ -120,7 +123,7 @@ class DotService:
             await ttyd_manager.unarchive_tab(tab.id)
         if tab is None:
             created = await ttyd_manager.create_tab(
-                name=TAB_NAME,
+                name=self.store.read_identity()["name"],
                 cwd=str(self.store.home),
                 solo_mode=True,
                 agent_type=AgentType.CLAUDE,
@@ -342,6 +345,7 @@ class DotService:
         task_mode: Optional[str] = None,
         start: bool = True,
         request_key: Optional[str] = None,
+        stall_hours: Optional[float] = None,
         actor_key: str,
     ) -> dict[str, Any]:
         """Register (and start) one Hub Task with a Dot brief; track it in work.json."""
@@ -389,8 +393,45 @@ class DotService:
             done_when=done_when.strip(),
             agent_type=agent_type,
             status=task.status.value,
+            stall_hours=stall_hours,
         )
         await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
+        return item
+
+    async def watch(self, task_id: str, *, stall_hours: Optional[float] = None) -> dict[str, Any]:
+        """Track an existing Hub task Dot did not start. Raises KeyError / ValueError."""
+        from .. import workspace_manager
+
+        task = workspace_manager.tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        status = task.status.value
+        if status in _TERMINAL_TASK_STATES:
+            raise ValueError(f"task is already {status}")
+        self.store.ensure()
+        # Old reports are history; only reports after this point raise events.
+        report = self._latest_report(task.workspace_id, task.id)
+        item = self.store.upsert_work(
+            task.id,
+            workspace_id=task.workspace_id,
+            title=task.title,
+            agent_type=task.agent_type.value,
+            status=status,
+            watched=True,
+            watched_at=now_iso(),
+            closed=False,
+            last_report_id=getattr(report, "id", None),
+            stall_hours=stall_hours,
+        )
+        await asyncio.to_thread(self.store.commit, f"dot: watch {task.id}")
+        return item
+
+    async def unwatch(self, task_id: str) -> Optional[dict[str, Any]]:
+        """Stop tracking a task (watched or delegated). Returns None when unknown."""
+        if self.store.get_work(task_id) is None:
+            return None
+        item = self.store.upsert_work(task_id, closed=True, stopped=True)
+        await asyncio.to_thread(self.store.commit, f"dot: unwatch {task_id}")
         return item
 
     # ── watcher ─────────────────────────────────────────────────────────
@@ -428,6 +469,19 @@ class DotService:
         except KeyError:
             return None
         return reports[-1] if reports else None
+
+    @staticmethod
+    def _last_activity(item: dict[str, Any], task: Any, report: Any) -> Optional[datetime]:
+        """Newest sign of life: task update, progress, runtime change, report, or watch start."""
+        moments = (
+            getattr(task, "updated_at", None),
+            getattr(getattr(task, "latest_progress", None), "reported_at", None),
+            getattr(getattr(task, "runtime_observation", None), "observed_at", None),
+            getattr(report, "created_at", None),
+            item.get("watched_at") or item.get("created"),
+        )
+        parsed = [moment for moment in map(_parse_time, moments) if moment is not None]
+        return max(parsed, default=None)
 
     def _result_card(self, item: dict[str, Any], status: str, report: Any) -> Card:
         message = str(getattr(report, "message", "") or "(no report)")
@@ -517,6 +571,23 @@ class DotService:
                     task_id=task_id,
                 )
                 events += 1
+            elif status in _STALL_TASK_STATES and (
+                activity := self._last_activity(item, task, report)
+            ):
+                idle = utc_now() - activity
+                limit = float(item.get("stall_hours") or DEFAULT_STALL_HOURS)
+                # One alarm per stall: a new sign of life re-arms it.
+                if idle > timedelta(hours=limit) and item.get("stall_alarm_for") != (
+                    marker := activity.isoformat()
+                ):
+                    self.store.add_inbox(
+                        "task_stalled",
+                        f"{item.get('title') or task_id} — no progress for "
+                        f"{idle.total_seconds() / 3600:.1f}h (status {status})",
+                        task_id=task_id,
+                    )
+                    changes["stall_alarm_for"] = marker
+                    events += 1
             if report_id and report_id != item.get("last_report_id"):
                 changes["last_report_id"] = report_id
             if status in _TERMINAL_TASK_STATES:
@@ -526,6 +597,28 @@ class DotService:
         if events:
             await asyncio.to_thread(self.store.commit, f"dot: {events} task event(s)")
         return events
+
+    # ── name and avatar ─────────────────────────────────────────────────
+
+    async def update_identity(
+        self,
+        *,
+        name: Optional[str] = None,
+        avatar: Optional[str] = None,
+        avatar_image: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Change Dot's name/avatar; a new name renames the tab and starts a fresh session."""
+        from .. import ttyd_manager
+
+        before = self.store.read_identity()
+        identity = self.store.update_identity(name=name, avatar=avatar, avatar_image=avatar_image)
+        if identity["name"] != before["name"]:
+            self.request_rotation()
+            tab_id = self.tab_id()
+            if tab_id:
+                ttyd_manager.rename_tab(tab_id, identity["name"])
+        await asyncio.to_thread(self.store.commit, "dot: identity")
+        return identity
 
     async def wake(self) -> bool:
         """Queue one wake-up turn in the Dot Chat (coalesced by the scheduler)."""
@@ -632,6 +725,7 @@ class DotService:
                 counts[card.kind] = counts.get(card.kind, 0) + 1
         return {
             "set_up": set_up,
+            "identity": self.store.read_identity(),
             "home": str(self.store.home),
             "tab_id": tab_id,
             "tab_exists": bool(tab_id and ttyd_manager.get_tab(tab_id)),
