@@ -38,6 +38,7 @@ from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotConfig,
     FeishuBotProfile,
+    FeishuBotRemoteError,
     FeishuMessageDedupStore,
     FeishuMessageEvent,
     feishu_message_time_is_valid,
@@ -591,6 +592,25 @@ async def _reconcile_ws() -> None:
         logger.exception("Feishu WebSocket reconciliation failed after a pool mutation")
 
 
+def _credentials_http_error(exc: Exception) -> HTTPException:
+    """Name the Feishu-side policy that refused the credentials, when known."""
+    if not isinstance(exc, FeishuBotRemoteError):
+        return HTTPException(status_code=502, detail="feishu_credentials_rejected")
+    logger.warning(
+        "Feishu Bot credential validation failed: remote_code=%s log_id=%s",
+        exc.code,
+        exc.log_id or "unavailable",
+    )
+    if str(exc.code) != "21001":
+        return HTTPException(status_code=502, detail="feishu_credentials_rejected")
+    # 21001 is an app access-control decision, not a wrong secret, so the
+    # operator has to involve the app administrator instead of retyping it.
+    detail = {"code": "feishu_access_control_denied", "upstream_code": "21001"}
+    if exc.log_id is not None:
+        detail["request_id"] = exc.log_id
+    return HTTPException(status_code=502, detail=detail)
+
+
 # ------------------------------------------------------------ pool routes
 
 
@@ -621,7 +641,7 @@ async def create_feishu_bot(
     try:
         profile = _validated_profile(await FeishuBotClient(candidate).validate_credentials(), name)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="feishu_credentials_rejected") from exc
+        raise _credentials_http_error(exc) from exc
     async with _create_gate:
         bot_id = await _in_pool(
             lambda: _pool.create_bot(
@@ -658,7 +678,7 @@ async def rotate_feishu_bot_secrets(
             await FeishuBotClient(candidate).validate_credentials(), entry.name
         )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="feishu_credentials_rejected") from exc
+        raise _credentials_http_error(exc) from exc
     async with _gate(bot_id):
         await _in_pool(
             lambda: _pool.rotate_secrets(

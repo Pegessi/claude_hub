@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 import httpx
 
+from claude_hub.services.proxy_rules import create_async_client
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
 _EVENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -35,6 +36,30 @@ class FeishuBotError(RuntimeError):
 
 class FeishuBotConfigurationError(FeishuBotError):
     """Raised when required Bot settings are absent or inconsistent."""
+
+
+class FeishuBotRemoteError(FeishuBotError):
+    """A safe description of a Feishu API request the remote service rejected.
+
+    A generic failure cannot be acted on. The upstream code and support id
+    identify which Feishu-side policy refused the call, and neither carries Hub
+    credentials or request bodies.
+    """
+
+    def __init__(
+        self,
+        operation: str,
+        *,
+        code: int | str | None,
+        remote_message: str,
+        log_id: str | None,
+    ) -> None:
+        label = str(code) if code is not None else "unknown"
+        super().__init__(f"Feishu rejected {operation} with code {label}")
+        self.operation = operation
+        self.code = code
+        self.remote_message = remote_message
+        self.log_id = log_id
 
 
 @dataclass(frozen=True)
@@ -69,6 +94,18 @@ class FeishuBotConfig:
             )
         base_url = env.get("CLAUDE_HUB_FEISHU_API_BASE_URL", "https://open.feishu.cn").rstrip("/")
         return cls(api_base_url=base_url, **values)
+
+
+def create_feishu_http_client(api_base_url: str, *, timeout: float) -> httpx.AsyncClient:
+    """Create the Bot's outbound client using the Hub's shared proxy rules.
+
+    Delegating keeps HTTPX from parsing ``NO_PROXY`` itself, which fails at
+    construction time on the IPv6 CIDR entries deployments commonly set.
+    """
+    try:
+        return create_async_client(api_base_url, timeout=timeout)
+    except ValueError as exc:
+        raise FeishuBotConfigurationError("Feishu API base URL must use HTTP or HTTPS") from exc
 
 
 @dataclass(frozen=True)
@@ -118,8 +155,26 @@ class FeishuBotClient:
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         if self._client is not None:
             return await self._client.request(method, path, **kwargs)
-        async with httpx.AsyncClient(base_url=self._config.api_base_url, timeout=15.0) as client:
+        async with create_feishu_http_client(self._config.api_base_url, timeout=15.0) as client:
             return await client.request(method, path, **kwargs)
+
+    @staticmethod
+    def _remote_error(
+        response: httpx.Response,
+        payload: Mapping[str, Any],
+        operation: str,
+    ) -> FeishuBotRemoteError:
+        """Carry the upstream code and support id, never the Hub's request data."""
+        raw_code = payload.get("code")
+        usable_code = isinstance(raw_code, (int, str)) and not isinstance(raw_code, bool)
+        raw_message = payload.get("msg")
+        raw_log_id = response.headers.get("x-tt-logid") or response.headers.get("x-request-id")
+        return FeishuBotRemoteError(
+            operation,
+            code=raw_code if usable_code else None,
+            remote_message=raw_message.strip()[:500] if isinstance(raw_message, str) else "",
+            log_id=raw_log_id.strip()[:256] if raw_log_id and raw_log_id.strip() else None,
+        )
 
     async def get_tenant_token(self) -> str:
         now = time.monotonic()
@@ -130,11 +185,21 @@ class FeishuBotClient:
             "/open-apis/auth/v3/tenant_access_token/internal",
             json={"app_id": self._config.app_id, "app_secret": self._config.app_secret},
         )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            response.raise_for_status()
+            raise FeishuBotError("Feishu returned an invalid Bot tenant token response") from exc
+        if not isinstance(payload, dict):
+            raise FeishuBotError("Feishu returned an invalid Bot tenant token response")
+        # A rejected call carries its reason in the body, which raise_for_status
+        # would discard before the caller can report the upstream code.
+        if response.is_error and payload.get("code") not in (None, 0):
+            raise self._remote_error(response, payload, "the Bot tenant token request")
         response.raise_for_status()
-        payload = response.json()
         raw_token = payload.get("tenant_access_token")
         if payload.get("code") != 0 or not isinstance(raw_token, str) or not raw_token.strip():
-            raise FeishuBotError("Feishu rejected the Bot tenant token request")
+            raise self._remote_error(response, payload, "the Bot tenant token request")
         self._tenant_token = raw_token
         expires_in = payload.get("expire", 7200)
         ttl = int(expires_in) if isinstance(expires_in, int) else 7200
@@ -321,7 +386,7 @@ class FeishuBotClient:
                 headers={"Authorization": f"Bearer {token}"},
             ) as response:
                 return await self._read_message_image(response)
-        async with httpx.AsyncClient(base_url=self._config.api_base_url, timeout=15.0) as client:
+        async with create_feishu_http_client(self._config.api_base_url, timeout=15.0) as client:
             async with client.stream(
                 "GET",
                 path,

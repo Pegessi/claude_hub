@@ -5,6 +5,18 @@
 
 ## Unreleased
 
+### fix(feishu): build Feishu HTTP clients without HTTPX parsing NO_PROXY
+
+- Resolve the proxy for each Feishu endpoint before constructing the client, so
+  IPv6 CIDR entries such as `fe80::/10` no longer raise `httpx.InvalidURL` while
+  the Bot API, WebSocket discovery and OAuth sign-in clients are created.
+- Move the `NO_PROXY` decision into one shared rule set used by both the native
+  provider selector and Feishu, replacing a weaker duplicate that ignored `*`,
+  per-entry ports and bracketed IPv6 addresses.
+- Report the upstream Feishu code and support id when credential validation is
+  rejected, and name access-control policy 21001 in the Bot pool UI instead of
+  suggesting the operator retype a correct secret.
+
 ### feat(chat): accept image input in MASO conversations
 
 - Enable image attachments, including image-only turns and queued drafts, through
