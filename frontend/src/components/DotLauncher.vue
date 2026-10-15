@@ -143,7 +143,8 @@ async function openDot() {
 }
 
 .dot-launcher--compact {
-  height: 36px;
+  /* Inner buttons are 36px tall (the 1px border sits outside them). */
+  height: 38px;
   flex: 0 0 auto;
 }
 
