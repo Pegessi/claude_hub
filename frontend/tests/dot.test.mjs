@@ -110,3 +110,15 @@ test('Dot panel is a full-screen sheet with touch-sized targets on phones', () =
   assert.ok(mobile.includes('font-size: 16px'), 'no iOS zoom on focus')
   assert.ok(mobile.includes('min-height: 40px'))
 })
+
+test('quiet Dot wake and tidy turns are hidden from the chat', () => {
+  const turn = (userText, assistantText, completed = true) => ({ userText, assistantText, completed })
+  assert.equal(api.DOT_QUIET_REPLY, '[quiet]')
+  assert.ok(api.isQuietDotTurn(turn('[Dot wake] New events', ' [quiet]\n')))
+  assert.ok(api.isQuietDotTurn(turn('[Dot tidy] Nightly memory tidy', '[quiet]')))
+  assert.ok(!api.isQuietDotTurn(turn('[Dot wake] New events', 'Paper summary is ready.')))
+  assert.ok(!api.isQuietDotTurn(turn('Say [quiet]', '[quiet]')), 'only Hub turns')
+  assert.ok(!api.isQuietDotTurn(turn('[Dot wake] New events', '[quiet]', false)), 'running turns stay visible')
+  const pane = read('../src/components/StructuredPane.vue')
+  assert.ok(pane.includes('.filter(({ turn }) => !isQuietDotTurn(turn))'))
+})

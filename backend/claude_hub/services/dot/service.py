@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from .context import TurnPack, build_session_pack, build_turn_pack
 from .index import DotIndex
-from .prompts import BRIEF_TEMPLATE, TIDY_MESSAGE, WAKE_MESSAGE
+from .prompts import BRIEF_TEMPLATE, QUIET_REPLY, TIDY_MESSAGE, WAKE_MESSAGE
 from .store import FOCUS_LIMIT, Card, DotStore, now_iso, utc_now
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,9 @@ TAB_STREAM_SESSION_PREFIX = "terminal-tab-"
 # Rotate the provider session before raw history piles up.
 MAX_SESSION_TURNS = 24
 MAX_SESSION_AGE = timedelta(hours=18)
-WAKE_CRON = "3 9 * * *"
+# Dot is woken only by watcher events (run now). Schedules need a timing, so the
+# wake-up gets one that never comes due: ten years.
+WAKE_INTERVAL_SECONDS = 10 * 365 * 24 * 3600
 TIDY_CRON = "17 3 * * *"
 # Task state changes are rare; one cheap in-memory pass a minute is enough.
 WATCH_INTERVAL_SECONDS = 60.0
@@ -184,24 +186,36 @@ class DotService:
 
         state = self.store.read_state()
         changes: dict[str, Any] = {}
-        for key, name, cron, message in (
-            ("wake_schedule_id", "Dot wake-up", WAKE_CRON, WAKE_MESSAGE),
-            ("tidy_schedule_id", "Dot nightly tidy", TIDY_CRON, TIDY_MESSAGE),
-        ):
+        timings: tuple[tuple[str, str, dict[str, Any], str], ...] = (
+            (
+                "wake_schedule_id",
+                "Dot wake-up",
+                {"interval_seconds": WAKE_INTERVAL_SECONDS},
+                WAKE_MESSAGE,
+            ),
+            ("tidy_schedule_id", "Dot nightly tidy", {"cron": TIDY_CRON}, TIDY_MESSAGE),
+        )
+        for key, name, timing, message in timings:
             existing = workspace_manager.scheduled_tasks.get(state.get(key) or "")
             if existing is not None:
+                update: dict[str, Any] = {}
                 if existing.tab_id != tab_id:
+                    update["tab_id"] = tab_id
+                # Older homes woke Dot every morning; move them to events only.
+                if any(getattr(existing, field, None) != value for field, value in timing.items()):
+                    update.update(timing)
+                if update:
                     workspace_manager.update_scheduled_task(
-                        existing.id, ScheduledTaskUpdate(tab_id=tab_id)
+                        existing.id, ScheduledTaskUpdate(**update)
                     )
                 continue
             created = workspace_manager.create_scheduled_task(
                 ScheduledTaskCreate(
                     name=name,
                     kind=ScheduledTaskKind.CHAT_TURN,
-                    cron=cron,
                     tab_id=tab_id,
                     message=message,
+                    **timing,
                 )
             )
             changes[key] = created.id
@@ -327,8 +341,13 @@ class DotService:
                     elif event.type == AgentStreamEventType.TURN_COMPLETED:
                         asked, asked_at = starts.pop(event.turn_id or "", ("", None))
                         answer = str(payload.get("assistant_text") or "")
+                        last_completed = event.stream_sequence
+                        from_hub = asked.lstrip().startswith("[Dot ")
+                        if from_hub and answer.strip() == QUIET_REPLY:
+                            # Nothing needed the user; keep it out of the recent talk.
+                            continue
                         if asked.strip():
-                            who = "hub" if asked.lstrip().startswith("[Dot ") else "you"
+                            who = "hub" if from_hub else "you"
                             self.store.append_journal(
                                 who, asked[:_JOURNAL_TEXT_LIMIT], _parse_time(asked_at)
                             )
@@ -344,7 +363,6 @@ class DotService:
                                 _parse_time(event.created_at),
                             )
                         added += 1
-                        last_completed = event.stream_sequence
                 cursor = page.next_sequence
                 if not page.has_more:
                     break
@@ -461,6 +479,13 @@ class DotService:
     # ── watcher ─────────────────────────────────────────────────────────
 
     def start(self) -> None:
+        tab_id = self.tab_id()
+        if tab_id:
+            # Bring standing schedules up to date (e.g. drop an old daily wake-up).
+            try:
+                self.ensure_schedules(tab_id)
+            except Exception:
+                logger.exception("dot schedule refresh failed")
         if self._watch_task is None or self._watch_task.done():
             self._watch_task = asyncio.create_task(self._watch_loop(), name="dot-watch")
 

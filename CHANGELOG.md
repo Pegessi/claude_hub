@@ -22,6 +22,9 @@
   every 60 s and alarms once when a task is stuck (default 2 h, `--stall-hours`).
 - Dot's name and avatar (emoji or picture) can be changed from the panel or
   `claude-hub dot identity`. Phone layout: tab-bar launcher and full-screen panel.
+- Dot wakes only on task events (no daily wake-up). Wake and tidy turns where
+  nothing needs the user reply `[quiet]` and are hidden from the chat and
+  journal. Dot self-checks briefs and keeps `Brief lesson` cards.
 
 ### fix(config): load the MASO service URL from backend startup settings
 

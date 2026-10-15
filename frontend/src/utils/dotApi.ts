@@ -200,3 +200,12 @@ export function watchDotTask(taskId: string, stallHours?: number): Promise<DotWo
 export function unwatchDotTask(taskId: string): Promise<DotWorkItem> {
   return requestJson(`/work/${encodeURIComponent(taskId)}/unwatch`, { method: 'POST' })
 }
+
+// Same as the backend QUIET_REPLY: a Hub wake or tidy turn where nothing needed the user.
+export const DOT_QUIET_REPLY = '[quiet]'
+
+export function isQuietDotTurn(turn: { userText: string, assistantText: string, completed: boolean }): boolean {
+  return turn.completed &&
+    turn.userText.trimStart().startsWith('[Dot ') &&
+    turn.assistantText.trim() === DOT_QUIET_REPLY
+}
