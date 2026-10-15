@@ -113,6 +113,30 @@ test('a reported window shows remaining first, with used and a reset countdown',
   assert.equal(weekly.barPercent, 42)
 })
 
+test('balance colors distinguish healthy, moderate, low and critical remaining shares', () => {
+  const cases = [
+    [100, 'healthy'], [86, 'healthy'], [50.1, 'healthy'],
+    [50, 'caution'], [39, 'caution'], [20.1, 'caution'],
+    [20, 'low'], [15, 'low'], [10.1, 'low'],
+    [10, 'critical'], [5, 'critical'], [0, 'critical'], [-5, 'critical'],
+  ]
+  const [view] = viewOf({ providers: [provider({ limits: cases.map(([remaining], index) =>
+    limit({ scope: `window-${index}`, remaining_percent: remaining })) })] })
+  assert.deepEqual(view.rows.map(row => row.tone), cases.map(([, tone]) => tone))
+  assert.equal(view.state, 'within', 'balance colors must preserve the reported provider status')
+})
+
+test('reported warnings keep their severity even with missing or contradictory percentages', () => {
+  const [view] = viewOf({ providers: [provider({ limits: [
+    limit({ scope: 'near', state: 'near', remaining_percent: 80 }),
+    limit({ scope: 'over', state: 'over', remaining_percent: 80 }),
+    limit({ scope: 'near-missing', state: 'near', remaining_percent: null }),
+    limit({ scope: 'over-missing', state: 'over', remaining_percent: null }),
+    limit({ scope: 'unknown', remaining_percent: NaN }),
+  ] })] })
+  assert.deepEqual(view.rows.map(row => row.tone), ['low', 'critical', 'low', 'critical', 'neutral'])
+})
+
 test('a missing percentage never renders as zero and keeps its reason', () => {
   const [, maso] = viewOf(fullPayload)
   const rows = rowsOf(maso)
@@ -121,6 +145,7 @@ test('a missing percentage never renders as zero and keeps its reason', () => {
   for (const key of ['es1_lime', 'es1_plum', 'es1_slate']) {
     assert.equal(rows[key].remainingPercent, null)
     assert.equal(rows[key].barPercent, null, `${key} must not draw a bar`)
+    assert.equal(rows[key].tone, 'neutral')
     assert.equal(rows[key].usedText, '')
     assert.doesNotMatch(rows[key].value, /\d/, `${key} must not show a number`)
   }
@@ -147,6 +172,7 @@ test('no_limit and no_data win over stray percentages the provider still sent', 
   const [view] = viewOf(payload)
   assert.deepEqual(view.rows.map(row => row.value), ['No limit', 'No data yet'])
   assert.deepEqual(view.rows.map(row => row.barPercent), [null, null])
+  assert.deepEqual(view.rows.map(row => row.tone), ['neutral', 'neutral'])
 })
 
 test('a used-only window reports used instead of inventing a remaining share', () => {
@@ -371,7 +397,17 @@ test('enforcement is only claimed when the provider reported it', () => {
 test('plan and prepaid credit are shown, and the credit unit is not invented', () => {
   const [codex] = viewOf(fullPayload)
   assert.ok(codex.notes.includes('Plan: pro'))
-  assert.ok(codex.notes.some(note => note.includes('62500.0000000000') && /unit not reported/.test(note)))
+  assert.ok(codex.notes.includes('Prepaid credit: 62500 (unit not reported)'))
+})
+
+test('prepaid credit drops decimal padding without rounding the provider value', () => {
+  for (const [raw, expected] of [
+    ['62500.0000000000', '62500'], ['0.0000', '0'],
+    ['123.4500', '123.45'], ['9007199254740993.1234567890', '9007199254740993.123456789'],
+  ]) {
+    const view = display.buildProviderView(provider({ credit_balance: raw }), NOW)
+    assert.ok(view.notes.includes(`Prepaid credit: ${expected} (unit not reported)`))
+  }
 })
 
 test('the headline reports the lowest remaining share across providers', () => {
@@ -675,7 +711,7 @@ test('the rendered panel shows every limit honestly, with no invented zero', asy
   ]) {
     assert.ok(text.includes(expected), `the panel should show "${expected}"`)
   }
-  assert.ok(text.some(entry => entry.includes('62500.0000000000') && entry.includes('unit not reported')))
+  assert.ok(text.includes('Prepaid credit: 62500 (unit not reported)'))
   assert.ok(text.some(entry => /out of date/.test(entry)), 'a stale reading must be called out on screen')
   assert.ok(text.some(entry => /does not refuse requests/.test(entry)))
   assert.ok(!text.some(entry => entry.includes('0%')), 'no row may render a fabricated 0%')
