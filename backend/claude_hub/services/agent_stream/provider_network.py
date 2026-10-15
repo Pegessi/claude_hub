@@ -2,9 +2,11 @@
 
 The selector works only with a caller-supplied subprocess environment.  It
 never mutates :data:`os.environ`, and it never retries a provider turn.  A
-short unauthenticated ``HEAD`` request proves transport reachability; every
-HTTP response is considered reachable because authorization, rate limits, and
-model/path errors are application outcomes rather than routing failures.
+short unauthenticated ``HEAD`` request can prove transport reachability, but
+a timeout is inconclusive. In automatic mode a timeout on the effective route
+preserves the provider's original environment so the real request can proceed.
+Explicit routes and configuration errors remain strict. Application errors
+such as authorization and rate limits are not routing failures.
 """
 
 from __future__ import annotations
@@ -151,7 +153,7 @@ def _log_selection(
         "returned_env_has_proxy": _has_nonempty_proxy(selected_env),
     }
     message = json.dumps(record, ensure_ascii=True, separators=(",", ":"))
-    if decision == "compatibility_inherit":
+    if decision in {"compatibility_inherit", "timeout_inherit"}:
         logger.warning("provider_network_selection %s", message)
     else:
         logger.info("provider_network_selection %s", message)
@@ -362,7 +364,10 @@ class ProviderNetworkSelector:
             raise
         else:
             async with self._lock:
-                self._store_cache(key, selection, self._success_ttl)
+                ttl = (
+                    self._failure_ttl if selection.route == "timeout_inherit" else self._success_ttl
+                )
+                self._store_cache(key, selection, ttl)
             return selection
         finally:
             async with self._lock:
@@ -404,13 +409,19 @@ class ProviderNetworkSelector:
 
             parsed = _parse_endpoint(endpoint)
             proxy_url, no_proxy = _proxy_for_endpoint(parsed, env)
-            if proxy_url is not None and _bypasses_proxy(parsed, no_proxy):
-                raise _selection_error(endpoint, direct=direct, proxy_note="bypassed by NO_PROXY")
-            if proxy_url is None:
-                raise _selection_error(endpoint, direct=direct, proxy_note="not configured")
+            if proxy_url is None or _bypasses_proxy(parsed, no_proxy):
+                if mode == "auto" and direct is not None and direct.phase == "timeout":
+                    return _Selection(route="timeout_inherit", direct=direct)
+                note = "not configured" if proxy_url is None else "bypassed by NO_PROXY"
+                raise _selection_error(endpoint, direct=direct, proxy_note=note)
             proxied = await self._probe(endpoint, proxy_url)
             if proxied.reachable:
                 return _Selection(route="proxy", direct=direct, proxy=proxied)
+            if mode == "auto" and proxied.phase == "timeout":
+                # The probe has a deliberately short budget. Preserve the
+                # configured route rather than treating a slow HEAD response
+                # as proof that the actual provider request cannot succeed.
+                return _Selection(route="timeout_inherit", direct=direct, proxy=proxied)
             raise _selection_error(endpoint, direct=direct, proxy=proxied)
 
 

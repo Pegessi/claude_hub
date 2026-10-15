@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Mapping, Optional
 
+import httpx
 import pytest
 
 from claude_hub.services.agent_stream.provider_network import (
@@ -238,7 +239,7 @@ async def test_auto_uses_configured_proxy_only_after_network_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_both_routes_fail_with_redacted_classified_error() -> None:
-    probe = RecordingProbe([ProbeResult(False, "dns"), ProbeResult(False, "timeout")])
+    probe = RecordingProbe([ProbeResult(False, "dns"), ProbeResult(False, "tls")])
     selector = ProviderNetworkSelector(probe=probe)
     env = {
         "ANTHROPIC_BASE_URL": "https://provider.example/v1?api_key=query-sensitive",
@@ -251,10 +252,201 @@ async def test_both_routes_fail_with_redacted_classified_error() -> None:
     message = str(caught.value)
     assert "provider.example:443" in message
     assert "direct dns failure" in message
-    assert "proxy timeout failure" in message
+    assert "proxy tls failure" in message
     assert "query-sensitive" not in message
     assert "proxy-sensitive" not in message
     assert "proxy-user" not in message
+
+
+@pytest.mark.asyncio
+async def test_auto_proxy_timeout_preserves_environment_and_warns_without_secrets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    probe = RecordingProbe([ProbeResult(False, "timeout"), ProbeResult(False, "timeout")])
+    selector = ProviderNetworkSelector(probe=probe)
+    env = {
+        "ANTHROPIC_BASE_URL": "https://provider.example/private?key=query-sensitive",
+        "ANTHROPIC_API_KEY": "credential-sensitive",
+        "HTTPS_PROXY": "http://proxy-user:proxy-sensitive@proxy.example:7890",
+        "NO_PROXY": "localhost",
+    }
+
+    selected = await selector.select("claude", env)
+
+    assert selected == env
+    assert selected is not env
+    assert len(probe.calls) == 2
+    record = _selection_log_records(caplog)[0]
+    assert record["decision"] == "timeout_inherit"
+    assert record["returned_env_has_proxy"] is True
+    assert (
+        record["direct"]
+        == record["proxy"]
+        == {
+            "attempted": True,
+            "reachable": False,
+            "phase": "timeout",
+            "status_code": None,
+        }
+    )
+    assert caplog.records[-1].levelno == logging.WARNING
+    for secret in [
+        "private",
+        "query-sensitive",
+        "credential-sensitive",
+        "proxy-sensitive",
+        "proxy-user",
+    ]:
+        assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("no_proxy", [None, ".provider.example"])
+async def test_auto_direct_timeout_keeps_original_route_when_proxy_is_unavailable(
+    no_proxy: Optional[str],
+) -> None:
+    probe = RecordingProbe([ProbeResult(False, "timeout")])
+    selector = ProviderNetworkSelector(probe=probe)
+    env = {"ANTHROPIC_BASE_URL": "https://api.provider.example"}
+    if no_proxy is not None:
+        env.update({"HTTPS_PROXY": "http://proxy.example:7890", "NO_PROXY": no_proxy})
+
+    assert await selector.select("claude", env) == env
+    assert probe.calls == [(env["ANTHROPIC_BASE_URL"], None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["direct", "proxy"])
+async def test_forced_route_timeout_still_fails(mode: str) -> None:
+    probe = RecordingProbe([ProbeResult(False, "timeout")])
+    selector = ProviderNetworkSelector(probe=probe)
+    env = {
+        PROVIDER_NETWORK_MODE_ENV: mode,
+        "ANTHROPIC_BASE_URL": "https://provider.example",
+        "HTTPS_PROXY": "http://proxy.example:7890",
+    }
+
+    with pytest.raises(ProviderNetworkError, match=f"{mode} timeout failure"):
+        await selector.select("claude", env)
+    assert len(probe.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "settings,match",
+    [
+        ({"HTTPS_PROXY": "not-a-url"}, "not a valid supported URL"),
+        (
+            {"HTTPS_PROXY": "http://one.example", "https_proxy": "http://two.example"},
+            "conflicting lowercase and uppercase",
+        ),
+    ],
+)
+async def test_auto_timeout_does_not_hide_invalid_proxy_configuration(
+    settings: dict[str, str], match: str
+) -> None:
+    selector = ProviderNetworkSelector(probe=RecordingProbe([ProbeResult(False, "timeout")]))
+    env = {"ANTHROPIC_BASE_URL": "https://provider.example", **settings}
+
+    with pytest.raises(ProviderNetworkError, match=match):
+        await selector.select("claude", env)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["proxy-auth", "proxy-redirect", "proxy-gateway", "tls"])
+async def test_auto_direct_timeout_does_not_hide_proxy_failures(phase: str) -> None:
+    probe = RecordingProbe([ProbeResult(False, "timeout"), ProbeResult(False, phase)])
+    selector = ProviderNetworkSelector(probe=probe)
+    env = {
+        "ANTHROPIC_BASE_URL": "https://provider.example",
+        "HTTPS_PROXY": "http://proxy.example:7890",
+    }
+
+    with pytest.raises(ProviderNetworkError):
+        await selector.select("claude", env)
+
+
+@pytest.mark.asyncio
+async def test_timeout_fallback_is_rechecked_using_failure_ttl() -> None:
+    probe = RecordingProbe(
+        [
+            ProbeResult(False, "timeout"),
+            ProbeResult(False, "timeout"),
+            ProbeResult(True, "http", 200),
+        ]
+    )
+    selector = ProviderNetworkSelector(probe=probe, failure_ttl=0, success_ttl=60)
+    env = {
+        "ANTHROPIC_BASE_URL": "https://provider.example",
+        "HTTPS_PROXY": "http://proxy.example:7890",
+    }
+
+    first = await selector.select("claude", env)
+    second = await selector.select("claude", env)
+    third = await selector.select("claude", env)
+
+    assert first == env
+    assert "HTTPS_PROXY" not in second
+    assert third == second
+    assert len(probe.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_slow_proxy_head_does_not_block_real_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_head = asyncio.Event()
+    handlers: list[asyncio.Task[object]] = []
+    requests: list[bytes] = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        handlers.append(task)
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            requests.append(request.split(b"\r\n", 1)[0])
+            if request.startswith(b"HEAD "):
+                await release_head.wait()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def probe(endpoint: str, proxy: Optional[str]) -> ProbeResult:
+        if proxy is None:
+            return ProbeResult(False, "timeout")
+        return await _probe_endpoint(endpoint, proxy)
+
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.provider_network._PROBE_TIMEOUT_SECONDS", 0.03
+    )
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    env = {
+        "ANTHROPIC_BASE_URL": "http://model.example.invalid",
+        "HTTP_PROXY": f"http://127.0.0.1:{port}",
+    }
+    try:
+        selected = await ProviderNetworkSelector(probe=probe).select("claude", env)
+        async with httpx.AsyncClient(
+            proxy=selected["HTTP_PROXY"], trust_env=False, timeout=2
+        ) as client:
+            response = await client.post(selected["ANTHROPIC_BASE_URL"] + "/v1/messages")
+        assert response.status_code == 200
+        assert response.text == "OK"
+        assert requests == [
+            b"HEAD http://model.example.invalid/ HTTP/1.1",
+            b"POST http://model.example.invalid/v1/messages HTTP/1.1",
+        ]
+    finally:
+        release_head.set()
+        server.close()
+        await server.wait_closed()
+        await asyncio.gather(*handlers)
 
 
 @pytest.mark.asyncio
@@ -308,7 +500,7 @@ async def test_forced_proxy_never_falls_back_to_direct() -> None:
 
 @pytest.mark.asyncio
 async def test_no_proxy_prevents_proxy_probe() -> None:
-    probe = RecordingProbe([ProbeResult(False, "timeout")])
+    probe = RecordingProbe([ProbeResult(False, "tcp")])
     selector = ProviderNetworkSelector(probe=probe)
     env = {
         "ANTHROPIC_BASE_URL": "https://api.example.test/v1",
