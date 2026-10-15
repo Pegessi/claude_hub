@@ -7,6 +7,7 @@ app-server and Cursor stream-json parsing.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1117,6 +1118,121 @@ def test_claude_result_emits_turn_completed() -> None:
     events = adapter.normalize_line(raw, _ctx())
     assert len(events) == 1
     assert events[0].type == AgentStreamEventType.TURN_COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("fields", "accepted"),
+    [
+        ({"origin": {"kind": "task-notification"}, "num_turns": 0, "result": ""}, False),
+        ({"origin": {"kind": "task-notification"}, "is_error": True}, False),
+        ({"origin": {"kind": "peer"}}, False),
+        ({"user_message_uuid": "previous-input"}, False),
+        ({"user_message_uuids": ["previous-input"]}, False),
+        ({"user_message_uuid": "CURRENT"}, True),
+        ({"user_message_uuid": "previous-input", "user_message_uuids": ["CURRENT"]}, True),
+        ({"user_message_uuid": "CURRENT", "origin": {"kind": "task-notification"}}, True),
+        ({"user_message_uuid": "CURRENT", "is_error": True}, True),
+        ({"origin": {"kind": "human"}, "num_turns": 0, "result": ""}, True),
+        ({"local_command": "clear", "num_turns": 0, "result": ""}, True),
+        ({"origin": {"kind": "unclassified"}}, True),
+        ({"origin": {"kind": "future-kind"}}, True),
+        ({}, True),
+    ],
+)
+def test_claude_result_belongs_to_input(fields, accepted) -> None:
+    native = ClaudeNativeSession(_session())
+    envelope = json.loads(native._build_stdin("hello"))
+    current = envelope["uuid"]
+    assert isinstance(current, str) and current
+    record = json.loads(
+        json.dumps({"type": "result", "subtype": "success", **fields}).replace(
+            '"CURRENT"', json.dumps(current)
+        )
+    )
+    assert native.accepts_notification(record) is accepted
+    # Provenance must not hide real assistant/tool progress.
+    assert native.accepts_notification({**record, "type": "assistant"}) is True
+    assert json.loads(native._build_stdin("next"))["uuid"] != current
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("background_error", [False, True])
+async def test_claude_background_result_does_not_retire_user_stream(
+    tmp_path: Path, monkeypatch: MonkeyPatch, background_error: bool
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    native = ClaudeNativeSession(_session())
+    proc = _FakeProcess(stdout_lines=[])
+    monkeypatch.setattr(native, "_build_provider_env", AsyncMock(return_value={"PATH": "/bin"}))
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    store = AgentStreamStore("ws-1", "sess-1")
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id="sess-1",
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: native.session,
+        store=store,
+        native_transport=native,
+    )
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        queue = await tailer.subscribe()
+        try:
+            await tailer.send_message("hello", [], client_turn_id="user-turn")
+            assert (
+                await asyncio.wait_for(queue.get(), 1)
+            ).type == AgentStreamEventType.TURN_STARTED
+            generation = native._stdout_generation
+            proc.stdout.push(
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": background_error,
+                        "origin": {"kind": "task-notification"},
+                        "num_turns": 0,
+                        "result": "",
+                    }
+                ).encode()
+                + b"\n"
+            )
+            proc.stdout.push(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "id": "answer",
+                            "content": [{"type": "text", "text": "Actual user reply"}],
+                        },
+                    }
+                ).encode()
+                + b"\n"
+            )
+            event = await asyncio.wait_for(queue.get(), 1)
+            assert event.type == AgentStreamEventType.TEXT_DELTA
+            assert event.payload["text"] == "Actual user reply"
+            assert native._stdout_generation == generation
+            assert native.turn_in_flight is True
+            envelope = json.loads(b"".join(proc.stdin.written))
+            proc.stdout.push(
+                json.dumps(
+                    {"type": "result", "subtype": "success", "user_message_uuid": envelope["uuid"]}
+                ).encode()
+                + b"\n"
+            )
+            done = await asyncio.wait_for(queue.get(), 1)
+            assert done.type == AgentStreamEventType.TURN_COMPLETED
+            assert done.turn_id == "user-turn"
+            assert done.payload["assistant_text"] == "Actual user reply"
+            assert native.turn_in_flight is False
+            page = await store.read_since(-1, 100)
+            assert [e.type for e in page.events].count(AgentStreamEventType.TURN_COMPLETED) == 1
+            assert not any(e.type == AgentStreamEventType.ERROR for e in page.events)
+        finally:
+            await tailer.stop()
 
 
 def test_claude_unknown_stream_event_is_skipped() -> None:
