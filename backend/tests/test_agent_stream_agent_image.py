@@ -15,8 +15,13 @@ an arbitrary file-read primitive:
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import importlib
 import json
 import os
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -24,12 +29,22 @@ from typing import Optional
 import pytest
 from httpx import AsyncClient
 
-from claude_hub.models import AgentType, ExecutionTarget, SessionKind
+from claude_hub.models import AgentStreamEventType, AgentType, ExecutionTarget, SessionKind
 
-# Minimal magic-byte prefixes are enough: the endpoint sniffs magic bytes and
-# never decodes the image, so arbitrary trailing data is acceptable.
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+# Keep a real image: retained output uses the attachment store's header and
+# dimension validation, and must round-trip the original bytes unchanged.
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJ1kAAAAASUVORK5CYII="
+)
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+
+
+@pytest.fixture(autouse=True)
+def image_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(workspace_manager, "STATE_ROOT", state)
 
 
 def _make_tab(
@@ -68,7 +83,9 @@ def tab_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     image.write_bytes(PNG_BYTES)
     tab = _make_tab("tab-a", str(cwd))
     monkeypatch.setattr(
-        agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab if tab_id == "tab-a" else None
+        agent_stream_api.ttyd_manager,
+        "get_tab",
+        lambda tab_id: tab if tab_id == "tab-a" else None,
     )
     return cwd
 
@@ -113,7 +130,8 @@ def _write_image_reference(
 
 
 @pytest.mark.parametrize(
-    "kind,split", [("text_delta", False), ("text_delta", True), ("turn_completed", False)]
+    "kind,split",
+    [("text_delta", False), ("text_delta", True), ("turn_completed", False)],
 )
 async def test_assistant_referenced_temp_image_is_allowed(
     client: AsyncClient, tab_dir: Path, tmp_path: Path, kind: str, split: bool
@@ -135,7 +153,12 @@ async def test_assistant_referenced_temp_image_is_allowed(
     ],
 )
 async def test_other_sources_do_not_grant_temp_image_access(
-    client: AsyncClient, tab_dir: Path, tmp_path: Path, kind: str, role: str, tab_id: str
+    client: AsyncClient,
+    tab_dir: Path,
+    tmp_path: Path,
+    kind: str,
+    role: str,
+    tab_id: str,
 ) -> None:
     outside = tmp_path / "private.png"
     outside.write_bytes(PNG_BYTES)
@@ -180,13 +203,185 @@ async def test_reference_cannot_grant_non_temp_file(
     assert (await _get_image(client, "tab-a", str(outside))).status_code == 404
 
 
-async def test_path_mention_without_markdown_image_is_not_a_grant(
+async def test_bare_path_mention_is_not_a_grant(
     client: AsyncClient, tab_dir: Path, tmp_path: Path
 ) -> None:
     outside = tmp_path / "private.png"
     outside.write_bytes(PNG_BYTES)
-    _write_image_reference(f"File at {outside}. [Link]({outside})")
+    _write_image_reference(f"File at {outside}.")
     assert (await _get_image(client, "tab-a", str(outside))).status_code == 404
+
+
+async def test_local_image_link_grants_the_inline_preview(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "output.png"
+    outside.write_bytes(PNG_BYTES)
+    _write_image_reference(f"[View result]({outside})")
+    assert (await _get_image(client, "tab-a", str(outside))).content == PNG_BYTES
+
+
+def _write_image_tool(path: Path, name: str = "Read", *, role: str = "assistant"):
+    from claude_hub.models import AgentStreamEvent
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    args = {"file_path" if name == "Read" else "path": str(path)}
+    event = AgentStreamEvent(
+        stream_sequence=0,
+        tab_id="tab-a",
+        session_id="terminal-tab-tab-a",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TOOL_CALL_STARTED,
+        payload={"name": name, "args": args, "role": role},
+        created_at=datetime.now(timezone.utc),
+    )
+    store = AgentStreamStore("terminal-tabs", event.session_id)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(event.model_dump_json() + "\n")
+    return event
+
+
+@pytest.mark.parametrize("name", ["Read", "view_image"])
+async def test_temporary_image_view_tool_grants_only_its_exact_file(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, name: str
+) -> None:
+    outside = tmp_path / "dot-mobile-work.png"
+    outside.write_bytes(PNG_BYTES)
+    sibling = tmp_path / "dot-mobile-home.png"
+    sibling.write_bytes(PNG_BYTES)
+    _write_image_tool(outside, name)
+    assert (await _get_image(client, "tab-a", str(outside))).content == PNG_BYTES
+    assert (await _get_image(client, "tab-a", str(sibling))).status_code == 404
+
+
+@pytest.mark.parametrize("name,role", [("Bash", "assistant"), ("Read", "user")])
+async def test_other_tool_or_user_cannot_grant_a_temporary_image(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, name: str, role: str
+) -> None:
+    outside = tmp_path / "private.png"
+    outside.write_bytes(PNG_BYTES)
+    _write_image_tool(outside, name, role=role)
+    assert (await _get_image(client, "tab-a", str(outside))).status_code == 404
+
+
+async def test_live_image_is_retained_before_any_browser_load(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path
+) -> None:
+    from claude_hub.api.agent_stream import _terminal_tab_session_or_404
+    from claude_hub.services.agent_stream.local_images import cache_event_images
+
+    outside = tmp_path / "output.png"
+    outside.write_bytes(PNG_BYTES)
+    event = _write_image_tool(outside)
+    await cache_event_images(_terminal_tab_session_or_404("tab-a"), event)
+    outside.unlink()
+    assert (await _get_image(client, "tab-a", str(outside))).content == PNG_BYTES
+
+
+async def test_original_bytes_survive_deletion_and_concurrent_reads_deduplicate(
+    client: AsyncClient, tab_dir: Path
+) -> None:
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    responses = await asyncio.gather(*[_get_image(client, "tab-a", "shot.png") for _ in range(8)])
+    assert all(response.content == PNG_BYTES for response in responses)
+    entries = AgentStreamAttachmentStore._read_index()
+    assert len(entries) == 1
+    assert entries[0]["size"] == len(PNG_BYTES)
+    assert "shot.png" not in json.dumps(entries)
+    (tab_dir / "shot.png").unlink()
+    # Each request constructs a new store; no in-memory mapping is required.
+    assert (await _get_image(client, "tab-a", str(tab_dir / "shot.png"))).content == PNG_BYTES
+
+
+async def test_overwritten_image_is_not_frozen_at_its_first_cached_version(
+    client: AsyncClient, tab_dir: Path
+) -> None:
+    assert (await _get_image(client, "tab-a", "shot.png")).content == PNG_BYTES
+    changed = PNG_BYTES + b"changed original bytes"
+    (tab_dir / "shot.png").write_bytes(changed)
+    assert (await _get_image(client, "tab-a", "shot.png")).content == changed
+    (tab_dir / "shot.png").unlink()
+    assert (await _get_image(client, "tab-a", "shot.png")).content == changed
+
+
+async def test_image_over_cache_cap_stays_original_without_growing_storage(
+    client: AsyncClient, tab_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.config import settings
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    monkeypatch.setattr(settings, "attachment_max_preview_bytes", len(PNG_BYTES) - 1)
+    assert (await _get_image(client, "tab-a", "shot.png")).content == PNG_BYTES
+    assert AgentStreamAttachmentStore._read_index() == []
+
+
+async def test_uncacheable_replacement_cannot_resurrect_the_previous_image(
+    client: AsyncClient, tab_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.config import settings
+
+    assert (await _get_image(client, "tab-a", "shot.png")).content == PNG_BYTES
+    monkeypatch.setattr(settings, "attachment_max_preview_bytes", len(PNG_BYTES))
+    replacement = PNG_BYTES + b"oversized replacement"
+    (tab_dir / "shot.png").write_bytes(replacement)
+    assert (await _get_image(client, "tab-a", "shot.png")).content == replacement
+    (tab_dir / "shot.png").unlink()
+    assert (await _get_image(client, "tab-a", "shot.png")).status_code == 404
+
+
+async def test_concurrent_replacement_retains_the_newer_source(
+    client: AsyncClient, tab_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    original_reader = local_images._read_referenced_image
+    first_read = threading.Event()
+    release = threading.Event()
+
+    def delayed_first(session, raw_path):
+        result = original_reader(session, raw_path)
+        if not first_read.is_set():
+            first_read.set()
+            assert release.wait(5), "first read was not released"
+        return result
+
+    monkeypatch.setattr(local_images, "_read_referenced_image", delayed_first)
+    first = asyncio.create_task(_get_image(client, "tab-a", "shot.png"))
+    second = None
+    try:
+        assert await asyncio.to_thread(first_read.wait, 5)
+        newer = PNG_BYTES + b"newer source contents"
+        (tab_dir / "shot.png").write_bytes(newer)
+        second = asyncio.create_task(_get_image(client, "tab-a", "shot.png"))
+        # An unlocked implementation publishes B while A is suspended, then
+        # incorrectly replaces B with A as soon as the first reader resumes.
+        await asyncio.wait({second}, timeout=0.1)
+    finally:
+        release.set()
+    assert second is not None
+    await asyncio.gather(first, second)
+    (tab_dir / "shot.png").unlink()
+    assert (await _get_image(client, "tab-a", "shot.png")).content == newer
+
+
+@pytest.mark.parametrize("valid_source", [True, False])
+async def test_cache_and_cleanup_failure_do_not_mask_the_source_response(
+    client: AsyncClient, tab_dir: Path, monkeypatch: pytest.MonkeyPatch, valid_source: bool
+) -> None:
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    async def storage_failure(*args, **kwargs):
+        raise OSError("cache storage unavailable")
+
+    monkeypatch.setattr(AgentStreamAttachmentStore, "save", storage_failure)
+    monkeypatch.setattr(AgentStreamAttachmentStore, "discard_source", storage_failure)
+    if not valid_source:
+        (tab_dir / "shot.png").write_bytes(b"not an image")
+    response = await _get_image(client, "tab-a", "shot.png")
+    assert response.status_code == (200 if valid_source else 404)
+    if valid_source:
+        assert response.content == PNG_BYTES
 
 
 async def test_valid_absolute_image_returns_bytes_and_content_type(

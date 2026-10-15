@@ -70,6 +70,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   markdownPathClick: [path: string]
+  imageClick: [url: string, alt: string, event: MouseEvent]
 }>()
 
 // Per-instance block cache. Each completed markdown block is parsed,
@@ -118,10 +119,20 @@ function handleError(event: Event) {
   const placeholder = document.createElement('span')
   placeholder.className = 'quoted-img-missing'
   placeholder.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
-  target.replaceWith(placeholder)
+  const button = target.closest('button[data-image-preview]')
+  ;(button || target).replaceWith(placeholder)
 }
 
 function handleClick(event: MouseEvent) {
+  const imageButton = event.target instanceof Element
+    ? event.target.closest<HTMLButtonElement>('button[data-image-preview]')
+    : null
+  const image = imageButton?.querySelector('img')
+  if (image) {
+    event.preventDefault()
+    emit('imageClick', image.src, image.alt, event)
+    return
+  }
   const target = event.target instanceof Element
     ? event.target.closest<HTMLAnchorElement>('a[data-markdown-path]')
     : null
@@ -328,10 +339,30 @@ function handleClick(event: MouseEvent) {
 }
 
 /* Proxied local/provider images stay within the chat width on mobile too. */
+.markdown-block :deep(.markdown-image-preview) {
+  display: block;
+  max-width: min(420px, 100%);
+  margin: 8px 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-canvas);
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.markdown-block :deep(.markdown-image-preview:focus-visible) {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: 2px;
+}
+
 .markdown-block :deep(img[data-quoted-img]),
 .markdown-block :deep(img[data-local-img]) {
   max-width: 100%;
+  max-height: 260px;
   height: auto;
+  object-fit: contain;
   border-radius: var(--ch-radius-sm);
 }
 
