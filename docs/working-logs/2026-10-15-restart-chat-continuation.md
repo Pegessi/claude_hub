@@ -55,3 +55,37 @@ and opt-out. A negative control replacing the observation retry budget with its
 old value fails specifically because the recovered reply never appears.
 These checks establish neither live provider connectivity nor deployment of
 this feature. The shared Hub is never restarted for validation.
+
+## Independent cross-validation follow-up
+
+A fresh review of commit `b38e3ac` found a later delivery window: the tailer
+validated intent before calling the transport, but Claude subsequently awaited
+provider environment preparation. A Stop, configuration change or conversation
+switch during that await still allowed the continuation to reach the provider.
+An independent probe reproduced all three cases without invoking a provider.
+
+The strict resume requirement now carries its synchronous admission callback
+through provider preparation. Claude/Cursor recheck after environment selection
+and old-process teardown, then again after subprocess creation before writing
+stdin. If that final check rejects, the empty process is terminated. Codex and
+TraeX check before their turn/start write; MASO checks after stream readiness and
+before marking uncertain delivery or initiating its message POST. The callback
+is cleared when the automatic attempt ends, preserving later manual input.
+An explicit Retry can replace an idle runtime while startup is awaiting; the
+same validator also fences tailer/transport ownership, so the pending automatic
+message cannot move to that unguarded replacement.
+Once input has been written or an HTTP message attempt initiated, existing
+cancellation and uncertain-delivery controls apply; automatic replay is still
+disabled.
+
+Regression coverage exercises actual Claude/Cursor input paths across environment,
+teardown and spawn awaits, with positive controls and Stop/configuration/
+conversation/shutdown changes. Only external process I/O is replaced; Cursor's
+separate store proof is stubbed in this lifecycle test. Codex RPC and MASO mocked
+HTTP tests cover revocation during startup/stream readiness and manual follow-up.
+
+The earlier HMR failure is retained alongside the unchanged-code full rerun.
+Independent source review identifies a possible observer sampling window, but
+without a timing trace this is neither a proven root cause nor proof that the
+failure predates this change. Live provider execution and shared-service restart
+remain outside this validation.

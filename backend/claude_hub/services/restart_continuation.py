@@ -350,6 +350,13 @@ async def _continue_chat(operation_id: str, target: ChatContinuation) -> None:
 
             def validate_identity() -> None:
                 _assert_claim(operation_id, target)
+                if api._native_input_shutting_down:
+                    raise ContinuationSkipped("The service is shutting down")
+                if transport is not None and (
+                    manager.get_tailer(session.id) is not tailer
+                    or tailer.native_transport is not transport
+                ):
+                    raise ContinuationSkipped("The Chat runtime was replaced")
                 tab = _eligible_tab(target.tab_id)
                 if (
                     tab.agent_session_id != target.conversation_id
@@ -377,6 +384,9 @@ async def _continue_chat(operation_id: str, target: ChatContinuation) -> None:
             transport = tailer.native_transport
             if transport is None:
                 raise ContinuationSkipped("Native provider is unavailable")
+            transport.require_resumed_conversation(
+                target.conversation_id, before_delivery=validate_identity
+            )
             await transport.start()
             transport.check_resumed_conversation()
             await manager.send_message(

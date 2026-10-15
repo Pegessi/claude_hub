@@ -1207,6 +1207,52 @@ def _codex_session() -> CodexNativeSession:
     return CodexNativeSession(_session(AgentType.CODEX))
 
 
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_codex_checks_automatic_admission_after_async_start(
+    monkeypatch: MonkeyPatch, revoke: bool
+) -> None:
+    native = _codex_session()
+    native._conversation_id = "original-thread"
+    native._conversation_id_verified = True
+    native._thread_id = "original-thread"
+    revoked = False
+
+    def admit() -> None:
+        if revoked:
+            raise RuntimeError("automatic continuation was stopped")
+
+    native.require_resumed_conversation("original-thread", before_delivery=admit)
+    proc = _FakeProcess(
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"turn": {"id": "turn"}}}).encode()
+            + b"\n"
+        ]
+    )
+
+    async def start() -> None:
+        nonlocal revoked
+        await asyncio.sleep(0)
+        revoked = revoke
+        native._started = True
+        native._process = cast(asyncio.subprocess.Process, proc)
+        native._reader_task = asyncio.create_task(native._drain_stdout())
+
+    monkeypatch.setattr(native, "start", start)
+    try:
+        if revoke:
+            with pytest.raises(RuntimeError, match="continuation was stopped"):
+                await native._send_text("Please continue.")
+            assert proc.stdin.written == []
+            assert native._pending_requests == {}
+        else:
+            await native._send_text("Please continue.")
+            requests = _written_requests(proc)
+            assert [request["method"] for request in requests] == ["turn/start"]
+            assert requests[0]["params"]["threadId"] == "original-thread"
+    finally:
+        await native.stop()
+
+
 def _written_requests(proc: _FakeProcess) -> List[Dict[str, Any]]:
     """Parse all JSON-RPC messages written to stdin."""
     out: List[Dict[str, Any]] = []
