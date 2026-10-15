@@ -130,9 +130,6 @@ class _SessionsMixin:
         if payload.ephemeral and payload.reuse_existing:
             raise ValueError("Cannot combine ephemeral with reuse_existing")
 
-        if payload.agent_type == AgentType.MASO:
-            raise ValueError("MASO is an HTTP Chat provider; open it as a standalone Chat")
-
         if payload.agent_type == AgentType.TRAEX:
             # TraeX is supported as a top-level terminal/Chat tab but not as a
             # managed workspace worker this wave (goal-packet / autonomous
@@ -300,11 +297,15 @@ class _SessionsMixin:
         session_workspace_path = (
             (remote_cwd or local_cwd) if session_target == ExecutionTarget.REMOTE else local_cwd
         )
-        cursor_transport = "terminal"
+        cursor_transport = "native" if payload.session_kind == SessionKind.CHAT else "terminal"
         cursor_create_kwargs: dict[str, Any] = {}
         cursor_session_id: str | None = None
         launch_env = dict(payload.env)
-        if payload.agent_type == AgentType.CURSOR and session_target == ExecutionTarget.LOCAL:
+        if (
+            payload.agent_type == AgentType.CURSOR
+            and session_target == ExecutionTarget.LOCAL
+            and payload.session_kind == SessionKind.TERMINAL
+        ):
             from ..ttyd_manager import (
                 CURSOR_TRANSCRIPT_SCHEMA,
                 SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS,
@@ -346,6 +347,7 @@ class _SessionsMixin:
                 cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
                 solo_mode=payload.solo_mode,
                 agent_type=payload.agent_type,
+                session_kind=payload.session_kind,
                 target=session_target,
                 remote_profile_id=remote_profile_id,
                 remote_cwd=remote_cwd,
@@ -354,6 +356,7 @@ class _SessionsMixin:
                 workspace_id=workspace.id,
                 workspace_name=workspace.name,
                 workspace_role=role,
+                managed_session_id=session_id,
                 env=launch_env,
                 **agent_session_kwargs,
                 **cursor_create_kwargs,
@@ -364,6 +367,7 @@ class _SessionsMixin:
                 cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
                 solo_mode=payload.solo_mode,
                 agent_type=payload.agent_type,
+                session_kind=payload.session_kind,
                 target=session_target,
                 remote_profile_id=remote_profile_id,
                 remote_cwd=remote_cwd,
@@ -372,6 +376,7 @@ class _SessionsMixin:
                 workspace_id=workspace.id,
                 workspace_name=workspace.name,
                 workspace_role=role,
+                managed_session_id=session_id,
                 **agent_session_kwargs,
                 **cursor_create_kwargs,
             )
@@ -383,10 +388,8 @@ class _SessionsMixin:
             tab_id=tab.id,
             role=role,
             agent_type=payload.agent_type,
-            # Workspace worker/reviewer/orchestrator sessions always drive
-            # the raw TUI control plane.  Never inherit a mocked, stale, or
-            # migrated top-level tab's Chat surface.
-            session_kind=SessionKind.TERMINAL,
+            session_kind=payload.session_kind,
+            chat_paused=False,
             status=ManagedSessionStatus.SPAWNING,
             runtime_status=AgentRuntimeStatus.IDLE,
             current_task_id=None,
@@ -394,7 +397,9 @@ class _SessionsMixin:
             title=title,
             branch=None,
             workspace_path=session_workspace_path,
-            tmux_session=f"claude-hub-{tab.id[:8]}",
+            tmux_session=(
+                "" if payload.session_kind == SessionKind.CHAT else f"claude-hub-{tab.id[:8]}"
+            ),
             target=session_target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -471,7 +476,11 @@ class _SessionsMixin:
         # structured stream before exposing that id for a new conversation.
         from ..agent_stream import discard_session_stream
 
-        await discard_session_stream(session.workspace_id, session_id)
+        await discard_session_stream(
+            session.workspace_id,
+            session_id,
+            acknowledged_call_ids=set(session.delivered_call_ids),
+        )
 
         self.sessions.pop(session_id, None)
         workspace = self.workspaces.get(session.workspace_id)

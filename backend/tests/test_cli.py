@@ -235,6 +235,36 @@ def test_task_create_body(monkeypatch):
     assert body["execution_complexity"] == "auto"
 
 
+def test_task_create_explicit_session_kind(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "t1"})
+
+    patch_get_client(monkeypatch, handler)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "task",
+            "create",
+            "ws1",
+            "--title",
+            "Chat",
+            "--prompt",
+            "do it",
+            "--session-id",
+            "chat-session",
+            "--session-kind",
+            "chat",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["session_id"] == "chat-session"
+    assert bodies[0]["session_kind"] == "chat"
+
+
 def test_task_create_agent_tag_success(monkeypatch):
     bodies: list[dict[str, Any]] = []
 
@@ -1357,7 +1387,9 @@ def test_session_send_payload_json_attachments(monkeypatch):
     payload = {"message": "from-json", "attachments": [{"filename": "a.txt"}]}
     result = runner.invoke(cli, ["session", "send", "s1", "--payload-json", json.dumps(payload)])
     assert result.exit_code == 0, result.output
-    assert bodies[0] == payload
+    assert bodies[0]["message"] == payload["message"]
+    assert bodies[0]["attachments"] == payload["attachments"]
+    assert isinstance(bodies[0]["call_id"], str)
 
 
 def test_lessons_summarize(monkeypatch):

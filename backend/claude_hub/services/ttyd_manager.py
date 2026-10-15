@@ -3,6 +3,7 @@ import base64
 import errno
 import glob
 import hashlib
+import ipaddress
 import itertools
 import json
 import logging
@@ -20,7 +21,8 @@ from collections import namedtuple
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, TypedDict
+from urllib.parse import urlsplit
 
 from ..config import settings
 from ..models import (
@@ -68,6 +70,20 @@ CURSOR_TRANSCRIPT_SCHEMA = "cli-transcript-v1"
 #: :data:`CURSOR_TRANSCRIPT_SCHEMA`. Pinned so an unknown CLI version fails
 #: closed rather than mis-normalizing rows.
 SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS: frozenset[str] = frozenset({"2026.08.25-3e8eec8"})
+
+
+def _is_loopback_url(value: str) -> bool:
+    """Return whether an HTTP service URL names this host's loopback interface."""
+
+    hostname = urlsplit(value).hostname
+    if hostname == "localhost":
+        return True
+    if hostname is None:
+        return False
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _promote_cursor_chat_transport(
@@ -1447,6 +1463,7 @@ class TTYDProcess:
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
+        managed_session_id: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         agent_session_id: Optional[str] = None,
         agent_session_id_verified: bool = False,
@@ -1484,6 +1501,7 @@ class TTYDProcess:
         self.workspace_id = workspace_id
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
+        self.managed_session_id = managed_session_id
         self.cursor_transport = (
             cursor_transport
             if cursor_transport in {"acp", "terminal_transcript", "native"}
@@ -1653,6 +1671,12 @@ class TTYDProcess:
             self.shell = os.environ.get("SHELL", "/bin/bash")
         else:
             self.shell = get_agent_command(agent_type)
+
+    @property
+    def is_managed_chat(self) -> bool:
+        """Whether this tab is a headless Workspace-managed Chat record."""
+
+        return self.workspace_role is not None and self.session_kind == SessionKind.CHAT
 
     @staticmethod
     def _clean_env(env: Dict[str, str]) -> Dict[str, str]:
@@ -1997,6 +2021,8 @@ asyncio.run(_main())
         so stamping there would systematically under-estimate the codex
         session_meta timestamp by ~1 s.
         """
+        if self.is_managed_chat:
+            return False
         if await _tmux_session_exists_async(self.tmux_session):
             return False
 
@@ -2091,6 +2117,10 @@ asyncio.run(_main())
 
     async def start(self) -> None:
         """Start the ttyd process with tmux for session persistence."""
+        if self.is_managed_chat:
+            self.process = None
+            self.is_active = False
+            return
         if self.process and self.process.returncode is None:
             logger.warning(f"Process for tab {self.tab_id} already running")
             return
@@ -3096,6 +3126,12 @@ asyncio.run(_main())
             kill_tmux: If True, also kill the tmux session. Only use this when
                       deleting a tab or rolling back an unpersisted tab startup.
         """
+        if self.is_managed_chat:
+            # Managed Chat tabs deliberately own no ttyd/tmux lifecycle. Their
+            # native provider runtime is stopped by the agent-stream layer.
+            self.process = None
+            self.is_active = False
+            return
         if self.process and self.process.returncode is None:
             logger.info(f"Stopping ttyd for tab {self.tab_id} (PID {self.process.pid})")
             self.process.terminate()
@@ -3147,6 +3183,7 @@ asyncio.run(_main())
                 if isinstance(self.workspace_role, WorkspaceSessionRole)
                 else self.workspace_role
             ),
+            "managed_session_id": self.managed_session_id,
             "port": self.port,
             "created_at": self.created_at.isoformat(),
             "agent_session_id": self.agent_session_id,
@@ -3186,6 +3223,7 @@ asyncio.run(_main())
             workspace_id=self.workspace_id,
             workspace_name=self.workspace_name,
             workspace_role=self.workspace_role,
+            managed_session_id=self.managed_session_id,
             agent_session_id=self.agent_session_id,
             agent_session_id_verified=self.agent_session_id_verified,
             cursor_transport=self.cursor_transport,
@@ -3303,13 +3341,6 @@ class TTYDManager:
                             if workspace_role_str in [e.value for e in WorkspaceSessionRole]
                             else None
                         )
-                        if workspace_role is not None:
-                            # Workspace-managed task runners always own a raw
-                            # TUI.  Normalize accidental historical Chat rows
-                            # at the persistence boundary; direct top-level
-                            # Chat tabs have no managed workspace role.
-                            session_kind = SessionKind.TERMINAL
-                            chat_mode = ChatMode.DEFAULT
                         process = TTYDProcess(
                             tab_id=tab_data["id"],
                             port=tab_data["port"],
@@ -3330,6 +3361,7 @@ class TTYDManager:
                             workspace_id=tab_data.get("workspace_id"),
                             workspace_name=tab_data.get("workspace_name"),
                             workspace_role=workspace_role,
+                            managed_session_id=tab_data.get("managed_session_id"),
                             agent_session_id=tab_data.get("agent_session_id"),
                             agent_session_id_verified=tab_data.get(
                                 "agent_session_id_verified", False
@@ -3443,24 +3475,34 @@ class TTYDManager:
         workspace_id: Optional[str],
         workspace_name: Optional[str],
         workspace_role: Optional[WorkspaceSessionRole],
+        managed_session_id: Optional[str] = None,
     ) -> bool:
         """Attach workspace ownership metadata to an existing tab."""
         process = self.processes.get(tab_id)
         if not process:
             return False
-        if workspace_role is not None and process.session_kind != SessionKind.TERMINAL:
-            raise ValueError("managed workspace tabs must use Terminal")
-
+        if (
+            process.session_kind == SessionKind.CHAT
+            and workspace_role is not None
+            and not process.is_managed_chat
+        ):
+            # Metadata cannot tear down an existing direct Chat's terminal runtime.
+            raise ValueError("Direct Chat tabs cannot become managed Chat through metadata")
+        next_managed_session_id = (
+            None if workspace_id is None else managed_session_id or process.managed_session_id
+        )
         if (
             process.workspace_id == workspace_id
             and process.workspace_name == workspace_name
             and process.workspace_role == workspace_role
+            and process.managed_session_id == next_managed_session_id
         ):
             return True
 
         process.workspace_id = workspace_id
         process.workspace_name = workspace_name
         process.workspace_role = workspace_role
+        process.managed_session_id = next_managed_session_id
         self._save_state()
         return True
 
@@ -3570,6 +3612,7 @@ class TTYDManager:
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
+        managed_session_id: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         agent_session_id: Optional[str] = None,
         cursor_transport: str = "terminal",
@@ -3587,10 +3630,22 @@ class TTYDManager:
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
-        if workspace_role is not None and (
-            session_kind != SessionKind.TERMINAL or chat_mode != ChatMode.DEFAULT
+        if workspace_role is not None and chat_mode != ChatMode.DEFAULT:
+            raise ValueError("managed workspace Chat mode must use default")
+        if (
+            workspace_role is not None
+            and session_kind == SessionKind.CHAT
+            and agent_type
+            not in {
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+                AgentType.CURSOR,
+                AgentType.MASO,
+            }
         ):
-            raise ValueError("managed workspace tabs must use Terminal")
+            raise ValueError(
+                "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"
+            )
         if agent_type == AgentType.MASO and session_kind != SessionKind.CHAT:
             raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
         if agent_type == AgentType.MASO:
@@ -3601,7 +3656,15 @@ class TTYDManager:
             # A persisted opaque session belongs to one service, even when the
             # backend's global default changes before a later restart.
             env = dict(env or {})
-            env["MASO_BASE_URL"], _models, _default = await discover_maso_service(env)
+            if workspace_role is not None:
+                from .agent_stream.maso_http import maso_base_url
+
+                if not _is_loopback_url(maso_base_url(env)):
+                    raise ValueError("Managed MASO Chat requires a loopback-local MASO service")
+            base_url, _models, _default = await discover_maso_service(env)
+            if workspace_role is not None and not _is_loopback_url(base_url):
+                raise ValueError("Managed MASO Chat requires a loopback-local MASO service")
+            env["MASO_BASE_URL"] = base_url
         if session_kind == SessionKind.CHAT and target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
         if target == ExecutionTarget.REMOTE:
@@ -3638,6 +3701,7 @@ class TTYDManager:
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
             env=env,
             agent_session_id=agent_session_id,
             cursor_transport=cursor_transport,
@@ -3649,6 +3713,14 @@ class TTYDManager:
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
         )
+        if process.is_managed_chat:
+            # Managed Chat keeps the ordinary tab/session navigation identity,
+            # but its native ProviderSession is created lazily by the Chat
+            # runtime. Never create a ttyd listener, tmux seat, shell, or TUI.
+            self.processes[tab_id] = process
+            self._ensure_tab_in_order(tab_id)
+            self._save_state()
+            return process.to_schema()
         tmux_created = False
         process_stopped_without_tmux = False
         startup_deadline = asyncio.get_running_loop().time() + _TAB_CREATE_STARTUP_TIMEOUT_SECONDS
@@ -5238,6 +5310,19 @@ class TTYDManager:
         Phase F — Persist final state to tabs.json so the next restart can
         resume the correctly-pinned sids.
         """
+        runtime_processes = [
+            process for process in self.processes.values() if not process.is_managed_chat
+        ]
+        for process in self.processes.values():
+            if process.is_managed_chat:
+                process.process = None
+                process.is_active = False
+        if not runtime_processes:
+            # A headless managed Chat restore must not initialize tmux merely
+            # because a navigation tab record exists.
+            self._save_state()
+            return
+
         logger.info("Ensuring tmux server is running...")
         _ensure_tmux_server()
 
@@ -5271,7 +5356,7 @@ class TTYDManager:
         except Exception as e:
             logger.debug("Could not list tmux sessions: %s", e)
 
-        processes = list(self.processes.values())
+        processes = runtime_processes
         logger.info("Starting %d saved tabs", len(processes))
 
         # Partition into hot (session exists) / cold-codex / cold-non-codex.

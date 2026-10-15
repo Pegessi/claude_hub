@@ -17,15 +17,25 @@ class _MonitorMixin:
             for session in self.sessions.values()
             if workspace_id is None or session.workspace_id == workspace_id
         ]
-        tab_ids = [session.tab_id for session in sessions]
-        statuses = {
-            status.tab_id: status
-            for status in await ttyd_manager.list_tab_agent_statuses(tab_ids=tab_ids)
-        }
+        tab_ids = [
+            session.tab_id for session in sessions if session.session_kind != SessionKind.CHAT
+        ]
+        statuses = (
+            {
+                status.tab_id: status
+                for status in await ttyd_manager.list_tab_agent_statuses(tab_ids=tab_ids)
+            }
+            if tab_ids
+            else {}
+        )
         changed = False
         for session in sessions:
             session_id = session.id
             if session.status in {ManagedSessionStatus.DONE, ManagedSessionStatus.ERROR}:
+                continue
+            if session.session_kind == SessionKind.CHAT:
+                self._refresh_chat_session_status(session)
+                changed = changed or self.sessions[session_id] != session
                 continue
             status = statuses.get(session.tab_id)
             if not status:
@@ -178,6 +188,8 @@ class _MonitorMixin:
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
+        if session.session_kind == SessionKind.CHAT:
+            return None
         live = self.tasks.get(task.id)
         if live is None or not self._workspace_owns_task(live):
             return None
@@ -426,6 +438,10 @@ class _MonitorMixin:
         task: WorkspaceTask,
         sampled_at: datetime,
     ) -> dict[str, Any] | None:
+        if session.session_kind == SessionKind.CHAT:
+            # Native transport failures have explicit delivery state. Terminal
+            # heuristics must never trigger a second, potentially duplicate turn.
+            return None
         # Only the agent that owns the current work phase may be auto-continued:
         # - During WORKING: the worker (task.session_id). After a ``review_failed``
         #   reopen the reviewer session stays bound via ``current_task_id`` but is
@@ -854,9 +870,10 @@ class _MonitorMixin:
         await self._interrupt_session(session)
         await asyncio.sleep(INTERRUPT_SETTLE_SECONDS)
 
-        # Step 2: Send /clear to wipe the context window.
-        await self.send_session_message(session.id, "/clear")
-        await asyncio.sleep(CLEAR_CONTEXT_SETTLE_SECONDS)
+        # Step 2: Reset through the execution transport, never as Chat text.
+        await self._reset_session_context(session)
+        if session.session_kind != SessionKind.CHAT:
+            await asyncio.sleep(max(0.0, CLEAR_CONTEXT_SETTLE_SECONDS - 0.5))
 
         # Step 3: Re-inject the appropriate recovery prompt.
         if session.role == WorkspaceSessionRole.REVIEWER:

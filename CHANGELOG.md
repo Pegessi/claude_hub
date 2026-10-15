@@ -7,6 +7,22 @@
 
 ## Released
 
+### feat(workspace): run managed agents and reviewers through Chat
+
+- Add an explicit Terminal/Chat execution choice for local Workspace agents,
+  including execution agents and independent reviewers. Existing configurations
+  retain Terminal behavior; MASO is available through local HTTP Chat only.
+- Keep managed Chat tabs as navigation records without starting ttyd, tmux or a
+  terminal shell. Reuse the managed-session stream for messages, tools, image
+  previews, approvals and persistent history.
+- Route Chat assignments and followups through the durable Workspace mailbox.
+  Separate provider handoff evidence from Task reports, preserve ambiguous
+  deliveries without automatic replay, and make Stop pause queued delivery until
+  an explicit continuation.
+- Reset native provider context for unrelated reviews while retaining display
+  history, inherit the execution agent's Chat configuration for auto-created
+  reviewers, and preserve existing review and human-acceptance requirements.
+
 ### docs: hold the change log in one Released section
 
 - Merge three same-named `Unreleased` headings into one section, keeping all

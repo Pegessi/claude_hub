@@ -165,6 +165,27 @@ message: inspect and stop the session in MASO before starting a new Chat. An
 idle status immediately after a timeout is not proof of cancellation.
 
 This integration supports local Chat, text, images, reasoning, tool output and
-tool confirmations. Goals, Plan mode, editing earlier turns and
-Workspace-managed worker execution are not advertised. Automatic long-context
-condensation remains MASO's responsibility; Hub adds no separate condenser.
+tool confirmations. Goals, Plan mode and editing earlier turns are not
+advertised. Automatic long-context condensation remains MASO's responsibility;
+Hub adds no separate condenser.
+
+## Workspace agents and reviewers
+
+Workspace agent creation also accepts `session_kind=chat` with `agent_type=maso`.
+This uses the existing Task assignment, report, review and human-acceptance flow;
+a model turn ending does not complete a Task. The associated tab is a navigation
+record only and does not start ttyd, tmux or a shell. Open it from Workspace to
+read the managed-session Chat history.
+
+Managed MASO execution is limited to a loopback MASO endpoint on the Hub machine.
+The MASO tools must see the selected working directory and be able to call the
+Hub report URL supplied in the assignment. A service catalog probe does not
+prove those tool/callback requirements; remote MASO service callbacks and SSH
+native Chat execution are not supported by this managed path. Ordinary standalone
+MASO Chat keeps its existing endpoint support.
+
+Workspace Stop pauses native execution and queued mailbox delivery. Resume with
+an explicit message or Task continuation; unknown message acceptance remains
+blocked rather than automatically repeating the assignment. Unrelated reviews
+receive a fresh native provider context while prior display history remains.
+The long first-turn Hub runtime guidance's injection frequency is unchanged.

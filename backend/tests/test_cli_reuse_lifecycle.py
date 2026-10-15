@@ -866,7 +866,13 @@ async def test_delete_session_allows_failed_task_binding(
     discarded: list[tuple[str, str]] = []
     deleted_tabs: list[str] = []
 
-    async def fake_discard(workspace_id: str, session_id: str) -> None:
+    async def fake_discard(
+        workspace_id: str,
+        session_id: str,
+        *,
+        acknowledged_call_ids: set[str] | None = None,
+    ) -> None:
+        assert acknowledged_call_ids == set()
         discarded.append((workspace_id, session_id))
 
     async def fake_delete_tab(tab_id: str) -> None:
@@ -2585,16 +2591,16 @@ def test_legacy_session_normalizes_caller_owned_ephemeral() -> None:
     assert retired_chat.get("session_kind") == "terminal"
     assert retired_chat.get("chat_mode") == "default"
 
-    accidental_chat = manager._normalize_session_item(
+    persisted_chat = manager._normalize_session_item(
         {
-            "id": "accidental-chat-s",
-            "tab_id": "accidental-chat-t",
+            "id": "persisted-chat-s",
+            "tab_id": "persisted-chat-t",
             "session_kind": "chat",
             "chat_mode": "plan",
         }
     )
-    assert accidental_chat.get("session_kind") == "terminal"
-    assert accidental_chat.get("chat_mode") == "default"
+    assert persisted_chat.get("session_kind") == "chat"
+    assert persisted_chat.get("chat_mode") == "default"
 
 
 def test_find_compatible_same_env_reuses(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

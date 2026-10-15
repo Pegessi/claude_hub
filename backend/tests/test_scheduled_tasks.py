@@ -2572,7 +2572,12 @@ def _install_live_terminal_fakes(monkeypatch: MonkeyPatch, tmp_path: Path) -> Di
         # re-pastes (mirrors a healthy tmux server).
         return True
 
-    async def fake_discard_stream(workspace_id: str, session_id: str) -> None:
+    async def fake_discard_stream(
+        workspace_id: str,
+        session_id: str,
+        *,
+        acknowledged_call_ids: set[str] | None = None,
+    ) -> None:
         return None
 
     async def fake_ready(_self: Any, _session: Any) -> None:

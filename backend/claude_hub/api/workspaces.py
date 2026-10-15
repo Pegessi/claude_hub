@@ -28,6 +28,7 @@ from ..models import (
     RequestTaskReviewRequest,
     RetryUncertainDeliveryRequest,
     SendSessionMessageRequest,
+    SessionKind,
     SpawnWorkerRequest,
     StartTaskRequest,
     TaskCleanupResult,
@@ -810,11 +811,17 @@ async def send_session_message(
 ) -> None:
     """Send a message to a managed session."""
     try:
-        await workspace_manager.send_session_message(
-            managed_session_id,
-            payload.message,
-            payload.attachments,
-        )
+        session = workspace_manager.sessions.get(managed_session_id)
+        if session is not None and session.session_kind == SessionKind.CHAT:
+            await workspace_manager.send_chat_session_message(
+                managed_session_id, payload.message, payload.attachments, payload.call_id
+            )
+        else:
+            await workspace_manager.send_session_message(
+                managed_session_id,
+                payload.message,
+                payload.attachments,
+            )
     except KeyError as e:
         raise HTTPException(status_code=404, detail="Session not found") from e
     except (RuntimeError, ValueError) as e:
