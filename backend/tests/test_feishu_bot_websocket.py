@@ -407,6 +407,39 @@ async def test_connection_discovery_is_bounded_and_applies_sdk_config() -> None:
 
 
 @pytest.mark.asyncio
+async def test_connection_discovery_uses_the_shared_feishu_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = importlib.import_module("lark_oapi.ws.client")
+    created: list[tuple[str, float]] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "msg": "ok",
+                "data": {"URL": "wss://example.test/ws?device_id=device&service_id=7"},
+            },
+        )
+
+    def factory(api_base_url: str, *, timeout: float) -> httpx.AsyncClient:
+        created.append((api_base_url, timeout))
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(websocket_runtime, "create_feishu_http_client", factory)
+    url = await _discover_connection_url(
+        SimpleNamespace(_configure=lambda _config: None),
+        _config(),
+        sdk,
+        timeout_seconds=0.2,
+    )
+
+    assert url == "wss://example.test/ws?device_id=device&service_id=7"
+    assert created == [("https://open.feishu.cn", 0.2)]
+
+
+@pytest.mark.asyncio
 async def test_sdk_loader_import_is_single_flight() -> None:
     entered = threading.Event()
     release = threading.Event()
