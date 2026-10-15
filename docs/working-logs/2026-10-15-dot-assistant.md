@@ -119,12 +119,37 @@ in git). The user decided on the gaps:
   skips them, so they no longer push real talk out of the recent-talk window.
 - No size-based rotation. Providers already compact a long context; rotation
   exists to stop drift, not overflow. Added a test for the 18h age rule.
-- Brief quality is not checked in code (length rules are easy to game).
-  Instead the tool guide (sent every session) has a three-question self-check,
-  and failed or questioning tasks become `Brief lesson` cards that Dot
-  recalls before delegating.
+- Brief quality: first a prompt-only self-check plus `Brief lesson` cards.
+  Replaced in round 4 (below).
 - Still open, by choice: "never poll workers" is prompt-only; nothing pushes
   a non-quiet wake reply to the user outside the Dot tab.
+
+## Round 4: brief, review, lesson loop (2026-10-16)
+
+The user asked for a cleaner answer to "briefs and failure lessons". Reading
+on agent feedback loops (Anthropic on agents and context engineering; OpenAI
+on agent guides and evals; Reflexion / ExpeL-style lesson memory) gave three
+points: the checklist is the contract, a lesson needs a verdict behind it,
+and rules must fade or the prompt fills with stale advice.
+
+- `done_when` is a numbered checklist; the brief adds Output and Out of scope;
+  the worker answers each check by number with ✓/✗ and evidence. The result
+  card puts the checklist next to the report.
+- Delegate gate (`lessons.lint_brief` + `match_lessons`, plain code): vague
+  checks, more than 7 checks, no output, no context, or a matching lesson hold
+  the task; `--confirm` sends anyway and the warnings stay on the work item.
+- `dot review` records ok/redo and the cause (brief/env/worker). Only a brief
+  miss writes a lesson (new rule or a vote on an old one), so lessons always
+  have a verdict behind them. Pending reviews are listed in every turn pack.
+- `lessons.json`: votes with a 60-day half-life. Top 5 (score ≥ 0.5) go into
+  the session pack; weaker ones only hold a matching brief; faded ones stay as
+  history. The nightly tidy merges and sharpens them.
+- First-pass rate (ok at first verdict, no question asked, last 20 reviews) in
+  `dot lessons` and the new Lessons tab, where rules can be added, edited
+  and dropped.
+- Tests: `test_dot_lessons.py` (lint, match, decay, store, gate, the whole
+  review loop with a second round), API/CLI routes, node API cases, and the
+  browser run now covers the Lessons tab.
 
 ## Risks
 

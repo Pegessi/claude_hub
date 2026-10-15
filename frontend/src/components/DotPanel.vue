@@ -291,6 +291,8 @@
                   <span class="dot-item__title">{{ item.title || item.task_id }}</span>
                   <span class="dot-item__sub">
                     {{ item.task_id }} · {{ item.watched ? 'watched' : 'delegated' }}
+                    <template v-if="item.review_due">· <strong>waiting for review</strong></template>
+                    <template v-else-if="item.review">· reviewed {{ item.review.verdict }}</template>
                     · stuck alarm {{ item.stall_hours ?? DEFAULT_STALL_HOURS }}h
                     · {{ relativeTime(item.created) }} ago
                   </span>
@@ -421,6 +423,111 @@
               </template>
             </template>
 
+            <!-- Lessons: rules for briefs, learned from tasks that came back wrong. -->
+            <template v-else-if="section === 'lessons'">
+              <p
+                v-if="reviewStats"
+                class="dot-lessons__stats"
+                data-testid="dot-lesson-stats"
+              >
+                {{ formatFirstPass(reviewStats) }}
+                <template v-if="causeText">
+                  · misses: {{ causeText }}
+                </template>
+                <template v-if="reviewStats.pending">
+                  · {{ reviewStats.pending }} waiting for review
+                </template>
+              </p>
+              <form
+                class="dot-row-form"
+                data-testid="dot-lesson-form"
+                @submit.prevent="addLesson"
+              >
+                <input
+                  v-model="newLesson"
+                  class="ch-input"
+                  placeholder="Add a rule for briefs"
+                  aria-label="New lesson"
+                  maxlength="300"
+                >
+                <button
+                  type="submit"
+                  class="ch-btn ch-btn--primary ch-btn--sm"
+                  :disabled="!newLesson.trim()"
+                >
+                  Add
+                </button>
+              </form>
+              <div
+                v-for="lesson in lessons"
+                :key="lesson.id"
+                class="dot-item"
+                data-testid="dot-lesson"
+              >
+                <span
+                  class="dot-item__badge"
+                  :title="`${lesson.votes} task(s) missed this`"
+                >×{{ lesson.votes }}</span>
+                <form
+                  v-if="editingLesson === lesson.id"
+                  class="dot-row-form dot-lessons__edit"
+                  @submit.prevent="saveLesson(lesson.id)"
+                >
+                  <input
+                    v-model="lessonDraft"
+                    class="ch-input"
+                    aria-label="Lesson rule"
+                    maxlength="300"
+                  >
+                  <button
+                    type="submit"
+                    class="ch-btn ch-btn--primary ch-btn--sm"
+                    :disabled="!lessonDraft.trim()"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    class="ch-btn ch-btn--ghost ch-btn--sm"
+                    @click="editingLesson = null"
+                  >
+                    Cancel
+                  </button>
+                </form>
+                <template v-else>
+                  <div class="dot-item__info">
+                    <span class="dot-item__title">{{ lesson.rule }}</span>
+                    <span class="dot-item__sub">
+                      {{ lessonReach(lesson) }} · score {{ lesson.score }} · seen {{ relativeTime(lesson.seen) }} ago
+                    </span>
+                  </div>
+                  <div class="dot-item__actions">
+                    <button
+                      type="button"
+                      class="ch-btn ch-btn--sm"
+                      @click="editLesson(lesson)"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      class="ch-btn ch-btn--ghost ch-btn--sm"
+                      @click="dropLesson(lesson.id)"
+                    >
+                      Drop
+                    </button>
+                  </div>
+                </template>
+              </div>
+              <p
+                v-if="!loading && lessons.length === 0"
+                class="dot-panel__empty"
+              >
+                No lessons yet. When a task comes back wrong because of its brief,
+                {{ identity.name }} writes one rule here.
+              </p>
+            </template>
+
             <!-- Health: deterministic checks, no model call. -->
             <template v-else>
               <div
@@ -453,19 +560,25 @@ import { relativeTime } from '@/utils/time'
 import {
   ackDotInbox,
   addDotFocus,
+  addDotLesson,
   archiveDotCard,
   clearDotAvatar,
+  dropDotLesson,
+  formatFirstPass,
+  lessonReach,
   loadDotCard,
   loadDotCards,
   loadDotFocus,
   loadDotHealth,
   loadDotInbox,
+  loadDotLessons,
   loadDotStatus,
   loadDotWork,
   recallDot,
   unwatchDotTask,
   updateDotFocus,
   updateDotIdentity,
+  updateDotLesson,
   uploadDotAvatar,
   watchDotTask,
   type DotCard,
@@ -473,16 +586,19 @@ import {
   type DotFocusItem,
   type DotHealth,
   type DotInboxEvent,
+  type DotLesson,
+  type DotReviewStats,
   type DotSearchHit,
   type DotStatus,
   type DotWorkItem,
 } from '@/utils/dotApi'
 
-type Section = 'focus' | 'work' | 'memory' | 'health'
+type Section = 'focus' | 'work' | 'lessons' | 'memory' | 'health'
 
 const SECTIONS: { key: Section, label: string }[] = [
   { key: 'focus', label: 'Focus' },
   { key: 'work', label: 'Work' },
+  { key: 'lessons', label: 'Lessons' },
   { key: 'memory', label: 'Memory' },
   { key: 'health', label: 'Health' },
 ]
@@ -504,6 +620,11 @@ const work = ref<DotWorkItem[]>([])
 const inbox = ref<DotInboxEvent[]>([])
 const cards = ref<(DotCard | DotSearchHit)[]>([])
 const health = ref<DotHealth | null>(null)
+const lessons = ref<DotLesson[]>([])
+const reviewStats = ref<DotReviewStats | null>(null)
+const newLesson = ref('')
+const editingLesson = ref<string | null>(null)
+const lessonDraft = ref('')
 const selectedCard = ref<DotCard | null>(null)
 const newFocus = ref('')
 const newPriority = ref(3)
@@ -517,6 +638,10 @@ const editingIdentity = ref(false)
 const nameDraft = ref('')
 const avatarDraft = ref('')
 let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+const causeText = computed(() =>
+  Object.entries(reviewStats.value?.causes ?? {}).map(([cause, count]) => `${cause} ${count}`).join(', '),
+)
 
 const cardTotal = computed(() =>
   Object.values(status.value?.cards ?? {}).reduce((sum, count) => sum + (count ?? 0), 0),
@@ -540,6 +665,7 @@ async function loadSection() {
     if (status.value.identity) setIdentity(status.value.identity)
     if (section.value === 'focus') focus.value = await loadDotFocus()
     else if (section.value === 'work') [work.value, inbox.value] = await Promise.all([loadDotWork(), loadDotInbox()])
+    else if (section.value === 'lessons') await loadLessons()
     else if (section.value === 'memory') await loadCards()
     else health.value = await loadDotHealth()
   })
@@ -565,6 +691,44 @@ function closeFocus(focusId: string, state: 'done' | 'dropped') {
   void run(async () => {
     await updateDotFocus(focusId, { status: state })
     focus.value = await loadDotFocus()
+  })
+}
+
+async function loadLessons() {
+  const data = await loadDotLessons()
+  lessons.value = data.lessons
+  reviewStats.value = data.stats
+}
+
+function addLesson() {
+  const rule = newLesson.value.trim()
+  if (!rule) return
+  void run(async () => {
+    await addDotLesson(rule)
+    newLesson.value = ''
+    await loadLessons()
+  })
+}
+
+function editLesson(lesson: DotLesson) {
+  editingLesson.value = lesson.id
+  lessonDraft.value = lesson.rule
+}
+
+function saveLesson(lessonId: string) {
+  const rule = lessonDraft.value.trim()
+  if (!rule) return
+  void run(async () => {
+    await updateDotLesson(lessonId, rule)
+    editingLesson.value = null
+    await loadLessons()
+  })
+}
+
+function dropLesson(lessonId: string) {
+  void run(async () => {
+    await dropDotLesson(lessonId)
+    await loadLessons()
   })
 }
 
@@ -653,6 +817,7 @@ watch(
     if (isOpen) {
       selectedCard.value = null
       editingIdentity.value = false
+      editingLesson.value = null
       void loadSection()
       window.addEventListener('keydown', handleKeydown)
     } else {
@@ -930,6 +1095,19 @@ onUnmounted(() => {
   display: flex;
   gap: 4px;
   flex: 0 0 auto;
+}
+
+.dot-lessons__stats {
+  margin: 0 0 8px;
+  padding: 0 4px;
+  font-size: var(--ch-font-size-xs);
+  color: var(--ch-color-text-muted);
+}
+
+.dot-lessons__edit {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
 }
 
 .dot-card {

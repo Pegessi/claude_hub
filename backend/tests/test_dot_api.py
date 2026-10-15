@@ -362,14 +362,36 @@ def test_delegate_route_and_cli(
         cli,
         [
             "dot", "delegate", "--workspace", "ws", "--title", "Paper", "--goal", "Summarize",
-            "--done-when", "5 bullets", "--stall-hours", "3",
+            "--done-when", "done", "--stall-hours", "3",
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 1, "a weak brief is held"
+    assert "Not sent" in result.output and "No output" in result.output
+    assert service.store.get_work("task-5") is None
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "dot", "delegate", "--workspace", "ws", "--title", "Paper", "--goal", "Summarize",
+            "--done-when", "notes/fa3.md has 5 bullets", "--done-when", "each cites a section",
+            "--output", "notes/fa3.md", "--context", "arxiv 2407.08608", "--stall-hours", "3",
         ],
     )  # fmt: skip
     assert result.exit_code == 0, result.output
     assert "delegated task-5 (queued): Paper" in result.output
-    assert service.store.get_work("task-5")["stall_hours"] == 3  # type: ignore[index]
+    work = service.store.get_work("task-5")
+    assert work is not None and work["stall_hours"] == 3 and len(work["done_when"]) == 2
 
-    body = {"workspace_id": "missing", "title": "x", "goal": "y", "done_when": "z"}
+    body: dict[str, Any] = {
+        "workspace_id": "missing",
+        "title": "x",
+        "goal": "y",
+        "done_when": ["z"],
+        "confirm": True,
+    }
+    assert client.post("/api/dot/delegate", json={**body, "done_when": []}).status_code == 422
+    held = client.post("/api/dot/delegate", json={**body, "confirm": False}).json()
+    assert held["held"] and held["work"] is None
     assert client.post("/api/dot/delegate", json=body).status_code == 404
     outcome["conflict"] = True
     body["workspace_id"] = "ws"
@@ -403,3 +425,64 @@ def test_journal_route_and_cli_show(
     assert result.exit_code == 0, result.output
     assert "FA3" in result.output and "summary: fast" in result.output
     assert "tags: gpu" in result.output and result.output.rstrip().endswith("details")
+
+
+def test_review_and_lessons_routes_and_cli(
+    api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, service = api
+    _route_to_app(client, monkeypatch)
+    store = service.store
+    store.upsert_work("task-1", workspace_id="ws", title="Paper", status="working")
+    review = {"verdict": "redo", "cause": "brief", "lesson": "Say the output path"}
+
+    assert client.post("/api/dot/work/nope/review", json=review).status_code == 404
+    assert client.post("/api/dot/work/task-1/review", json=review).status_code == 400
+    assert client.post("/api/dot/work/task-1/review", json={"verdict": "meh"}).status_code == 422
+    store.upsert_work("task-1", status="review", result_card="c-1", review_due=True)
+    assert client.get("/api/dot/lessons").json()["stats"]["pending"] == 1
+
+    result = CliRunner().invoke(
+        cli,
+        ["dot", "review", "task-1", "--verdict", "redo", "--cause", "brief",
+         "--lesson", "Say the output path"],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert (
+        "reviewed task-1: redo (brief)" in result.output and "Say the output path" in result.output
+    )
+    lessons = client.get("/api/dot/lessons").json()
+    assert lessons["stats"] == {
+        "reviewed": 1,
+        "first_pass": 0,
+        "rate": 0.0,
+        "causes": {"brief": 1},
+        "pending": 0,
+        "window": 20,
+    }
+    lesson_id = lessons["lessons"][0]["id"]
+    assert lessons["lessons"][0]["in_session"]
+
+    added = client.post("/api/dot/lessons", json={"rule": "Give the output location"}).json()
+    assert client.post("/api/dot/lessons", json={"rule": ""}).status_code == 422
+    edited = client.patch(f"/api/dot/lessons/{added['id']}", json={"rule": "Name the output"})
+    assert edited.json()["rule"] == "Name the output"
+    assert client.patch("/api/dot/lessons/l-none", json={"rule": "x"}).status_code == 404
+    merge = {"keep": lesson_id, "others": [added["id"]]}
+    assert client.post("/api/dot/lessons/merge", json=merge).json()["votes"] == 2
+    bad_merge = {"keep": lesson_id, "others": ["l-none"]}
+    assert client.post("/api/dot/lessons/merge", json=bad_merge).status_code == 404
+
+    listed = CliRunner().invoke(cli, ["dot", "lessons"])
+    assert listed.exit_code == 0, listed.output
+    assert "first pass: 0/1" in listed.output and lesson_id in listed.output
+    assert added["id"] not in listed.output
+    assert added["id"] in CliRunner().invoke(cli, ["dot", "lessons", "--all"]).output
+
+    assert CliRunner().invoke(cli, ["dot", "lessons", "drop", lesson_id]).exit_code == 0
+    assert client.get("/api/dot/lessons").json()["lessons"] == []
+    assert client.delete("/api/dot/lessons/l-none").status_code == 404
+    assert CliRunner().invoke(cli, ["dot", "lessons", "add", "Split big goals"]).exit_code == 0
+    assert [row["rule"] for row in client.get("/api/dot/lessons").json()["lessons"]] == [
+        "Split big goals"
+    ]

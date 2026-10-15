@@ -2,10 +2,12 @@
 
 Two packs keep Dot's mind small and fresh:
 
-* the **session pack** (role, tool guide, user profile, concepts) is passed as
-  the system prompt and stays fixed for one provider session;
-* the **turn pack** (time, focus, open work, new events, recalled cards and,
-  on a session's first turn, the recent talk) is rebuilt for every turn.
+* the **session pack** (role, tool guide, delegation rules, user profile,
+  concepts) is passed as the system prompt and stays fixed for one provider
+  session;
+* the **turn pack** (time, focus, open work, new events, tasks waiting for
+  review, recalled cards and, on a session's first turn, the recent talk) is
+  rebuilt for every turn.
 
 Both have hard size caps so memory growth never floods the conversation.
 """
@@ -17,8 +19,9 @@ from datetime import datetime
 from typing import Any, Iterable, Optional
 
 from .index import DotIndex
+from .lessons import session_rules
 from .prompts import DOT_CONTEXT_HEADER, TOOL_GUIDE
-from .store import DEFAULT_NAME, Card, DotStore
+from .store import DEFAULT_NAME, Card, DotStore, utc_now
 
 SESSION_PACK_CHARS = 9000
 TURN_PACK_CHARS = 5000
@@ -54,12 +57,18 @@ def _ranked(cards: list[Card]) -> list[Card]:
 
 
 def build_session_pack(store: DotStore) -> str:
-    """Role + name + tools + user profile + concepts, capped at ``SESSION_PACK_CHARS``."""
+    """Role + name + tools + rules + user profile + concepts, capped at ``SESSION_PACK_CHARS``."""
     parts = [store.read_role().strip()]
     name = store.read_identity()["name"]
     if name != DEFAULT_NAME:
         parts.append(f'## Your name\nThe user named you "{name}". Use this name instead of Dot.')
     parts.append(TOOL_GUIDE.strip())
+    rules = session_rules(store.list_lessons(), utc_now())
+    if rules:
+        parts.append(
+            "## Delegation rules (learned from your past briefs)\n"
+            + "\n".join(f"- {_clip(rule.get('rule', ''))} [{rule.get('id')}]" for rule in rules)
+        )
     profile = _take_lines(
         (_card_line(card) for card in _ranked(store.list_cards("user"))), _PROFILE_CHARS
     )
@@ -104,6 +113,32 @@ def _work_lines(store: DotStore) -> list[str]:
 
 _EVENTS_PER_TURN = 12
 _EVENTS_TITLE = "## New events since your last turn"
+_REVIEWS_PER_TURN = 8
+
+
+def _review_lines(store: DotStore) -> list[str]:
+    """Returned tasks stay listed every turn until Dot records a verdict."""
+    pending = store.pending_reviews()
+    if not pending:
+        return []
+    lines = []
+    for item in pending[:_REVIEWS_PER_TURN]:
+        notes = [str(item.get("status") or "?")]
+        if item.get("result_card"):
+            notes.append(f"card {item['result_card']}")
+        if item.get("asked"):
+            notes.append("the worker had to ask a question")
+        lines.append(
+            f"- [{item.get('task_id')}] {_clip(item.get('title', ''), 120)} — {', '.join(notes)}"
+        )
+    if len(pending) > _REVIEWS_PER_TURN:
+        lines.append(f"- ({len(pending) - _REVIEWS_PER_TURN} more)")
+    lines.append(
+        "- Judge each result against its done-when list, then "
+        "`claude-hub dot review <task-id> --verdict ok|redo [--cause brief|env|worker]`; "
+        "a brief miss needs `--lesson` or `--lesson-id`."
+    )
+    return lines
 
 
 def _event_lines(events: list[dict[str, Any]]) -> list[str]:
@@ -142,6 +177,9 @@ def build_turn_pack(
     ]
     if events:
         sections.append((_EVENTS_TITLE, _event_lines(events)))
+    reviews = _review_lines(store)
+    if reviews:
+        sections.append(("## Waiting for your review", reviews))
     if recall and text.strip():
         hits = index.search(text, limit=6) if index is not None else []
         if hits:

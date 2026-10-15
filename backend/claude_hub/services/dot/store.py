@@ -41,6 +41,7 @@ NAME_LIMIT = 40
 # Code points, not characters: one emoji may be several code points.
 AVATAR_TEXT_LIMIT = 16
 AVATAR_IMAGE_BYTES = 2 * 1024 * 1024
+LESSON_RULE_LIMIT = 300
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -247,6 +248,7 @@ class DotStore:
                 ("focus.json", []),
                 ("work.json", []),
                 ("inbox.json", []),
+                ("lessons.json", []),
                 ("state.json", {}),
             ):
                 if not (self.home / name).exists():
@@ -567,6 +569,120 @@ class DotStore:
             if item.get("task_id") == task_id:
                 return item
         return None
+
+    def pending_reviews(self) -> list[dict[str, Any]]:
+        """Delegated tasks with a result Dot has not judged yet (oldest first)."""
+        return [
+            item
+            for item in self.list_work(include_closed=True)
+            if item.get("review_due") and not item.get("stopped")
+        ]
+
+    # ── lessons ─────────────────────────────────────────────────────────
+
+    def list_lessons(self, *, include_dropped: bool = False) -> list[dict[str, Any]]:
+        self.ensure()
+        items = [item for item in self._read_json("lessons.json", []) if isinstance(item, dict)]
+        if not include_dropped:
+            items = [item for item in items if not item.get("dropped")]
+        return items
+
+    def get_lesson(self, lesson_id: str) -> Optional[dict[str, Any]]:
+        for item in self.list_lessons(include_dropped=True):
+            if item.get("id") == lesson_id:
+                return item
+        return None
+
+    @staticmethod
+    def _clean_rule(rule: str) -> str:
+        clean = " ".join(rule.split())
+        if not clean or len(clean) > LESSON_RULE_LIMIT:
+            raise ValueError(f"a lesson is one rule of 1-{LESSON_RULE_LIMIT} characters")
+        return clean
+
+    def add_lesson(self, rule: str, task_id: Optional[str] = None) -> dict[str, Any]:
+        clean = self._clean_rule(rule)
+        self.ensure()
+        with self._lock:
+            items = self._read_json("lessons.json", [])
+            stamp = now_iso()
+            item = {
+                "id": f"l-{uuid.uuid4().hex[:6]}",
+                "rule": clean,
+                "votes": 1,
+                "tasks": [task_id] if task_id else [],
+                "created": stamp,
+                "seen": stamp,
+            }
+            items.append(item)
+            self._write_json("lessons.json", items)
+            return dict(item)
+
+    def _change_lesson(self, lesson_id: str, change: Any) -> Optional[dict[str, Any]]:
+        self.ensure()
+        with self._lock:
+            items = self._read_json("lessons.json", [])
+            for item in items:
+                if isinstance(item, dict) and item.get("id") == lesson_id:
+                    change(item)
+                    self._write_json("lessons.json", items)
+                    return dict(item)
+        return None
+
+    def vote_lesson(
+        self, lesson_id: str, task_id: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """The same miss happened again: one more vote, and the lesson is fresh again."""
+
+        def vote(item: dict[str, Any]) -> None:
+            item["votes"] = int(item.get("votes") or 0) + 1
+            item["seen"] = now_iso()
+            item.pop("dropped", None)
+            if task_id and task_id not in item.setdefault("tasks", []):
+                item["tasks"] = [*item["tasks"], task_id][-20:]
+
+        return self._change_lesson(lesson_id, vote)
+
+    def update_lesson(
+        self, lesson_id: str, *, rule: Optional[str] = None, dropped: Optional[bool] = None
+    ) -> Optional[dict[str, Any]]:
+        clean = self._clean_rule(rule) if rule is not None else None
+
+        def update(item: dict[str, Any]) -> None:
+            if clean is not None:
+                item["rule"] = clean
+            if dropped:
+                item["dropped"] = True
+            elif dropped is False:
+                item.pop("dropped", None)
+
+        return self._change_lesson(lesson_id, update)
+
+    def merge_lessons(self, keep_id: str, other_ids: Iterable[str]) -> dict[str, Any]:
+        """Fold lessons that say the same thing into one; votes and tasks add up."""
+        others = [other for other in dict.fromkeys(other_ids) if other != keep_id]
+        self.ensure()
+        with self._lock:
+            items = [item for item in self._read_json("lessons.json", []) if isinstance(item, dict)]
+            by_id = {item.get("id"): item for item in items}
+            keep = by_id.get(keep_id)
+            missing = [other for other in others if other not in by_id]
+            if keep is None or missing:
+                raise KeyError(keep_id if keep is None else missing[0])
+            for other in others:
+                item = by_id[other]
+                if item.get("dropped"):
+                    continue
+                keep["votes"] = int(keep.get("votes") or 0) + int(item.get("votes") or 0)
+                keep["seen"] = max(str(keep.get("seen") or ""), str(item.get("seen") or ""))
+                keep["tasks"] = list(
+                    dict.fromkeys([*keep.get("tasks", []), *item.get("tasks", [])])
+                )[-20:]
+                item["dropped"] = True
+                item["merged_into"] = keep_id
+            keep.pop("dropped", None)
+            self._write_json("lessons.json", items)
+            return dict(keep)
 
     # ── inbox ───────────────────────────────────────────────────────────
 

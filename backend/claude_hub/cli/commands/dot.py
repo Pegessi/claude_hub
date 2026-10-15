@@ -406,9 +406,17 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
 @click.option("--workspace", "workspace_id", required=True, help="Workspace id.")
 @click.option("--title", required=True)
 @click.option("--goal", required=True, help="What outcome is wanted, and why.")
-@click.option("--done-when", required=True, help="Concrete, checkable finish line.")
+@click.option(
+    "--done-when",
+    "done_when",
+    multiple=True,
+    required=True,
+    help="One check a stranger can verify (repeat for each check).",
+)
+@click.option("--output", default="", help="What the result is and where it goes.")
 @click.option("--context", default="", help="Facts, paths and links the worker needs.")
-@click.option("--constraints", default="", help="Limits: scope, style, things not to touch.")
+@click.option("--out-of-scope", default="", help="What the worker must not do or change.")
+@click.option("--constraints", default="", help="Limits: style, tools, budget.")
 @click.option("--agent", "agent_type", type=click.Choice(AGENT_TYPES), default="codex")
 @click.option("--mode", "task_mode", type=click.Choice(TASK_MODES), default=None)
 @click.option("--no-start", is_flag=True, help="Register only; do not dispatch.")
@@ -419,31 +427,42 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
     default=None,
     help="Alert Dot when the task shows no progress this long (default: 2).",
 )
+@click.option("--confirm", is_flag=True, help="Send even if the brief check holds it.")
 @click.pass_context
 def dot_delegate(
     ctx: click.Context,
     workspace_id: str,
     title: str,
     goal: str,
-    done_when: str,
+    done_when: Tuple[str, ...],
+    output: str,
     context: str,
+    out_of_scope: str,
     constraints: str,
     agent_type: str,
     task_mode: Optional[str],
     no_start: bool,
     request_key: Optional[str],
     stall_hours: Optional[float],
+    confirm: bool,
 ) -> None:
-    """Hand a job to a Hub Task with a full brief. Dot is woken when it ends."""
+    """Hand a job to a Hub Task with a full brief. Dot is woken when it ends.
+
+    The Hub checks the brief first. Warnings or matching lessons hold the task
+    (exit code 1); fix the brief, or send again with --confirm.
+    """
     body: Dict[str, Any] = {
         "workspace_id": workspace_id,
         "title": title,
         "goal": goal,
-        "done_when": done_when,
+        "done_when": list(done_when),
+        "output": output,
         "context": context,
+        "out_of_scope": out_of_scope,
         "constraints": constraints,
         "agent_type": agent_type,
         "start": not no_start,
+        "confirm": confirm,
     }
     if task_mode:
         body["task_mode"] = task_mode
@@ -451,11 +470,133 @@ def dot_delegate(
         body["request_key"] = request_key
     if stall_hours is not None:
         body["stall_hours"] = stall_hours
-    item = _call(ctx, "POST", "/delegate", json=body)
+    result = _call(ctx, "POST", "/delegate", json=body)
     if cli_main.as_json(ctx):
-        emit(item, True)
+        emit(result, True)
     else:
-        click.echo(f"delegated {item['task_id']} ({item.get('status')}): {item.get('title')}")
+        if result.get("held"):
+            click.echo("Not sent: the brief check held this task.")
+        for warning in result.get("warnings") or []:
+            click.echo(f"- {warning}")
+        lessons = result.get("lessons") or []
+        if lessons:
+            click.echo("Lessons from past briefs that may apply:")
+            for lesson in lessons:
+                click.echo(f"- [{lesson.get('id')}] {lesson.get('rule')}")
+        if result.get("held"):
+            click.echo("Fix the brief and send again, or add --confirm if these do not apply.")
+        else:
+            item = result.get("work") or {}
+            click.echo(
+                f"delegated {item.get('task_id')} ({item.get('status')}): {item.get('title')}"
+            )
+    if result.get("held"):
+        ctx.exit(1)
+
+
+@dot.command("review")
+@click.argument("task_id")
+@click.option("--verdict", type=click.Choice(["ok", "redo"]), required=True)
+@click.option(
+    "--cause",
+    type=click.Choice(["brief", "env", "worker"]),
+    default=None,
+    help="Why it missed (required for redo): the brief, the environment, or the worker.",
+)
+@click.option("--note", default="", help="One line on what you saw.")
+@click.option("--lesson", default="", help="New rule for future briefs (cause brief).")
+@click.option("--lesson-id", default=None, help="Vote for an existing lesson instead.")
+@click.pass_context
+def dot_review(
+    ctx: click.Context,
+    task_id: str,
+    verdict: str,
+    cause: Optional[str],
+    note: str,
+    lesson: str,
+    lesson_id: Optional[str],
+) -> None:
+    """Judge a task Dot delegated, once it came back."""
+    body: Dict[str, Any] = {"verdict": verdict, "cause": cause, "note": note, "lesson": lesson}
+    if lesson_id:
+        body["lesson_id"] = lesson_id
+    result = _call(ctx, "POST", f"/work/{quote(task_id, safe='')}/review", json=body)
+    if cli_main.as_json(ctx):
+        emit(result, True)
+        return
+    click.echo(f"reviewed {task_id}: {verdict}" + (f" ({cause})" if cause else ""))
+    saved = result.get("lesson")
+    if saved:
+        click.echo(f"lesson [{saved['id']}] x{saved.get('votes')}: {saved.get('rule')}")
+
+
+# ── lessons ─────────────────────────────────────────────────────────────
+
+
+@dot.group("lessons", invoke_without_command=True)
+@click.option("--all", "include_all", is_flag=True, help="Include dropped and merged lessons.")
+@click.pass_context
+def dot_lessons(ctx: click.Context, include_all: bool) -> None:
+    """Rules for briefs, learned from tasks that came back wrong."""
+    if ctx.invoked_subcommand is not None:
+        return
+    data = _call(ctx, "GET", "/lessons", params={"all": include_all})
+    if cli_main.as_json(ctx):
+        emit(data, True)
+        return
+    stats = data.get("stats") or {}
+    if stats.get("reviewed"):
+        click.echo(
+            f"first pass: {stats['first_pass']}/{stats['reviewed']} of the latest reviews; "
+            f"{stats.get('pending', 0)} waiting for review"
+        )
+    rows = [
+        {
+            "id": lesson.get("id"),
+            "votes": lesson.get("votes"),
+            "score": lesson.get("score"),
+            "shown": "always" if lesson.get("in_session") else "on match",
+            "rule": truncate(lesson.get("rule", "")),
+        }
+        for lesson in data.get("lessons") or []
+    ]
+    print_rows(rows, ["id", "votes", "score", "shown", "rule"])
+
+
+@dot_lessons.command("add")
+@click.argument("rule")
+@click.pass_context
+def dot_lessons_add(ctx: click.Context, rule: str) -> None:
+    """Add a rule for briefs by hand."""
+    emit(_call(ctx, "POST", "/lessons", json={"rule": rule}), cli_main.as_json(ctx))
+
+
+@dot_lessons.command("edit")
+@click.argument("lesson_id")
+@click.argument("rule")
+@click.pass_context
+def dot_lessons_edit(ctx: click.Context, lesson_id: str, rule: str) -> None:
+    """Reword a lesson (votes are kept)."""
+    path = f"/lessons/{quote(lesson_id, safe='')}"
+    emit(_call(ctx, "PATCH", path, json={"rule": rule}), cli_main.as_json(ctx))
+
+
+@dot_lessons.command("drop")
+@click.argument("lesson_id")
+@click.pass_context
+def dot_lessons_drop(ctx: click.Context, lesson_id: str) -> None:
+    """Drop a lesson that was wrong or no longer applies."""
+    emit(_call(ctx, "DELETE", f"/lessons/{quote(lesson_id, safe='')}"), cli_main.as_json(ctx))
+
+
+@dot_lessons.command("merge")
+@click.argument("keep_id")
+@click.argument("other_ids", nargs=-1, required=True)
+@click.pass_context
+def dot_lessons_merge(ctx: click.Context, keep_id: str, other_ids: Tuple[str, ...]) -> None:
+    """Fold lessons that say the same thing into KEEP_ID (votes add up)."""
+    body = {"keep": keep_id, "others": list(other_ids)}
+    emit(_call(ctx, "POST", "/lessons/merge", json=body), cli_main.as_json(ctx))
 
 
 # ── inbox ───────────────────────────────────────────────────────────────

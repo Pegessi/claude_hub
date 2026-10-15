@@ -32,6 +32,11 @@ const cases = [
   ['watchDotTask', ['t/1', 4], 'POST', '/api/dot/work/t%2F1/watch', { stall_hours: 4 }],
   ['watchDotTask', ['t-1'], 'POST', '/api/dot/work/t-1/watch', { stall_hours: null }],
   ['unwatchDotTask', ['t-1'], 'POST', '/api/dot/work/t-1/unwatch', undefined],
+  ['loadDotLessons', [], 'GET', '/api/dot/lessons', undefined],
+  ['loadDotLessons', [true], 'GET', '/api/dot/lessons?all=true', undefined],
+  ['addDotLesson', ['Name the output path'], 'POST', '/api/dot/lessons', { rule: 'Name the output path' }],
+  ['updateDotLesson', ['l-1', 'Say where'], 'PATCH', '/api/dot/lessons/l-1', { rule: 'Say where' }],
+  ['dropDotLesson', ['l-1'], 'DELETE', '/api/dot/lessons/l-1', undefined],
 ]
 for (const [name, args, method, url, body] of cases) {
   test(`${name}(${JSON.stringify(args)}) calls ${method} ${url}`, async t => {
@@ -68,12 +73,23 @@ test('Dot launcher sits in the app bar and opens the Dot Chat tab', () => {
   assert.match(launcher, /<DotPanel[\s\S]*:open="panelOpen"/)
 })
 
-test('Dot panel covers focus, work, memory and health', () => {
+test('first-pass rate and lesson reach read plainly', () => {
+  assert.equal(api.formatFirstPass({ reviewed: 0, first_pass: 0, rate: null }), 'No reviews yet')
+  assert.equal(api.formatFirstPass({ reviewed: 4, first_pass: 3, rate: 0.75 }), 'First pass 3/4 (75%)')
+  assert.equal(api.lessonReach({ score: 2, in_session: true }), 'always')
+  assert.equal(api.lessonReach({ score: 0.3, in_session: false }), 'on match')
+  assert.equal(api.lessonReach({ score: 0.05, in_session: false }), 'faded')
+})
+
+test('Dot panel covers focus, work, lessons, memory and health', () => {
   const panel = read('../src/components/DotPanel.vue')
-  for (const label of ["label: 'Focus'", "label: 'Work'", "label: 'Memory'", "label: 'Health'"]) {
+  for (const label of ["label: 'Focus'", "label: 'Work'", "label: 'Lessons'", "label: 'Memory'", "label: 'Health'"]) {
     assert.ok(panel.includes(label), label)
   }
-  for (const call of ['recallDot(', 'archiveDotCard(', 'updateDotFocus(', 'ackDotInbox(', 'loadDotHealth(']) {
+  for (const call of [
+    'recallDot(', 'archiveDotCard(', 'updateDotFocus(', 'ackDotInbox(', 'loadDotHealth(',
+    'loadDotLessons(', 'addDotLesson(', 'updateDotLesson(', 'dropDotLesson(', 'formatFirstPass(',
+  ]) {
     assert.ok(panel.includes(call), call)
   }
   assert.ok(panel.includes("event.key === 'Escape'"))

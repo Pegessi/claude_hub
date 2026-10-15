@@ -66,6 +66,26 @@ async def main(browser_run: BrowserRun) -> None:
             "at": NOW,
         }
     ]
+    lessons = [
+        {
+            "id": "l-1",
+            "rule": "Paper tasks: name the paper version and the output path",
+            "votes": 2,
+            "tasks": ["task-1", "task-2"],
+            "created": NOW,
+            "seen": NOW,
+            "score": 2.0,
+            "in_session": True,
+        }
+    ]
+    review_stats = {
+        "reviewed": 4,
+        "first_pass": 3,
+        "rate": 0.75,
+        "causes": {"brief": 1},
+        "pending": 1,
+        "window": 20,
+    }
     writes: list[list] = []
     report = {
         "result": "FAIL",
@@ -98,6 +118,7 @@ async def main(browser_run: BrowserRun) -> None:
             "focus": 0,
             "open_work": len(work),
             "unread_events": len(inbox),
+            "pending_reviews": 1,
             "last_tidy_at": None,
         }
 
@@ -206,6 +227,30 @@ async def main(browser_run: BrowserRun) -> None:
                         }
                     )
                     body = work[-1]
+                elif path == "/api/dot/lessons" and method == "GET":
+                    live = [lesson for lesson in lessons if not lesson.get("dropped")]
+                    body = {"lessons": live, "stats": review_stats}
+                elif path == "/api/dot/lessons" and method == "POST":
+                    lessons.append(
+                        {
+                            "id": "l-2",
+                            "rule": data["rule"],
+                            "votes": 1,
+                            "tasks": [],
+                            "created": NOW,
+                            "seen": NOW,
+                            "score": 1.0,
+                            "in_session": True,
+                        }
+                    )
+                    body = lessons[-1]
+                elif path.startswith("/api/dot/lessons/"):
+                    lesson = next(item for item in lessons if item["id"] == path.rsplit("/", 1)[1])
+                    if method == "PATCH":
+                        lesson["rule"] = data["rule"]
+                    else:
+                        lesson["dropped"] = True
+                    body = lesson
                 elif path == "/api/dot/work/task-7/unwatch":
                     work.clear()
                     body = {"task_id": "task-7", "closed": True}
@@ -292,6 +337,30 @@ async def main(browser_run: BrowserRun) -> None:
             assert wrote("POST", "/api/dot/work/task-7/unwatch") == [None]
             await panel.get_by_role("button", name="Mark read").click()
             await expect(panel.locator(".dot-item__badge--warn")).to_have_count(0)
+
+            # Lessons: first-pass rate, add, edit and drop a rule for briefs.
+            await panel.get_by_role("tab", name="Lessons").click()
+            await expect(page.get_by_test_id("dot-lesson-stats")).to_contain_text(
+                "First pass 3/4 (75%)"
+            )
+            await expect(page.get_by_test_id("dot-lesson-stats")).to_contain_text("brief 1")
+            rows = page.get_by_test_id("dot-lesson")
+            await expect(rows).to_have_count(1)
+            await expect(rows.first).to_contain_text("always")
+            lesson_form = page.get_by_test_id("dot-lesson-form")
+            await lesson_form.get_by_label("New lesson").fill("Split goals over 7 checks")
+            await lesson_form.get_by_role("button", name="Add").click()
+            await expect(rows).to_have_count(2)
+            assert wrote("POST", "/api/dot/lessons") == [{"rule": "Split goals over 7 checks"}]
+            await shot("dot-mobile-lessons.png")
+            await rows.first.get_by_role("button", name="Edit").click()
+            await rows.first.get_by_label("Lesson rule").fill("Name the paper version")
+            await rows.first.get_by_role("button", name="Save").click()
+            await expect(rows.first).to_contain_text("Name the paper version")
+            assert wrote("PATCH", "/api/dot/lessons/l-1") == [{"rule": "Name the paper version"}]
+            await rows.nth(1).get_by_role("button", name="Drop").click()
+            await expect(rows).to_have_count(1)
+            assert wrote("DELETE", "/api/dot/lessons/l-2") == [None]
 
             await panel.get_by_role("button", name="Close Jarvis memory").click()
             await expect(panel).to_be_hidden()

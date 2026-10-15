@@ -21,6 +21,8 @@ export interface DotStatus {
   focus: number
   open_work: number
   unread_events: number
+  // Delegated tasks that came back and wait for Dot's verdict.
+  pending_reviews: number
   last_tidy_at: string | null
 }
 
@@ -65,15 +67,57 @@ export interface DotWorkItem {
   workspace_id?: string
   title?: string
   goal?: string
-  done_when?: string
+  // A numbered checklist; older items hold one string.
+  done_when?: string | string[]
+  output?: string
   status?: string
   result_card?: string
+  // A result came back and Dot has not judged it yet.
+  review_due?: boolean
+  review?: DotReview
+  // The worker had to ask a question before finishing.
+  asked?: boolean
   closed?: boolean
   // Set for an existing task the user asked Dot to watch (not delegated by Dot).
   watched?: boolean
   stall_hours?: number
   created: string
   updated: string
+}
+
+export type DotReviewCause = 'brief' | 'env' | 'worker'
+
+export interface DotReview {
+  verdict: 'ok' | 'redo'
+  cause?: DotReviewCause
+  note?: string
+  lesson_id?: string
+  at: string
+}
+
+// One rule for writing briefs, learned when a task came back wrong because of its brief.
+export interface DotLesson {
+  id: string
+  rule: string
+  votes: number
+  tasks: string[]
+  created: string
+  seen: string
+  // Votes halved every 60 days without a new vote.
+  score: number
+  // Among the few strongest rules shown in every session.
+  in_session: boolean
+  dropped?: boolean
+  merged_into?: string
+}
+
+export interface DotReviewStats {
+  reviewed: number
+  first_pass: number
+  rate: number | null
+  causes: Partial<Record<DotReviewCause, number>>
+  pending: number
+  window: number
 }
 
 export interface DotInboxEvent {
@@ -199,6 +243,30 @@ export function watchDotTask(taskId: string, stallHours?: number): Promise<DotWo
 }
 export function unwatchDotTask(taskId: string): Promise<DotWorkItem> {
   return requestJson(`/work/${encodeURIComponent(taskId)}/unwatch`, { method: 'POST' })
+}
+export function loadDotLessons(all = false): Promise<{ lessons: DotLesson[], stats: DotReviewStats }> {
+  return requestJson(`/lessons${query({ all: all || undefined })}`)
+}
+export function addDotLesson(rule: string): Promise<DotLesson> {
+  return requestJson('/lessons', jsonRequest('POST', { rule }))
+}
+export function updateDotLesson(lessonId: string, rule: string): Promise<DotLesson> {
+  return requestJson(`/lessons/${encodeURIComponent(lessonId)}`, jsonRequest('PATCH', { rule }))
+}
+export function dropDotLesson(lessonId: string): Promise<DotLesson> {
+  return requestJson(`/lessons/${encodeURIComponent(lessonId)}`, { method: 'DELETE' })
+}
+
+// "First pass 3/4 (75%)": tasks that were right at the first verdict, no question asked.
+export function formatFirstPass(stats: DotReviewStats): string {
+  if (!stats.reviewed) return 'No reviews yet'
+  return `First pass ${stats.first_pass}/${stats.reviewed} (${Math.round((stats.rate ?? 0) * 100)}%)`
+}
+
+// Same rule as the backend: strong lessons are always shown, weaker ones only on a match.
+export function lessonReach(lesson: Pick<DotLesson, 'score' | 'in_session'>): 'always' | 'on match' | 'faded' {
+  if (lesson.in_session) return 'always'
+  return lesson.score >= 0.1 ? 'on match' : 'faded'
 }
 
 // Same as the backend QUIET_REPLY: a Hub wake or tidy turn where nothing needed the user.
