@@ -12,6 +12,8 @@ import { isChatModeLocked } from '@/utils/chatTurnLifecycle'
 const props = defineProps<{
   paneId: string
   tabId: string
+  managedChat?: boolean
+  managedSessionId?: string
 }>()
 
 const store = useTerminalStore()
@@ -38,7 +40,12 @@ function reconcileQueue() {
   }
 }
 
-void start(props.tabId, 'terminal-tab')
+if (!props.managedChat || props.managedSessionId) {
+  void start(
+    props.managedSessionId ?? props.tabId,
+    props.managedChat ? 'managed-session' : 'terminal-tab',
+  )
+}
 watch(
   [
     () => queue.drafts.length,

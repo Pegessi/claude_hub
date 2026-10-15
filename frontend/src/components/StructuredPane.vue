@@ -54,9 +54,11 @@
         >
           Retry
         </button>
-        <span class="banner-guidance">{{ currentTab?.agent_type === 'maso'
-          ? 'Start the MASO HTTP service, then retry.'
-          : 'Create a Terminal session for native TUI access.' }}</span>
+        <span class="banner-guidance">{{ managedIdentityMissing
+          ? 'Return to Workspace and refresh managed sessions.'
+          : currentTab?.agent_type === 'maso'
+            ? 'Start the MASO HTTP service, then retry.'
+            : 'Create a Terminal session for native TUI access.' }}</span>
       </template>
     </div>
 
@@ -935,6 +937,7 @@
               {{ implementingPlanKey === turn.key ? 'Starting…' : 'Implement plan' }}
             </button>
             <button
+              v-if="!isManagedChat"
               type="button"
               class="turn-fork-button"
               :disabled="forkingOrdinal !== null"
@@ -1005,7 +1008,7 @@
 
 
     <GoalStatusBar
-      v-if="goal"
+      v-if="goal && !isManagedChat"
       :goal="goal"
       :busy="isGoalMutating"
       :error="goalError"
@@ -1026,7 +1029,7 @@
           {{ modeChangeError }}
         </div>
         <div
-          v-if="goalError && !goal && !isGoalSetupOpen"
+          v-if="goalError && !goal && !isGoalSetupOpen && !isManagedChat"
           class="composer-mode-error"
           role="alert"
         >
@@ -1102,7 +1105,8 @@
           <div class="composer-tools">
             <ComposerAddMenu
               v-model:open="isAddMenuOpen"
-              :show-goal="!goal && Boolean(capabilities?.supports_goals)"
+              :show-goal="!isManagedChat && !goal && Boolean(capabilities?.supports_goals)"
+              :show-schedule="!isManagedChat"
               :attachment-disabled-reason="attachmentDisabledReason"
               :goal-disabled-reason="goalSetupDisabledReason"
               @attachment="triggerFilePicker"
@@ -1334,6 +1338,7 @@
     </div>
 
     <GoalSetupDialog
+      v-if="!isManagedChat"
       :open="isGoalSetupOpen"
       :busy="isGoalMutating"
       :error="goalError"
@@ -1416,11 +1421,22 @@ import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
-  /** A top-level Chat tab owns its transcript directly. */
+  /** Display tab identity; ordinary Chat also uses it for stream identity. */
   tabId: string
+  /** Whether this pane belongs to Workspace-managed execution. */
+  managedChat?: boolean
+  /** ManagedSession.id; provider conversation IDs are never stream identity. */
+  managedSessionId?: string
   /** Keep queued drafts attached to the pane whose KeepAlive owns this instance. */
   paneId: string
 }>()
+const isManagedChat = computed(() => Boolean(props.managedChat))
+const managedIdentityMissing = computed(() => isManagedChat.value && !props.managedSessionId)
+const streamSource = computed(() => isManagedChat.value ? 'managed-session' as const : 'terminal-tab' as const)
+const streamSourceId = computed(() => isManagedChat.value ? props.managedSessionId ?? '' : props.tabId)
+const streamBasePath = computed(() => isManagedChat.value
+  ? `/api/workspaces/sessions/${encodeURIComponent(streamSourceId.value)}/stream`
+  : `/api/workspaces/tabs/${encodeURIComponent(streamSourceId.value)}/stream`)
 
 const terminalStore = useTerminalStore()
 const appStore = useAppStore()
@@ -1518,7 +1534,12 @@ const isHistoryVisible = computed(() =>
 )
 
 function startStream() {
-  void start(props.tabId, 'terminal-tab')
+  if (managedIdentityMissing.value) {
+    errorMessage.value = 'Managed Chat identity is not available yet. Refresh Workspace sessions and try again.'
+    connectionState.value = 'failed'
+    return
+  }
+  void start(streamSourceId.value, streamSource.value)
 }
 
 // ── Timeline grouping ───────────────────────────────────────────────────────
@@ -1607,7 +1628,7 @@ async function implementPlan(turn: TimelineTurn) {
 }
 
 async function forkFromTurn(ordinal: number) {
-  if (forkingOrdinal.value !== null) return
+  if (isManagedChat.value || forkingOrdinal.value !== null) return
   forkingOrdinal.value = ordinal
   try {
     await terminalStore.forkTab(props.tabId, ordinal)
@@ -1711,7 +1732,9 @@ const modelEnvVar = computed(() => {
 // Edit-resend truncates the provider's on-disk transcript, which is only wired
 // for providers whose rollout Hub can locate. TraeX transcripts live under
 // ~/.trae and are not wired this wave, so the control is hidden (it would 409).
-const supportsEditResend = computed(() => ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? ''))
+const supportsEditResend = computed(() =>
+  !isManagedChat.value && ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? '')
+)
 const currentModel = computed(() => {
   const env = currentTab.value?.env ?? {}
   const key = modelEnvVar.value
@@ -2059,8 +2082,8 @@ watch(events, (latest, previous) => {
         break
       }
     }
-    if (completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
-    else void hydrateGoal()
+    if (!isManagedChat.value && completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
+    else if (!isManagedChat.value) void hydrateGoal()
   }
 })
 
@@ -2090,7 +2113,7 @@ onActivated(() => {
   visibleHistoryStart.value = null
   resetActivation()
   startStream()
-  void hydrateGoal()
+  if (!isManagedChat.value) void hydrateGoal()
   void nextTick(() => {
     if (timelineDisposed) return
     observeTimelineGeometry()
@@ -2131,7 +2154,11 @@ onUnmounted(() => {
 })
 
 function retry() {
-  void retryStream(props.tabId, 'terminal-tab')
+  if (managedIdentityMissing.value) {
+    startStream()
+    return
+  }
+  void retryStream(streamSourceId.value, streamSource.value)
 }
 
 /** Monotonically increasing epoch that advances on every source switch
@@ -2555,7 +2582,7 @@ function removeAttachment(att: DraftAttachment) {
  */
 function attachmentUrl(attachmentId: string): string {
   const encId = encodeURIComponent(attachmentId)
-  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/attachments/${encId}`
+  return `${streamBasePath.value}/attachments/${encId}`
 }
 
 /**
@@ -2564,7 +2591,7 @@ function attachmentUrl(attachmentId: string): string {
  * validates magic bytes before serving, so this is not an arbitrary file read.
  */
 function agentImageUrl(path: string): string {
-  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/agent-image?path=${encodeURIComponent(path)}`
+  return `${streamBasePath.value}/agent-image?path=${encodeURIComponent(path)}`
 }
 
 /** Short file name for the image block's subtitle (full path stays on hover). */
@@ -3003,7 +3030,7 @@ async function cancelActiveTurn() {
   isCancelling.value = true
   composerError.value = null
   try {
-    const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/cancel`, {
+    const res = await fetch(`${streamBasePath.value}/cancel`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -3074,7 +3101,7 @@ async function sendToStream(
   delivery: 'normal' | 'steer' = 'normal',
   timeoutMs: number | null = null,
 ) {
-  const base = `/api/workspaces/tabs/${props.tabId}/stream/send`
+  const base = `${streamBasePath.value}/send`
   const controller = new AbortController()
   const timer = timeoutMs === null ? null : setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
@@ -3166,7 +3193,7 @@ async function submitEdit(turn: TimelineTurn) {
     ? crypto.randomUUID()
     : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
   try {
-    const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/edit-resend`, {
+    const res = await fetch(`${streamBasePath.value}/edit-resend`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
@@ -3191,7 +3218,7 @@ async function submitEdit(turn: TimelineTurn) {
     editingTurnKey.value = null
     editDraft.value = ''
     resetStream()
-    void start(props.tabId, 'terminal-tab')
+    void start(streamSourceId.value, streamSource.value)
   } catch (err) {
     editError.value = err instanceof Error ? err.message : 'Failed to resend message'
   } finally {
@@ -3277,7 +3304,7 @@ async function submit(
     }
     requestLatestAnchor(true)
     await sendToStream(message, atts, clientTurnId, delivery, source === 'queue' ? 15_000 : null)
-    if (messageOverride) await hydrateGoal()
+    if (messageOverride && !isManagedChat.value) await hydrateGoal()
     // A successful explicit send resolves a previously uncertain queued item.
     // Automatic queue sends never clear this flag; only deliberate user input
     // may resume the remaining queue after an ambiguous POST failure.

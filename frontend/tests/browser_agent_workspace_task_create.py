@@ -84,6 +84,7 @@ def task_fixture(
         "prompt": f"Description for {title}",
         "attachments": [],
         "agent_type": "codex",
+        "session_kind": "terminal",
         "task_mode": "reviewed",
         "execution_complexity": "auto",
         "origin": "human",
@@ -128,6 +129,8 @@ async def main(browser_run: BrowserRun) -> None:
     blocked_requests: list[tuple[str, str]] = []
     unknown_requests: list[tuple[str, str]] = []
     create_calls: list[dict] = []
+    agent_create_calls: list[dict] = []
+    managed_sessions: dict[str, list[dict]] = {"ws-1": [], "ws-2": []}
     created_by_key: dict[tuple[str, str], dict] = {}
     board_tasks = {
         "ws-1": [
@@ -155,7 +158,7 @@ async def main(browser_run: BrowserRun) -> None:
         return {
             "workspace": workspace,
             "tasks": board_tasks[workspace_id],
-            "sessions": [],
+            "sessions": managed_sessions[workspace_id],
             "reports": [],
             "snapshot_path": None,
             "tasks_pagination": {
@@ -196,6 +199,7 @@ async def main(browser_run: BrowserRun) -> None:
             prompt=body["prompt"],
             attachments=persisted_attachments,
             agent_type=body.get("agent_type", "codex"),
+            session_kind=body.get("session_kind", "terminal"),
             task_mode=body.get("task_mode", "reviewed"),
             execution_complexity=body.get("execution_complexity", "auto"),
             execution_ref=body.get("execution_ref"),
@@ -285,6 +289,30 @@ async def main(browser_run: BrowserRun) -> None:
                 body = WORKSPACES
             elif method == "GET" and path == "/api/tabs/status" and not parsed.query:
                 body = []
+            elif method == "GET" and path == "/api/tabs/sidebar-preferences" and not parsed.query:
+                body = {"pinned_chat_ids": []}
+            elif method == "POST" and path == "/api/tabs/sidebar-preferences/migrate-browser-pins" and not parsed.query:
+                body = {"pinned_chat_ids": []}
+            elif method == "GET" and path == "/api/tabs" and not parsed.query:
+                body = [
+                    {
+                        "id": session["tab_id"],
+                        "name": session["title"],
+                        "cwd": session["workspace_path"],
+                        "agent_type": session["agent_type"],
+                        "session_kind": session["session_kind"],
+                        "target": session["target"],
+                        "port": 0,
+                        "created_at": NOW,
+                        "is_active": True,
+                        "workspace_id": session["workspace_id"],
+                        "workspace_role": session["role"],
+                        "managed_session_id": session["id"],
+                        "agent_session_id": None,
+                    }
+                    for sessions in managed_sessions.values()
+                    for session in sessions
+                ]
             else:
                 capabilities_match = re.fullmatch(
                     r"/api/workspaces/(ws-1|ws-2)/task-capabilities",
@@ -306,7 +334,42 @@ async def main(browser_run: BrowserRun) -> None:
                     r"/api/workspaces/(ws-1|ws-2)/tasks",
                     path,
                 )
-                if method == "GET" and capabilities_match and not parsed.query:
+                agent_match = re.fullmatch(
+                    r"/api/workspaces/(ws-1|ws-2)/agent",
+                    path,
+                )
+                if method == "POST" and agent_match and not parsed.query:
+                    workspace_id = agent_match.group(1)
+                    submitted = json.loads(request.post_data or "{}")
+                    agent_create_calls.append(submitted)
+                    index = len(agent_create_calls)
+                    session = {
+                        "id": f"managed-chat-{index}",
+                        "workspace_id": workspace_id,
+                        "task_id": None,
+                        "tab_id": f"managed-tab-{index}",
+                        "role": submitted.get("role", "orchestrator"),
+                        "agent_type": submitted["agent_type"],
+                        "session_kind": submitted.get("session_kind", "terminal"),
+                        "status": "idle",
+                        "runtime_status": "idle",
+                        "current_task_id": None,
+                        "queued_count": 0,
+                        "title": submitted.get("title") or "Managed Chat",
+                        "branch": None,
+                        "workspace_path": submitted.get("cwd") or "/tmp/alpha",
+                        "tmux_session": "managed-chat-fixture",
+                        "target": submitted.get("target", "local"),
+                        "remote_profile_id": None,
+                        "remote_cwd": None,
+                        "remote_reconnect": False,
+                        "solo_mode": False,
+                        "ephemeral": False,
+                        "env": submitted.get("env") or {},
+                    }
+                    managed_sessions[workspace_id].append(session)
+                    body = session
+                elif method == "GET" and capabilities_match and not parsed.query:
                     workspace_id = capabilities_match.group(1)
                     mode = capability_modes[workspace_id]
                     if mode == "deferred":
@@ -471,6 +534,39 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(workspace_select).to_have_value("ws-1")
         await expect(page.get_by_role("button", name="Add Task", exact=True)).to_be_enabled()
 
+        # Workspace workers and reviewers choose their execution surface before
+        # provider selection. MASO is Chat-only, and selecting Remote must force
+        # the form back to Terminal rather than offering unsupported native Chat.
+        await page.get_by_role("button", name="Manage Agents", exact=True).click()
+        agent_modal = page.locator(".workspace-modal").filter(
+            has=page.get_by_role("heading", name="Manage Agents", exact=True)
+        )
+        await expect(agent_modal).to_be_visible()
+        await agent_modal.get_by_role("button", name="Chat", exact=True).click()
+        agent_type = agent_modal.get_by_label("Agent Type", exact=True)
+        await expect(agent_type.locator('option[value="maso"]')).to_have_count(1)
+        await agent_type.select_option("maso")
+        await agent_modal.get_by_role("button", name="Remote", exact=True).click()
+        await expect(agent_modal.get_by_role("button", name="Chat", exact=True)).to_be_disabled()
+        await expect(agent_type).to_have_value("codex")
+        await expect(agent_type.locator('option[value="maso"]')).to_have_count(0)
+        await agent_modal.get_by_role("button", name="Local", exact=True).click()
+        await agent_modal.get_by_role("button", name="Chat", exact=True).click()
+        await agent_type.select_option("maso")
+        title_field = agent_modal.locator('input[placeholder="Workspace Agent"]')
+        await title_field.fill("MASO Chat reviewer")
+        await agent_modal.get_by_role("button", name="Create agent", exact=True).click()
+        await expect(agent_modal.get_by_text("MASO Chat reviewer", exact=True)).to_be_visible()
+        assert len(agent_create_calls) == 1
+        agent_payload = agent_create_calls[0]
+        assert agent_payload["agent_type"] == "maso"
+        assert agent_payload["session_kind"] == "chat"
+        assert agent_payload["role"] == "orchestrator"
+        assert agent_payload["target"] == "local"
+        assert agent_payload["title"] == "MASO Chat reviewer"
+        await page.screenshot(path=output / "managed-chat-agent.png", full_page=True)
+        await agent_modal.get_by_role("button", name="Cancel", exact=True).click()
+
         async def open_add_task():
             await page.get_by_role("button", name="Add Task", exact=True).click()
             modal = page.locator(".workspace-modal").filter(
@@ -599,6 +695,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(modal.locator(".attachment-row")).to_have_count(0)
         assert await load_create_attempt("ws-1") is None
 
+        await modal.get_by_role("button", name="Chat", exact=True).click()
         await modal.get_by_label("Title", exact=True).fill("Attachment-only uncertain create")
         await paste_task_attachment(modal)
         await expect(modal.get_by_label("Task description", exact=True)).to_have_value("")
@@ -611,6 +708,7 @@ async def main(browser_run: BrowserRun) -> None:
         first_attachment_call = create_calls[-1]
         assert first_attachment_call["body"]["title"] == "Attachment-only uncertain create"
         assert first_attachment_call["body"]["prompt"] == ""
+        assert first_attachment_call["body"]["session_kind"] == "chat"
         assert first_attachment_call["body"]["attachments"] == [EXPECTED_ATTACHMENT_CREATE]
         attachment_request_key = first_attachment_call["body"]["request_key"]
         assert isinstance(attachment_request_key, str) and attachment_request_key

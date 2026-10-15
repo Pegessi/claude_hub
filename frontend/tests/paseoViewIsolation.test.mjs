@@ -122,7 +122,7 @@ test('an acknowledged turn shows a waiting state until provider activity arrives
 
 test('structured Retry asks the backend to replace a failed provider transport', () => {
   assert.match(structuredPane, /retry: retryStream/)
-  assert.match(structuredPane, /retryStream\(props\.tabId, 'terminal-tab'\)/)
+  assert.match(structuredPane, /retryStream\(streamSourceId\.value, streamSource\.value\)/)
   assert.doesNotMatch(structuredPane, /function retry\(\) \{\s*startStream\(\)/)
 })
 

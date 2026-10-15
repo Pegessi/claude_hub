@@ -2259,7 +2259,7 @@
             >
               <div>
                 <strong>{{ agent.title }}</strong>
-                <span>{{ agentRoleLabel(agent) }} · {{ agent.agent_type }} · {{ agent.id }}</span>
+                <span>{{ agentRoleLabel(agent) }} · {{ agent.agent_type }} · {{ agent.session_kind }} · {{ agent.id }}</span>
                 <span>{{ agent.target }} · {{ agent.workspace_path }}</span>
               </div>
               <div class="agent-row-meta">
@@ -2371,11 +2371,42 @@
             </div>
           </div>
 
+          <div class="modal-field">
+            <label>Execution surface</label>
+            <div class="segmented-control">
+              <button
+                type="button"
+                :class="['segment-button', { active: agentOptionsForm.session_kind === 'terminal' }]"
+                @click="handleAgentSurfaceChange('terminal')"
+              >
+                Terminal
+              </button>
+              <button
+                type="button"
+                :disabled="agentOptionsForm.target === 'remote'"
+                :class="['segment-button', { active: agentOptionsForm.session_kind === 'chat' }]"
+                title="Managed Chat is available for local agents"
+                @click="handleAgentSurfaceChange('chat')"
+              >
+                Chat
+              </button>
+            </div>
+            <p class="modal-hint">
+              {{ agentOptionsForm.target === 'remote'
+                ? 'Remote agents use the Terminal surface.'
+                : agentOptionsForm.session_kind === 'chat'
+                  ? 'Chat opens structured managed history and sends through the Workspace mailbox.'
+                  : 'Terminal opens the provider’s native CLI.' }}
+            </p>
+          </div>
+
           <AgentConfigFields
             v-model:agent-type="agentOptionsForm.agent_type"
             v-model:solo-mode="agentOptionsForm.solo_mode"
             v-model:env-preset="agentOptionsForm.env_preset"
             v-model:env-text="agentOptionsForm.env_text"
+            :allow-maso="agentOptionsForm.session_kind === 'chat'"
+            :allow-terminal="agentOptionsForm.session_kind === 'terminal'"
             :exclude-types="['traex']"
             variant="modal"
           />
@@ -2796,6 +2827,7 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
+import { providerSupportsManagedSurface } from '@/utils/managedChatSurface'
 import { remoteInteractive, remoteProfileBadge } from '@/utils/remoteProfiles'
 import { DEFAULT_ABORT_REASON, resolveAbortReason } from '@/utils/taskAbort'
 import {
@@ -2821,6 +2853,7 @@ import type {
   ResidentPeriodicTask,
   ReviewProfile,
   ReviewProfileResult,
+  SessionKind,
   TerminalAgentStatus,
   WorkspaceAttachment,
   WorkspaceSessionRole,
@@ -3020,6 +3053,7 @@ const agentOptionsForm = reactive({
   title: '',
   role: 'orchestrator' as WorkspaceSessionRole,
   agent_type: 'codex' as AgentType,
+  session_kind: 'terminal' as SessionKind,
   target: 'local' as ExecutionTarget,
   cwd: '',
   solo_mode: true,
@@ -3625,6 +3659,11 @@ const isAgentOptionsCreateDisabled = computed(
   () =>
     isLoading.value ||
     isPending('agent:create') ||
+    !providerSupportsManagedSurface(
+      agentOptionsForm.agent_type,
+      agentOptionsForm.session_kind,
+      agentOptionsForm.target,
+    ) ||
     (agentOptionsForm.target === 'remote' && !agentOptionsForm.remote_profile_id) ||
     (agentOptionsForm.target === 'remote' && !remoteInteractive(selectedAgentRemoteProfile.value))
 )
@@ -4663,6 +4702,7 @@ function resetAgentOptionsForm() {
   agentOptionsForm.title = ''
   agentOptionsForm.role = 'orchestrator'
   agentOptionsForm.agent_type = 'codex'
+  agentOptionsForm.session_kind = 'terminal'
   agentOptionsForm.target = workspace?.target ?? 'local'
   agentOptionsForm.solo_mode = true
   agentOptionsForm.remote_reconnect = workspace?.remote_reconnect ?? true
@@ -4672,10 +4712,24 @@ function resetAgentOptionsForm() {
   agentOptionsForm.cwd = workspaceDefaultCwd(agentOptionsForm.target)
 }
 
+function handleAgentSurfaceChange(sessionKind: SessionKind) {
+  if (sessionKind === 'chat' && agentOptionsForm.target === 'remote') return
+  agentOptionsForm.session_kind = sessionKind
+  if (
+    (sessionKind === 'chat' && agentOptionsForm.agent_type === 'terminal') ||
+    (sessionKind === 'terminal' && agentOptionsForm.agent_type === 'maso')
+  ) {
+    agentOptionsForm.agent_type = 'codex'
+    agentOptionsForm.solo_mode = true
+    resetAgentEnvForType('codex')
+  }
+}
+
 function handleAgentTargetChange(target: ExecutionTarget) {
   if (agentOptionsForm.target === target) return
   const previousDefault = workspaceDefaultCwd(agentOptionsForm.target)
   agentOptionsForm.target = target
+  if (target === 'remote') handleAgentSurfaceChange('terminal')
   if (!agentOptionsForm.cwd.trim() || agentOptionsForm.cwd === previousDefault) {
     agentOptionsForm.cwd = workspaceDefaultCwd(target)
   }
@@ -4715,6 +4769,7 @@ async function handleCreateAdvancedAgent() {
   await runPending('agent:create', async () => {
     await workspaceStore.ensureWorkspaceAgent({
       agent_type: agentOptionsForm.agent_type,
+      session_kind: agentOptionsForm.session_kind,
       title: agentOptionsForm.title.trim() || null,
       role: agentOptionsForm.role,
       reuse_existing: false,
