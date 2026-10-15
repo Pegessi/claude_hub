@@ -1,0 +1,325 @@
+"""Exercise the Dot launcher and panel on a phone, then on desktop, in the real SPA.
+
+Run only with a task-owned Vite server, never 5173/8173:
+  python tests/browser_dot_panel.py <owned-loopback-url> <new-output-dir> <browser>
+
+All APIs are mocked. No Hub backend or provider is contacted.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+from playwright.async_api import expect
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
+
+TAB = "dot-tab"
+NOW = "2026-10-15T08:00:00Z"
+
+
+def origin(url: str) -> tuple[str, str | None, int | None]:
+    parsed = urlparse(url)
+    return parsed.scheme, parsed.hostname, parsed.port
+
+
+async def main(browser_run: BrowserRun) -> None:
+    if len(sys.argv) != 4:
+        raise SystemExit(__doc__)
+    base = sys.argv[1].rstrip("/")
+    parsed_base = urlparse(base)
+    if (
+        parsed_base.scheme != "http"
+        or parsed_base.hostname not in {"127.0.0.1", "::1"}
+        or parsed_base.port in {None, 5173, 8173, 10025, 18183}
+        or parsed_base.username is not None
+        or parsed_base.password is not None
+        or parsed_base.path not in {"", "/"}
+        or parsed_base.query
+        or parsed_base.fragment
+    ):
+        raise SystemExit("Use an owned numeric-loopback review server")
+    output = Path(sys.argv[2]).resolve()
+
+    identity = {"name": "Dot", "avatar": "", "avatar_image": None}
+    tab = {
+        "id": TAB,
+        "name": "Dot",
+        "cwd": "/fixture/dot",
+        "agent_type": "claude",
+        "session_kind": "chat",
+        "port": 0,
+        "is_active": True,
+        "created_at": NOW,
+    }
+    work: list[dict] = []
+    inbox = [
+        {
+            "id": "e-1",
+            "kind": "task_stalled",
+            "text": "Train run — no progress for 2.5h (status working)",
+            "at": NOW,
+        }
+    ]
+    writes: list[list] = []
+    report = {
+        "result": "FAIL",
+        "api_requests": [],
+        "blocked_external_requests": [],
+        "blocked_websockets": [],
+        "unknown_requests": [],
+        "page_errors": [],
+        "writes": writes,
+        "screenshots": [],
+        "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
+    }
+    failure: BaseException | None = None
+    page = None
+
+    def status() -> dict:
+        return {
+            "set_up": True,
+            "identity": identity,
+            "home": "/fixture/dot",
+            "tab_id": TAB,
+            "tab_exists": True,
+            "session": {
+                "conversation_id": None,
+                "turns": 1,
+                "started_at": NOW,
+                "max_turns": 24,
+            },
+            "cards": {"knowledge": 2},
+            "focus": 0,
+            "open_work": len(work),
+            "unread_events": len(inbox),
+            "last_tidy_at": None,
+        }
+
+    async with browser_run.context(
+        viewport={"width": 390, "height": 844},
+        launch_args=["--disable-background-networking", "--disable-component-update"],
+    ) as context:
+        try:
+
+            async def block_websocket(socket) -> None:
+                report["blocked_websockets"].append(socket.url)
+                await socket.close(code=1000, reason="mocked dot smoke")
+
+            async def route_all(route) -> None:
+                request = route.request
+                parsed = urlparse(request.url)
+                if origin(request.url) != origin(base):
+                    report["blocked_external_requests"].append(request.url)
+                    await route.abort("blockedbyclient")
+                    return
+                path = parsed.path
+                if not path.startswith("/api/"):
+                    await route.continue_()
+                    return
+                method = request.method
+                report["api_requests"].append([method, path])
+                data = json.loads(request.post_data or "null")
+                if method != "GET":
+                    writes.append([method, path, data])
+
+                code = 200
+                body: object
+                if path == "/api/auth/check":
+                    body = {"auth_required": False, "user": None}
+                elif path == "/api/tabs":
+                    body = [tab]
+                elif path in {"/api/tabs/status", "/api/tabs/archived"}:
+                    body = []
+                elif path.startswith("/api/tabs/sidebar-preferences"):
+                    body = {"pinned_tab_ids": []}
+                elif path == "/api/env-presets":
+                    body = {"custom_presets": [], "hidden_builtin_ids": []}
+                elif path == "/api/feishu/bot/bots":
+                    body = {
+                        "pool_revision": 0,
+                        "bots": [],
+                        "pool_editable": True,
+                        "deprecated_env": [],
+                        "focus_bot_id": None,
+                    }
+                elif path.endswith("/capabilities"):
+                    body = {
+                        "structured": True,
+                        "send_message": True,
+                        "supports_goals": False,
+                        "supports_images": True,
+                        "agent_type": "claude",
+                        "supports_mode_switch": False,
+                    }
+                elif path.endswith("/events") or path.endswith("/wait"):
+                    if path.endswith("/wait"):
+                        await asyncio.sleep(0.2)
+                    body = {"events": [], "next_sequence": -1, "has_more": False}
+                elif path.endswith("/live"):
+                    await route.fulfill(
+                        status=200, content_type="text/event-stream", body=": mock\n\n"
+                    )
+                    return
+                elif path.endswith("/goal/current"):
+                    body = None
+                elif path.endswith("/view"):
+                    body = {"ok": True}
+                elif "network" in path:
+                    body = {"hostname": "fixture", "addresses": []}
+                elif path == "/api/dot/status":
+                    body = status()
+                elif path == "/api/dot/identity" and method == "GET":
+                    body = identity
+                elif path == "/api/dot/identity" and method == "PATCH":
+                    identity.update(
+                        {key: value for key, value in data.items() if value is not None}
+                    )
+                    tab["name"] = identity["name"]
+                    body = identity
+                elif path == "/api/dot/focus":
+                    body = []
+                elif path == "/api/dot/work":
+                    body = work
+                elif path == "/api/dot/inbox":
+                    body = inbox
+                elif path == "/api/dot/inbox/ack":
+                    inbox.clear()
+                    body = {"acked": 1}
+                elif path == "/api/dot/work/no-such-task/watch":
+                    code, body = 404, {"detail": "Task not found"}
+                elif path == "/api/dot/work/task-7/watch":
+                    work.append(
+                        {
+                            "task_id": "task-7",
+                            "title": "Train run",
+                            "status": "working",
+                            "watched": True,
+                            "stall_hours": data["stall_hours"],
+                            "created": NOW,
+                            "updated": NOW,
+                        }
+                    )
+                    body = work[-1]
+                elif path == "/api/dot/work/task-7/unwatch":
+                    work.clear()
+                    body = {"task_id": "task-7", "closed": True}
+                else:
+                    report["unknown_requests"].append([method, path])
+                    await route.fulfill(
+                        status=501,
+                        content_type="application/json",
+                        body=json.dumps({"detail": f"unmocked API: {method} {path}"}),
+                    )
+                    return
+                await route.fulfill(
+                    status=code, content_type="application/json", body=json.dumps(body)
+                )
+
+            def wrote(method: str, path: str) -> list:
+                return [item[2] for item in writes if item[0] == method and item[1] == path]
+
+            async def shot(name: str) -> None:
+                await page.screenshot(path=str(output / name))
+                report["screenshots"].append(name)
+
+            await context.route_web_socket("**/*", block_websocket)
+            await context.route("**/*", route_all)
+            page = await context.new_page()
+            page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
+            await page.goto(base + f"/?tab={TAB}", wait_until="domcontentloaded")
+
+            # Phone: the app bar is hidden, so the compact launcher sits in the tab bar.
+            launchers = page.get_by_test_id("dot-launcher")
+            await expect(launchers).to_have_count(1)
+            launcher = launchers.first
+            await expect(launcher).to_be_visible()
+            assert "dot-launcher--compact" in (await launcher.get_attribute("class") or "")
+            box = await launcher.locator(".dot-launcher__memory").bounding_box()
+            assert box is not None and box["height"] >= 36, box
+            await shot("dot-mobile-home.png")
+
+            await launcher.get_by_role("button", name="Open Dot memory").click()
+            panel = page.get_by_test_id("dot-panel")
+            await expect(panel).to_be_visible()
+            panel_box = await panel.bounding_box()
+            assert panel_box is not None and panel_box["width"] == 390, panel_box
+            close_box = await panel.get_by_role("button", name="Close Dot memory").bounding_box()
+            assert close_box is not None and close_box["height"] >= 44, close_box
+
+            # Rename and set an emoji; the tab list is refreshed for the new tab name.
+            await panel.get_by_role("button", name="Edit").click()
+            editor = page.get_by_test_id("dot-identity-editor")
+            name_input = editor.get_by_label("Name")
+            font = await name_input.evaluate("el => getComputedStyle(el).fontSize")
+            assert font == "16px", f"phone inputs must be 16px to avoid iOS zoom, got {font}"
+            tab_reads = report["api_requests"].count(["GET", "/api/tabs"])
+            await name_input.fill("Jarvis")
+            await editor.get_by_label("Emoji").fill("🦊")
+            await shot("dot-mobile-edit.png")
+            await editor.get_by_role("button", name="Save").click()
+            await expect(editor).to_be_hidden()
+            await expect(panel.locator(".dot-panel__title")).to_have_text("Jarvis")
+            await expect(panel.locator(".dot-avatar__text").first).to_have_text("🦊")
+            assert wrote("PATCH", "/api/dot/identity") == [{"name": "Jarvis", "avatar": "🦊"}]
+            deadline = asyncio.get_running_loop().time() + 5
+            while report["api_requests"].count(["GET", "/api/tabs"]) == tab_reads:
+                assert asyncio.get_running_loop().time() < deadline, "tabs were not refreshed"
+                await asyncio.sleep(0.05)
+
+            # Work: the stuck alarm is flagged, a bad id shows the server error,
+            # a good one is watched with the chosen alarm and can be stopped.
+            await panel.get_by_role("tab", name="Work").click()
+            await expect(panel.locator(".dot-item__badge--warn")).to_have_text("stalled")
+            watch_form = page.get_by_test_id("dot-watch-form")
+            await watch_form.get_by_label("Task id to watch").fill("no-such-task")
+            await watch_form.get_by_role("button", name="Watch").click()
+            await expect(panel.locator(".dot-panel__error")).to_have_text("Task not found")
+            await watch_form.get_by_label("Task id to watch").fill("task-7")
+            await watch_form.get_by_label("Stuck alarm after").select_option("4")
+            await watch_form.get_by_role("button", name="Watch").click()
+            await expect(panel.get_by_text("task-7 · watched")).to_be_visible()
+            await expect(panel.get_by_text("stuck alarm 4h")).to_be_visible()
+            assert wrote("POST", "/api/dot/work/task-7/watch") == [{"stall_hours": 4}]
+            await shot("dot-mobile-work.png")
+            await panel.get_by_role("button", name="Stop").click()
+            await expect(panel.get_by_text("task-7 · watched")).to_be_hidden()
+            assert wrote("POST", "/api/dot/work/task-7/unwatch") == [None]
+            await panel.get_by_role("button", name="Mark read").click()
+            await expect(panel.locator(".dot-item__badge--warn")).to_have_count(0)
+
+            await panel.get_by_role("button", name="Close Jarvis memory").click()
+            await expect(panel).to_be_hidden()
+
+            # Desktop: the full launcher moves to the app bar and shows the name.
+            await page.set_viewport_size({"width": 1280, "height": 900})
+            await expect(launchers).to_have_count(1)
+            await expect(page.locator(".app-mode-tools [data-testid=dot-launcher]")).to_be_visible()
+            await expect(page.locator(".dot-launcher__name")).to_have_text("Jarvis")
+            await shot("dot-desktop-home.png")
+
+            assert not report["unknown_requests"], report["unknown_requests"]
+            assert not report["page_errors"], report["page_errors"]
+            report["result"] = "PASS"
+        except BaseException as exc:
+            failure = exc
+            report["error_type"] = type(exc).__name__
+            if page is not None:
+                try:
+                    await page.screenshot(path=str(output / "failure.png"), full_page=True)
+                except Exception:
+                    pass
+
+    (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps(report, indent=2))
+    if failure is not None:
+        raise failure
+
+
+if __name__ == "__main__":
+    run_browser_main(main)

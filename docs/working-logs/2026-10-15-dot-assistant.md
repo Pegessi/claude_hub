@@ -86,8 +86,23 @@ that fails on the old code:
   under the store lock. Commits use their own git lock so slow git does not
   block JSON reads and writes.
 
-Not changed (decision for the user): the Dot tab runs in solo mode
-(permissions skipped) so unattended wake and tidy turns can run tools.
+The user kept solo mode for the Dot tab (permissions skipped) so unattended
+wake and tidy turns can run tools.
+
+## Test coverage
+
+- Backend: 47 Dot tests; line coverage of `services/dot`, `api/dot.py` and
+  `cli/commands/dot.py` is 92% (88% before). Added schedule creation and
+  re-pointing, the plain `done` path, delegate route/CLI errors, journal and
+  `dot show`. What is left uncovered is mostly CLI text output and rare
+  error branches.
+- Browser: `frontend/tests/browser_dot_panel.py` (in `browser-mocks`) runs the
+  real SPA with mocked APIs at 390x844, then 1280x900: compact launcher in
+  the tab bar, full-width panel, 16px inputs, rename + emoji (PATCH body, tab
+  refresh), stalled badge, watch error and success with a 4h alarm, Stop,
+  Mark read, then the desktop launcher with the new name. It found two small
+  issues, now fixed: the phone launcher buttons were 34px tall (now 36px),
+  and the close button label still said "Dot" after a rename.
 
 ## Risks
 

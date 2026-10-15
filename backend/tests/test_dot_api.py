@@ -19,9 +19,10 @@ from claude_hub.cli.client import HubClient
 from claude_hub.cli.main import cli
 from claude_hub.main import app
 from claude_hub.models.schemas import User
-from claude_hub.services import ttyd_manager
+from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.dot import DotService, DotStore, reset_dot_service
 from claude_hub.services.ttyd_manager import DEFAULT_CLAUDE_LAUNCH_ENV
+from claude_hub.services.workspace_manager._task_execution import TaskExecutionConflict
 
 
 @pytest.fixture()
@@ -333,3 +334,72 @@ def test_watch_routes_and_cli(
     assert service.store.get_work("task-1")["stall_hours"] == 1.5  # type: ignore[index]
     assert CliRunner().invoke(cli, ["dot", "unwatch", "task-1"]).exit_code == 0
     assert service.store.list_work() == []
+
+
+def test_delegate_route_and_cli(
+    api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, service = api
+    _route_to_app(client, monkeypatch)
+    outcome: dict[str, Any] = {}
+
+    async def fake_register(ws: str, payload: Any, actor_key: str) -> tuple[Any, bool]:
+        if ws == "missing":
+            raise KeyError(ws)
+        task = SimpleNamespace(
+            id="task-5", title=payload.title, status=SimpleNamespace(value="todo")
+        )
+        return task, False
+
+    async def fake_start(task_id: str, request: Any) -> Any:
+        if outcome.get("conflict"):
+            raise TaskExecutionConflict("task_is_initiator_controlled")
+        return SimpleNamespace(id=task_id, title="Paper", status=SimpleNamespace(value="queued"))
+
+    monkeypatch.setattr(workspace_manager, "register_task", fake_register)
+    monkeypatch.setattr(workspace_manager, "start_task", fake_start)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "dot", "delegate", "--workspace", "ws", "--title", "Paper", "--goal", "Summarize",
+            "--done-when", "5 bullets", "--stall-hours", "3",
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert "delegated task-5 (queued): Paper" in result.output
+    assert service.store.get_work("task-5")["stall_hours"] == 3  # type: ignore[index]
+
+    body = {"workspace_id": "missing", "title": "x", "goal": "y", "done_when": "z"}
+    assert client.post("/api/dot/delegate", json=body).status_code == 404
+    outcome["conflict"] = True
+    body["workspace_id"] = "ws"
+    assert client.post("/api/dot/delegate", json=body).status_code == 409
+    assert client.post("/api/dot/delegate", json={**body, "goal": " "}).status_code == 400
+    assert client.post("/api/dot/delegate", json={**body, "stall_hours": 0}).status_code == 422
+
+
+def test_journal_route_and_cli_show(
+    api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, service = api
+    _route_to_app(client, monkeypatch)
+    assert client.get("/api/dot/journal").json() == {"days": [], "day": None, "text": ""}
+    service.store.append_journal("user", "hello Dot")
+    journal = client.get("/api/dot/journal").json()
+    assert journal["days"] == [journal["day"]] and "hello Dot" in journal["text"]
+    assert client.get("/api/dot/journal", params={"day": "bad"}).status_code == 422
+
+    card = client.post(
+        "/api/dot/cards",
+        json={
+            "kind": "knowledge",
+            "title": "FA3",
+            "summary": "fast",
+            "body": "details",
+            "tags": ["gpu"],
+        },
+    ).json()
+    result = CliRunner().invoke(cli, ["dot", "show", card["id"]])
+    assert result.exit_code == 0, result.output
+    assert "FA3" in result.output and "summary: fast" in result.output
+    assert "tags: gpu" in result.output and result.output.rstrip().endswith("details")

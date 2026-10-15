@@ -40,7 +40,7 @@
             <button
               type="button"
               class="dot-panel__close"
-              aria-label="Close Dot memory"
+              :aria-label="`Close ${identity.name} memory`"
               @click="$emit('close')"
             >
               ×
@@ -201,7 +201,7 @@
                 v-if="!loading && focus.length === 0"
                 class="dot-panel__empty"
               >
-                Nothing in focus. Tell Dot what matters.
+                Nothing in focus. Tell {{ identity.name }} what matters.
               </p>
             </template>
 

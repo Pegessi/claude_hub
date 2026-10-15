@@ -175,6 +175,57 @@ async def test_check_work_turns_transitions_into_events(
 
 
 @pytest.mark.asyncio
+async def test_done_task_without_review_writes_a_result_card(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-1": _task("done")})
+    monkeypatch.setattr(
+        workspace_manager,
+        "reports_for_task",
+        lambda _ws, _task_id: [_report("r1", "done", "All good.")],
+    )
+    service.store.upsert_work(
+        "task-1", workspace_id="ws", title="Summarize paper", status="working"
+    )
+    assert await service.check_work() == 1
+    event = service.store.list_inbox()[-1]
+    assert event["kind"] == "task_done" and event["card_id"]
+    assert service.store.get_work("task-1")["closed"]  # type: ignore[index]
+    assert await service.check_work() == 0
+
+
+def test_schedules_are_created_once_and_follow_the_tab(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    schedules: dict[str, Any] = {}
+    updates: list[tuple[str, Any]] = []
+
+    def create(payload: Any) -> SimpleNamespace:
+        item = SimpleNamespace(id=f"s-{len(schedules) + 1}", tab_id=payload.tab_id, payload=payload)
+        schedules[item.id] = item
+        return item
+
+    def update(schedule_id: str, payload: Any) -> None:
+        updates.append((schedule_id, payload.tab_id))
+        schedules[schedule_id].tab_id = payload.tab_id
+
+    monkeypatch.setattr(workspace_manager, "scheduled_tasks", schedules)
+    monkeypatch.setattr(workspace_manager, "create_scheduled_task", create)
+    monkeypatch.setattr(workspace_manager, "update_scheduled_task", update)
+    service.ensure_schedules(TAB_ID)
+    state = service.store.read_state()
+    assert {state["wake_schedule_id"], state["tidy_schedule_id"]} == {"s-1", "s-2"}
+    names = sorted(item.payload.name for item in schedules.values())
+    assert names == ["Dot nightly tidy", "Dot wake-up"]
+    assert all(item.payload.kind.value == "chat_turn" for item in schedules.values())
+
+    service.ensure_schedules(TAB_ID)
+    assert len(schedules) == 2 and updates == [], "repeat setup reuses the schedules"
+    service.ensure_schedules("tab-new")
+    assert sorted(updates) == [("s-1", "tab-new"), ("s-2", "tab-new")]
+
+
+@pytest.mark.asyncio
 async def test_watch_wakes_dot_through_schedule(
     service: DotService, monkeypatch: MonkeyPatch
 ) -> None:
