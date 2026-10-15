@@ -43,6 +43,23 @@ seeded the env, and the next turn answered "Your top focus is P1: Ship Dot."
 from memory and was journaled. One retry was needed for a provider network
 timeout unrelated to Dot.
 
+## Round 3: watch, stuck alarm, name and avatar, phone UI
+
+- Watcher interval 15 s -> 60 s. `dot watch <task_id>` tracks an existing Hub
+  Task; `dot unwatch` stops. A queued/working task with no activity for
+  `stall_hours` (default 2) gets one `task_stalled` inbox event and wakes Dot;
+  activity is the latest of task update, progress report, runtime observation,
+  report time and watch time. No daily summary (user's choice).
+- `identity.json` stores name, emoji/text avatar and a picture under `files/`
+  (raster only, sniffed by magic bytes, max 2 MB). A rename renames the tab and
+  rotates the session; the session pack tells Dot its name.
+- Phone (<= 768 px): compact launcher in the mobile tab bar, full-screen panel
+  with safe-area padding, 16 px inputs (no iOS zoom) and 40-44 px targets.
+- Checked at 390x844 and desktop in headless Chromium: rename to "Jarvis" with
+  a fox emoji updated the header, launcher and tab; watching an unknown id shows
+  "Task not found". Found and fixed: the tab bar kept the old name until reload,
+  so the panel now refreshes tabs after a rename.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

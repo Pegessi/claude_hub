@@ -88,6 +88,34 @@ def dot_health(ctx: click.Context) -> None:
         click.echo(f"{mark} {check.get('name')}: {check.get('detail')}")
 
 
+@dot.command("identity")
+@click.option("--name", default=None, help="Dot's new name (1-40 characters).")
+@click.option("--avatar", default=None, help="Short emoji or text; '' clears it.")
+@click.option("--avatar-image", default=None, help="PNG, JPEG, GIF or WebP file (max 2 MB).")
+@click.option("--clear-image", is_flag=True, help="Remove the avatar image.")
+@click.pass_context
+def dot_identity(
+    ctx: click.Context,
+    name: Optional[str],
+    avatar: Optional[str],
+    avatar_image: Optional[str],
+    clear_image: bool,
+) -> None:
+    """Show or change Dot's name and avatar."""
+    data = None
+    if name is not None or avatar is not None:
+        data = _call(ctx, "PATCH", "/identity", json={"name": name, "avatar": avatar})
+    if avatar_image:
+        file_path = Path(avatar_image).expanduser()
+        if not file_path.is_file():
+            raise click.ClickException(f"Not a file: {avatar_image}")
+        encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+        data = _call(ctx, "POST", "/identity/avatar", json={"data_base64": encoded})
+    elif clear_image:
+        data = _call(ctx, "DELETE", "/identity/avatar")
+    emit(data if data is not None else _call(ctx, "GET", "/identity"), cli_main.as_json(ctx))
+
+
 @dot.command("rotate")
 @click.pass_context
 def dot_rotate(ctx: click.Context) -> None:
@@ -328,7 +356,7 @@ def dot_focus_drop(ctx: click.Context, focus_id: str) -> None:
 
 @dot.group("work")
 def dot_work() -> None:
-    """Hub Tasks that Dot delegated and tracks."""
+    """Hub Tasks that Dot delegated or watches."""
 
 
 @dot_work.command("list")
@@ -342,6 +370,38 @@ def dot_work_list(ctx: click.Context, include_all: bool) -> None:
     )
 
 
+@dot.command("watch")
+@click.argument("task_id")
+@click.option(
+    "--stall-hours",
+    type=click.FloatRange(min=0, min_open=True, max=720),
+    default=None,
+    help="Alert Dot when the task shows no progress this long (default: 2).",
+)
+@click.pass_context
+def dot_watch(ctx: click.Context, task_id: str, stall_hours: Optional[float]) -> None:
+    """Watch an existing Hub Task: Dot is woken when it ends, needs input, or stalls."""
+    item = _call(
+        ctx, "POST", f"/work/{quote(task_id, safe='')}/watch", json={"stall_hours": stall_hours}
+    )
+    if cli_main.as_json(ctx):
+        emit(item, True)
+    else:
+        click.echo(f"watching {item['task_id']} ({item.get('status')}): {item.get('title')}")
+
+
+@dot.command("unwatch")
+@click.argument("task_id")
+@click.pass_context
+def dot_unwatch(ctx: click.Context, task_id: str) -> None:
+    """Stop tracking a Hub Task."""
+    item = _call(ctx, "POST", f"/work/{quote(task_id, safe='')}/unwatch")
+    if cli_main.as_json(ctx):
+        emit(item, True)
+    else:
+        click.echo(f"stopped watching {item['task_id']}")
+
+
 @dot.command("delegate")
 @click.option("--workspace", "workspace_id", required=True, help="Workspace id.")
 @click.option("--title", required=True)
@@ -353,6 +413,12 @@ def dot_work_list(ctx: click.Context, include_all: bool) -> None:
 @click.option("--mode", "task_mode", type=click.Choice(TASK_MODES), default=None)
 @click.option("--no-start", is_flag=True, help="Register only; do not dispatch.")
 @click.option("--request-key", default=None, help="Idempotency key for safe retries.")
+@click.option(
+    "--stall-hours",
+    type=click.FloatRange(min=0, min_open=True, max=720),
+    default=None,
+    help="Alert Dot when the task shows no progress this long (default: 2).",
+)
 @click.pass_context
 def dot_delegate(
     ctx: click.Context,
@@ -366,6 +432,7 @@ def dot_delegate(
     task_mode: Optional[str],
     no_start: bool,
     request_key: Optional[str],
+    stall_hours: Optional[float],
 ) -> None:
     """Hand a job to a Hub Task with a full brief. Dot is woken when it ends."""
     body: Dict[str, Any] = {
@@ -382,6 +449,8 @@ def dot_delegate(
         body["task_mode"] = task_mode
     if request_key:
         body["request_key"] = request_key
+    if stall_hours is not None:
+        body["stall_hours"] = stall_hours
     item = _call(ctx, "POST", "/delegate", json=body)
     if cli_main.as_json(ctx):
         emit(item, True)

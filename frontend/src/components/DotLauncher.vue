@@ -1,26 +1,30 @@
 <template>
   <div
-    class="dot-launcher"
+    :class="['dot-launcher', { 'dot-launcher--compact': compact }]"
     data-testid="dot-launcher"
   >
     <button
       type="button"
       class="dot-launcher__open"
       :disabled="opening"
-      title="Talk to Dot"
+      :title="`Talk to ${identity.name}`"
+      :aria-label="`Talk to ${identity.name}`"
       @click="openDot"
     >
-      <span
-        class="dot-launcher__mark"
-        aria-hidden="true"
+      <DotAvatar
+        :identity="identity"
+        :size="compact ? 24 : 20"
       />
-      Dot
+      <span
+        v-if="!compact"
+        class="dot-launcher__name"
+      >{{ identity.name }}</span>
     </button>
     <button
       type="button"
       class="dot-launcher__memory"
-      title="Dot memory, focus and work"
-      aria-label="Open Dot memory"
+      :title="`${identity.name} memory, focus and work`"
+      :aria-label="`Open ${identity.name} memory`"
       @click="panelOpen = true"
     >
       ☰
@@ -33,14 +37,20 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
+import DotAvatar from '@/components/DotAvatar.vue'
 import DotPanel from '@/components/DotPanel.vue'
+import { useDotIdentity } from '@/composables/useDotIdentity'
 import { parseLaunchEnv, useLaunchEnvPresets } from '@/composables/useLaunchEnvPresets'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { setupDot } from '@/utils/dotApi'
 
+// Compact: avatar only, with larger touch targets (mobile header).
+defineProps<{ compact?: boolean }>()
+
 const appStore = useAppStore()
+const { identity, setIdentity, refreshIdentity } = useDotIdentity()
 const terminalStore = useTerminalStore()
 const { defaultPresetTextForAgent } = useLaunchEnvPresets()
 const opening = ref(false)
@@ -54,12 +64,15 @@ function providerEnv(): Record<string, string> | undefined {
   return source?.env ?? parseLaunchEnv(defaultPresetTextForAgent('claude'))
 }
 
+onMounted(() => { void refreshIdentity() })
+
 // Setup is idempotent: it creates (or restores) Dot's Chat tab on first use.
 // The backend only seeds env into a tab still on the built-in fallback env.
 async function openDot() {
   opening.value = true
   try {
     const status = await setupDot(providerEnv())
+    if (status.identity) setIdentity(status.identity)
     appStore.setMode('terminal')
     await terminalStore.fetchTabs({ force: true })
     if (status.tab_id && terminalStore.tabs.some(tab => tab.id === status.tab_id)) {
@@ -103,7 +116,14 @@ async function openDot() {
 }
 
 .dot-launcher__open {
-  padding: 0 10px 0 12px;
+  padding: 0 10px 0 6px;
+}
+
+.dot-launcher__name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dot-launcher__memory {
@@ -122,11 +142,21 @@ async function openDot() {
   cursor: progress;
 }
 
-.dot-launcher__mark {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ch-color-accent);
-  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+.dot-launcher--compact {
+  height: 36px;
+  flex: 0 0 auto;
+}
+
+.dot-launcher--compact .dot-launcher__open {
+  justify-content: center;
+  min-width: 40px;
+  padding: 0 6px 0 8px;
+}
+
+.dot-launcher--compact .dot-launcher__memory {
+  min-width: 36px;
+  justify-content: center;
+  padding: 0 8px;
+  font-size: var(--ch-font-size-sm);
 }
 </style>

@@ -68,7 +68,7 @@
         </div>
         <TabBar v-if="!isMobile && mode === 'terminal'" />
         <div class="app-mode-tools">
-          <DotLauncher />
+          <DotLauncher v-if="!isMobile" />
           <AppExtensionsMenu v-if="!isMobile" />
           <button
             type="button"

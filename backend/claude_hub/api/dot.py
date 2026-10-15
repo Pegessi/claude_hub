@@ -85,6 +85,26 @@ class DelegateRequest(BaseModel):
     task_mode: Optional[Literal["direct", "reviewed", "autonomous"]] = None
     start: bool = True
     request_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    stall_hours: Optional[float] = Field(default=None, gt=0, le=720)
+
+
+class WatchRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    stall_hours: Optional[float] = Field(default=None, gt=0, le=720)
+
+
+class IdentityUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    name: Optional[str] = Field(default=None, max_length=200)
+    avatar: Optional[str] = Field(default=None, max_length=64)
+
+
+class AvatarUpload(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    data_base64: str = Field(max_length=3_000_000)
 
 
 class InboxAck(BaseModel):
@@ -107,6 +127,13 @@ def _actor_key(user: User) -> str:
             {"user": user.open_id, "oauth_app": settings.feishu_app_id or ""}, sort_keys=True
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _decode_base64(text: str) -> bytes:
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="data_base64 is not valid base64") from None
 
 
 @router.get("/status")
@@ -137,6 +164,39 @@ async def dot_setup(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return service.status()
+
+
+@router.get("/identity")
+async def dot_identity(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+    return _service().store.read_identity()
+
+
+@router.patch("/identity")
+async def dot_update_identity(
+    payload: IdentityUpdate, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    try:
+        return await _service().update_identity(name=payload.name, avatar=payload.avatar)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@router.post("/identity/avatar")
+async def dot_upload_avatar(
+    payload: AvatarUpload, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    data = _decode_base64(payload.data_base64)
+    service = _service()
+    try:
+        path = service.store.store_avatar(data)
+        return await service.update_identity(avatar_image=path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@router.delete("/identity/avatar")
+async def dot_clear_avatar(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+    return await _service().update_identity(avatar_image="")
 
 
 @router.post("/rotate")
@@ -243,10 +303,7 @@ async def dot_forget_card(
 async def dot_upload_file(
     payload: FileUpload, current_user: User = Depends(get_current_user)
 ) -> dict[str, Any]:
-    try:
-        data = base64.b64decode(payload.data_base64, validate=True)
-    except (binascii.Error, ValueError):
-        raise HTTPException(status_code=400, detail="data_base64 is not valid base64") from None
+    data = _decode_base64(payload.data_base64)
     service = _service()
     try:
         path = service.store.store_file(data, payload.filename)
@@ -342,6 +399,30 @@ async def dot_delegate(
         raise HTTPException(status_code=404, detail="Workspace not found") from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc) or "invalid_delegate") from None
+
+
+@router.post("/work/{task_id}/watch")
+async def dot_watch(
+    task_id: str,
+    payload: Optional[WatchRequest] = None,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    try:
+        return await _service().watch(task_id, stall_hours=payload.stall_hours if payload else None)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
+@router.post("/work/{task_id}/unwatch")
+async def dot_unwatch(
+    task_id: str, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    item = await _service().unwatch(task_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Dot is not tracking this task")
+    return item
 
 
 @router.get("/inbox")

@@ -88,6 +88,10 @@
       {{ isLoading ? '...' : '+' }}
     </button>
     <LayoutSelector variant="menu" />
+    <DotLauncher
+      v-if="isMobile"
+      compact
+    />
     <div class="mobile-app-menu">
       <details
         ref="mobileAppMenuRef"
@@ -600,6 +604,7 @@ import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import AppExtensionActions from '@/components/AppExtensionActions.vue'
+import DotLauncher from '@/components/DotLauncher.vue'
 import TabActionsMenu from '@/components/TabActionsMenu.vue'
 import {
   defaultLaunchEnvPresetForAgent,
@@ -613,6 +618,7 @@ import { useMasoPreflight } from '@/composables/useMasoPreflight'
 import { useTabStatus } from '@/composables/useTabStatus'
 import { remoteInteractive, remoteProfileBadge } from '@/utils/remoteProfiles'
 import { useCwdHistory } from '@/composables/useCwdHistory'
+import { useViewport } from '@/composables/useViewport'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import type { AppMode, RemoteProfile, TerminalTab } from '@/types'
@@ -633,6 +639,7 @@ interface DirectoryListing {
 
 const store = useTerminalStore()
 const appStore = useAppStore()
+const { isMobile } = useViewport()
 const { defaultPresetTextForAgent } = useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses, notifications } = storeToRefs(store)

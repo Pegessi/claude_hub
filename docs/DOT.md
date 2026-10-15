@@ -92,15 +92,22 @@ Values are JSON; a plain unquoted value is read as a string.
 ## Delegation and wake-up
 
 `claude-hub dot delegate` builds a brief from the template, registers and
-starts a Hub Task, and records it in `work.json`. A background watcher checks
-tracked tasks. When one finishes, fails, or needs input it:
+starts a Hub Task, and records it in `work.json`. `claude-hub dot watch
+<task_id>` (or the Work tab in the panel) adds a Hub Task you started yourself;
+`dot unwatch` stops tracking it. A background watcher checks tracked tasks
+every 60 seconds. When one finishes, fails, needs input, or looks stuck it:
 
 - writes an inbox event,
 - writes a result card from the latest report,
 - runs the standing "Dot wake-up" Chat schedule now (queued behind any
   active turn; repeated wakes coalesce).
 
-Dot does not poll workers. It only reacts to these events.
+A task looks stuck when it is queued or working with no progress (task update,
+progress report, runtime status change or new report) for `--stall-hours`
+(default 2). It alarms once per stall; new progress resets it.
+
+Dot does not poll workers. It only reacts to these events. There is no daily
+summary; ask Dot when you want one.
 
 A second schedule runs the nightly `[Dot tidy]` turn in a fresh session:
 compress yesterday's journal into cards and concepts, merge duplicates,
@@ -108,10 +115,19 @@ prune focus.
 
 ## Interfaces
 
-- CLI: `claude-hub dot status|recall|remember|forget|show|focus|work|delegate|inbox|rotate|health|setup`
+- CLI: `claude-hub dot status|recall|remember|forget|show|focus|work|delegate|watch|unwatch|inbox|identity|rotate|health|setup`
 - REST: `/api/dot/*`
 - UI: Dot button in the header opens the Dot Chat; the Dot panel shows focus,
-  work and memory.
+  work and memory. On phones the button sits in the tab bar and the panel is a
+  full-screen sheet with touch-sized controls.
+
+## Name and avatar
+
+`identity.json` in the Dot home holds the name (max 40 chars), an emoji or
+short text avatar, and an optional picture (PNG, JPEG, GIF or WebP, max 2 MB;
+no SVG). Change them with Edit in the panel or `claude-hub dot identity
+--name ... --avatar ... --avatar-image <path>`. A new name renames the Dot tab
+and rotates the session, so the next turn is told its new name.
 
 Setup is safe to repeat. It takes the provider env (API endpoint, key, model)
 like a normal new Chat: the UI borrows it from your active Claude tab (else the

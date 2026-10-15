@@ -36,6 +36,12 @@ _FRONTMATTER = "---"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _JOURNAL_HEADER_RE = re.compile(r"(?m)^## (\d{2}:\d{2}) · (\w+)[ \t]*$")
 _GITIGNORE = "index.sqlite*\n*.tmp\n.lock\n"
+DEFAULT_NAME = "Dot"
+NAME_LIMIT = 40
+# Code points, not characters: one emoji may be several code points.
+AVATAR_TEXT_LIMIT = 16
+AVATAR_IMAGE_BYTES = 2 * 1024 * 1024
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def utc_now() -> datetime:
@@ -287,6 +293,69 @@ class DotStore:
             return self.role_path.read_text(encoding="utf-8")
         except OSError:
             return DEFAULT_ROLE
+
+    # ── identity ────────────────────────────────────────────────────────
+
+    def read_identity(self) -> dict[str, Any]:
+        """Dot's name and avatar. Never creates the home (read by every status call)."""
+        raw = self._read_json("identity.json", {})
+        name = " ".join(str(raw.get("name") or "").split())[:NAME_LIMIT]
+        avatar = str(raw.get("avatar") or "").strip()[:AVATAR_TEXT_LIMIT]
+        image = raw.get("avatar_image")
+        if not (
+            isinstance(image, str)
+            and image.startswith("files/")
+            and self.resolve_home_path(image) is not None
+        ):
+            image = None
+        return {"name": name or DEFAULT_NAME, "avatar": avatar, "avatar_image": image}
+
+    def update_identity(
+        self,
+        *,
+        name: Optional[str] = None,
+        avatar: Optional[str] = None,
+        avatar_image: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Change the given fields; ``None`` keeps a field, ``""`` clears avatar/image."""
+        self.ensure()
+        with self._lock:
+            identity = self.read_identity()
+            if name is not None:
+                clean = " ".join(name.split())
+                if not clean or len(clean) > NAME_LIMIT or _CONTROL_RE.search(clean):
+                    raise ValueError(f"name must be 1-{NAME_LIMIT} characters")
+                identity["name"] = clean
+            if avatar is not None:
+                clean = avatar.strip()
+                if len(clean) > AVATAR_TEXT_LIMIT or _CONTROL_RE.search(clean):
+                    raise ValueError("avatar must be a short emoji or text")
+                identity["avatar"] = clean
+            if avatar_image is not None:
+                if avatar_image and (
+                    not avatar_image.startswith("files/")
+                    or self.resolve_home_path(avatar_image) is None
+                ):
+                    raise ValueError(f"file not found in Dot home: {avatar_image}")
+                identity["avatar_image"] = avatar_image or None
+            self._write_json("identity.json", identity)
+            return identity
+
+    def store_avatar(self, data: bytes) -> str:
+        """Store an avatar image (PNG, JPEG, GIF or WebP; no SVG); return its path."""
+        if len(data) > AVATAR_IMAGE_BYTES:
+            raise ValueError(f"avatar image must be at most {AVATAR_IMAGE_BYTES // 1024} KB")
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            suffix = ".png"
+        elif data.startswith(b"\xff\xd8\xff"):
+            suffix = ".jpg"
+        elif data[:6] in (b"GIF87a", b"GIF89a"):
+            suffix = ".gif"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            suffix = ".webp"
+        else:
+            raise ValueError("avatar must be a PNG, JPEG, GIF or WebP image")
+        return self.store_file(data, f"avatar{suffix}")
 
     # ── cards ───────────────────────────────────────────────────────────
 

@@ -9,13 +9,17 @@
         <aside
           class="dot-panel"
           role="dialog"
-          aria-label="Dot memory"
+          :aria-label="`${identity.name} memory`"
           data-testid="dot-panel"
         >
           <div class="dot-panel__header">
-            <div>
+            <DotAvatar
+              :identity="identity"
+              :size="32"
+            />
+            <div class="dot-panel__heading">
               <h2 class="dot-panel__title">
-                Dot
+                {{ identity.name }}
               </h2>
               <p
                 v-if="status"
@@ -27,6 +31,14 @@
             </div>
             <button
               type="button"
+              class="ch-btn ch-btn--ghost ch-btn--sm"
+              :aria-expanded="editingIdentity"
+              @click="toggleIdentityEditor"
+            >
+              {{ editingIdentity ? 'Cancel' : 'Edit' }}
+            </button>
+            <button
+              type="button"
               class="dot-panel__close"
               aria-label="Close Dot memory"
               @click="$emit('close')"
@@ -34,6 +46,66 @@
               ×
             </button>
           </div>
+
+          <!-- Name and avatar. A new name starts a fresh Dot session. -->
+          <form
+            v-if="editingIdentity"
+            class="dot-identity"
+            data-testid="dot-identity-editor"
+            @submit.prevent="saveIdentity"
+          >
+            <label class="dot-identity__field">
+              <span>Name</span>
+              <input
+                v-model="nameDraft"
+                class="ch-input"
+                maxlength="40"
+                required
+                autocomplete="off"
+              >
+            </label>
+            <label class="dot-identity__field">
+              <span>Emoji</span>
+              <input
+                v-model="avatarDraft"
+                class="ch-input dot-identity__emoji"
+                maxlength="16"
+                placeholder="e.g. 🤖"
+                autocomplete="off"
+              >
+            </label>
+            <div class="dot-identity__field dot-identity__field--wide">
+              <span>Picture</span>
+              <div class="dot-identity__image">
+                <label class="ch-btn ch-btn--sm dot-identity__upload">
+                  {{ identity.avatar_image ? 'Change' : 'Upload' }}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/gif,image/webp"
+                    @change="uploadAvatar"
+                  >
+                </label>
+                <button
+                  v-if="identity.avatar_image"
+                  type="button"
+                  class="ch-btn ch-btn--ghost ch-btn--sm"
+                  @click="removeAvatar"
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+            <p class="dot-identity__hint">
+              PNG, JPEG, GIF or WebP, up to 2 MB. A picture wins over the emoji.
+            </p>
+            <button
+              type="submit"
+              class="ch-btn ch-btn--primary ch-btn--sm dot-identity__save"
+              :disabled="!nameDraft.trim() || loading"
+            >
+              Save
+            </button>
+          </form>
 
           <div class="dot-panel__tabs">
             <div
@@ -135,6 +207,40 @@
 
             <!-- Work: delegated tasks and new events. -->
             <template v-else-if="section === 'work'">
+              <form
+                class="dot-row-form"
+                data-testid="dot-watch-form"
+                @submit.prevent="watchTask"
+              >
+                <input
+                  v-model="watchId"
+                  class="ch-input"
+                  placeholder="Task id to watch"
+                  aria-label="Task id to watch"
+                  autocomplete="off"
+                >
+                <select
+                  v-model.number="watchStallHours"
+                  class="ch-select dot-row-form__priority"
+                  aria-label="Stuck alarm after"
+                  title="Alarm when the task shows no progress this long"
+                >
+                  <option
+                    v-for="hours in STALL_CHOICES"
+                    :key="hours"
+                    :value="hours"
+                  >
+                    {{ hours }}h
+                  </option>
+                </select>
+                <button
+                  type="submit"
+                  class="ch-btn ch-btn--primary ch-btn--sm"
+                  :disabled="!watchId.trim()"
+                >
+                  Watch
+                </button>
+              </form>
               <div
                 v-if="inbox.length"
                 class="dot-group"
@@ -154,19 +260,25 @@
                   :key="event.id"
                   class="dot-item"
                 >
-                  <span class="dot-item__badge">{{ event.kind.replace('task_', '') }}</span>
+                  <span :class="['dot-item__badge', { 'dot-item__badge--warn': ALERT_EVENTS.has(event.kind) }]">
+                    {{ event.kind.replace('task_', '').replace('_', ' ') }}
+                  </span>
                   <div class="dot-item__info">
                     <span class="dot-item__title">{{ event.text }}</span>
                     <span class="dot-item__sub">{{ relativeTime(event.at) }} ago</span>
                   </div>
-                  <button
+                  <div
                     v-if="event.card_id"
-                    type="button"
-                    class="ch-btn ch-btn--sm"
-                    @click="openCard(event.card_id)"
+                    class="dot-item__actions"
                   >
-                    Result
-                  </button>
+                    <button
+                      type="button"
+                      class="ch-btn ch-btn--sm"
+                      @click="openCard(event.card_id)"
+                    >
+                      Result
+                    </button>
+                  </div>
                 </div>
               </div>
               <div
@@ -177,14 +289,28 @@
                 <span class="dot-item__badge">{{ item.status || '?' }}</span>
                 <div class="dot-item__info">
                   <span class="dot-item__title">{{ item.title || item.task_id }}</span>
-                  <span class="dot-item__sub">{{ item.task_id }} · {{ relativeTime(item.created) }} ago</span>
+                  <span class="dot-item__sub">
+                    {{ item.task_id }} · {{ item.watched ? 'watched' : 'delegated' }}
+                    · stuck alarm {{ item.stall_hours ?? DEFAULT_STALL_HOURS }}h
+                    · {{ relativeTime(item.created) }} ago
+                  </span>
+                </div>
+                <div class="dot-item__actions">
+                  <button
+                    type="button"
+                    class="ch-btn ch-btn--ghost ch-btn--sm"
+                    title="Stop watching this task"
+                    @click="unwatchTask(item.task_id)"
+                  >
+                    Stop
+                  </button>
                 </div>
               </div>
               <p
                 v-if="!loading && work.length === 0 && inbox.length === 0"
                 class="dot-panel__empty"
               >
-                No delegated work.
+                No tracked work. Paste a task id above to watch it.
               </p>
             </template>
 
@@ -320,11 +446,15 @@
 
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
+import DotAvatar from '@/components/DotAvatar.vue'
+import { useDotIdentity } from '@/composables/useDotIdentity'
+import { useTerminalStore } from '@/stores/terminalStore'
 import { relativeTime } from '@/utils/time'
 import {
   ackDotInbox,
   addDotFocus,
   archiveDotCard,
+  clearDotAvatar,
   loadDotCard,
   loadDotCards,
   loadDotFocus,
@@ -333,7 +463,11 @@ import {
   loadDotStatus,
   loadDotWork,
   recallDot,
+  unwatchDotTask,
   updateDotFocus,
+  updateDotIdentity,
+  uploadDotAvatar,
+  watchDotTask,
   type DotCard,
   type DotCardKind,
   type DotFocusItem,
@@ -353,6 +487,10 @@ const SECTIONS: { key: Section, label: string }[] = [
   { key: 'health', label: 'Health' },
 ]
 const KINDS: DotCardKind[] = ['user', 'work', 'knowledge', 'concept']
+const DEFAULT_STALL_HOURS = 2
+const STALL_CHOICES = [1, 2, 4, 8, 24]
+const ALERT_EVENTS = new Set(['task_failed', 'task_needs_input', 'task_stalled', 'task_missing'])
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -371,6 +509,13 @@ const newFocus = ref('')
 const newPriority = ref(3)
 const searchText = ref('')
 const kindFilter = ref<DotCardKind | ''>('')
+const watchId = ref('')
+const watchStallHours = ref(DEFAULT_STALL_HOURS)
+const { identity, setIdentity } = useDotIdentity()
+const terminalStore = useTerminalStore()
+const editingIdentity = ref(false)
+const nameDraft = ref('')
+const avatarDraft = ref('')
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
 const cardTotal = computed(() =>
@@ -392,6 +537,7 @@ async function run(action: () => Promise<void>) {
 async function loadSection() {
   await run(async () => {
     status.value = await loadDotStatus()
+    if (status.value.identity) setIdentity(status.value.identity)
     if (section.value === 'focus') focus.value = await loadDotFocus()
     else if (section.value === 'work') [work.value, inbox.value] = await Promise.all([loadDotWork(), loadDotInbox()])
     else if (section.value === 'memory') await loadCards()
@@ -419,6 +565,59 @@ function closeFocus(focusId: string, state: 'done' | 'dropped') {
   void run(async () => {
     await updateDotFocus(focusId, { status: state })
     focus.value = await loadDotFocus()
+  })
+}
+
+function toggleIdentityEditor() {
+  editingIdentity.value = !editingIdentity.value
+  nameDraft.value = identity.value.name
+  avatarDraft.value = identity.value.avatar
+}
+
+function saveIdentity() {
+  void run(async () => {
+    const renamed = nameDraft.value.trim() !== identity.value.name
+    setIdentity(await updateDotIdentity({ name: nameDraft.value.trim(), avatar: avatarDraft.value.trim() }))
+    editingIdentity.value = false
+    // The backend renamed the Dot tab too; refresh so the tab bar shows it now.
+    if (renamed) await terminalStore.fetchTabs({ force: true })
+  })
+}
+
+function uploadAvatar(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (file.size > AVATAR_MAX_BYTES) {
+    errorText.value = 'The picture must be at most 2 MB.'
+    return
+  }
+  void run(async () => {
+    setIdentity(await uploadDotAvatar(file))
+  })
+}
+
+function removeAvatar() {
+  void run(async () => {
+    setIdentity(await clearDotAvatar())
+  })
+}
+
+function watchTask() {
+  const taskId = watchId.value.trim()
+  if (!taskId) return
+  void run(async () => {
+    await watchDotTask(taskId, watchStallHours.value)
+    watchId.value = ''
+    work.value = await loadDotWork()
+  })
+}
+
+function unwatchTask(taskId: string) {
+  void run(async () => {
+    await unwatchDotTask(taskId)
+    work.value = await loadDotWork()
   })
 }
 
@@ -453,6 +652,7 @@ watch(
   isOpen => {
     if (isOpen) {
       selectedCard.value = null
+      editingIdentity.value = false
       void loadSection()
       window.addEventListener('keydown', handleKeydown)
     } else {
@@ -497,13 +697,21 @@ onUnmounted(() => {
 
 .dot-panel__header {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
   padding: 14px 16px 10px;
+}
+
+.dot-panel__heading {
+  flex: 1;
+  min-width: 0;
 }
 
 .dot-panel__title {
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--ch-font-size-lg);
   font-weight: 600;
   color: var(--ch-color-text-strong);
@@ -529,6 +737,64 @@ onUnmounted(() => {
 .dot-panel__close:hover {
   background: var(--ch-color-surface-control-hover);
   color: var(--ch-color-text);
+}
+
+.dot-identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 8px 10px;
+  margin: 0 16px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+}
+
+.dot-identity__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
+  color: var(--ch-color-text-muted);
+}
+
+.dot-identity__field--wide,
+.dot-identity__hint,
+.dot-identity__save {
+  grid-column: 1 / -1;
+}
+
+.dot-identity__emoji {
+  text-align: center;
+}
+
+.dot-identity__image {
+  display: flex;
+  gap: 6px;
+}
+
+.dot-identity__upload {
+  position: relative;
+  overflow: hidden;
+}
+
+.dot-identity__upload input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.dot-identity__hint {
+  margin: 0;
+  font-size: var(--ch-font-size-xs);
+  color: var(--ch-color-text-subtle);
+}
+
+.dot-identity__save {
+  justify-self: end;
 }
 
 .dot-panel__tabs {
@@ -700,6 +966,100 @@ onUnmounted(() => {
   font-size: var(--ch-font-size-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Phones: a full-screen sheet with finger-sized targets. Inputs use 16px text
+   so iOS Safari does not zoom in on focus. */
+@media (max-width: 768px) {
+  .dot-panel {
+    width: 100%;
+    border-left: none;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .dot-panel__header {
+    padding: 10px 8px 8px 14px;
+  }
+
+  .dot-panel__close {
+    width: 44px;
+    height: 44px;
+    font-size: 24px;
+  }
+
+  .dot-identity {
+    margin: 0 12px 10px;
+  }
+
+  .dot-panel__tabs {
+    padding: 0 12px 10px;
+  }
+
+  .dot-panel__tabs .ch-segmented {
+    display: flex;
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .dot-panel__tabs .ch-segmented__btn {
+    flex: 1 0 auto;
+    min-height: 36px;
+  }
+
+  .dot-panel__body {
+    padding: 10px 8px;
+  }
+
+  .dot-panel .ch-input,
+  .dot-panel .ch-select {
+    min-height: 40px;
+    font-size: 16px;
+  }
+
+  .dot-panel .ch-btn {
+    min-height: 40px;
+    padding-inline: 14px;
+  }
+
+  .dot-row-form {
+    flex-wrap: wrap;
+  }
+
+  .dot-row-form .ch-input {
+    flex: 1 1 100%;
+  }
+
+  .dot-row-form .ch-btn {
+    flex: 1;
+  }
+
+  .dot-row-form__priority,
+  .dot-row-form__kind {
+    flex: 1;
+  }
+
+  .dot-item {
+    flex-wrap: wrap;
+    padding: 10px 8px;
+  }
+
+  /* Actions drop below the text instead of squeezing it. */
+  .dot-item__info {
+    flex-basis: calc(100% - 64px);
+  }
+
+  .dot-item__actions {
+    margin-left: auto;
+  }
+
+  .dot-item__title {
+    font-size: var(--ch-font-size-md);
+  }
+
+  .dot-item__sub {
+    font-size: var(--ch-font-size-sm);
+  }
 }
 
 .dot-fade-enter-active,

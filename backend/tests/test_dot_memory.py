@@ -238,3 +238,15 @@ def test_is_dot_tab_does_not_create_home(tmp_path: Path) -> None:
     service = DotService(DotStore(tmp_path / "missing"))
     assert not service.is_dot_tab("tab-1")
     assert not (tmp_path / "missing").exists()
+
+
+def test_store_avatar_accepts_only_raster_images(store: DotStore) -> None:
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    path = store.store_avatar(png)
+    assert path.startswith("files/") and path.endswith(".png")
+    assert store.store_avatar(b"RIFF\x00\x00\x00\x00WEBPVP8 ").endswith(".webp")
+    for bad in (b"<svg xmlns='http://www.w3.org/2000/svg'/>", b"hello", b"\xff\xd8\xff" * 10**6):
+        with pytest.raises(ValueError):
+            store.store_avatar(bad)
+    assert store.update_identity(avatar_image=path)["avatar_image"] == path
+    assert store.update_identity(avatar_image="")["avatar_image"] is None
