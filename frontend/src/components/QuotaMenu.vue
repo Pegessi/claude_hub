@@ -100,7 +100,7 @@
             v-for="row in view.rows"
             :key="row.key"
             class="quota-row"
-            :class="`quota-row--${row.state}`"
+            :class="[`quota-row--${row.state}`, `quota-row--${row.tone}`]"
           >
             <div class="quota-row-head">
               <span
@@ -572,12 +572,36 @@ onUnmounted(() => {
 }
 
 .quota-row {
+  --quota-fill: var(--ch-color-border-strong);
+  --quota-value: var(--ch-color-text-muted);
+
   min-width: 0;
   display: grid;
-  gap: 3px;
+  gap: 4px;
   padding: 6px 8px;
+  border-inline-start: 2px solid var(--quota-fill);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-soft);
+}
+
+.quota-row--healthy {
+  --quota-fill: var(--ch-color-success);
+  --quota-value: var(--ch-color-success-strong);
+}
+
+.quota-row--caution {
+  --quota-fill: var(--ch-color-warning);
+  --quota-value: var(--ch-color-warning-strong);
+}
+
+.quota-row--low {
+  --quota-fill: color-mix(in srgb, var(--ch-color-warning) 45%, var(--ch-color-danger));
+  --quota-value: color-mix(in srgb, var(--ch-color-warning-strong) 45%, var(--ch-color-danger));
+}
+
+.quota-row--critical {
+  --quota-fill: var(--ch-color-danger);
+  --quota-value: var(--ch-color-danger-text);
 }
 
 .quota-row-head {
@@ -600,17 +624,10 @@ onUnmounted(() => {
 
 .quota-row-value {
   flex: 0 0 auto;
-  color: var(--ch-color-text);
+  color: var(--quota-value);
   font-size: var(--ch-font-size-sm);
   font-weight: 700;
-}
-
-.quota-row--near .quota-row-value {
-  color: var(--ch-color-warning-strong);
-}
-
-.quota-row--over .quota-row-value {
-  color: var(--ch-color-danger-strong);
+  font-variant-numeric: tabular-nums;
 }
 
 .quota-row--no_data .quota-row-value,
@@ -622,7 +639,7 @@ onUnmounted(() => {
 }
 
 .quota-bar {
-  height: 4px;
+  height: 5px;
   overflow: hidden;
   border-radius: 999px;
   background: var(--ch-color-border);
@@ -632,15 +649,7 @@ onUnmounted(() => {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: var(--ch-color-success);
-}
-
-.quota-row--near .quota-bar span {
-  background: var(--ch-color-warning);
-}
-
-.quota-row--over .quota-bar span {
-  background: var(--ch-color-danger);
+  background: var(--quota-fill);
 }
 
 .quota-row-meta {
@@ -650,6 +659,7 @@ onUnmounted(() => {
   margin: 0;
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-size-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .quota-status {

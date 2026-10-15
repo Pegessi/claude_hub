@@ -7,6 +7,14 @@
 
 ## Released
 
+### feat(quota): color remaining balances by available share
+
+- Show remaining quota in green above 50%, amber at 50% or less, orange at
+  20% or less, and red at 10% or less. Match the percentage, progress bar and
+  row accent while preserving provider warnings and neutral missing readings.
+- Improve numeric alignment and remove insignificant decimal zeroes from
+  prepaid credit without rounding its value.
+
 ### docs: hold the change log in one Released section
 
 - Merge three same-named `Unreleased` headings into one section, keeping all
