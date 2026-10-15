@@ -35,6 +35,8 @@ PNG_IMAGE = base64.b64decode(
 # or a GET where the app should have sent a POST, and the unknown-request
 # assertion at the end would never see it.
 BASE = f"/api/workspaces/tabs/{TAB}/stream"
+MANAGED_SESSION = "fixture-managed-session"
+MANAGED_BASE = f"/api/workspaces/sessions/{MANAGED_SESSION}/stream"
 
 
 def event(sequence, event_type, payload, *, turn_id=TURN_ONE, message_id=None, agent_type="maso"):
@@ -108,6 +110,7 @@ async def main(browser_run: BrowserRun) -> None:
     unexpected_external: list[str] = []
     sends: list[dict] = []
     interrupts: list[dict] = []
+    managed_stream_paths: list[tuple[str, str]] = []
     codex_session_requests = 0
     model_changes: list[dict] = []
     preflight_requests: list[dict] = []
@@ -166,6 +169,8 @@ async def main(browser_run: BrowserRun) -> None:
 
             path = parsed.path
             method = request.method
+            if path.startswith(MANAGED_BASE):
+                managed_stream_paths.append((method, path))
             if not path.startswith("/api/"):
                 await route.fallback()
                 return
@@ -185,7 +190,9 @@ async def main(browser_run: BrowserRun) -> None:
                         "created_at": NOW,
                         "workspace_id": "fixture-workspace",
                         "workspace_name": "Fixture workspace",
-                        "workspace_role": "agent",
+                        "workspace_role": "worker",
+                        "managed_session_id": MANAGED_SESSION,
+                        "agent_session_id": "provider-conversation-is-not-managed-session",
                         "archived": False,
                     },
                 ]
@@ -204,8 +211,8 @@ async def main(browser_run: BrowserRun) -> None:
                         else "MASO service is unavailable and cannot be used. Start MASO, then retry."
                     ),
                 }
-            elif (method == "GET" and path == f"{BASE}/capabilities") or (
-                method == "POST" and path == f"{BASE}/retry"
+            elif (method == "GET" and path in {f"{BASE}/capabilities", f"{MANAGED_BASE}/capabilities"}) or (
+                method == "POST" and path in {f"{BASE}/retry", f"{MANAGED_BASE}/retry"}
             ):
                 body = {
                     "structured": state["existing_maso_available"],
@@ -246,13 +253,13 @@ async def main(browser_run: BrowserRun) -> None:
                 model_changes.append(payload)
                 tab["env"] = payload["env"]
                 body = tab
-            elif method == "GET" and path == f"{BASE}/events":
+            elif method == "GET" and path in {f"{BASE}/events", f"{MANAGED_BASE}/events"}:
                 body = {
                     "events": state["events"],
                     "next_sequence": len(state["events"]),
                     "has_more": False,
                 }
-            elif method == "POST" and path == f"{BASE}/wait":
+            elif method == "POST" and path in {f"{BASE}/wait", f"{MANAGED_BASE}/wait"}:
                 # Return authoritative edges without advancing past events
                 # the client has not received, including after a reload.
                 since = json.loads(request.post_data or "{}").get("since_sequence", -1)
@@ -263,7 +270,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "next_sequence": fresh[-1]["stream_sequence"] if fresh else since,
                     "has_more": False,
                 }
-            elif method == "POST" and path == f"{BASE}/send":
+            elif method == "POST" and path in {f"{BASE}/send", f"{MANAGED_BASE}/send"}:
                 payload = json.loads(request.post_data or "{}")
                 sends.append(payload)
                 if payload.get("text") in state["fail_texts"]:
@@ -312,7 +319,10 @@ async def main(browser_run: BrowserRun) -> None:
                     "client_turn_id": payload.get("client_turn_id"),
                     "turn_id": turn_id,
                 }
-            elif method == "GET" and path.startswith(f"{BASE}/attachments/"):
+            elif method == "GET" and (
+                path.startswith(f"{BASE}/attachments/")
+                or path.startswith(f"{MANAGED_BASE}/attachments/")
+            ):
                 preview = state["previews"].get(path.rsplit("/", 1)[-1])
                 if preview is None:
                     unknown_requests.append((method, path))
@@ -320,7 +330,7 @@ async def main(browser_run: BrowserRun) -> None:
                 else:
                     await route.fulfill(status=200, content_type="image/png", body=preview)
                 return
-            elif method == "POST" and path == f"{BASE}/cancel":
+            elif method == "POST" and path in {f"{BASE}/cancel", f"{MANAGED_BASE}/cancel"}:
                 interrupts.append(json.loads(request.post_data or "{}"))
                 sequence = len(state["events"])
                 interrupted_turn = next(
@@ -339,7 +349,7 @@ async def main(browser_run: BrowserRun) -> None:
                 )
                 state["turn_open"] = False
                 body = {"ok": True}
-            elif method == "GET" and path == f"{BASE}/live":
+            elif method == "GET" and path in {f"{BASE}/live", f"{MANAGED_BASE}/live"}:
                 await route.fulfill(
                     status=200,
                     content_type="text/event-stream",
@@ -348,7 +358,7 @@ async def main(browser_run: BrowserRun) -> None:
                 return
             elif method == "GET" and path == f"{BASE}/goal/current":
                 body = None
-            elif method == "POST" and path == f"/api/tabs/{TAB}/view":
+            elif method == "POST" and path in {f"/api/tabs/{TAB}/view", "/api/tabs/fixture-managed-tab/view"}:
                 body = {"ok": True}
             elif method == "GET" and path == "/api/feishu/bot/bots":
                 body = {
@@ -665,6 +675,31 @@ async def main(browser_run: BrowserRun) -> None:
             len(sends) == sends_before_reload
         ), "image history reload must not resend a provider turn"
         await page.screenshot(path=str(output / "maso-image-history-mobile.png"), full_page=True)
+
+        # Opening the Workspace-managed Chat must preserve one conversation
+        # surface while switching every history/send/cancel request to managed
+        # session identity. The ordinary MASO Chat above remained tab-scoped.
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.evaluate("""async () => {
+          const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+          useTerminalStore().setActiveTab('fixture-managed-tab')
+        }""")
+        await expect(composer).to_be_visible()
+        await composer.fill("Managed mailbox message")
+        await send_button.click()
+        await expect(page.locator(".composer-stop-btn")).to_be_visible()
+        await page.locator(".composer-stop-btn").click()
+        assert ("GET", f"{MANAGED_BASE}/capabilities") in managed_stream_paths
+        assert ("GET", f"{MANAGED_BASE}/events") in managed_stream_paths
+        assert ("POST", f"{MANAGED_BASE}/send") in managed_stream_paths
+        assert ("POST", f"{MANAGED_BASE}/cancel") in managed_stream_paths
+        assert all("/workspaces/tabs/fixture-managed-tab/stream" not in path for _, path in managed_stream_paths)
+        await page.screenshot(path=str(output / "managed-chat-session-stream.png"), full_page=True)
+        await page.evaluate(f"""async () => {{
+          const {{ useTerminalStore }} = await import('/src/stores/terminalStore.ts')
+          useTerminalStore().setActiveTab('{TAB}')
+        }}""")
+        await expect(composer).to_be_visible()
 
         # The create dialog must show common directories even when the input
         # starts with a different path. Codex history stays unloaded until the

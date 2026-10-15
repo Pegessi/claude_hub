@@ -6,9 +6,9 @@ const pane = readFileSync(new URL('../src/components/StructuredPane.vue', import
 const composable = readFileSync(new URL('../src/composables/useChatGoal.ts', import.meta.url), 'utf8')
 const statusBar = readFileSync(new URL('../src/components/GoalStatusBar.vue', import.meta.url), 'utf8')
 
-test('StructuredPane renders Goal setup and persistent status independently of provider type', () => {
-  assert.match(pane, /<GoalStatusBar[\s\S]*v-if="goal"/)
-  assert.match(pane, /<GoalSetupDialog/)
+test('StructuredPane keeps Goal controls on ordinary Chat rather than managed Task Chat', () => {
+  assert.match(pane, /<GoalStatusBar[\s\S]*v-if="goal && !isManagedChat"/)
+  assert.match(pane, /<GoalSetupDialog[\s\S]*v-if="!isManagedChat"/)
   assert.doesNotMatch(composable, /agent_type|agentType/)
 })
 

@@ -107,7 +107,7 @@
         :title="tabName"
       >{{ tabName }}</span>
       <FeishuBindingPanel
-        v-if="isChatSession"
+        v-if="isChatSession && !isManagedChat"
         :tab-id="pane.tabId"
       />
     </div>
@@ -159,8 +159,8 @@
       />
     </div>
 
-    <!-- Only top-level Chat sessions use the native structured endpoint.
-         Workspace-managed agents always remain on their Terminal surface.
+    <!-- Chat sessions use their canonical structured endpoint. Managed Chat is
+         identified by its managed session id; ordinary Chat keeps tab identity.
          KeepAlive caches one StructuredPane per chat tab (keyed by tabId) so
          switching tabs preserves scroll, draft, attachments, and expand state. -->
     <div
@@ -172,6 +172,8 @@
           :key="store.chatPaneCacheKey(pane.tabId)"
           :tab-id="pane.tabId"
           :pane-id="pane.id"
+          :managed-chat="isManagedTab"
+          :managed-session-id="isManagedTab ? paneTab?.managed_session_id || undefined : undefined"
         />
       </KeepAlive>
     </div>
@@ -180,6 +182,8 @@
       :key="tabId"
       :pane-id="pane.id"
       :tab-id="tabId"
+      :managed-chat="Boolean(tabs.find(tab => tab.id === tabId)?.workspace_role)"
+      :managed-session-id="managedSessionIdForTab(tabId)"
     />
   </div>
 </template>
@@ -212,12 +216,11 @@ const paneTab = computed<TerminalTab | undefined>(() =>
 )
 const agentType = computed(() => paneTab.value?.agent_type)
 const tabName = computed(() => paneTab.value?.name || '')
-// workspace_id is optional display metadata on direct top-level sessions.
-// Only a workspace role marks an internal Agent Workspace runner.
+// workspace_role marks an internal Agent Workspace runner. Managed Chat uses
+// the structured surface only when the backend supplied its managed identity.
 const isManagedTab = computed(() => Boolean(paneTab.value?.workspace_role))
-const isChatSession = computed(() =>
-  paneTab.value?.session_kind === 'chat' && !isManagedTab.value
-)
+const isManagedChat = computed(() => isManagedTab.value)
+const isChatSession = computed(() => paneTab.value?.session_kind === 'chat')
 
 // ── Manual reconnect button (Terminal panes only) ──────────────────────────
 // Status is per-tab in the store; TerminalView performs the actual re-attach
@@ -256,6 +259,10 @@ function handleReconnect() {
 // and QueuedChatObserver owns only the hidden completion stream needed to
 // reactivate an evicted queued Chat.
 const MAX_CACHED_CHAT_PANES = 8
+function managedSessionIdForTab(tabId: string): string | undefined {
+  const tab = tabs.value.find(candidate => candidate.id === tabId)
+  return tab?.workspace_role ? tab.managed_session_id ?? undefined : undefined
+}
 const queuedObserverTabIds = computed(() =>
   store.observedQueuedChatIds(props.pane.id).filter(tabId => tabId !== props.pane.tabId)
 )
