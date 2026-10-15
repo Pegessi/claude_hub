@@ -17,7 +17,7 @@ import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 from ...models import AgentStreamEvent, AgentStreamEventPage, AgentStreamEventType
 
@@ -26,6 +26,28 @@ _COMPACTABLE_HISTORY_TYPES = frozenset(
     {AgentStreamEventType.TEXT_DELTA, AgentStreamEventType.THINKING_DELTA}
 )
 _HISTORY_CHUNK_COUNT_KEY = "_history_chunk_count"
+_IOResult = TypeVar("_IOResult")
+
+
+async def _complete_io(operation: Callable[..., _IOResult], *args: Any) -> _IOResult:
+    """Join disk work before releasing its owner's locks, even on cancellation.
+
+    Cancellation cannot stop a thread. Keep the caller alive until the operation
+    settles so lifecycle teardown cannot clear/reuse its path while it can still
+    write. A disk error takes precedence over cancellation; callers invalidate
+    derived state on either outcome before releasing their locks.
+    """
+    task = asyncio.create_task(asyncio.to_thread(operation, *args))
+    cancellation: Optional[asyncio.CancelledError] = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+    result = task.result()
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 class TurnLifecycleState(str, Enum):
@@ -160,7 +182,13 @@ class AgentStreamStore:
             seq = self._next_seq
             event = event.model_copy(update={"stream_sequence": seq})
             self._ensure_dir()
-            await asyncio.to_thread(self._write_line, event)
+            try:
+                await _complete_io(self._write_line, event)
+            except BaseException:
+                # A cancelled/failed write may already have reached disk. Recover
+                # the actual sequence on retry rather than reusing its old value.
+                self._next_seq = None
+                raise
             # Only advance the sequence counter after a successful write so a
             # failed append does not leave a permanent gap in the stream.
             self._next_seq = seq + 1
@@ -175,9 +203,11 @@ class AgentStreamStore:
         """
         async with self._lock:
             async with self._read_lock:
-                await asyncio.to_thread(self._unlink_session_files)
-                self._next_seq = None
-                self._reset_read_index()
+                try:
+                    await _complete_io(self._unlink_session_files)
+                finally:
+                    self._next_seq = None
+                    self._reset_read_index()
 
     def _unlink_session_files(self) -> None:
         for path in (self._path, self.cursor_path):
@@ -199,9 +229,12 @@ class AgentStreamStore:
                 for i, ev in enumerate(events):
                     ev = ev.model_copy(update={"stream_sequence": i})
                     lines.append(ev.model_dump_json())
-                await asyncio.to_thread(self._write_all, lines)
+                try:
+                    await _complete_io(self._write_all, lines)
+                finally:
+                    self._next_seq = None
+                    self._reset_read_index()
                 self._next_seq = len(events)
-                self._reset_read_index()
 
     def _write_all(self, lines: List[str]) -> None:
         with self._path.open("w", encoding="utf-8") as f:
@@ -292,7 +325,7 @@ class AgentStreamStore:
                             continue
                 self._remember_read_offset(next_seq, next_offset, force=True)
 
-            await asyncio.to_thread(_read)
+            await _complete_io(_read)
             return AgentStreamEventPage(
                 events=compact_history_events(events) if compact else events,
                 next_sequence=next_seq,
@@ -378,7 +411,7 @@ class AgentStreamStore:
                 except OSError as exc:
                     raise RuntimeError(f"cannot inspect agent stream {self._path}") from exc
 
-            await asyncio.to_thread(_read)
+            await _complete_io(_read)
             return TurnLifecycleSnapshot(state=state, latest_unfinished=latest_unfinished)
 
     async def latest_unfinished_turn(self) -> Optional[AgentStreamEvent]:
@@ -434,7 +467,7 @@ class AgentStreamStore:
                 except OSError:
                     candidate = None
 
-            await asyncio.to_thread(_read)
+            await _complete_io(_read)
             return candidate
 
     async def last_event_at(self) -> Optional[str]:
@@ -520,10 +553,13 @@ class AgentStreamStore:
                                 continue
                             kept.append(stripped)
 
-                await asyncio.to_thread(_read)
-                await asyncio.to_thread(self._write_all, kept)
+                await _complete_io(_read)
+                try:
+                    await _complete_io(self._write_all, kept)
+                finally:
+                    self._next_seq = None
+                    self._reset_read_index()
                 self._next_seq = len(kept)
-                self._reset_read_index()
                 return removed
 
     async def snapshot(self) -> Optional[Path]:
@@ -533,11 +569,12 @@ class AgentStreamStore:
         truncate/fork/send can be fully undone.  Returns the backup path, or
         ``None`` if the store file does not exist (nothing to snapshot).
         """
-        if not self._path.exists():
-            return None
-        backup = self._path.with_name(self._path.name + ".edit-bak")
-        await asyncio.to_thread(shutil.copy2, self._path, backup)
-        return backup
+        async with self._lock:
+            if not self._path.exists():
+                return None
+            backup = self._path.with_name(self._path.name + ".edit-bak")
+            await _complete_io(shutil.copy2, self._path, backup)
+            return backup
 
     async def restore(self, backup: Optional[Path]) -> None:
         """Restore the event store from a snapshot created by :meth:`snapshot`.
@@ -546,11 +583,15 @@ class AgentStreamStore:
         reset so subsequent appends/reads observe the restored content rather
         than stale cached state.
         """
-        if backup is None or not backup.exists():
-            return
-        await asyncio.to_thread(shutil.copy2, backup, self._path)
-        self._next_seq = None
-        self._reset_read_index()
+        async with self._lock:
+            async with self._read_lock:
+                if backup is None or not backup.exists():
+                    return
+                try:
+                    await _complete_io(shutil.copy2, backup, self._path)
+                finally:
+                    self._next_seq = None
+                    self._reset_read_index()
 
     async def find_turn(self, turn_id: str) -> Optional[Tuple[int, int, str, List[Dict[str, Any]]]]:
         """Locate a turn while preserving the established four-field contract."""
@@ -627,5 +668,5 @@ class AgentStreamStore:
                             result = (seq, turn_count - 1, text, attachments, metadata)
                         return
 
-        await asyncio.to_thread(_read)
+        await _complete_io(_read)
         return result

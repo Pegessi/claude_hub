@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -29,6 +29,7 @@ from claude_hub.models import (
     User,
     Workspace,
     WorkspaceSessionRole,
+    WorkspaceTaskCreate,
 )
 from claude_hub.services.agent_stream.native import CodexNativeSession
 from claude_hub.services.agent_stream.store import AgentStreamStore
@@ -425,29 +426,6 @@ async def test_idle_question_does_not_enqueue_into_recreated_session(
             call_id="claude-question-reuse",
         )
     )
-    send_entered = asyncio.Event()
-    release_send = asyncio.Event()
-    original_send = manager.send_chat_session_message
-
-    async def blocked_send(*args: Any, **kwargs: Any) -> None:
-        send_entered.set()
-        await release_send.wait()
-        await original_send(*args, **kwargs)
-
-    monkeypatch.setattr(manager, "send_chat_session_message", blocked_send)
-    answer_task = asyncio.create_task(
-        stream_api.send_stream_input(
-            session.id,
-            stream_api.AgentStreamSendRequest(
-                text=_answer_text(),
-                client_turn_id="followup-reuse-call",
-                question_turn_id="question-turn-reuse",
-                question_call_id="claude-question-reuse",
-            ),
-            User(open_id="user", name="User", email="user@example.com"),
-        )
-    )
-    await asyncio.wait_for(send_entered.wait(), timeout=2)
     replacement = session.model_copy(
         update={
             "created_at": session.created_at + timedelta(seconds=1),
@@ -455,10 +433,20 @@ async def test_idle_question_does_not_enqueue_into_recreated_session(
         }
     )
     async with manager.workspace_mutation_lock(session.workspace_id):
-        pump_lock = manager._pump_locks.setdefault(session.id, asyncio.Lock())
-        async with pump_lock:
-            manager.sessions[session.id] = replacement
-    release_send.set()
+        answer_task = asyncio.create_task(
+            stream_api.send_stream_input(
+                session.id,
+                stream_api.AgentStreamSendRequest(
+                    text=_answer_text(),
+                    client_turn_id="followup-reuse-call",
+                    question_turn_id="question-turn-reuse",
+                    question_call_id="claude-question-reuse",
+                ),
+                User(open_id="user", name="User", email="user@example.com"),
+            )
+        )
+        await asyncio.sleep(0)
+        manager.sessions[session.id] = replacement
 
     with pytest.raises(HTTPException) as stale:
         await asyncio.wait_for(answer_task, timeout=2)
@@ -642,6 +630,13 @@ async def test_managed_history_and_wait_reject_friendly_id_replacement(
         return page
 
     monkeypatch.setattr(stream_api, "_wait_stream_events_for", replaced_wait)
+    # This test owns the replacement after waiting, not provider discovery.
+    # Keep the real guard/post-await check without starting a Codex app-server.
+    monkeypatch.setattr(
+        stream_api,
+        "_capabilities_for",
+        AsyncMock(return_value=stream_api.StreamCapabilities(structured=True)),
+    )
     with pytest.raises(HTTPException) as wait:
         await stream_api.wait_stream_events(
             session.id,
@@ -893,3 +888,375 @@ async def test_managed_tab_rejects_direct_stream_and_destructive_tab_controls(
     direct_session = stream_api._terminal_tab_session_or_404(direct.id)
     assert direct_session.tab_id == direct.id
     assert tabs_api._managed_chat_session_for_tab(direct.id) is None
+
+
+async def _idle_answer_card(manager, workspace, monkeypatch, agent_type=AgentType.CLAUDE):
+    session = _managed_session(workspace, agent_type=agent_type, tab_id="answer-admission")
+    if agent_type == AgentType.CURSOR:
+        session = session.model_copy(update={"cursor_transport": "native"})
+    tailers, tailer = await _real_tailer_manager(manager, session, monkeypatch)
+    transport = tailer.native_transport
+    assert transport is not None
+    send_text = AsyncMock()
+    monkeypatch.setattr(transport, "_send_text", send_text)
+    tailer._active_turn_id = "question-turn"
+    tailer._record_approval_card(
+        _approval_event(session, turn_id="question-turn", call_id="question-card")
+    )
+    return session, tailers, tailer, transport, send_text
+
+
+def _answer_request(session, call_id="answer-A", value="red", card="question-card"):
+    return stream_api.send_stream_input(
+        session.id,
+        stream_api.AgentStreamSendRequest(
+            text=_answer_text(value),
+            client_turn_id=call_id,
+            question_turn_id="question-turn",
+            question_call_id=card,
+        ),
+        User(open_id="user", name="User", email="user@example.com"),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CURSOR])
+@pytest.mark.parametrize("same_call", [False, True])
+async def test_question_answers_are_serialized_with_mailbox_admission(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch, agent_type: AgentType, same_call: bool
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch, agent_type
+    )
+    try:
+        # Both requests wait behind a real Workspace writer (e.g. report
+        # intake). Lock fairness exposed the old check -> enqueue gap without
+        # inserting artificial yields into either request implementation.
+        async with manager.workspace_mutation_lock(workspace.id):
+            first = asyncio.create_task(_answer_request(session))
+            second = asyncio.create_task(
+                _answer_request(session, "answer-A" if same_call else "answer-B")
+            )
+            await asyncio.sleep(0)
+        results = await asyncio.wait_for(
+            asyncio.gather(first, second, return_exceptions=True), timeout=2
+        )
+        assert results[0] == {"ok": True}
+        if same_call:
+            assert results[1] == {"ok": True}
+        else:
+            assert isinstance(results[1], HTTPException)
+            assert results[1].status_code == 409
+            assert results[1].headers is not None
+            assert results[1].headers[stream_api.CHAT_ERROR_REASON_HEADER] == "stale_question"
+        send_text.assert_awaited_once()
+        live = manager.sessions[session.id]
+        assert live.processing_call_ids == ["answer-A"]
+        assert live.pending_call_ids == []
+        assert live.chat_question_answer_calls == {'["question-turn","question-card"]': "answer-A"}
+        assert "question-card" not in tailer._pending_approvals
+    finally:
+        await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
+async def test_question_claim_survives_unsent_failure_and_reload(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch
+    )
+    original_ready = manager._ensure_session_ready_for_send
+    monkeypatch.setattr(
+        manager, "_ensure_session_ready_for_send", AsyncMock(side_effect=RuntimeError("not sent"))
+    )
+    try:
+        with pytest.raises(HTTPException) as unsent:
+            await _answer_request(session)
+        assert unsent.value.status_code == 503
+        send_text.assert_not_awaited()
+        assert "question-card" in tailer._pending_approvals
+        assert manager.sessions[session.id].pending_call_ids == ["answer-A"]
+        reloaded = WorkspaceManager()
+        reloaded._load_nested_state()
+        restored = reloaded.sessions[session.id]
+        manager.sessions[session.id] = restored
+        assert restored.chat_question_answer_calls == {
+            '["question-turn","question-card"]': "answer-A"
+        }
+        with pytest.raises(HTTPException) as competing:
+            await _answer_request(session, "answer-B", "blue")
+        assert competing.value.status_code == 409
+        monkeypatch.setattr(manager, "_ensure_session_ready_for_send", original_ready)
+        assert await _answer_request(session) == {"ok": True}
+        send_text.assert_awaited_once()
+        assert manager.sessions[session.id].pending_call_ids == []
+    finally:
+        await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
+async def test_question_failure_before_envelope_does_not_claim_card(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch
+    )
+    persist = manager._persist_attachments
+    monkeypatch.setattr(manager, "_persist_attachments", Mock(side_effect=OSError("disk")))
+    try:
+        with pytest.raises(HTTPException) as failure:
+            await _answer_request(session)
+        assert failure.value.status_code == 500
+        assert not manager.sessions[session.id].chat_question_answer_calls
+        assert not manager.sessions[session.id].call_payload_fingerprints
+        assert "question-card" in tailer._pending_approvals
+        monkeypatch.setattr(manager, "_persist_attachments", persist)
+        assert await _answer_request(session, "answer-B", "blue") == {"ok": True}
+        send_text.assert_awaited_once()
+    finally:
+        await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("resolution failed"), asyncio.CancelledError()])
+async def test_question_retry_after_resolution_failure_keeps_exact_ownership(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch
+    )
+    resolve = tailers.resolve_answered_questions
+    monkeypatch.setattr(tailers, "resolve_answered_questions", AsyncMock(side_effect=failure))
+    try:
+        with pytest.raises(
+            asyncio.CancelledError if isinstance(failure, asyncio.CancelledError) else HTTPException
+        ):
+            await _answer_request(session)
+        live = manager.sessions[session.id]
+        assert live.processing_call_ids == ["answer-A"]
+        assert live.chat_question_answer_calls == {'["question-turn","question-card"]': "answer-A"}
+        # Losing the HTTP acknowledgement cannot authorize either a second
+        # answer or retargeting the accepted client call to a later card.
+        tailer._record_approval_card(
+            _approval_event(session, turn_id="question-turn", call_id="newer-card")
+        )
+        for request in (
+            _answer_request(session, "answer-B", "blue"),
+            _answer_request(session, card="newer-card"),
+        ):
+            with pytest.raises(HTTPException) as rejected:
+                await request
+            assert rejected.value.status_code == 409
+        with pytest.raises(HTTPException) as changed:
+            await _answer_request(session, value="blue")
+        assert changed.value.status_code == 400
+        monkeypatch.setattr(tailers, "resolve_answered_questions", resolve)
+        assert await _answer_request(session) == {"ok": True}
+        assert "newer-card" in tailer._pending_approvals
+        send_text.assert_awaited_once()
+    finally:
+        await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
+async def test_question_does_not_adopt_existing_ordinary_message_call(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch
+    )
+    try:
+        await manager.send_chat_session_message(session.id, _answer_text(), call_id="ordinary")
+        tailer._record_approval_card(
+            _approval_event(session, turn_id="question-turn", call_id="newer-card")
+        )
+        with pytest.raises(HTTPException) as rejected:
+            await _answer_request(session, "ordinary", card="newer-card")
+        assert rejected.value.status_code == 409
+        assert not manager.sessions[session.id].chat_question_answer_calls
+        assert "newer-card" in tailer._pending_approvals
+        send_text.assert_awaited_once()
+    finally:
+        await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
+async def test_question_claim_and_envelope_remain_consistent_on_save_failure(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch
+    )
+    write = manager._atomic_write_text
+    attempted = []
+
+    def fail_envelope_write(path: Path, text: str) -> None:
+        if path == manager._workspace_state_file(workspace.id):
+            attempted.append(json.loads(text))
+            raise OSError("state persistence failed")
+        write(path, text)
+
+    monkeypatch.setattr(manager, "_atomic_write_text", fail_envelope_write)
+    try:
+        with pytest.raises(HTTPException) as failed:
+            await _answer_request(session)
+        assert failed.value.status_code == 500
+        row = next(item for item in attempted[0]["sessions"] if item["id"] == session.id)
+        assert row["pending_messages"]["answer-A"] == _answer_text()
+        assert row["call_payload_fingerprints"]["answer-A"]
+        assert row["chat_question_answer_calls"] == {
+            '["question-turn","question-card"]': "answer-A"
+        }
+        live = manager.sessions[session.id]
+        assert live.pending_call_ids == ["answer-A"]
+        assert live.chat_question_answer_calls == row["chat_question_answer_calls"]
+        with pytest.raises(HTTPException) as competing:
+            await _answer_request(session, "answer-B")
+        assert competing.value.status_code == 409
+        send_text.assert_not_awaited()
+        assert "question-card" in tailer._pending_approvals
+        monkeypatch.setattr(manager, "_atomic_write_text", write)
+        assert await _answer_request(session) == {"ok": True}
+        send_text.assert_awaited_once()
+    finally:
+        await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("handoff lost"), asyncio.CancelledError()])
+async def test_uncertain_question_delivery_retains_claim_without_replay(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch
+    )
+    send_text.side_effect = failure
+    try:
+        with pytest.raises(
+            asyncio.CancelledError if isinstance(failure, asyncio.CancelledError) else HTTPException
+        ):
+            await _answer_request(session)
+        live = manager.sessions[session.id]
+        assert live.uncertain_call_ids == ["answer-A"]
+        assert live.chat_question_answer_calls == {'["question-turn","question-card"]': "answer-A"}
+        with pytest.raises(HTTPException) as retry:
+            await _answer_request(session)
+        assert retry.value.status_code == 503
+        with pytest.raises(HTTPException) as competing:
+            await _answer_request(session, "answer-B")
+        assert competing.value.status_code == 409
+        send_text.assert_awaited_once()
+        assert manager.sessions[session.id].uncertain_call_ids == ["answer-A"]
+    finally:
+        await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("committed_before_failure", [False, True])
+async def test_question_processing_intent_save_failure_restores_pending_retry(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch, committed_before_failure: bool
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch
+    )
+    task = manager.create_task(
+        workspace.id,
+        WorkspaceTaskCreate(
+            title="Question persistence", prompt="Test", agent_type=session.agent_type
+        ),
+    )
+    task = task.model_copy(update={"session_id": session.id, "pending_call_ids": ["answer-A"]})
+    manager.tasks[task.id] = task
+    session = session.model_copy(update={"task_id": task.id})
+    manager.sessions[session.id] = session
+    write = manager._atomic_write_text
+    failed = False
+    admitted_session = None
+
+    def fail_processing_intent(path: Path, text: str) -> None:
+        nonlocal failed, admitted_session
+        if path == manager._workspace_state_file(workspace.id):
+            state = json.loads(text)
+            row = next(item for item in state["sessions"] if item["id"] == session.id)
+            if row["pending_call_ids"] == ["answer-A"]:
+                admitted_session = ManagedSession.model_validate(row)
+            if row["processing_call_ids"] == ["answer-A"] and not failed:
+                failed = True
+                if committed_before_failure:
+                    # _save_state may replace this workspace before another
+                    # write fails. No provider submission has happened yet.
+                    write(path, text)
+                raise OSError("processing-intent persistence failed")
+        write(path, text)
+
+    monkeypatch.setattr(manager, "_atomic_write_text", fail_processing_intent)
+    try:
+        with pytest.raises(HTTPException) as failure:
+            await _answer_request(session)
+        assert failure.value.status_code == 500
+        assert failed
+        send_text.assert_not_awaited()
+        # Restore the complete pre-intent models, not just the state-list
+        # membership: the new processing lease must not survive either.
+        assert admitted_session is not None
+        live = manager.sessions[session.id]
+        assert live == admitted_session
+        assert live.pending_call_ids == ["answer-A"]
+        assert live.processing_call_ids == []
+        assert "answer-A" not in live.processing_call_ids_at
+        assert live.chat_question_answer_calls == {'["question-turn","question-card"]': "answer-A"}
+        assert manager.tasks[task.id] == task
+        assert "question-card" in tailer._pending_approvals
+        durable = json.loads(manager._workspace_state_file(workspace.id).read_text())
+        row = next(item for item in durable["sessions"] if item["id"] == session.id)
+        assert row["chat_question_answer_calls"] == live.chat_question_answer_calls
+        assert row["processing_call_ids"] == (["answer-A"] if committed_before_failure else [])
+        assert await _answer_request(session) == {"ok": True}
+        send_text.assert_awaited_once()
+        assert manager.sessions[session.id].processing_call_ids == ["answer-A"]
+        assert manager.tasks[task.id].processing_call_ids == ["answer-A"]
+        assert "question-card" not in tailer._pending_approvals
+    finally:
+        await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
+async def test_question_rejects_legacy_delivered_call_without_fingerprint(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, workspace = managed_workspace
+    session, tailers, tailer, transport, send_text = await _idle_answer_card(
+        manager, workspace, monkeypatch
+    )
+    # Legacy mailbox recovery deliberately accepts delivered IDs without a
+    # fingerprint/envelope. Such an ordinary ID cannot answer an unrelated card.
+    manager.sessions[session.id] = session.model_copy(
+        update={"delivered_call_ids": ["legacy-ordinary"]}
+    )
+    try:
+        with pytest.raises(HTTPException) as rejected:
+            await _answer_request(session, "legacy-ordinary")
+        assert rejected.value.status_code == 409
+        assert "question-card" in tailer._pending_approvals
+        assert not manager.sessions[session.id].chat_question_answer_calls
+        send_text.assert_not_awaited()
+        # Ordinary-message compatibility remains an idempotent no-op.
+        await manager.send_chat_session_message(
+            session.id, "earlier ordinary message", call_id="legacy-ordinary"
+        )
+        send_text.assert_not_awaited()
+        assert manager.sessions[session.id].delivered_call_ids == ["legacy-ordinary"]
+        assert await _answer_request(session) == {"ok": True}
+        send_text.assert_awaited_once()
+        assert "question-card" not in tailer._pending_approvals
+    finally:
+        await _stop_tailers(tailers, transport)

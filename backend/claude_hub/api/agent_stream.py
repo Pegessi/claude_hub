@@ -1581,39 +1581,84 @@ async def send_stream_input(
             )
         try:
             async with _managed_stream_interaction(session, require_chat=True) as live:
-                consumed = await manager.answer_pending_question(
-                    live,
-                    payload.text,
-                    payload.question_turn_id,
-                    expected_call_id=payload.question_call_id,
+                question_key = json.dumps(
+                    [payload.question_turn_id, payload.question_call_id], separators=(",", ":")
                 )
-                if consumed:
-                    return {"ok": True, "answered_question": True}
-                follows_card = await manager.accepts_question_followup(
-                    live,
-                    payload.text,
-                    payload.question_turn_id,
-                    expected_call_id=payload.question_call_id,
-                )
-                if not follows_card:
+                claimed_call = live.chat_question_answer_calls.get(question_key)
+                retry = claimed_call == payload.client_turn_id
+                # Legacy mailbox IDs may own a delivery without a fingerprint.
+                if (claimed_call is not None and not retry) or (
+                    not retry
+                    and (
+                        payload.client_turn_id in live.call_payload_fingerprints
+                        or payload.client_turn_id in live.pending_call_ids
+                        or payload.client_turn_id in live.processing_call_ids
+                        or payload.client_turn_id in live.delivered_call_ids
+                        or payload.client_turn_id in live.uncertain_call_ids
+                        or payload.client_turn_id in live.chat_question_answer_calls.values()
+                    )
+                ):
                     raise HTTPException(
                         status_code=409,
-                        detail="The referenced provider question is no longer pending",
+                        detail="The provider question or answer call already has another owner",
                         headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
                     )
-                if await manager.turn_in_flight(live):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Wait for the current provider turn before submitting this answer",
-                        headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+                if retry and payload.client_turn_id not in live.call_payload_fingerprints:
+                    raise RuntimeError("The claimed question answer has no mailbox envelope")
+                if not retry:
+                    consumed = await manager.answer_pending_question(
+                        live,
+                        payload.text,
+                        payload.question_turn_id,
+                        expected_call_id=payload.question_call_id,
                     )
+                    if consumed:
+                        return {"ok": True, "answered_question": True}
+                    follows_card = await manager.accepts_question_followup(
+                        live,
+                        payload.text,
+                        payload.question_turn_id,
+                        expected_call_id=payload.question_call_id,
+                    )
+                    if not follows_card:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="The referenced provider question is no longer pending",
+                            headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
+                        )
+                    if await manager.turn_in_flight(live):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Wait for the current provider turn before submitting this answer",
+                            headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+                        )
+                # Keep exact-card admission and its durable handoff indivisible.
+                # The public send method would reacquire our non-reentrant pump
+                # lock; use its locked body while retaining incarnation ownership.
+                await workspace_manager.send_chat_session_message_locked(
+                    live.id,
+                    payload.text,
+                    call_id=payload.client_turn_id,
+                    question_key=question_key,
+                )
+                await manager.resolve_answered_questions(
+                    live,
+                    payload.text,
+                    expected_turn_id=payload.question_turn_id,
+                    expected_call_id=payload.question_call_id,
+                )
+                return {"ok": True}
         except KeyError as exc:
             raise HTTPException(
                 status_code=409,
                 detail="The managed Chat session changed while answering the provider question",
                 headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
             ) from exc
-        except (ValueError, RuntimeError) as exc:
+        except StructuredSourceUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
             raise _map_send_exception(exc) from exc
     try:
         await workspace_manager.send_chat_session_message(
@@ -1630,14 +1675,6 @@ async def send_stream_input(
             call_id=payload.client_turn_id,
             expected_session=session,
         )
-        if payload.question_turn_id is not None and payload.question_call_id is not None:
-            async with _managed_stream_interaction(session, require_chat=True) as live:
-                await manager.resolve_answered_questions(
-                    live,
-                    payload.text,
-                    expected_turn_id=payload.question_turn_id,
-                    expected_call_id=payload.question_call_id,
-                )
     except KeyError as exc:
         raise HTTPException(
             status_code=409,

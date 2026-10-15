@@ -1328,6 +1328,11 @@ class ManagedSession(BaseModel):
     # detected as conflicting. Raw bytes are NOT stored in the fingerprint
     # (only the digest), so the JSON state stays small.
     call_payload_fingerprints: Dict[str, str] = Field(default_factory=dict)
+    # Exact [turn_id, tool_call_id] JSON key -> answer client call_id. Persisted
+    # with the mailbox envelope, not provider completion, so a failed handoff
+    # cannot admit a competing answer. Retained for this session's lifetime,
+    # like fingerprints; legacy sessions start without claims.
+    chat_question_answer_calls: Dict[str, str] = Field(default_factory=dict)
     # Report intake idempotency: call_id → report_id. Populated by
     # ``create_report`` when the payload carries a call_id. Lets a retry
     # after an error-response (report was durably committed but the

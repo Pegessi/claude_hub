@@ -4033,9 +4033,20 @@ class TTYDManager:
             raise
 
     async def delete_tab(self, tab_id: str) -> bool:
-        """Delete a tab and explicitly kill its tmux session."""
+        """Fence the structured owner before retiring its tab and terminal."""
+        from .agent_stream.tailer import discard_session_stream, fence_session_stream
+
+        expected = self.processes.get(tab_id)
+        if expected is None:
+            return False
+        expected_created_at = expected.created_at
+        # Tailer/send locks must never nest under the tab lock. Keep the tab
+        # discoverable while Stop persists its terminal edge; failures retain a
+        # fenced, retryable owner rather than report a partially deleted Chat.
+        stream_id = f"terminal-tab-{tab_id}"
+        provider_fenced = await fence_session_stream(stream_id)
         async with self._locked_current_tab(tab_id) as process:
-            if process is None:
+            if process is not expected or process.created_at != expected_created_at:
                 return False
             logger.warning(
                 f"User requested deletion of tab {tab_id}, killing tmux session {process.tmux_session}"
@@ -4048,11 +4059,10 @@ class TTYDManager:
                 self._save_order()
             self._save_state()
 
-        # The id is no longer discoverable. Do not add tailer/send locks to the tab lock.
         try:
-            from .agent_stream.tailer import discard_session_stream
-
-            await discard_session_stream("terminal-tabs", f"terminal-tab-{tab_id}")
+            await discard_session_stream(
+                "terminal-tabs", stream_id, provider_fenced=provider_fenced
+            )
         except Exception:
             logger.exception("Failed to discard structured stream for tab %s", tab_id)
         return True

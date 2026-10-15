@@ -606,7 +606,7 @@ async def reset_context(session: ManagedSession) -> None:
             raise ManagedChatDeliveryUncertain(
                 "cannot reset managed Chat context while provider delivery is uncertain"
             )
-        await _manager().forget_session(session.id, require_fenced=True)
+        await _manager().forget_session(session.id)
         _persist_fresh_identity(session)
 
 

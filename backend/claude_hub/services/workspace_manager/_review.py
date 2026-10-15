@@ -71,6 +71,7 @@ class _ReviewMixin:
                 and reviewer.workspace_id == workspace.id
                 and reviewer.role == WorkspaceSessionRole.REVIEWER
                 and reviewer.status != ManagedSessionStatus.STOPPED
+                and not reviewer.chat_paused
                 and not self._reviewer_is_busy_with_other_task(reviewer, task.id)
                 and self._reviewer_matches_placement(reviewer, workspace, task)
             ):
