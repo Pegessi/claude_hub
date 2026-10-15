@@ -17,7 +17,11 @@ from typing import Any, Awaitable, Callable, Protocol
 
 import httpx
 
-from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuMessageEvent
+from claude_hub.services.feishu_bot import (
+    FeishuBotConfig,
+    FeishuMessageEvent,
+    create_feishu_http_client,
+)
 from claude_hub.services.feishu_bot_pool import (
     EffectiveBot,
     FeishuBotPoolError,
@@ -427,7 +431,9 @@ async def _discover_connection_url(
     try:
         async with asyncio.timeout(timeout_seconds):
             if http_client is None:
-                async with httpx.AsyncClient(timeout=timeout_seconds) as requester:
+                async with create_feishu_http_client(
+                    config.api_base_url, timeout=timeout_seconds
+                ) as requester:
                     response = await request(requester)
             else:
                 response = await request(http_client)

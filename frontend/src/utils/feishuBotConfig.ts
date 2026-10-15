@@ -89,6 +89,7 @@ const ROOT = '/api/feishu/bot/bots'
 const ERROR_CODES = new Set([
   'bot_revision_conflict', 'bot_pool_unavailable', 'bot_operation_busy',
   'hub_access_required', 'app_id_already_in_pool', 'app_id_immutable',
+  'feishu_access_control_denied',
   'bot_already_bound', 'chat_already_bound', 'pairing_not_claimed',
   'pairing_confirmation_mismatch', 'pairing_expired', 'pairing_not_owned',
   'bot_disabled', 'bot_not_found', 'pair_code_rate_limited',
@@ -121,7 +122,12 @@ function fixedMessage(status: number, code: string | null): string {
   }
   if (status === 410) return 'The Hub Bot API has changed. Refresh this page or update the UI.'
   if (status === 429) return 'Too many pairing codes were requested. Wait and try again.'
-  if (status === 502) return 'Feishu could not validate these credentials. Check them and try again.'
+  if (status === 502) {
+    if (code === 'feishu_access_control_denied') {
+      return 'Feishu blocked this app with access-control policy 21001. Ask the app administrator to check Open API logs and contact Feishu support.'
+    }
+    return 'Feishu could not validate these credentials. Check them and try again.'
+  }
   if (status === 500) {
     if (code === 'routing_cleanup_failed') return 'The Bot may have changed, but routing cleanup failed. Reload the pool before another action.'
     return 'The Bot operation may have changed the pool. Reload before another action.'

@@ -101,6 +101,76 @@ def system_network_access(ctx: click.Context) -> None:
     emit(data, cli_main.as_json(ctx))
 
 
+QUOTA_LIMIT_COLUMNS = ["scope", "label", "state", "used", "remaining", "resets_at"]
+
+
+def _quota_limit_rows(provider: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """Flatten one provider's limits into table rows."""
+    rows: list[Dict[str, Any]] = []
+    limits = provider.get("limits")
+    for limit in limits if isinstance(limits, list) else []:
+        if not isinstance(limit, dict):
+            continue
+        rows.append(
+            {
+                "scope": limit.get("scope", ""),
+                "label": limit.get("label", ""),
+                "state": limit.get("state", ""),
+                # A percentage is absent whenever the provider withheld it.
+                "used": "-" if limit.get("used_percent") is None else limit["used_percent"],
+                "remaining": (
+                    "-" if limit.get("remaining_percent") is None else limit["remaining_percent"]
+                ),
+                "resets_at": limit.get("resets_at") or "-",
+            }
+        )
+    return rows
+
+
+def _echo_provider_quota(provider: Dict[str, Any]) -> None:
+    """Print one provider's heading, notes and limit table."""
+    details = [
+        # Booleans render JSON-style so the text and --json views agree.
+        f"{key}={str(provider[key]).lower() if isinstance(provider[key], bool) else provider[key]}"
+        for key in ("plan", "credit_balance", "enforcing", "as_of")
+        if provider.get(key) is not None
+    ]
+    if provider.get("stale"):
+        details.append("stale=true")
+    suffix = f" ({', '.join(details)})" if details else ""
+    click.echo(f"{provider.get('provider', '?')}: {provider.get('state', 'unknown')}{suffix}")
+    if provider.get("message"):
+        click.echo(f"  {provider['message']}")
+    rows = _quota_limit_rows(provider)
+    if rows:
+        print_rows(rows, QUOTA_LIMIT_COLUMNS)
+
+
+@click.command("quota")
+@click.option("--refresh", is_flag=True, default=False, help="Bypass the cached reading.")
+@click.pass_context
+def quota(ctx: click.Context, refresh: bool) -> None:
+    """Show remaining provider quota (Codex and MASO)."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.get_quota(refresh=refresh)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if cli_main.as_json(ctx):
+        emit(data, True)
+        return
+    providers = data.get("providers") if isinstance(data, dict) else None
+    if not providers:
+        click.echo("(none)")
+        return
+    for index, provider in enumerate(providers):
+        if not isinstance(provider, dict):
+            continue
+        if index:
+            click.echo("")
+        _echo_provider_quota(provider)
+
+
 @click.group()
 def tab() -> None:
     """Manage terminal tabs."""

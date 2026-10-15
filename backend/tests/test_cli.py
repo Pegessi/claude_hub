@@ -58,8 +58,116 @@ def test_help_lists_groups():
         "agent",
         "session",
         "lessons",
+        "quota",
     ):
         assert group in result.output
+
+
+QUOTA_SAMPLE = {
+    "providers": [
+        {
+            "provider": "codex",
+            "available": True,
+            "state": "near",
+            "message": "",
+            "as_of": "2026-10-15T04:07:36.155Z",
+            "stale": False,
+            "limits": [
+                {
+                    "scope": "weekly",
+                    "label": "Weekly limit",
+                    "state": "near",
+                    "used_percent": 82,
+                    "remaining_percent": 18,
+                    "resets_at": "2026-10-20T18:38:35Z",
+                }
+            ],
+            "plan": "pro",
+            "credit_balance": "62500.0000000000",
+            "enforcing": None,
+        },
+        {
+            "provider": "maso",
+            "available": False,
+            "state": "unavailable",
+            "message": "MASO quota is unavailable. Check the MASO service, then refresh.",
+            "as_of": None,
+            "stale": False,
+            "limits": [],
+            "plan": None,
+            "credit_balance": None,
+            "enforcing": None,
+        },
+    ]
+}
+
+
+def test_quota_json(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=QUOTA_SAMPLE)
+
+    captured = patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--json", "quota", "--refresh"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == QUOTA_SAMPLE
+    assert captured[0].url.path == "/api/quota"
+    assert captured[0].url.params["refresh"] == "true"
+
+
+def test_quota_table_shows_limits_and_unavailable_reason(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=QUOTA_SAMPLE)
+
+    captured = patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["quota"])
+    assert result.exit_code == 0, result.output
+    assert "codex: near" in result.output
+    assert "plan=pro" in result.output and "credit_balance=62500.0000000000" in result.output
+    assert "weekly" in result.output and "82" in result.output
+    assert "maso: unavailable" in result.output
+    assert "Check the MASO service" in result.output
+    assert "refresh" not in captured[0].url.params
+
+
+def test_quota_table_renders_booleans_json_style(monkeypatch):
+    payload = {
+        "providers": [
+            {
+                "provider": "maso",
+                "available": True,
+                "state": "within",
+                "message": "",
+                "as_of": None,
+                "stale": True,
+                "limits": [],
+                "plan": None,
+                "credit_balance": None,
+                "enforcing": True,
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["quota"])
+    assert result.exit_code == 0, result.output
+    assert "enforcing=true" in result.output
+    assert "stale=true" in result.output
+
+
+def test_quota_error_exits_nonzero(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "boom"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["quota"])
+    assert result.exit_code != 0
 
 
 def test_workspace_list_json(monkeypatch):
