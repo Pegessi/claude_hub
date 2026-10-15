@@ -274,6 +274,8 @@ async def dot_save_card(
         files=payload.files,
         source=payload.source,
         created=existing.created if existing else "",
+        # An update keeps the card archived; it is not a way to bring it back.
+        archived=existing.archived if existing else False,
     )
     try:
         saved = service.store.save_card(card)
@@ -312,15 +314,28 @@ async def dot_upload_file(
     return {"path": path, "bytes": len(data)}
 
 
+_INLINE_FILE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
 @router.get("/files/{relative_path:path}")
 async def dot_get_file(
     relative_path: str, current_user: User = Depends(get_current_user)
 ) -> FileResponse:
     service = _service()
-    path = service.store.resolve_home_path(f"files/{relative_path}")
+    path = service.store.resolve_file(f"files/{relative_path}")
     if path is None:
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path, media_type=service.store.guess_mime(path))
+    media_type = service.store.guess_mime(path)
+    # Only raster images render inline; anything else (HTML, SVG, ...) is a
+    # download, so a stored file can never run script on the Hub origin.
+    inline = media_type in _INLINE_FILE_TYPES
+    return FileResponse(
+        path,
+        media_type=media_type if inline else "application/octet-stream",
+        filename=path.name,
+        content_disposition_type="inline" if inline else "attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get("/journal")

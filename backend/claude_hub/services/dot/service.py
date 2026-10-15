@@ -42,6 +42,8 @@ class TurnPlan:
     conversation_id: Optional[str]
     system_pack: str
     turn_pack: str
+    # Inbox events shown in ``turn_pack``; ack them only once the turn is sent.
+    delivered_event_ids: list[str]
 
 
 def _parse_time(value: Any) -> Optional[datetime]:
@@ -71,8 +73,10 @@ class DotService:
         self.store = store or DotStore()
         self.index = DotIndex(self.store)
         self._journal_lock: Optional[asyncio.Lock] = None
+        self._setup_lock: Optional[asyncio.Lock] = None
+        self._wake_pending = False
         self._watch_task: Optional[asyncio.Task[None]] = None
-        self._state_cache: tuple[float, dict[str, Any]] = (-1.0, {})
+        self._state_cache: tuple[tuple[int, int, int], dict[str, Any]] = ((-1, -1, -1), {})
 
     # ── identity ────────────────────────────────────────────────────────
 
@@ -80,18 +84,21 @@ class DotService:
         """Read state without creating the home (cheap; called on every Chat turn)."""
         path = self.store.home / "state.json"
         try:
-            mtime = path.stat().st_mtime
+            info = path.stat()
         except OSError:
             return {}
-        cached_mtime, cached = self._state_cache
-        if cached_mtime == mtime:
+        # Writes are atomic replaces (new inode), so this key changes even when
+        # two writes land in the same mtime tick.
+        key = (info.st_ino, info.st_mtime_ns, info.st_size)
+        cached_key, cached = self._state_cache
+        if cached_key == key:
             return cached
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         state = value if isinstance(value, dict) else {}
-        self._state_cache = (mtime, state)
+        self._state_cache = (key, state)
         return state
 
     def tab_id(self) -> Optional[str]:
@@ -113,6 +120,13 @@ class DotService:
         tab, exactly like a normal new Chat. See ``env_seed_needed`` for an
         existing tab.
         """
+        # Two setups at once (double click, CLI) must not create two tabs.
+        if self._setup_lock is None:
+            self._setup_lock = asyncio.Lock()
+        async with self._setup_lock:
+            return await self._ensure_tab(env)
+
+    async def _ensure_tab(self, env: Optional[dict[str, str]]) -> str:
         from ...models.schemas import AgentType, SessionKind
         from .. import ttyd_manager
 
@@ -199,6 +213,12 @@ class DotService:
     def prepare_turn(self, text: str, conversation_id: Optional[str]) -> TurnPlan:
         """Decide rotation and build both packs for one Dot turn."""
         self.store.ensure()
+        # Read-decide-write under the store lock so a concurrent rotation
+        # request is not overwritten.
+        with self.store.lock:
+            return self._prepare_turn(text, conversation_id)
+
+    def _prepare_turn(self, text: str, conversation_id: Optional[str]) -> TurnPlan:
         state = self.store.read_state()
         now = utc_now()
         stripped = text.lstrip()
@@ -232,8 +252,6 @@ class DotService:
             session_turn=turns,
             recall=not tidy,
         )
-        if pack.delivered_event_ids:
-            self.store.mark_inbox_read(pack.delivered_event_ids)
         updates: dict[str, Any] = {
             "session_conversation_id": conversation_id,
             "session_turns": turns,
@@ -251,7 +269,13 @@ class DotService:
             conversation_id=conversation_id,
             system_pack=system_pack,
             turn_pack=pack.text,
+            delivered_event_ids=pack.delivered_event_ids,
         )
+
+    def mark_delivered(self, event_ids: list[str]) -> None:
+        """The provider accepted a turn: its shown inbox events are now read."""
+        if event_ids:
+            self.store.mark_inbox_read(event_ids)
 
     def request_rotation(self) -> None:
         self.store.update_state(rotate_requested=True)
@@ -453,8 +477,9 @@ class DotService:
     async def _watch_loop(self) -> None:
         while True:
             try:
-                if self.is_set_up() and await self.check_work():
-                    await self.wake()
+                if self.is_set_up() and (await self.check_work() or self._wake_pending):
+                    # A failed or skipped wake retries next tick while events are unread.
+                    self._wake_pending = not await self.wake() and bool(self.store.list_inbox())
             except asyncio.CancelledError:
                 raise
             except Exception:
