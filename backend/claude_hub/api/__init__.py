@@ -10,6 +10,7 @@ from .feishu_bot import router as feishu_bot_router
 from .filesystem import router as filesystem_router
 from .goal_runs import router as goal_runs_router
 from .maso import router as maso_router
+from .quota import router as quota_router
 from .remote import router as remote_router
 from .scheduled_tasks import router as scheduled_tasks_router
 from .system import router as system_router
@@ -34,5 +35,6 @@ api_router.include_router(codex_router)
 api_router.include_router(env_presets_router)
 api_router.include_router(scheduled_tasks_router)
 api_router.include_router(agent_stream_router)
+api_router.include_router(quota_router)
 
 __all__ = ["api_router"]

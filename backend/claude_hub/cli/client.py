@@ -236,6 +236,10 @@ class HubClient:
         """GET /api/system/network-access."""
         return self._request("GET", "/api/system/network-access")
 
+    def get_quota(self, refresh: bool = False) -> Any:
+        """GET /api/quota."""
+        return self._request("GET", "/api/quota", params={"refresh": "true"} if refresh else None)
+
     # -- Workspaces ---------------------------------------------------------
 
     def list_workspaces(self) -> Any:

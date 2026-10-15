@@ -5,6 +5,28 @@
 
 ## Unreleased
 
+### feat(quota): report remaining Codex and MASO quota
+
+- Add `GET /api/quota`, a `claude-hub quota` command and a Hub menu panel that
+  report how much of each provider's allowance is still available, as a share
+  per limit window with its reset time.
+- Read Codex from the newest `token_count` record in its local rollout files,
+  ordered by modification time because resuming a session appends current
+  records to a file filed under its original date.
+- Withhold a Codex share once its rolling window has elapsed, rather than
+  presenting a reading that describes a window which no longer exists.
+- Ask MASO for its own per-model accounting over the discovered local endpoint
+  and present its states unchanged; report each provider separately so one
+  unavailable provider still leaves the other readable.
+- Separate a provider that is absent from the deployment from one that is
+  configured but unreachable, so a Hub without MASO states the fact quietly
+  instead of raising a permanent alert nobody can act on.
+- Carry the age of every reading, because Codex only refreshes its figures when
+  a turn completes and a stale reading is otherwise indistinguishable.
+- Say so when a manual refresh returns the same reading, and mark an ageing
+  reading as a last known value: an allowance can also be reset out of band,
+  which the reset time in an older reading cannot predict.
+
 ### feat(chat): accept image input in MASO conversations
 
 - Enable image attachments, including image-only turns and queued drafts, through
