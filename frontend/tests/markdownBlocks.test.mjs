@@ -85,8 +85,8 @@ const mocked = outputText
     'const { highlightVersion, renderCodeBlockHtml } = globalThis.__codeHighlight;',
   )
   .replace(
-    /import \{ rewriteQuotedImageSrcs \} from ['"]@\/utils\/quotedImage['"];?/,
-    'const { rewriteQuotedImageSrcs } = globalThis.__quotedImage;',
+    /import \{ resolveLocalImageUrl, rewriteQuotedImageSrcs \} from ['"]@\/utils\/quotedImage['"];?/,
+    'const { resolveLocalImageUrl, rewriteQuotedImageSrcs } = globalThis.__quotedImage;',
   )
 
 globalThis.__marked = marked
@@ -855,4 +855,14 @@ test('local markdown images keep their tab scope through block and list caching'
   const b = renderString(cache, src, { complete: true, quotedTabId: 'tab-b' })
   assert.doesNotMatch(b, /tabs\/tab-a\//)
   assert.equal((b.match(/tabs\/tab-b\//g) || []).length, 2)
+})
+
+
+test('local image links render as pictures while external links and code keep their meaning', () => {
+  const cache = new MarkdownBlockCache()
+  const blocks = cache.render('[View result](</work/large screenshot.png>) [Docs](https://example.com/photo.png)\n\n`[Code](/work/code.png)`', { quotedTabId: 'image-tab', complete: true })
+  const html = blocks.map(block => block.html || '').join('')
+  assert.match(html, /<img[^>]+agent-image\?path=%2Fwork%2Flarge%20screenshot.png/)
+  assert.match(html, /<a href="https:\/\/example.com\/photo.png">Docs<\/a>/)
+  assert.match(html, /<code>\[Code\]\(\/work\/code.png\)<\/code>/)
 })

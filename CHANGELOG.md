@@ -7,6 +7,18 @@
 
 ## Released
 
+### feat(chat): preview assistant images and retain original output in the shared LRU
+
+- Render local image links directly in Chat and open them in the image viewer,
+  with fit-to-window, actual-size and original-image controls.
+- Allow a tab's recorded image-view tools to display their exact temporary
+  screenshot, matching the frontend's existing Read/view_image recognition.
+- Save agent output as original bytes in the existing attachment cache and
+  shared quotas/LRU. Capture live image output before fanout, deduplicate
+  repeated reads, and keep retained images available after source cleanup.
+- Serialize updates to the same image and invalidate superseded versions so
+  concurrent reads or an uncacheable replacement cannot revive an older image.
+
 ### docs: hold the change log in one Released section
 
 - Merge three same-named `Unreleased` headings into one section, keeping all

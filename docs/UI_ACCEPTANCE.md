@@ -55,7 +55,7 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 | Bot components | Settings/binding behavior, secret clearing and desktop/mobile layout |
 | Queued chat activation | A hidden queued Chat activates before its draft is sent |
 | Goal steering | Steering a running Goal and resuming after a question is answered |
-| Chat image quality | An original image is sent once, sized from the real preview |
+| Chat image quality | An original image is sent once, sized from the real preview; assistant local links and Read screenshots render inline, open at actual size, and retain keyboard/mobile controls |
 
 These are real Vue/Pinia DOM checks served by a dedicated Vite process. Page
 APIs are mocked, unknown API routes fail, and WebSockets are blocked. This is

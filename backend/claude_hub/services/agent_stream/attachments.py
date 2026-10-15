@@ -664,7 +664,7 @@ def _normalize_entry(entry: Any) -> Optional[Dict[str, Any]]:
     ):
         last_used_at = created_at
 
-    return {
+    normalized = {
         "id": att_id,
         "workspace_id": ws,
         "session_id": sess,
@@ -675,6 +675,15 @@ def _normalize_entry(entry: Any) -> Optional[Dict[str, Any]]:
         "created_at": float(created_at),
         "last_used_at": float(last_used_at),
     }
+    # Agent outputs share this manifest and its quotas. Only hashes are kept;
+    # a source filename never becomes a manifest-controlled filesystem path.
+    if "source_key" in entry:
+        for field in ("source_key", "source_digest"):
+            value = entry.get(field)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                return None
+            normalized[field] = value
+    return normalized
 
 
 def _lru_key(entry: Dict[str, Any]) -> Tuple[float, float]:
@@ -815,11 +824,11 @@ class AgentStreamAttachmentStore:
         *,
         width: Optional[int] = None,
         height: Optional[int] = None,
+        source_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Persist a bounded preview and return its opaque metadata.
 
-        The caller is responsible for supplying the bounded preview (the
-        frontend resamples to max edge 1024px). The backend enforces the
+        The caller supplies an original or bounded display image. The backend enforces the
         per-preview byte cap, the MIME whitelist, magic-byte consistency, and
         server-side dimension bounds (1..MAX_PREVIEW_EDGE).
 
@@ -835,6 +844,9 @@ class AgentStreamAttachmentStore:
         dimensions are outside 1..MAX_PREVIEW_EDGE, or the declared
         dimensions disagree with the parsed header.
         """
+        if source_key is not None and re.fullmatch(r"[0-9a-f]{64}", source_key) is None:
+            raise ValueError("source_key must be a SHA-256 digest")
+        source_digest = hashlib.sha256(preview_bytes).hexdigest() if source_key else None
         if len(preview_bytes) > self.max_preview_bytes:
             raise ValueError(
                 f"preview exceeds per-file cap: {len(preview_bytes)} > {self.max_preview_bytes} bytes"
@@ -858,6 +870,31 @@ class AgentStreamAttachmentStore:
 
         async with _get_global_lock():
             index = self._read_index()
+            if source_key is not None and _session_dir_chain_is_real(
+                self.workspace_id, self.session_id
+            ):
+                for existing in self._session_entries(index):
+                    if (
+                        existing.get("source_key") != source_key
+                        or existing.get("source_digest") != source_digest
+                    ):
+                        continue
+                    cached = _resolve_attachment_path(
+                        self.workspace_id, self.session_id, existing["id"]
+                    )
+                    if cached.is_symlink() or not cached.is_file():
+                        continue
+                    now = time.time()
+                    if now - existing["last_used_at"] >= _LRU_TOUCH_INTERVAL_SECONDS:
+                        existing["last_used_at"] = now
+                        self._write_index(index)
+                    return {
+                        "id": existing["id"],
+                        "mime_type": existing["mime_type"],
+                        "bytes": existing["size"],
+                        "width": existing["width"],
+                        "height": existing["height"],
+                    }
             attachment_id = uuid.uuid4().hex
             created_at = time.time()
 
@@ -885,6 +922,8 @@ class AgentStreamAttachmentStore:
                 "created_at": created_at,
                 "last_used_at": created_at,
             }
+            if source_key is not None:
+                entry.update(source_key=source_key, source_digest=source_digest)
 
             # Publish the file and the manifest atomically: if the manifest
             # write fails (or anything else raises before the index is
@@ -919,7 +958,16 @@ class AgentStreamAttachmentStore:
             # manifest rewrite. When ``max_age_seconds`` is ``None``,
             # ``_evict_aged`` returns immediately without scanning.
             try:
-                changed = self._evict_aged(index)
+                changed = False
+                if source_key is not None:
+                    # A path URL denotes its latest retained contents. Remove
+                    # superseded versions so evicting the current one cannot
+                    # silently resurrect an older screenshot at that URL.
+                    for old in list(self._session_entries(index)):
+                        if old.get("source_key") == source_key and old["id"] != attachment_id:
+                            self._delete_entry(index, old, persist=False)
+                            changed = True
+                changed = self._evict_aged(index) or changed
                 changed = self._evict_session(index) or changed
                 changed = self._evict_global(index) or changed
                 if changed:
@@ -960,6 +1008,38 @@ class AgentStreamAttachmentStore:
                 "height": parsed_height,
             }
 
+    async def discard_source(self, source_key: str) -> None:
+        """Forget superseded output when its replacement cannot be retained."""
+        async with _get_global_lock():
+            index = self._read_index()
+            entries = [
+                entry
+                for entry in self._session_entries(index)
+                if entry.get("source_key") == source_key
+            ]
+            for entry in entries:
+                self._delete_entry(index, entry, persist=False)
+            if entries:
+                self._write_index(index)
+
+    async def read_source(self, source_key: str) -> Tuple[bytes, str]:
+        """Read the latest retained version of a source in this session.
+
+        Works after the original file is gone. The regular read refreshes
+        LRU recency and enforces the same ownership and symlink checks.
+        """
+        async with _get_global_lock():
+            index = self._read_index()
+            entries = [
+                entry
+                for entry in self._session_entries(index)
+                if entry.get("source_key") == source_key
+            ]
+            if not entries:
+                raise KeyError(source_key)
+            entry = max(entries, key=lambda entry: entry["created_at"])
+            return self._read_entry(index, entry)
+
     async def read(self, attachment_id: str) -> Tuple[bytes, str]:
         """Return ``(preview_bytes, mime_type)`` for an existing attachment.
 
@@ -981,40 +1061,42 @@ class AgentStreamAttachmentStore:
             )
             if entry is None:
                 raise KeyError(attachment_id)
-            # Refuse to follow a symlink placed at the workspace or session
-            # hash component: it would redirect the read to another session's
-            # directory. Treat as missing.
-            if not _session_dir_chain_is_real(self.workspace_id, self.session_id):
-                raise KeyError(attachment_id)
-            # Build the path from hashed components; the raw ids from the
-            # index are never interpolated into the filesystem path.
+            return self._read_entry(index, entry)
+
+    def _read_entry(self, index: List[Dict[str, Any]], entry: Dict[str, Any]) -> Tuple[bytes, str]:
+        attachment_id = entry["id"]
+        # Refuse to follow a symlink placed at the workspace or session
+        # hash component: it would redirect the read to another session's
+        # directory. Treat as missing.
+        if not _session_dir_chain_is_real(self.workspace_id, self.session_id):
+            raise KeyError(attachment_id)
+        # Build the path from hashed components; the raw ids from the
+        # index are never interpolated into the filesystem path.
+        try:
+            path = _resolve_attachment_path(entry["workspace_id"], entry["session_id"], entry["id"])
+        except ValueError:
+            # Corrupt index entry (bad attachment id) — drop it and fail
+            # closed.
+            index = [e for e in index if e.get("id") != attachment_id]
+            self._write_index(index)
+            raise KeyError(attachment_id)
+        if path.is_symlink() or not path.is_file():
+            # Index says it exists but the entry is gone, is a symlink,
+            # or is an unexpected directory/device. Treat it as stale;
+            # preview reads serve regular files only.
+            index = [e for e in index if e.get("id") != attachment_id]
+            self._write_index(index)
+            raise KeyError(attachment_id)
+        data = path.read_bytes()
+        now = time.time()
+        if now - entry["last_used_at"] >= _LRU_TOUCH_INTERVAL_SECONDS:
+            entry["last_used_at"] = now
             try:
-                path = _resolve_attachment_path(
-                    entry["workspace_id"], entry["session_id"], entry["id"]
-                )
-            except ValueError:
-                # Corrupt index entry (bad attachment id) — drop it and fail
-                # closed.
-                index = [e for e in index if e.get("id") != attachment_id]
                 self._write_index(index)
-                raise KeyError(attachment_id)
-            if path.is_symlink() or not path.is_file():
-                # Index says it exists but the entry is gone, is a symlink,
-                # or is an unexpected directory/device. Treat it as stale;
-                # preview reads serve regular files only.
-                index = [e for e in index if e.get("id") != attachment_id]
-                self._write_index(index)
-                raise KeyError(attachment_id)
-            data = path.read_bytes()
-            now = time.time()
-            if now - entry["last_used_at"] >= _LRU_TOUCH_INTERVAL_SECONDS:
-                entry["last_used_at"] = now
-                try:
-                    self._write_index(index)
-                except OSError:
-                    # Recency is advisory; a failed refresh must not fail the read.
-                    pass
-            return data, entry["mime_type"]
+            except OSError:
+                # Recency is advisory; a failed refresh must not fail the read.
+                pass
+        return data, entry["mime_type"]
 
     async def _delete_by_id(self, attachment_id: str) -> None:
         """Delete a single preview by id from the index and disk.

@@ -59,6 +59,7 @@ from .base import (
 )
 from .coalescer import AgentStreamCoalescer
 from .fork_seed import discard_seed_sidecar, read_seed_sidecar
+from .local_images import cache_event_images, image_paths_from_event
 from .native import (
     ProviderSession,
     _detect_image_mime,
@@ -2905,6 +2906,23 @@ class SessionTailer:
         whole flush.
         """
         event = await self._store.append(event)
+        if (
+            self._is_live
+            and event.type
+            in {
+                AgentStreamEventType.TOOL_CALL_STARTED,
+                AgentStreamEventType.TURN_COMPLETED,
+            }
+            and image_paths_from_event(event)
+        ):
+            session = self._session_getter()
+            if session is not None:
+                try:
+                    await cache_event_images(session, event)
+                except Exception:
+                    # Image retention cannot turn a successful agent event
+                    # into a failed turn or suppress delivery to the Chat.
+                    logger.warning("Could not retain agent image for session %s", self.session_id)
         if self._is_live:
             self._fanout(event)
             if event.type in {
