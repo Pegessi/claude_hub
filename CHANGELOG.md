@@ -7,6 +7,13 @@
 
 ## Released
 
+### fix(chat): keep Claude background results from completing a user request
+
+- Correlate Claude result messages with the submitted input UUID, so a resumed
+  background-task notification cannot end the user's turn and discard its reply.
+- Preserve local-command completions, owned errors and older CLI results without
+  correlation metadata; retain the existing cancellation and stale-stream fences.
+
 ### fix(chat): recheck restart continuation after provider preparation
 
 - Honor Stop, conversation/configuration changes and shutdown during asynchronous
