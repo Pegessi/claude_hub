@@ -47,7 +47,9 @@ TOOL_GUIDE = """\
 - `claude-hub dot work list` — tasks you delegated and their state
 - `claude-hub dot delegate --workspace <id> --title "..." --goal "..." \
 --done-when "..." [--context "..."] [--constraints "..."] [--agent codex|claude] \
-[--stall-hours N]`
+[--stall-hours N]`. Before you send it, check: is "done when" something a
+  stranger can verify? Could the worker finish without asking you anything?
+  Is it one goal? Run `claude-hub dot recall "brief lesson"` for past misses.
 - `claude-hub dot watch <task-id> [--stall-hours N]` — watch an existing Hub task (default \
 stuck alarm: 2 hours without progress); `claude-hub dot unwatch <task-id>` stops it
 - `claude-hub task accept <task-id>` — accept a finished task once the user agrees
@@ -85,14 +87,20 @@ Finish with a short report: what you did, the result (or where it is), how you
 checked it, and open risks. Lead with the result.
 """
 
+# A wake or tidy turn answered with exactly this is hidden from the chat and the journal.
+QUIET_REPLY = "[quiet]"
+
 WAKE_MESSAGE = (
     "[Dot wake] New events are in your context. Handle them: read each result, "
-    "update Focus and memory, and tell me only what needs me. If nothing needs me, "
-    "reply with one short line."
+    "update Focus and memory, and tell me only what needs me (a decision, a "
+    "result I asked for, a problem). When a task failed or came back with a "
+    "question, save a card titled `Brief lesson: <what the brief missed>` "
+    f"(kind knowledge). If nothing needs me, reply with exactly {QUIET_REPLY}."
 )
 
-TIDY_MESSAGE = """\
-[Dot tidy] Nightly memory tidy. Work quietly and reply with a 3-line summary.
+TIDY_MESSAGE = f"""\
+[Dot tidy] Nightly memory tidy. Work quietly. Reply with exactly {QUIET_REPLY}
+unless you found something that needs me; then say it in a line or two.
 1. Read the journal files since your last tidy. Turn durable facts, decisions
    and results into cards (`claude-hub dot remember`). Skip small talk.
 2. Merge duplicate or overlapping cards; archive stale ones (`claude-hub dot forget`).

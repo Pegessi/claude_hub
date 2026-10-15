@@ -105,6 +105,18 @@ async def test_sync_journal_pairs_turns_once(
     assert recent[-1].endswith("hub] (turn failed)")
     assert not any("401" in line for line in recent)
 
+    # A quiet wake (nothing needed the user) stays out of the recent talk.
+    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t4", summary="[Dot wake] x"))
+    await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, "t4", assistant_text="[quiet]"))
+    assert await service.sync_journal() == 0
+    assert service.store.recent_journal() == recent
+    assert await service.sync_journal() == 0, "the cursor moved past the quiet turn"
+    # The marker only counts for Hub turns.
+    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t5", summary="Say [quiet]"))
+    await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, "t5", assistant_text="[quiet]"))
+    assert await service.sync_journal() == 1
+    assert service.store.recent_journal()[-1].endswith("dot] [quiet]")
+
 
 @pytest.mark.asyncio
 async def test_stream_observer_ignores_other_tabs(service: DotService) -> None:
@@ -198,31 +210,53 @@ def test_schedules_are_created_once_and_follow_the_tab(
     service: DotService, monkeypatch: MonkeyPatch
 ) -> None:
     schedules: dict[str, Any] = {}
-    updates: list[tuple[str, Any]] = []
+    updates: list[tuple[str, dict[str, Any]]] = []
 
     def create(payload: Any) -> SimpleNamespace:
-        item = SimpleNamespace(id=f"s-{len(schedules) + 1}", tab_id=payload.tab_id, payload=payload)
+        item = SimpleNamespace(
+            id=f"s-{len(schedules) + 1}",
+            tab_id=payload.tab_id,
+            cron=payload.cron,
+            interval_seconds=payload.interval_seconds,
+            payload=payload,
+        )
         schedules[item.id] = item
         return item
 
     def update(schedule_id: str, payload: Any) -> None:
-        updates.append((schedule_id, payload.tab_id))
-        schedules[schedule_id].tab_id = payload.tab_id
+        fields = payload.model_dump(exclude_unset=True)
+        updates.append((schedule_id, fields))
+        for field, value in fields.items():
+            setattr(schedules[schedule_id], field, value)
 
     monkeypatch.setattr(workspace_manager, "scheduled_tasks", schedules)
     monkeypatch.setattr(workspace_manager, "create_scheduled_task", create)
     monkeypatch.setattr(workspace_manager, "update_scheduled_task", update)
     service.ensure_schedules(TAB_ID)
     state = service.store.read_state()
-    assert {state["wake_schedule_id"], state["tidy_schedule_id"]} == {"s-1", "s-2"}
-    names = sorted(item.payload.name for item in schedules.values())
-    assert names == ["Dot nightly tidy", "Dot wake-up"]
+    wake = schedules[state["wake_schedule_id"]]
+    tidy = schedules[state["tidy_schedule_id"]]
+    assert (wake.payload.name, tidy.payload.name) == ("Dot wake-up", "Dot nightly tidy")
     assert all(item.payload.kind.value == "chat_turn" for item in schedules.values())
+    # Dot wakes on events only: no daily wake-up.
+    assert wake.cron is None and wake.interval_seconds >= 365 * 24 * 3600
+    assert tidy.cron == service_module.TIDY_CRON
 
     service.ensure_schedules(TAB_ID)
     assert len(schedules) == 2 and updates == [], "repeat setup reuses the schedules"
     service.ensure_schedules("tab-new")
-    assert sorted(updates) == [("s-1", "tab-new"), ("s-2", "tab-new")]
+    assert sorted(updates) == [("s-1", {"tab_id": "tab-new"}), ("s-2", {"tab_id": "tab-new"})]
+
+    # A home from before this change woke Dot every morning; setup moves it off that.
+    updates.clear()
+    wake.cron, wake.interval_seconds = "3 9 * * *", None
+    service.ensure_schedules("tab-new")
+    assert updates == [
+        (
+            wake.id,
+            {"interval_seconds": service_module.WAKE_INTERVAL_SECONDS},
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -385,8 +419,11 @@ async def test_failed_wake_retries_while_events_are_unread(
     checked = AsyncMock(side_effect=lambda: next(checks, 0))
     monkeypatch.setattr(service, "check_work", checked)
     monkeypatch.setattr(service, "is_set_up", lambda: True)
+    refreshed: list[str] = []
+    monkeypatch.setattr(service, "ensure_schedules", refreshed.append)
 
     service.start()
+    assert refreshed == [TAB_ID], "startup brings the standing schedules up to date"
     for _ in range(50):
         await asyncio.sleep(0)
         if checked.await_count >= 3:

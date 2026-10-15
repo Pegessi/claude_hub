@@ -101,8 +101,30 @@ wake and tidy turns can run tools.
   the tab bar, full-width panel, 16px inputs, rename + emoji (PATCH body, tab
   refresh), stalled badge, watch error and success with a 4h alarm, Stop,
   Mark read, then the desktop launcher with the new name. It found two small
-  issues, now fixed: the phone launcher buttons were 34px tall (now 36px),
+  issues, now fixed: the phone launcher buttons were 34px tall (now 38px),
   and the close button label still said "Dot" after a rename.
+
+## Design review against the original goal
+
+A separate reviewer checked the branch against the user's first messages.
+Verdict: mostly meets it (fresh packs, focus, delivered-once events, memory
+in git). The user decided on the gaps:
+
+- The wake-up schedule had a 09:03 daily cron, which fired a turn every day
+  with no events. It now has a ten-year interval, so only watcher events run
+  it. `ensure_schedules` moves old homes off the cron. Frequency now follows
+  the work: many task events, many wakes; few events, few wakes.
+- "Report only when needed": wake and tidy turns answer exactly `[quiet]`
+  when nothing needs the user. The chat hides those turns and the journal
+  skips them, so they no longer push real talk out of the recent-talk window.
+- No size-based rotation. Providers already compact a long context; rotation
+  exists to stop drift, not overflow. Added a test for the 18h age rule.
+- Brief quality is not checked in code (length rules are easy to game).
+  Instead the tool guide (sent every session) has a three-question self-check,
+  and failed or questioning tasks become `Brief lesson` cards that Dot
+  recalls before delegating.
+- Still open, by choice: "never poll workers" is prompt-only; nothing pushes
+  a non-quiet wake reply to the user outside the Dot tab.
 
 ## Risks
 

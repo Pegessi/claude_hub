@@ -100,7 +100,15 @@ every 60 seconds. When one finishes, fails, needs input, or looks stuck it:
 - writes an inbox event,
 - writes a result card from the latest report,
 - runs the standing "Dot wake-up" Chat schedule now (queued behind any
-  active turn; repeated wakes coalesce).
+  active turn; repeated wakes coalesce). The schedule has a ten-year interval
+  so it never fires on its own; events are the only way it runs.
+
+So Dot wakes often when many tasks move and rarely when few do. On a wake it
+tells the user only what needs them. When nothing does, it replies exactly
+`[quiet]`; that turn is hidden from the chat and kept out of the journal. A
+failed task, or one that came back with a question, becomes a `Brief lesson`
+card. Before delegating, Dot checks its brief (verifiable "done when", no
+questions needed, one goal) and recalls past brief lessons.
 
 A task looks stuck when it is queued or working with no progress (task update,
 progress report, runtime status change or new report) for `--stall-hours`
@@ -111,7 +119,7 @@ summary; ask Dot when you want one.
 
 A second schedule runs the nightly `[Dot tidy]` turn in a fresh session:
 compress yesterday's journal into cards and concepts, merge duplicates,
-prune focus.
+prune focus. It also replies `[quiet]` unless something needs the user.
 
 ## Interfaces
 

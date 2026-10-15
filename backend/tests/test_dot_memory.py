@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,8 @@ from claude_hub.services.dot.context import (
     build_turn_pack,
 )
 from claude_hub.services.dot.index import DotIndex, query_terms
-from claude_hub.services.dot.service import MAX_SESSION_TURNS
-from claude_hub.services.dot.store import FOCUS_LIMIT, parse_card
+from claude_hub.services.dot.service import MAX_SESSION_AGE, MAX_SESSION_TURNS
+from claude_hub.services.dot.store import FOCUS_LIMIT, parse_card, utc_now
 
 
 @pytest.fixture()
@@ -200,6 +201,7 @@ def test_prepare_turn_rotation_rules(store: DotStore) -> None:
     first = service.prepare_turn("hello", None)
     assert first.rotate and first.conversation_id
     assert "You are Dot" in first.system_pack
+    assert 'recall "brief lesson"' in first.system_pack, "the brief self-check is in every session"
     cid = first.conversation_id
 
     second = service.prepare_turn("next", cid)
@@ -214,6 +216,15 @@ def test_prepare_turn_rotation_rules(store: DotStore) -> None:
 
     store.update_state(session_turns=MAX_SESSION_TURNS)
     assert service.prepare_turn("again", "external-id").rotate
+
+    # A few turns spread over a long time also rotate once the session is too old.
+    fresh = service.prepare_turn("hi", None)
+    almost = utc_now() - MAX_SESSION_AGE + timedelta(minutes=5)
+    store.update_state(session_started_at=almost.isoformat())
+    assert not service.prepare_turn("still here", fresh.conversation_id).rotate
+    store.update_state(session_started_at=(almost - timedelta(minutes=10)).isoformat())
+    old = service.prepare_turn("still here?", fresh.conversation_id)
+    assert old.rotate and old.conversation_id != fresh.conversation_id
 
     tidy = service.prepare_turn(
         "[Dot tidy] go", service.store.read_state()["session_conversation_id"]

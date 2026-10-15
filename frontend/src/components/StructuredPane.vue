@@ -1369,6 +1369,7 @@ import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStr
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
 import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceAvatarUrl, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { isQuietDotTurn } from '@/utils/dotApi'
 import { trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
 import { subagentProviderLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
@@ -1556,7 +1557,7 @@ const visibleTurns = computed(() => selectTimelineWindow(
   turns.value,
   historyWindowStart.value,
   turn => isEditingTurn(turn) || turn.approvals.some(approval => !isApprovalResolved(approval)),
-).map(({ turn, ordinal }) => ({
+).filter(({ turn }) => !isQuietDotTurn(turn)).map(({ turn, ordinal }) => ({
   ordinal,
   turn: {
     ...turn,
