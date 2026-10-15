@@ -4609,7 +4609,7 @@ def test_delete_tab_keeps_process_registered_when_teardown_fails(
     """A failed tmux teardown must remain visible so reconciliation can retry it."""
     manager = TTYDManager.__new__(TTYDManager)
     manager._start_locks = {}
-    process = SimpleNamespace(tmux_session="claude-hub-deadbeef")
+    process = SimpleNamespace(tmux_session="claude-hub-deadbeef", created_at=datetime.now())
 
     async def _failed_stop(*, kill_tmux: bool = False) -> None:
         assert kill_tmux is True
@@ -4644,7 +4644,7 @@ def test_delete_tab_discards_structured_stream_via_tailer(
     """
     manager = TTYDManager.__new__(TTYDManager)
     manager._start_locks = {}
-    process = SimpleNamespace(tmux_session="claude-hub-deadbeef")
+    process = SimpleNamespace(tmux_session="claude-hub-deadbeef", created_at=datetime.now())
 
     async def _ok_stop(*, kill_tmux: bool = False) -> None:
         assert kill_tmux is True
@@ -4655,7 +4655,7 @@ def test_delete_tab_discards_structured_stream_via_tailer(
 
     discard_calls: list[tuple[str, str]] = []
 
-    async def _fake_discard(workspace_id: str, session_id: str) -> None:
+    async def _fake_discard(workspace_id: str, session_id: str, *, provider_fenced: bool) -> None:
         discard_calls.append((workspace_id, session_id))
 
     tailer_module = importlib.import_module("claude_hub.services.agent_stream.tailer")
@@ -5985,7 +5985,7 @@ async def test_delete_and_listener_recovery_share_tab_lifecycle_lock(
             first_entered.set()
             await release_first.wait()
 
-    async def fake_discard(workspace_id: str, session_id: str) -> None:
+    async def fake_discard(workspace_id: str, session_id: str, *, provider_fenced: bool) -> None:
         assert process.tab_id not in manager.processes
         assert not manager._start_locks[process.tab_id].locked()
         discards.append((workspace_id, session_id))
@@ -6085,8 +6085,14 @@ def _make_lifecycle_subject(
         assert current is process
         await current.start()
 
-    async def discard(_workspace_id: str, _session_id: str) -> None:
+    async def discard(_workspace_id: str, _session_id: str, *, provider_fenced: bool) -> None:
         pass
+
+    async def fence_stream(session_id: str) -> bool:
+        # This subject tests queued tab-lock writers, not structured runtime
+        # retirement. Unrelated managers must not add pre-lock scheduling here.
+        assert session_id == f"terminal-tab-{process.tab_id}"
+        return False
 
     async def stop_stream(_session_id: str) -> None:
         pass
@@ -6102,6 +6108,7 @@ def _make_lifecycle_subject(
     monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda _port: False)
     stream = importlib.import_module("claude_hub.services.agent_stream.tailer")
     monkeypatch.setattr(stream, "discard_session_stream", discard)
+    monkeypatch.setattr(stream, "fence_session_stream", fence_stream)
     monkeypatch.setattr(stream, "stop_session_stream", stop_stream)
     return manager, process, calls
 

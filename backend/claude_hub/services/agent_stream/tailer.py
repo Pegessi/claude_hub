@@ -37,10 +37,11 @@ import re
 import time
 import uuid
 import weakref
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from ...models import (
     AgentRuntimeStatus,
@@ -596,6 +597,8 @@ class SessionTailer:
         self._native_terminal_status: Optional[NativeRuntimeSnapshot] = None
 
         self._task: Optional[asyncio.Task[Any]] = None
+        self._stop_lock = asyncio.Lock()
+        self._retirement_pending = False
         self._subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
         self._completion_subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
         self._last_subscriber_at = time.monotonic()
@@ -1851,6 +1854,8 @@ class SessionTailer:
         return bool(session is not None and self.matches_session(session))
 
     def _require_startable_incarnation(self) -> None:
+        if self._retirement_pending:
+            raise StructuredSourceUnavailable("structured runtime teardown is in progress")
         if self.session_id in _DELETION_FENCED_SESSION_IDS or not self._incarnation_is_current():
             raise StructuredSourceUnavailable("structured runtime owner was deleted or replaced")
 
@@ -1895,13 +1900,35 @@ class SessionTailer:
             )
 
     async def stop(self, *, raise_errors: bool = False) -> None:
+        # Concurrent deletion callers must not treat another in-progress stop as
+        # an absent runtime. Observers remain in this caller's task because it
+        # may own a task-reentrant Workspace mutation lock.
+        async with self._stop_lock:
+            self._retirement_pending = True
+            if self.session_id in _DELETION_FENCED_SESSION_IDS:
+                _RETIRING_TAILER_IDS.add(id(self))
+            try:
+                await self._stop(raise_errors=raise_errors)
+                self._retirement_pending = False
+            finally:
+                _RETIRING_TAILER_IDS.discard(id(self))
+
+    async def _stop(self, *, raise_errors: bool) -> None:
         errors: List[BaseException] = []
         self._stopped = True
         task = self._task
         if task is not None:
             task.cancel()
+            # Disk writes now join through cancellation. wait_for would wait
+            # past its own timeout trying to cancel that join. A timed-out
+            # consumer stays attached, so the owner can retry but not be freed.
+            done, _ = await asyncio.wait({task}, timeout=_STOP_JOIN_TIMEOUT_S)
+            if not done:
+                raise RuntimeError(
+                    f"structured runtime teardown still pending for session {self.session_id}"
+                )
             try:
-                await asyncio.wait_for(task, timeout=_STOP_JOIN_TIMEOUT_S)
+                task.result()
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
@@ -3322,13 +3349,25 @@ class TailerManager:
         self._tailers: Dict[str, SessionTailer] = {}
         self._accepting_sends = True
         self._lock = asyncio.Lock()
-        # Per-session locks that serialize edit-resend attempts.  A second
-        # edit_resend for a session waits for the first to complete rather
-        # than interleaving truncate/fork/send operations.  Keyed by
-        # session_id; entries persist for the manager's lifetime (one small
-        # lock per session that has ever been edited).
-        self._edit_locks: Dict[str, asyncio.Lock] = {}
+        # The edit transaction owns its identity through rollback even when its
+        # tailer is detached. Retry and retirement share this same barrier.
+        self._lifecycle_locks: Dict[str, asyncio.Lock] = {}
         _TAILER_MANAGERS.add(self)
+
+    @asynccontextmanager
+    async def _retirement_guard(self, session_id: str) -> AsyncIterator[None]:
+        """Wait for edit/rollback ownership without holding the manager/tab lock."""
+        lock = self._lifecycle_locks.setdefault(session_id, asyncio.Lock())
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=_STOP_JOIN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            raise StructuredSourceUnavailable(
+                "structured runtime mutation is still pending; retry retirement"
+            ) from None
+        try:
+            yield
+        finally:
+            lock.release()
 
     def session_is_current(self, session: ManagedSession) -> bool:
         """Whether ``session`` is still the manager's exact durable owner."""
@@ -3599,11 +3638,12 @@ class TailerManager:
         transcript and resumes via ``--resume`` / ``thread/resume``) and the
         edited ``text`` is delivered as the new turn.
 
-        Concurrency: a per-session lock (``self._edit_locks``) is held across
+        Concurrency: a per-session lock (``self._lifecycle_locks``) is held across
         the entire sequence.  A concurrent ``edit_resend`` for the same
         session waits for the in-flight one to complete; it does not fail
         fast.  This prevents two edits from interleaving truncate/fork/send
-        operations.
+        operations. Retirement also waits on this lock, including while the
+        edit has no registered tailer and is restoring its snapshot.
 
         Failure recovery: before truncating either plane, both files are
         snapshotted to ``.edit-bak`` sidecars.  If any step after the
@@ -3635,8 +3675,10 @@ class TailerManager:
 
         # Per-session lock: serialize concurrent edit-resend attempts.  The
         # second caller waits (no fail-fast).
-        edit_lock = self._edit_locks.setdefault(session.id, asyncio.Lock())
+        edit_lock = self._lifecycle_locks.setdefault(session.id, asyncio.Lock())
         async with edit_lock:
+            if not self.session_is_current(session) or session.id in _DELETION_FENCED_SESSION_IDS:
+                raise StructuredSourceUnavailable("managed session was deleted or replaced")
             await self._edit_resend_locked(
                 session,
                 text,
@@ -3674,7 +3716,7 @@ class TailerManager:
                 raise EditResendTurnInFlightError(
                     "A turn is currently running; wait for it to finish before editing"
                 )
-            await tailer.stop()
+            await tailer.stop(raise_errors=True)
 
     async def _edit_resend_locked(
         self,
@@ -3713,28 +3755,15 @@ class TailerManager:
                 continue
             images.append(data)
 
-        # Stop the current tailer so it cannot write to the store during
-        # truncation.  Pop under the manager lock, then stop outside (stop()
-        # is async).  The stop itself is guarded: if a turn is running, the
-        # tailer is restored and the edit is rejected (409) rather than
-        # silently killing the turn.
+        # Keep a failed/busy/timed-out owner registered; the lifecycle lock
+        # reserves detached edit work until rollback and snapshot cleanup finish.
         async with self._lock:
-            previous = self._tailers.pop(session.id, None)
+            previous = self._tailers.get(session.id)
         if previous is not None:
-            try:
-                await self._stop_tailer_for_edit(previous)
-            except EditResendTurnInFlightError:
-                # Restore the tailer so its in-flight turn is not orphaned.
-                # self._lock is acquired WITHOUT holding the tailer's
-                # _send_lock to preserve lock ordering (self._lock ->
-                # _send_lock, as used by stop_all).  A new tailer is created
-                # in the meantime only if a send raced the pop; in that rare
-                # case the previous tailer's turn still completes and
-                # persists events (the tailer itself is leaked).
-                async with self._lock:
-                    if session.id not in self._tailers:
-                        self._tailers[session.id] = previous
-                raise
+            await self._stop_tailer_for_edit(previous)
+            async with self._lock:
+                if self._tailers.get(session.id) is previous:
+                    self._tailers.pop(session.id)
 
         # Use a fresh store instance now that the tailer is gone, so the
         # snapshot/truncate/restore operate on a store without a live writer.
@@ -3747,6 +3776,7 @@ class TailerManager:
         # Snapshot both files BEFORE truncating so a failure can be undone.
         store_backup = await store.snapshot()
         transcript_backup = snapshot_transcript(transcript_path)
+        retain_backups = False
 
         try:
             # Truncate the Hub event store.
@@ -3773,24 +3803,34 @@ class TailerManager:
                 send_kwargs["turn_metadata"] = dict(turn_metadata)
             await tailer.send_message(text, images, client_turn_id, **send_kwargs)
         except BaseException:
-            # Discard any tailer created during the failed attempt so it
-            # cannot operate on the forked transcript.
+            if not self.session_is_current(session):
+                retain_backups = True
+                raise StructuredSourceUnavailable("edit owner was deleted or replaced") from None
+            # A replacement created by the edit must stop safely before rollback
+            # can write its files. Keep both runtime and backups on failure.
             async with self._lock:
-                created = self._tailers.pop(session.id, None)
+                created = self._tailers.get(session.id)
             if created is not None:
                 try:
-                    await created.stop()
-                except Exception:
-                    logger.exception(
-                        "edit_resend: failed to stop tailer after error for session %s",
-                        session.id,
-                    )
+                    await created.stop(raise_errors=True)
+                except BaseException:
+                    retain_backups = True
+                    raise
+                async with self._lock:
+                    if self._tailers.get(session.id) is created:
+                        self._tailers.pop(session.id)
 
+            if not self.session_is_current(session):
+                retain_backups = True
+                raise StructuredSourceUnavailable("edit owner was deleted or replaced") from None
             # Restore both files from their snapshots so the conversation is
             # byte-identical to before the edit.
             try:
                 await store.restore(store_backup)
-            except Exception:
+            except BaseException as exc:
+                retain_backups = True
+                if not isinstance(exc, Exception):
+                    raise
                 logger.exception(
                     "edit_resend: failed to restore event store for session %s",
                     session.id,
@@ -3798,6 +3838,7 @@ class TailerManager:
             try:
                 restore_transcript(transcript_path, transcript_backup)
             except Exception:
+                retain_backups = True
                 logger.exception(
                     "edit_resend: failed to restore transcript for session %s",
                     session.id,
@@ -3816,9 +3857,9 @@ class TailerManager:
                 )
             raise
         finally:
-            # Clean up snapshot files on both success and failure paths.
-            discard_snapshot(store_backup)
-            discard_snapshot(transcript_backup)
+            if not retain_backups:
+                discard_snapshot(store_backup)
+                discard_snapshot(transcript_backup)
 
     async def set_mode(self, session: ManagedSession, mode: str) -> None:
         """Set the existing native owner's mode for subsequent turns."""
@@ -3863,7 +3904,7 @@ class TailerManager:
         runtime-interruption. Only a hard-failed, stopped, or idle tailer is
         replaced (AC2).
         """
-        if tailer.hard_failed or not tailer.is_running():
+        if tailer._retirement_pending or tailer.hard_failed or not tailer.is_running():
             return False
         transport = tailer.native_transport
         if transport is None or not transport.turn_in_flight:
@@ -3885,24 +3926,29 @@ class TailerManager:
         return it; the durable conversation id is unchanged.
         """
 
-        async with self._lock:
-            if not self.session_is_current(session) or session.id in _DELETION_FENCED_SESSION_IDS:
-                raise StructuredSourceUnavailable("managed session was deleted or replaced")
-            previous = self._tailers.get(session.id)
-            if previous is not None and not previous.matches_session(session):
-                raise StructuredSourceUnavailable(
-                    "structured runtime belongs to a replaced session incarnation"
-                )
-            if previous is not None and self._is_reusable(previous):
-                self._tailers[session.id] = previous
-                _HARD_FAILED_SESSION_IDS.discard(session.id)
-                return previous
-            previous = self._tailers.pop(session.id, None)
-        if previous is not None:
-            await previous.stop()
-        _HARD_FAILED_SESSION_IDS.discard(session.id)
-        invalidate_source(session.id)
-        return await self._get_or_create(session)
+        async with self._retirement_guard(session.id):
+            async with self._lock:
+                if (
+                    not self.session_is_current(session)
+                    or session.id in _DELETION_FENCED_SESSION_IDS
+                ):
+                    raise StructuredSourceUnavailable("managed session was deleted or replaced")
+                previous = self._tailers.get(session.id)
+                if previous is not None and not previous.matches_session(session):
+                    raise StructuredSourceUnavailable(
+                        "structured runtime belongs to a replaced session incarnation"
+                    )
+                if previous is not None and self._is_reusable(previous):
+                    _HARD_FAILED_SESSION_IDS.discard(session.id)
+                    return previous
+            if previous is not None:
+                await previous.stop(raise_errors=True)
+                async with self._lock:
+                    if self._tailers.get(session.id) is previous:
+                        self._tailers.pop(session.id)
+            _HARD_FAILED_SESSION_IDS.discard(session.id)
+            invalidate_source(session.id)
+            return await self._get_or_create(session)
 
     def get_tailer(self, session_id: str) -> Optional[SessionTailer]:
         return self._tailers.get(session_id)
@@ -3983,57 +4029,40 @@ class TailerManager:
 
     async def fence_session(self, session_id: str) -> bool:
         """Strictly stop and detach an owner without releasing its delete fence."""
-        async with self._lock:
-            tailer = self._tailers.pop(session_id, None)
-        if tailer is None:
-            return False
-        _RETIRING_TAILER_IDS.add(id(tailer))
-        try:
-            await tailer.stop(raise_errors=True)
-        except BaseException:
-            async with self._lock:
-                self._tailers.setdefault(session_id, tailer)
-            raise
-        finally:
-            _RETIRING_TAILER_IDS.discard(id(tailer))
-        _HARD_FAILED_SESSION_IDS.discard(session_id)
-        invalidate_source(session_id)
-        return True
+        return await self.forget_session(session_id)
 
-    async def forget_session(self, session_id: str, *, require_fenced: bool = False) -> bool:
-        """Stop and discard an in-process tailer for a deleted session.
+    async def forget_session(self, session_id: str) -> bool:
+        """Detach an owner only after its runtime has stopped safely.
 
-        Returns whether this manager owned a runtime that was stopped. Explicit
-        deletion requests ``require_fenced`` so provider-stop failures preserve
-        all durable state instead of permitting unsafe id reuse.
+        Every removal path, including archive, preserves the owner on failure.
+        Returns whether this manager owned a runtime that was stopped.
         """
-        async with self._lock:
-            tailer = self._tailers.pop(session_id, None)
-        if tailer is not None:
-            try:
-                await tailer.stop(raise_errors=require_fenced)
-            except BaseException:
+        async with self._retirement_guard(session_id):
+            async with self._lock:
+                tailer = self._tailers.get(session_id)
+            if tailer is not None:
+                await tailer.stop(raise_errors=True)
                 async with self._lock:
-                    self._tailers.setdefault(session_id, tailer)
-                raise
-        _HARD_FAILED_SESSION_IDS.discard(session_id)
-        invalidate_source(session_id)
-        return tailer is not None
+                    if self._tailers.get(session_id) is tailer:
+                        self._tailers.pop(session_id)
+            _HARD_FAILED_SESSION_IDS.discard(session_id)
+            invalidate_source(session_id)
+            return tailer is not None
 
     async def stop_all(self) -> None:
         async with self._lock:
-            tailers = list(self._tailers.values())
-            # Each owner still flushes and terminalizes its own active turn.
-            # Independent provider teardown must not serialize across tabs.
-            results = await asyncio.gather(
-                *(tailer.stop() for tailer in tailers), return_exceptions=True
-            )
-            for tailer in tailers:
-                _HARD_FAILED_SESSION_IDS.discard(tailer.session_id)
-            self._tailers.clear()
-            for result in results:
-                if isinstance(result, BaseException):
-                    raise result
+            session_ids = set(self._tailers) | {
+                session_id for session_id, lock in self._lifecycle_locks.items() if lock.locked()
+            }
+        # Do not hold the manager lock while waiting for edits or observers.
+        # Strict retirement keeps a failed provider (or detached rollback) owned.
+        results = await asyncio.gather(
+            *(self.forget_session(session_id) for session_id in session_ids),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
 
 async def fence_session_stream(session_id: str) -> bool:
@@ -4050,7 +4079,10 @@ async def fence_session_stream(session_id: str) -> bool:
     provider_fenced = session_id in _PROVIDER_FENCED_SESSION_IDS
     for manager in list(_TAILER_MANAGERS):
         provider_fenced = await manager.fence_session(session_id) or provider_fenced
-    if provider_fenced:
+    provider_fenced = provider_fenced or session_id in _PROVIDER_FENCED_SESSION_IDS
+    if provider_fenced and session_id in _DELETION_FENCED_SESSION_IDS:
+        # A concurrent deleter may have already completed discard while this
+        # caller was joining the same owner. Do not resurrect its reservation.
         _PROVIDER_FENCED_SESSION_IDS.add(session_id)
     return provider_fenced
 

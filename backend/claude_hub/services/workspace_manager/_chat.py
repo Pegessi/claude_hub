@@ -57,22 +57,46 @@ class _ChatMixin:
                     or session.created_at != current.created_at
                 ):
                     raise KeyError(f"session {session_id} was deleted or replaced")
-                if session.session_kind != SessionKind.CHAT:
-                    raise ValueError("This endpoint requires a managed Chat session")
-                if not message.strip() and not attachments:
-                    raise ValueError("A message or attachment is required")
-                if session.status == ManagedSessionStatus.STOPPED:
-                    raise ValueError("The managed Chat session has been stopped")
-                self._assert_session_seat(session)
-                # Invalid input must not undo an explicit Stop before the mailbox rejects it.
-                fingerprint = self._compute_payload_fingerprint(message, attachments or [])
-                if call_id and call_id in session.call_payload_fingerprints:
-                    if session.call_payload_fingerprints[call_id] != fingerprint:
-                        raise ValueError("call_id already identifies a different message")
-                if session.uncertain_call_ids:
-                    raise RuntimeError("Chat delivery is uncertain; reconcile it before resuming")
-                self._resume_chat_session_locked(session_id)
-                await self._send_session_message_locked(session_id, message, attachments, call_id)
+                await self.send_chat_session_message_locked(
+                    session_id, message, attachments, call_id
+                )
+
+    async def send_chat_session_message_locked(
+        self,
+        session_id: str,
+        message: str,
+        attachments: list[WorkspaceAttachmentCreate] | None = None,
+        call_id: str | None = None,
+        *,
+        question_key: str | None = None,
+    ) -> None:
+        """Submit while the caller holds the workspace and session pump locks.
+
+        Question-card admission must retain those locks through mailbox delivery
+        so another answer cannot validate the same card before it is resolved.
+        """
+        session = self.sessions[session_id]
+        if session.session_kind != SessionKind.CHAT:
+            raise ValueError("This endpoint requires a managed Chat session")
+        if not message.strip() and not attachments:
+            raise ValueError("A message or attachment is required")
+        # Validate before either an idempotent acknowledgement or resuming a
+        # paused session. Accepted retries never change a card or runtime state.
+        fingerprint = self._compute_payload_fingerprint(message, attachments or [])
+        if call_id and call_id in session.call_payload_fingerprints:
+            if session.call_payload_fingerprints[call_id] != fingerprint:
+                raise ValueError("call_id already identifies a different message")
+            if call_id in session.processing_call_ids or call_id in session.delivered_call_ids:
+                return
+        if session.status == ManagedSessionStatus.STOPPED:
+            raise ValueError("The managed Chat session has been stopped")
+        self._assert_session_seat(session)
+        if session.uncertain_call_ids:
+            raise RuntimeError("Chat delivery is uncertain; reconcile it before resuming")
+        self._resume_chat_session_locked(session_id)
+        await self._send_session_message_locked(
+            session_id, message, attachments, call_id, question_key=question_key
+        )
 
     async def _resume_chat_session(self, session_id: str) -> None:
         """Resume a managed Chat while serialized with delivery and deletion."""

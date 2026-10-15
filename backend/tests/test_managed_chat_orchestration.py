@@ -259,7 +259,7 @@ async def test_explicit_user_message_resumes_chat_but_invalid_message_does_not(
     send.assert_not_awaited()
     await manager.send_chat_session_message(session.id, "continue", call_id="resume")
     assert not manager.sessions[session.id].chat_paused
-    send.assert_awaited_once_with(session.id, "continue", None, "resume")
+    send.assert_awaited_once_with(session.id, "continue", None, "resume", question_key=None)
 
 
 @pytest.mark.asyncio
@@ -668,6 +668,106 @@ async def test_auto_reviewer_inherits_chat_provider_and_environment(
     assert created[0].agent_type == AgentType.MASO
     assert created[0].env == worker.env
     assert created[0].ephemeral
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_available_reviewer", [True, False])
+async def test_stopped_chat_reviewer_is_not_reused_after_worker_continues(
+    manager: WorkspaceManager,
+    monkeypatch: pytest.MonkeyPatch,
+    has_available_reviewer: bool,
+) -> None:
+    worker = manager.sessions["chat-worker"]
+    task = manager.tasks["chat-task"]
+    previous = worker.model_copy(
+        update={
+            "id": "previous-reviewer",
+            "tab_id": "previous-reviewer-tab",
+            "role": WorkspaceSessionRole.REVIEWER,
+            "task_id": task.id,
+            "current_task_id": task.id,
+            "last_review_task_id": task.id,
+            "status": ManagedSessionStatus.WORKING,
+            "runtime_status": AgentRuntimeStatus.WORKING,
+        }
+    )
+    replacement = worker.model_copy(
+        update={
+            "id": "replacement-reviewer",
+            "tab_id": "replacement-reviewer-tab",
+            "role": WorkspaceSessionRole.REVIEWER,
+        }
+    )
+    manager.sessions[previous.id] = previous
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "status": WorkspaceTaskStatus.REVIEW,
+            "review_session_id": previous.id,
+            "review_requested_at": datetime.now(),
+            "review_cycle": 1,
+        }
+    )
+    if has_available_reviewer:
+        manager.sessions[replacement.id] = replacement
+
+    async def create_reviewer(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
+        assert workspace_id == task.workspace_id
+        assert payload.role == WorkspaceSessionRole.REVIEWER
+        assert payload.session_kind == SessionKind.CHAT
+        manager.sessions[replacement.id] = replacement
+        return replacement
+
+    create = AsyncMock(side_effect=create_reviewer)
+    send = AsyncMock()
+    monkeypatch.setattr(manager, "ensure_workspace_agent", create)
+    monkeypatch.setattr(managed_chat, "cancel", AsyncMock(return_value=True))
+    monkeypatch.setattr(managed_chat, "send_message", send)
+
+    assert await manager.cancel_chat_session(previous.id, expected_turn_id="review-turn")
+    assert manager.sessions[previous.id].chat_paused
+    continued = await manager.continue_task(task.id, call_id="continue-worker")
+    assert continued.status == WorkspaceTaskStatus.WORKING
+    assert continued.review_session_id == previous.id
+    assert continued.review_requested_at is None
+    assert manager.sessions[previous.id].chat_paused
+
+    result = await manager.request_task_review(task.id)
+    assert result.status == WorkspaceTaskStatus.REVIEW
+    assert result.review_session_id == replacement.id
+    assert manager.sessions[previous.id].chat_paused
+    assert manager.sessions[previous.id].pending_call_ids == []
+    assert manager.sessions[replacement.id].pending_call_ids == []
+    assert len(manager.sessions[replacement.id].processing_call_ids) == 1
+    assert [call.args[0].id for call in send.await_args_list] == [worker.id, replacement.id]
+    assert create.await_count == (0 if has_available_reviewer else 1)
+
+
+@pytest.mark.asyncio
+async def test_unpaused_previous_chat_reviewer_keeps_same_task_context(
+    manager: WorkspaceManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = manager.sessions["chat-worker"]
+    task = manager.tasks["chat-task"]
+    reviewer = worker.model_copy(
+        update={
+            "id": "previous-reviewer",
+            "tab_id": "previous-reviewer-tab",
+            "role": WorkspaceSessionRole.REVIEWER,
+            "last_review_task_id": task.id,
+        }
+    )
+    manager.sessions[reviewer.id] = reviewer
+    task = task.model_copy(update={"review_session_id": reviewer.id})
+    manager.tasks[task.id] = task
+    create = AsyncMock(side_effect=AssertionError("reuse the eligible previous reviewer"))
+    monkeypatch.setattr(manager, "ensure_workspace_agent", create)
+
+    selected = await manager._select_or_create_reviewer(manager.workspaces[task.workspace_id], task)
+    assert selected is reviewer
+    assert selected.last_review_task_id == task.id
+    create.assert_not_awaited()
 
 
 @pytest.mark.asyncio

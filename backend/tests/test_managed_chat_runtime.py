@@ -77,7 +77,6 @@ class _FakeManager:
         self.tailer: Any = None
         self.cancelled: list[str | None] = []
         self.forgotten: list[str] = []
-        self.forget_require_fenced: list[bool] = []
         self.forget_error: Exception | None = None
 
     async def send_message(self, *args: Any, **kwargs: Any) -> None:
@@ -91,9 +90,8 @@ class _FakeManager:
         self.cancelled.append(expected_turn_id)
         return True
 
-    async def forget_session(self, session_id: str, *, require_fenced: bool = False) -> bool:
+    async def forget_session(self, session_id: str) -> bool:
         self.forgotten.append(session_id)
-        self.forget_require_fenced.append(require_fenced)
         if self.forget_error is not None:
             raise self.forget_error
         return True
@@ -592,7 +590,7 @@ async def test_reset_stop_failure_preserves_old_provider_identity(
     with pytest.raises(RuntimeError, match="provider teardown failed"):
         await managed_chat.reset_context(session)
 
-    assert isolated_bridge.forget_require_fenced == [True]
+    assert isolated_bridge.forgotten == [session.id]
     assert session.agent_session_id == "provider-old"
     assert session.agent_session_id_verified is True
     assert tab.agent_session_id == "provider-old"

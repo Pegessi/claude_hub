@@ -198,6 +198,8 @@ class _MessagingMixin:
         message: str,
         attachments: list[WorkspaceAttachmentCreate] | None = None,
         call_id: str | None = None,
+        *,
+        question_key: str | None = None,
     ) -> None:
         """Persist and deliver input while the per-session pump lock is held."""
         session = self.sessions.get(session_id)
@@ -363,12 +365,18 @@ class _MessagingMixin:
                 pending_call_ids.append(call_id)
             call_payload_fingerprints = dict(session.call_payload_fingerprints)
             call_payload_fingerprints[call_id] = new_fp
+            question_answer_calls = dict(session.chat_question_answer_calls)
+            if question_key is not None:
+                question_answer_calls[question_key] = call_id
             self.sessions[session_id] = session.model_copy(
                 update={
                     "pending_messages": pending_messages,
                     "pending_attachments": pending_attachments,
                     "pending_call_ids": pending_call_ids,
                     "call_payload_fingerprints": call_payload_fingerprints,
+                    # One state write claims both the answer and its envelope.
+                    # Pump or card-resolution failure must not reopen admission.
+                    "chat_question_answer_calls": question_answer_calls,
                 }
             )
             self._save_state()
@@ -665,7 +673,19 @@ class _MessagingMixin:
             self.sessions[session_id] = session.model_copy(update=session_update)
             if task is not None and task_update:
                 self.tasks[task.id] = task.model_copy(update=task_update)
-            self._save_state()
+            try:
+                self._save_state()
+            except BaseException:
+                if session.session_kind == SessionKind.CHAT:
+                    # No provider side effect has started. Restore only this
+                    # intent transition, retaining its admitted envelope/claim,
+                    # so an immediate retry cannot mistake it for an accepted
+                    # in-flight send. Even a partially committed save is safe:
+                    # the next pump must persist intent again before delivery.
+                    self.sessions[session_id] = session
+                    if task is not None and task_update:
+                        self.tasks[task.id] = task
+                raise
 
             # ---- SEND to tmux ----
             # The [call_id:<id>] marker lets the worker correlate its ACK.

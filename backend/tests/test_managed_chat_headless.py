@@ -164,7 +164,7 @@ async def test_managed_chat_delete_safely_handles_headless_record(
     async def forbidden_kill(_name: str) -> None:
         pytest.fail("headless managed Chat deletion must not kill tmux")
 
-    async def discard(_workspace_id: str, _session_id: str) -> None:
+    async def discard(_workspace_id: str, _session_id: str, *, provider_fenced: bool) -> None:
         return None
 
     monkeypatch.setattr(ttyd_module, "_tmux_kill_session", forbidden_kill)

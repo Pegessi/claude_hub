@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(chat): serialize question answers and finish cleanup before session reuse
+
+- Bind each managed question to one durable answer call so concurrent answers,
+  provider-handoff failures and retries cannot enqueue contradictory follow-ups.
+- Skip a paused previous reviewer when dispatching the next review, preserving
+  explicit Stop while selecting an available or newly created reviewer.
+- Stop direct Chat streams while their tab owner remains discoverable, and retain
+  failed runtime stops for retry across delete, retry, edit and archive paths.
+- Finish outstanding event-log I/O before cleanup or identifier reuse, including
+  cancellation, so old writes cannot enter a replacement session's history.
+
 ### fix(chat): fence image cache ownership and retry proven-unsent restart input
 
 - Prevent deleted or cancelled Chat image reads from restoring retired cache
