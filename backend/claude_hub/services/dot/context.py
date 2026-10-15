@@ -102,13 +102,18 @@ def _work_lines(store: DotStore) -> list[str]:
     return lines[-15:]
 
 
+_EVENTS_PER_TURN = 12
+_EVENTS_TITLE = "## New events since your last turn"
+
+
 def _event_lines(events: list[dict[str, Any]]) -> list[str]:
     lines = []
-    if len(events) > 12:
+    if len(events) > _EVENTS_PER_TURN:
         lines.append(
-            f"- ({len(events) - 12} older events omitted; see `claude-hub dot inbox --all`)"
+            f"- ({len(events) - _EVENTS_PER_TURN} older events stay unread for a later turn; "
+            "see `claude-hub dot inbox`)"
         )
-    for event in events[-12:]:
+    for event in events[-_EVENTS_PER_TURN:]:
         card = f" (card {event['card_id']})" if event.get("card_id") else ""
         lines.append(f"- {event.get('kind', 'event')}: {_clip(event.get('text', ''), 400)}{card}")
     return lines
@@ -136,7 +141,7 @@ def build_turn_pack(
         ("## Delegated work", _work_lines(store) or ["- (none)"]),
     ]
     if events:
-        sections.append(("## New events since your last turn", _event_lines(events)))
+        sections.append((_EVENTS_TITLE, _event_lines(events)))
     if recall and text.strip():
         hits = index.search(text, limit=6) if index is not None else []
         if hits:
@@ -159,14 +164,19 @@ def build_turn_pack(
 
     budget = TURN_PACK_CHARS - len(header)
     blocks = [header]
+    shown_events = 0
     for title, lines in sections:
         kept = _take_lines(lines, max(budget - len(title) - 2, 0))
         if not kept:
             break
+        if title == _EVENTS_TITLE:
+            shown_events = len(kept) - (len(events) > _EVENTS_PER_TURN)
         block = title + "\n" + "\n".join(kept)
         blocks.append(block)
         budget -= len(block) + 2
+    # Only events Dot actually saw are delivered; cut ones stay unread.
+    shown = events[-_EVENTS_PER_TURN:][:shown_events] if shown_events > 0 else []
     return TurnPack(
         text="\n\n".join(blocks),
-        delivered_event_ids=[str(event.get("id")) for event in events if event.get("id")],
+        delivered_event_ids=[str(event.get("id")) for event in shown if event.get("id")],
     )

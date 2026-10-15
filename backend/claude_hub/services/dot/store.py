@@ -194,7 +194,16 @@ class DotStore:
     def __init__(self, home: Optional[Path] = None) -> None:
         self.home = (home or resolve_dot_home()).expanduser()
         self._lock = threading.RLock()
+        # Commits use their own lock: git can take seconds and must not block
+        # JSON reads and writes (some run on the event loop). Writes are
+        # atomic replaces, so ``git add`` never sees half a file.
+        self._git_lock = threading.Lock()
         self._ready = False
+
+    @property
+    def lock(self) -> threading.RLock:
+        """The store lock, for callers that read, decide and write state."""
+        return self._lock
 
     # ── layout ──────────────────────────────────────────────────────────
 
@@ -302,11 +311,7 @@ class DotStore:
         name = " ".join(str(raw.get("name") or "").split())[:NAME_LIMIT]
         avatar = str(raw.get("avatar") or "").strip()[:AVATAR_TEXT_LIMIT]
         image = raw.get("avatar_image")
-        if not (
-            isinstance(image, str)
-            and image.startswith("files/")
-            and self.resolve_home_path(image) is not None
-        ):
+        if not (isinstance(image, str) and self.resolve_file(image) is not None):
             image = None
         return {"name": name or DEFAULT_NAME, "avatar": avatar, "avatar_image": image}
 
@@ -332,10 +337,7 @@ class DotStore:
                     raise ValueError("avatar must be a short emoji or text")
                 identity["avatar"] = clean
             if avatar_image is not None:
-                if avatar_image and (
-                    not avatar_image.startswith("files/")
-                    or self.resolve_home_path(avatar_image) is None
-                ):
+                if avatar_image and self.resolve_file(avatar_image) is None:
                     raise ValueError(f"file not found in Dot home: {avatar_image}")
                 identity["avatar_image"] = avatar_image or None
             self._write_json("identity.json", identity)
@@ -468,6 +470,15 @@ class DotStore:
         candidate = (self.home / relative).resolve()
         try:
             candidate.relative_to(self.home.resolve())
+        except ValueError:
+            return None
+        return candidate if candidate.is_file() else None
+
+    def resolve_file(self, relative: str) -> Optional[Path]:
+        """Resolve a ``files/...`` path, refusing anything outside ``files/``."""
+        candidate = (self.home / relative).resolve()
+        try:
+            candidate.relative_to(self.files_dir.resolve())
         except ValueError:
             return None
         return candidate if candidate.is_file() else None
@@ -665,7 +676,7 @@ class DotStore:
         """Commit every change in the home. Returns True when a commit was made."""
         if not (self.home / ".git").exists():
             return False
-        with self._lock:
+        with self._git_lock:
             try:
                 self._git("add", "-A")
                 if self._git("diff", "--cached", "--quiet").returncode == 0:

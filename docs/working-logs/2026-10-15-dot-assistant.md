@@ -60,6 +60,35 @@ timeout unrelated to Dot.
   "Task not found". Found and fixed: the tab bar kept the old name until reload,
   so the panel now refreshes tabs after a rename.
 
+## Cross review fixes
+
+A high-effort review of the branch found these; each has a regression test
+that fails on the old code:
+
+- Inbox events were marked read when the pack was built, even if the budget
+  cut them or the send failed. Now only events shown in the pack are acked,
+  and only after the provider accepts the turn. Over 12 events, older ones
+  wait for a later turn.
+- A failed or skipped wake was never retried. The watcher now retries each
+  tick while unread events remain.
+- Updating an archived card un-archived it. Updates keep `archived`.
+- `/api/dot/files` served any stored file inline (HTML/SVG would run on the
+  Hub origin) and `files/../` reached the whole Dot home. Now paths must stay
+  in `files/`; only PNG/JPEG/GIF/WebP render inline, the rest download with
+  `nosniff`.
+- Two setups at once could create two Dot tabs. `ensure_tab` is locked, and
+  the state cache now keys on inode + mtime_ns + size (same-tick writes were
+  read stale).
+- A `</claude_hub_instructions>` inside a report or card ended the hidden
+  block early and leaked the pack into the visible message. The marker is
+  broken inside injected context.
+- `prepare_turn` could overwrite a concurrent rotation request; it now runs
+  under the store lock. Commits use their own git lock so slow git does not
+  block JSON reads and writes.
+
+Not changed (decision for the user): the Dot tab runs in solo mode
+(permissions skipped) so unattended wake and tidy turns can run tools.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

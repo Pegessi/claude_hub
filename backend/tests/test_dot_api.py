@@ -241,6 +241,35 @@ def test_cli_remember_recall_and_merge(
     assert gone.exit_code != 0
 
 
+def test_files_are_confined_and_only_images_render_inline(
+    api: tuple[TestClient, DotService],
+) -> None:
+    client, service = api
+    html = base64.b64encode(b"<script>alert(1)</script>").decode()
+    path = client.post("/api/dot/files", json={"filename": "x.html", "data_base64": html}).json()[
+        "path"
+    ]
+    page = client.get(f"/api/dot/{path}")
+    assert page.headers["content-disposition"].startswith("attachment")
+    assert page.headers["content-type"] == "application/octet-stream"
+    assert page.headers["x-content-type-options"] == "nosniff"
+    service.store.update_state(tab_id="tab-dot")
+    assert client.get("/api/dot/files/%2e%2e/state.json").status_code == 404
+
+
+def test_updating_an_archived_card_keeps_it_archived(
+    api: tuple[TestClient, DotService],
+) -> None:
+    client, _ = api
+    card = client.post(
+        "/api/dot/cards", json={"kind": "knowledge", "title": "Old", "summary": "s"}
+    ).json()
+    client.delete(f"/api/dot/cards/{card['id']}")
+    update = {"id": card["id"], "kind": "knowledge", "title": "Old", "summary": "new"}
+    assert client.post("/api/dot/cards", json=update).json()["archived"] is True
+    assert all(item["id"] != card["id"] for item in client.get("/api/dot/cards").json())
+
+
 def test_identity_and_avatar_routes(
     api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

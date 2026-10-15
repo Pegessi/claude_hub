@@ -230,8 +230,43 @@ def test_prepare_turn_delivers_events_once(store: DotStore) -> None:
     store.add_inbox("task_failed", "Build broke")
     first = service.prepare_turn("hi", None)
     assert "Build broke" in first.turn_pack
+    # Not sent yet (e.g. the provider failed): the event is shown again.
+    retry = service.prepare_turn("hi", first.conversation_id)
+    assert "Build broke" in retry.turn_pack
+    service.mark_delivered(retry.delivered_event_ids)
     second = service.prepare_turn("hi again", first.conversation_id)
     assert "Build broke" not in second.turn_pack
+
+
+def test_events_cut_from_the_pack_stay_unread(store: DotStore) -> None:
+    service = DotService(store)
+    store.update_state(tab_id="tab-dot")
+    for number in range(15):
+        store.add_inbox("task_ready", f"event {number:02d} " + "x" * 380)
+    plan = service.prepare_turn("hi", None)
+    shown = [number for number in range(15) if f"event {number:02d}" in plan.turn_pack]
+    # Oldest three wait for a later turn; the budget cuts more of the twelve.
+    assert shown and shown[0] == 3 and len(shown) < 12
+    assert len(plan.delivered_event_ids) == len(shown)
+    service.mark_delivered(plan.delivered_event_ids)
+    assert len(store.list_inbox()) == 15 - len(shown)
+
+
+def test_prepare_turn_keeps_a_concurrent_rotation_request(store: DotStore) -> None:
+    service = DotService(store)
+    store.update_state(tab_id="tab-dot")
+    first = service.prepare_turn("hi", None)
+    service.request_rotation()
+    assert service.prepare_turn("again", first.conversation_id).rotate
+
+
+def test_file_paths_stay_inside_files(store: DotStore) -> None:
+    path = store.store_file(b"hello", "a.txt")
+    assert store.resolve_file(path) is not None
+    store.update_state(tab_id="tab-dot")
+    assert store.resolve_file("files/../state.json") is None
+    with pytest.raises(ValueError):
+        store.update_identity(avatar_image="files/../state.json")
 
 
 def test_is_dot_tab_does_not_create_home(tmp_path: Path) -> None:

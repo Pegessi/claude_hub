@@ -303,6 +303,11 @@ def wrap_hub_runtime_guidance(
     block on transcript read (see :func:`strip_hub_runtime_guidance`) so it
     never reaches the persisted timeline or the UI.
     """
+    # ``context`` can quote untrusted text (task reports, memory cards). A
+    # closing marker in it would end the hidden block early and leak the rest
+    # into the visible message, so break any marker it contains.
+    for _opening, closing in _HUB_RUNTIME_MARKERS:
+        context = context.replace(closing, closing[:2] + " " + closing[2:])
     body = "\n\n".join(part for part in (guidance, context) if part)
     return f"{_HUB_RUNTIME_START}\n{body}\n{_HUB_RUNTIME_END}\n\n{text}"
 
@@ -1327,6 +1332,7 @@ class ProviderSession(ABC):
                     self._stage_images(images)
                 prompt, seed_included = await self._with_first_turn_prefixes(text)
                 await self._send_text(prompt)
+                await self._on_turn_sent()
                 # The provider accepted the turn; commit the one-shot fork
                 # seed ONLY when this turn actually carried it. An image-only
                 # first turn carries no prompt text and therefore no seed; it
@@ -1387,6 +1393,9 @@ class ProviderSession(ABC):
         for the Dot tab's context pack and session rotation).
         """
         return ""
+
+    async def _on_turn_sent(self) -> None:
+        """Hook run once the provider accepted a turn (Claude acks Dot's events)."""
 
     async def _mark_seed_delivered(self) -> None:
         """Record a successful first-turn seed delivery and drop its sidecar.
@@ -1832,6 +1841,7 @@ class ClaudeNativeSession(ProviderSession):
         self._staged_images: List[bytes] = []
         # Dot tab only: the session pack appended to the system prompt.
         self._dot_system_pack: str = ""
+        self._dot_event_ids: List[str] = []
         self._network_settings_by_gen: Dict[int, Path] = {}
         self._validated_tab_settings_payload: Optional[Dict[str, Any]] = None
         self._validated_claude_launch_env: Optional[Dict[str, str]] = None
@@ -1978,6 +1988,7 @@ class ClaudeNativeSession(ProviderSession):
 
     async def _prepare_turn_context(self, text: str) -> str:
         """Dot tab only: fresh context pack, stable session pack and rotation."""
+        self._dot_event_ids = []
         if not text:
             return ""
         from ..dot import get_dot_service
@@ -1997,7 +2008,19 @@ class ClaudeNativeSession(ProviderSession):
             self._conversation_id_verified = False
             self._hub_runtime_guidance_injected = False
         self._dot_system_pack = plan.system_pack
+        self._dot_event_ids = plan.delivered_event_ids
         return plan.turn_pack
+
+    async def _on_turn_sent(self) -> None:
+        event_ids, self._dot_event_ids = self._dot_event_ids, []
+        if not event_ids:
+            return
+        from ..dot import get_dot_service
+
+        try:
+            await asyncio.to_thread(get_dot_service().mark_delivered, event_ids)
+        except Exception:
+            logger.exception("Dot inbox ack failed")
 
     def _resume_arg(self) -> List[str]:
         """Claude: ``--session-id`` creates the conversation; ``--resume``
