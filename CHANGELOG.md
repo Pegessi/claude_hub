@@ -7,6 +7,27 @@
 
 ## Released
 
+### fix(chat): retain streamed images and release inactive image viewers
+
+- Capture completed image references while assistant text streams, including
+  split links in long replies whose final summary is truncated.
+- Close an image viewer when its Chat becomes inactive and release its keyboard
+  focus trap without moving focus back into the hidden Chat.
+- Preserve fragment/query navigation, including HTML entities, when promoting
+  local image links; recapture expired source entries through normal cache eviction.
+
+### feat(chat): preview assistant images and retain original output in the shared LRU
+
+- Render local image links directly in Chat and open them in the image viewer,
+  with fit-to-window, actual-size and original-image controls.
+- Allow a tab's recorded image-view tools to display their exact temporary
+  screenshot, matching the frontend's existing Read/view_image recognition.
+- Save agent output as original bytes in the existing attachment cache and
+  shared quotas/LRU. Capture live image output before fanout, deduplicate
+  repeated reads, and keep retained images available after source cleanup.
+- Serialize updates to the same image and invalidate superseded versions so
+  concurrent reads or an uncacheable replacement cannot revive an older image.
+
 ### feat(quota): color remaining balances by available share
 
 - Show remaining quota in green above 50%, amber at 50% or less, orange at

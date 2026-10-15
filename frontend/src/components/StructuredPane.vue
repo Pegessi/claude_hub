@@ -198,6 +198,7 @@
                   :text="turn.userText"
                   :tab-id="props.tabId"
                   compact
+                  @image-click="openImageLightbox"
                 />
                 <div
                   v-if="turn.attachments?.length"
@@ -333,6 +334,7 @@
                   :tab-id="props.tabId"
                   compact
                   :complete="turn.completed"
+                  @image-click="openImageLightbox"
                 />
               </div>
             </div>
@@ -576,6 +578,7 @@
                             :tab-id="props.tabId"
                             compact
                             :complete="subthreadTerminal(thread)"
+                            @image-click="openImageLightbox"
                           />
                         </div>
 
@@ -963,6 +966,7 @@
                 :text="turn.userText"
                 :tab-id="props.tabId"
                 compact
+                @image-click="openImageLightbox"
               />
               <div
                 v-if="turn.attachments?.length"
@@ -1344,12 +1348,29 @@
     <Teleport to="body">
       <div
         v-if="imageLightboxUrl"
+        ref="lightboxEl"
         class="structured-image-lightbox"
+        :class="{ 'structured-image-lightbox--actual': imageLightboxActualSize }"
         role="dialog"
         aria-modal="true"
         aria-label="Image preview"
         @click.self="closeImageLightbox"
       >
+        <div class="structured-image-lightbox-toolbar">
+          <span v-if="imageLightboxDimensions">{{ imageLightboxDimensions }}</span>
+          <button
+            type="button"
+            :aria-pressed="imageLightboxActualSize"
+            @click="imageLightboxActualSize = !imageLightboxActualSize"
+          >
+            {{ imageLightboxActualSize ? 'Fit image' : 'Actual size' }}
+          </button>
+          <a
+            :href="imageLightboxUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Open original</a>
+        </div>
         <button
           ref="lightboxCloseEl"
           type="button"
@@ -1364,6 +1385,7 @@
           :src="imageLightboxUrl"
           :alt="imageLightboxAlt"
           @click.stop
+          @load="onLightboxImageLoad"
           @error="closeImageLightbox"
         >
       </div>
@@ -2099,6 +2121,7 @@ onActivated(() => {
 
 onDeactivated(() => {
   isPaneActivated.value = false
+  dismissImageLightbox(false)
   isAddMenuOpen.value = false
   isGoalSetupOpen.value = false
   goalRefreshEpoch++
@@ -2158,16 +2181,28 @@ const erroredAttachments = ref<Set<string>>(new Set())
 const erroredAgentImages = ref<Set<string>>(new Set())
 const imageLightboxUrl = ref<string | null>(null)
 const imageLightboxAlt = ref('')
+const imageLightboxActualSize = ref(false)
+const imageLightboxDimensions = ref('')
+const lightboxEl = ref<HTMLElement | null>(null)
 const lightboxCloseEl = ref<HTMLButtonElement | null>(null)
 let imageLightboxTrigger: HTMLElement | null = null
 
 function openImageLightbox(url: string, alt: string, event: MouseEvent) {
   imageLightboxUrl.value = url
   imageLightboxAlt.value = alt
-  imageLightboxTrigger = event.currentTarget instanceof HTMLElement
+  imageLightboxActualSize.value = false
+  imageLightboxDimensions.value = ''
+  const delegated = event.target instanceof Element
+    ? event.target.closest<HTMLElement>('button[data-image-preview]') : null
+  imageLightboxTrigger = delegated || (event.currentTarget instanceof HTMLElement
     ? event.currentTarget
-    : null
+    : null)
   void nextTick(() => lightboxCloseEl.value?.focus())
+}
+
+function onLightboxImageLoad(event: Event) {
+  const image = event.target as HTMLImageElement
+  imageLightboxDimensions.value = `${image.naturalWidth} × ${image.naturalHeight}`
 }
 
 function dismissImageLightbox(restoreFocus: boolean) {
@@ -2184,6 +2219,17 @@ function closeImageLightbox() {
 }
 
 function handleDocumentKeydown(event: KeyboardEvent) {
+  if (!isPaneActivated.value) return
+  if (event.key === 'Tab' && imageLightboxUrl.value) {
+    const controls = lightboxEl.value?.querySelectorAll<HTMLElement>('button, a[href]')
+    if (controls?.length) {
+      const index = Array.from(controls).indexOf(document.activeElement as HTMLElement)
+      const next = (index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length
+      event.preventDefault()
+      controls[next].focus()
+    }
+    return
+  }
   if (event.key === 'Escape' && isModelMenuOpen.value) {
     event.preventDefault()
     closeModelMenu(true)
@@ -4742,20 +4788,66 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 72px 24px 24px;
   background: rgb(0 0 0 / 78%);
   backdrop-filter: blur(4px);
 }
 
 .structured-image-lightbox-img {
   max-width: min(1200px, calc(100vw - 48px));
-  max-height: calc(100dvh - 48px);
+  max-height: calc(100dvh - 96px);
   width: auto;
   height: auto;
   object-fit: contain;
   border-radius: var(--ch-radius-sm);
   box-shadow: 0 18px 64px rgb(0 0 0 / 52%);
-  cursor: zoom-out;
+}
+
+.structured-image-lightbox-toolbar {
+  position: fixed;
+  z-index: 1;
+  top: 16px;
+  left: 16px;
+  right: 72px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  color: #fff;
+  font-size: 12px;
+}
+
+.structured-image-lightbox-toolbar button,
+.structured-image-lightbox-toolbar a {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: var(--ch-radius-sm);
+  background: rgb(24 24 24 / 96%);
+  color: #fff;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+@media (max-width: 480px) {
+  .structured-image-lightbox-toolbar > span {
+    display: none;
+  }
+}
+
+.structured-image-lightbox--actual {
+  display: block;
+  overflow: auto;
+}
+
+.structured-image-lightbox--actual .structured-image-lightbox-img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  margin: auto;
 }
 
 .structured-image-lightbox-close {

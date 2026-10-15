@@ -48,6 +48,7 @@ from claude_hub.models.schemas import (
     TaskRuntimeObservation,
     TaskSourceReference,
 )
+from claude_hub.services.agent_stream.local_images import ImageReferenceBuffer
 from claude_hub.services.agent_stream.tailer import SessionTailer
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._dispatch import _DispatchMixin
@@ -683,6 +684,7 @@ async def test_live_publish_observes_high_level_events_only(manager, workspace):
     tailer = SimpleNamespace(
         _store=store,
         _is_live=True,
+        _image_references=ImageReferenceBuffer(),
         _fanout=Mock(),
         _fanout_completion=Mock(),
         _task_activity_observer=observer,
@@ -719,6 +721,7 @@ async def test_observer_error_does_not_fail_completion_publish(caplog):
     tailer = SimpleNamespace(
         _store=store,
         _is_live=True,
+        _image_references=ImageReferenceBuffer(),
         _fanout=Mock(),
         _fanout_completion=Mock(),
         _task_activity_observer=failed_observer,
