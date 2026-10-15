@@ -154,6 +154,52 @@ class _MessagingMixin:
             absent (→ ``pending_call_ids`` for one safe re-delivery).
           (Receipt present → stays in ``processing``, no repaste.)
         """
+        # A duplicate caller must not wait behind a provider side effect that
+        # already owns this call id. This lock-free fast path is read-only; all
+        # mutations and every first delivery still serialize below. The locked
+        # implementation repeats the fingerprint/state validation.
+        current = self.sessions.get(session_id)
+        if current is None:
+            raise KeyError(session_id)
+        expected_tab_id = current.tab_id
+        expected_created_at = current.created_at
+        if call_id:
+            existing_fp = current.call_payload_fingerprints.get(call_id)
+            if existing_fp is not None:
+                new_fp = self._compute_payload_fingerprint(message, attachments or [])
+                if new_fp != existing_fp:
+                    raise ValueError(
+                        f"call_id {call_id} already used with a different payload; "
+                        "cannot mutate a committed delivery. Use a new call_id for a "
+                        "different message."
+                    )
+                if call_id in current.processing_call_ids or call_id in current.delivered_call_ids:
+                    return
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with self.workspace_mutation_lock(current.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != expected_tab_id
+                    or live.created_at != expected_created_at
+                ):
+                    raise KeyError(f"session {session_id} was deleted or replaced")
+                await self._send_session_message_locked(
+                    session_id,
+                    message,
+                    attachments,
+                    call_id,
+                )
+
+    async def _send_session_message_locked(
+        self,
+        session_id: str,
+        message: str,
+        attachments: list[WorkspaceAttachmentCreate] | None = None,
+        call_id: str | None = None,
+    ) -> None:
+        """Persist and deliver input while the per-session pump lock is held."""
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
@@ -261,7 +307,7 @@ class _MessagingMixin:
                     )
                 if call_id in session.pending_call_ids:
                     # Same payload, still pending: pump the stored envelope.
-                    await self._pump_session_messages(session_id)
+                    await self._pump_session_messages_locked(session_id)
                     session = self.sessions[session_id]
                     if call_id in session.uncertain_call_ids:
                         raise DeliveryUncertain(
@@ -328,8 +374,9 @@ class _MessagingMixin:
             self._save_state()
             session = self.sessions[session_id]
 
-            # Kick the receiver pump to deliver the message.
-            await self._pump_session_messages(session_id)
+            # Kick the receiver pump to deliver the message while retaining the
+            # same lock that protected the durable enqueue.
+            await self._pump_session_messages_locked(session_id)
             # After the pump, check whether the call_id landed in
             # uncertain_call_ids (ambiguous tmux send failure). If so, raise
             # DeliveryUncertain so the caller knows the dispatch failed and
@@ -383,6 +430,23 @@ class _MessagingMixin:
         Returns ``True`` if the call_id was found and handled (pumped or
         no-op), ``False`` if it is absent.
         """
+        expected = self.sessions.get(session_id)
+        if expected is None:
+            raise KeyError(f"session {session_id} not found")
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with self.workspace_mutation_lock(expected.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != expected.tab_id
+                    or live.created_at != expected.created_at
+                ):
+                    raise KeyError(f"session {session_id} was deleted or replaced")
+                return await self._resume_existing_call_locked(session_id, call_id)
+
+    async def _resume_existing_call_locked(self, session_id: str, call_id: str) -> bool:
+        """Resume a persisted call while the per-session pump lock is held."""
         if session_id not in self.sessions:
             raise KeyError(f"session {session_id} not found")
         session = self.sessions[session_id]
@@ -399,7 +463,7 @@ class _MessagingMixin:
                 "resume_existing_call call_id=%s pending; pumping stored " "envelope",
                 call_id,
             )
-            await self._pump_session_messages(session_id)
+            await self._pump_session_messages_locked(session_id)
             session = self.sessions[session_id]
             if call_id in session.uncertain_call_ids:
                 raise DeliveryUncertain(
@@ -484,11 +548,21 @@ class _MessagingMixin:
         if not session:
             return
 
-        # Serialize pump cycles per session so two concurrent calls cannot
-        # both send the same pending call_id to tmux.
+        # Every producer uses workspace -> pump ordering. Native Chat publish
+        # observers re-enter the workspace lock inline while the pump owns the
+        # provider send, so deletion can never hold workspace while waiting on
+        # this pump.
         lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            await self._pump_session_messages_locked(session_id)
+        async with self.workspace_mutation_lock(session.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != session.tab_id
+                    or live.created_at != session.created_at
+                ):
+                    return
+                await self._pump_session_messages_locked(session_id)
 
     async def _pump_session_messages_locked(self, session_id: str) -> None:
         """Inner pump logic — caller must hold ``self._pump_locks[session_id]``."""
@@ -1060,6 +1134,35 @@ class _MessagingMixin:
         HTTP 204 success. The uncertain state and original payload are
         preserved for another explicit operator retry.
         """
+        expected = self.sessions.get(session_id)
+        if expected is None:
+            raise KeyError(f"session {session_id} not found")
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with self.workspace_mutation_lock(expected.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != expected.tab_id
+                    or live.created_at != expected.created_at
+                ):
+                    raise KeyError(f"session {session_id} was deleted or replaced")
+                await self._retry_uncertain_delivery_locked(
+                    session_id,
+                    call_id,
+                    reason=reason,
+                    actor=actor,
+                )
+
+    async def _retry_uncertain_delivery_locked(
+        self,
+        session_id: str,
+        call_id: str,
+        *,
+        reason: str,
+        actor: str,
+    ) -> None:
+        """Retry an uncertain call while the per-session pump lock is held."""
         session = self.sessions.get(session_id)
         if session is None:
             raise KeyError(f"session {session_id} not found")
@@ -1379,7 +1482,7 @@ class _MessagingMixin:
 
         # Pump through the normal delivery path. If the re-send hits another
         # ambiguous failure, the call_id returns to uncertain_call_ids.
-        await self._pump_session_messages(session_id)
+        await self._pump_session_messages_locked(session_id)
 
         # Fail-closed: re-fetch the session and verify the call_id did NOT
         # land back in uncertain_call_ids. If it did, the retry hit another

@@ -628,19 +628,32 @@ class MasoHttpSession(ProviderSession):
     def accepts_notification(self, record: Dict[str, Any]) -> bool:
         return record.get("generation") == self._stdout_generation
 
-    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+    async def answer_pending_question(
+        self,
+        answers: List[Dict[str, Any]],
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
+        if expected_call_id is not None and expected_call_id not in self._pending_confirmations:
+            return False
         if not self._pending_confirmations:
             # Structured card answers must never fall through as new prompts,
             # including after Stop, completion, or a backend restart.
             raise ValueError("This MASO tool confirmation is no longer pending")
         decisions: List[Tuple[str, bool]] = []
         if not answers:
-            decisions = [(call_id, False) for call_id in self._pending_confirmations]
+            decisions = [
+                (call_id, False)
+                for call_id in self._pending_confirmations
+                if expected_call_id is None or call_id == expected_call_id
+            ]
         for entry in answers:
             question_id = entry.get("questionId")
             if not isinstance(question_id, str) or not question_id.startswith("maso-confirm:"):
                 continue
             call_id = question_id[len("maso-confirm:") :]
+            if expected_call_id is not None and call_id != expected_call_id:
+                continue
             if call_id not in self._pending_confirmations:
                 continue
             selected = entry.get("selected")

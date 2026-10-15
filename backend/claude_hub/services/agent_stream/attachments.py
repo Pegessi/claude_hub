@@ -808,6 +808,12 @@ class AgentStreamAttachmentStore:
 
     # ── public API ────────────────────────────────────────────────────────
 
+    def has_residual_state(self) -> bool:
+        """Whether files or manifest rows still reserve this session identity."""
+        if self._session_dir.exists():
+            return True
+        return bool(self._session_entries(self._read_index()))
+
     async def save(
         self,
         mime_type: str,

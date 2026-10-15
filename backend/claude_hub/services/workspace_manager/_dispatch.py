@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ...models.schemas import validate_workspace_session_surface
 from ..task_dependencies import require_task_dependencies, task_dependency_blockers
 from ._constants import *  # noqa: F401,F403
 
@@ -45,6 +46,10 @@ class _DispatchMixin:
                 await self.dispatch_workspace(workspace.id)
             return self.tasks[task_id]
 
+        # A compatibility start payload can override the provider even when an
+        # existing agent avoids the normal creation/admission path.
+        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
+
         logger.info(
             "Starting workspace task id=%s workspace_id=%s title=%r payload_target_session_id=%s "
             "payload_related_task_id=%s stored_related_task_id=%s current_session_id=%s status=%s",
@@ -58,6 +63,15 @@ class _DispatchMixin:
             task.status,
         )
         await self._refresh_session_statuses(workspace.id)
+        # Refresh can yield to a todo edit. Do not create an agent from the
+        # pre-refresh surface and only discover that it was invalid afterward.
+        task = self.tasks[task_id]
+        if task.status == WorkspaceTaskStatus.DONE:
+            raise RuntimeError("Done tasks cannot be started")
+        if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+            return task
+        require_task_dependencies(self.tasks, task)
+        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
         selected_kind = task.session_kind
         if payload.target_session_id:
             selected = self.sessions.get(payload.target_session_id)
@@ -93,6 +107,7 @@ class _DispatchMixin:
             raise RuntimeError("Done tasks cannot be started")
         if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
             return task
+        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
         require_task_dependencies(self.tasks, task)
 
         base_update: dict[str, Any] = {
@@ -485,7 +500,7 @@ class _DispatchMixin:
                     "next_action": self._autonomous_next_action(phase),
                 }
             )
-        self._resume_chat_session(session.id)
+        await self._resume_chat_session(session.id)
         session = self.sessions[session.id]
         # Opening a fresh work round: bump review_cycle so the worker's next
         # ready_for_review outranks the prior verdict (reviewed_cycle) and a
@@ -990,7 +1005,7 @@ class _DispatchMixin:
         task = self.tasks[task.id]
         require_task_dependencies(self.tasks, task)
 
-        self._resume_chat_session(session.id)
+        await self._resume_chat_session(session.id)
         session = self.sessions[session.id]
         dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
         if task.clear_context and (

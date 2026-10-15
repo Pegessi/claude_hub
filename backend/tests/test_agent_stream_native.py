@@ -2762,6 +2762,34 @@ async def test_codex_answer_pending_question_sends_jsonrpc_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_answer_pending_question_requires_exact_card_call_id() -> None:
+    """Reused question ids cannot redirect a retry to a newer request."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = cast(asyncio.subprocess.Process, proc)
+    old = _codex_question_request(42)["params"]
+    old["itemId"] = "item-old"
+    new = _codex_question_request(43)["params"]
+    new["itemId"] = "item-new"
+    sess._pending_questions[42] = old
+    sess._pending_questions[43] = new
+    answers = [{"questionId": "q1", "selected": ["red"]}]
+
+    assert await sess.answer_pending_question(answers, expected_call_id="item-old")
+    responses = [message for message in _written_requests(proc) if "method" not in message]
+    assert [message["id"] for message in responses] == [42]
+    assert set(sess._pending_questions) == {43}
+
+    # A delayed retry for the consumed card must not match item-new merely
+    # because its question id is also q1.
+    assert not await sess.answer_pending_question(answers, expected_call_id="item-old")
+    assert set(sess._pending_questions) == {43}
+    assert await sess.answer_pending_question(answers, expected_call_id="item-new")
+    responses = [message for message in _written_requests(proc) if "method" not in message]
+    assert [message["id"] for message in responses] == [42, 43]
+
+
+@pytest.mark.asyncio
 async def test_codex_answer_pending_question_dismissal_empty_answers() -> None:
     """An empty answers list (dismissal) yields ``{"answers": {}}``."""
     sess = _codex_session()

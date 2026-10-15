@@ -7,6 +7,21 @@
 
 ## Released
 
+### fix(workspace): preserve managed Chat ownership across controls and failures
+
+- Bind question answers to the active turn and exact provider request instead of
+  treating them as arbitrary steering or a new Task message.
+- Keep managed model changes, durable queued messages and retries on the actual
+  ManagedSession; distinguish stale Stop from an already completed turn.
+- Reject direct-tab lifecycle/history mutations for managed Chat, serve generated
+  images through its own stream, and reconcile panes after Agent deletion.
+- Fence failed initialization and deletion before releasing identities; retain
+  delivery evidence until durable removal prevents replay after a failed save.
+- Apply the same provider/surface rules to Task creation and start overrides, and
+  keep managed execution modes under Task control.
+- Keep ordinary Chat descriptors tied to persisted tab creation, and preserve
+  reviewer escalation when automatic recovery limits are reached.
+
 ### feat(workspace): run managed agents and reviewers through Chat
 
 - Add an explicit Terminal/Chat execution choice for local Workspace agents,

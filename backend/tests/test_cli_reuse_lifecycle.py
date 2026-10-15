@@ -25,6 +25,7 @@ from claude_hub.models import (
     ManagedSession,
     ManagedSessionStatus,
     RemoteProfile,
+    SessionKind,
     TerminalTab,
     Workspace,
     WorkspaceCreate,
@@ -37,7 +38,11 @@ from claude_hub.models import (
 )
 from claude_hub.services.ttyd_manager import ttyd_manager
 from claude_hub.services.workspace_identity import DuplicateWorkspaceError
-from claude_hub.services.workspace_manager import WorkspaceManager, workspace_manager
+from claude_hub.services.workspace_manager import (
+    WorkspaceAgentInitializationError,
+    WorkspaceManager,
+    workspace_manager,
+)
 
 
 def make_client(handler: Callable[[httpx.Request], httpx.Response], **kwargs: Any) -> HubClient:
@@ -888,6 +893,189 @@ async def test_delete_session_allows_failed_task_binding(
     assert session.id not in manager.sessions
     assert discarded == [(ws.id, session.id)]
     assert deleted_tabs == [session.tab_id]
+
+
+@pytest.mark.asyncio
+async def test_delete_session_save_failure_preserves_evidence_and_allows_retry(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    manager = WorkspaceManager()
+    repo, ws = _cleanup_workspace(tmp_path, manager)
+    session = _caller_owned_ephemeral_session(ws=ws, repo=repo, session_id="retry-delete")
+    manager.sessions[session.id] = session
+    save_attempts = 0
+    deleted_tabs: list[str] = []
+    discarded: list[str] = []
+
+    def fail_first_save() -> None:
+        nonlocal save_attempts
+        save_attempts += 1
+        if save_attempts == 1:
+            raise OSError("state write failed")
+
+    async def fake_delete_tab(tab_id: str) -> bool:
+        deleted_tabs.append(tab_id)
+        return True
+
+    async def fake_discard(
+        _workspace_id: str,
+        session_id: str,
+        **_kwargs: Any,
+    ) -> None:
+        discarded.append(session_id)
+
+    import claude_hub.services.agent_stream as agent_stream
+
+    monkeypatch.setattr(manager, "_save_state", fail_first_save)
+    monkeypatch.setattr(ttyd_manager, "delete_tab", fake_delete_tab)
+    monkeypatch.setattr(agent_stream, "discard_session_stream", fake_discard)
+
+    with pytest.raises(OSError, match="state write failed"):
+        await manager.delete_session(session.id)
+    assert session.id in manager.sessions
+    assert manager.sessions[session.id].runtime_status == AgentRuntimeStatus.ATTENTION
+    assert discarded == []
+
+    await manager.delete_session(session.id)
+    assert session.id not in manager.sessions
+    assert discarded == [session.id]
+    # Resource retirement is idempotently retried while the durable owner is
+    # retained; evidence is collected only after the second state commit.
+    assert deleted_tabs == [session.tab_id, session.tab_id]
+
+
+@pytest.mark.asyncio
+async def test_delete_session_serializes_with_full_message_enqueue(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    manager = WorkspaceManager()
+    repo, ws = _cleanup_workspace(tmp_path, manager)
+    session = _caller_owned_ephemeral_session(
+        ws=ws,
+        repo=repo,
+        session_id="concurrent-delete",
+    ).model_copy(update={"session_kind": SessionKind.CHAT, "tmux_session": ""})
+    manager.sessions[session.id] = session
+    pump_entered = asyncio.Event()
+    release_pump = asyncio.Event()
+    pumped: list[str] = []
+
+    async def blocked_pump(session_id: str) -> None:
+        pumped.append(session_id)
+        pump_entered.set()
+        await release_pump.wait()
+
+    async def fake_delete_tab(_tab_id: str) -> bool:
+        return True
+
+    async def fake_discard(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    import claude_hub.services.agent_stream as agent_stream
+
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_assert_session_seat", lambda _session: "seat")
+    monkeypatch.setattr(manager, "_pump_session_messages_locked", blocked_pump)
+    monkeypatch.setattr(ttyd_manager, "delete_tab", fake_delete_tab)
+    monkeypatch.setattr(agent_stream, "discard_session_stream", fake_discard)
+
+    sending = asyncio.create_task(
+        manager.send_session_message(session.id, "hello", call_id="concurrent-call")
+    )
+    await asyncio.wait_for(pump_entered.wait(), timeout=1)
+    deleting = asyncio.create_task(manager.delete_session(session.id))
+    await asyncio.sleep(0)
+    assert not deleting.done()
+
+    release_pump.set()
+    await asyncio.gather(sending, deleting)
+    assert session.id not in manager.sessions
+    assert pumped == [session.id]
+
+
+@pytest.mark.asyncio
+async def test_workspace_mutation_reentrancy_does_not_leak_to_child_tasks(
+    tmp_path: Path,
+) -> None:
+    manager = WorkspaceManager()
+    _repo, workspace = _cleanup_workspace(tmp_path, manager)
+    child_entered = asyncio.Event()
+
+    async def child() -> None:
+        async with manager.workspace_mutation_lock(workspace.id):
+            child_entered.set()
+
+    async with manager.workspace_mutation_lock(workspace.id):
+        task = asyncio.create_task(child())
+        await asyncio.sleep(0)
+        assert not child_entered.is_set()
+    await asyncio.wait_for(task, timeout=1)
+    assert child_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_create_save_failure_cleans_tab_or_reserves_its_friendly_id(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    manager = WorkspaceManager()
+    _repo, workspace = _cleanup_workspace(tmp_path, manager)
+    payload = EnsureWorkspaceAgentRequest(
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        reuse_existing=False,
+    )
+    surviving_tabs: list[TerminalTab] = []
+    created_ids: list[str] = []
+    fail_save = True
+
+    async def fake_create_tab(**kwargs: Any) -> TerminalTab:
+        created_ids.append(kwargs["managed_session_id"])
+        tab = TerminalTab(
+            id=f"create-tab-{len(created_ids)}",
+            name=kwargs["name"],
+            cwd=workspace.path,
+            solo_mode=True,
+            agent_type=kwargs["agent_type"],
+            session_kind=kwargs["session_kind"],
+            target=ExecutionTarget.LOCAL,
+            port=12000 + len(created_ids),
+            created_at=datetime.now(timezone.utc),
+            is_active=True,
+            workspace_id=workspace.id,
+            workspace_name=workspace.name,
+            workspace_role=kwargs["workspace_role"],
+            managed_session_id=kwargs["managed_session_id"],
+        )
+        surviving_tabs.append(tab)
+        return tab
+
+    async def fail_tab_cleanup(_tab_id: str) -> bool:
+        raise RuntimeError("tab cleanup failed")
+
+    def save_state() -> None:
+        if fail_save:
+            raise OSError("state save failed")
+
+    monkeypatch.setattr(manager, "_save_state", save_state)
+    monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_args: "")
+    monkeypatch.setattr(ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(ttyd_manager, "delete_tab", fail_tab_cleanup)
+    monkeypatch.setattr(ttyd_manager, "list_tabs", lambda: list(surviving_tabs))
+    monkeypatch.setattr(ttyd_manager, "list_archived_tabs", lambda: [])
+
+    with pytest.raises(WorkspaceAgentInitializationError, match="Failed to create and persist"):
+        await manager.ensure_workspace_agent(workspace.id, payload)
+    assert manager.sessions == {}
+    orphan_id = created_ids[0]
+
+    # A restarted manager would reload this backing tab even though workspace
+    # state never committed. Its managed_session_id must reserve the friendly
+    # identity if cleanup could not be confirmed.
+    fail_save = False
+    created = await manager.ensure_workspace_agent(workspace.id, payload)
+    assert created.id != orphan_id
+    assert created_ids == [orphan_id, created.id]
 
 
 @pytest.mark.asyncio

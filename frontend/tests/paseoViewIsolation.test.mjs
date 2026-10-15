@@ -88,8 +88,8 @@ test('active Terminal tabs retain their runtime status indicator and idle fallba
   assert.match(useTabStatus, /tab\.is_active \? 'idle' : 'offline'/)
 })
 
-test('Chat mode menu renders only backend capabilities and applies to the next turn', () => {
-  assert.match(structuredPane, /v-if="modeOptions\.length > 0"/)
+test('direct Chat mode menu renders backend capabilities while managed Task mode stays hidden', () => {
+  assert.match(structuredPane, /v-if="!isManagedChat && modeOptions\.length > 0"/)
   assert.match(structuredPane, /v-for="option in modeOptions"/)
   assert.match(structuredPane, /:disabled="modeInteractionLocked \|\| isUpdatingMode"/)
   assert.match(structuredPane, /aria-haspopup="menu"/)

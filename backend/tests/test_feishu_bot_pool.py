@@ -8,6 +8,7 @@ import math
 import re
 import struct
 import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -2785,6 +2786,7 @@ def test_completed_native_turn_is_not_replayed_after_route_cancellation(
             id="terminal-tab-tab-1",
             workspace_id="terminal-tabs",
             tab_id="tab-1",
+            created_at=datetime.fromtimestamp(clock.value, timezone.utc),
             agent_type=AgentType.CLAUDE,
             chat_mode=ChatMode.DEFAULT,
         )

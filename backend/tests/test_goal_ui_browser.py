@@ -267,3 +267,143 @@ def test_composer_add_menu_and_objective_only_goal(page, tmp_path, width, theme)
     expect(page.get_by_role("button", name="Resume", exact=True)).to_be_visible()
     assert len(creates) == 1
     assert not errors
+
+
+@pytest.mark.skipif(not os.environ.get("GOAL_UI_REVIEW_URL"), reason="requires isolated Vite")
+def test_managed_chat_question_uses_managed_owner_and_hides_task_owned_controls(page):
+    """Exercise the rendered SPA with only the provider boundary mocked."""
+    origin = os.environ["GOAL_UI_REVIEW_URL"].rstrip("/")
+    component = page.request.get(f"{origin}/src/components/StructuredPane.vue").text()
+    vue_url = re.search(r'from "([^"]*/vue.js[^"]*)"', component).group(1)
+    pinia_url = re.search(
+        r'from "([^"]*/pinia.js[^"]*)"',
+        page.request.get(f"{origin}/src/stores/terminalStore.ts").text(),
+    ).group(1)
+    sent = []
+    events = [
+        {
+            "stream_sequence": 0,
+            "session_id": "managed-session",
+            "tab_id": "backing-tab",
+            "agent_type": "codex",
+            "type": "turn_started",
+            "turn_id": "question-turn",
+            "payload": {"summary": "Need a choice"},
+            "created_at": "2026-10-15T00:00:00Z",
+            "redacted": False,
+        },
+        {
+            "stream_sequence": 2,
+            "session_id": "managed-session",
+            "tab_id": "backing-tab",
+            "agent_type": "codex",
+            "type": "approval_required",
+            "turn_id": "question-turn",
+            "call_id": "question-call",
+            "payload": {
+                "tool_call_id": "question-call",
+                "kind": "ask_question",
+                "title": "Choose a color",
+                "questions": [
+                    {
+                        "id": "color",
+                        "prompt": "Pick one",
+                        "options": [
+                            {"id": "red", "label": "Red"},
+                            {"id": "blue", "label": "Blue"},
+                        ],
+                    }
+                ],
+            },
+            "created_at": "2026-10-15T00:00:02Z",
+            "redacted": False,
+        },
+    ]
+    capabilities = {
+        "structured": True,
+        "adapter_id": "codex-app-server",
+        "schema_version": 1,
+        "sources": [],
+        "supports_approval_ui": True,
+        "supports_tool_timeline": True,
+        "supports_images": True,
+        # Deliberately advertise provider features that task-owned managed Chat
+        # must still project away in the rendered surface.
+        "supports_goals": True,
+        "supports_dynamic_modes": True,
+        "current_mode": "default",
+        "available_modes": [
+            {"id": "default", "label": "Agent"},
+            {"id": "plan", "label": "Plan"},
+        ],
+        "available_models": [],
+        "current_model": None,
+        "current_reasoning_effort": None,
+    }
+
+    def api(route):
+        url = route.request.url
+        if url.endswith("/stream/wait") or "/stream/live" in url:
+            return  # Keep the provider poll pending; there is no live provider.
+        if url.endswith("/stream/capabilities"):
+            route.fulfill(json=capabilities)
+        elif "/stream/events" in url:
+            route.fulfill(json={"events": events, "next_sequence": 2, "has_more": False})
+        elif url.endswith("/stream/send"):
+            sent.append((url, route.request.post_data_json))
+            route.fulfill(json={"ok": True, "answered_question": True})
+        elif url.endswith("/api/tabs/status"):
+            route.fulfill(json=[])
+        else:
+            route.fulfill(json={})
+
+    page.route(f"{origin}/api/**", api)
+    page.add_init_script("window.EventSource = undefined")
+    page.route(
+        f"{origin}/managed-controls-review",
+        lambda route: route.fulfill(
+            content_type="text/html",
+            body=f"""<!doctype html><html><body>
+        <div id="app" style="height:100dvh"></div>
+        <script type="module">
+        import {{createApp, h, KeepAlive}} from '{vue_url}';
+        import {{createPinia}} from '{pinia_url}';
+        import '/src/App.vue';
+        import StructuredPane from '/src/components/StructuredPane.vue';
+        import {{useTerminalStore}} from '/src/stores/terminalStore.ts';
+        const pinia = createPinia();
+        const app = createApp({{setup() {{
+          useTerminalStore().tabs = [{{
+            id:'backing-tab', agent_type:'codex', env:{{}}, session_kind:'chat',
+            workspace_id:'workspace-1', managed_session_id:'managed-session'
+          }}];
+          return () => h(KeepAlive, null, {{default: () => h(StructuredPane, {{
+            tabId:'backing-tab', managedChat:true, managedSessionId:'managed-session', paneId:'pane-1'
+          }})}});
+        }}}});
+        app.use(pinia).mount('#app');
+        </script></body></html>""",
+        ),
+    )
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(f"{origin}/managed-controls-review")
+
+    expect(page.get_by_text("Choose a color", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name=re.compile(r"Chat mode:"))).to_have_count(0)
+    page.get_by_role("button", name="Add to chat", exact=True).click()
+    expect(page.get_by_role("menuitem", name="Set a Goal", exact=True)).to_have_count(0)
+    expect(page.get_by_role("menuitem", name="Create scheduled task", exact=True)).to_have_count(0)
+    page.keyboard.press("Escape")
+
+    page.get_by_role("group", name="Pick one").get_by_role("button", name="Red", exact=True).click()
+    page.get_by_role("button", name="提交选择", exact=True).click()
+    expect(page.get_by_text("已提交", exact=True)).to_be_visible()
+
+    assert len(sent) == 1
+    send_url, body = sent[0]
+    assert send_url.endswith("/api/workspaces/sessions/managed-session/stream/send")
+    assert body["question_turn_id"] == "question-turn"
+    assert body["question_call_id"] == "question-call"
+    assert body["delivery"] == "normal"
+    assert not errors

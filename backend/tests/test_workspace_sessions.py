@@ -342,25 +342,43 @@ def test_delete_session_succeeds_for_idle_session(tmp_path: Path, monkeypatch: M
     assert session.tab_id in deleted_tabs
 
 
-def test_delete_session_removes_agent_when_tab_cleanup_fails(
+def test_delete_session_retains_agent_until_tab_cleanup_retry_succeeds(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     client = TestClient(app)
+    delete_attempts = 0
+    discarded: list[str] = []
 
     async def fake_delete_tab(_tab_id: str) -> None:
-        raise RuntimeError("cli unregister failed")
+        nonlocal delete_attempts
+        delete_attempts += 1
+        if delete_attempts == 1:
+            raise RuntimeError("cli unregister failed")
+
+    async def fake_discard(_workspace_id: str, session_id: str, **_kwargs) -> None:
+        discarded.append(session_id)
+
+    import claude_hub.services.agent_stream as agent_stream
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", fake_delete_tab)
+    monkeypatch.setattr(agent_stream, "discard_session_stream", fake_discard)
 
     workspace = _make_workspace(client, repo)
     session = _make_session(workspace["id"], repo)
 
-    response = client.delete(f"/api/workspaces/sessions/{session.id}")
+    failed = client.delete(f"/api/workspaces/sessions/{session.id}")
+    assert failed.status_code == 400
+    assert session.id in workspace_manager.sessions
+    assert workspace_manager.sessions[session.id].runtime_status == AgentRuntimeStatus.ATTENTION
+    assert discarded == []
 
-    assert response.status_code == 204
+    retried = client.delete(f"/api/workspaces/sessions/{session.id}")
+    assert retried.status_code == 204
     assert session.id not in workspace_manager.sessions
+    assert discarded == [session.id]
+    assert delete_attempts == 2
 
 
 def test_delete_session_blocked_by_active_task_returns_400(

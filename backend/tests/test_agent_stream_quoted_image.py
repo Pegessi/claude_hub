@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -36,6 +37,7 @@ def _make_tab(tab_id: str) -> SimpleNamespace:
     return SimpleNamespace(
         id=tab_id,
         name=f"tab-{tab_id}",
+        created_at=datetime.now(timezone.utc),
         cwd="/tmp",
         remote_cwd=None,
         target=ExecutionTarget.LOCAL,
@@ -43,6 +45,9 @@ def _make_tab(tab_id: str) -> SimpleNamespace:
         remote_reconnect=True,
         solo_mode=True,
         env={},
+        managed_session_id=None,
+        workspace_id=None,
+        workspace_role=None,
         agent_session_id="provider-session-id",
         agent_session_id_verified=False,
         cursor_transport="terminal",

@@ -1394,7 +1394,12 @@ class ProviderSession(ABC):
             except Exception:
                 logger.warning("fork-seed consumed callback failed", exc_info=True)
 
-    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+    async def answer_pending_question(
+        self,
+        answers: List[Dict[str, Any]],
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
         """Answer a provider-native blocking question, if one is pending.
 
         Some providers (Codex) block the in-flight turn on a server→client
@@ -2942,12 +2947,19 @@ class CodexNativeSession(ProviderSession):
             # The app-server is gone; nothing to answer.
             pass
 
-    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+    async def answer_pending_question(
+        self,
+        answers: List[Dict[str, Any]],
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
         """Answer a pending ``requestUserInput`` question.
 
         Maps the composer's ``[{questionId, selected: [labels]}]`` payload to
         the app-server's ``{answers: {questionId: {answers: [labels]}}}``
-        shape and responds only to matching pending question requests.
+        shape and responds only to matching pending question requests. When
+        ``expected_call_id`` is supplied, only the provider request whose
+        ``itemId`` produced that exact card can be consumed.
         An empty answers list (dismissal) yields ``{"answers": {}}``.
         Returns ``False`` when no question is pending so the caller can
         deliver the text normally.
@@ -2966,6 +2978,10 @@ class CodexNativeSession(ProviderSession):
             codex_answers[question_id] = {"answers": values}
         responses: List[Tuple[Any, Dict[str, Any]]] = []
         for req_id, params in list(self._pending_questions.items()):
+            item_id = params.get("itemId")
+            call_id = str(item_id) if item_id is not None else "request_user_input"
+            if expected_call_id is not None and call_id != expected_call_id:
+                continue
             ids = {
                 question["id"] for question in codex_normalize_questions(params.get("questions"))
             }
@@ -3324,7 +3340,12 @@ class TraexNativeSession(CodexNativeSession):
             }
         )
 
-    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+    async def answer_pending_question(
+        self,
+        answers: List[Dict[str, Any]],
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
         selected = {
             a["questionId"]: a.get("selected")
             for a in answers
@@ -3333,6 +3354,8 @@ class TraexNativeSession(CodexNativeSession):
         responses: List[Tuple[Any, Dict[str, Any]]] = []
         for req_id, choices in list(self._pending_permissions.items()):
             question_id = f"permission:{req_id}"
+            if expected_call_id is not None and question_id != expected_call_id:
+                continue
             if answers and question_id not in selected:
                 continue
             values = selected.get(question_id)
@@ -3344,6 +3367,10 @@ class TraexNativeSession(CodexNativeSession):
             self._pending_permissions.pop(req_id, None)
             responses.append((req_id, {"decision": decision}))
         for req_id, params in list(self._pending_questions.items()):
+            item_id = params.get("itemId")
+            call_id = str(item_id) if item_id is not None else "request_user_input"
+            if expected_call_id is not None and call_id != expected_call_id:
+                continue
             questions = codex_normalize_questions(params.get("questions"))
             ids = {question["id"] for question in questions}
             if answers and not ids <= selected.keys():

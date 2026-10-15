@@ -510,6 +510,22 @@ async def test_explicit_discard_removes_receipts_before_reusing_session_id(
 
 
 @pytest.mark.asyncio
+async def test_attachment_residue_reserves_friendly_session_identity(
+    isolated_bridge: _FakeManager,
+) -> None:
+    session = _session()
+    attachment_store = managed_chat.AgentStreamAttachmentStore(
+        session.workspace_id,
+        session.id,
+    )
+    await attachment_store.save("image/png", _PNG)
+
+    assert managed_chat.has_residual_state(session.workspace_id, session.id)
+    await attachment_store.clear()
+    assert not managed_chat.has_residual_state(session.workspace_id, session.id)
+
+
+@pytest.mark.asyncio
 async def test_explicit_discard_preserves_unfenced_uncertain_evidence(
     isolated_bridge: _FakeManager,
 ) -> None:
@@ -674,5 +690,5 @@ async def test_managed_stream_api_cancel_uses_workspace_stop_semantics(
         agent_stream_api.StreamCancelRequest(expected_turn_id="turn-9"),
         _user(),
     )
-    assert result == {"ok": True, "cancelled": True}
+    assert result == {"ok": True, "cancelled": True, "outcome": "cancelled_matching"}
     assert calls == [(session.id, "turn-9")]

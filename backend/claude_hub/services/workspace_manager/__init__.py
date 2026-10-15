@@ -9,6 +9,7 @@ monkeypatch targets such as ``STATE_ROOT`` and ``_now``.
 from ._artifacts import _ArtifactsMixin
 from ._attachments import _AttachmentsMixin
 from ._chat import _ChatMixin
+from ._chat_controls import _ChatControlsMixin
 from ._constants import *  # noqa: F401,F403
 from ._constants import (  # noqa: F401  (ensure underscore-prefixed names are package attrs)
     _format_duration,
@@ -40,6 +41,7 @@ from ._workspaces import _WorkspacesMixin, build_resident_agent_prompt  # noqa: 
 class WorkspaceManager(
     _StateMixin,
     _ChatMixin,
+    _ChatControlsMixin,
     _NormalizeMixin,
     _PersistenceMixin,
     _WorkspacesMixin,

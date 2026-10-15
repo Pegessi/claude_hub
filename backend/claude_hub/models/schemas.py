@@ -940,6 +940,21 @@ class TaskExecutionHandoffRequest(BaseModel):
         return value
 
 
+def validate_workspace_session_surface(agent_type: AgentType, session_kind: SessionKind) -> None:
+    """Keep task creation, start overrides, and managed admission on the same surface rules."""
+    if agent_type == AgentType.TRAEX:
+        raise ValueError("TraeX is not supported for workspace agents")
+    if agent_type == AgentType.MASO and session_kind != SessionKind.CHAT:
+        raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+    if session_kind == SessionKind.CHAT and agent_type not in {
+        AgentType.CLAUDE,
+        AgentType.CODEX,
+        AgentType.CURSOR,
+        AgentType.MASO,
+    }:
+        raise ValueError("Managed Chat supports only local Claude, Codex, Cursor, or MASO agents")
+
+
 class WorkspaceTaskCreate(BaseModel):
     """Payload for creating a workspace task."""
 
@@ -990,17 +1005,7 @@ class WorkspaceTaskCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_session_surface(self) -> "WorkspaceTaskCreate":
-        if self.agent_type == AgentType.MASO and self.session_kind != SessionKind.CHAT:
-            raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
-        if self.session_kind == SessionKind.CHAT and self.agent_type not in {
-            AgentType.CLAUDE,
-            AgentType.CODEX,
-            AgentType.CURSOR,
-            AgentType.MASO,
-        }:
-            raise ValueError(
-                "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"
-            )
+        validate_workspace_session_surface(self.agent_type, self.session_kind)
         return self
 
 
@@ -1825,20 +1830,8 @@ class EnsureWorkspaceAgentRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_managed_session_admission(self) -> "EnsureWorkspaceAgentRequest":
-        if self.agent_type == AgentType.TRAEX:
-            raise ValueError("TraeX is not supported for workspace agents")
-        if self.agent_type == AgentType.MASO and self.session_kind != SessionKind.CHAT:
-            raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+        validate_workspace_session_surface(self.agent_type, self.session_kind)
         if self.session_kind == SessionKind.CHAT:
-            if self.agent_type not in {
-                AgentType.CLAUDE,
-                AgentType.CODEX,
-                AgentType.CURSOR,
-                AgentType.MASO,
-            }:
-                raise ValueError(
-                    "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"
-                )
             if (
                 self.target == ExecutionTarget.REMOTE
                 or self.remote_profile_id is not None

@@ -575,6 +575,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   // (the two floating panels mount at once, poll-driven refreshes overlap)
   // coalesce onto one in-flight request and share its result.
   let tabsFetchPromise: Promise<void> | null = null
+  let tabSnapshotGeneration = 0
   let sidebarPreferencesFetchPromise: Promise<void> | null = null
   let legacyPinsMigrated = false
   let sidebarPreferencesFailureNotified = false
@@ -643,16 +644,41 @@ export const useTerminalStore = defineStore('terminal', () => {
     return sidebarPreferencesFetchPromise
   }
 
+  function invalidateTabSnapshots(): number {
+    tabSnapshotGeneration += 1
+    return tabSnapshotGeneration
+  }
+
   function fetchTabs(options: { force?: boolean } = {}): Promise<void> {
     // Mutation callers (restore, switch-env, create agent, ...) rely on the
     // awaited refresh reflecting the change they just made, so they bypass
     // coalescing — a poll-started fetch could have raced the server.
     if (tabsFetchPromise && !options.force) return tabsFetchPromise
+    const generation = invalidateTabSnapshots()
     const run = async () => {
       try {
         const response = await fetch(`${API_BASE}/tabs`)
         if (!response.ok) throw new Error('Failed to fetch tabs')
-        tabs.value = await response.json()
+        const snapshot: unknown = await response.json()
+        if (!Array.isArray(snapshot)) throw new Error('Invalid full tab snapshot')
+        // A newer fetch or a successful local mutation owns the current list.
+        // Never let this older full snapshot erase a newly created/restored tab,
+        // its pane assignment, or a protected queued draft.
+        if (generation !== tabSnapshotGeneration) return
+        const nextTabs = snapshot as TerminalTab[]
+        const nextIds = new Set(nextTabs.map(tab => tab.id))
+        const removedIds = tabs.value
+          .map(tab => tab.id)
+          .filter(tabId => !nextIds.has(tabId))
+        tabs.value = nextTabs
+        if (removedIds.length > 0) {
+          const removed = new Set(removedIds)
+          for (const pane of panes.value) {
+            if (pane.tabId && removed.has(pane.tabId)) pane.tabId = null
+          }
+          for (const tabId of removedIds) discardQueuedChat(tabId)
+          if (activeTabId.value && removed.has(activeTabId.value)) activeTabId.value = null
+        }
         if (manualTabs.value.length && !activeTabId.value) {
           activeTabId.value = manualTabs.value[0].id
         }
@@ -673,13 +699,13 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
     }
     const promise = run()
-    if (!options.force) {
-      tabsFetchPromise = promise.finally(() => {
-        tabsFetchPromise = null
-      })
-      return tabsFetchPromise
-    }
-    return promise
+    const tracked = promise.finally(() => {
+      if (tabsFetchPromise === tracked) tabsFetchPromise = null
+    })
+    // A forced request supersedes an older coalesced request. Its identity
+    // check in finally prevents the older request from clearing this promise.
+    tabsFetchPromise = tracked
+    return tracked
   }
 
   async function fetchAgentStatuses() {
@@ -733,6 +759,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw await tabRequestError(response, 'Failed to create tab')
       const newTab = await response.json()
+      invalidateTabSnapshots()
       tabs.value.unshift(newTab)
       activeTabId.value = newTab.id
       // Auto-assign new tab to active pane
@@ -755,6 +782,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw await tabRequestError(response, 'Failed to duplicate tab')
       const newTab = await response.json()
+      invalidateTabSnapshots()
       tabs.value.unshift(newTab)
       activeTabId.value = newTab.id
       if (activePaneId.value) {
@@ -790,6 +818,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw await tabRequestError(response, 'Failed to fork tab')
       const newTab = await response.json()
+      invalidateTabSnapshots()
       tabs.value.unshift(newTab)
       // Is the user still looking at the source tab? The active pane's tab is
       // the ground truth for what is on screen right now. If yes → auto-switch
@@ -834,6 +863,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to update tab')
       const updatedTab = await response.json()
+      invalidateTabSnapshots()
       const index = tabs.value.findIndex(tab => tab.id === tabId)
       if (index !== -1) {
         tabs.value[index] = updatedTab
@@ -853,6 +883,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         method: 'DELETE',
       })
       if (!response.ok) throw new Error('Failed to delete tab')
+      invalidateTabSnapshots()
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
       discardQueuedChat(tabId)
       // Remove tab from all panes
@@ -903,6 +934,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         method: 'POST',
       })
       if (!response.ok) throw new Error('Failed to archive tab')
+      invalidateTabSnapshots()
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
       discardQueuedChat(tabId)
       // Remove tab from all panes, remembering the first pane that lost it so
@@ -976,6 +1008,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         throw new Error(errText || `Failed to switch env (${response.status})`)
       }
       const updatedTab = await response.json()
+      invalidateTabSnapshots()
       const index = tabs.value.findIndex(t => t.id === tabId)
       if (index !== -1) {
         tabs.value[index] = updatedTab
@@ -1054,6 +1087,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const reorderedManualTabs = [...visibleTabs]
     const [removed] = reorderedManualTabs.splice(fromIndex, 1)
     reorderedManualTabs.splice(toIndex, 0, removed)
+    invalidateTabSnapshots()
     tabs.value = [...reorderedManualTabs, ...managedTabs.value]
     // Save the new order to backend
     saveTabOrder()
@@ -1065,6 +1099,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (!source || !target) return
     const next = moveTabById(tabs.value, sourceId, targetId, position)
     if (next === tabs.value) return
+    invalidateTabSnapshots()
     tabs.value = next
     void saveTabOrder()
   }
@@ -1087,6 +1122,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const reorderedManualTabs = manualTabs.value.map(
       tab => (pinned.has(tab.id) ? tab : movedTabs[movedIndex++]),
     )
+    invalidateTabSnapshots()
     tabs.value = [...reorderedManualTabs, ...managedTabs.value]
     void saveTabOrder()
   }
