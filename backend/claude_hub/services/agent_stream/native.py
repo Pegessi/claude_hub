@@ -1893,7 +1893,9 @@ class ClaudeNativeSession(ProviderSession):
         # every proxy spelling so a user-level settings file cannot silently
         # restore a route that the preflight did not select.
         for lower, upper in zip(PROXY_ENV_NAMES[::2], PROXY_ENV_NAMES[1::2]):
-            value = provider_env.get(lower) or provider_env.get(upper) or ""
+            # An explicitly empty lowercase setting disables the uppercase
+            # proxy, matching the precedence used during route selection.
+            value = provider_env[lower] if lower in provider_env else provider_env.get(upper, "")
             settings_env[lower] = value
             settings_env[upper] = value
         launch_dir = _runtime_home() / "launch_env"
