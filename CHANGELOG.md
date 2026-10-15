@@ -7,6 +7,10 @@
 
 ## Released
 
+### chore: remove unrelated presentation draft assets
+
+- Remove the unused root draft folder and its fifteen presentation assets.
+
 ### fix(chat): retain streamed images and release inactive image viewers
 
 - Capture completed image references while assistant text streams, including
