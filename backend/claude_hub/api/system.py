@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 class RestartRequest(BaseModel):
     instance_id: str
     request_id: UUID
+    resume_running_chats: bool = False
 
 
 @router.get("/restart")
@@ -36,7 +37,11 @@ async def restart_service(
     if x_claude_hub_restart != "1":
         raise HTTPException(status_code=403, detail="Restart confirmation header required.")
     try:
-        return service_restart.request_restart(body.instance_id, str(body.request_id))
+        return service_restart.request_restart(
+            body.instance_id,
+            str(body.request_id),
+            resume_running_chats=body.resume_running_chats,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:

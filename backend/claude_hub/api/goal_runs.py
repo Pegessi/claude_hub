@@ -15,13 +15,13 @@ from ..models import (
     SessionKind,
     User,
 )
-from ..services import ttyd_manager
 from ..services.goal_run import (
     GoalPolicyError,
     configure_goal_dispatch,
     get_goal_admission_lock,
     get_goal_manager,
 )
+from ..services.ttyd_manager import ttyd_manager
 
 router = APIRouter(tags=["goals"])
 

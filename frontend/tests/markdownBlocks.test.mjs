@@ -85,8 +85,8 @@ const mocked = outputText
     'const { highlightVersion, renderCodeBlockHtml } = globalThis.__codeHighlight;',
   )
   .replace(
-    /import \{ rewriteQuotedImageSrcs \} from ['"]@\/utils\/quotedImage['"];?/,
-    'const { rewriteQuotedImageSrcs } = globalThis.__quotedImage;',
+    /import \{ resolveLocalImageUrl, rewriteQuotedImageSrcs \} from ['"]@\/utils\/quotedImage['"];?/,
+    'const { resolveLocalImageUrl, rewriteQuotedImageSrcs } = globalThis.__quotedImage;',
   )
 
 globalThis.__marked = marked
@@ -855,4 +855,35 @@ test('local markdown images keep their tab scope through block and list caching'
   const b = renderString(cache, src, { complete: true, quotedTabId: 'tab-b' })
   assert.doesNotMatch(b, /tabs\/tab-a\//)
   assert.equal((b.match(/tabs\/tab-b\//g) || []).length, 2)
+})
+
+
+test('local image links render as pictures while external links and code keep their meaning', () => {
+  const cache = new MarkdownBlockCache()
+  const blocks = cache.render('[View result](</work/large screenshot.png>) [Docs](https://example.com/photo.png)\n\n`[Code](/work/code.png)`', { quotedTabId: 'image-tab', complete: true })
+  const html = blocks.map(block => block.html || '').join('')
+  assert.match(html, /<img[^>]+agent-image\?path=%2Fwork%2Flarge%20screenshot.png/)
+  assert.match(html, /<a href="https:\/\/example.com\/photo.png">Docs<\/a>/)
+  assert.match(html, /<code>\[Code\]\(\/work\/code.png\)<\/code>/)
+})
+
+test('fragment and query navigation remain links even when their targets end in image suffixes', () => {
+  const cache = new MarkdownBlockCache()
+  const blocks = cache.render('[Jump](#diagram.png) [Filter](?file=diagram.png) [Entity jump](<&#35;diagram.png>) [Entity filter](<&#63;file=diagram.png>) [Named jump](<&num;diagram.png>) [Named filter](<&quest;file=diagram.png>)', { quotedTabId: 'image-tab', complete: true })
+  const html = blocks.map(block => block.html || '').join('')
+  assert.match(html, /<a href="#diagram.png">Jump<\/a>/)
+  assert.match(html, /<a href="\?file=diagram.png">Filter<\/a>/)
+  assert.match(html, /<a href="&#35;diagram.png">Entity jump<\/a>/)
+  assert.match(html, /<a href="&#63;file=diagram.png">Entity filter<\/a>/)
+  assert.match(html, /<a href="&num;diagram.png">Named jump<\/a>/)
+  assert.match(html, /<a href="&quest;file=diagram.png">Named filter<\/a>/)
+  assert.doesNotMatch(html, /agent-image|<img/)
+})
+
+test('percent-encoded navigation characters remain valid local image filenames', () => {
+  const cache = new MarkdownBlockCache()
+  const html = renderString(cache, '[Image](%23diagram.png) [Other](%3Fdiagram.png)', { quotedTabId: 'image-tab', complete: true })
+  assert.equal((html.match(/<img/g) || []).length, 2)
+  assert.match(html, /agent-image\?path=%23diagram.png/)
+  assert.match(html, /agent-image\?path=%3Fdiagram.png/)
 })

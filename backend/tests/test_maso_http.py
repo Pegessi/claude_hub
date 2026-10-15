@@ -244,6 +244,45 @@ def raw(kind: str, **data: Any) -> dict:
     return {"type": kind, "root_agent_id": "main", "data": {"agent_id": "main", **data}}
 
 
+async def test_automatic_admission_revoked_while_stream_opens_posts_no_message() -> None:
+    server = MasoServer()
+    provider = transport(
+        server, session(agent_session_id="original-session", agent_session_id_verified=True)
+    )
+    revoked = False
+    original = server.handle
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal revoked
+        response = await original(request)
+        if request.url.path.endswith("/stream"):
+            revoked = True
+        return response
+
+    assert provider._client is not None
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(
+        base_url="http://maso.test", transport=httpx.MockTransport(handle), trust_env=False
+    )
+
+    def admit() -> None:
+        if revoked:
+            raise RuntimeError("automatic continuation was stopped")
+
+    provider.require_resumed_conversation("original-session", before_delivery=admit)
+    try:
+        with pytest.raises(RuntimeError, match="continuation was stopped"):
+            await provider.send_message("Please continue.", [])
+        assert not any(path.endswith("/messages") for _, path, _ in server.calls)
+        assert not provider._delivery_path.exists()
+        assert not provider._delivery_uncertain and not provider.turn_in_flight
+        provider.require_resumed_conversation(None)
+        await provider.send_message("Manual follow-up", [])
+        assert sum(path.endswith("/messages") for _, path, _ in server.calls) == 1
+    finally:
+        await provider.stop()
+
+
 @pytest.mark.asyncio
 async def test_remote_images_are_uploaded_in_order_before_atomic_multimodal_message() -> None:
     server = MasoServer()

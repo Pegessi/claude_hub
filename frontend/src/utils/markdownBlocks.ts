@@ -1,7 +1,7 @@
 import { marked, type Token, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
 import { highlightVersion, renderCodeBlockHtml } from '@/utils/codeHighlight'
-import { rewriteQuotedImageSrcs } from '@/utils/quotedImage'
+import { resolveLocalImageUrl, rewriteQuotedImageSrcs } from '@/utils/quotedImage'
 
 /**
  * Marked render options.
@@ -51,6 +51,34 @@ export type RenderedBlock = RenderedHtmlBlock | RenderedListBlock
  */
 export function splitBlockTokens(source: string): Token[] {
   return marked.lexer(source, MARKED_OPTIONS).filter((t) => t.type !== 'space')
+}
+
+function promoteLocalImageLinks(tokens: Token[], tabId: string): void {
+  marked.walkTokens(tokens, (token) => {
+    if (token.type !== 'link' || !resolveLocalImageUrl(tabId, token.href)) return
+    // Work with parsed tokens: code examples and external links keep their
+    // meaning, including nested lists and escaped/space-containing filenames.
+    Object.assign(token, { type: 'image' })
+  })
+}
+
+function wrapImagePreviews(html: string): string {
+  if (typeof document === 'undefined') return html
+  const template = document.createElement('template')
+  template.innerHTML = html
+  template.content.querySelectorAll<HTMLImageElement>('img[data-local-img], img[data-quoted-img]').forEach((img) => {
+    if (img.closest('a, button')) return
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'markdown-image-preview'
+    button.dataset.imagePreview = '1'
+    button.setAttribute('aria-label', img.alt ? `Open image ${img.alt}` : 'Open image')
+    img.loading = 'lazy'
+    img.decoding = 'async'
+    img.replaceWith(button)
+    button.append(img)
+  })
+  return template.innerHTML
 }
 
 /**
@@ -261,6 +289,7 @@ export class MarkdownBlockCache {
     this.hlVersion = highlightVersion.value
 
     const tokens = splitBlockTokens(source)
+    if (quotedTabId) promoteLocalImageLinks(tokens, quotedTabId)
     if (tokens.length === 0) return []
 
     const blocks: RenderedBlock[] = []
@@ -300,6 +329,7 @@ export class MarkdownBlockCache {
     }
     if (quotedTabId) {
       result = rewriteQuotedImageSrcs(result, quotedTabId)
+      result = wrapImagePreviews(result)
     }
     return result
   }

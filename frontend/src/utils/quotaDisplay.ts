@@ -33,10 +33,14 @@ export type QuotaDisplayState =
  */
 export type QuotaMessageTone = 'error' | 'neutral'
 
+/** Balance colors are independent of the provider's enforcement status. */
+export type QuotaBalanceTone = 'healthy' | 'caution' | 'low' | 'critical' | 'neutral'
+
 export interface QuotaLimitRow {
   key: string
   label: string
   state: QuotaDisplayState
+  tone: QuotaBalanceTone
   /** Primary text: a real percentage, or why there is no percentage. */
   value: string
   /** Remaining percentage as reported, or null when it is not a number. */
@@ -160,6 +164,16 @@ function formatPercent(value: number): string {
   return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(1)}%`
 }
 
+function balanceTone(state: QuotaDisplayState, remaining: number | null): QuotaBalanceTone {
+  // A provider-declared warning must never become reassuring because of a
+  // contradictory or missing percentage. Absence of a limit stays neutral.
+  if (state === 'no_limit' || state === 'no_data') return 'neutral'
+  if (state === 'over' || (remaining !== null && remaining <= 10)) return 'critical'
+  if (state === 'near' || (remaining !== null && remaining <= 20)) return 'low'
+  if (remaining === null) return 'neutral'
+  return remaining <= 50 ? 'caution' : 'healthy'
+}
+
 function parseTime(iso: string | null | undefined): number | null {
   if (!iso) return null
   const value = new Date(iso).getTime()
@@ -225,6 +239,7 @@ function buildLimitRow(limit: QuotaLimit, index: number, now: number): QuotaLimi
     key: limit?.scope || `limit-${index}`,
     label: limit?.label || limit?.scope || 'Unnamed limit',
     state,
+    tone: balanceTone(state, remaining),
     value,
     remainingPercent: remaining,
     barPercent: showsRemaining ? Math.min(100, Math.max(0, remaining)) : null,
@@ -238,7 +253,10 @@ function buildNotes(provider: ProviderQuota): string[] {
   const notes: string[] = []
   if (provider.plan) notes.push(`Plan: ${provider.plan}`)
   if (provider.credit_balance) {
-    notes.push(`Prepaid credit: ${provider.credit_balance} (unit not reported)`)
+    // Keep the provider's exact decimal value without converting it to a
+    // floating-point number just to remove insignificant trailing zeroes.
+    const balance = provider.credit_balance.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+    notes.push(`Prepaid credit: ${balance} (unit not reported)`)
   }
   if (provider.enforcing === false) {
     notes.push('Reaching a limit does not refuse requests here, so these percentages are advisory.')

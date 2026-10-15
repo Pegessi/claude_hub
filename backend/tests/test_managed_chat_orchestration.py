@@ -6,6 +6,7 @@ import asyncio
 import importlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -30,9 +31,12 @@ from claude_hub.models import (
     WorkspaceTaskUpdate,
 )
 from claude_hub.services import managed_chat
+from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError
+from claude_hub.services.agent_stream.native import ProviderSession
 from claude_hub.services.workspace_manager import WorkspaceManager
 
 wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+_real_managed_chat_delivery_state = managed_chat.delivery_state
 
 
 @pytest.fixture
@@ -119,6 +123,100 @@ async def test_chat_dispatch_claims_assignment_before_native_send(
     await manager._send_dispatch_message("chat-worker", calls[0], "a rebuilt prompt")
     assert len(calls) == 1
     forbidden.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pre_provider_shutdown_rejection_rolls_mailbox_back_to_pending(
+    manager: WorkspaceManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    call_id = "managed-restart-call"
+    attempts = 0
+
+    async def send(session, text, attachments, delivered_call_id):
+        nonlocal attempts
+        attempts += 1
+        assert delivered_call_id == call_id
+        if attempts == 1:
+            raise NativeInputNotSubmittedError("service is shutting down")
+
+    delivery_states = iter(["not_sent"])
+    monkeypatch.setattr(managed_chat, "send_message", send)
+    monkeypatch.setattr(
+        managed_chat,
+        "delivery_state",
+        lambda session, delivered_call_id: next(delivery_states),
+    )
+
+    with pytest.raises(NativeInputNotSubmittedError, match="shutting down"):
+        await manager.send_session_message("chat-worker", "continue", call_id=call_id)
+    session = manager.sessions["chat-worker"]
+    assert session.pending_call_ids == [call_id]
+    assert session.processing_call_ids == []
+    assert session.uncertain_call_ids == []
+    fingerprint = session.call_payload_fingerprints[call_id]
+
+    monkeypatch.setattr(
+        managed_chat, "delivery_state", lambda session, delivered_call_id: "accepted"
+    )
+    await manager.send_session_message("chat-worker", "continue", call_id=call_id)
+    session = manager.sessions["chat-worker"]
+    assert attempts == 2
+    assert session.pending_call_ids == []
+    assert session.processing_call_ids == [call_id]
+    assert session.uncertain_call_ids == []
+    assert session.call_payload_fingerprints[call_id] == fingerprint
+
+
+@pytest.mark.asyncio
+async def test_lazy_api_shutdown_rejection_rolls_workspace_call_back_to_pending(
+    manager: WorkspaceManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services.agent_stream import tailer as tailer_module
+
+    call_id = "lazy-manager-restart-call"
+    providers: list[ProviderSession] = []
+    provider_inputs: list[str] = []
+
+    class MemoryProvider(ProviderSession):
+        def _build_command(self) -> list[str]:
+            return []
+
+        async def _send_text(self, text: str) -> None:
+            provider_inputs.append(text)
+
+    def factory(*args: Any, **kwargs: Any) -> ProviderSession:
+        provider = MemoryProvider(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(tailer_module, "create_native_session", factory)
+    monkeypatch.setattr(agent_stream_api, "workspace_manager", manager)
+    monkeypatch.setattr(agent_stream_api, "_tailer_manager", None)
+    monkeypatch.setattr(agent_stream_api, "_native_input_shutting_down", True)
+    monkeypatch.setattr(managed_chat, "delivery_state", _real_managed_chat_delivery_state)
+
+    with pytest.raises(NativeInputNotSubmittedError, match="shutting down"):
+        await manager.send_session_message("chat-worker", "continue", call_id=call_id)
+    session = manager.sessions["chat-worker"]
+    assert session.pending_call_ids == [call_id]
+    assert session.processing_call_ids == []
+    assert session.uncertain_call_ids == []
+    assert managed_chat.delivery_state(session, call_id) == "not_sent"
+    assert providers == []
+
+    agent_stream_api._reset_tailer_manager()
+    try:
+        await manager.send_session_message("chat-worker", "continue", call_id=call_id)
+        session = manager.sessions["chat-worker"]
+        assert session.pending_call_ids == []
+        assert session.processing_call_ids == [call_id]
+        assert session.uncertain_call_ids == []
+        assert managed_chat.delivery_state(session, call_id) == "accepted"
+        assert len(providers) == 1
+        assert len(provider_inputs) == 1
+    finally:
+        await agent_stream_api._stop_all_tailer_managers()
 
 
 @pytest.mark.asyncio

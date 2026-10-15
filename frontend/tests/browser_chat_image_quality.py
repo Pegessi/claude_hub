@@ -23,9 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "image-quality-tab"
+OTHER_TAB = "other-image-tab"
 TURN = "cursor-turn"
 NOW = "2026-10-12T08:00:00Z"
 REPORT = "Run B regressed on 3 cases."
+OUTPUT_PATH = "/tmp/dotbm/dot-mobile-work.png"
+OUTPUT_TEXT = "[View screenshot](/tmp/result.png)\n\n![Missing screenshot](/tmp/missing.png)"
 
 
 def origin(url: str) -> tuple[str, str | None, int | None]:
@@ -64,7 +67,7 @@ def event(sequence: int, event_type: str, payload: dict, message_id: str, turn: 
         "type": event_type,
         "turn_id": turn,
         "message_id": message_id,
-        "call_id": "task-1" if event_type.startswith("tool_call") else None,
+        "call_id": (payload.get("tool_call_id") if event_type.startswith("tool_call") else None),
         "payload": payload,
         "created_at": NOW,
         "redacted": False,
@@ -72,7 +75,12 @@ def event(sequence: int, event_type: str, payload: dict, message_id: str, turn: 
 
 
 EVENTS = [
-    event(0, "turn_started", {"summary": "Compare runs", "mode": "default"}, f"{TURN}:user"),
+    event(
+        0,
+        "turn_started",
+        {"summary": "Compare runs", "mode": "default"},
+        f"{TURN}:user",
+    ),
     event(
         1,
         "tool_call_started",
@@ -104,7 +112,29 @@ EVENTS = [
         },
         "task-1",
     ),
-    event(3, "turn_completed", {"status": "completed"}, TURN),
+    event(
+        3,
+        "tool_call_started",
+        {
+            "tool_call_id": "image-read",
+            "name": "Read",
+            "args": {"file_path": OUTPUT_PATH},
+        },
+        "image-read",
+    ),
+    event(
+        4,
+        "tool_call_completed",
+        {"tool_call_id": "image-read", "status": "completed"},
+        "image-read",
+    ),
+    event(5, "text_delta", {"text": OUTPUT_TEXT}, f"{TURN}:assistant"),
+    event(
+        6,
+        "turn_completed",
+        {"status": "completed", "assistant_text": OUTPUT_TEXT},
+        TURN,
+    ),
 ]
 
 
@@ -139,6 +169,7 @@ async def main(browser_run: BrowserRun) -> None:
             "created_at": NOW,
         }
     ]
+    tabs.append({**tabs[0], "id": OTHER_TAB, "name": "Other Image Chat"})
     send_payloads: list[dict] = []
     report: dict = {
         "result": "FAIL",
@@ -153,6 +184,7 @@ async def main(browser_run: BrowserRun) -> None:
     }
     failure: BaseException | None = None
     page = None
+    output_image = png(1920, 1080)
 
     async with browser_run.context(
         viewport={"width": 1280, "height": 900},
@@ -208,14 +240,34 @@ async def main(browser_run: BrowserRun) -> None:
                 elif path.endswith("/events"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     rows = [item for item in EVENTS if item["stream_sequence"] > since]
+                    if f"/tabs/{OTHER_TAB}/" in path:
+                        rows = []
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
-                    body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
+                    body = {
+                        "events": rows,
+                        "next_sequence": next_sequence,
+                        "has_more": False,
+                    }
+                elif path.endswith("/stream/agent-image"):
+                    image_path = parse_qs(parsed.query).get("path", [""])[0]
+                    await route.fulfill(
+                        status=404 if image_path == "/tmp/missing.png" else 200,
+                        content_type="image/png",
+                        body=b"" if image_path == "/tmp/missing.png" else output_image,
+                    )
+                    return
                 elif path.endswith("/wait"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     await asyncio.sleep(0.2)
                     rows = [item for item in EVENTS if item["stream_sequence"] > since]
+                    if f"/tabs/{OTHER_TAB}/" in path:
+                        rows = []
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
-                    body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
+                    body = {
+                        "events": rows,
+                        "next_sequence": next_sequence,
+                        "has_more": False,
+                    }
                 elif path.endswith("/live"):
                     await route.fulfill(
                         status=200, content_type="text/event-stream", body=": mock\n\n"
@@ -227,11 +279,21 @@ async def main(browser_run: BrowserRun) -> None:
                     turn = payload["client_turn_id"]
                     EVENTS.append(
                         event(
-                            len(EVENTS), "turn_started", {"mode": "default"}, f"{turn}:user", turn
+                            len(EVENTS),
+                            "turn_started",
+                            {"mode": "default"},
+                            f"{turn}:user",
+                            turn,
                         )
                     )
                     EVENTS.append(
-                        event(len(EVENTS), "turn_completed", {"status": "completed"}, turn, turn)
+                        event(
+                            len(EVENTS),
+                            "turn_completed",
+                            {"status": "completed"},
+                            turn,
+                            turn,
+                        )
                     )
                     body = {"ok": True}
                 elif path.endswith("/goal/current"):
@@ -267,11 +329,100 @@ async def main(browser_run: BrowserRun) -> None:
             await page.screenshot(path=str(output / "cursor-subagent-card.png"), full_page=True)
             report["screenshots"].append("cursor-subagent-card.png")
 
+            # Ordinary local image links and Read screenshots both render as
+            # real images. The encoded bytes stay original; only CSS fits the
+            # thumbnail. Missing images leave an explicit quiet placeholder.
+            preview = page.get_by_role("button", name="Open image View screenshot", exact=True)
+            await expect(preview).to_be_visible()
+            await expect(page.locator(".agent-image-card img")).to_have_count(1)
+            await expect(page.locator(".quoted-img-missing")).to_contain_text("image unavailable")
+            assert await preview.locator("img").evaluate("img => img.naturalWidth") == 1920
+            await preview.click()
+            dialog = page.get_by_role("dialog", name="Image preview", exact=True)
+            await expect(dialog).to_be_visible()
+            original = dialog.get_by_role("link", name="Open original")
+            assert await original.get_attribute("href") == await dialog.locator(
+                "img"
+            ).get_attribute("src")
+            await dialog.get_by_role("button", name="Actual size").click()
+            assert (
+                await dialog.locator("img").evaluate("img => img.getBoundingClientRect().width")
+                == 1920
+            )
+            await dialog.get_by_role("button", name="Fit image").click()
+            assert await dialog.locator("img").evaluate(
+                "img => img.getBoundingClientRect().width < innerWidth"
+            )
+            await page.keyboard.press("Escape")
+            await expect(preview).to_be_focused()
+            await page.set_viewport_size({"width": 390, "height": 844})
+            await expect(preview).to_be_visible()
+            await preview.focus()
+            await page.keyboard.press("Enter")
+            await expect(dialog).to_be_visible()
+            await expect(dialog.get_by_role("button", name="Close image preview")).to_be_focused()
+            await page.keyboard.press("Tab")
+            assert await dialog.evaluate("el => el.contains(document.activeElement)")
+            await expect(dialog.get_by_role("button", name="Actual size")).to_be_in_viewport()
+            await expect(original).to_be_in_viewport()
+            await page.screenshot(path=str(output / "assistant-image-mobile.png"), full_page=True)
+            report["screenshots"].append("assistant-image-mobile.png")
+            await dialog.get_by_role("button", name="Close image preview").click()
+            await expect(preview).to_be_focused()
+            assert await page.locator(".structured-pane").evaluate(
+                "el => el.scrollWidth <= el.clientWidth"
+            )
+            report["assistant_images"] = {
+                "natural_width": 1920,
+                "actual_size_width": 1920,
+                "mobile_width": 390,
+                "plain_link_preview": True,
+                "read_preview": True,
+                "missing_placeholder": True,
+            }
+            await page.set_viewport_size({"width": 1280, "height": 900})
+
+            # A queued Chat can activate while a KeepAlive instance owns an
+            # open Teleport dialog. The old pane must release its window and
+            # keyboard trap without restoring focus into the hidden Chat.
+            await preview.click()
+            await expect(dialog).to_be_visible()
+            await page.evaluate(
+                """async tabId => {
+                const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+                useTerminalStore().setActiveTab(tabId)
+            }""",
+                OTHER_TAB,
+            )
+            await expect(dialog).to_have_count(0)
+            active_composer = page.locator(".composer-textarea:visible").first
+            await active_composer.focus()
+            await page.keyboard.press("Tab")
+            assert await page.evaluate(
+                "!document.activeElement.closest('.structured-image-lightbox')"
+            )
+            await page.evaluate(
+                """async tabId => {
+                const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+                useTerminalStore().setActiveTab(tabId)
+            }""",
+                TAB,
+            )
+            await expect(preview).to_be_visible()
+            report["chat_activation_closes_image"] = True
+
             composer = page.locator(".composer-textarea").first
             file_input = page.locator(".composer-file-input").first
-            for name, (width, height) in (("screen.png", (1600, 1000)), ("wide.png", (9000, 40))):
+            for name, (width, height) in (
+                ("screen.png", (1600, 1000)),
+                ("wide.png", (9000, 40)),
+            ):
                 await file_input.set_input_files(
-                    {"name": name, "mimeType": "image/png", "buffer": png(width, height)}
+                    {
+                        "name": name,
+                        "mimeType": "image/png",
+                        "buffer": png(width, height),
+                    }
                 )
                 await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(
                     1

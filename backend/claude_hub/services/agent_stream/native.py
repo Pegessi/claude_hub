@@ -1026,6 +1026,8 @@ class ProviderSession(ABC):
         self._conversation_id_verified: bool = bool(
             getattr(session, "agent_session_id_verified", False)
         )
+        self._required_conversation_id: Optional[str] = None
+        self._delivery_admission: Optional[Callable[[], None]] = None
         # Turn-in-flight guard. A second ``send_message`` while a turn is still
         # generating must raise rather than cancel the active turn (which the
         # old ``_send_lock``-only approach did, because the lock was released
@@ -1301,6 +1303,35 @@ class ProviderSession(ABC):
 
     # ── input ───────────────────────────────────────────────────────────────
 
+    def require_resumed_conversation(
+        self,
+        conversation_id: Optional[str],
+        *,
+        before_delivery: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Fence automatic continuation against a fresh-conversation fallback."""
+        if conversation_id is not None and (
+            not self._conversation_id_verified or self._conversation_id != conversation_id
+        ):
+            raise RuntimeError("the original provider conversation is no longer available")
+        self._required_conversation_id = conversation_id
+        self._delivery_admission = before_delivery
+
+    def check_resumed_conversation(self) -> None:
+        expected = self._required_conversation_id
+        if expected is not None and (
+            not self._conversation_id_verified
+            or self._conversation_id != expected
+            or (self.active_thread_id is not None and self.active_thread_id != expected)
+        ):
+            raise RuntimeError("the original provider conversation could not be resumed")
+
+    def check_delivery_admission(self) -> None:
+        """Recheck automatic intent after preparation, at the input boundary."""
+        self.check_resumed_conversation()
+        if self._delivery_admission is not None:
+            self._delivery_admission()
+
     async def _prepare_for_send(self) -> None:
         """Apply provider lifecycle changes before accepting the next turn."""
 
@@ -1317,6 +1348,7 @@ class ProviderSession(ABC):
         """
         async with self._send_lock:
             await self._prepare_for_send()
+            self.check_delivery_admission()
             self._begin_turn()
             try:
                 if images:
@@ -1748,6 +1780,7 @@ class ProviderSession(ABC):
         if provider_env is None:
             provider_env = await self._build_provider_env()
         await self._terminate_process()
+        self.check_delivery_admission()
         generation = self._stdout_generation
         self._stderr_buffer = b""
         self._exit_error = None
@@ -1767,6 +1800,13 @@ class ProviderSession(ABC):
         except OSError as exc:
             self._last_error = f"failed to launch provider: {exc}"
             self._end_turn()
+            raise
+        try:
+            self.check_delivery_admission()
+        except BaseException:
+            # Spawn itself yields. A Stop/configuration change while it runs
+            # must kill this empty process before its stdin receives a prompt.
+            await self._terminate_process()
             raise
         self._started = True
         self._reader_task = asyncio.create_task(self._drain_oneshot_stdout(generation))
@@ -1898,7 +1938,9 @@ class ClaudeNativeSession(ProviderSession):
         # every proxy spelling so a user-level settings file cannot silently
         # restore a route that the preflight did not select.
         for lower, upper in zip(PROXY_ENV_NAMES[::2], PROXY_ENV_NAMES[1::2]):
-            value = provider_env.get(lower) or provider_env.get(upper) or ""
+            # An explicitly empty lowercase setting disables the uppercase
+            # proxy, matching the precedence used during route selection.
+            value = provider_env[lower] if lower in provider_env else provider_env.get(upper, "")
             settings_env[lower] = value
             settings_env[upper] = value
         launch_dir = _runtime_home() / "launch_env"
@@ -2011,6 +2053,7 @@ class ClaudeNativeSession(ProviderSession):
 
     async def _send_text(self, text: str) -> None:
         provider_env = await self._build_provider_env()
+        self.check_delivery_admission()
         settings_path = self._write_selected_settings(provider_env)
         cmd = self._build_command(settings_path)
         stdin_text = self._build_stdin(text)
@@ -2336,8 +2379,12 @@ class CodexNativeSession(ProviderSession):
                         self._thread_id = thread["id"]
                         return
             except RuntimeError:
+                if self._required_conversation_id is not None:
+                    raise
                 # Resume failed (e.g. thread not found); fall through to start.
                 logger.warning("codex thread/resume failed; starting a new thread")
+        if self._required_conversation_id is not None:
+            raise RuntimeError("the original provider thread could not be resumed")
         thread_resp = await self._send_request("thread/start", self._thread_config())
         if isinstance(thread_resp, dict):
             self._capture_thread_model(thread_resp)
@@ -2736,6 +2783,7 @@ class CodexNativeSession(ProviderSession):
         # handler would see an empty list and the temp files would leak.
         self._inflight_images = image_paths
         try:
+            self.check_delivery_admission()
             response = await self._send_request("turn/start", params)
             turn = response.get("turn") if isinstance(response, dict) else None
             self._provider_turn_id = turn.get("id") if isinstance(turn, dict) else None
@@ -2831,6 +2879,8 @@ class CodexNativeSession(ProviderSession):
         placed on the notification queue and never re-queued ahead of the
         response.
         """
+        if method == "turn/start":
+            self.check_delivery_admission()
         proc = self._process
         if proc is None or proc.stdin is None:
             raise RuntimeError("codex app-server is not running")

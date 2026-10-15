@@ -21,11 +21,29 @@ from claude_hub.models import (
     WorkspaceSessionRole,
 )
 from claude_hub.services import managed_chat
-from claude_hub.services.agent_stream.tailer import TailerManager, discard_session_stream
+from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError
+from claude_hub.services.agent_stream.native import ProviderSession
+from claude_hub.services.agent_stream.tailer import (
+    SessionTailer,
+    TailerManager,
+    discard_session_stream,
+)
 
 _PNG = (
     b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + (1).to_bytes(4, "big") + (1).to_bytes(4, "big")
 )
+
+
+class _MemoryProvider(ProviderSession):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.inputs: list[str] = []
+
+    def _build_command(self) -> list[str]:
+        return []
+
+    async def _send_text(self, text: str) -> None:
+        self.inputs.append(text)
 
 
 def _user() -> User:
@@ -115,6 +133,132 @@ async def test_send_persists_attempt_before_handoff_and_accepts_once(
 
     with pytest.raises(ValueError, match="different Chat payload"):
         await managed_chat.send_message(session, "changed", [], "call-1")
+
+
+@pytest.mark.asyncio
+async def test_pre_provider_rejection_remains_retryable_with_same_call_id(
+    isolated_bridge: _FakeManager,
+) -> None:
+    session = _session()
+
+    async def reject_before_submission() -> None:
+        raise NativeInputNotSubmittedError("service is shutting down")
+
+    isolated_bridge.on_send = reject_before_submission
+    with pytest.raises(NativeInputNotSubmittedError, match="shutting down"):
+        await managed_chat.send_message(session, "hello", [], "call-retry")
+    assert managed_chat.delivery_state(session, "call-retry") == "not_sent"
+
+    isolated_bridge.on_send = None
+    await managed_chat.send_message(session, "hello", [], "call-retry")
+    assert managed_chat.delivery_state(session, "call-retry") == "accepted"
+    assert [call[0][3] for call in isolated_bridge.calls] == [
+        "call-retry",
+        "call-retry",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_quiesced_manager_rejection_keeps_managed_call_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    from claude_hub.services.agent_stream import tailer as tailer_module
+
+    workspace_manager_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager_module, "STATE_ROOT", tmp_path)
+    session = _session()
+    sessions = {session.id: session}
+    providers: list[_MemoryProvider] = []
+
+    def factory(*args: Any, **kwargs: Any) -> _MemoryProvider:
+        provider = _MemoryProvider(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(tailer_module, "create_native_session", factory)
+    quiesced = TailerManager(session_getter=sessions.get)
+    quiesced.quiesce()
+    monkeypatch.setattr(managed_chat, "_manager", lambda: quiesced)
+
+    with pytest.raises(NativeInputNotSubmittedError, match="shutting down"):
+        await managed_chat.send_message(session, "hello", [], "call-quiesced")
+    assert managed_chat.delivery_state(session, "call-quiesced") == "not_sent"
+    assert providers == []
+
+    resumed = TailerManager(session_getter=sessions.get)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: resumed)
+    try:
+        await managed_chat.send_message(session, "hello", [], "call-quiesced")
+        assert managed_chat.delivery_state(session, "call-quiesced") == "accepted"
+        assert len(providers) == 1
+        assert len(providers[0].inputs) == 1
+    finally:
+        await resumed.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_late_pre_provider_rejection_retries_same_managed_call_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    from claude_hub.models import AgentStreamEventType
+    from claude_hub.services.agent_stream import tailer as tailer_module
+
+    workspace_manager_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager_module, "STATE_ROOT", tmp_path)
+    session = _session()
+    sessions = {session.id: session}
+    providers: list[_MemoryProvider] = []
+
+    def factory(*args: Any, **kwargs: Any) -> _MemoryProvider:
+        provider = _MemoryProvider(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(tailer_module, "create_native_session", factory)
+    first_manager = TailerManager(session_getter=sessions.get)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: first_manager)
+    original_publish = SessionTailer._publish
+    rejected = False
+
+    async def quiesce_after_turn_started(tailer: SessionTailer, event: Any) -> None:
+        nonlocal rejected
+        await original_publish(tailer, event)
+        if event.type == AgentStreamEventType.TURN_STARTED and not rejected:
+            rejected = True
+            first_manager.quiesce()
+
+    monkeypatch.setattr(SessionTailer, "_publish", quiesce_after_turn_started)
+    try:
+        with pytest.raises(NativeInputNotSubmittedError, match="shutting down"):
+            await managed_chat.send_message(session, "hello", [], "call-late")
+        assert managed_chat.delivery_state(session, "call-late") == "not_sent"
+        assert len(providers) == 1
+        assert providers[0].inputs == []
+    finally:
+        await first_manager.stop_all()
+
+    resumed = TailerManager(session_getter=sessions.get)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: resumed)
+    try:
+        await managed_chat.send_message(session, "hello", [], "call-late")
+        assert managed_chat.delivery_state(session, "call-late") == "accepted"
+        assert len(providers) == 2
+        assert providers[0].inputs == []
+        assert len(providers[1].inputs) == 1
+        page = await managed_chat.AgentStreamStore(session.workspace_id, session.id).read_since(
+            -1, 100, compact=False
+        )
+        assert [
+            event.turn_id
+            for event in page.events
+            if event.type == AgentStreamEventType.TURN_STARTED
+        ].count("call-late") == 2
+    finally:
+        await resumed.stop_all()
 
 
 @pytest.mark.asyncio

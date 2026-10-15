@@ -25,6 +25,7 @@ from ..models import (
     WorkspaceAttachmentCreate,
 )
 from .agent_stream.attachments import AgentStreamAttachmentStore, preview_within_cache_bounds
+from .agent_stream.base import NativeInputNotSubmittedError
 from .agent_stream.fork_seed import seed_sidecar_path
 from .agent_stream.native import _detect_image_mime
 from .agent_stream.store import AgentStreamStore
@@ -521,6 +522,10 @@ async def send_message(
                 previews=previews,
                 turn_metadata={"origin": "workspace"},
             )
+        except NativeInputNotSubmittedError:
+            attempts.pop(call_id, None)
+            _write_attempts(session, evidence)
+            raise
         except BaseException:
             attempts[call_id]["state"] = "uncertain"
             _write_attempts(session, evidence)
