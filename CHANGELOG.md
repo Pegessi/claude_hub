@@ -62,6 +62,23 @@
   rejected, and name access-control policy 21001 in the Bot pool UI instead of
   suggesting the operator retype a correct secret.
 
+### ci: initialize browser paths after runner assignment
+
+- Fix workflow rejection by setting browser installation and evidence paths
+  through `GITHUB_ENV` in each browser job's first step, using `RUNNER_TEMP`.
+- Preserve the existing runner-local paths, browser gates and artifact retention.
+
+### fix(chat): avoid blocking provider requests on inconclusive probe timeouts
+
+- In automatic network mode, preserve the existing subprocess environment when
+  the effective route's short HEAD probe times out, allowing the real provider
+  request to proceed without replaying the prompt.
+- Warn with redacted probe results and use the short failure-cache TTL so route
+  selection recovers promptly. Explicit routes and invalid configurations still
+  fail as before.
+- Preserve explicitly empty lowercase proxy settings when generating Claude
+  launch settings, so an inherited uppercase proxy cannot be restored by mistake.
+
 ### feat(chat): accept image input in MASO conversations
 
 - Enable image attachments, including image-only turns and queued drafts, through
