@@ -45,9 +45,17 @@ const HYDRATION_PAGE_LIMIT = 5_000
  * Only after the budget is exhausted does it surface ``failed``. A genuine
  * session loss therefore still fails, but a single dropped poll never does.
  */
-const LONG_POLL_MAX_RETRIES = 6
+// A planned service restart can outlast a short network blip. These retries
+// only observe the existing session; they never replace or resend a provider turn.
+const LONG_POLL_MAX_RETRIES = 60
 const LONG_POLL_RETRY_BASE_MS = 1_000
 const LONG_POLL_RETRY_MAX_MS = 5_000
+
+class StreamWaitError extends Error {
+  constructor(readonly status: number) {
+    super(`wait HTTP ${status}`)
+  }
+}
 
 export interface UseAgentStreamApi {
   capabilities: ShallowRef<StreamCapabilities | null>
@@ -284,7 +292,7 @@ export function useAgentStream(): UseAgentStreamApi {
       body: JSON.stringify({ since_sequence: since, timeout_seconds: 30 }),
       signal: signal ?? longPollAbort?.signal,
     })
-    if (!res.ok) throw new Error(`wait HTTP ${res.status}`)
+    if (!res.ok) throw new StreamWaitError(res.status)
     return (await res.json()) as AgentStreamEventPage
   }
 
@@ -319,7 +327,8 @@ export function useAgentStream(): UseAgentStreamApi {
         // Transient blip: stay live and retry with capped backoff rather than
         // failing on one dropped poll (which used to disable Stop and flash a
         // reconnect banner during a long provider queue).
-        if (consecutiveFailures < LONG_POLL_MAX_RETRIES) {
+        const retryable = !(err instanceof StreamWaitError) || err.status === 408 || err.status === 429 || err.status >= 500
+        if (retryable && consecutiveFailures < LONG_POLL_MAX_RETRIES) {
           consecutiveFailures += 1
           const delay = Math.min(
             LONG_POLL_RETRY_BASE_MS * 2 ** (consecutiveFailures - 1),

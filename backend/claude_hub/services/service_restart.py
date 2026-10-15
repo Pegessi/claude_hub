@@ -7,13 +7,33 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
+
+from pydantic import BaseModel, Field, ValidationError
 
 from .runtime_isolation import resolve_runtime_home
 
 INSTANCE_ID = os.environ.get("CLAUDE_HUB_INSTANCE_ID") or str(uuid4())
 ACTIVE_STATUSES = {"preparing", "restarting"}
+
+
+class ChatContinuation(BaseModel):
+    tab_id: str
+    turn_id: str
+    start_sequence: int
+    conversation_id: str
+    config_digest: str
+    continuation_id: str
+    state: Literal["pending", "claimed", "started", "skipped", "failed"] = "pending"
+    claimed_by_instance_id: str | None = None
+    reason: str = ""
+
+
+class ChatRecovery(BaseModel):
+    launcher_id: str = Field(min_length=1)
+    captured_at: float = Field(ge=0, allow_inf_nan=False)
+    targets: list[ChatContinuation] = Field(max_length=1000)
 
 
 class RestartStore:
@@ -72,15 +92,35 @@ def is_available(state: dict[str, Any]) -> bool:
 
 def public_status(state: dict[str, Any]) -> dict[str, Any]:
     available = is_available(state)
+    operation = state.get("operation")
+    if isinstance(operation, dict):
+        operation = dict(operation)
+        if "chat_recovery" in operation:
+            recovery = operation.pop("chat_recovery")
+            invalid = 0
+            try:
+                states = [target.state for target in ChatRecovery.model_validate(recovery).targets]
+            except ValidationError:
+                states = []
+                invalid = 1
+            operation["continuation"] = {
+                "total": len(states),
+                "pending": states.count("pending") + states.count("claimed"),
+                "started": states.count("started"),
+                "skipped": states.count("skipped"),
+                "attention": states.count("failed") + invalid,
+            }
     return {
         "instance_id": INSTANCE_ID,
         "available": available,
-        "reason": "" if available else "Start the service with ./start.sh to enable restart.",
-        "operation": state.get("operation"),
+        "reason": ("" if available else "Start the service with ./start.sh to enable restart."),
+        "operation": operation,
     }
 
 
-def request_restart(instance_id: str, request_id: str) -> dict[str, Any]:
+def request_restart(
+    instance_id: str, request_id: str, *, resume_running_chats: bool = False
+) -> dict[str, Any]:
     with get_store().locked() as state:
         if not is_available(state):
             raise RuntimeError("Restart is unavailable. Start the service with ./start.sh.")
@@ -97,5 +137,6 @@ def request_restart(instance_id: str, request_id: str) -> dict[str, Any]:
                 "status": "preparing",
                 "message": "Preparing the service. The current service is still available.",
                 "requested_at": time.time(),
+                "resume_running_chats": resume_running_chats,
             }
         return public_status(state)

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sys
 from collections.abc import AsyncIterator, Iterator
@@ -85,6 +86,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("Logging to file: %s", log_file)
         # Startup
         logger.info("Starting Claude Hub Backend")
+        from .api.agent_stream import _reset_tailer_manager
+
+        _reset_tailer_manager()
         try:
             from .services.feishu_bot_websocket import prewarm_lark_sdk
 
@@ -142,6 +146,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         # Start all saved tabs
         await ttyd_manager.start_all_tabs()
+        from .services.restart_continuation import (
+            capture_interrupted_chats,
+            continue_interrupted_chats,
+        )
+
+        continuation_task = asyncio.create_task(continue_interrupted_chats())
         workspace_manager.start_background_monitor()
         try:
             from .api.feishu_bot import start_feishu_websockets
@@ -154,6 +164,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         finally:
             # Shutdown
             logger.info("Shutting down Claude Hub Backend")
+            from .api.agent_stream import _quiesce_tailer_managers
+
+            _quiesce_tailer_managers()
+            continuation_task.cancel()
+            await asyncio.gather(continuation_task, return_exceptions=True)
             try:
                 try:
                     from .api.feishu_bot import stop_feishu_websockets
@@ -163,6 +178,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     logger.exception("Failed to stop Feishu Bot WebSockets")
                 # Stop new scheduled dispatch before draining its transports.
                 await workspace_manager.stop_background_monitor()
+                try:
+                    await capture_interrupted_chats()
+                except Exception:
+                    logger.exception("Could not capture restart Chat continuations")
             finally:
                 try:
                     from .api.agent_stream import _stop_all_tailer_managers

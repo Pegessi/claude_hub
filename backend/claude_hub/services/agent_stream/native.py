@@ -1026,6 +1026,7 @@ class ProviderSession(ABC):
         self._conversation_id_verified: bool = bool(
             getattr(session, "agent_session_id_verified", False)
         )
+        self._required_conversation_id: Optional[str] = None
         # Turn-in-flight guard. A second ``send_message`` while a turn is still
         # generating must raise rather than cancel the active turn (which the
         # old ``_send_lock``-only approach did, because the lock was released
@@ -1301,6 +1302,23 @@ class ProviderSession(ABC):
 
     # ── input ───────────────────────────────────────────────────────────────
 
+    def require_resumed_conversation(self, conversation_id: Optional[str]) -> None:
+        """Fence automatic continuation against a fresh-conversation fallback."""
+        if conversation_id is not None and (
+            not self._conversation_id_verified or self._conversation_id != conversation_id
+        ):
+            raise RuntimeError("the original provider conversation is no longer available")
+        self._required_conversation_id = conversation_id
+
+    def check_resumed_conversation(self) -> None:
+        expected = self._required_conversation_id
+        if expected is not None and (
+            not self._conversation_id_verified
+            or self._conversation_id != expected
+            or (self.active_thread_id is not None and self.active_thread_id != expected)
+        ):
+            raise RuntimeError("the original provider conversation could not be resumed")
+
     async def _prepare_for_send(self) -> None:
         """Apply provider lifecycle changes before accepting the next turn."""
 
@@ -1317,6 +1335,7 @@ class ProviderSession(ABC):
         """
         async with self._send_lock:
             await self._prepare_for_send()
+            self.check_resumed_conversation()
             self._begin_turn()
             try:
                 if images:
@@ -2333,8 +2352,12 @@ class CodexNativeSession(ProviderSession):
                         self._thread_id = thread["id"]
                         return
             except RuntimeError:
+                if self._required_conversation_id is not None:
+                    raise
                 # Resume failed (e.g. thread not found); fall through to start.
                 logger.warning("codex thread/resume failed; starting a new thread")
+        if self._required_conversation_id is not None:
+            raise RuntimeError("the original provider thread could not be resumed")
         thread_resp = await self._send_request("thread/start", self._thread_config())
         if isinstance(thread_resp, dict):
             self._capture_thread_model(thread_resp)

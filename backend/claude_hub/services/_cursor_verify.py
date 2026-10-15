@@ -99,7 +99,7 @@ def _read_agent_id_from_db(db_path: Path) -> Optional[str]:
     """Read meta key=0 from ``store.db`` and return the agentId field, or None."""
     try:
         # open in read-only mode to avoid interfering with a running Cursor
-        uri = f"file:{db_path}?mode=ro"
+        uri = db_path.resolve().as_uri() + "?mode=ro"
         with sqlite3.connect(uri, uri=True) as conn:
             cur = conn.execute("SELECT value FROM meta WHERE key = 0 LIMIT 1")
             row = cur.fetchone()
