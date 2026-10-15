@@ -7,6 +7,17 @@
 
 ## Released
 
+### feat(chat): continue working Chats after a planned service restart
+
+- Offer automatic continuation in the restart dialog, enabled by default. Send
+  `Please continue.` once in each eligible interrupted Chat's original provider
+  conversation, regardless of the task's language.
+- Preserve waiting Chats and managed recovery controls. Recheck conversation,
+  configuration, Stop and newer input before sending; uncertain attempts require
+  manual attention rather than automatic replay.
+- Reconnect Chat observation across a longer restart, preserving unsent drafts,
+  and report service recovery separately from Chat continuation results.
+
 ### chore: remove unrelated presentation draft assets
 
 - Remove the unused root draft folder and its fifteen presentation assets.

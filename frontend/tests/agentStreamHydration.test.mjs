@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { readFile } from 'node:fs/promises'
+import { setImmediate as nextImmediate } from 'node:timers/promises'
 import test from 'node:test'
 import { createRenderer, isProxy, watch } from 'vue'
 import ts from 'typescript'
@@ -33,6 +34,23 @@ function mountStream() {
   app.mount({})
   return { stream, unmount: () => app.unmount() }
 }
+
+test('a permanent observation denial fails promptly without retrying or replacing the provider', async t => {
+  const requests = []
+  t.mock.method(globalThis, 'fetch', async url => {
+    requests.push(url)
+    if (url.endsWith('/capabilities')) return { ok: true, json: async () => ({ structured: true }) }
+    if (url.includes('/events?')) return { ok: true, json: async () => ({ events: [], next_sequence: -1, has_more: false }) }
+    return { ok: false, status: 403 }
+  })
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+  await stream.start('permanent-denial', 'terminal-tab')
+  await nextImmediate()
+  assert.equal(stream.connectionState.value, 'failed')
+  assert.equal(requests.filter(url => url.endsWith('/wait')).length, 1)
+  assert.ok(!requests.some(url => url.endsWith('/retry')))
+})
 
 test('the final delta-only hydration page is committed before live, without deep proxies', async t => {
   const event = { stream_sequence: 0, type: 'text_delta', payload: { text: 'Latest message' } }

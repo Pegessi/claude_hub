@@ -512,6 +512,7 @@ class SessionTailer:
         native_error: Optional[str] = None,
         post_persist_observers: Optional[List[PostPersistObserver]] = None,
         task_activity_observer: Optional[PostPersistObserver] = None,
+        send_admission: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.workspace_id = workspace_id
         self.session_id = session_id
@@ -528,6 +529,7 @@ class SessionTailer:
         self._native_error = native_error
         self._post_persist_observers = post_persist_observers or []
         self._task_activity_observer = task_activity_observer
+        self._send_admission = send_admission
 
         self._offset = 0
         self._inode: Optional[int] = None
@@ -781,6 +783,8 @@ class SessionTailer:
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
         strip_goal_protocol: bool = False,
+        before_send: Optional[Callable[[], Awaitable[None]]] = None,
+        before_delivery: Optional[Callable[[], None]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -837,6 +841,8 @@ class SessionTailer:
             raise RuntimeError("no native transport for this session; use the terminal send path")
         if self._native_error is not None:
             raise RuntimeError(self._native_error)
+        if self._send_admission is not None and not self._send_admission():
+            raise RuntimeError("service is shutting down; try again after it reconnects")
         # A prior manual Stop may still be killing/relaunching the provider.
         # Wait for that bounded teardown BEFORE taking the send lock so the new
         # turn/start reaches the fresh app-server rather than the process being
@@ -869,6 +875,8 @@ class SessionTailer:
                     return
 
         async with self._send_lock:
+            if self._send_admission is not None and not self._send_admission():
+                raise RuntimeError("service is shutting down; try again after it reconnects")
             # 1. Busy check BEFORE any state mutation. If a turn is already in
             #    flight, fail fast so the in-flight turn's _active_turn_id and
             #    _run_epoch are never overwritten — unless the caller steers.
@@ -888,6 +896,8 @@ class SessionTailer:
             session = self._session_getter()
             if session is None:
                 raise RuntimeError("session no longer exists")
+            if before_send is not None:
+                await before_send()
 
             # 3. Preview count validation. When the frontend supplies previews,
             #    there must be exactly one per image. When previews is None,
@@ -940,6 +950,8 @@ class SessionTailer:
                                 "height": None,
                             }
                         )
+                if self._send_admission is not None and not self._send_admission():
+                    raise RuntimeError("service is shutting down; try again after it reconnects")
             except Exception:
                 # Partial save failure: delete any previews already persisted
                 # in this turn so we don't leak unreferenced cache entries.
@@ -1011,6 +1023,10 @@ class SessionTailer:
             #    the user turn is durably recorded and must remain renderable
             #    even if the provider rejects the input.
             try:
+                if self._send_admission is not None and not self._send_admission():
+                    raise RuntimeError("service is shutting down; try again after it reconnects")
+                if before_delivery is not None:
+                    before_delivery()
                 await transport.send_message(text, images)
             except Exception:
                 # The provider rejected or failed to start the turn. Publish an
@@ -3144,6 +3160,7 @@ class TailerManager:
         self._post_persist_observers = post_persist_observers or []
         self._task_activity_observer = task_activity_observer
         self._tailers: Dict[str, SessionTailer] = {}
+        self._accepting_sends = True
         self._lock = asyncio.Lock()
         # Per-session locks that serialize edit-resend attempts.  A second
         # edit_resend for a session waits for the first to complete rather
@@ -3153,9 +3170,17 @@ class TailerManager:
         self._edit_locks: Dict[str, asyncio.Lock] = {}
         _TAILER_MANAGERS.add(self)
 
-    async def _get_or_create(self, session: ManagedSession) -> SessionTailer:
+    def quiesce(self) -> None:
+        """Fence new dispatches before shutdown observers can schedule more work."""
+        self._accepting_sends = False
+
+    async def _get_or_create(
+        self, session: ManagedSession, *, required_conversation_id: Optional[str] = None
+    ) -> SessionTailer:
         existing: Optional[SessionTailer] = None
         async with self._lock:
+            if not self._accepting_sends:
+                raise RuntimeError("service is shutting down; try again after it reconnects")
             tailer = self._tailers.get(session.id)
             if tailer is not None:
                 existing = tailer
@@ -3220,8 +3245,14 @@ class TailerManager:
                     native_error=native_error,
                     post_persist_observers=self._post_persist_observers,
                     task_activity_observer=self._task_activity_observer,
+                    send_admission=lambda: self._accepting_sends,
                 )
                 self._tailers[session.id] = tailer
+            if required_conversation_id is not None:
+                transport = tailer.native_transport
+                if transport is None:
+                    raise RuntimeError("native provider is unavailable")
+                transport.require_resumed_conversation(required_conversation_id)
         if existing is not None:
             if existing.hard_failed:
                 await existing.poll_once()
@@ -3261,6 +3292,8 @@ class TailerManager:
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
         strip_goal_protocol: bool = False,
+        before_send: Optional[Callable[[], Awaitable[None]]] = None,
+        before_delivery: Optional[Callable[[], None]] = None,
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
@@ -3283,6 +3316,8 @@ class TailerManager:
             visible_text=visible_text,
             turn_metadata=turn_metadata,
             strip_goal_protocol=strip_goal_protocol,
+            before_send=before_send,
+            before_delivery=before_delivery,
         )
 
     async def cancel_turn(
@@ -3587,8 +3622,10 @@ class TailerManager:
         transport.update_env(env)
         transport.session.solo_mode = session.solo_mode
 
-    async def ensure_started(self, session: ManagedSession) -> SessionTailer:
-        return await self._get_or_create(session)
+    async def ensure_started(
+        self, session: ManagedSession, *, required_conversation_id: Optional[str] = None
+    ) -> SessionTailer:
+        return await self._get_or_create(session, required_conversation_id=required_conversation_id)
 
     @staticmethod
     def _is_reusable(tailer: SessionTailer) -> bool:

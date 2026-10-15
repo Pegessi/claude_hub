@@ -85,6 +85,7 @@ _SSE_HEARTBEAT_S = 15.0
 
 _tailer_manager: Optional[TailerManager] = None
 _tab_tailer_manager: Optional[TailerManager] = None
+_native_input_shutting_down = False
 
 
 async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
@@ -146,6 +147,8 @@ def _persist_tab_chat_mode(stream_session_id: str, mode: str) -> None:
 
 def _get_tailer_manager() -> TailerManager:
     global _tailer_manager
+    if _native_input_shutting_down:
+        raise RuntimeError("service is shutting down; try again after it reconnects")
     if _tailer_manager is None:
         _tailer_manager = TailerManager(
             session_getter=lambda sid: workspace_manager.sessions.get(sid),
@@ -219,6 +222,8 @@ def _terminal_tab_stream_session_by_id(
 
 def _get_tab_tailer_manager() -> TailerManager:
     global _tab_tailer_manager
+    if _native_input_shutting_down:
+        raise RuntimeError("service is shutting down; try again after it reconnects")
     if _tab_tailer_manager is None:
         _tab_tailer_manager = TailerManager(
             session_getter=_terminal_tab_stream_session_by_id,
@@ -375,8 +380,17 @@ async def _stop_all_tailer_managers() -> None:
             logger.exception("failed to stop an agent-stream tailer manager")
 
 
+def _quiesce_tailer_managers() -> None:
+    global _native_input_shutting_down
+    _native_input_shutting_down = True
+    for manager in (_tailer_manager, _tab_tailer_manager):
+        if manager is not None:
+            manager.quiesce()
+
+
 def _reset_tailer_manager() -> None:
-    global _tailer_manager, _tab_tailer_manager
+    global _tailer_manager, _tab_tailer_manager, _native_input_shutting_down
+    _native_input_shutting_down = False
     _tailer_manager = None
     _tab_tailer_manager = None
 
@@ -1781,7 +1795,13 @@ async def cancel_tab_stream_turn(
     payload: Optional[StreamCancelRequest] = None,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    from ..services.restart_continuation import cancel_pending_continuation
+
     session = _terminal_tab_session_or_404(tab_id)
+    expected = payload.expected_turn_id if payload is not None else None
+    continuation = cancel_pending_continuation(tab_id, expected)
+    if continuation is not None:
+        payload = StreamCancelRequest(expected_turn_id=continuation)
     return await _cancel_native_turn(session, _get_tab_tailer_manager(), payload)
 
 
