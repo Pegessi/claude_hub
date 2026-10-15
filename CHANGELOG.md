@@ -5,6 +5,12 @@
 
 ## Unreleased
 
+### ci: initialize browser paths after runner assignment
+
+- Fix workflow rejection by setting browser installation and evidence paths
+  through `GITHUB_ENV` in each browser job's first step, using `RUNNER_TEMP`.
+- Preserve the existing runner-local paths, browser gates and artifact retention.
+
 ### fix(chat): avoid blocking provider requests on inconclusive probe timeouts
 
 - In automatic network mode, preserve the existing subprocess environment when
