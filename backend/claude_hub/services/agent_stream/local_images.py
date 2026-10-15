@@ -345,21 +345,68 @@ def image_paths_from_event(event: AgentStreamEvent) -> List[str]:
         path = image_tool_path(payload)
         if path:
             paths.append(path)
-    elif event.type == "turn_completed":
-        text = payload.get("assistant_text")
+    elif event.type in {"turn_completed", "text_delta"}:
+        text = payload.get("assistant_text" if event.type == "turn_completed" else "text")
         if isinstance(text, str):
-            paths = [
-                unquote(html.unescape(m.group(1) or m.group(2)))
-                for m in _IMAGE_REFERENCE.finditer(text)
-            ]
+            return _image_paths_from_text(text)
     return list(
         dict.fromkeys(path for path in paths if re.search(r"\.(png|jpe?g|gif|webp)$", path, re.I))
     )
 
 
+def _image_paths_from_text(text: str, *, after: int = 0) -> List[str]:
+    paths = [
+        unquote(html.unescape(match.group(1) or match.group(2)))
+        for match in _IMAGE_REFERENCE.finditer(text)
+        if match.end() > after
+    ]
+    return list(
+        dict.fromkeys(path for path in paths if re.search(r"\.(png|jpe?g|gif|webp)$", path, re.I))
+    )
+
+
+class ImageReferenceBuffer:
+    """Find complete references in persisted deltas, including split links.
+
+    Completion summaries may be truncated, so capture as links become complete.
+    Keep only bounded tails per message and avoid re-emitting old matches on
+    every subsequent delta. Different messages/turns never share a prefix.
+    """
+
+    def __init__(self) -> None:
+        self._tails: Dict[Tuple[str, str, str], str] = {}
+
+    def paths(self, event: AgentStreamEvent) -> List[str]:
+        turn = (str(event.run_epoch), str(event.turn_id))
+        if event.type == "turn_completed":
+            self._tails = {key: tail for key, tail in self._tails.items() if key[:2] != turn}
+        if event.type != "text_delta":
+            return image_paths_from_event(event)
+        payload = event.payload
+        if payload.get("role", "assistant") != "assistant" or (event.message_id or "").endswith(
+            ":user"
+        ):
+            return []
+        text = payload.get("text")
+        if not isinstance(text, str):
+            return []
+        key = (*turn, str(event.message_id))
+        prefix = "" if payload.get("snapshot") is True else self._tails.get(key, "")
+        combined = prefix + text
+        self._tails[key] = combined[-16384:]
+        if len(self._tails) > 64:
+            del self._tails[next(iter(self._tails))]
+        return _image_paths_from_text(combined, after=len(prefix))
+
+
 async def cache_event_images(session: ManagedSession, event: AgentStreamEvent) -> None:
     """Capture live image output before temporary files can be cleaned up."""
-    for path in image_paths_from_event(event):
+    await cache_image_paths(session, image_paths_from_event(event))
+
+
+async def cache_image_paths(session: ManagedSession, paths: List[str]) -> None:
+    """Cache references selected from this session's persisted assistant output."""
+    for path in paths:
         try:
             await read_cached_agent_image(session, path)
         except (AgentImageUnavailable, OSError, ValueError):

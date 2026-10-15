@@ -24,7 +24,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
 import pytest
 from httpx import AsyncClient
@@ -274,6 +274,51 @@ async def test_live_image_is_retained_before_any_browser_load(
     outside.write_bytes(PNG_BYTES)
     event = _write_image_tool(outside)
     await cache_event_images(_terminal_tab_session_or_404("tab-a"), event)
+    outside.unlink()
+    assert (await _get_image(client, "tab-a", str(outside))).content == PNG_BYTES
+
+
+async def test_long_answer_split_image_link_is_retained_before_truncated_completion(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path
+) -> None:
+    from claude_hub.api.agent_stream import _terminal_tab_session_or_404
+    from claude_hub.models import AgentStreamEvent
+    from claude_hub.services.agent_stream.redaction import redact_event
+    from claude_hub.services.agent_stream.registry import get_adapter_for_session
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    outside = tmp_path / "long-answer.png"
+    outside.write_bytes(PNG_BYTES)
+    session = _terminal_tab_session_or_404("tab-a")
+    adapter = get_adapter_for_session(session)
+    assert adapter is not None
+    tailer = SessionTailer(session.workspace_id, session.id, adapter, lambda: session)
+    tailer._is_live = True
+    chunks = ["x" * 3000, "y" * 1500 + "\n[Open result](", str(outside) + ")"]
+    base: dict[str, Any] = dict(
+        stream_sequence=-1,
+        tab_id="tab-a",
+        session_id=session.id,
+        agent_type=AgentType.CLAUDE,
+        message_id="image:assistant",
+        turn_id="image",
+        run_epoch=1,
+        created_at=datetime.now(timezone.utc),
+    )
+    for text in chunks:
+        event = AgentStreamEvent(
+            **base, type=AgentStreamEventType.TEXT_DELTA, payload={"text": text}
+        )
+        await tailer._persist_and_fanout(redact_event(event))
+    completion = redact_event(
+        AgentStreamEvent(
+            **base,
+            type=AgentStreamEventType.TURN_COMPLETED,
+            payload={"assistant_text": "".join(chunks), "status": "completed"},
+        )
+    )
+    assert str(outside) not in completion.payload["assistant_text"]
+    await tailer._persist_and_fanout(completion)
     outside.unlink()
     assert (await _get_image(client, "tab-a", str(outside))).content == PNG_BYTES
 

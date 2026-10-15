@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(chat): retain streamed images and release inactive image viewers
+
+- Capture completed image references while assistant text streams, including
+  split links in long replies whose final summary is truncated.
+- Close an image viewer when its Chat becomes inactive and release its keyboard
+  focus trap without moving focus back into the hidden Chat.
+- Preserve fragment/query navigation, including HTML entities, when promoting
+  local image links; recapture expired source entries through normal cache eviction.
+
 ### feat(chat): preview assistant images and retain original output in the shared LRU
 
 - Render local image links directly in Chat and open them in the image viewer,

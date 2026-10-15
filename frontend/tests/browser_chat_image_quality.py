@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "image-quality-tab"
+OTHER_TAB = "other-image-tab"
 TURN = "cursor-turn"
 NOW = "2026-10-12T08:00:00Z"
 REPORT = "Run B regressed on 3 cases."
@@ -168,6 +169,7 @@ async def main(browser_run: BrowserRun) -> None:
             "created_at": NOW,
         }
     ]
+    tabs.append({**tabs[0], "id": OTHER_TAB, "name": "Other Image Chat"})
     send_payloads: list[dict] = []
     report: dict = {
         "result": "FAIL",
@@ -238,6 +240,8 @@ async def main(browser_run: BrowserRun) -> None:
                 elif path.endswith("/events"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     rows = [item for item in EVENTS if item["stream_sequence"] > since]
+                    if f"/tabs/{OTHER_TAB}/" in path:
+                        rows = []
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
                     body = {
                         "events": rows,
@@ -256,6 +260,8 @@ async def main(browser_run: BrowserRun) -> None:
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     await asyncio.sleep(0.2)
                     rows = [item for item in EVENTS if item["stream_sequence"] > since]
+                    if f"/tabs/{OTHER_TAB}/" in path:
+                        rows = []
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
                     body = {
                         "events": rows,
@@ -375,6 +381,35 @@ async def main(browser_run: BrowserRun) -> None:
                 "missing_placeholder": True,
             }
             await page.set_viewport_size({"width": 1280, "height": 900})
+
+            # A queued Chat can activate while a KeepAlive instance owns an
+            # open Teleport dialog. The old pane must release its window and
+            # keyboard trap without restoring focus into the hidden Chat.
+            await preview.click()
+            await expect(dialog).to_be_visible()
+            await page.evaluate(
+                """async tabId => {
+                const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+                useTerminalStore().setActiveTab(tabId)
+            }""",
+                OTHER_TAB,
+            )
+            await expect(dialog).to_have_count(0)
+            active_composer = page.locator(".composer-textarea:visible").first
+            await active_composer.focus()
+            await page.keyboard.press("Tab")
+            assert await page.evaluate(
+                "!document.activeElement.closest('.structured-image-lightbox')"
+            )
+            await page.evaluate(
+                """async tabId => {
+                const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+                useTerminalStore().setActiveTab(tabId)
+            }""",
+                TAB,
+            )
+            await expect(preview).to_be_visible()
+            report["chat_activation_closes_image"] = True
 
             composer = page.locator(".composer-textarea").first
             file_input = page.locator(".composer-file-input").first
