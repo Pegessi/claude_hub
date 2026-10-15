@@ -4,16 +4,20 @@ import logging
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode
 
-import httpx
-
 from ..config import settings
+from ..services.proxy_rules import create_async_client
 
 logger = logging.getLogger(__name__)
 
+FEISHU_API_BASE_URL = "https://open.feishu.cn"
 FEISHU_AUTH_URL = "https://open.feishu.cn/open-apis/authen/v1/index"
 FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
 FEISHU_USER_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v1/access_token"
 FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
+
+# The shared factory requires an explicit timeout. Keeping HTTPX's own
+# default leaves OAuth timing exactly as it was before the proxy fix.
+_TIMEOUT_SECONDS = 5.0
 
 
 def get_feishu_auth_url(state: str = "") -> str:
@@ -37,7 +41,7 @@ async def get_app_access_token() -> Optional[str]:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         return None
 
-    async with httpx.AsyncClient() as client:
+    async with create_async_client(FEISHU_API_BASE_URL, timeout=_TIMEOUT_SECONDS) as client:
         response = await client.post(
             FEISHU_TOKEN_URL,
             json={
@@ -64,7 +68,7 @@ async def get_user_access_token(code: str) -> Tuple[Optional[str], Optional[str]
     if not app_access_token:
         return None, None
 
-    async with httpx.AsyncClient() as client:
+    async with create_async_client(FEISHU_API_BASE_URL, timeout=_TIMEOUT_SECONDS) as client:
         response = await client.post(
             FEISHU_USER_TOKEN_URL,
             headers={"Authorization": f"Bearer {app_access_token}"},
@@ -89,7 +93,7 @@ async def refresh_user_access_token(refresh_token: str) -> Tuple[Optional[str], 
     if not app_access_token:
         return None, None
 
-    async with httpx.AsyncClient() as client:
+    async with create_async_client(FEISHU_API_BASE_URL, timeout=_TIMEOUT_SECONDS) as client:
         response = await client.post(
             FEISHU_USER_TOKEN_URL,
             headers={"Authorization": f"Bearer {app_access_token}"},
@@ -105,7 +109,7 @@ async def refresh_user_access_token(refresh_token: str) -> Tuple[Optional[str], 
 
 async def get_user_info(access_token: str) -> Optional[Dict[str, Any]]:
     """Get user information from Feishu."""
-    async with httpx.AsyncClient() as client:
+    async with create_async_client(FEISHU_API_BASE_URL, timeout=_TIMEOUT_SECONDS) as client:
         response = await client.get(
             FEISHU_USER_INFO_URL,
             headers={"Authorization": f"Bearer {access_token}"},

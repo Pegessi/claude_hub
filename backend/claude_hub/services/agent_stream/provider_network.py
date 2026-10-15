@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import ipaddress
 import json
 import logging
 import shutil
@@ -25,6 +24,8 @@ from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpx
+
+from ..proxy_rules import bypasses_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +405,7 @@ class ProviderNetworkSelector:
 
             parsed = _parse_endpoint(endpoint)
             proxy_url, no_proxy = _proxy_for_endpoint(parsed, env)
-            if proxy_url is not None and _bypasses_proxy(parsed, no_proxy):
+            if proxy_url is not None and bypasses_proxy(parsed, no_proxy):
                 raise _selection_error(endpoint, direct=direct, proxy_note="bypassed by NO_PROXY")
             if proxy_url is None:
                 raise _selection_error(endpoint, direct=direct, proxy_note="not configured")
@@ -781,49 +782,6 @@ def _proxy_for_endpoint(
         if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.hostname:
             raise ProviderNetworkError("configured provider proxy is not a valid supported URL")
     return proxy, no_proxy
-
-
-def _bypasses_proxy(endpoint: SplitResult, no_proxy: Optional[str]) -> bool:
-    if not no_proxy:
-        return False
-    host = (endpoint.hostname or "").rstrip(".").casefold()
-    port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
-    for raw_entry in no_proxy.split(","):
-        entry = raw_entry.strip().casefold()
-        if not entry:
-            continue
-        if entry == "*":
-            return True
-        entry_host, entry_port = _split_no_proxy_entry(entry)
-        if entry_port is not None and entry_port != port:
-            continue
-        try:
-            if "/" in entry_host and ipaddress.ip_address(host) in ipaddress.ip_network(
-                entry_host, strict=False
-            ):
-                return True
-        except ValueError:
-            pass
-        normalized = entry_host.removeprefix("*.").lstrip(".").rstrip(".")
-        if normalized and (host == normalized or host.endswith(f".{normalized}")):
-            return True
-    return False
-
-
-def _split_no_proxy_entry(entry: str) -> Tuple[str, Optional[int]]:
-    if entry.startswith("["):
-        closing = entry.find("]")
-        if closing != -1:
-            host = entry[1:closing]
-            suffix = entry[closing + 1 :]
-            if suffix.startswith(":") and suffix[1:].isdigit():
-                return host, int(suffix[1:])
-            return host, None
-    if entry.count(":") == 1:
-        host, raw_port = entry.rsplit(":", 1)
-        if raw_port.isdigit():
-            return host, int(raw_port)
-    return entry, None
 
 
 def _without_proxy(env: Mapping[str, str]) -> Dict[str, str]:
