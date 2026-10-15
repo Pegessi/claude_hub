@@ -46,7 +46,9 @@ test('managed Chat mounts StructuredPane with managed session identity', () => {
   assert.match(structuredPane, /`\$\{streamBasePath\.value\}\/cancel`/)
   assert.match(structuredPane, /`\$\{streamBasePath\.value\}\/attachments\/\$\{encId\}`/)
   assert.match(structuredPane, /Managed Chat identity is not available yet\. Refresh Workspace sessions and try again\./)
-  assert.match(structuredPane, /if \(managedIdentityMissing\.value\)/)
+  assert.match(structuredPane, /v-else-if="isManagedChat"[\s\S]*Enter \{\{ turnInFlight \? 'queue' : 'send' \}\}[\s\S]*Shift\+Enter newline/)
+  assert.match(structuredPane, /action === 'steer' && !isManagedChat\.value \? 'steer' : 'normal'/)
+  assert.match(structuredPane, /isManagedChat\.value && action === 'steer' && turnInFlight\.value/)
 })
 
 test('Workspace launcher exposes MASO only for local Chat', () => {

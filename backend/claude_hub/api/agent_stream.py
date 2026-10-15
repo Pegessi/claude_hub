@@ -52,6 +52,7 @@ from ..models import (
     SessionKind,
     StreamCapabilities,
     User,
+    WorkspaceAttachmentCreate,
     WorkspaceSessionRole,
 )
 from ..models.schemas import TaskExecutionControl, TaskExecutionReference
@@ -155,6 +156,12 @@ def _get_tailer_manager() -> TailerManager:
             task_activity_observer=_notify_task_activity,
         )
     return _tailer_manager
+
+
+def get_managed_tailer_manager() -> TailerManager:
+    """Return the sole structured-stream owner for managed sessions."""
+
+    return _get_tailer_manager()
 
 
 def _tab_stream_session_id(tab_id: str) -> str:
@@ -1430,14 +1437,26 @@ async def send_stream_input(
     payload: AgentStreamSendRequest,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    session = _session_or_404(managed_session_id)
-    manager = _get_tailer_manager()
+    _session_or_404(managed_session_id)
+    if payload.delivery != "normal":
+        raise HTTPException(
+            status_code=409,
+            detail="steering an active managed Chat turn is not supported",
+            headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+        )
     try:
-        await _send_to_native(
-            session,
-            payload,
-            manager,
-            turn_metadata={"origin": "web"},
+        await workspace_manager.send_chat_session_message(
+            managed_session_id,
+            payload.text,
+            attachments=[
+                WorkspaceAttachmentCreate(
+                    filename=attachment.filename,
+                    mime_type=attachment.mime_type,
+                    data_url=attachment.data_url,
+                )
+                for attachment in payload.attachments
+            ],
+            call_id=payload.client_turn_id,
         )
     except StructuredSourceUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -1772,8 +1791,18 @@ async def cancel_stream_turn(
     payload: Optional[StreamCancelRequest] = None,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    session = _session_or_404(managed_session_id)
-    return await _cancel_native_turn(session, _get_tailer_manager(), payload)
+    _session_or_404(managed_session_id)
+    expected_turn_id = payload.expected_turn_id if payload is not None else None
+    try:
+        cancelled = await workspace_manager.cancel_chat_session(
+            managed_session_id,
+            expected_turn_id=expected_turn_id,
+        )
+    except StructuredSourceUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "cancelled": cancelled}
 
 
 @router.post("/tabs/{tab_id}/stream/cancel")

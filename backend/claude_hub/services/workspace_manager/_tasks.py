@@ -52,12 +52,17 @@ class _TasksMixin:
             raise ValueError("initiator_task_requires_authenticated_registration")
         if payload.related_task_id and payload.related_task_id not in self.tasks:
             raise KeyError(payload.related_task_id)
+        session_kind = payload.session_kind
         if payload.session_id:
             session = self.sessions.get(payload.session_id)
             if not session or session.workspace_id != workspace_id:
                 raise KeyError(payload.session_id)
             if session.role != WorkspaceSessionRole.ORCHESTRATOR:
                 raise ValueError("Tasks can only be assigned to workspace agents")
+            if "session_kind" not in payload.model_fields_set:
+                session_kind = session.session_kind
+            elif session.session_kind != session_kind:
+                raise ValueError("The selected agent does not match the Task execution surface")
         title = payload.title.strip()
         prompt = payload.prompt.strip()
         if not title:
@@ -97,6 +102,7 @@ class _TasksMixin:
             goal_packet=payload.goal_packet,
             review_profiles=payload.review_profiles,
             agent_type=payload.agent_type,
+            session_kind=session_kind,
             task_mode=payload.task_mode,
             execution_complexity=payload.execution_complexity,
             origin=payload.origin,
@@ -583,6 +589,7 @@ class _TasksMixin:
             return
         elif task.status == WorkspaceTaskStatus.WORKING:
             if task.session_id:
+                self._resume_chat_session(task.session_id)
                 await self.send_session_message(task.session_id, message, call_id=call_id)
         elif task.status == WorkspaceTaskStatus.REVIEW:
             await self.continue_task(

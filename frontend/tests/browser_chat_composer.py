@@ -211,9 +211,9 @@ async def main(browser_run: BrowserRun) -> None:
                         else "MASO service is unavailable and cannot be used. Start MASO, then retry."
                     ),
                 }
-            elif (method == "GET" and path in {f"{BASE}/capabilities", f"{MANAGED_BASE}/capabilities"}) or (
-                method == "POST" and path in {f"{BASE}/retry", f"{MANAGED_BASE}/retry"}
-            ):
+            elif (
+                method == "GET" and path in {f"{BASE}/capabilities", f"{MANAGED_BASE}/capabilities"}
+            ) or (method == "POST" and path in {f"{BASE}/retry", f"{MANAGED_BASE}/retry"}):
                 body = {
                     "structured": state["existing_maso_available"],
                     "unavailable_reason": (
@@ -358,7 +358,10 @@ async def main(browser_run: BrowserRun) -> None:
                 return
             elif method == "GET" and path == f"{BASE}/goal/current":
                 body = None
-            elif method == "POST" and path in {f"/api/tabs/{TAB}/view", "/api/tabs/fixture-managed-tab/view"}:
+            elif method == "POST" and path in {
+                f"/api/tabs/{TAB}/view",
+                "/api/tabs/fixture-managed-tab/view",
+            }:
                 body = {"ok": True}
             elif method == "GET" and path == "/api/feishu/bot/bots":
                 body = {
@@ -685,15 +688,32 @@ async def main(browser_run: BrowserRun) -> None:
           useTerminalStore().setActiveTab('fixture-managed-tab')
         }""")
         await expect(composer).to_be_visible()
+        managed_send_count = len(sends)
         await composer.fill("Managed mailbox message")
-        await send_button.click()
+        await composer.press("Control+Enter")
         await expect(page.locator(".composer-stop-btn")).to_be_visible()
+        assert len(sends) == managed_send_count + 1
+        assert sends[-1]["text"] == "Managed mailbox message"
+        assert sends[-1]["delivery"] == "normal"
+        await composer.fill("Managed queued shortcut")
+        await composer.press("Control+Enter")
+        await expect(page.locator(".composer-queue")).to_contain_text("1 message queued")
+        assert len(sends) == managed_send_count + 1
+        await expect(page.locator(".composer-stop-btn")).to_be_visible()
+        await page.locator(".composer-stop-btn").click()
+        await expect(page.locator(".composer-queue")).to_have_count(0)
+        assert len(sends) == managed_send_count + 2
+        assert sends[-1]["text"] == "Managed queued shortcut"
+        assert sends[-1]["delivery"] == "normal"
         await page.locator(".composer-stop-btn").click()
         assert ("GET", f"{MANAGED_BASE}/capabilities") in managed_stream_paths
         assert ("GET", f"{MANAGED_BASE}/events") in managed_stream_paths
         assert ("POST", f"{MANAGED_BASE}/send") in managed_stream_paths
         assert ("POST", f"{MANAGED_BASE}/cancel") in managed_stream_paths
-        assert all("/workspaces/tabs/fixture-managed-tab/stream" not in path for _, path in managed_stream_paths)
+        assert all(
+            "/workspaces/tabs/fixture-managed-tab/stream" not in path
+            for _, path in managed_stream_paths
+        )
         await page.screenshot(path=str(output / "managed-chat-session-stream.png"), full_page=True)
         await page.evaluate(f"""async () => {{
           const {{ useTerminalStore }} = await import('/src/stores/terminalStore.ts')

@@ -997,6 +997,21 @@ class _WorkspacesMixin:
             raise KeyError(workspace_id)
 
         for session in [s for s in self.sessions.values() if s.workspace_id == workspace_id]:
+            if session.session_kind == SessionKind.CHAT:
+                from ..agent_stream import discard_session_stream
+
+                # Do not erase an unfenced provider attempt just because a
+                # workspace deletion was requested. Failure retains this session
+                # and its evidence; completed earlier deletions stay durable.
+                await discard_session_stream(
+                    session.workspace_id,
+                    session.id,
+                    acknowledged_call_ids=set(session.delivered_call_ids),
+                )
+                await ttyd_manager.delete_tab(session.tab_id)
+                self.sessions.pop(session.id, None)
+                self._save_state()
+                continue
             self.sessions.pop(session.id, None)
             # Discard the structured stream (events + bounded preview cache)
             # before the session id can be reused. delete_tab below also clears

@@ -535,7 +535,7 @@ def _resident_session(
     )
 
 
-def test_workspace_chat_state_migrates_to_terminal_on_cold_reload(
+def test_workspace_explicit_chat_state_survives_cold_reload(
     manager: WorkspaceManager, tmp_path: Path
 ) -> None:
     workspace = _make_workspace(manager, tmp_path)
@@ -545,7 +545,7 @@ def test_workspace_chat_state_migrates_to_terminal_on_cold_reload(
     manager._save_state()
 
     reloaded = WorkspaceManager()
-    assert reloaded.sessions[session.id].session_kind == SessionKind.TERMINAL
+    assert reloaded.sessions[session.id].session_kind == SessionKind.CHAT
     assert reloaded.sessions[session.id].chat_mode == ChatMode.DEFAULT
 
 

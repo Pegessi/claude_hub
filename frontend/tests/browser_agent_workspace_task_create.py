@@ -291,7 +291,11 @@ async def main(browser_run: BrowserRun) -> None:
                 body = []
             elif method == "GET" and path == "/api/tabs/sidebar-preferences" and not parsed.query:
                 body = {"pinned_chat_ids": []}
-            elif method == "POST" and path == "/api/tabs/sidebar-preferences/migrate-browser-pins" and not parsed.query:
+            elif (
+                method == "POST"
+                and path == "/api/tabs/sidebar-preferences/migrate-browser-pins"
+                and not parsed.query
+            ):
                 body = {"pinned_chat_ids": []}
             elif method == "GET" and path == "/api/tabs" and not parsed.query:
                 body = [

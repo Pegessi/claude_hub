@@ -1311,7 +1311,7 @@
             class="composer-send-btn"
             :disabled="!canSend || isSending"
             :title="goalSteerOnly ? 'Send now as the next Goal turn' : goalComposerReason || undefined"
-            @click="() => submit(goalSteerOnly ? 'steer' : 'normal')"
+            @click="() => submit(isManagedChat ? 'normal' : (goalSteerOnly ? 'steer' : 'normal'))"
           >
             {{ isSending ? 'Sending…' : (goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
           </button>
@@ -1326,6 +1326,10 @@
           <template v-else-if="goalSteerOnly">
             <span>Enter queue until the Goal stops</span>
             <span>⌘/Ctrl+Enter steer Goal</span>
+            <span>Shift+Enter newline</span>
+          </template>
+          <template v-else-if="isManagedChat">
+            <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
             <span>Shift+Enter newline</span>
           </template>
           <template v-else>
@@ -2643,11 +2647,11 @@ function handleComposerEnter(event: KeyboardEvent) {
   })
   if (action === 'ignore' || action === 'newline') return
   event.preventDefault()
-  if (action === 'queue') {
+  if (action === 'queue' || (isManagedChat.value && action === 'steer' && turnInFlight.value)) {
     enqueueDraft()
     return
   }
-  void submit(action === 'steer' ? 'steer' : 'normal')
+  void submit(action === 'steer' && !isManagedChat.value ? 'steer' : 'normal')
 }
 
 function enqueueDraft() {

@@ -129,8 +129,8 @@ def test_list_workspaces_returns_created_workspaces(tmp_path: Path) -> None:
     assert created["id"] in ids
 
 
-def test_workspace_agent_request_rejects_chat_surface_fields(tmp_path: Path) -> None:
-    repo = tmp_path / "repo-chat-reject"
+def test_workspace_agent_request_rejects_managed_chat_mode(tmp_path: Path) -> None:
+    repo = tmp_path / "repo-chat-mode-reject"
     repo.mkdir()
     client = TestClient(app)
     workspace = _make_workspace(client, repo)
@@ -141,17 +141,17 @@ def test_workspace_agent_request_rejects_chat_surface_fields(tmp_path: Path) -> 
     )
 
     assert response.status_code == 422
-    assert "session_kind" in response.text
+    assert "chat_mode" in response.text
 
     with pytest.raises(ValueError, match="always use Terminal"):
         SpawnWorkerRequest.model_validate({"session_kind": "chat"})
 
 
 @pytest.mark.asyncio
-async def test_managed_session_creation_never_inherits_chat_tab_surface(
+async def test_managed_session_creation_preserves_requested_chat_surface(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    repo = tmp_path / "repo-managed-terminal"
+    repo = tmp_path / "repo-managed-chat"
     repo.mkdir()
     client = TestClient(app)
     workspace_payload = _make_workspace(client, repo)
@@ -165,7 +165,7 @@ async def test_managed_session_creation_never_inherits_chat_tab_surface(
             solo_mode=True,
             agent_type=AgentType.CLAUDE,
             session_kind=SessionKind.CHAT,
-            chat_mode=ChatMode.PLAN,
+            chat_mode=ChatMode.DEFAULT,
             target=ExecutionTarget.LOCAL,
             port=12345,
             created_at=datetime.now(),
@@ -181,11 +181,12 @@ async def test_managed_session_creation_never_inherits_chat_tab_surface(
         workspace,
         EnsureWorkspaceAgentRequest(
             agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
             role=WorkspaceSessionRole.WORKER,
         ),
     )
 
-    assert session.session_kind == SessionKind.TERMINAL
+    assert session.session_kind == SessionKind.CHAT
     assert session.chat_mode == ChatMode.DEFAULT
 
 

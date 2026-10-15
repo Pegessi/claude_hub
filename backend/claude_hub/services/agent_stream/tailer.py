@@ -1756,21 +1756,25 @@ class SessionTailer:
                 self._run(), name=f"agent-stream-tail-{self.session_id[:8]}"
             )
 
-    async def stop(self) -> None:
+    async def stop(self, *, raise_errors: bool = False) -> None:
+        errors: List[BaseException] = []
         self._stopped = True
         task = self._task
         if task is not None:
             task.cancel()
             try:
                 await asyncio.wait_for(task, timeout=_STOP_JOIN_TIMEOUT_S)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                errors.append(exc)
         self._task = None
         # Flush any coalesced text deltas that haven't been persisted yet so
         # no trailing content is lost on shutdown.
         try:
             await self._coalescer.flush_async()
-        except Exception:
+        except Exception as exc:
+            errors.append(exc)
             logger.exception(
                 "agent_stream coalescer flush failed during stop for session %s",
                 self.session_id,
@@ -1793,15 +1797,21 @@ class SessionTailer:
                                 error_message=_RUNTIME_INTERRUPTED_MESSAGE,
                                 await_teardown=True,
                             )
-                except Exception:
+                except Exception as exc:
+                    errors.append(exc)
                     logger.exception(
                         "native turn terminalization failed during stop for session %s",
                         self.session_id,
                     )
             try:
                 await self._native_transport.stop()
-            except Exception:
+            except Exception as exc:
+                errors.append(exc)
                 logger.exception("native transport stop failed for session %s", self.session_id)
+        if raise_errors and errors:
+            raise RuntimeError(
+                f"could not safely stop structured runtime for session {self.session_id}"
+            ) from errors[0]
 
     async def _run(self) -> None:
         try:
@@ -3699,14 +3709,25 @@ class TailerManager:
                     session_id,
                 )
 
-    async def forget_session(self, session_id: str) -> None:
-        """Stop and discard an in-process tailer for a deleted session."""
+    async def forget_session(self, session_id: str, *, require_fenced: bool = False) -> bool:
+        """Stop and discard an in-process tailer for a deleted session.
+
+        Returns whether this manager owned a runtime that was stopped. Explicit
+        deletion requests ``require_fenced`` so provider-stop failures preserve
+        all durable state instead of permitting unsafe id reuse.
+        """
         async with self._lock:
             tailer = self._tailers.pop(session_id, None)
         if tailer is not None:
-            await tailer.stop()
+            try:
+                await tailer.stop(raise_errors=require_fenced)
+            except BaseException:
+                async with self._lock:
+                    self._tailers.setdefault(session_id, tailer)
+                raise
         _HARD_FAILED_SESSION_IDS.discard(session_id)
         invalidate_source(session_id)
+        return tailer is not None
 
     async def stop_all(self) -> None:
         async with self._lock:
@@ -3724,15 +3745,36 @@ class TailerManager:
                     raise result
 
 
-async def discard_session_stream(workspace_id: str, session_id: str) -> None:
+async def discard_session_stream(
+    workspace_id: str,
+    session_id: str,
+    *,
+    acknowledged_call_ids: Optional[Set[str]] = None,
+) -> None:
     """Purge all structured state when a managed session is deleted.
 
     The workspace allocator may reuse a friendly session id (for example,
     ``prefix-agent-1``). Both on-disk events and an in-process tailer therefore
     must be forgotten before that id can identify another conversation.
     """
+    provider_fenced = False
     for manager in list(_TAILER_MANAGERS):
-        await manager.forget_session(session_id)
+        provider_fenced = (
+            await manager.forget_session(session_id, require_fenced=True) or provider_fenced
+        )
+
+    # Delivery receipts outlive the event log and can make a reused friendly id
+    # look accepted or permanently uncertain. Validate them only after every
+    # in-process owner stopped successfully, but remove them last so any failure
+    # below preserves the evidence and prevents unsafe id reuse.
+    from .. import managed_chat
+
+    managed_chat.validate_delivery_state_discard(
+        workspace_id,
+        session_id,
+        acknowledged_call_ids=acknowledged_call_ids or set(),
+        provider_fenced=provider_fenced,
+    )
     await AgentStreamStore(workspace_id, session_id).clear()
     # Drop any unconsumed fork-seed sidecar so a reused session id never seeds
     # a fresh conversation with a deleted fork's history.
@@ -3740,6 +3782,7 @@ async def discard_session_stream(workspace_id: str, session_id: str) -> None:
     # Also clear the session's bounded preview cache so a reused session id
     # cannot surface another conversation's images.
     await AgentStreamAttachmentStore(workspace_id, session_id).clear()
+    await asyncio.to_thread(managed_chat.discard_delivery_state, workspace_id, session_id)
 
 
 async def stop_session_stream(session_id: str) -> None:

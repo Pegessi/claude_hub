@@ -81,7 +81,8 @@ test('active Goal accepts steers while queued drafts wait for the Goal to stop',
   // Enter queues and ⌘/Ctrl+Enter steers while the Goal runs.
   assert.ok(pane.includes('turnInFlight: turnInFlight.value || goalSteerOnly.value'))
   assert.ok(pane.includes("(turnInFlight.value || goalSteerOnly.value) && !messageOverride"))
-  assert.ok(pane.includes("submit(goalSteerOnly ? 'steer' : 'normal')"))
+  // Direct Goal turns keep steering; managed Task turns always use normal delivery.
+  assert.ok(pane.includes("submit(isManagedChat ? 'normal' : (goalSteerOnly ? 'steer' : 'normal'))"))
   assert.ok(pane.includes('⌘/Ctrl+Enter steer Goal'))
   // Goal turns cannot carry images, including pasted or dropped ones.
   assert.ok(pane.includes('draftMessage.value.trim().length > 0 && attachments.value.length === 0'))

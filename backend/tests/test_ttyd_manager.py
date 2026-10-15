@@ -1349,11 +1349,10 @@ def test_restore_promotes_stale_terminal_cursor_chat_to_native(
 
 
 @pytest.mark.asyncio
-async def test_managed_workspace_tab_is_terminal_while_direct_tab_may_be_chat(
+async def test_managed_workspace_tab_defaults_terminal_and_accepts_explicit_chat(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A workspace role marks an internal raw-TUI runner. Direct top-level
-    tabs may still carry optional workspace display metadata and use Chat."""
+    """Existing managed callers keep Terminal; explicit Chat uses a headless tab."""
     manager = TTYDManager.__new__(TTYDManager)
     manager._next_port = 12350
     manager.processes = {}
@@ -1394,26 +1393,43 @@ async def test_managed_workspace_tab_is_terminal_while_direct_tab_may_be_chat(
 
     assert chat_tab.session_kind == SessionKind.CHAT
 
-    with pytest.raises(ValueError, match="managed workspace tabs must use Terminal"):
+    direct_process = manager.processes[chat_tab.id]
+    metadata_before = direct_process.to_dict()
+    with pytest.raises(ValueError, match="Direct Chat tabs cannot become managed Chat"):
         manager.set_tab_workspace_metadata(
             chat_tab.id,
             "workspace-1",
             "Workspace One",
             WorkspaceSessionRole.WORKER,
+            managed_session_id="managed-existing",
         )
+    assert direct_process.to_dict() == metadata_before
+    assert manager.set_tab_chat_mode(chat_tab.id, ChatMode.PLAN.value)
 
-    with pytest.raises(ValueError, match="managed workspace tabs must use Terminal"):
-        await manager.create_tab(
-            name="Invalid Managed Chat",
-            cwd=str(tmp_path),
-            agent_type=AgentType.CLAUDE,
-            workspace_id="workspace-1",
-            workspace_role=WorkspaceSessionRole.WORKER,
-            session_kind=SessionKind.CHAT,
-        )
+    managed_chat_tab = await manager.create_tab(
+        name="Managed Chat",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CLAUDE,
+        workspace_id="workspace-1",
+        workspace_role=WorkspaceSessionRole.WORKER,
+        session_kind=SessionKind.CHAT,
+        managed_session_id="managed-new",
+    )
+    assert managed_chat_tab.session_kind == SessionKind.CHAT
+    assert managed_chat_tab.managed_session_id == "managed-new"
+    assert managed_chat_tab.is_active is False
+    assert manager.processes[managed_chat_tab.id].process is None
+    assert manager.set_tab_workspace_metadata(
+        managed_chat_tab.id,
+        "workspace-1",
+        "Workspace One",
+        WorkspaceSessionRole.WORKER,
+        managed_session_id="managed-new",
+    )
 
-    with pytest.raises(ValueError, match="direct top-level Chat tabs"):
-        manager.set_tab_chat_mode(tab.id, ChatMode.PLAN.value)
+    for managed_tab in (tab, managed_chat_tab):
+        with pytest.raises(ValueError, match="direct top-level Chat tabs"):
+            manager.set_tab_chat_mode(managed_tab.id, ChatMode.PLAN.value)
 
 
 def test_non_solo_codex_initial_launch_translates_model_and_keeps_env_wrapper(
@@ -4476,9 +4492,11 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
     # The retired persisted value is upgraded at the load boundary.
     assert manager.processes["tab-explicit-agent"].session_kind == SessionKind.CHAT
     assert manager.processes["tab-explicit-agent"].chat_mode == ChatMode.PLAN
+    # Explicit Chat stays Chat, including its mode, when Workspace metadata is present.
     managed = manager.processes["tab-managed-explicit-chat"]
-    assert managed.session_kind == SessionKind.TERMINAL
-    assert managed.chat_mode == ChatMode.DEFAULT
+    assert managed.session_kind == SessionKind.CHAT
+    assert managed.chat_mode == ChatMode.PLAN
+    assert managed.is_managed_chat is True
 
 
 def test_agent_session_id_verified_round_trips_through_state(
@@ -4727,6 +4745,7 @@ def test_hot_restart_reattaches_only_tabs_with_surviving_tmux(
             self.agent_type = agent_type
             self.target = target
             self.agent_session_id = "pinned-session"
+            self.is_managed_chat = False
             self.resume_quarantined = False
             self.cwd = "/tmp"
             self.is_active = False
@@ -4887,6 +4906,7 @@ def test_cold_restart_recovers_all_saved_non_codex_tabs(monkeypatch: MonkeyPatch
             self.agent_type = agent_type
             self.target = ExecutionTarget.LOCAL
             self.agent_session_id = None
+            self.is_managed_chat = False
             self.resume_quarantined = False
             self.cwd = "/tmp"
             self.is_active = False

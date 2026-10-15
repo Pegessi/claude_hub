@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional
 
+from ..models import SessionKind
 from .ttyd_manager import _tmux_session_name
 
 
@@ -55,6 +56,27 @@ def validate_session_seat(
 
     session_id = getattr(session, "id", "?")
     tab_id = getattr(session, "tab_id", "") or ""
+    if getattr(session, "session_kind", SessionKind.TERMINAL) == SessionKind.CHAT:
+        stored = (getattr(session, "tmux_session", None) or "").strip()
+        if stored:
+            raise SessionSeatMismatch(
+                f"managed Chat session {session_id} unexpectedly claims tmux seat {stored!r}"
+            )
+        if processes is not None:
+            own = processes.get(tab_id)
+            if own is None:
+                raise SessionSeatMismatch(
+                    f"managed Chat session {session_id} tab {tab_id} is not registered"
+                )
+            if getattr(own, "session_kind", None) != SessionKind.CHAT:
+                raise SessionSeatMismatch(
+                    f"managed Chat session {session_id} tab {tab_id} is not a Chat record"
+                )
+            if getattr(own, "workspace_id", None) != getattr(session, "workspace_id", None):
+                raise SessionSeatMismatch(
+                    f"managed Chat session {session_id} tab {tab_id} belongs to another workspace"
+                )
+        return ""
     expected = expected_tmux_session_name(tab_id)
     stored = (getattr(session, "tmux_session", None) or "").strip()
     if stored != expected:

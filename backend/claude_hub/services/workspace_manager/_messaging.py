@@ -1,4 +1,10 @@
-"""Session messaging and tmux output capture.
+"""Managed session messaging and terminal output capture.
+
+Managed Chat uses the same durable envelope, payload fingerprint and report
+ACK contract. Native provider handoff evidence replaces tmux receipts: known
+unsent calls may retry, accepted calls await ACK, and ambiguous calls block
+further input. Chat pumps one turn at a time and preserves paused/queued work.
+The terminal-specific receipt and recovery details below remain unchanged.
 
 Delivery semantics: **at-least-once with fail-closed uncertainty**.
 
@@ -105,6 +111,7 @@ import time
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from .. import managed_chat
 from ..session_seat import SessionSeatMismatch, validate_session_seat
 from ._constants import *  # noqa: F401,F403
 
@@ -151,6 +158,10 @@ class _MessagingMixin:
         if not session:
             raise KeyError(session_id)
         self._assert_session_seat(session)
+        if session.session_kind == SessionKind.CHAT:
+            # Native transports cannot queue a second model turn themselves.
+            # Even unkeyed bootstrap/follow-up input uses the durable inbox.
+            call_id = call_id or f"chat:{uuid.uuid4().hex}"
 
         if call_id:
             # Compute the canonical payload fingerprint (message text +
@@ -497,6 +508,14 @@ class _MessagingMixin:
             if call_id not in session.pending_call_ids:
                 # Already claimed by a concurrent pump cycle.
                 continue
+            if session.session_kind == SessionKind.CHAT and (
+                session.chat_paused
+                or session.uncertain_call_ids
+                or managed_chat.is_turn_running(session)
+            ):
+                # Leave the envelope pending. A busy turn is not an ambiguous
+                # delivery, and later input must not bypass an uncertain turn.
+                return
 
             message = session.pending_messages.get(call_id)
             if message is None:
@@ -587,6 +606,14 @@ class _MessagingMixin:
                 self._assert_session_seat(self.sessions[session_id])
                 await self._ensure_session_ready_for_send(self.sessions[session_id])
                 full_message = f"{marker}\n{message}"
+                native_attachments: list[WorkspaceAttachment] = []
+                if session.session_kind == SessionKind.CHAT:
+                    native_attachments = [
+                        item for item in persisted if item.mime_type.startswith("image/")
+                    ]
+                    persisted = [
+                        item for item in persisted if not item.mime_type.startswith("image/")
+                    ]
                 full_message = self._append_attachment_block(full_message, persisted)
             except SessionSeatMismatch:
                 logger.exception(
@@ -607,8 +634,40 @@ class _MessagingMixin:
                     call_id,
                     session_id,
                 )
+                if session.session_kind == SessionKind.CHAT:
+                    self._rollback_chat_processing_to_pending(session_id, [call_id])
+                    raise
                 self._rollback_processing_to_pending(session.task_id, session_id, [call_id])
                 continue
+
+            if session.session_kind == SessionKind.CHAT:
+                try:
+                    await managed_chat.send_message(
+                        self.sessions[session_id], full_message, native_attachments, call_id
+                    )
+                except (Exception, asyncio.CancelledError) as exc:
+                    state = self._chat_delivery_state(self.sessions[session_id], call_id)
+                    if state == "not_sent":
+                        self._rollback_chat_processing_to_pending(session_id, [call_id])
+                        raise
+                    if (
+                        state != "accepted"
+                        and call_id in self.sessions[session_id].processing_call_ids
+                    ):
+                        self._mark_processing_as_uncertain(session_id, [call_id])
+                    # Cancellation must propagate after the mailbox records
+                    # uncertainty; callers must not mistake it for acceptance.
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    logger.exception(
+                        "Chat delivery failed for call_id=%s session=%s state=%s",
+                        call_id,
+                        session_id,
+                        state,
+                    )
+                # A model turn can outlive send_message. The monitor pumps
+                # the next envelope only after this native turn has ended.
+                return
 
             try:
                 # Use the receipt-aware delivery primitive. The tmux server
@@ -642,6 +701,48 @@ class _MessagingMixin:
             # We do NOT move it to delivered — only the worker's ACK does
             # that. If we crash here, cold recovery moves it to
             # uncertain_call_ids (fail-closed).
+
+    def _chat_delivery_state(
+        self, session: ManagedSession, call_id: str
+    ) -> managed_chat.DeliveryState:
+        try:
+            return managed_chat.delivery_state(session, call_id)
+        except RuntimeError:
+            logger.exception(
+                "Cannot read Chat delivery evidence for call_id=%s session=%s",
+                call_id,
+                session.id,
+            )
+            return "uncertain"
+
+    def _rollback_chat_processing_to_pending(self, session_id: str, call_ids: list[str]) -> None:
+        """Retry proven-unsent envelopes ahead of later queued Chat input."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        retry_ids = [call_id for call_id in session.processing_call_ids if call_id in call_ids]
+        self._rollback_processing_to_pending(session.task_id, session_id, retry_ids)
+        session = self.sessions[session_id]
+        self.sessions[session_id] = session.model_copy(
+            update={
+                "pending_call_ids": retry_ids
+                + [call_id for call_id in session.pending_call_ids if call_id not in retry_ids]
+            }
+        )
+        task = self.tasks.get(session.task_id) if session.task_id else None
+        if task is not None:
+            task_retry_ids = [call_id for call_id in retry_ids if call_id in task.pending_call_ids]
+            self.tasks[task.id] = task.model_copy(
+                update={
+                    "pending_call_ids": task_retry_ids
+                    + [
+                        call_id
+                        for call_id in task.pending_call_ids
+                        if call_id not in task_retry_ids
+                    ]
+                }
+            )
+        self._save_state()
 
     def _expire_processing_leases(self, session_id: str, max_age_seconds: float = 300.0) -> int:
         """Move stale ``processing_call_ids`` to ``uncertain_call_ids``.
@@ -718,6 +819,10 @@ class _MessagingMixin:
         session = self.sessions.get(session_id)
         if not session or not session.processing_call_ids:
             return 0
+        if session.session_kind == SessionKind.CHAT:
+            lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+            async with lock:
+                return self._recover_chat_processing_via_receipt(session_id)
 
         to_pending: list[str] = []
         to_uncertain: list[str] = []
@@ -770,6 +875,27 @@ class _MessagingMixin:
             self._mark_processing_as_uncertain(session_id, to_uncertain)
             changed += len(to_uncertain)
         return changed
+
+    def _recover_chat_processing_via_receipt(self, session_id: str) -> int:
+        """Reconcile provider handoff evidence without using UI or tmux history."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            return 0
+        to_pending: list[str] = []
+        to_uncertain: list[str] = []
+        for call_id in session.processing_call_ids:
+            state = self._chat_delivery_state(session, call_id)
+            if state == "not_sent":
+                to_pending.append(call_id)
+            elif state != "accepted":
+                # The pump lock excludes live sends. Persisted in-flight
+                # evidence after a crash cannot prove provider acceptance.
+                to_uncertain.append(call_id)
+        if to_pending:
+            self._rollback_chat_processing_to_pending(session_id, to_pending)
+        if to_uncertain:
+            self._mark_processing_as_uncertain(session_id, to_uncertain)
+        return len(to_pending) + len(to_uncertain)
 
     def _mark_processing_as_uncertain(self, session_id: str, call_ids: list[str]) -> None:
         """Move call_ids from ``processing_call_ids`` to ``uncertain_call_ids``.
@@ -1006,16 +1132,25 @@ class _MessagingMixin:
         #   * session gone /   -> cannot prove either way. Fail closed:
         #     unqueryable         stay uncertain, raise DeliveryUncertain.
         receipt_present: Optional[bool] = None
-        try:
-            receipt_present = await self._query_tmux_receipt(session.tmux_session, call_id)
-        except RuntimeError:
-            # tmux session gone or query failed — fail closed.
-            raise DeliveryUncertain(
-                f"cannot retry call_id={call_id} on session {session_id}: "
-                "tmux session is gone or unqueryable; delivery remains "
-                "uncertain. Operator must verify the worker state before "
-                "deciding whether to re-dispatch."
-            )
+        if session.session_kind == SessionKind.CHAT:
+            state = self._chat_delivery_state(session, call_id)
+            if state not in {"not_sent", "accepted"}:
+                raise DeliveryUncertain(
+                    f"cannot retry call_id={call_id} on Chat session {session_id}: "
+                    "provider acceptance is unknown; automatic replay is unsafe"
+                )
+            receipt_present = state == "accepted"
+        else:
+            try:
+                receipt_present = await self._query_tmux_receipt(session.tmux_session, call_id)
+            except RuntimeError:
+                # tmux session gone or query failed — fail closed.
+                raise DeliveryUncertain(
+                    f"cannot retry call_id={call_id} on session {session_id}: "
+                    "tmux session is gone or unqueryable; delivery remains "
+                    "uncertain. Operator must verify the worker state before "
+                    "deciding whether to re-dispatch."
+                )
 
         if receipt_present:
             # The original paste already happened. A second paste would
@@ -1086,6 +1221,11 @@ class _MessagingMixin:
                     call_id,
                 )
                 raise
+
+            if session.session_kind == SessionKind.CHAT:
+                # The provider has already accepted this turn. Only the
+                # agent's report ACK may commit it; no resubmit or key press.
+                return
 
             # The paste ran but the Hub may have died before the submit
             # verification loop could nudge additional Enter keys. Ensure the
@@ -1344,6 +1484,8 @@ class _MessagingMixin:
 
     async def _ensure_session_ready_for_send(self, session: ManagedSession) -> None:
         self._assert_session_seat(session)
+        if session.session_kind == SessionKind.CHAT:
+            return
         from ..ttyd_manager import _tmux_session_exists_async
 
         # Send paths must not create a same-name pane and pour into it.
@@ -1424,6 +1566,9 @@ class _MessagingMixin:
         showing when the wait expires, fail closed so bootstrap Enter cannot
         confirm ``npm install -g``.
         """
+        if session.session_kind == SessionKind.CHAT:
+            self._assert_session_seat(session)
+            return
         deadline = time.monotonic() + AGENT_PROMPT_WAIT_SECONDS
         saw_update_dialog = False
         last_output = ""
