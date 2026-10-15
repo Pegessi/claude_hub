@@ -67,8 +67,9 @@ recheck the frozen result rather than relying on the earlier feature approval.
   restoration with a fresh WorkspaceManager proves the same call ID reaches the
   provider once after the rejected attempt submitted zero inputs.
 - Type corrections preserve the actual module singleton and model contracts.
-  Restart fixtures match the revised quiesce order. The local TTYDManager fixture
-  finalizes every owned tab even when an assertion fails.
+  Restart fixtures include persisted tab creation and managed identity fields.
+  The local TTYDManager fixture finalizes every owned tab even when an assertion
+  fails.
 
 ## Frozen validation
 
@@ -103,6 +104,19 @@ correctness issue in their reviewed scope. The lifecycle reviewer also pinned th
 fully staged candidate and checked its reviewed hashes. The fixed merge SHA and
 manual-resolution explanations belong in the accompanying decision record,
 committed after that merge so it can bind an immutable object.
+
+## Fixed merge
+
+- Merge: `9668717249fa5f12a6a36518ab3133a91c164e7b`.
+- Tree: `70699ca1a627f70380f59235b1ce1500b026349c`.
+- Parents: the exact feature/main commits listed above.
+- Decision record: `2026-10-16-managed-chat-integration-decisions.json`.
+  `verify.sh merge-decisions` reports complete coverage of all 16 manual decision
+  paths, including the four native conflicts. This mechanical coverage check does
+  not replace the independent semantic reviews described above.
+- The follow-up documentation commit corrects the restart-fixture description,
+  records this immutable merge identity and adds its decision record. It does not
+  alter validated production or test code.
 
 ## Limits and delivery boundary
 
