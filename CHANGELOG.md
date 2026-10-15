@@ -5,6 +5,17 @@
 
 ## Unreleased
 
+### fix(chat): explain a MASO failure instead of printing its provider frame
+
+- Read MASO's `agent_error` as a provider failure frame: recover the description
+  it carries, and state plainly that there is none when it carries none, rather
+  than showing the frame itself as the error text.
+- Keep the frame verbatim as JSON evidence beside the message, surface
+  `stop_reason` when it says something the sentence does not, and stop leaking a
+  Python repr when the field is not a string.
+- Render the provider payload as a de-emphasized second line under the error
+  banner, so the readable statement is what the reader sees first.
+
 ### feat(chat): accept image input in MASO conversations
 
 - Enable image attachments, including image-only turns and queued drafts, through

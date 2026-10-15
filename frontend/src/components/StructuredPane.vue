@@ -840,7 +840,16 @@
                 class="error-icon"
                 aria-hidden="true"
               >⚠</span>
-              <span>{{ part.message }}</span>
+              <span class="error-body">
+                <span>{{ part.message }}</span>
+                <!-- The provider's verbatim failure payload. De-emphasized:
+                     it is evidence for whoever debugs the run, not the
+                     statement the reader has to parse. -->
+                <code
+                  v-if="part.detail"
+                  class="error-detail"
+                >{{ part.detail }}</code>
+              </span>
             </div>
 
             <div
@@ -3864,6 +3873,21 @@ onUnmounted(() => {
 
 .error-icon {
   flex-shrink: 0;
+}
+
+.error-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.error-detail {
+  font-family: var(--ch-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--ch-color-text-subtle);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .event-status {
