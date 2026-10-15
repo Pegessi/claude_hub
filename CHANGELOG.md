@@ -7,6 +7,14 @@
 
 ## Released
 
+### fix(chat): recheck restart continuation after provider preparation
+
+- Honor Stop, conversation/configuration changes and shutdown during asynchronous
+  provider preparation, before sending a continuation through stdin, RPC or HTTP.
+- Terminate an empty one-shot process if continuation is revoked while it starts,
+  and preserve manual follow-up after a rejected automatic attempt.
+- Skip a pending continuation if Retry replaces its original runtime.
+
 ### feat(chat): continue working Chats after a planned service restart
 
 - Offer automatic continuation in the restart dialog, enabled by default. Send

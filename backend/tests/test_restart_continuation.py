@@ -16,7 +16,12 @@ import pytest
 from claude_hub.models import AgentType, ChatMode, ExecutionTarget, SessionKind
 from claude_hub.services import restart_continuation as recovery
 from claude_hub.services import service_restart as restart
-from claude_hub.services.agent_stream.native import CodexNativeSession, ProviderSession
+from claude_hub.services.agent_stream.native import (
+    ClaudeNativeSession,
+    CodexNativeSession,
+    CursorNativeSession,
+    ProviderSession,
+)
 
 
 class MemoryProvider(ProviderSession):
@@ -362,6 +367,96 @@ async def test_identity_change_during_turn_publication_prevents_delivery(setup, 
     assert all("Please continue." not in provider.inputs for provider in h.providers)
 
 
+@pytest.mark.parametrize("boundary", ["environment", "terminate", "spawn"])
+@pytest.mark.parametrize("change", [None, "stop", "config", "conversation", "shutdown"])
+@pytest.mark.parametrize("provider_type", [AgentType.CLAUDE, AgentType.CURSOR])
+async def test_oneshot_rechecks_intent_after_async_preparation(
+    setup, boundary, change, provider_type
+):
+    """Use actual Claude/Cursor stdin paths; replace external process I/O."""
+    from claude_hub.services.agent_stream import tailer as tailer_module
+
+    h = setup
+    h.tab.agent_type = provider_type
+    await h.work()
+    await h.replace()
+    writes = []
+    processes = []
+    providers = []
+    changed = False
+
+    def mutate():
+        nonlocal changed
+        if changed:
+            return
+        changed = True
+        if change == "stop":
+            recovery.cancel_pending_continuation(h.tab.id, "original-turn")
+        elif change == "config":
+            h.tab.env["ANTHROPIC_BASE_URL"] = "https://changed-provider.invalid"
+        elif change == "conversation":
+            h.tab.agent_session_id = "another-conversation"
+        elif change == "shutdown":
+            h.api._quiesce_tailer_managers()
+
+    async def environment(provider):
+        await asyncio.sleep(0)
+        if boundary == "environment":
+            mutate()
+        return {"CLAUDE_HUB_PROVIDER_NETWORK_MODE": "inherit"}
+
+    original_terminate = ProviderSession._terminate_process
+
+    async def terminate(provider):
+        await original_terminate(provider)
+        if boundary == "terminate":
+            mutate()
+
+    async def spawn(*args, **kwargs):
+        await asyncio.sleep(0)
+        if boundary == "spawn":
+            mutate()
+        process = SimpleNamespace(
+            stdin=SimpleNamespace(write=writes.append, drain=AsyncMock(), close=lambda: None),
+            stdout=asyncio.StreamReader(),
+            stderr=asyncio.StreamReader(),
+            returncode=None,
+            wait=AsyncMock(return_value=0),
+        )
+        process.terminate = lambda: setattr(process, "returncode", 0)
+        process.kill = process.terminate
+        processes.append(process)
+        return process
+
+    def factory(*args, **kwargs):
+        provider_class = (
+            ClaudeNativeSession if provider_type == AgentType.CLAUDE else CursorNativeSession
+        )
+        provider = provider_class(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    h.monkeypatch.setattr(tailer_module, "create_native_session", factory)
+    h.monkeypatch.setattr(ClaudeNativeSession, "_build_provider_env", environment)
+    h.monkeypatch.setattr(ProviderSession, "_build_provider_env", environment)
+    h.monkeypatch.setattr(ProviderSession, "_terminate_process", terminate)
+    h.monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    # The separate Cursor database tests own store verification; this test
+    # isolates input admission through the actual Cursor one-shot lifecycle.
+    h.monkeypatch.setattr(recovery, "_cursor_database_exists", lambda _: True)
+    await recovery.continue_interrupted_chats()
+    if change is None:
+        assert len(writes) == 1
+        assert "Please continue." in writes[0].decode()
+    else:
+        assert writes == []
+        assert all(process.returncode == 0 for process in processes)
+    assert providers[0]._delivery_admission is None
+    assert providers[0]._required_conversation_id is None
+    await recovery.continue_interrupted_chats()
+    assert len(writes) == int(change is None)
+
+
 async def test_shutdown_barrier_rejects_lazy_manager_creation(setup):
     h = setup
     h.api._quiesce_tailer_managers()
@@ -370,6 +465,49 @@ async def test_shutdown_barrier_rejects_lazy_manager_creation(setup):
             getter()
     assert h.api._tab_tailer_manager is None
     assert not h.providers
+
+
+async def test_retry_during_provider_start_cannot_move_continuation_to_new_runtime(setup):
+    from claude_hub.services.agent_stream import tailer as tailer_module
+
+    h = setup
+    await h.work()
+    await h.replace()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    providers = []
+    original_start = ProviderSession.start
+    spawn = AsyncMock(side_effect=AssertionError("provider must not receive a continuation"))
+
+    async def start(provider):
+        await original_start(provider)
+        if provider is providers[0] and not entered.is_set():
+            entered.set()
+            await release.wait()
+
+    def factory(*args, **kwargs):
+        provider = ClaudeNativeSession(*args, **kwargs)
+        providers.append(provider)
+        return provider
+
+    h.monkeypatch.setattr(tailer_module, "create_native_session", factory)
+    h.monkeypatch.setattr(ClaudeNativeSession, "start", start)
+    h.monkeypatch.setattr(ProviderSession, "_spawn_oneshot", spawn)
+    pending = asyncio.create_task(recovery.continue_interrupted_chats())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        session = h.api._terminal_tab_session_or_404(h.tab.id)
+        replacement = await h.api._get_tab_tailer_manager().retry(session)
+        assert replacement.native_transport is not providers[0]
+        release.set()
+        await asyncio.wait_for(pending, 2)
+        spawn.assert_not_awaited()
+        assert h.mailbox.read()["operation"]["chat_recovery"]["targets"][0]["state"] == "skipped"
+    finally:
+        release.set()
+        if not pending.done():
+            pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_shutdown_during_turn_publication_prevents_delivery(setup):
