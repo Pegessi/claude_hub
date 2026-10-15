@@ -54,7 +54,7 @@ def test_task_session_kind_defaults_persists_and_validates_provider() -> None:
     assert update.session_kind == SessionKind.CHAT
     with pytest.raises(ValidationError, match="select a Chat session"):
         WorkspaceTaskCreate(title="bad", prompt="work", agent_type=AgentType.MASO)
-    with pytest.raises(ValidationError, match="supports only"):
+    with pytest.raises(ValidationError, match="TraeX is not supported"):
         WorkspaceTaskCreate(
             title="bad",
             prompt="work",

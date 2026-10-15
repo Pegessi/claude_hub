@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -20,6 +21,7 @@ from claude_hub.models import (
     ManagedSessionStatus,
     SessionKind,
     StartTaskRequest,
+    TerminalAgentStatus,
     Workspace,
     WorkspaceSessionRole,
     WorkspaceTask,
@@ -152,7 +154,7 @@ async def test_explicit_user_message_resumes_chat_but_invalid_message_does_not(
     session = manager.sessions["chat-worker"]
     manager.sessions[session.id] = session.model_copy(update={"chat_paused": True})
     send = AsyncMock()
-    monkeypatch.setattr(manager, "send_session_message", send)
+    monkeypatch.setattr(manager, "_send_session_message_locked", send)
     with pytest.raises(ValueError, match="message or attachment"):
         await manager.send_chat_session_message(session.id, "", call_id="resume")
     assert manager.sessions[session.id].chat_paused
@@ -171,7 +173,7 @@ async def test_uncertain_delivery_cannot_be_unpaused_by_user_message(
         update={"chat_paused": True, "uncertain_call_ids": ["unknown"]}
     )
     send = AsyncMock()
-    monkeypatch.setattr(manager, "send_session_message", send)
+    monkeypatch.setattr(manager, "_send_session_message_locked", send)
     with pytest.raises(RuntimeError, match="uncertain"):
         await manager.send_chat_session_message(session.id, "continue", call_id="resume")
     assert manager.sessions[session.id].chat_paused
@@ -241,6 +243,295 @@ async def test_chat_paused_status_survives_monitor_refresh(
     await manager._refresh_session_statuses(run_auto_continue=True)
     assert manager.sessions[session.id].chat_paused
     assert manager.sessions[session.id].runtime_status == AgentRuntimeStatus.ATTENTION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reuse_friendly_id", [False, True])
+async def test_chat_monitor_snapshot_cannot_resurrect_deleted_or_reused_session(
+    manager: WorkspaceManager,
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_friendly_id: bool,
+) -> None:
+    stale = manager.sessions["chat-worker"]
+    terminal = stale.model_copy(
+        update={
+            "id": "terminal-monitor-barrier",
+            "tab_id": "terminal-monitor-tab",
+            "session_kind": SessionKind.TERMINAL,
+        }
+    )
+    manager.sessions[terminal.id] = terminal
+    status_waiting = asyncio.Event()
+    release_status = asyncio.Event()
+
+    async def blocked_statuses(*, tab_ids):
+        assert tab_ids == [terminal.tab_id]
+        status_waiting.set()
+        await release_status.wait()
+        return []
+
+    monkeypatch.setattr(wm_module.ttyd_manager, "list_tab_agent_statuses", blocked_statuses)
+    refresh = asyncio.create_task(manager._refresh_session_statuses())
+    await asyncio.wait_for(status_waiting.wait(), timeout=1)
+
+    manager.sessions.pop(stale.id)
+    replacement = None
+    if reuse_friendly_id:
+        replacement = stale.model_copy(
+            update={
+                "tab_id": "fresh-tab",
+                "created_at": stale.created_at + timedelta(seconds=1),
+                "env": {"FRESH": "1"},
+                "chat_paused": True,
+                "pending_call_ids": ["fresh-call"],
+            }
+        )
+        manager.sessions[replacement.id] = replacement
+    release_status.set()
+    await asyncio.wait_for(refresh, timeout=1)
+
+    if replacement is None:
+        assert stale.id not in manager.sessions
+    else:
+        assert manager.sessions[stale.id] == replacement
+
+
+@pytest.mark.asyncio
+async def test_terminal_monitor_snapshot_cannot_resurrect_deleted_session(
+    manager: WorkspaceManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal = manager.sessions["chat-worker"].model_copy(
+        update={
+            "id": "terminal-monitor-victim",
+            "tab_id": "terminal-monitor-victim-tab",
+            "session_kind": SessionKind.TERMINAL,
+        }
+    )
+    manager.sessions[terminal.id] = terminal
+    status_waiting = asyncio.Event()
+    release_status = asyncio.Event()
+    sampled_at = datetime.now(timezone.utc)
+
+    async def blocked_statuses(*, tab_ids):
+        assert tab_ids == [terminal.tab_id]
+        status_waiting.set()
+        await release_status.wait()
+        return [
+            TerminalAgentStatus(
+                tab_id=terminal.tab_id,
+                tab_name="victim",
+                agent_type=terminal.agent_type,
+                status=AgentRuntimeStatus.WORKING,
+                status_text="Working",
+                detail=None,
+                tmux_session=terminal.tmux_session,
+                last_changed_at=sampled_at,
+                sampled_at=sampled_at,
+            )
+        ]
+
+    monkeypatch.setattr(wm_module.ttyd_manager, "list_tab_agent_statuses", blocked_statuses)
+    refresh = asyncio.create_task(manager._refresh_session_statuses())
+    await asyncio.wait_for(status_waiting.wait(), timeout=1)
+    manager.sessions.pop(terminal.id)
+    release_status.set()
+    await asyncio.wait_for(refresh, timeout=1)
+
+    assert terminal.id not in manager.sessions
+
+
+@pytest.mark.asyncio
+async def test_prompt_retry_after_workspace_delete_cannot_resurrect_session(
+    manager: WorkspaceManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = manager.sessions["chat-worker"]
+    task = manager.tasks["chat-task"]
+    tmux_entered = asyncio.Event()
+    release_tmux = asyncio.Event()
+
+    async def blocked_tmux(*_args: str) -> None:
+        tmux_entered.set()
+        await release_tmux.wait()
+
+    async def fake_delete_tab(_tab_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(manager, "_run_tmux", blocked_tmux)
+    monkeypatch.setattr(wm_module.ttyd_manager, "delete_tab", fake_delete_tab)
+    retrying = asyncio.create_task(
+        manager._retry_pending_prompt_submit(session, task, datetime.now(timezone.utc))
+    )
+    await asyncio.wait_for(tmux_entered.wait(), timeout=1)
+    await manager.delete_workspace(session.workspace_id)
+    release_tmux.set()
+    await asyncio.wait_for(retrying, timeout=1)
+
+    assert session.workspace_id not in manager.workspaces
+    assert task.id not in manager.tasks
+    assert session.id not in manager.sessions
+
+
+@pytest.mark.asyncio
+async def test_prompt_stall_capture_cannot_corrupt_reused_session(
+    manager: WorkspaceManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    original = manager.sessions["chat-worker"].model_copy(
+        update={
+            "session_kind": SessionKind.TERMINAL,
+            "tab_id": "old-tab",
+            "tmux_session": "old-tmux",
+            "prompt_retry_task_id": "chat-task",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    task = manager.tasks["chat-task"].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "started_at": now - timedelta(hours=1),
+            "updated_at": now,
+        }
+    )
+    manager.sessions[original.id] = original
+    manager.tasks[task.id] = task
+    capture_entered = asyncio.Event()
+    release_capture = asyncio.Event()
+
+    async def blocked_capture(_tmux_session: str) -> str:
+        capture_entered.set()
+        await release_capture.wait()
+        return "> New workspace task assigned."
+
+    monkeypatch.setattr(manager, "_capture_tmux_output", blocked_capture)
+    detecting = asyncio.create_task(manager._detect_prompt_dispatch_stall(original, task, now))
+    await asyncio.wait_for(capture_entered.wait(), timeout=1)
+    replacement = original.model_copy(
+        update={
+            "tab_id": "replacement-tab",
+            "tmux_session": "replacement-tmux",
+            "created_at": now + timedelta(seconds=1),
+            "updated_at": now + timedelta(seconds=1),
+        }
+    )
+    manager.sessions[original.id] = replacement
+    release_capture.set()
+
+    assert await asyncio.wait_for(detecting, timeout=1) is None
+    assert manager.sessions[original.id] == replacement
+    assert not manager.reports
+
+
+@pytest.mark.asyncio
+async def test_auto_continue_capture_after_workspace_delete_cannot_resurrect_task(
+    manager: WorkspaceManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    session = manager.sessions["chat-worker"].model_copy(
+        update={
+            "session_kind": SessionKind.TERMINAL,
+            "tab_id": "terminal-tab",
+            "tmux_session": "terminal-tmux",
+            "status": ManagedSessionStatus.IDLE,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "auto_continue_task_id": "chat-task",
+            "auto_continue_attempts": 999,
+            "hard_recovery_task_id": "chat-task",
+            "hard_recovery_attempts": 999,
+            "last_activity_at": now - timedelta(hours=1),
+            "updated_at": now,
+        }
+    )
+    task = manager.tasks["chat-task"].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "session_id": session.id,
+            "started_at": now - timedelta(hours=1),
+            "updated_at": now,
+        }
+    )
+    manager.sessions[session.id] = session
+    manager.tasks[task.id] = task
+    capture_entered = asyncio.Event()
+    release_capture = asyncio.Event()
+
+    async def blocked_capture(_tmux_session: str) -> str:
+        capture_entered.set()
+        await release_capture.wait()
+        return "API error"
+
+    async def fake_delete_tab(_tab_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(manager, "_capture_tmux_output", blocked_capture)
+    monkeypatch.setattr(wm_module.ttyd_manager, "delete_tab", fake_delete_tab)
+    continuing = asyncio.create_task(manager._auto_continue_stopped_task(session, task, now))
+    await asyncio.wait_for(capture_entered.wait(), timeout=1)
+    await manager.delete_workspace(session.workspace_id)
+    release_capture.set()
+
+    assert await asyncio.wait_for(continuing, timeout=1) is None
+    assert session.workspace_id not in manager.workspaces
+    assert task.id not in manager.tasks
+    assert session.id not in manager.sessions
+
+
+@pytest.mark.asyncio
+async def test_delete_first_recreate_rejects_stale_message_waiter(
+    manager: WorkspaceManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = manager.sessions["chat-worker"]
+    lock = manager._pump_locks.setdefault(stale.id, asyncio.Lock())
+    await lock.acquire()
+    pumped: list[str] = []
+
+    async def record_pump(session_id: str) -> None:
+        pumped.append(session_id)
+
+    monkeypatch.setattr(manager, "_pump_session_messages_locked", record_pump)
+    waiter = asyncio.create_task(manager.send_session_message(stale.id, "old", call_id="old-call"))
+    await asyncio.sleep(0)
+    manager.sessions.pop(stale.id)
+    fresh = stale.model_copy(
+        update={
+            "tab_id": "fresh-tab",
+            "created_at": stale.created_at + timedelta(seconds=1),
+            "pending_call_ids": [],
+            "pending_messages": {},
+            "call_payload_fingerprints": {},
+        }
+    )
+    manager.sessions[fresh.id] = fresh
+    lock.release()
+
+    with pytest.raises(KeyError):
+        await asyncio.wait_for(waiter, timeout=1)
+    assert pumped == []
+    assert manager.sessions[fresh.id].pending_call_ids == []
+
+
+@pytest.mark.asyncio
+async def test_chat_sender_rejects_terminal_duplicate_fast_path(
+    manager: WorkspaceManager,
+) -> None:
+    terminal = manager.sessions["chat-worker"].model_copy(
+        update={
+            "session_kind": SessionKind.TERMINAL,
+            "call_payload_fingerprints": {
+                "same-call": manager._compute_payload_fingerprint("x", [])
+            },
+            "processing_call_ids": ["same-call"],
+        }
+    )
+    manager.sessions[terminal.id] = terminal
+
+    with pytest.raises(ValueError, match="requires a managed Chat"):
+        await manager.send_chat_session_message(terminal.id, "x", call_id="same-call")
 
 
 def test_persisted_chat_surface_and_pause_are_preserved(manager: WorkspaceManager) -> None:

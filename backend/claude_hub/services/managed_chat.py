@@ -24,7 +24,8 @@ from ..models import (
     WorkspaceAttachment,
     WorkspaceAttachmentCreate,
 )
-from .agent_stream.attachments import preview_within_cache_bounds
+from .agent_stream.attachments import AgentStreamAttachmentStore, preview_within_cache_bounds
+from .agent_stream.fork_seed import seed_sidecar_path
 from .agent_stream.native import _detect_image_mime
 from .agent_stream.store import AgentStreamStore
 from .agent_stream.tailer import NativeRuntimeSnapshot, TailerManager
@@ -66,6 +67,25 @@ def _delivery_paths(workspace_id: str, session_id: str) -> tuple[Path, Path]:
     return (
         stream_path.with_suffix(".managed-delivery.json"),
         stream_path.with_suffix(".maso-delivery.json"),
+    )
+
+
+def has_residual_state(workspace_id: str, session_id: str) -> bool:
+    """Return whether known per-session files still reserve this identity."""
+
+    store = AgentStreamStore(workspace_id, session_id)
+    paths = (
+        *_delivery_paths(workspace_id, session_id),
+        store.path,
+        store.cursor_path,
+        seed_sidecar_path(workspace_id, session_id),
+    )
+    return (
+        any(path.exists() for path in paths)
+        or AgentStreamAttachmentStore(
+            workspace_id,
+            session_id,
+        ).has_residual_state()
     )
 
 
@@ -132,6 +152,21 @@ def validate_delivery_state_discard(
     if unresolved and not provider_fenced:
         raise ManagedChatDeliveryUncertain(
             "cannot discard managed Chat delivery evidence without a verified runtime fence"
+        )
+    accepted_without_ack = [
+        call_id
+        for call_id, record in attempts.items()
+        if call_id not in acknowledged_call_ids
+        and isinstance(record, dict)
+        and record.get("state") == "accepted"
+    ]
+    if (
+        accepted_without_ack
+        and not provider_fenced
+        and _durable_turn_state_for_ids(workspace_id, session_id) != "terminal"
+    ):
+        raise ManagedChatDeliveryUncertain(
+            "cannot discard provider-accepted managed Chat delivery before it is terminal or fenced"
         )
 
 
@@ -295,25 +330,11 @@ def delivery_state(session: ManagedSession, call_id: str) -> DeliveryState:
     )
 
 
-def _durable_turn_state(
-    session: ManagedSession,
+def _scan_durable_turn_state(
+    path: Path,
 ) -> Literal["empty", "terminal", "unfinished", "unknown"]:
-    path = AgentStreamStore(session.workspace_id, session.id).path
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        _turn_state_cache.pop(session.id, None)
-        return "empty"
-    except OSError:
-        return "unknown"
-    cached = _turn_state_cache.get(session.id)
-    identity = (path, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    if cached is not None and cached[:4] == identity:
-        return cached[4]
-
     unfinished: set[str] = set()
     saw_lifecycle = False
-    state: Literal["empty", "terminal", "unfinished", "unknown"]
     try:
         with path.open("r", encoding="utf-8") as file:
             for line in file:
@@ -332,9 +353,36 @@ def _durable_turn_state(
                 elif event_type == "turn_completed":
                     saw_lifecycle = True
                     unfinished.discard(key)
-        state = "unfinished" if unfinished else ("terminal" if saw_lifecycle else "empty")
+        return "unfinished" if unfinished else ("terminal" if saw_lifecycle else "empty")
+    except FileNotFoundError:
+        return "empty"
     except (OSError, json.JSONDecodeError, ValueError, AttributeError):
-        state = "unknown"
+        return "unknown"
+
+
+def _durable_turn_state_for_ids(
+    workspace_id: str, session_id: str
+) -> Literal["empty", "terminal", "unfinished", "unknown"]:
+    return _scan_durable_turn_state(AgentStreamStore(workspace_id, session_id).path)
+
+
+def _durable_turn_state(
+    session: ManagedSession,
+) -> Literal["empty", "terminal", "unfinished", "unknown"]:
+    path = AgentStreamStore(session.workspace_id, session.id).path
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        _turn_state_cache.pop(session.id, None)
+        return "empty"
+    except OSError:
+        return "unknown"
+    cached = _turn_state_cache.get(session.id)
+    identity = (path, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    if cached is not None and cached[:4] == identity:
+        return cached[4]
+
+    state = _scan_durable_turn_state(path)
     _turn_state_cache[session.id] = (*identity, state)
     return state
 

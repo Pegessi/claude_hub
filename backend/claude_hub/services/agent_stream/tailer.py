@@ -216,6 +216,15 @@ _GENERATION_ACTIVITY_TYPES = frozenset(
 )
 
 _HARD_FAILED_SESSION_IDS: Set[str] = set()
+# A strict deletion fence is process-wide: all managers must reject a new
+# owner between provider teardown and durable identity removal. It also records
+# a successful fence across a failed state commit so deletion can be retried
+# without requiring the already-stopped runtime to be recreated.
+_DELETION_FENCED_SESSION_IDS: Set[str] = set()
+_PROVIDER_FENCED_SESSION_IDS: Set[str] = set()
+# The retiring owner alone may append its final cancelled/error lifecycle
+# edges while the process-wide deletion fence blocks every new owner.
+_RETIRING_TAILER_IDS: Set[int] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
 PostPersistObserver = Callable[[AgentStreamEvent], Awaitable[None]]
 
@@ -516,6 +525,16 @@ class SessionTailer:
         self.session_id = session_id
         self.adapter = adapter
         self._session_getter = session_getter
+        initial_session = session_getter()
+        self._session_identity = (
+            (
+                initial_session.workspace_id,
+                initial_session.tab_id,
+                initial_session.created_at,
+            )
+            if initial_session is not None
+            else None
+        )
         self._store = store or AgentStreamStore(workspace_id, session_id)
         self._attachment_store: Optional[AgentStreamAttachmentStore] = None
         self._cursor_path = self._store.cursor_path
@@ -723,8 +742,33 @@ class SessionTailer:
             detail=f"native provider turn {status or 'failed'}",
         )
 
-    async def answer_pending_question(self, text: str, expected_turn_id: str) -> bool:
-        """Answer the current native question without ever starting a turn."""
+    @staticmethod
+    def _answer_covers_card(
+        answers: List[Dict[str, Any]],
+        card: _PendingApproval,
+    ) -> bool:
+        answered_ids = {
+            answer["questionId"]
+            for answer in answers
+            if isinstance(answer, dict)
+            and isinstance(answer.get("questionId"), str)
+            and isinstance(answer.get("selected"), list)
+        }
+        return bool(card.question_ids) and card.question_ids <= answered_ids
+
+    async def answer_pending_question(
+        self,
+        text: str,
+        expected_turn_id: str,
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
+        """Answer one exact native question without ever starting a turn.
+
+        Legacy callers may omit ``expected_call_id``. Managed Chat supplies the
+        card call id so a delayed click can never answer a newer provider
+        request that happens to reuse the same question ids.
+        """
         answers = parse_ask_question_response(text)
         transport = self._native_transport
         if (
@@ -734,18 +778,51 @@ class SessionTailer:
             or not transport.turn_in_flight
         ):
             return False
-        consumed = await transport.answer_pending_question(answers)
+        if expected_call_id is not None:
+            card = self._pending_approvals.get(expected_call_id)
+            if (
+                card is None
+                or card.turn_id != expected_turn_id
+                or not self._answer_covers_card(answers, card)
+            ):
+                return False
+            consumed = await transport.answer_pending_question(
+                answers,
+                expected_call_id=expected_call_id,
+            )
+        else:
+            consumed = await transport.answer_pending_question(answers)
         if consumed:
-            await self._emit_approval_resolved(answers)
+            await self._emit_approval_resolved(
+                answers,
+                expected_turn_id=expected_turn_id if expected_call_id is not None else None,
+                expected_call_id=expected_call_id,
+            )
         return consumed
 
-    async def resolve_answered_questions(self, text: str) -> None:
+    async def resolve_answered_questions(
+        self,
+        text: str,
+        *,
+        expected_turn_id: Optional[str] = None,
+        expected_call_id: Optional[str] = None,
+    ) -> None:
         """Close question cards whose answer travels inside another turn."""
         answers = parse_ask_question_response(text)
         if answers is not None and self._pending_approvals:
-            await self._emit_approval_resolved(answers)
+            await self._emit_approval_resolved(
+                answers,
+                expected_turn_id=expected_turn_id,
+                expected_call_id=expected_call_id,
+            )
 
-    def accepts_question_followup(self, text: str, expected_turn_id: str) -> bool:
+    def accepts_question_followup(
+        self,
+        text: str,
+        expected_turn_id: str,
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
         """Claude/Cursor answer questions with a new turn, not in-turn."""
         session = self._session_getter()
         answers = parse_ask_question_response(text)
@@ -753,17 +830,15 @@ class SessionTailer:
             return False
         if answers is None:
             return False
-        ids = {
-            answer["questionId"]
-            for answer in answers
-            if isinstance(answer, dict)
-            and isinstance(answer.get("questionId"), str)
-            and isinstance(answer.get("selected"), list)
-        }
+        if expected_call_id is not None:
+            card = self._pending_approvals.get(expected_call_id)
+            return bool(
+                card is not None
+                and card.turn_id == expected_turn_id
+                and self._answer_covers_card(answers, card)
+            )
         return any(
-            card.turn_id == expected_turn_id
-            and bool(card.question_ids)
-            and (not answers or card.question_ids <= ids)
+            card.turn_id == expected_turn_id and self._answer_covers_card(answers, card)
             for card in self._pending_approvals.values()
         )
 
@@ -830,6 +905,7 @@ class SessionTailer:
         failure we append an ``error`` and a ``turn_completed(status=failed)``
         for the same ``turn_id`` so the frontend never leaves the turn pending.
         """
+        self._require_startable_incarnation()
         transport = self._native_transport
         if transport is None:
             raise RuntimeError("no native transport for this session; use the terminal send path")
@@ -841,8 +917,10 @@ class SessionTailer:
         # killed. The composer-side lock was already released by the cancelled
         # edge, so this only bounds a resend sent within the teardown window.
         await self._await_turn_teardown()
+        self._require_startable_incarnation()
         if not transport._started:
             await transport.start()
+        self._require_startable_incarnation()
 
         # A structured answer to a provider-native blocking question (e.g.
         # Codex ``requestUserInput``) must be routed as the question's JSON-RPC
@@ -867,6 +945,7 @@ class SessionTailer:
                     return
 
         async with self._send_lock:
+            self._require_startable_incarnation()
             # 1. Busy check BEFORE any state mutation. If a turn is already in
             #    flight, fail fast so the in-flight turn's _active_turn_id and
             #    _run_epoch are never overwritten — unless the caller steers.
@@ -1732,10 +1811,34 @@ class SessionTailer:
         self._completion_subscribers.discard(queue)
         self._last_subscriber_at = time.monotonic()
 
+    def matches_session(self, session: ManagedSession) -> bool:
+        """Whether ``session`` is this tailer's exact durable owner incarnation."""
+        return self._session_identity == (
+            session.workspace_id,
+            session.tab_id,
+            session.created_at,
+        )
+
+    def _incarnation_is_current(self) -> bool:
+        session = self._session_getter()
+        return bool(session is not None and self.matches_session(session))
+
+    def _require_startable_incarnation(self) -> None:
+        if self.session_id in _DELETION_FENCED_SESSION_IDS or not self._incarnation_is_current():
+            raise StructuredSourceUnavailable("structured runtime owner was deleted or replaced")
+
+    def _require_publishable_incarnation(self) -> None:
+        if not self._incarnation_is_current() or (
+            self.session_id in _DELETION_FENCED_SESSION_IDS and id(self) not in _RETIRING_TAILER_IDS
+        ):
+            raise StructuredSourceUnavailable("structured runtime owner was deleted or replaced")
+
     async def start(self) -> None:
+        self._require_startable_incarnation()
         if self.is_running():
             return
         async with self._send_lock:
+            self._require_startable_incarnation()
             # ``start`` is the first touch after a backend restart. A new
             # native transport cannot own a durable turn from the old process,
             # so repair that lifecycle immediately; history loading will then
@@ -1744,6 +1847,7 @@ class SessionTailer:
                 return
             if self._native_transport is not None and not self._native_transport.turn_in_flight:
                 await self._recover_orphaned_turn_locked()
+            self._require_startable_incarnation()
             self._stopped = False
             # (Re)starting the consumer is explicit liveness evidence from
             # either a UI subscriber or a headless background dispatch (a
@@ -1796,6 +1900,7 @@ class SessionTailer:
                                 self._native_transport,
                                 error_message=_RUNTIME_INTERRUPTED_MESSAGE,
                                 await_teardown=True,
+                                require_teardown=raise_errors,
                             )
                 except Exception as exc:
                     errors.append(exc)
@@ -2844,7 +2949,13 @@ class SessionTailer:
             # suppressed for the rest of the turn.
             self._active_tool_call_ids.discard(event.call_id)
 
-    async def _emit_approval_resolved(self, answers: Optional[List[Dict[str, Any]]] = None) -> None:
+    async def _emit_approval_resolved(
+        self,
+        answers: Optional[List[Dict[str, Any]]] = None,
+        *,
+        expected_turn_id: Optional[str] = None,
+        expected_call_id: Optional[str] = None,
+    ) -> None:
         """Persist + fan out ``approval_resolved`` for the answered cards.
 
         Snapshot + clear before any await so a concurrent answer cannot emit a
@@ -2857,16 +2968,28 @@ class SessionTailer:
         """
         if not self._pending_approvals:
             return
-        answered_ids = {
-            answer["questionId"]
-            for answer in answers or []
-            if isinstance(answer, dict) and isinstance(answer.get("questionId"), str)
-        }
-        pending = {
-            key: card
-            for key, card in self._pending_approvals.items()
-            if not answers or not card.question_ids or card.question_ids <= answered_ids
-        }
+        if expected_call_id is not None:
+            card = self._pending_approvals.get(expected_call_id)
+            pending = (
+                {expected_call_id: card}
+                if card is not None
+                and (expected_turn_id is None or card.turn_id == expected_turn_id)
+                and answers is not None
+                and self._answer_covers_card(answers, card)
+                else {}
+            )
+        else:
+            answered_ids = {
+                answer["questionId"]
+                for answer in answers or []
+                if isinstance(answer, dict) and isinstance(answer.get("questionId"), str)
+            }
+            pending = {
+                key: card
+                for key, card in self._pending_approvals.items()
+                if (expected_turn_id is None or card.turn_id == expected_turn_id)
+                and (not answers or not card.question_ids or card.question_ids <= answered_ids)
+            }
         for key in pending:
             self._pending_approvals.pop(key)
             self._blocking_approval_call_ids.discard(key)
@@ -2914,6 +3037,7 @@ class SessionTailer:
         from this callback so a single failed persist does not abort the
         whole flush.
         """
+        self._require_publishable_incarnation()
         event = await self._store.append(event)
         if self._is_live:
             self._fanout(event)
@@ -3151,11 +3275,29 @@ class TailerManager:
         self._edit_locks: Dict[str, asyncio.Lock] = {}
         _TAILER_MANAGERS.add(self)
 
+    def session_is_current(self, session: ManagedSession) -> bool:
+        """Whether ``session`` is still the manager's exact durable owner."""
+        live = self._session_getter(session.id)
+        return bool(
+            live is not None
+            and live.workspace_id == session.workspace_id
+            and live.tab_id == session.tab_id
+            and live.created_at == session.created_at
+        )
+
     async def _get_or_create(self, session: ManagedSession) -> SessionTailer:
         existing: Optional[SessionTailer] = None
         async with self._lock:
+            if not self.session_is_current(session):
+                raise StructuredSourceUnavailable("managed session was deleted or replaced")
+            if session.id in _DELETION_FENCED_SESSION_IDS:
+                raise StructuredSourceUnavailable("structured runtime is fenced for deletion")
             tailer = self._tailers.get(session.id)
             if tailer is not None:
+                if not tailer.matches_session(session):
+                    raise StructuredSourceUnavailable(
+                        "structured runtime belongs to a replaced session incarnation"
+                    )
                 existing = tailer
             else:
                 from .registry import get_adapter_for_session
@@ -3297,11 +3439,32 @@ class TailerManager:
         tailer = await self._get_or_create(session)
         return await tailer.retire_external_turn(expected_turn_id)
 
+    async def active_turn_id(self, session: ManagedSession) -> Optional[str]:
+        """Observe the attached provider-owned turn without creating an owner."""
+        if not self.session_is_current(session):
+            return None
+        tailer = self.get_tailer(session.id)
+        if tailer is None or not tailer.matches_session(session):
+            return None
+        transport = tailer._native_transport
+        if transport is None or not transport.turn_in_flight:
+            return None
+        return tailer._active_turn_id
+
     async def answer_pending_question(
-        self, session: ManagedSession, text: str, expected_turn_id: str
+        self,
+        session: ManagedSession,
+        text: str,
+        expected_turn_id: str,
+        *,
+        expected_call_id: Optional[str] = None,
     ) -> bool:
-        tailer = await self._get_or_create(session)
-        return await tailer.answer_pending_question(text, expected_turn_id)
+        tailer = self.get_tailer(session.id) or await self._get_or_create(session)
+        return await tailer.answer_pending_question(
+            text,
+            expected_turn_id,
+            expected_call_id=expected_call_id,
+        )
 
     async def turn_in_flight(self, session: ManagedSession) -> bool:
         """Return the authoritative native transport turn guard."""
@@ -3310,14 +3473,34 @@ class TailerManager:
         return bool(transport is not None and transport.turn_in_flight)
 
     async def accepts_question_followup(
-        self, session: ManagedSession, text: str, expected_turn_id: str
+        self,
+        session: ManagedSession,
+        text: str,
+        expected_turn_id: str,
+        *,
+        expected_call_id: Optional[str] = None,
     ) -> bool:
-        tailer = await self._get_or_create(session)
-        return tailer.accepts_question_followup(text, expected_turn_id)
+        tailer = self.get_tailer(session.id) or await self._get_or_create(session)
+        return tailer.accepts_question_followup(
+            text,
+            expected_turn_id,
+            expected_call_id=expected_call_id,
+        )
 
-    async def resolve_answered_questions(self, session: ManagedSession, text: str) -> None:
-        tailer = await self._get_or_create(session)
-        await tailer.resolve_answered_questions(text)
+    async def resolve_answered_questions(
+        self,
+        session: ManagedSession,
+        text: str,
+        *,
+        expected_turn_id: Optional[str] = None,
+        expected_call_id: Optional[str] = None,
+    ) -> None:
+        tailer = self.get_tailer(session.id) or await self._get_or_create(session)
+        await tailer.resolve_answered_questions(
+            text,
+            expected_turn_id=expected_turn_id,
+            expected_call_id=expected_call_id,
+        )
 
     async def edit_resend(
         self,
@@ -3570,6 +3753,8 @@ class TailerManager:
         if transport is None or tailer.native_error is not None:
             raise RuntimeError(tailer.native_error or "native provider transport unavailable")
         await transport.set_mode(mode)
+        if not self.session_is_current(session) or not tailer.matches_session(session):
+            raise StructuredSourceUnavailable("managed session was deleted or replaced")
         if self._persist_mode_cb is not None:
             self._persist_mode_cb(session.id, mode)
 
@@ -3577,7 +3762,11 @@ class TailerManager:
         """Update the native owner's session env for subsequent turns."""
 
         tailer = self._tailers.get(session.id)
-        if tailer is None:
+        if (
+            tailer is None
+            or not self.session_is_current(session)
+            or not tailer.matches_session(session)
+        ):
             return
         transport = tailer.native_transport
         if transport is None or tailer.native_error is not None:
@@ -3620,7 +3809,13 @@ class TailerManager:
         """
 
         async with self._lock:
+            if not self.session_is_current(session) or session.id in _DELETION_FENCED_SESSION_IDS:
+                raise StructuredSourceUnavailable("managed session was deleted or replaced")
             previous = self._tailers.get(session.id)
+            if previous is not None and not previous.matches_session(session):
+                raise StructuredSourceUnavailable(
+                    "structured runtime belongs to a replaced session incarnation"
+                )
             if previous is not None and self._is_reusable(previous):
                 self._tailers[session.id] = previous
                 _HARD_FAILED_SESSION_IDS.discard(session.id)
@@ -3709,6 +3904,25 @@ class TailerManager:
                     session_id,
                 )
 
+    async def fence_session(self, session_id: str) -> bool:
+        """Strictly stop and detach an owner without releasing its delete fence."""
+        async with self._lock:
+            tailer = self._tailers.pop(session_id, None)
+        if tailer is None:
+            return False
+        _RETIRING_TAILER_IDS.add(id(tailer))
+        try:
+            await tailer.stop(raise_errors=True)
+        except BaseException:
+            async with self._lock:
+                self._tailers.setdefault(session_id, tailer)
+            raise
+        finally:
+            _RETIRING_TAILER_IDS.discard(id(tailer))
+        _HARD_FAILED_SESSION_IDS.discard(session_id)
+        invalidate_source(session_id)
+        return True
+
     async def forget_session(self, session_id: str, *, require_fenced: bool = False) -> bool:
         """Stop and discard an in-process tailer for a deleted session.
 
@@ -3745,23 +3959,42 @@ class TailerManager:
                     raise result
 
 
+async def fence_session_stream(session_id: str) -> bool:
+    """Strictly stop every in-process owner while retaining durable evidence.
+
+    ``False`` means no manager owned a process-local runtime; it is not a
+    provider fence. Callers must keep that distinction when validating an
+    accepted but semantically unacknowledged delivery. The reservation is kept
+    until destructive cleanup finishes, so a failed state commit cannot admit
+    a replacement owner or forget a previously completed fence.
+    """
+
+    _DELETION_FENCED_SESSION_IDS.add(session_id)
+    provider_fenced = session_id in _PROVIDER_FENCED_SESSION_IDS
+    for manager in list(_TAILER_MANAGERS):
+        provider_fenced = await manager.fence_session(session_id) or provider_fenced
+    if provider_fenced:
+        _PROVIDER_FENCED_SESSION_IDS.add(session_id)
+    return provider_fenced
+
+
 async def discard_session_stream(
     workspace_id: str,
     session_id: str,
     *,
     acknowledged_call_ids: Optional[Set[str]] = None,
+    provider_fenced: Optional[bool] = None,
 ) -> None:
-    """Purge all structured state when a managed session is deleted.
+    """Purge structured state only after its runtime identity is retired.
 
-    The workspace allocator may reuse a friendly session id (for example,
-    ``prefix-agent-1``). Both on-disk events and an in-process tailer therefore
-    must be forgotten before that id can identify another conversation.
+    When ``provider_fenced`` is supplied, the caller already completed strict
+    teardown before durably removing the owning session. Omitting it preserves
+    the original combined fence-and-discard behavior for direct tab lifecycle
+    callers.
     """
-    provider_fenced = False
-    for manager in list(_TAILER_MANAGERS):
-        provider_fenced = (
-            await manager.forget_session(session_id, require_fenced=True) or provider_fenced
-        )
+
+    if provider_fenced is None:
+        provider_fenced = await fence_session_stream(session_id)
 
     # Delivery receipts outlive the event log and can make a reused friendly id
     # look accepted or permanently uncertain. Validate them only after every
@@ -3783,6 +4016,8 @@ async def discard_session_stream(
     # cannot surface another conversation's images.
     await AgentStreamAttachmentStore(workspace_id, session_id).clear()
     await asyncio.to_thread(managed_chat.discard_delivery_state, workspace_id, session_id)
+    _PROVIDER_FENCED_SESSION_IDS.discard(session_id)
+    _DELETION_FENCED_SESSION_IDS.discard(session_id)
 
 
 async def stop_session_stream(session_id: str) -> None:

@@ -1,5 +1,10 @@
 # Managed Workspace Chat execution
 
+> Follow-up cross-verification found control-routing and failure-ordering gaps
+> after the initial delivery. The validation below records that earlier candidate,
+> not final acceptance of the repairs. See
+> [managed Chat control repairs](2026-10-15-managed-chat-control-repairs.md).
+
 ## Scope and baseline
 
 User request: enable Chat execution for Workspace agents and independent reviewers,

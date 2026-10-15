@@ -589,7 +589,7 @@ class _TasksMixin:
             return
         elif task.status == WorkspaceTaskStatus.WORKING:
             if task.session_id:
-                self._resume_chat_session(task.session_id)
+                await self._resume_chat_session(task.session_id)
                 await self.send_session_message(task.session_id, message, call_id=call_id)
         elif task.status == WorkspaceTaskStatus.REVIEW:
             await self.continue_task(

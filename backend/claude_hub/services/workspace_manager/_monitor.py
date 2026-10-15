@@ -34,12 +34,19 @@ class _MonitorMixin:
             if session.status in {ManagedSessionStatus.DONE, ManagedSessionStatus.ERROR}:
                 continue
             if session.session_kind == SessionKind.CHAT:
-                self._refresh_chat_session_status(session)
-                changed = changed or self.sessions[session_id] != session
+                changed = self._refresh_chat_session_status(session) or changed
                 continue
             status = statuses.get(session.tab_id)
             if not status:
                 continue
+            live = self.sessions.get(session_id)
+            if (
+                live is None
+                or live.tab_id != session.tab_id
+                or live.created_at != session.created_at
+            ):
+                continue
+            session = live
             next_status = self._map_runtime_status(status)
             runtime_status = status.status
             if next_status == ManagedSessionStatus.STOPPED and self._is_spawn_grace_period(session):
@@ -68,11 +75,14 @@ class _MonitorMixin:
                         task,
                         status.sampled_at,
                     )
+                    current = self._current_monitor_entities(session, task)
+                    if current is None:
+                        continue
+                    session, task = current
                     if stalled_update:
                         update.update(stalled_update)
                         next_status = update["status"]
                         runtime_status = update["runtime_status"]
-                        task = self.tasks.get(current_task_id)
                         changed = True
                 if (
                     run_auto_continue
@@ -85,6 +95,10 @@ class _MonitorMixin:
                         task,
                         status.sampled_at,
                     )
+                    current = self._current_monitor_entities(session, task)
+                    if current is None:
+                        continue
+                    session, task = current
                     if auto_continue_update:
                         update.update(auto_continue_update)
                         next_status = update["status"]
@@ -128,7 +142,22 @@ class _MonitorMixin:
                     update["task_id"] = current_task_id
                     changed = True
 
-            self.sessions[session_id] = session.model_copy(update=update)
+            if current_task_id and task is not None:
+                current = self._current_monitor_entities(session, task)
+                if current is None:
+                    continue
+                live, task = current
+            else:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or self.workspaces.get(session.workspace_id) is None
+                    or live.workspace_id != session.workspace_id
+                    or live.tab_id != session.tab_id
+                    or live.created_at != session.created_at
+                ):
+                    continue
+            self.sessions[session_id] = live.model_copy(update=update)
             changed = True
 
         # --- Failure detection: session death and timeout ---
@@ -182,6 +211,28 @@ class _MonitorMixin:
         if changed:
             self._save_state()
 
+    def _current_monitor_entities(
+        self,
+        session: ManagedSession,
+        task: WorkspaceTask,
+    ) -> tuple[ManagedSession, WorkspaceTask] | None:
+        """Return the exact live monitor owners, rejecting deletion or reuse."""
+        live = self.sessions.get(session.id)
+        live_task = self.tasks.get(task.id)
+        if (
+            self.workspaces.get(session.workspace_id) is None
+            or live is None
+            or live.workspace_id != session.workspace_id
+            or live.tab_id != session.tab_id
+            or live.created_at != session.created_at
+            or live_task is None
+            or live_task.workspace_id != task.workspace_id
+            or live_task.created_at != task.created_at
+            or not self._workspace_owns_task(live_task)
+        ):
+            return None
+        return live, live_task
+
     async def _detect_prompt_dispatch_stall(
         self,
         session: ManagedSession,
@@ -190,10 +241,10 @@ class _MonitorMixin:
     ) -> dict[str, Any] | None:
         if session.session_kind == SessionKind.CHAT:
             return None
-        live = self.tasks.get(task.id)
-        if live is None or not self._workspace_owns_task(live):
+        current = self._current_monitor_entities(session, task)
+        if current is None:
             return None
-        task = live
+        session, task = current
         if self._prompt_dispatch_still_in_grace_period(session, task, sampled_at):
             return None
         try:
@@ -205,6 +256,10 @@ class _MonitorMixin:
                 exc,
             )
             return None
+        current = self._current_monitor_entities(session, task)
+        if current is None:
+            return None
+        session, task = current
 
         # Check ALL known prompt prefixes rather than a single one. The
         # continue_task and hard-recovery paths send prompts that start with
@@ -352,17 +407,22 @@ class _MonitorMixin:
             session.role,
         )
         await self._run_tmux("send-keys", "-t", session.tmux_session, "Enter")
-        self.sessions[session.id] = session.model_copy(
-            update={
-                "status": ManagedSessionStatus.WORKING,
-                "runtime_status": AgentRuntimeStatus.WORKING,
-                "prompt_retry_task_id": task.id,
-                "prompt_retry_attempted_at": sampled_at,
-                "last_activity_at": sampled_at,
-                "updated_at": sampled_at,
-            }
-        )
-        self._save_state()
+        async with self.workspace_mutation_lock(session.workspace_id):
+            current = self._current_monitor_entities(session, task)
+            if current is None:
+                return
+            live, _live_task = current
+            self.sessions[session.id] = live.model_copy(
+                update={
+                    "status": ManagedSessionStatus.WORKING,
+                    "runtime_status": AgentRuntimeStatus.WORKING,
+                    "prompt_retry_task_id": task.id,
+                    "prompt_retry_attempted_at": sampled_at,
+                    "last_activity_at": sampled_at,
+                    "updated_at": sampled_at,
+                }
+            )
+            self._save_state()
 
     def _mark_prompt_dispatch_stalled(
         self,
@@ -449,10 +509,10 @@ class _MonitorMixin:
         #   reviewer as a worker owing a report and endlessly auto-prompt it.
         # - During REVIEW: the reviewer (task.review_session_id). The worker may
         #   also be idle but should not be auto-continued while review is in flight.
-        live = self.tasks.get(task.id)
-        if live is None or not self._workspace_owns_task(live):
+        current = self._current_monitor_entities(session, task)
+        if current is None:
             return None
-        task = live
+        session, task = current
         is_worker = bool(task.session_id and task.session_id == session.id)
         is_reviewer = bool(task.review_session_id and task.review_session_id == session.id)
         sealed_round_awaiting_continue = False
@@ -557,6 +617,10 @@ class _MonitorMixin:
                 exc,
             )
             return None
+        current = self._current_monitor_entities(session, task)
+        if current is None:
+            return None
+        session, task = current
 
         if self._auto_continue_output_looks_busy(output):
             return {
@@ -693,13 +757,9 @@ class _MonitorMixin:
                     "current_task_id": None,
                     "updated_at": sampled_at,
                 }
-            self.tasks[task.id] = task.model_copy(
-                update={
-                    "status": WorkspaceTaskStatus.REVIEW,
-                    "reviewed_at": sampled_at,
-                    "updated_at": sampled_at,
-                }
-            )
+            # Keep the durable task in WORKING until the caller records the
+            # NEEDS_INPUT report and dispatches its reviewer. Mutating it here
+            # would make the caller's fresh revalidation skip that transition.
             logger.warning(
                 "Workspace agent hard recovery exhausted session_id=%s task_id=%s "
                 "soft_attempts=%s hard_attempts=%s reason=%s",
@@ -743,13 +803,9 @@ class _MonitorMixin:
                     "current_task_id": None,
                     "updated_at": sampled_at,
                 }
-            self.tasks[task.id] = task.model_copy(
-                update={
-                    "status": WorkspaceTaskStatus.REVIEW,
-                    "reviewed_at": sampled_at,
-                    "updated_at": sampled_at,
-                }
-            )
+            # Keep the durable task in WORKING until the caller records the
+            # NEEDS_INPUT report and dispatches its reviewer. Mutating it here
+            # would make the caller's fresh revalidation skip that transition.
             logger.warning(
                 "Workspace agent auto-continue limit reached session_id=%s task_id=%s attempts=%s hard_attempts=%s",
                 session.id,
@@ -819,7 +875,7 @@ class _MonitorMixin:
         interruption_reason: str,
         soft_attempts: int,
         hard_attempts: int,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Hard-recover a stuck agent: interrupt, /clear, re-inject task prompt.
 
         This is the escalation path when soft auto-continue prompts fail to
@@ -828,7 +884,10 @@ class _MonitorMixin:
         window is wiped via /clear so the agent can continue without a corrupt
         error state in its context.
         """
-        task = self._require_workspace_execution(task)
+        current = self._current_monitor_entities(session, task)
+        if current is None:
+            return None
+        session, task = current
         workspace = self.workspaces.get(task.workspace_id)
         if not workspace:
             logger.warning(
@@ -866,14 +925,36 @@ class _MonitorMixin:
         )
 
         # Step 1: Interrupt the agent (Escape + single Ctrl-C) to dismiss any
-        # error dialog and return to the Claude prompt.
-        await self._interrupt_session(session)
+        # error dialog and return to the Claude prompt. Serialize this side
+        # effect with deletion, but do not hold the mutation lock across the
+        # later settle sleeps.
+        async with self.workspace_mutation_lock(session.workspace_id):
+            current = self._current_monitor_entities(session, task)
+            if current is None:
+                return None
+            session, task = current
+            await self._interrupt_session(session)
         await asyncio.sleep(INTERRUPT_SETTLE_SECONDS)
+        current = self._current_monitor_entities(session, task)
+        if current is None:
+            return None
+        session, task = current
 
         # Step 2: Reset through the execution transport, never as Chat text.
-        await self._reset_session_context(session)
+        try:
+            await self._reset_session_context(session)
+        except KeyError:
+            return None
+        current = self._current_monitor_entities(session, task)
+        if current is None:
+            return None
+        session, task = current
         if session.session_kind != SessionKind.CHAT:
             await asyncio.sleep(max(0.0, CLEAR_CONTEXT_SETTLE_SECONDS - 0.5))
+            current = self._current_monitor_entities(session, task)
+            if current is None:
+                return None
+            session, task = current
 
         # Step 3: Re-inject the appropriate recovery prompt.
         if session.role == WorkspaceSessionRole.REVIEWER:
@@ -906,7 +987,13 @@ class _MonitorMixin:
                 recovery_attempt=new_hard_attempts,
             )
 
-        await self.send_session_message(session.id, prompt)
+        try:
+            await self.send_session_message(session.id, prompt)
+        except KeyError:
+            return None
+        current = self._current_monitor_entities(session, task)
+        if current is None:
+            return None
 
         logger.info(
             "Hard recovery complete for session_id=%s task_id=%s hard_attempt=%s",
@@ -1210,6 +1297,15 @@ class _MonitorMixin:
         )
 
         for session_id in session_ids:
+            live_task = self.tasks.get(task.id)
+            if (
+                self.workspaces.get(task.workspace_id) is None
+                or live_task is None
+                or live_task.workspace_id != task.workspace_id
+                or live_task.created_at != task.created_at
+                or not self._workspace_owns_task(live_task)
+            ):
+                return ephemeral_tab_ids
             session = self.sessions.get(session_id)
             if not session or session.role != WorkspaceSessionRole.REVIEWER:
                 continue

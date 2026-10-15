@@ -22,29 +22,76 @@ class _ChatMixin:
         message: str,
         attachments: list[WorkspaceAttachmentCreate] | None = None,
         call_id: str | None = None,
+        *,
+        expected_session: ManagedSession | None = None,
     ) -> None:
         """Submit explicit user input through the durable Workspace mailbox."""
-        session = self.sessions.get(session_id)
-        if session is None:
+        current = self.sessions.get(session_id)
+        if current is None:
             raise KeyError(session_id)
-        if session.session_kind != SessionKind.CHAT:
+        if expected_session is not None and (
+            current.workspace_id != expected_session.workspace_id
+            or current.tab_id != expected_session.tab_id
+            or current.created_at != expected_session.created_at
+        ):
+            raise KeyError(f"session {session_id} was deleted or replaced")
+        if current.session_kind != SessionKind.CHAT:
             raise ValueError("This endpoint requires a managed Chat session")
         if not message.strip() and not attachments:
             raise ValueError("A message or attachment is required")
-        if session.status == ManagedSessionStatus.STOPPED:
-            raise ValueError("The managed Chat session has been stopped")
-        self._assert_session_seat(session)
-        # Invalid input must not undo an explicit Stop before the mailbox rejects it.
-        fingerprint = self._compute_payload_fingerprint(message, attachments or [])
-        if call_id and call_id in session.call_payload_fingerprints:
-            if session.call_payload_fingerprints[call_id] != fingerprint:
-                raise ValueError("call_id already identifies a different message")
-        if session.uncertain_call_ids:
-            raise RuntimeError("Chat delivery is uncertain; reconcile it before resuming")
-        self._resume_chat_session(session_id)
-        await self.send_session_message(session_id, message, attachments, call_id)
+        if call_id:
+            fingerprint = self._compute_payload_fingerprint(message, attachments or [])
+            existing = current.call_payload_fingerprints.get(call_id)
+            if existing is not None:
+                if existing != fingerprint:
+                    raise ValueError("call_id already identifies a different message")
+                if call_id in current.processing_call_ids or call_id in current.delivered_call_ids:
+                    return
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with self.workspace_mutation_lock(current.workspace_id):
+            async with lock:
+                session = self.sessions.get(session_id)
+                if (
+                    session is None
+                    or session.tab_id != current.tab_id
+                    or session.created_at != current.created_at
+                ):
+                    raise KeyError(f"session {session_id} was deleted or replaced")
+                if session.session_kind != SessionKind.CHAT:
+                    raise ValueError("This endpoint requires a managed Chat session")
+                if not message.strip() and not attachments:
+                    raise ValueError("A message or attachment is required")
+                if session.status == ManagedSessionStatus.STOPPED:
+                    raise ValueError("The managed Chat session has been stopped")
+                self._assert_session_seat(session)
+                # Invalid input must not undo an explicit Stop before the mailbox rejects it.
+                fingerprint = self._compute_payload_fingerprint(message, attachments or [])
+                if call_id and call_id in session.call_payload_fingerprints:
+                    if session.call_payload_fingerprints[call_id] != fingerprint:
+                        raise ValueError("call_id already identifies a different message")
+                if session.uncertain_call_ids:
+                    raise RuntimeError("Chat delivery is uncertain; reconcile it before resuming")
+                self._resume_chat_session_locked(session_id)
+                await self._send_session_message_locked(session_id, message, attachments, call_id)
 
-    def _resume_chat_session(self, session_id: str) -> None:
+    async def _resume_chat_session(self, session_id: str) -> None:
+        """Resume a managed Chat while serialized with delivery and deletion."""
+        expected = self.sessions.get(session_id)
+        if expected is None:
+            return
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with self.workspace_mutation_lock(expected.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != expected.tab_id
+                    or live.created_at != expected.created_at
+                ):
+                    return
+                self._resume_chat_session_locked(session_id)
+
+    def _resume_chat_session_locked(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
         if session is None or session.session_kind != SessionKind.CHAT or not session.chat_paused:
             return
@@ -64,28 +111,36 @@ class _ChatMixin:
         self, session_id: str, *, expected_turn_id: Optional[str] = None
     ) -> bool:
         """Stop only the targeted turn and pause automatic mailbox delivery."""
+        expected = self.sessions.get(session_id)
+        if expected is None:
+            raise KeyError(session_id)
         lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            session = self.sessions.get(session_id)
-            if session is None:
-                raise KeyError(session_id)
-            if session.session_kind != SessionKind.CHAT:
-                raise ValueError("This endpoint requires a managed Chat session")
-            self._assert_session_seat(session)
-            cancelled = await managed_chat.cancel(session, expected_turn_id=expected_turn_id)
-            if cancelled:
-                # Re-read after awaiting: a final report may have updated task ownership.
-                session = self.sessions[session_id]
-                self.sessions[session_id] = session.model_copy(
-                    update={
-                        "chat_paused": True,
-                        "status": ManagedSessionStatus.NEEDS_INPUT,
-                        "runtime_status": AgentRuntimeStatus.ATTENTION,
-                        "updated_at": _now(),
-                    }
-                )
-                self._save_state()
-            return cancelled
+        async with self.workspace_mutation_lock(expected.workspace_id):
+            async with lock:
+                session = self.sessions.get(session_id)
+                if (
+                    session is None
+                    or session.tab_id != expected.tab_id
+                    or session.created_at != expected.created_at
+                ):
+                    raise KeyError(f"session {session_id} was deleted or replaced")
+                if session.session_kind != SessionKind.CHAT:
+                    raise ValueError("This endpoint requires a managed Chat session")
+                self._assert_session_seat(session)
+                cancelled = await managed_chat.cancel(session, expected_turn_id=expected_turn_id)
+                if cancelled:
+                    # Re-read after awaiting: a final report may have updated task ownership.
+                    session = self.sessions[session_id]
+                    self.sessions[session_id] = session.model_copy(
+                        update={
+                            "chat_paused": True,
+                            "status": ManagedSessionStatus.NEEDS_INPUT,
+                            "runtime_status": AgentRuntimeStatus.ATTENTION,
+                            "updated_at": _now(),
+                        }
+                    )
+                    self._save_state()
+                return cancelled
 
     async def _reset_session_context(self, session: ManagedSession) -> None:
         if session.session_kind != SessionKind.CHAT:
@@ -93,23 +148,45 @@ class _ChatMixin:
             await asyncio.sleep(0.5)
             return
         lock = self._pump_locks.setdefault(session.id, asyncio.Lock())
-        async with lock:
-            session = self.sessions[session.id]
-            self._assert_session_seat(session)
-            if session.uncertain_call_ids:
-                raise RuntimeError("Cannot reset a Chat with uncertain message delivery")
-            if managed_chat.is_turn_running(session):
-                await managed_chat.cancel(session)
-            await managed_chat.reset_context(self.sessions[session.id])
+        async with self.workspace_mutation_lock(session.workspace_id):
+            async with lock:
+                live = self.sessions.get(session.id)
+                if (
+                    live is None
+                    or live.tab_id != session.tab_id
+                    or live.created_at != session.created_at
+                ):
+                    raise KeyError(f"session {session.id} was deleted or replaced")
+                self._assert_session_seat(live)
+                if live.uncertain_call_ids:
+                    raise RuntimeError("Cannot reset a Chat with uncertain message delivery")
+                if managed_chat.is_turn_running(live):
+                    await managed_chat.cancel(live)
+                current = self.sessions.get(session.id)
+                if (
+                    current is None
+                    or current.tab_id != session.tab_id
+                    or current.created_at != session.created_at
+                ):
+                    raise KeyError(f"session {session.id} was deleted or replaced")
+                await managed_chat.reset_context(current)
 
-    def _refresh_chat_session_status(self, session: ManagedSession) -> None:
+    def _refresh_chat_session_status(self, session: ManagedSession) -> bool:
         """Observe native state without terminal heuristics or automatic replay."""
+        live = self.sessions.get(session.id)
+        if live is None or live.tab_id != session.tab_id or live.created_at != session.created_at:
+            return False
+        # The monitor snapshots before awaiting terminal status collection.
+        # Derive every update from the current incarnation so deletion, reuse,
+        # mailbox, pause, and configuration changes cannot be overwritten by
+        # that stale snapshot.
+        session = live
         if session.status in {
             ManagedSessionStatus.STOPPED,
             ManagedSessionStatus.DONE,
             ManagedSessionStatus.ERROR,
         }:
-            return
+            return False
         runtime = managed_chat.runtime_status(session)
         if session.chat_paused or session.uncertain_call_ids:
             runtime = AgentRuntimeStatus.ATTENTION
@@ -143,3 +220,5 @@ class _ChatMixin:
             self.sessions[session.id] = session.model_copy(
                 update={"status": status, "runtime_status": runtime, "updated_at": _now()}
             )
+            return True
+        return False

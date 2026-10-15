@@ -198,7 +198,7 @@
                 <MarkdownContent
                   v-if="turn.userText"
                   :text="turn.userText"
-                  :tab-id="props.tabId"
+                  :tab-id="markdownImageScope"
                   compact
                 />
                 <div
@@ -332,7 +332,7 @@
               <div class="conversation-bubble conversation-bubble--assistant">
                 <MarkdownContent
                   :text="stripTrailingGoalProtocol(part.text)"
-                  :tab-id="props.tabId"
+                  :tab-id="markdownImageScope"
                   compact
                   :complete="turn.completed"
                 />
@@ -575,7 +575,7 @@
                         >
                           <MarkdownContent
                             :text="sub.text"
-                            :tab-id="props.tabId"
+                            :tab-id="markdownImageScope"
                             compact
                             :complete="subthreadTerminal(thread)"
                           />
@@ -826,7 +826,7 @@
                   type="button"
                   class="approval-submit-btn"
                   :disabled="!canSubmitQuestion(part.approval) || isSending"
-                  @click="submitQuestionResponse(part.approval)"
+                  @click="submitQuestionResponse(turn, part.approval)"
                 >
                   提交选择
                 </button>
@@ -927,7 +927,7 @@
               >{{ copyFeedbackLabel(turn.key) }}</span>
             </button>
             <button
-              v-if="completedPlanText(turn)"
+              v-if="!isManagedChat && completedPlanText(turn)"
               type="button"
               class="turn-fork-button turn-implement-button"
               :disabled="implementingPlanKey !== null || turnInFlight || goalComposerLocked"
@@ -964,7 +964,7 @@
               <MarkdownContent
                 v-if="turn.userText"
                 :text="turn.userText"
-                :tab-id="props.tabId"
+                :tab-id="markdownImageScope"
                 compact
               />
               <div
@@ -1122,7 +1122,7 @@
               @change="handleFilePick"
             >
             <div
-              v-if="modeOptions.length > 0"
+              v-if="!isManagedChat && modeOptions.length > 0"
               ref="modePickerEl"
               class="composer-mode-picker"
             >
@@ -1329,7 +1329,8 @@
             <span>Shift+Enter newline</span>
           </template>
           <template v-else-if="isManagedChat">
-            <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
+            <span>Enter / ⌘/Ctrl+Enter send</span>
+            <span v-if="turnInFlight">Busy turn follow-ups are durable</span>
             <span>Shift+Enter newline</span>
           </template>
           <template v-else>
@@ -1441,6 +1442,7 @@ const streamSourceId = computed(() => isManagedChat.value ? props.managedSession
 const streamBasePath = computed(() => isManagedChat.value
   ? `/api/workspaces/sessions/${encodeURIComponent(streamSourceId.value)}/stream`
   : `/api/workspaces/tabs/${encodeURIComponent(streamSourceId.value)}/stream`)
+const markdownImageScope = computed(() => isManagedChat.value ? streamBasePath.value : props.tabId)
 
 const terminalStore = useTerminalStore()
 const appStore = useAppStore()
@@ -1612,6 +1614,7 @@ function completedPlanText(turn: TimelineTurn): string | null {
 }
 
 async function implementPlan(turn: TimelineTurn) {
+  if (isManagedChat.value) return
   const plan = completedPlanText(turn)
   if (!plan || implementingPlanKey.value || turnInFlight.value) return
   if (goalComposerLocked.value) {
@@ -1690,6 +1693,45 @@ type PendingTurn = {
   turnId: string
   userText: string
   attachments: { preview_url: string; mime_type: string }[]
+}
+
+type QuestionIdentity = { turnId: string; callId: string }
+
+type RetriableSend = {
+  clientTurnId: string
+  message: string
+  attachments: DraftAttachment[]
+  questionIdentity: QuestionIdentity | null
+}
+
+const retrySendAttempt = ref<RetriableSend | null>(null)
+
+function sameRetryAttachment(left: DraftAttachment, right: DraftAttachment): boolean {
+  return left.filename === right.filename &&
+    left.mime_type === right.mime_type &&
+    left.data_url === right.data_url &&
+    left.preview_data_url === right.preview_data_url
+}
+
+function reusableSendId(
+  message: string,
+  draftAtts: DraftAttachment[],
+  questionIdentity: QuestionIdentity | null,
+): string | null {
+  const attempt = retrySendAttempt.value
+  if (!attempt || attempt.message !== message || attempt.attachments.length !== draftAtts.length) {
+    return null
+  }
+  if (
+    attempt.questionIdentity?.turnId !== questionIdentity?.turnId ||
+    attempt.questionIdentity?.callId !== questionIdentity?.callId
+  ) {
+    return null
+  }
+  return attempt.attachments.every((attachment, index) =>
+    sameRetryAttachment(attachment, draftAtts[index]))
+    ? attempt.clientTurnId
+    : null
 }
 
 const pendingDirectTurns = ref<PendingTurn[]>([])
@@ -2647,11 +2689,17 @@ function handleComposerEnter(event: KeyboardEvent) {
   })
   if (action === 'ignore' || action === 'newline') return
   event.preventDefault()
-  if (action === 'queue' || (isManagedChat.value && action === 'steer' && turnInFlight.value)) {
+  if (isManagedChat.value) {
+    // Managed Chat has no browser-only queue: every explicit Enter/Ctrl+Enter
+    // is a durable Hub mailbox intent, even while the provider owns a turn.
+    void submit('normal')
+    return
+  }
+  if (action === 'queue') {
     enqueueDraft()
     return
   }
-  void submit(action === 'steer' && !isManagedChat.value ? 'steer' : 'normal')
+  void submit(action === 'steer' ? 'steer' : 'normal')
 }
 
 function enqueueDraft() {
@@ -3016,12 +3064,22 @@ function subthreadInstructionText(tool: TimelineTool): string {
   return tool.subagent?.prompt ?? tool.argsText
 }
 
-async function submitQuestionResponse(approval: TimelineApproval) {
+async function submitQuestionResponse(turn: TimelineTurn, approval: TimelineApproval) {
   if (!canSubmitQuestion(approval)) {
     composerError.value = '请选择所有问题的选项后再提交。'
     return
   }
-  const sent = await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))
+  if (!turn.turnId || !approval.callId) {
+    composerError.value = 'This provider question is missing its current request identity.'
+    return
+  }
+  const delivery = isManagedChat.value ? 'normal' : turnInFlight.value ? 'steer' : 'normal'
+  const sent = await submit(
+    delivery,
+    formatAskQuestionResponse(answersFor(approval.key)),
+    'user',
+    { turnId: turn.turnId, callId: approval.callId },
+  )
   if (sent) markResolved(approval.key)
 }
 
@@ -3054,19 +3112,17 @@ async function cancelActiveTurn() {
       }
       throw new Error(detail)
     }
-    // Consume the body (``{ ok, cancelled }``) but do NOT gate on
-    // ``cancelled``. A 200 means Stop intent was honored, and that includes the
-    // idempotent re-Stop that is the reported wedge (tab 896983b0): a prior Stop
-    // already persisted ``cancelled`` and released the Hub guard, so the backend
-    // answers ``cancelled:false`` ("nothing new to terminalize") while the
-    // browser is still stuck on Reconnecting and this very edge is stuck behind
-    // a wedged long-poll. Keying the reset on that boolean left the composer
-    // locked — the bug. So on ANY successful Stop: optimistically terminalize
-    // the turn we asked about (unlocks + marks Stopped) and nudge /wait so the
-    // real edge reconciles in one RTT. The backend already refuses to cancel a
-    // genuinely different LIVE turn via the expected_turn_id hint, so the only
-    // false-but-200 cases are already-terminal / idempotent — safe to resolve.
-    await res.json().catch(() => ({}))
+    const result: { cancelled?: boolean; outcome?: string } = await res.json().catch(() => ({}))
+    if (
+      isManagedChat.value &&
+      result?.cancelled !== true &&
+      result?.outcome !== 'already_terminal'
+    ) {
+      throw new Error('Stop did not match the current managed Chat turn.')
+    }
+    // Direct Chat preserves its legacy idempotent 200 contract. Managed Chat
+    // uses the explicit outcome so a stale Stop can never unlock a newer turn,
+    // while an already-terminal retry still repairs a wedged local view.
     if (cancelledTurnId) {
       optimisticCancelledTurnId.value = cancelledTurnId
     }
@@ -3104,6 +3160,7 @@ async function sendToStream(
   clientTurnId: string,
   delivery: 'normal' | 'steer' = 'normal',
   timeoutMs: number | null = null,
+  questionIdentity: QuestionIdentity | null = null,
 ) {
   const base = `${streamBasePath.value}/send`
   const controller = new AbortController()
@@ -3120,6 +3177,8 @@ async function sendToStream(
         text: message,
         delivery,
         attachments: atts.map(toStreamSendAttachment),
+        question_turn_id: questionIdentity?.turnId,
+        question_call_id: questionIdentity?.callId,
       }),
     })
   } catch (error) {
@@ -3234,6 +3293,7 @@ async function submit(
   delivery: 'normal' | 'steer' = 'normal',
   messageOverride?: string,
   source: 'user' | 'queue' = 'user',
+  questionIdentity: QuestionIdentity | null = null,
 ): Promise<boolean> {
   if (isSending.value) return false
   if (!messageOverride && goalInputBlocked.value) {
@@ -3251,7 +3311,12 @@ async function submit(
   const message = messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || attachments.value.length > 0
   if (!hasContent) return false
-  if (delivery === 'normal' && (turnInFlight.value || goalSteerOnly.value) && !messageOverride) {
+  if (
+    !isManagedChat.value &&
+    delivery === 'normal' &&
+    (turnInFlight.value || goalSteerOnly.value) &&
+    !messageOverride
+  ) {
     enqueueDraft()
     return false
   }
@@ -3278,9 +3343,10 @@ async function submit(
     preview_url,
     mime_type,
   }))
-  const clientTurnId = typeof crypto.randomUUID === 'function'
+  const retainedClientTurnId = reusableSendId(message, draftAtts, questionIdentity)
+  const clientTurnId = retainedClientTurnId ?? (typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
-    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`)
   try {
     if (!messageOverride) {
       draftMessage.value = ''
@@ -3307,7 +3373,15 @@ async function submit(
       ]
     }
     requestLatestAnchor(true)
-    await sendToStream(message, atts, clientTurnId, delivery, source === 'queue' ? 15_000 : null)
+    await sendToStream(
+      message,
+      atts,
+      clientTurnId,
+      delivery,
+      source === 'queue' ? 15_000 : null,
+      questionIdentity,
+    )
+    retrySendAttempt.value = null
     if (messageOverride && !isManagedChat.value) await hydrateGoal()
     // A successful explicit send resolves a previously uncertain queued item.
     // Automatic queue sends never clear this flag; only deliberate user input
@@ -3322,6 +3396,12 @@ async function submit(
     return true
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
+    retrySendAttempt.value = {
+      clientTurnId,
+      message,
+      attachments: [...draftAtts],
+      questionIdentity: questionIdentity ? { ...questionIdentity } : null,
+    }
     if (!messageOverride) {
       draftMessage.value = message
       attachments.value = draftAtts
