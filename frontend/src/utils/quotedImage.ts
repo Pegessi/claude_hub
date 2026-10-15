@@ -97,14 +97,17 @@ export function resolveQuotedImageUrl(tabId: string, src: unknown): string | nul
   return quotedImageEndpointUrl(tabId, src)
 }
 
-function decodeImagePath(src: string): string {
-  const entities: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
-  const decoded = src.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt);/gi, (match, entity: string) => {
+function decodeImagePath(src: string): string | null {
+  const entities: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', num: '#', quest: '?' }
+  const decoded = src.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt|num|quest);/gi, (match, entity: string) => {
     if (!entity.startsWith('#')) return entities[entity.toLowerCase()] ?? match
     const code = entity[1].toLowerCase() === 'x'
       ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10)
     return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match
   })
+  // HTML entities preserve URL navigation semantics; percent-encoded # and ?
+  // are filename characters and must only be decoded after this check.
+  if (/^[#?]/.test(decoded)) return null
   try { return decodeURIComponent(decoded) } catch { return decoded }
 }
 

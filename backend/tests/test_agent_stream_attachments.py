@@ -134,6 +134,26 @@ async def test_agent_output_source_key_is_session_scoped(state_root: Path) -> No
         await two.read_source(key)
 
 
+async def test_source_deduplication_recaptures_an_expired_image(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import attachments
+
+    clock = [100.0]
+    monkeypatch.setattr(attachments.time, "time", lambda: clock[0])
+    store = _make_store(max_age_seconds=10)
+    key = hashlib.sha256(b"same output path").hexdigest()
+    first = await store.save("image/png", _png(), source_key=key)
+    clock[0] = 1000.0
+    second = await store.save("image/png", _png(), source_key=key)
+    assert second["id"] != first["id"]
+    with pytest.raises(KeyError):
+        await store.read(first["id"])
+    assert (await store.read_source(key))[0] == _png()
+    entries = store._read_index()
+    assert len(entries) == 1 and entries[0]["created_at"] == 1000.0
+
+
 # ── config validation ───────────────────────────────────────────────────────
 
 

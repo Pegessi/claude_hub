@@ -885,6 +885,13 @@ class AgentStreamAttachmentStore:
                     if cached.is_symlink() or not cached.is_file():
                         continue
                     now = time.time()
+                    if (
+                        self.max_age_seconds is not None
+                        and now - existing["created_at"] >= self.max_age_seconds
+                    ):
+                        # An expired source is a new capture, not a cache hit.
+                        # Continue through normal publication/eviction below.
+                        continue
                     if now - existing["last_used_at"] >= _LRU_TOUCH_INTERVAL_SECONDS:
                         existing["last_used_at"] = now
                         self._write_index(index)

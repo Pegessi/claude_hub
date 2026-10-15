@@ -2121,6 +2121,7 @@ onActivated(() => {
 
 onDeactivated(() => {
   isPaneActivated.value = false
+  dismissImageLightbox(false)
   isAddMenuOpen.value = false
   isGoalSetupOpen.value = false
   goalRefreshEpoch++
@@ -2218,6 +2219,7 @@ function closeImageLightbox() {
 }
 
 function handleDocumentKeydown(event: KeyboardEvent) {
+  if (!isPaneActivated.value) return
   if (event.key === 'Tab' && imageLightboxUrl.value) {
     const controls = lightboxEl.value?.querySelectorAll<HTMLElement>('button, a[href]')
     if (controls?.length) {
