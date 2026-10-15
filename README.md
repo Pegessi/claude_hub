@@ -164,6 +164,8 @@ uv run claude-hub session send <SESSION_ID> --message "continue"
 uv run claude-hub session report <SESSION_ID> --state working --message "..."
 uv run claude-hub lessons list <WORKSPACE_ID> --query terminal
 uv run claude-hub lessons get <WORKSPACE_ID> <LESSON_ID>
+uv run claude-hub quota                                     # Codex/MASO remaining quota
+uv run claude-hub quota --refresh                           # bypass the cached reading
 uv run claude-hub --json task tree <WORKSPACE_ID> [<PARENT_TASK_ID>]
 uv run claude-hub --json task events <WORKSPACE_ID> <TASK_ID> --subtree --since-sequence 0
 uv run claude-hub --json task wait <WORKSPACE_ID> <TASK_ID> --subtree --since-sequence 0

@@ -16,6 +16,40 @@
 - Render the provider payload as a de-emphasized second line under the error
   banner, so the readable statement is what the reader sees first.
 
+### feat(quota): report remaining Codex and MASO quota
+
+- Add `GET /api/quota`, a `claude-hub quota` command and a Hub menu panel that
+  report how much of each provider's allowance is still available, as a share
+  per limit window with its reset time.
+- Read Codex from the newest `token_count` record in its local rollout files,
+  ordered by modification time because resuming a session appends current
+  records to a file filed under its original date.
+- Withhold a Codex share once its rolling window has elapsed, rather than
+  presenting a reading that describes a window which no longer exists.
+- Ask MASO for its own per-model accounting over the discovered local endpoint
+  and present its states unchanged; report each provider separately so one
+  unavailable provider still leaves the other readable.
+- Separate a provider that is absent from the deployment from one that is
+  configured but unreachable, so a Hub without MASO states the fact quietly
+  instead of raising a permanent alert nobody can act on.
+- Carry the age of every reading, because Codex only refreshes its figures when
+  a turn completes and a stale reading is otherwise indistinguishable.
+- Say so when a manual refresh returns the same reading, and mark an ageing
+  reading as a last known value: an allowance can also be reset out of band,
+  which the reset time in an older reading cannot predict.
+
+### fix(feishu): build Feishu HTTP clients without HTTPX parsing NO_PROXY
+
+- Resolve the proxy for each Feishu endpoint before constructing the client, so
+  IPv6 CIDR entries such as `fe80::/10` no longer raise `httpx.InvalidURL` while
+  the Bot API, WebSocket discovery and OAuth sign-in clients are created.
+- Move the `NO_PROXY` decision into one shared rule set used by both the native
+  provider selector and Feishu, replacing a weaker duplicate that ignored `*`,
+  per-entry ports and bracketed IPv6 addresses.
+- Report the upstream Feishu code and support id when credential validation is
+  rejected, and name access-control policy 21001 in the Bot pool UI instead of
+  suggesting the operator retype a correct secret.
+
 ### feat(chat): accept image input in MASO conversations
 
 - Enable image attachments, including image-only turns and queued drafts, through

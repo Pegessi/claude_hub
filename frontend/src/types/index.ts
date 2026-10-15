@@ -238,6 +238,50 @@ export interface NetworkAccessInfo {
   addresses: NetworkAddress[]
 }
 
+/**
+ * One quota window reported by a provider (`GET /api/quota`).
+ *
+ * `state` is an open string: known values are `within`, `near`, `over`,
+ * `no_limit`, `no_data` and `unknown`. Percentages are null whenever the
+ * provider did not report a number; null is not zero.
+ */
+export interface QuotaLimit {
+  /** Codex uses a window name such as `weekly`; MASO uses the model name. */
+  scope: string
+  label: string
+  state: string
+  used_percent: number | null
+  remaining_percent: number | null
+  resets_at: string | null
+}
+
+/**
+ * One provider's quota reading. `available: false` means the Hub could not read
+ * the provider at all and `message` carries the reason; the request still
+ * succeeds so one broken provider never hides the other.
+ */
+export interface ProviderQuota {
+  provider: string
+  available: boolean
+  /** Same values as `QuotaLimit.state`, plus `unavailable`. */
+  state: string
+  message: string
+  /** When this reading was taken, not when it was requested. */
+  as_of: string | null
+  stale: boolean
+  limits: QuotaLimit[]
+  /** Codex subscription plan, e.g. `pro`. */
+  plan: string | null
+  /** Codex prepaid balance as reported; the unit is not part of the contract. */
+  credit_balance: string | null
+  /** MASO: whether reaching a limit actually refuses requests. */
+  enforcing: boolean | null
+}
+
+export interface QuotaResponse {
+  providers: ProviderQuota[]
+}
+
 export interface TerminalAgentStatus {
   tab_id: string
   tab_name: string
