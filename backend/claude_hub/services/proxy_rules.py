@@ -17,11 +17,33 @@ handing HTTPX an explicit answer keeps that parser out of the path.
 from __future__ import annotations
 
 import ipaddress
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple, TypeVar
 from urllib.parse import SplitResult, urlsplit
 from urllib.request import getproxies
 
 import httpx
+
+PROXY_ENV_KEYS = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
+_EnvValue = TypeVar("_EnvValue")
+
+
+def with_proxy_env_aliases(env: Mapping[str, _EnvValue]) -> dict[str, _EnvValue]:
+    """Copy an environment and fill missing proxy case aliases.
+
+    Preserve explicitly supplied counterparts, including empty values. Apply
+    this separately to inherited and override layers before merging so a
+    session override replaces both inherited spellings. Optional values are
+    retained so callers can use ``None`` to remove an inherited proxy pair.
+    """
+    normalized = dict(env)
+    additions: dict[str, _EnvValue] = {}
+    for key, value in env.items():
+        if key.lower() in PROXY_ENV_KEYS:
+            opposite = key.upper() if key.islower() else key.lower()
+            if opposite not in env:
+                additions[opposite] = value
+    normalized.update(additions)
+    return normalized
 
 
 def bypasses_proxy(endpoint: SplitResult, no_proxy: Optional[str]) -> bool:

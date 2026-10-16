@@ -44,6 +44,7 @@ from ..models.schemas import CHAT_REMOTE_UNSUPPORTED
 from . import pty_exec
 from ._cursor_verify import _cursor_id_exists
 from .agent_status_markers import codex_output_is_working
+from .proxy_rules import PROXY_ENV_KEYS, with_proxy_env_aliases
 from .remote_profiles import (
     profile_capabilities,
     reject_unsupported_interactive,
@@ -1424,7 +1425,7 @@ def _agent_spawn_env() -> dict:
     Normalize the environment so panes always render with their full palette,
     regardless of how the backend itself was started.
     """
-    env = dict(os.environ)
+    env = with_proxy_env_aliases(os.environ)
     env.pop("NO_COLOR", None)
     env["COLORTERM"] = "truecolor"
     env["FORCE_COLOR"] = "3"
@@ -1689,19 +1690,7 @@ class TTYDProcess:
             if not name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                 raise ValueError(f"Invalid environment variable name: {name or '<empty>'}")
             cleaned[name] = str(value)
-        # Normalize proxy env vars: add the opposite-case variant so both
-        # Node.js (uppercase HTTP_PROXY) and Unix tools (lowercase http_proxy)
-        # pick up the same setting regardless of what the user typed.
-        _PROXY_KEYS = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
-        additions: dict[str, str] = {}
-        for key in list(cleaned):
-            lower = key.lower()
-            if lower in _PROXY_KEYS:
-                opposite = key.upper() if key.islower() else key.lower()
-                if opposite not in cleaned:
-                    additions[opposite] = cleaned[key]
-        cleaned.update(additions)
-        return cleaned
+        return with_proxy_env_aliases(cleaned)
 
     @staticmethod
     def _default_env_for_agent(agent_type: AgentType) -> Dict[str, str]:
@@ -1869,27 +1858,53 @@ asyncio.run(_main())
         return child
 
     def _env_shell_prefix(self) -> str:
-        env = self._child_env()
+        env = self._shell_child_env()
         if not env:
             return ""
         assignments = [f"{key}={shlex.quote(value)}" for key, value in env.items()]
         return "env " + " ".join(assignments) + " "
 
     def _env_export_commands(self) -> list[str]:
-        return [f"export {key}={shlex.quote(value)}" for key, value in self._child_env().items()]
+        return [
+            f"export {key}={shlex.quote(value)}" for key, value in self._shell_child_env().items()
+        ]
+
+    def _shell_child_env(self) -> Dict[str, str]:
+        """Carry current local proxy settings even through an older tmux server.
+
+        Keep inherited values out of persisted tab/Claude settings, and never
+        forward this machine's proxy environment to a remote host.
+        """
+        child = self._child_env()
+        if self.target != ExecutionTarget.LOCAL:
+            return child
+        inherited = {
+            key: value for key, value in os.environ.items() if key.lower() in PROXY_ENV_KEYS
+        }
+        return {**with_proxy_env_aliases(inherited), **child}
 
     def _with_env(self, command: str) -> str:
-        if self.env and self.target == ExecutionTarget.LOCAL:
+        if self.target == ExecutionTarget.LOCAL:
             return self._with_local_env_wrapper(command)
         return f"{self._env_shell_prefix()}{command}"
 
     def _with_local_env_wrapper(self, command: str) -> str:
         LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
         script_path = LAUNCH_ENV_DIR / f"{self.tab_id}.sh"
-        exports = "\n".join(
-            f"export {key}={shlex.quote(value)}" for key, value in self._child_env().items()
+        child = self._shell_child_env()
+        absent_proxy_keys = sorted(
+            name for lower in PROXY_ENV_KEYS for name in (lower, lower.upper()) if name not in child
         )
-        script = "#!/bin/sh\n" "set -eu\n" f"{exports}\n" 'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
+        # A long-lived tmux server may retain a removed proxy or NO_PROXY=*,
+        # even when this backend has no proxy settings at all.
+        clear_proxies = f"unset {' '.join(absent_proxy_keys)}\n" if absent_proxy_keys else ""
+        exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in child.items())
+        script = (
+            "#!/bin/sh\n"
+            "set -eu\n"
+            f"{clear_proxies}{exports}\n"
+            'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
+        )
         script_path.write_text(script, encoding="utf-8")
         os.chmod(script_path, 0o600)
         return f"/bin/sh {shlex.quote(str(script_path))} {shlex.quote(command)}"
