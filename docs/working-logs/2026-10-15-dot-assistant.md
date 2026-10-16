@@ -227,6 +227,34 @@ From the design review:
 Not taken: a code-computed ✓/✗ summary on the result card, and an example task
 per lesson in the UI.
 
+### Review of round 6
+
+Two more reviewers (code paths and failure modes) read the round-5 commits.
+Fixed, each with a test that fails on the old code:
+
+- Watching a task Dot delegated made it "watched", so its pending review could
+  never be cleared. Watching now keeps a delegated task delegated (only the
+  stall limit changes), and watched tasks are never listed for review.
+- The Hub's own READY_FOR_REVIEW reports (manual move to review, "Human
+  requested reviewer checks.") fired a second `task_ready` and replaced the
+  worker's report on the result card. They are no longer a new round, and the
+  card shows what the worker said last.
+- One task whose reports could not be read, or one huge report (card body
+  over 200,000 characters), stopped the watcher for every task. Each task is
+  now checked on its own, and card parts are cut at 20,000 characters.
+- A Hub reviewer's question (`review_needs_input`) raised no event. It does
+  now; it does not count as a worker question for the first-pass rate.
+- The nightly tidy turn consumed inbox events (marked read, no one told).
+  Tidy packs carry no events now.
+- A bad hand edit of a JSON file read as empty, and the next write erased
+  it. The file is now kept as `<name>.corrupt-<time>`. Non-object entries,
+  a focus priority like `"high"`, a read event without an id, a huge integer
+  weight, `importance: 1e999` and a card that is not UTF-8 no longer crash.
+- "Mark read" in the panel acked every unread event, including ones that
+  arrived after the list was shown. It sends the shown ids now.
+- A NUL byte or an over-long name in a file path was a 500; it is a 404 (or
+  400 on a card). A blank focus title is 400, and an edit cannot blank it.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

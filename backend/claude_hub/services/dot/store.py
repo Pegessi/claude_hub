@@ -162,6 +162,21 @@ def _lesson_tasks(lesson: dict[str, Any]) -> list[str]:
     return [str(task) for task in tasks] if isinstance(tasks, list) else []
 
 
+def _priority(focus: dict[str, Any]) -> int:
+    # focus.json is hand-editable too.
+    try:
+        return int(focus.get("priority") or 3)
+    except (TypeError, ValueError, OverflowError):
+        return 3
+
+
+def _parse_json(raw: bytes) -> Any:
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+
+
 def parse_card(text: str, path: Optional[Path] = None) -> Optional[Card]:
     """Parse a card file; tolerate hand edits. Returns None without a header."""
     lines = text.splitlines()
@@ -183,7 +198,7 @@ def parse_card(text: str, path: Optional[Path] = None) -> Optional[Card]:
     kind = str(meta.get("kind") or (path.parent.name if path is not None else "knowledge"))
     try:
         importance = int(meta.get("importance", 2))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         importance = 2
     return Card(
         id=str(meta.get("id") or fallback_id),
@@ -275,11 +290,35 @@ class DotStore:
     # ── json files ──────────────────────────────────────────────────────
 
     def _read_json(self, name: str, default: Any) -> Any:
+        """Read a JSON file; lists keep only their objects.
+
+        A missing file is ``default``. A file that is not the expected JSON (a bad
+        hand edit) is moved aside first, so the next write cannot erase it.
+        """
+        path = self.home / name
         try:
-            value = json.loads((self.home / name).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw = path.read_bytes()
+        except FileNotFoundError:
             return default
-        return value if isinstance(value, type(default)) else default
+        value = _parse_json(raw)
+        if not isinstance(value, type(default)):
+            self._set_aside(path, raw)
+            return default
+        if isinstance(value, list):
+            value = [item for item in value if isinstance(item, dict)]
+        return value
+
+    def _set_aside(self, path: Path, raw: bytes) -> None:
+        with self._lock:
+            try:
+                # Only the bad copy that was read: a writer may have replaced it since.
+                if path.read_bytes() != raw:
+                    return
+                stamp = utc_now().strftime("%Y%m%dT%H%M%S%f")
+                path.rename(path.with_name(f"{path.name}.corrupt-{stamp}"))
+            except OSError:
+                return
+        logger.warning("dot: %s was not valid JSON; kept it as %s.corrupt-*", path.name, path.name)
 
     def _write_json(self, name: str, value: Any) -> None:
         self._atomic_write(self.home / name, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
@@ -399,7 +438,8 @@ class DotStore:
     def read_card_path(path: Path) -> Optional[Card]:
         try:
             return parse_card(path.read_text(encoding="utf-8"), path)
-        except OSError:
+        except (OSError, ValueError):
+            # Unreadable or not UTF-8: skipped like a file without a header.
             return None
 
     def find_card_path(self, card_id: str) -> Optional[Path]:
@@ -483,21 +523,20 @@ class DotStore:
 
     def resolve_home_path(self, relative: str) -> Optional[Path]:
         """Resolve a home-relative path, refusing escapes."""
-        candidate = (self.home / relative).resolve()
-        try:
-            candidate.relative_to(self.home.resolve())
-        except ValueError:
-            return None
-        return candidate if candidate.is_file() else None
+        return self._resolve_inside(self.home, relative)
 
     def resolve_file(self, relative: str) -> Optional[Path]:
         """Resolve a ``files/...`` path, refusing anything outside ``files/``."""
-        candidate = (self.home / relative).resolve()
+        return self._resolve_inside(self.files_dir, relative)
+
+    def _resolve_inside(self, root: Path, relative: str) -> Optional[Path]:
         try:
-            candidate.relative_to(self.files_dir.resolve())
-        except ValueError:
+            candidate = (self.home / relative).resolve()
+            candidate.relative_to(root.resolve())
+            return candidate if candidate.is_file() else None
+        except (OSError, ValueError):
+            # Escapes, NUL bytes and over-long names are all "no such file".
             return None
-        return candidate if candidate.is_file() else None
 
     @staticmethod
     def guess_mime(path: Path) -> str:
@@ -510,7 +549,7 @@ class DotStore:
         items = [item for item in self._read_json("focus.json", []) if isinstance(item, dict)]
         if not include_closed:
             items = [item for item in items if item.get("status", "active") == "active"]
-        return sorted(items, key=lambda item: (int(item.get("priority") or 3), item.get("id", "")))
+        return sorted(items, key=lambda item: (_priority(item), str(item.get("id", ""))))
 
     def add_focus(self, title: str, why: str = "", priority: int = 3) -> dict[str, Any]:
         title = title.strip()
@@ -544,6 +583,10 @@ class DotStore:
                     value = changes.get(key)
                     if value is None:
                         continue
+                    if key == "title":
+                        value = value.strip()
+                        if not value:
+                            raise ValueError("title is required")
                     if key == "priority":
                         value = max(1, min(5, int(value)))
                     if key == "status" and value not in ("active", "done", "dropped"):
@@ -589,7 +632,8 @@ class DotStore:
         return [
             item
             for item in self.list_work(include_closed=True)
-            if item.get("review_due") and not item.get("stopped")
+            # A watched task's brief was not Dot's; it is never judged.
+            if item.get("review_due") and not item.get("stopped") and not item.get("watched")
         ]
 
     # ── lessons ─────────────────────────────────────────────────────────
@@ -755,7 +799,7 @@ class DotStore:
             # Keep the file small: drop the oldest read events beyond 200.
             read = [entry for entry in items if entry.get("read")]
             if len(read) > 200:
-                drop = {entry["id"] for entry in read[: len(read) - 200]}
+                drop = {entry.get("id") for entry in read[: len(read) - 200]}
                 items = [entry for entry in items if entry.get("id") not in drop]
             self._write_json("inbox.json", items)
             return item

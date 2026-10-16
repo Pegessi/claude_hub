@@ -33,9 +33,15 @@ DEFAULT_STALL_HOURS = 2.0
 _TERMINAL_TASK_STATES = {"done", "failed"}
 # Only running tasks can look stuck; review waits on a person, todo was never started.
 _STALL_TASK_STATES = {"queued", "working"}
-_ATTENTION_REPORT_STATES = {"needs_input", "blocked"}
+# A worker question: it counts against first pass.
+_QUESTION_REPORT_STATES = {"needs_input", "blocked"}
+_ATTENTION_REPORT_STATES = _QUESTION_REPORT_STATES | {"review_needs_input"}
 # Report states that hand the work back (a new round after a verdict).
 _RETURN_REPORT_STATES = {"ready_for_review", "completed", "failed"}
+# review_reason of the report the Hub writes when a task is moved to review by hand.
+_MANUAL_REVIEW_REASON = "Manual status transition to REVIEW."
+# Per report field on a result card; a huge report must not make the card unsavable.
+RESULT_TEXT_LIMIT = 20_000
 _JOURNAL_TEXT_LIMIT = 20_000
 # skip: Dot cannot judge this one (say why in the note). Not counted anywhere.
 REVIEW_VERDICTS = ("ok", "redo", "skip")
@@ -92,6 +98,27 @@ def _ended_at(task: Any) -> Optional[str]:
 
 def _report_state(report: Any) -> str:
     return str(getattr(getattr(report, "state", None), "value", "") or "")
+
+
+def _hub_review_request(report: Any) -> bool:
+    """The Hub's own "please review" report (manual move to review, review re-request).
+
+    It carries no work, so it is neither a new round nor a result to show.
+    """
+    decision = getattr(getattr(report, "review_decision", None), "value", None)
+    reason = getattr(report, "review_reason", None)
+    return (
+        _report_state(report) == "ready_for_review"
+        and decision == "request"
+        and not getattr(report, "changed_files", None)
+        and not getattr(report, "validation", None)
+        and not getattr(report, "risks", None)
+        and reason in (getattr(report, "message", None), _MANUAL_REVIEW_REASON)
+    )
+
+
+def _clip_text(text: str, limit: int = RESULT_TEXT_LIMIT) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _first_line(text: str, limit: int = 200) -> str:
@@ -299,6 +326,8 @@ class DotService:
             first_turn=new_session,
             session_turn=turns,
             recall=not tidy,
+            # A tidy turn is not the user's: events wait for a turn that can act on them.
+            inbox=not tidy,
         )
         updates: dict[str, Any] = {
             "session_conversation_id": conversation_id,
@@ -681,6 +710,11 @@ class DotService:
         if status in _TERMINAL_TASK_STATES:
             raise ValueError(f"task is already {status}")
         self.store.ensure()
+        existing = self.store.get_work(task.id)
+        # Dot's own delegation stays one: it keeps its review and unseen events.
+        delegated = existing is not None and not existing.get("watched")
+        if existing is not None and delegated and not existing.get("stopped"):
+            return self.store.upsert_work(task.id, stall_hours=stall_hours)
         # Old reports are history; only reports after this point raise events.
         report = self._latest_report(task.workspace_id, task.id)
         item = self.store.upsert_work(
@@ -689,8 +723,8 @@ class DotService:
             title=task.title,
             agent_type=task.agent_type.value,
             status=status,
-            watched=True,
-            watched_at=now_iso(),
+            watched=None if delegated else True,
+            watched_at=None if delegated else now_iso(),
             closed=False,
             stopped=False,
             last_report_id=getattr(report, "id", None),
@@ -768,7 +802,7 @@ class DotService:
         return max(parsed, default=None)
 
     def _result_card(self, item: dict[str, Any], status: str, report: Any) -> Card:
-        message = str(getattr(report, "message", "") or "(no report)")
+        message = _clip_text(str(getattr(report, "message", "") or "(no report)"))
         lines = [f"Task `{item['task_id']}` in workspace `{item.get('workspace_id')}`: {status}."]
         if item.get("goal"):
             lines += ["", f"Goal: {item['goal']}"]
@@ -786,7 +820,7 @@ class DotService:
         for label, attr in (("Validation", "validation"), ("Risks", "risks")):
             value = getattr(report, attr, None)
             if value:
-                lines += ["", f"## {label}", str(value)]
+                lines += ["", f"## {label}", _clip_text(str(value))]
         changed = list(getattr(report, "changed_files", []) or [])
         artifacts = list(getattr(report, "artifact_refs", []) or [])
         if changed:
@@ -811,131 +845,139 @@ class DotService:
 
         events = 0
         for item in self.store.list_work(include_closed=True):
-            task_id = str(item.get("task_id") or "")
-            task = workspace_manager.tasks.get(task_id)
-            # A re-run that ends the same way between two polls only shows as a new end time.
-            ended = _ended_at(task)
-            rerun = (
-                task is not None
-                and ended is not None
-                and task.status.value == item.get("status")
-                and "ended_at" in item
-                and ended != item["ended_at"]
-            )
-            if item.get("closed"):
-                if ended and "ended_at" not in item and not item.get("stopped"):
-                    # Closed before end times were kept: remember it, no event.
-                    self.store.upsert_work(task_id, ended_at=ended)
-                # A closed task is looked at again only when it was restarted or re-run.
-                if (
-                    item.get("stopped")
-                    or task is None
-                    or (task.status.value == item.get("status") and not rerun)
-                ):
-                    continue
-            if task is None:
-                self.store.upsert_work(task_id, status="missing", closed=True)
-                self.store.add_inbox(
-                    "task_missing",
-                    f"{item.get('title') or task_id} — task no longer exists",
-                    task_id=task_id,
-                )
-                events += 1
-                continue
-            status = task.status.value
-            previous = item.get("status")
-            reports = self._reports(str(item.get("workspace_id") or ""), task_id)
-            report = reports[-1] if reports else None
-            report_id = getattr(report, "id", None)
-            seen_ids = [getattr(old, "id", None) for old in reports]
-            last_seen = item.get("last_report_id")
-            new_reports = (
-                reports[seen_ids.index(last_seen) + 1 :] if last_seen in seen_ids else reports
-            )
-            changes: dict[str, Any] = {}
-            if status != previous:
-                changes["status"] = status
-            # Any question since the last check, even one answered before this poll, counts
-            # against first pass (only until the first verdict).
-            if not item.get("first_verdict") and any(
-                _report_state(new) in _ATTENTION_REPORT_STATES for new in new_reports
-            ):
-                changes["asked"] = True
-            # Dot judges what it delegated; a watched task's brief was not Dot's.
-            review_due = None if item.get("watched") else True
-            # A new final report in review/failed is a new round, even when the poll never
-            # saw the task working again; before a verdict it refreshes the result card.
-            again = (
-                status == previous
-                and report_id is not None
-                and report_id != last_seen
-                and _report_state(report) in _RETURN_REPORT_STATES
-            )
-            if status in ("review", "failed") and (status != previous or again or rerun):
-                card = self._result_card(item, status, report)
-                changes["result_card"] = card.id
-                changes["review_due"] = review_due
-                kind = "task_ready" if status == "review" else "task_failed"
-                summary = _first_line(str(getattr(report, "message", "") or ""), 300)
-                self.store.add_inbox(
-                    kind,
-                    f"{item.get('title') or task_id} — {summary or status}",
-                    task_id=task_id,
-                    card_id=card.id,
-                )
-                events += 1
-            elif status == "done" and (previous not in ("review", "done") or rerun):
-                card = self._result_card(item, status, report)
-                changes["result_card"] = card.id
-                changes["review_due"] = review_due
-                self.store.add_inbox(
-                    "task_done",
-                    f"{item.get('title') or task_id} — done",
-                    task_id=task_id,
-                    card_id=card.id,
-                )
-                events += 1
-            elif (
-                report is not None
-                and report_id != last_seen
-                and _report_state(report) in _ATTENTION_REPORT_STATES
-                and status not in _TERMINAL_TASK_STATES
-            ):
-                self.store.add_inbox(
-                    "task_needs_input",
-                    f"{item.get('title') or task_id} — {_first_line(str(report.message), 300)}",
-                    task_id=task_id,
-                )
-                events += 1
-            elif status in _STALL_TASK_STATES and (
-                activity := self._last_activity(item, task, report)
-            ):
-                idle = utc_now() - activity
-                limit = float(item.get("stall_hours") or DEFAULT_STALL_HOURS)
-                # One alarm per stall: a new sign of life re-arms it.
-                if idle > timedelta(hours=limit) and item.get("stall_alarm_for") != (
-                    marker := activity.isoformat()
-                ):
-                    self.store.add_inbox(
-                        "task_stalled",
-                        f"{item.get('title') or task_id} — no progress for "
-                        f"{idle.total_seconds() / 3600:.1f}h (status {status})",
-                        task_id=task_id,
-                    )
-                    changes["stall_alarm_for"] = marker
-                    events += 1
-            if report_id and report_id != last_seen:
-                changes["last_report_id"] = report_id
-            if status in _TERMINAL_TASK_STATES:
-                changes["closed"] = True
-                if ended and ended != item.get("ended_at"):
-                    changes["ended_at"] = ended
-            elif item.get("closed"):
-                changes["closed"] = False
-            if changes:
-                self.store.upsert_work(task_id, **changes)
+            try:
+                events += self._check_item(workspace_manager, item)
+            except Exception:
+                # One bad task or report must not stop the others from being seen.
+                logger.exception("dot: checking task %s failed", item.get("task_id"))
         if events:
             await asyncio.to_thread(self.store.commit, f"dot: {events} task event(s)")
+        return events
+
+    def _check_item(self, workspace_manager: Any, item: dict[str, Any]) -> int:
+        """Look at one tracked task; returns how many inbox events it raised."""
+        task_id = str(item.get("task_id") or "")
+        task = workspace_manager.tasks.get(task_id)
+        # A re-run that ends the same way between two polls only shows as a new end time.
+        ended = _ended_at(task)
+        rerun = (
+            task is not None
+            and ended is not None
+            and task.status.value == item.get("status")
+            and "ended_at" in item
+            and ended != item["ended_at"]
+        )
+        if item.get("closed"):
+            if ended and "ended_at" not in item and not item.get("stopped"):
+                # Closed before end times were kept: remember it, no event.
+                self.store.upsert_work(task_id, ended_at=ended)
+            # A closed task is looked at again only when it was restarted or re-run.
+            if (
+                item.get("stopped")
+                or task is None
+                or (task.status.value == item.get("status") and not rerun)
+            ):
+                return 0
+        if task is None:
+            self.store.upsert_work(task_id, status="missing", closed=True)
+            self.store.add_inbox(
+                "task_missing",
+                f"{item.get('title') or task_id} — task no longer exists",
+                task_id=task_id,
+            )
+            return 1
+        status = task.status.value
+        previous = item.get("status")
+        reports = self._reports(str(item.get("workspace_id") or ""), task_id)
+        report = reports[-1] if reports else None
+        # What the worker said last; the Hub's own review requests carry no result.
+        result = next((old for old in reversed(reports) if not _hub_review_request(old)), report)
+        report_id = getattr(report, "id", None)
+        seen_ids = [getattr(old, "id", None) for old in reports]
+        last_seen = item.get("last_report_id")
+        new_reports = reports[seen_ids.index(last_seen) + 1 :] if last_seen in seen_ids else reports
+        events = 0
+        changes: dict[str, Any] = {}
+        if status != previous:
+            changes["status"] = status
+        # Any question since the last check, even one answered before this poll, counts
+        # against first pass (only until the first verdict).
+        if not item.get("first_verdict") and any(
+            _report_state(new) in _QUESTION_REPORT_STATES for new in new_reports
+        ):
+            changes["asked"] = True
+        # Dot judges what it delegated; a watched task's brief was not Dot's.
+        review_due = None if item.get("watched") else True
+        # A new final report in review/failed is a new round, even when the poll never
+        # saw the task working again; before a verdict it refreshes the result card.
+        again = (
+            status == previous
+            and report_id is not None
+            and report_id != last_seen
+            and _report_state(report) in _RETURN_REPORT_STATES
+            and not _hub_review_request(report)
+        )
+        if status in ("review", "failed") and (status != previous or again or rerun):
+            card = self._result_card(item, status, result)
+            changes["result_card"] = card.id
+            changes["review_due"] = review_due
+            kind = "task_ready" if status == "review" else "task_failed"
+            summary = _first_line(str(getattr(result, "message", "") or ""), 300)
+            self.store.add_inbox(
+                kind,
+                f"{item.get('title') or task_id} — {summary or status}",
+                task_id=task_id,
+                card_id=card.id,
+            )
+            events += 1
+        elif status == "done" and (previous not in ("review", "done") or rerun):
+            card = self._result_card(item, status, result)
+            changes["result_card"] = card.id
+            changes["review_due"] = review_due
+            self.store.add_inbox(
+                "task_done",
+                f"{item.get('title') or task_id} — done",
+                task_id=task_id,
+                card_id=card.id,
+            )
+            events += 1
+        elif (
+            report is not None
+            and report_id != last_seen
+            and _report_state(report) in _ATTENTION_REPORT_STATES
+            and status not in _TERMINAL_TASK_STATES
+        ):
+            self.store.add_inbox(
+                "task_needs_input",
+                f"{item.get('title') or task_id} — {_first_line(str(report.message), 300)}",
+                task_id=task_id,
+            )
+            events += 1
+        elif status in _STALL_TASK_STATES and (activity := self._last_activity(item, task, report)):
+            idle = utc_now() - activity
+            limit = float(item.get("stall_hours") or DEFAULT_STALL_HOURS)
+            # One alarm per stall: a new sign of life re-arms it.
+            if idle > timedelta(hours=limit) and item.get("stall_alarm_for") != (
+                marker := activity.isoformat()
+            ):
+                self.store.add_inbox(
+                    "task_stalled",
+                    f"{item.get('title') or task_id} — no progress for "
+                    f"{idle.total_seconds() / 3600:.1f}h (status {status})",
+                    task_id=task_id,
+                )
+                changes["stall_alarm_for"] = marker
+                events += 1
+        if report_id and report_id != last_seen:
+            changes["last_report_id"] = report_id
+        if status in _TERMINAL_TASK_STATES:
+            changes["closed"] = True
+            if ended and ended != item.get("ended_at"):
+                changes["ended_at"] = ended
+        elif item.get("closed"):
+            changes["closed"] = False
+        if changes:
+            self.store.upsert_work(task_id, **changes)
         return events
 
     # ── name and avatar ─────────────────────────────────────────────────

@@ -99,11 +99,17 @@ Values are JSON; a plain unquoted value is read as a string.
 `claude-hub dot delegate` builds a brief from the template, registers and
 starts a Hub Task, and records it in `work.json`. `claude-hub dot watch
 <task_id>` (or the Work tab in the panel) adds a Hub Task you started yourself;
-`dot unwatch` stops tracking it. A background watcher checks tracked tasks
-every 60 seconds. When one finishes, fails, needs input, or looks stuck it:
+`dot unwatch` stops tracking it. Watching a task Dot delegated keeps it a
+delegated task (only `--stall-hours` changes), so its review is not lost. A
+background watcher checks tracked tasks every 60 seconds; one task that cannot
+be read does not stop the others. When one finishes, fails, needs input (the
+worker or the Hub reviewer asks), or looks stuck it:
 
 - writes an inbox event,
-- writes a result card from the latest report,
+- writes a result card from the worker's latest report (each part cut at
+  20,000 characters). The Hub's own "please review" reports (a task moved to
+  review by hand, a review asked again) carry no result, so they neither
+  fill the card nor start a new round,
 - runs the standing "Dot wake-up" Chat schedule now (queued behind any
   active turn; repeated wakes coalesce). The schedule has a ten-year interval
   so it never fires on its own; events are the only way it runs.
@@ -189,6 +195,13 @@ summary; ask Dot when you want one.
 A second schedule runs the nightly `[Dot tidy]` turn in a fresh session:
 compress yesterday's journal into cards and concepts, merge duplicates,
 prune focus. It also replies `[quiet]` unless something needs the user.
+Its turn pack has no inbox events: they stay unread for a turn that can act
+on them. "Mark read" in the panel marks only the events on screen.
+
+The JSON files are hand-editable. One that is not valid JSON (or not the
+expected list or object) is renamed to `<name>.corrupt-<time>` before Dot
+starts a fresh one, so the next write cannot erase it; stray values inside a
+list and odd numbers are skipped, not fatal.
 
 ## Interfaces
 

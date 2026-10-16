@@ -402,10 +402,13 @@ async def dot_list_focus(
 async def dot_add_focus(
     payload: FocusCreate, current_user: User = Depends(get_current_user)
 ) -> dict[str, Any]:
+    if not payload.title.strip():
+        raise HTTPException(status_code=400, detail="title is required")
     service = _service()
     try:
         item = service.store.add_focus(payload.title, payload.why, payload.priority)
     except ValueError as exc:
+        # The only other refusal is a full focus list.
         raise HTTPException(status_code=409, detail=str(exc)) from None
     await _commit(service, f"dot: focus + {item['id']}")
     return item
