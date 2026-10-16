@@ -353,8 +353,8 @@ async def test_watcher_catches_quick_questions_redo_rounds_and_restarts(
         workspace_manager, "reports_for_task", lambda _ws, tid: reports.get(tid, [])
     )
 
-    def task(status: str) -> SimpleNamespace:
-        return SimpleNamespace(status=SimpleNamespace(value=status), title="t")
+    def task(status: str, **times: Any) -> SimpleNamespace:
+        return SimpleNamespace(status=SimpleNamespace(value=status), title="t", **times)
 
     for task_id in ("task-a", "task-b", "task-c"):
         store.upsert_work(task_id, workspace_id="ws", title=task_id, status="working")
@@ -390,6 +390,20 @@ async def test_watcher_catches_quick_questions_redo_rounds_and_restarts(
     reports["task-b"].append(_report("b2", "ready_for_review", "ran"))
     await service.check_work()
     assert store.get_work("task-b")["review_due"]  # type: ignore[index]
+
+    # task-b again: re-run and failed again between two polls; only the end time moved.
+    await service.review("task-b", verdict="redo", cause="env")
+    tasks["task-b"] = task("failed", failed_at=utc_now() - timedelta(minutes=5))
+    await service.check_work()
+    assert store.get_work("task-b")["ended_at"] and store.get_work("task-b")["closed"]  # type: ignore[index]
+    store.mark_inbox_read([event["id"] for event in store.list_inbox()])
+    await service.review("task-b", verdict="redo", cause="env")
+    await service.check_work()
+    assert store.list_inbox() == [], "same run, no event"
+    tasks["task-b"] = task("failed", failed_at=utc_now())
+    await service.check_work()
+    assert store.get_work("task-b")["review_due"]  # type: ignore[index]
+    assert [event["kind"] for event in store.list_inbox()] == ["task_failed"]
 
     # task-c: the user changed their mind. Not a brief miss, not in the rate.
     with pytest.raises(ValueError, match="only for brief"):
