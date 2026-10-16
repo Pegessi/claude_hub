@@ -118,15 +118,9 @@ def _worker_report(report: Any) -> bool:
     return not _hub_report(report) and not _report_state(report).startswith("review_")
 
 
-def _result_report(reports: list[Any], status: str) -> Any:
-    """The report a result is: in review or done the worker's latest return (a worker
-    may post progress after it), else the worker's latest report."""
-    workers = [report for report in reports if _worker_report(report)]
-    if status in ("review", "done"):
-        returns = [report for report in workers if _report_state(report) in _RETURN_REPORT_STATES]
-        if returns:
-            return returns[-1]
-    return workers[-1] if workers else (reports[-1] if reports else None)
+def _worker_return(report: Any) -> bool:
+    """A worker report that hands work back: a result (or failure) for a person."""
+    return _worker_report(report) and _report_state(report) in _RETURN_REPORT_STATES
 
 
 def _hub_report(report: Any) -> bool:
@@ -251,7 +245,7 @@ class DotService:
                 journal_seq=-1,
                 session_pack=None,
             )
-            self.store.commit("dot: new chat tab")
+            await asyncio.to_thread(self.store.commit, "dot: new chat tab")
         assert tab_id is not None
         self.ensure_schedules(tab_id)
         return tab_id
@@ -639,17 +633,19 @@ class DotService:
         )
         try:
             if start and task.status.value == "todo":
-                task = await workspace_manager.start_task(
-                    task.id, StartTaskRequest(agent_type=AgentType(agent_type))
-                )
+                try:
+                    task = await workspace_manager.start_task(
+                        task.id, StartTaskRequest(agent_type=AgentType(agent_type))
+                    )
+                except TaskExecutionConflict:
+                    raise
+                except Exception as exc:
+                    raise DelegateNotStarted(
+                        f"Task {task.id} was created but did not start: {exc}"
+                    ) from exc
+                # Outside the "did not start" net: it did start, whatever this write does.
                 if not replay:
                     item = self.store.upsert_work(task.id, status=task.status.value)
-        except TaskExecutionConflict:
-            raise
-        except Exception as exc:
-            raise DelegateNotStarted(
-                f"Task {task.id} was created but did not start: {exc}"
-            ) from exc
         finally:
             await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
         return {"held": False, "warnings": warnings, "work": item}
@@ -849,7 +845,7 @@ class DotService:
         # Old reports are history; only reports after this point raise events.
         reports = self._reports(task.workspace_id, task.id)
         report = reports[-1] if reports else None
-        result = _result_report(reports, status)
+        result = next((old for old in reversed(reports) if _worker_report(old)), None)
         item = self.store.upsert_work(
             task.id,
             workspace_id=task.workspace_id,
@@ -862,7 +858,7 @@ class DotService:
             stopped=False,
             last_report_id=getattr(report, "id", None),
             # ... and so is the result: the Hub reviewer going over it is not news.
-            announced_report_id=getattr(result, "id", None) if _worker_report(result) else None,
+            announced_report_id=getattr(result, "id", None),
             announced_status=status,
             stall_hours=stall_hours,
         )
@@ -937,7 +933,9 @@ class DotService:
         parsed = [moment for moment in map(_parse_time, moments) if moment is not None]
         return max(parsed, default=None)
 
-    def _result_card(self, item: dict[str, Any], status: str, report: Any) -> Card:
+    def _result_card(
+        self, item: dict[str, Any], status: str, report: Any, failure: str = ""
+    ) -> Card:
         message = _clip_text(str(getattr(report, "message", "") or "(no report)"))
         lines = [f"Task `{item['task_id']}` in workspace `{item.get('workspace_id')}`: {status}."]
         if item.get("goal"):
@@ -952,6 +950,10 @@ class DotService:
                 "## Done when",
                 *[f"{number}. {check}" for number, check in enumerate(checks, 1)],
             ]
+        # The worker's own failure report says why; else the Hub's reason does.
+        headline = failure if failure and _report_state(report) != "failed" else message
+        if failure:
+            lines += ["", "## Failure", _clip_text(failure)]
         lines += ["", "## Report", message]
         for label, attr in (("Validation", "validation"), ("Risks", "risks")):
             value = getattr(report, attr, None)
@@ -967,7 +969,7 @@ class DotService:
             id=str(item.get("result_card") or ""),
             kind="work",
             title=f"Result: {item.get('title') or item['task_id']}",
-            summary=f"[{status}] {_first_line(message)}",
+            summary=f"[{status}] {_first_line(headline)}",
             body="\n".join(lines),
             tags=["result", status],
             importance=3,
@@ -1032,7 +1034,6 @@ class DotService:
         last_seen = item.get("last_report_id")
         new_reports = reports[seen_ids.index(last_seen) + 1 :] if last_seen in seen_ids else reports
         # The Hub's own review requests carry no result, question or round.
-        result = _result_report(reports, status)
         fresh = [new for new in new_reports if not _hub_report(new)]
         latest = fresh[-1] if fresh else None
         # The Hub reviewer's reports (review_*) are not a round's result either.
@@ -1051,52 +1052,83 @@ class DotService:
         review_due = None if item.get("watched") else True
         # A new final report in review/failed is a new round, even when the poll never
         # saw the task working again; before a verdict it refreshes the result card.
-        new_result = any(_report_state(new) in _RETURN_REPORT_STATES for new in returned)
+        new_returns = [new for new in returned if _worker_return(new)]
+        new_result = bool(new_returns)
         again = status == previous and new_result
         title = item.get("title") or task_id
+        # A new round shows its return even when progress came after it; otherwise
+        # the worker's newest word (a send-back that came back without a new result).
+        result = (
+            new_returns[-1]
+            if new_returns
+            else next((old for old in reversed(reports) if _worker_report(old)), None)
+        )
+        result_id = getattr(result, "id", None)
         # The Hub reviewer moves a task to working and back to review (or a person then
         # accepts it): that is the result already announced, not a new one.
-        result_id = getattr(result, "id", None) if _worker_report(result) else None
+        announced = item.get("announced_report_id")
+        since = reports[seen_ids.index(announced) + 1 :] if announced in seen_ids else None
         same_result = (
-            bool(result_id)
-            and result_id == item.get("announced_report_id")
-            and not new_result
+            bool(announced)
+            and since is not None
+            and not any(_worker_return(old) for old in since)
             # Back in review without a reviewer step, someone sent the task back: ask
-            # again. Accepting (again) a result announced for review or done is not news;
+            # again. Accepting (again) a result that was not a failure is not news;
             # failing again with no new report (a re-run that crashed) is.
             and (
                 any(_report_state(new).startswith("review_") for new in fresh)
                 if status == "review"
                 else (
-                    item.get("announced_status") in ("review", "done")
+                    item.get("announced_status") != "failed"
                     if status == "done"
-                    else ended == item.get("ended_at")
+                    else ended is not None and ended == item.get("ended_at")
                 )
             )
         )
+        # Why the Hub failed it, when the worker did not say (session died, timeout).
+        failure = str(getattr(task, "failure_reason", None) or "") if status == "failed" else ""
         if (
             status in ("review", "failed")
             and (status != previous or again or rerun)
             and not same_result
         ):
-            card = self._result_card(item, status, result)
+            card = self._result_card(item, status, result, failure)
             changes.update(result_card=card.id, review_due=review_due)
             changes.update(announced_report_id=result_id, announced_status=status)
-            summary = _first_line(str(getattr(result, "message", "") or ""), 300)
+            said = str(getattr(result, "message", "") or "")
+            if failure and _report_state(result) != "failed":
+                said = failure
+            summary = _first_line(said, 300)
             kind = "task_ready" if status == "review" else "task_failed"
             notices.append((kind, f"{title} — {summary or status}", card.id))
-        elif status == "done" and (previous not in ("review", "done") or rerun) and not same_result:
+        elif (
+            status == "done"
+            and (previous not in ("review", "done") or rerun or new_result)
+            and not same_result
+        ):
             card = self._result_card(item, status, result)
             changes.update(result_card=card.id, review_due=review_due)
             changes.update(announced_report_id=result_id, announced_status=status)
             notices.append(("task_done", f"{title} — done", card.id))
+        asking = latest if _report_state(latest) in _ATTENTION_REPORT_STATES else None
+        if asking is None and status == "review":
+            # Worker progress after it does not answer the Hub reviewer's question.
+            step = next(
+                (
+                    new
+                    for new in reversed(fresh)
+                    if _report_state(new).startswith("review_") or _worker_return(new)
+                ),
+                None,
+            )
+            asking = step if _report_state(step) == "review_needs_input" else None
         if (
-            _report_state(latest) in _ATTENTION_REPORT_STATES
+            asking is not None
             and status not in _TERMINAL_TASK_STATES
             # The Hub reviewer's question can come with the result it is about.
-            and (not notices or _report_state(latest) == "review_needs_input")
+            and (not notices or _report_state(asking) == "review_needs_input")
         ):
-            question = _first_line(str(getattr(latest, "message", "") or ""), 300)
+            question = _first_line(str(getattr(asking, "message", "") or ""), 300)
             notices.append(("task_needs_input", f"{title} — {question}", None))
         elif (
             not notices
