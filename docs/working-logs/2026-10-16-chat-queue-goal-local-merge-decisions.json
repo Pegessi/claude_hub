@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "f99d6867714ed598439fe0a96d366bc6d8dcf0c2",
+  "parents": [
+    "19e6c0780d40e04efe25660a243a763ec3652789",
+    "47bdae723ee1984c8d50577f1ab9b4f5fa8c2561"
+  ],
+  "base": "39ca52eb6f6f4dfb6aa69d9c46eb22e79d002e3b",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "e2dbbe06e019d3be5164652d3030055b6d6d36b0",
+  "reconstructed_tree": "9d0f8185ecd825fadd2b9bbba27009e8c4b3a8a2",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a2cf26e6c77fbc1d4df6aaa41c83990a82b4e46f"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c1cad5a398b54cdf641804f5920b4a1e14ec4631"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "59783e188d7218135da5db555c6c334ba038f3c2"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "14de5958f5a7e46111fcf8e9b2604fe6b024e206"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2b509adad628b62e5c836ed4a33f320f93f0b85a"
+      },
+      "reason": "Retain both the queue/Goal feature release and the remote CI short-test-ID release; application source merges natively.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
