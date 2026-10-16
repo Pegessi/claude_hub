@@ -59,6 +59,10 @@ class LessonNotFound(LookupError):
     """A review named a lesson id that does not exist."""
 
 
+class DelegateNotStarted(Exception):
+    """The delegated task was created (and is tracked) but did not start."""
+
+
 @dataclass
 class TurnPlan:
     """What the provider transport must apply before sending one Dot turn."""
@@ -258,7 +262,6 @@ class DotService:
         from .. import workspace_manager
 
         state = self.store.read_state()
-        changes: dict[str, Any] = {}
         timings: tuple[tuple[str, str, dict[str, Any], str], ...] = (
             (
                 "wake_schedule_id",
@@ -273,9 +276,11 @@ class DotService:
             if existing is not None:
                 update: dict[str, Any] = {}
                 if existing.tab_id != tab_id:
-                    update["tab_id"] = tab_id
-                # Older homes woke Dot every morning; move them to events only.
-                if any(getattr(existing, field, None) != value for field, value in timing.items()):
+                    # The Hub turns off a schedule whose Chat was deleted.
+                    update.update(tab_id=tab_id, enabled=True)
+                # Older homes woke Dot every morning; move them to events only. A
+                # time the user picked in the right form is kept.
+                if any(getattr(existing, field, None) is None for field in timing):
                     update.update(timing)
                 if update:
                     workspace_manager.update_scheduled_task(
@@ -291,9 +296,8 @@ class DotService:
                     **timing,
                 )
             )
-            changes[key] = created.id
-        if changes:
-            self.store.update_state(**changes)
+            # Kept at once: if the next one fails, a retry must not create this again.
+            self.store.update_state(**{key: created.id})
 
     # ── turns ───────────────────────────────────────────────────────────
 
@@ -365,34 +369,58 @@ class DotService:
             delivered_event_ids=pack.delivered_event_ids,
         )
 
-    def _turn_ended(self, ended_at: Any, failed: bool) -> None:
+    def _turn_ended(self, started_at: Any, until: Any, ended_at: Any, failed: bool) -> None:
         """Match a finished turn to the turn Dot prepared for it.
+
+        A turn is prepared after it starts and before the next one starts
+        (``until``). A turn the provider never accepted ends with its start time,
+        so the end time alone cannot place it. Otherwise the latest turn prepared
+        before the end is taken.
 
         A failed turn never reached Dot: its events are unread again, and when it
         opened a session the next turn opens a fresh one (with the recent talk).
         """
-        ended = _parse_time(ended_at)
+        started, bound, ended = _parse_time(started_at), _parse_time(until), _parse_time(ended_at)
         if ended is None:
             return
         with self.store.lock:
             sent = _sent_turns(self.store.read_state())
-            before = [turn for turn in sent if (_parse_time(turn.get("at")) or ended) <= ended]
+            limit = max(bound, ended) if bound is not None else ended
+            before = [one for one in sent if (_parse_time(one.get("at")) or ended) <= limit]
+            mine = [
+                one
+                for one in before
+                if started is not None
+                and bound is not None
+                and started <= (_parse_time(one.get("at")) or ended) < bound
+            ]
+            earlier = [one for one in before if (_parse_time(one.get("at")) or ended) <= ended]
+            turn = mine[0] if mine else earlier[-1] if earlier else {}
             if not before:
                 return
-            turn = before[-1]
             rest = [one for one in sent if one not in before]
             changes: dict[str, Any] = {"sent_turns": rest or None}
             if failed and turn.get("first"):
                 changes["rotate_requested"] = True
             self.store.update_state(**changes)
-        ids = [str(one) for one in turn.get("ids") or []]
+        # Only a turn the provider took marked its events read; a later turn may have
+        # shown and read them since a turn that was never taken.
+        ids = [str(one) for one in turn.get("ids") or []] if turn.get("acked") else []
         if failed and ids:
             self.store.mark_inbox_unread(ids)
 
     def mark_delivered(self, event_ids: list[str]) -> None:
         """The provider accepted a turn: its shown inbox events are now read."""
-        if event_ids:
-            self.store.mark_inbox_read(event_ids)
+        if not event_ids:
+            return
+        self.store.mark_inbox_read(event_ids)
+        with self.store.lock:
+            sent = _sent_turns(self.store.read_state())
+            for turn in reversed(sent):
+                if turn.get("ids") == event_ids:
+                    turn["acked"] = True
+                    self.store.update_state(sent_turns=sent)
+                    break
 
     def request_rotation(self) -> None:
         self.store.update_state(rotate_requested=True)
@@ -430,9 +458,13 @@ class DotService:
             if cursor >= 0 and await stream.count() == 0:
                 cursor = -1
             starts: dict[str, tuple[str, Any]] = {}
+            # Ended turns wait for the next start, the end of the window they were
+            # prepared in; the last ones wait for the time of the last read.
+            ended: list[tuple[Any, Any, bool]] = []
             added = 0
             last_completed = cursor
             while True:
+                read_at = utc_now()
                 page = await stream.read_since(cursor, limit=500)
                 for event in page.events:
                     payload = event.payload if isinstance(event.payload, dict) else {}
@@ -441,11 +473,16 @@ class DotService:
                             str(payload.get("summary") or ""),
                             event.created_at,
                         )
+                        for turn in ended:
+                            self._turn_ended(turn[0], event.created_at, turn[1], turn[2])
+                        ended.clear()
                     elif event.type == AgentStreamEventType.TURN_COMPLETED:
                         asked, asked_at = starts.pop(event.turn_id or "", ("", None))
                         answer = str(payload.get("assistant_text") or "")
                         last_completed = event.stream_sequence
-                        self._turn_ended(event.created_at, payload.get("status") == "failed")
+                        ended.append(
+                            (asked_at, event.created_at, payload.get("status") == "failed")
+                        )
                         from_hub = asked.lstrip().startswith("[Dot ")
                         if from_hub and answer.strip() == QUIET_REPLY:
                             # Nothing needed the user; keep it out of the recent talk.
@@ -470,6 +507,8 @@ class DotService:
                 cursor = page.next_sequence
                 if not page.has_more:
                     break
+            for turn in ended:
+                self._turn_ended(turn[0], read_at, turn[1], turn[2])
             if last_completed != int(self.store.read_state().get("journal_seq", -1)):
                 self.store.update_state(journal_seq=last_completed)
             if added:
@@ -512,6 +551,7 @@ class DotService:
             WorkspaceTaskMode,
         )
         from .. import workspace_manager
+        from ..workspace_manager._task_execution import TaskExecutionConflict
 
         checks = [" ".join(item.split()) for item in done_when if item.strip()]
         if not title.strip() or not goal.strip() or not checks:
@@ -546,10 +586,7 @@ class DotService:
         task, _replayed = await workspace_manager.register_task(
             workspace_id, WorkspaceTaskCreate(**fields), actor_key
         )
-        if start and task.status.value == "todo":
-            task = await workspace_manager.start_task(
-                task.id, StartTaskRequest(agent_type=AgentType(agent_type))
-            )
+        # Tracked before it starts: a task that fails to start is still Dot's.
         item = self.store.upsert_work(
             task.id,
             workspace_id=workspace_id,
@@ -566,7 +603,21 @@ class DotService:
             # Kept so a later review can see which warnings Dot sent past.
             brief_warnings=warnings or None,
         )
-        await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
+        try:
+            if start and task.status.value == "todo":
+                task = await workspace_manager.start_task(
+                    task.id, StartTaskRequest(agent_type=AgentType(agent_type))
+                )
+                if not replay:
+                    item = self.store.upsert_work(task.id, status=task.status.value)
+        except TaskExecutionConflict:
+            raise
+        except Exception as exc:
+            raise DelegateNotStarted(
+                f"Task {task.id} was created but did not start: {exc}"
+            ) from exc
+        finally:
+            await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
         return {"held": False, "warnings": warnings, "work": item}
 
     # ── review and lessons ──────────────────────────────────────────────
@@ -920,12 +971,13 @@ class DotService:
             ):
                 return 0
         if task is None:
-            self.store.upsert_work(task_id, status="missing", closed=True)
             self.store.add_inbox(
                 "task_missing",
                 f"{item.get('title') or task_id} — task no longer exists",
                 task_id=task_id,
+                key=f"task_missing:{task_id}",
             )
+            self.store.upsert_work(task_id, status="missing", closed=True)
             return 1
         status = task.status.value
         previous = item.get("status")
@@ -997,13 +1049,17 @@ class DotService:
                 changes["ended_at"] = ended
         elif item.get("closed"):
             changes["closed"] = False
-        if changes:
-            self.store.upsert_work(task_id, **changes)
-        # Events go last: if anything above fails, the next tick tries again instead
-        # of repeating an event it already wrote. A lost event still leaves the review due.
+        # Events go first, so a failed write cannot lose one. The next tick sees the same
+        # change again; its key makes that the same unread event, not a second one.
+        key = ":".join(
+            str(part or "")
+            for part in (task_id, status, report_id, ended, changes.get("stall_alarm_for"))
+        )
         for kind, text, card_id in notices:
             extra = {"card_id": card_id} if card_id else {}
-            self.store.add_inbox(kind, text, task_id=task_id, **extra)
+            self.store.add_inbox(kind, text, task_id=task_id, key=f"{kind}:{key}", **extra)
+        if changes:
+            self.store.upsert_work(task_id, **changes)
         return len(notices)
 
     # ── name and avatar ─────────────────────────────────────────────────
@@ -1030,9 +1086,18 @@ class DotService:
 
     async def wake(self) -> bool:
         """Queue one wake-up turn in the Dot Chat (coalesced by the scheduler)."""
-        from .. import workspace_manager
+        from .. import ttyd_manager, workspace_manager
 
         schedule_id = self.store.read_state().get("wake_schedule_id")
+        tab_id = self.tab_id()
+        if schedule_id not in workspace_manager.scheduled_tasks and tab_id:
+            # A deleted schedule would leave Dot asleep until the next restart.
+            if ttyd_manager.get_tab(tab_id) is not None:
+                try:
+                    self.ensure_schedules(tab_id)
+                except Exception:
+                    logger.exception("dot: restoring the schedules failed")
+                schedule_id = self.store.read_state().get("wake_schedule_id")
         if not schedule_id or schedule_id not in workspace_manager.scheduled_tasks:
             return False
         try:

@@ -17,7 +17,7 @@ from ..auth.dependencies import get_current_user
 from ..config import settings
 from ..models.schemas import User
 from ..services.dot import Card, DotService, get_dot_service
-from ..services.dot.service import LessonNotFound
+from ..services.dot.service import DelegateNotStarted, LessonNotFound
 from ..services.dot.store import LESSON_RULE_LIMIT
 from ..services.workspace_manager._task_execution import TaskExecutionConflict
 
@@ -443,6 +443,8 @@ async def dot_delegate(
 ) -> dict[str, Any]:
     try:
         return await _service().delegate(**payload.model_dump(), actor_key=_actor_key(current_user))
+    except DelegateNotStarted as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except TaskExecutionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except KeyError:

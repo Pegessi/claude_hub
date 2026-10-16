@@ -103,13 +103,17 @@ def dot_identity(
 ) -> None:
     """Show or change Dot's name and avatar."""
     data = None
+    encoded = None
+    if avatar_image:
+        # Read first, so a bad file changes nothing.
+        file_path = Path(avatar_image).expanduser()
+        try:
+            encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+        except OSError as exc:
+            raise click.ClickException(f"Cannot read {avatar_image}: {exc}") from None
     if name is not None or avatar is not None:
         data = _call(ctx, "PATCH", "/identity", json={"name": name, "avatar": avatar})
-    if avatar_image:
-        file_path = Path(avatar_image).expanduser()
-        if not file_path.is_file():
-            raise click.ClickException(f"Not a file: {avatar_image}")
-        encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+    if encoded is not None:
         data = _call(ctx, "POST", "/identity/avatar", json={"data_base64": encoded})
     elif clear_image:
         data = _call(ctx, "DELETE", "/identity/avatar")
