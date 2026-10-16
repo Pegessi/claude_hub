@@ -57,7 +57,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
+from uuid import uuid4
 
+from ...config import settings
 from ...models import (
     AgentType,
     ChatMode,
@@ -68,6 +70,7 @@ from ...models import (
     StreamReasoningEffortOption,
 )
 from ..agent_execution_policy import EXECUTION_POLICY
+from ..provider_proxy import provider_subprocess_env, redact_provider_proxy_diagnostic
 from .fork_seed import wrap_fork_seed_history
 from .provider_network import (
     PROVIDER_NETWORK_MODE_ENV,
@@ -489,7 +492,6 @@ _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
 _MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
 _MODELS_NEGATIVE_TTL_S = 60.0  # failed probe (static fallback): 1 minute
-_MODELS_PROBE_TIMEOUT_S = 5.0
 _REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 _REASONING_LABELS = {
     "none": "None",
@@ -726,8 +728,8 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
     unparseable output) and the static curated list was returned instead; the
     caller applies the short negative TTL so recovery is quick.
 
-    The probe deliberately inherits the backend process environment rather
-    than the session env: the catalog is cached globally per agent type, so a
+    The probe uses the backend process plus deployment Cursor proxy defaults,
+    rather than the session env: the catalog is cached globally per agent type, so a
     session-specific ``agent`` binary or credentials would leak one session's
     models into another's. The backend runs as the user, so ``agent`` auth
     works.
@@ -738,11 +740,14 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
             "--list-models",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=provider_subprocess_env("cursor", os.environ),
         )
     except (OSError, NotImplementedError):
         return _group_cursor_model_options(_static_options("cursor")), True
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_MODELS_PROBE_TIMEOUT_S)
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=settings.cursor_models_probe_timeout_seconds
+        )
     except asyncio.CancelledError:
         # The calling task was cancelled mid-probe. ``wait_for`` propagates
         # this without killing the process, so do so explicitly to avoid a
@@ -1035,6 +1040,8 @@ class ProviderSession(ABC):
         self._conversation_id_verified: bool = bool(
             getattr(session, "agent_session_id_verified", False)
         )
+        self._required_conversation_id: Optional[str] = None
+        self._delivery_admission: Optional[Callable[[], None]] = None
         # Turn-in-flight guard. A second ``send_message`` while a turn is still
         # generating must raise rather than cancel the active turn (which the
         # old ``_send_lock``-only approach did, because the lock was released
@@ -1310,6 +1317,35 @@ class ProviderSession(ABC):
 
     # ── input ───────────────────────────────────────────────────────────────
 
+    def require_resumed_conversation(
+        self,
+        conversation_id: Optional[str],
+        *,
+        before_delivery: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Fence automatic continuation against a fresh-conversation fallback."""
+        if conversation_id is not None and (
+            not self._conversation_id_verified or self._conversation_id != conversation_id
+        ):
+            raise RuntimeError("the original provider conversation is no longer available")
+        self._required_conversation_id = conversation_id
+        self._delivery_admission = before_delivery
+
+    def check_resumed_conversation(self) -> None:
+        expected = self._required_conversation_id
+        if expected is not None and (
+            not self._conversation_id_verified
+            or self._conversation_id != expected
+            or (self.active_thread_id is not None and self.active_thread_id != expected)
+        ):
+            raise RuntimeError("the original provider conversation could not be resumed")
+
+    def check_delivery_admission(self) -> None:
+        """Recheck automatic intent after preparation, at the input boundary."""
+        self.check_resumed_conversation()
+        if self._delivery_admission is not None:
+            self._delivery_admission()
+
     async def _prepare_for_send(self) -> None:
         """Apply provider lifecycle changes before accepting the next turn."""
 
@@ -1326,6 +1362,7 @@ class ProviderSession(ABC):
         """
         async with self._send_lock:
             await self._prepare_for_send()
+            self.check_delivery_admission()
             self._begin_turn()
             try:
                 if images:
@@ -1421,7 +1458,12 @@ class ProviderSession(ABC):
             except Exception:
                 logger.warning("fork-seed consumed callback failed", exc_info=True)
 
-    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+    async def answer_pending_question(
+        self,
+        answers: List[Dict[str, Any]],
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
         """Answer a provider-native blocking question, if one is pending.
 
         Some providers (Codex) block the in-flight turn on a server→client
@@ -1557,7 +1599,9 @@ class ProviderSession(ABC):
                 except Exception:
                     pass
             if returncode != 0:
-                stderr_text = self._stderr_buffer.decode("utf-8", errors="ignore").strip()
+                stderr_text = redact_provider_proxy_diagnostic(
+                    self._stderr_buffer.decode("utf-8", errors="ignore").strip()
+                )
                 self._exit_error = f"provider exited with code {returncode}" + (
                     f": {stderr_text}" if stderr_text else ""
                 )
@@ -1657,12 +1701,9 @@ class ProviderSession(ABC):
         ``session.env``) authoritative. This is process env only — it is never
         written back to the persisted tab env.
         """
-        env = dict(os.environ)
-        for key, value in self.session.env.items():
-            if value is None:
-                env.pop(key, None)
-            else:
-                env[key] = value
+        # Apply deployment defaults before explicit session overrides;
+        # normalize each layer so single-case proxy overrides replace both.
+        env = provider_subprocess_env(self.session.agent_type.value, os.environ, self.session.env)
         tab_id = getattr(self.session, "tab_id", None)
         if tab_id:
             env.setdefault("CLAUDE_HUB_TAB_ID", tab_id)
@@ -1770,6 +1811,7 @@ class ProviderSession(ABC):
         if provider_env is None:
             provider_env = await self._build_provider_env()
         await self._terminate_process()
+        self.check_delivery_admission()
         generation = self._stdout_generation
         self._stderr_buffer = b""
         self._exit_error = None
@@ -1789,6 +1831,13 @@ class ProviderSession(ABC):
         except OSError as exc:
             self._last_error = f"failed to launch provider: {exc}"
             self._end_turn()
+            raise
+        try:
+            self.check_delivery_admission()
+        except BaseException:
+            # Spawn itself yields. A Stop/configuration change while it runs
+            # must kill this empty process before its stdin receives a prompt.
+            await self._terminate_process()
             raise
         self._started = True
         self._reader_task = asyncio.create_task(self._drain_oneshot_stdout(generation))
@@ -1848,6 +1897,32 @@ class ClaudeNativeSession(ProviderSession):
         self._validated_tab_settings_payload: Optional[Dict[str, Any]] = None
         self._validated_claude_launch_env: Optional[Dict[str, str]] = None
         self._tab_endpoint_is_authoritative = False
+        self._input_message_uuid: Optional[str] = None
+
+    def accepts_notification(self, record: Dict[str, Any]) -> bool:
+        """Only the submitted input's result may release its turn guard.
+
+        A resumed Claude process can emit background-task results before it
+        answers stdin, including empty zero-turn results for batched notices.
+        Admitting those would retire stdout and discard the real answer.
+        Prefer explicit input correlation; older CLIs may only give provenance.
+        Unattributed legacy results and legitimate zero-turn commands still end
+        their turn. This runs before normalization can clear adapter state.
+        """
+        if record.get("type") != "result" or self._input_message_uuid is None:
+            return True
+        linked: set[str] = set()
+        singular = record.get("user_message_uuid")
+        if isinstance(singular, str) and singular:
+            linked.add(singular)
+        plural = record.get("user_message_uuids")
+        if isinstance(plural, list):
+            linked.update(value for value in plural if isinstance(value, str) and value)
+        if linked:
+            return self._input_message_uuid in linked
+        origin = record.get("origin")
+        kind = origin.get("kind") if isinstance(origin, dict) else None
+        return kind not in ("task-notification", "peer")
 
     def _tab_settings_path(self) -> Optional[Path]:
         tab_id = getattr(self.session, "tab_id", None)
@@ -1923,7 +1998,9 @@ class ClaudeNativeSession(ProviderSession):
         # every proxy spelling so a user-level settings file cannot silently
         # restore a route that the preflight did not select.
         for lower, upper in zip(PROXY_ENV_NAMES[::2], PROXY_ENV_NAMES[1::2]):
-            value = provider_env.get(lower) or provider_env.get(upper) or ""
+            # An explicitly empty lowercase setting disables the uppercase
+            # proxy, matching the precedence used during route selection.
+            value = provider_env[lower] if lower in provider_env else provider_env.get(upper, "")
             settings_env[lower] = value
             settings_env[upper] = value
         launch_dir = _runtime_home() / "launch_env"
@@ -2070,8 +2147,10 @@ class ClaudeNativeSession(ProviderSession):
                 }
             )
         content.append({"type": "text", "text": text})
+        self._input_message_uuid = str(uuid4())
         envelope = {
             "type": "user",
+            "uuid": self._input_message_uuid,
             "message": {"role": "user", "content": content},
             "parent_tool_use_id": None,
             "session_id": None,
@@ -2080,6 +2159,7 @@ class ClaudeNativeSession(ProviderSession):
 
     async def _send_text(self, text: str) -> None:
         provider_env = await self._build_provider_env()
+        self.check_delivery_admission()
         settings_path = self._write_selected_settings(provider_env)
         cmd = self._build_command(settings_path)
         stdin_text = self._build_stdin(text)
@@ -2405,8 +2485,12 @@ class CodexNativeSession(ProviderSession):
                         self._thread_id = thread["id"]
                         return
             except RuntimeError:
+                if self._required_conversation_id is not None:
+                    raise
                 # Resume failed (e.g. thread not found); fall through to start.
                 logger.warning("codex thread/resume failed; starting a new thread")
+        if self._required_conversation_id is not None:
+            raise RuntimeError("the original provider thread could not be resumed")
         thread_resp = await self._send_request("thread/start", self._thread_config())
         if isinstance(thread_resp, dict):
             self._capture_thread_model(thread_resp)
@@ -2805,6 +2889,7 @@ class CodexNativeSession(ProviderSession):
         # handler would see an empty list and the temp files would leak.
         self._inflight_images = image_paths
         try:
+            self.check_delivery_admission()
             response = await self._send_request("turn/start", params)
             turn = response.get("turn") if isinstance(response, dict) else None
             self._provider_turn_id = turn.get("id") if isinstance(turn, dict) else None
@@ -2900,6 +2985,8 @@ class CodexNativeSession(ProviderSession):
         placed on the notification queue and never re-queued ahead of the
         response.
         """
+        if method == "turn/start":
+            self.check_delivery_admission()
         proc = self._process
         if proc is None or proc.stdin is None:
             raise RuntimeError("codex app-server is not running")
@@ -3016,12 +3103,19 @@ class CodexNativeSession(ProviderSession):
             # The app-server is gone; nothing to answer.
             pass
 
-    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+    async def answer_pending_question(
+        self,
+        answers: List[Dict[str, Any]],
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
         """Answer a pending ``requestUserInput`` question.
 
         Maps the composer's ``[{questionId, selected: [labels]}]`` payload to
         the app-server's ``{answers: {questionId: {answers: [labels]}}}``
-        shape and responds only to matching pending question requests.
+        shape and responds only to matching pending question requests. When
+        ``expected_call_id`` is supplied, only the provider request whose
+        ``itemId`` produced that exact card can be consumed.
         An empty answers list (dismissal) yields ``{"answers": {}}``.
         Returns ``False`` when no question is pending so the caller can
         deliver the text normally.
@@ -3040,6 +3134,10 @@ class CodexNativeSession(ProviderSession):
             codex_answers[question_id] = {"answers": values}
         responses: List[Tuple[Any, Dict[str, Any]]] = []
         for req_id, params in list(self._pending_questions.items()):
+            item_id = params.get("itemId")
+            call_id = str(item_id) if item_id is not None else "request_user_input"
+            if expected_call_id is not None and call_id != expected_call_id:
+                continue
             ids = {
                 question["id"] for question in codex_normalize_questions(params.get("questions"))
             }
@@ -3398,7 +3496,12 @@ class TraexNativeSession(CodexNativeSession):
             }
         )
 
-    async def answer_pending_question(self, answers: List[Dict[str, Any]]) -> bool:
+    async def answer_pending_question(
+        self,
+        answers: List[Dict[str, Any]],
+        *,
+        expected_call_id: Optional[str] = None,
+    ) -> bool:
         selected = {
             a["questionId"]: a.get("selected")
             for a in answers
@@ -3407,6 +3510,8 @@ class TraexNativeSession(CodexNativeSession):
         responses: List[Tuple[Any, Dict[str, Any]]] = []
         for req_id, choices in list(self._pending_permissions.items()):
             question_id = f"permission:{req_id}"
+            if expected_call_id is not None and question_id != expected_call_id:
+                continue
             if answers and question_id not in selected:
                 continue
             values = selected.get(question_id)
@@ -3418,6 +3523,10 @@ class TraexNativeSession(CodexNativeSession):
             self._pending_permissions.pop(req_id, None)
             responses.append((req_id, {"decision": decision}))
         for req_id, params in list(self._pending_questions.items()):
+            item_id = params.get("itemId")
+            call_id = str(item_id) if item_id is not None else "request_user_input"
+            if expected_call_id is not None and call_id != expected_call_id:
+                continue
             questions = codex_normalize_questions(params.get("questions"))
             ids = {question["id"] for question in questions}
             if answers and not ids <= selected.keys():

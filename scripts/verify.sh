@@ -306,6 +306,19 @@ run_one() {
       ;;
     docs)
       cmp "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md"
+      # One heading owns the entries. Resolving a CHANGELOG conflict by keeping
+      # both sides' headings splits the log into same-named blocks: readers see
+      # only the first and cannot tell the rest exists. Three such blocks hid
+      # 194 of 276 entries for four months before anyone noticed.
+      _changelog_heads=$(grep -c '^## Released$' "$ROOT/CHANGELOG.md" || true)
+      if [ "$_changelog_heads" -ne 1 ]; then
+        echo "ERROR: CHANGELOG.md has $_changelog_heads '## Released' headings; expected exactly 1" >&2
+        return 1
+      fi
+      if grep -q '^## Unreleased$' "$ROOT/CHANGELOG.md"; then
+        echo "ERROR: CHANGELOG.md still has an '## Unreleased' heading; main is released" >&2
+        return 1
+      fi
       ;;
     backend-format)
       check_backend_tools

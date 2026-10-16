@@ -15,13 +15,16 @@ from ..models import (
     SessionKind,
     User,
 )
-from ..services import ttyd_manager
+from ..models.chat_image import ChatImageAttachment
+from ..models.goal_run import GoalObjectiveUpdate
 from ..services.goal_run import (
     GoalPolicyError,
     configure_goal_dispatch,
     get_goal_admission_lock,
     get_goal_manager,
 )
+from ..services.goal_run.images import goal_image_input, pending_goal_images
+from ..services.ttyd_manager import ttyd_manager
 
 router = APIRouter(tags=["goals"])
 
@@ -46,6 +49,7 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
         session,
         AgentStreamSendRequest(
             text=prompt,
+            attachments=pending_goal_images(goal),
             client_turn_id=turn_id,
             delivery="steer" if steered else "normal",
         ),
@@ -54,6 +58,24 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
         turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
     )
     return turn_id
+
+
+async def validate_goal_images(tab_id: str, images: list[ChatImageAttachment]) -> None:
+    """Reject invalid/unsupported images before changing or cancelling a Goal."""
+    if not images:
+        return
+    from .agent_stream import (
+        _capabilities_for,
+        _decode_attachments,
+        _get_tab_tailer_manager,
+        _terminal_tab_session_or_404,
+    )
+
+    _decode_attachments(images)
+    session = _terminal_tab_session_or_404(tab_id)
+    capabilities = await _capabilities_for(session, _get_tab_tailer_manager())
+    if not capabilities.supports_images:
+        raise HTTPException(status_code=400, detail="This Chat does not support image attachments")
 
 
 async def _cancel_goal_turn(goal: GoalRun) -> None:
@@ -101,6 +123,16 @@ async def _ensure_goal_ready(tab_id: str, *, check_busy: bool = True) -> None:
         )
 
 
+def _cancel_restart_for_mutation(goal: GoalRun, request_id: str) -> None:
+    if request_id in goal.idempotency:
+        return
+    from ..services.restart_continuation import cancel_pending_continuation
+
+    # Revoke before waiting for admission: provider preparation may be holding
+    # that lock, but a new human control must still prevent its late submission.
+    cancel_pending_continuation(goal.tab_id, None, goal_id=goal.id)
+
+
 def _call(operation: Callable[..., GoalRun], *args: object) -> GoalRun:
     try:
         return operation(*args)
@@ -125,7 +157,12 @@ async def create_goal(
             return replay
         try:
             await _ensure_goal_ready(tab_id)
-            return await manager.create_and_start(tab_id, body)
+            await validate_goal_images(tab_id, body.attachments)
+            with goal_image_input(tab_id, body.attachments):
+                result = await manager.create_and_start(tab_id, body)
+            if result.dispatch_state.value == "uncertain":
+                raise HTTPException(status_code=503, detail=result.status_message)
+            return result
         except (ValueError, GoalPolicyError) as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
 
@@ -135,12 +172,31 @@ async def current_goal(
     tab_id: str, current_user: User = Depends(get_current_user)
 ) -> GoalRun | None:
     _direct_chat_tab(tab_id)
-    return get_goal_manager().current(tab_id)
+    # A steer parks the Goal while cancelling/dispatching. Do not expose that
+    # intermediate snapshot as a completed recovery to a lost-response client.
+    async with get_goal_admission_lock(tab_id):
+        return get_goal_manager().current(tab_id)
 
 
 @router.get("/api/goals/{goal_id}", response_model=GoalRun)
 async def get_goal(goal_id: str, current_user: User = Depends(get_current_user)) -> GoalRun:
     return _call(get_goal_manager().get, goal_id)
+
+
+@router.patch("/api/goals/{goal_id}/objective", response_model=GoalRun)
+async def update_goal_objective(
+    goal_id: str, body: GoalObjectiveUpdate, current_user: User = Depends(get_current_user)
+) -> GoalRun:
+    try:
+        manager = get_goal_manager()
+        goal = manager.get(goal_id)
+        _direct_chat_tab(goal.tab_id)
+        async with get_goal_admission_lock(goal.tab_id):
+            return await manager.update_objective(goal_id, body.client_request_id, body.objective)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except (ValueError, GoalPolicyError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
 
 
 @router.post("/api/goals/{goal_id}/pause", response_model=GoalRun)
@@ -150,6 +206,7 @@ async def pause_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.pause(goal_id, body.client_request_id)
     except KeyError as exc:
@@ -165,6 +222,7 @@ async def resume_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             goal = manager.get(goal_id)
             if body.client_request_id in goal.idempotency or (
@@ -179,12 +237,9 @@ async def resume_goal(
             session = _terminal_tab_session_or_404(goal.tab_id)
             stream_manager = _get_tab_tailer_manager()
             if not await stream_manager.turn_in_flight(session):
-                if goal.resume_after_turn:
-                    return await manager.release_deferred_resume(goal_id)
                 return await manager.resume(goal_id, body.client_request_id)
-            if goal.resume_after_turn:
-                # Already resuming once the running Chat turn ends.
-                return goal
+            # Even an already-deferred no-op must record the accepted request;
+            # a later HTTP retry must not revoke a new restart generation.
             goal = await manager.resume(goal_id, body.client_request_id, after_current_turn=True)
             # The running turn may have ended before the deferral was stored.
             if not await stream_manager.turn_in_flight(session):
@@ -203,6 +258,7 @@ async def complete_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.complete(goal_id, body.client_request_id)
     except KeyError as exc:
@@ -218,6 +274,7 @@ async def clear_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.clear(goal_id, body.client_request_id)
     except KeyError as exc:

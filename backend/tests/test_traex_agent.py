@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -161,7 +162,9 @@ def test_traex_ttyd_command_solo_keeps_flags_in_wrapper(monkeypatch: pytest.Monk
     cmd = _traex_process(solo_mode=True)._build_ttyd_command(session_exists=False)
 
     assert cmd[-3:-1] == ["/bin/zsh", "-c"]
-    assert "traex --ask-for-approval never --sandbox danger-full-access; exec /bin/zsh" in cmd[-1]
+    assert cmd[-1].endswith("; exec /bin/zsh")
+    launch = shlex.split(cmd[-1].removesuffix("; exec /bin/zsh"))
+    assert launch[2] == "traex --ask-for-approval never --sandbox danger-full-access"
 
 
 def test_traex_existing_session_reattaches_without_relaunch_or_flags() -> None:

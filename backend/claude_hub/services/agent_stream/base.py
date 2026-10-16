@@ -27,6 +27,10 @@ from ...models import (
 _DISCOVERY_NEGATIVE_TTL_S = 5.0
 
 
+class NativeInputNotSubmittedError(RuntimeError):
+    """Native input was rejected before any provider submission side effect."""
+
+
 @dataclass
 class _TurnAccumulator:
     """Per-turn accumulated text/thinking for final-snapshot deduplication.

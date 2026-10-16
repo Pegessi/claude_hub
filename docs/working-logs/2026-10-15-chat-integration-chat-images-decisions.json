@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "45fa1208942ab77e4cb33b58d3023b5ea107f365",
+  "parents": [
+    "99d4aa9ad937526001b40508afc20d1b849c9186",
+    "d8380d2276fdab3ad2a43ab87bc8ac720564fa16"
+  ],
+  "base": "a89dd7870e256fb871ff9edb8bd94f9887479922",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "61b9cc5cc095ad0efb35b6a55cde85741a51ae01",
+  "reconstructed_tree": "f52db515cf0baaafd828b1a71bda4b87690f700e",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c8e7ae97a1e956190237004abf11974fb56079ba"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8e61c838c8b2334e1d4b261cb42f01181cfb43c8"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "98c20e459dcb7516e3684118ed88554db0fd9c0d"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2a93b033ef2e56a890ddb463006f670987b3e38f"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d1fd94f4a6f3f58d71cf1a5e381b9c2a447c6056"
+      },
+      "reason": "Retain both image feature/fix entries from parent 2 and quota-color entry plus all earlier local/remote release entries from parent 1. Remove only conflict markers and put image entries before quota colors.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

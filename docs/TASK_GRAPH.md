@@ -271,4 +271,4 @@ or product dependency.
 
 Design history (includes removed Agent Tree semantics — **not** current API):
 [2026-08-16-agent-tree-durable-mailbox.md](working-logs/2026-08-16-agent-tree-durable-mailbox.md).
-See also `CHANGELOG.md` Unreleased.
+See also `CHANGELOG.md` Released.

@@ -10,7 +10,7 @@ const actions = readFileSync(new URL('../src/components/AppExtensionActions.vue'
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 })
-const { restartOutcome, createRestartId } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
+const { restartOutcome, createRestartId, restartCompletionMessage } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 const pending = { id: 'request', instanceId: 'old' }
 
 test('request IDs also work on LAN HTTP where randomUUID is unavailable', () => {
@@ -30,6 +30,12 @@ test('server failures remain failures and in-progress statuses keep waiting', ()
   for (const status of ['preparing', 'restarting', 'failed']) {
     assert.equal(restartOutcome({ instance_id: 'new', operation: { id: 'request', status } }, pending), status === 'failed' ? 'failed' : 'waiting')
   }
+})
+
+test('service success reports continuation outcomes without promising every chat resumed', () => {
+  const message = restartCompletionMessage({ continuation: { total: 3, pending: 0, started: 1, skipped: 1, attention: 1 } })
+  assert.match(message, /1 started, 1 skipped, 1 need attention/)
+  assert.match(restartCompletionMessage(null), /interrupted work that still needs attention/)
 })
 
 test('restart UI explains and names the frontend build', () => {

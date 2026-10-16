@@ -92,6 +92,34 @@ implicit import of existing MASO conversations or local trajectory files.
 An existing verified session without a persisted service address is refused;
 create a new Chat rather than guessing which service owns its opaque ID.
 
+## Image input
+
+MASO Chats accept pasted or selected PNG, JPEG, GIF and WebP images, up to 8 MiB
+of original bytes per image. Text is optional. Images remain attached when a
+draft queues behind a running turn, and Hub retains bounded display previews for
+history and reload. Original image bytes are sent to MASO, not the smaller
+display preview. The selected MASO model and upstream endpoint must also support
+visual input; the service's model catalog has no per-model vision capability
+field.
+
+Hub validates every image before creating or uploading to a session. It uploads
+512 KiB binary chunks over HTTP, then sends text and session-scoped image refs
+in one message. This works with a remote MASO_BASE_URL and avoids MASO's proxy
+limit on large JSON bodies. It does not pass Hub filesystem paths or authenticated
+preview URLs to the service.
+
+Upload failure happens before message delivery and permits a fresh send.
+Transport cancellation fences a pending upload so it cannot start a later model
+turn. The composer keeps Stop disabled until the send request finishes, including
+its upload; Stop then cancels the delivered turn. Unused uploaded refs expire
+under MASO's own policy; Hub does not delete service files. Once the message POST
+starts, the existing uncertain-delivery rules still apply.
+
+MASO's user-message echoes are not added to Hub history, so provider data URLs
+are not duplicated in the display event log. Opening history does not upload or
+resend earlier images. Forked history transfers text; it does not automatically
+attach past images to the new context.
+
 ## Condensation and streaming
 
 MASO's `turn_end` ends one model call; the root agent's `agent_end` completes the
@@ -136,7 +164,28 @@ after a Hub restart. The error explains that the service may still execute the
 message: inspect and stop the session in MASO before starting a new Chat. An
 idle status immediately after a timeout is not proof of cancellation.
 
-This initial integration supports local Chat, text, reasoning, tool output and
-tool confirmations. Images, Goals, Plan mode, editing earlier turns and
-Workspace-managed worker execution are not advertised. Automatic long-context
-condensation remains MASO's responsibility; Hub adds no separate condenser.
+This integration supports local Chat, text, images, reasoning, tool output and
+tool confirmations. Goals, Plan mode and editing earlier turns are not
+advertised. Automatic long-context condensation remains MASO's responsibility;
+Hub adds no separate condenser.
+
+## Workspace agents and reviewers
+
+Workspace agent creation also accepts `session_kind=chat` with `agent_type=maso`.
+This uses the existing Task assignment, report, review and human-acceptance flow;
+a model turn ending does not complete a Task. The associated tab is a navigation
+record only and does not start ttyd, tmux or a shell. Open it from Workspace to
+read the managed-session Chat history.
+
+Managed MASO execution is limited to a loopback MASO endpoint on the Hub machine.
+The MASO tools must see the selected working directory and be able to call the
+Hub report URL supplied in the assignment. A service catalog probe does not
+prove those tool/callback requirements; remote MASO service callbacks and SSH
+native Chat execution are not supported by this managed path. Ordinary standalone
+MASO Chat keeps its existing endpoint support.
+
+Workspace Stop pauses native execution and queued mailbox delivery. Resume with
+an explicit message or Task continuation; unknown message acceptance remains
+blocked rather than automatically repeating the assignment. Unrelated reviews
+receive a fresh native provider context while prior display history remains.
+The long first-turn Hub runtime guidance's injection frequency is unchanged.

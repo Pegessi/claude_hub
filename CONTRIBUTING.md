@@ -64,6 +64,11 @@ ci: add AGENTS.md <> CLAUDE.md sync check
 
 ### 5. Run validation
 
+For test and CI changes, follow the [CI reliability contract](docs/CI_RELIABILITY.md):
+choose the smallest meaningful check, keep IDs/output bounded, inspect cost and
+failure evidence, and report the exact verified scope. Collection automatically
+rejects oversized pytest IDs; slow-phase timings are diagnostic, not a time gate.
+
 Use the shared local/CI entry point from the feature worktree:
 
 ```bash
@@ -136,8 +141,9 @@ Stage the intended files explicitly, then run:
 
 This reads the index's blobs, not the working tree. Git environment variables that
 redirect the repository, index or object database must be unset explicitly; the
-check refuses them instead of inspecting a different snapshot. It rejects the machine-local
-`frontend/pnpm-workspace.yaml` and checks the production host argument of a tracked
+check refuses them instead of inspecting a different snapshot. It rejects private
+root/backend `.env` files and the machine-local `frontend/pnpm-workspace.yaml`,
+and checks the production host argument of a tracked
 `start.sh`, when present. The repository default remains
 `"${CLAUDE_HUB_HOST:-0.0.0.0}"`; setting `CLAUDE_HUB_HOST=::` in the deployment
 environment is permitted. Intentional changes to that startup contract need a
@@ -194,8 +200,7 @@ instructions match the current commands, paths, and module responsibilities.
 ### 6. Update `CHANGELOG.md`
 
 For any non-trivial change that ships user-facing or dev-facing behavior, add
-an entry to `CHANGELOG.md` at the top of the **Unreleased** section (or under
-today's date if there is no Unreleased block) using:
+an entry to `CHANGELOG.md` at the top of the **Released** section using:
 
 ```
 ### <type>: <one-line description>

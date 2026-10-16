@@ -13,7 +13,7 @@ import {
   saveTaskReporterKey, type StoredTaskCreateAttempt,
 } from '@/utils/taskExecution'
 import type {
-  AutonomyPolicy, WorkspaceTask, WorkspaceTaskCapabilitiesStatus,
+  AutonomyPolicy, SessionKind, WorkspaceTask, WorkspaceTaskCapabilitiesStatus,
   WorkspaceTaskCreate, WorkspaceTaskExecutionComplexity,
   WorkspaceTaskExecutionControl, WorkspaceTaskMode,
 } from '@/types'
@@ -76,6 +76,7 @@ export function useTaskCreateFlow() {
 
   const taskForm = reactive({
     execution_control: 'workspace' as WorkspaceTaskExecutionControl,
+    session_kind: 'terminal' as SessionKind,
     title: '',
     prompt: '',
     task_mode: 'reviewed' as WorkspaceTaskMode,
@@ -266,6 +267,7 @@ export function useTaskCreateFlow() {
           ...(recordOnly ? { reporter_key: generateTaskReporterKey() } : {}),
           title: taskForm.title.trim(),
           prompt: taskForm.prompt.trim(),
+          session_kind: taskForm.session_kind,
           task_mode: taskForm.task_mode,
           execution_complexity: taskForm.execution_complexity,
           autonomy_policy: autonomyPolicy,
@@ -379,6 +381,7 @@ export function useTaskCreateFlow() {
 
   function resetTaskForm() {
     taskForm.execution_control = 'workspace'
+    taskForm.session_kind = 'terminal'
     taskForm.title = ''
     taskForm.prompt = ''
     taskForm.task_mode = 'reviewed'

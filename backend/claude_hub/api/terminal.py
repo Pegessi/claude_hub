@@ -24,7 +24,7 @@ from websockets.typing import Subprotocol
 
 from ..auth.dependencies import get_current_user, get_current_user_ws
 from ..models import AgentType, User
-from ..services import ttyd_manager
+from ..services.ttyd_manager import ttyd_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/terminal", tags=["terminal"])

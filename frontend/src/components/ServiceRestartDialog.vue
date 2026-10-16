@@ -12,8 +12,20 @@
       {{ phase === 'succeeded' ? 'Service is back online' : 'Build and restart service' }}
     </h2>
     <p id="restart-description">
-      {{ phase === 'confirm' ? 'This rebuilds the frontend, synchronizes backend dependencies, then restarts the service. Running chats and agent tasks are interrupted for everyone only after preparation succeeds. The page will briefly disconnect; resume interrupted work manually after it returns.' : message }}
+      {{ phase === 'confirm' ? 'This rebuilds the frontend, synchronizes backend dependencies, then restarts the service. Running chats and agent tasks are interrupted for everyone only after preparation succeeds. The page will briefly disconnect.' : message }}
     </p>
+    <label
+      v-if="phase === 'confirm'"
+      class="restart-continuation"
+    >
+      <input
+        v-model="continueChats"
+        type="checkbox"
+      >
+      <span>Continue interrupted Chats automatically
+        <small>Send “Please continue.” to eligible working Chats after restart. Chats waiting for your input and managed automations keep their own recovery controls.</small>
+      </span>
+    </label>
     <p
       v-if="phase === 'confirm' && !status?.available"
       class="restart-status"
@@ -25,7 +37,7 @@
       role="status"
       class="restart-status"
     >
-      Waiting for the service… {{ elapsed }}s
+      Reconnecting and restoring work… {{ elapsed }}s
     </p>
     <div class="restart-actions">
       <button
@@ -65,7 +77,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import {
-  createRestartId, fetchRestartStatus, RESTART_STORAGE_KEY, restartOutcome, RestartRequestError,
+  createRestartId, fetchRestartStatus, RESTART_STORAGE_KEY, restartOutcome, restartCompletionMessage, RestartRequestError,
   type PendingRestart, type RestartStatus,
 } from '@/utils/serviceRestart'
 
@@ -75,6 +87,7 @@ const phase = ref<'loading' | 'confirm' | 'waiting' | 'succeeded' | 'error'>('lo
 const message = ref('Checking service…')
 const status = ref<RestartStatus | null>(null)
 const elapsed = ref(0)
+const continueChats = ref(true)
 let pending: PendingRestart | null = null
 let disposed = false
 const recoveryTimeoutMs = 300_000
@@ -89,6 +102,7 @@ async function waitForRecovery() {
   if (!pending) return
   phase.value = 'waiting'
   const started = Date.now()
+  let serviceReturned = false
   while (!disposed && Date.now() - started < recoveryTimeoutMs) {
     elapsed.value = Math.floor((Date.now() - started) / 1000)
     try {
@@ -96,9 +110,17 @@ async function waitForRecovery() {
       if (disposed) return
       const outcome = restartOutcome(current, pending)
       if (current.operation?.id === pending.id) message.value = current.operation.message
+      if (outcome === 'succeeded') {
+        serviceReturned = true
+        if (current.operation?.continuation?.pending) {
+          message.value = 'The service is back online. Continuing interrupted Chats…'
+          await new Promise(resolve => window.setTimeout(resolve, 1000))
+          continue
+        }
+      }
       if (outcome !== 'waiting') {
         phase.value = outcome === 'succeeded' ? 'succeeded' : 'error'
-        if (outcome === 'succeeded') message.value = 'The frontend was rebuilt and the service restarted. Resume any interrupted chats or agent tasks manually.'
+        if (outcome === 'succeeded') message.value = restartCompletionMessage(current.operation)
         savePending(null)
         return
       }
@@ -108,6 +130,12 @@ async function waitForRecovery() {
     await new Promise(resolve => window.setTimeout(resolve, 1000))
   }
   if (!disposed) {
+    if (serviceReturned) {
+      phase.value = 'succeeded'
+      message.value = 'The service restarted. Some continuation attempts still need attention; check those Chats before continuing them manually.'
+      savePending(null)
+      return
+    }
     phase.value = 'error'
     message.value = 'Restart could not be confirmed within 5 minutes. Check again, or open a terminal on the host and inspect the service logs. Another restart has not been sent.'
   }
@@ -141,7 +169,7 @@ async function confirmRestart() {
   phase.value = 'waiting'
   message.value = 'Requesting restart…'
   try {
-    const accepted = await fetchRestartStatus({ instance_id: pending!.instanceId, request_id: pending!.id })
+    const accepted = await fetchRestartStatus({ instance_id: pending!.instanceId, request_id: pending!.id, resume_running_chats: continueChats.value })
     if (accepted.operation) savePending({ id: accepted.operation.id, instanceId: accepted.operation.instance_id })
   } catch (error) {
     if (error instanceof RestartRequestError) {
@@ -181,6 +209,9 @@ onUnmounted(() => { disposed = true; dialog.value?.close() })
 h2 { margin: 0 0 14px; font-size: 19px; }
 p { margin: 0 0 18px; font-size: 14px; line-height: 1.6; }
 .restart-status { color: var(--ch-color-text-muted); }
+.restart-continuation { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 18px; font-size: 14px; cursor: pointer; }
+.restart-continuation input { margin-top: 3px; min-width: 18px; min-height: 18px; }
+.restart-continuation small { display: block; margin-top: 6px; color: var(--ch-color-text-muted); line-height: 1.5; }
 .restart-actions { display: flex; justify-content: flex-end; gap: 10px; }
 button {
   min-height: 40px;

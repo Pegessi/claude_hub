@@ -12,6 +12,8 @@ import { isChatModeLocked } from '@/utils/chatTurnLifecycle'
 const props = defineProps<{
   paneId: string
   tabId: string
+  managedChat?: boolean
+  managedSessionId?: string
 }>()
 
 const store = useTerminalStore()
@@ -21,7 +23,7 @@ const reducer = new IncrementalTimelineReducer()
 const turnInFlight = computed(() => isChatModeLocked(false, reducer.reduce(events.value)))
 
 function reconcileQueue() {
-  if (queue.drafts.length === 0 || queue.paused || queue.sendInProgress) {
+  if (queue.drafts.length === 0 || queue.paused || queue.editing || queue.sendInProgress) {
     store.releaseQueuedChatActivation(props.paneId, props.tabId)
     stop()
     return
@@ -38,11 +40,17 @@ function reconcileQueue() {
   }
 }
 
-void start(props.tabId, 'terminal-tab')
+if (!props.managedChat || props.managedSessionId) {
+  void start(
+    props.managedSessionId ?? props.tabId,
+    props.managedChat ? 'managed-session' : 'terminal-tab',
+  )
+}
 watch(
   [
     () => queue.drafts.length,
     () => queue.paused,
+    () => queue.editing,
     () => queue.sendInProgress,
     () => queue.autoActivationBlock,
     turnInFlight,

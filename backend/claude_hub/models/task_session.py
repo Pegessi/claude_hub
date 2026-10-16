@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from .schemas import AgentType, ExecutionTarget
+from .schemas import AgentType, ExecutionTarget, SessionKind
 
 
 class ExecutorCapabilities(BaseModel):
@@ -19,6 +19,8 @@ class ExecutorCapabilities(BaseModel):
     supports_interrupt: bool = False
     durable_status: bool = False
     supported_agent_types: List[AgentType] = Field(default_factory=list)
+    supported_session_kinds: List[SessionKind] = Field(default_factory=list)
+    chat_supported_agent_types: List[AgentType] = Field(default_factory=list)
     model_configurable_agent_types: List[AgentType] = Field(default_factory=list)
     unavailable_reason: Optional[str] = None
 
@@ -32,6 +34,7 @@ class ManagedExecutorConfig(BaseModel):
     """
 
     agent_type: AgentType = AgentType.CLAUDE
+    session_kind: SessionKind = SessionKind.TERMINAL
     model: Optional[str] = None
     env: Dict[str, str] = Field(default_factory=dict)
     solo_mode: bool = True

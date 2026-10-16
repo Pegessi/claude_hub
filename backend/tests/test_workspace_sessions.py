@@ -129,8 +129,8 @@ def test_list_workspaces_returns_created_workspaces(tmp_path: Path) -> None:
     assert created["id"] in ids
 
 
-def test_workspace_agent_request_rejects_chat_surface_fields(tmp_path: Path) -> None:
-    repo = tmp_path / "repo-chat-reject"
+def test_workspace_agent_request_rejects_managed_chat_mode(tmp_path: Path) -> None:
+    repo = tmp_path / "repo-chat-mode-reject"
     repo.mkdir()
     client = TestClient(app)
     workspace = _make_workspace(client, repo)
@@ -141,17 +141,17 @@ def test_workspace_agent_request_rejects_chat_surface_fields(tmp_path: Path) -> 
     )
 
     assert response.status_code == 422
-    assert "session_kind" in response.text
+    assert "chat_mode" in response.text
 
     with pytest.raises(ValueError, match="always use Terminal"):
         SpawnWorkerRequest.model_validate({"session_kind": "chat"})
 
 
 @pytest.mark.asyncio
-async def test_managed_session_creation_never_inherits_chat_tab_surface(
+async def test_managed_session_creation_preserves_requested_chat_surface(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    repo = tmp_path / "repo-managed-terminal"
+    repo = tmp_path / "repo-managed-chat"
     repo.mkdir()
     client = TestClient(app)
     workspace_payload = _make_workspace(client, repo)
@@ -165,7 +165,7 @@ async def test_managed_session_creation_never_inherits_chat_tab_surface(
             solo_mode=True,
             agent_type=AgentType.CLAUDE,
             session_kind=SessionKind.CHAT,
-            chat_mode=ChatMode.PLAN,
+            chat_mode=ChatMode.DEFAULT,
             target=ExecutionTarget.LOCAL,
             port=12345,
             created_at=datetime.now(),
@@ -181,11 +181,12 @@ async def test_managed_session_creation_never_inherits_chat_tab_surface(
         workspace,
         EnsureWorkspaceAgentRequest(
             agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
             role=WorkspaceSessionRole.WORKER,
         ),
     )
 
-    assert session.session_kind == SessionKind.TERMINAL
+    assert session.session_kind == SessionKind.CHAT
     assert session.chat_mode == ChatMode.DEFAULT
 
 
@@ -341,25 +342,43 @@ def test_delete_session_succeeds_for_idle_session(tmp_path: Path, monkeypatch: M
     assert session.tab_id in deleted_tabs
 
 
-def test_delete_session_removes_agent_when_tab_cleanup_fails(
+def test_delete_session_retains_agent_until_tab_cleanup_retry_succeeds(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     client = TestClient(app)
+    delete_attempts = 0
+    discarded: list[str] = []
 
     async def fake_delete_tab(_tab_id: str) -> None:
-        raise RuntimeError("cli unregister failed")
+        nonlocal delete_attempts
+        delete_attempts += 1
+        if delete_attempts == 1:
+            raise RuntimeError("cli unregister failed")
+
+    async def fake_discard(_workspace_id: str, session_id: str, **_kwargs) -> None:
+        discarded.append(session_id)
+
+    import claude_hub.services.agent_stream as agent_stream
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", fake_delete_tab)
+    monkeypatch.setattr(agent_stream, "discard_session_stream", fake_discard)
 
     workspace = _make_workspace(client, repo)
     session = _make_session(workspace["id"], repo)
 
-    response = client.delete(f"/api/workspaces/sessions/{session.id}")
+    failed = client.delete(f"/api/workspaces/sessions/{session.id}")
+    assert failed.status_code == 400
+    assert session.id in workspace_manager.sessions
+    assert workspace_manager.sessions[session.id].runtime_status == AgentRuntimeStatus.ATTENTION
+    assert discarded == []
 
-    assert response.status_code == 204
+    retried = client.delete(f"/api/workspaces/sessions/{session.id}")
+    assert retried.status_code == 204
     assert session.id not in workspace_manager.sessions
+    assert discarded == [session.id]
+    assert delete_attempts == 2
 
 
 def test_delete_session_blocked_by_active_task_returns_400(

@@ -124,6 +124,12 @@ class _PromptsMixin:
             f"Runtime target: {session.target.value}",
             f"Local workspace dir: {workspace.path}",
         ]
+        if session.session_kind == SessionKind.CHAT:
+            lines.append(
+                "Execution uses native Chat, without a terminal. Finish this turn when idle; "
+                "the Workspace delivers later assignments. Report through the supplied API; "
+                "a Chat reply alone does not complete the Task."
+            )
         if session.target == ExecutionTarget.REMOTE:
             lines.extend(
                 [
@@ -144,7 +150,7 @@ class _PromptsMixin:
             f"Session: {session.id}\n"
             f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
-            "Wait in this terminal for assigned tasks; do not start unrelated work. When a task "
+            "Wait for assigned tasks in this Workspace session; do not start unrelated work. When a task "
             "arrives, read the state snapshot first, choose the correct project directory from the "
             "task, and check for uncommitted changes before editing. If another agent modified files "
             "you need, avoid overwriting; ask for review. When reviewer feedback comes back, continue "
@@ -247,6 +253,7 @@ class _PromptsMixin:
                 "queued_count": self._queued_count(session.id),
             }
             for session in self._workspace_agents(workspace.id)
+            if session.session_kind == task.session_kind
         ]
         recent_tasks = [
             {

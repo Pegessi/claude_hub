@@ -85,9 +85,11 @@ class _StateMixin:
         self._report_intake_committed: set[str] = set()
         # Re-entrancy for workspace_mutation_lock: create_report already holds
         # the lock when it ACKs mailbox state.
-        self._workspace_mutation_held: ContextVar[str | None] = ContextVar(
-            f"workspace_mutation_held_{id(self)}",
-            default=None,
+        self._workspace_mutation_held: ContextVar[tuple[str, asyncio.Task[Any] | None] | None] = (
+            ContextVar(
+                f"workspace_mutation_held_{id(self)}",
+                default=None,
+            )
         )
         self._monitor_task: asyncio.Task[None] | None = None
         # Cache of resolved git worktree roots per workspace id: (timestamp, roots).
@@ -121,11 +123,13 @@ class _StateMixin:
         on this lock so a concurrent tree write cannot land between
         snapshot and restore. Re-entrant for the owning coroutine.
         """
-        if self._workspace_mutation_held.get() == workspace_id:
+        owner = self._workspace_mutation_held.get()
+        current_task = asyncio.current_task()
+        if owner is not None and owner == (workspace_id, current_task):
             yield
             return
         async with self._workspace_mutation_lock(workspace_id):
-            token = self._workspace_mutation_held.set(workspace_id)
+            token = self._workspace_mutation_held.set((workspace_id, current_task))
             try:
                 yield
             finally:

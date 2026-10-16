@@ -26,9 +26,15 @@
 /** Maximum key length accepted by the backend resolver layer. */
 const QUOTED_IMAGE_KEY_MAX_LEN = 256
 
-/** Endpoint path builder. Tab id and key are always percent-encoded. */
-function quotedImageEndpointUrl(tabId: string, key: string): string {
-  return `/api/workspaces/tabs/${encodeImagePart(tabId)}/stream/quoted-image?key=${encodeImagePart(key)}`
+/** Endpoint path builder. Scope ids and keys are always percent-encoded. */
+function imageStreamBase(tabId: string, streamBasePath: string): string {
+  if (streamBasePath) return streamBasePath
+  if (tabId.startsWith('/api/workspaces/')) return tabId
+  return `/api/workspaces/tabs/${encodeImagePart(tabId)}/stream`
+}
+
+function quotedImageEndpointUrl(tabId: string, key: string, streamBasePath: string): string {
+  return `${imageStreamBase(tabId, streamBasePath)}/quoted-image?key=${encodeImagePart(key)}`
 }
 
 /**
@@ -92,19 +98,26 @@ export function quotedImageProviderName(src: unknown): string | null {
  * Build the restricted backend reader URL for a validated bare token.
  * Returns ``null`` when *src* is not a registered bare token.
  */
-export function resolveQuotedImageUrl(tabId: string, src: unknown): string | null {
+export function resolveQuotedImageUrl(
+  tabId: string,
+  src: unknown,
+  streamBasePath = '',
+): string | null {
   if (!tabId || !isBareQuotedImageKey(src)) return null
-  return quotedImageEndpointUrl(tabId, src)
+  return quotedImageEndpointUrl(tabId, src, streamBasePath)
 }
 
-function decodeImagePath(src: string): string {
-  const entities: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
-  const decoded = src.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt);/gi, (match, entity: string) => {
+function decodeImagePath(src: string): string | null {
+  const entities: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', num: '#', quest: '?' }
+  const decoded = src.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt|num|quest);/gi, (match, entity: string) => {
     if (!entity.startsWith('#')) return entities[entity.toLowerCase()] ?? match
     const code = entity[1].toLowerCase() === 'x'
       ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10)
     return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match
   })
+  // HTML entities preserve URL navigation semantics; percent-encoded # and ?
+  // are filename characters and must only be decoded after this check.
+  if (/^[#?]/.test(decoded)) return null
   try { return decodeURIComponent(decoded) } catch { return decoded }
 }
 
@@ -113,7 +126,11 @@ function encodeImagePart(value: string): string {
   return encodeURIComponent(value).replace(/'/g, '%27')
 }
 
-export function resolveLocalImageUrl(tabId: string, src: string): string | null {
+export function resolveLocalImageUrl(
+  tabId: string,
+  src: string,
+  streamBasePath = '',
+): string | null {
   const path = decodeImagePath(src)
   if (!tabId || !path || path.length > 4096 || path !== path.trim()) return null
   if (/^[a-z][a-z\d+.-]*:|^\/\//i.test(path)) return null
@@ -121,7 +138,7 @@ export function resolveLocalImageUrl(tabId: string, src: string): string | null 
   if (/^\/(?:api|assets|static)\//.test(path)) return null
   if (!/\.(?:png|jpe?g|gif|webp)$/i.test(path)) return null
   try {
-    return `/api/workspaces/tabs/${encodeImagePart(tabId)}/stream/agent-image?path=${encodeImagePart(path)}`
+    return `${imageStreamBase(tabId, streamBasePath)}/agent-image?path=${encodeImagePart(path)}`
   } catch {
     // A malformed Unicode filename must not prevent the whole chat rendering.
     return null
@@ -137,13 +154,17 @@ const QUOTED_ATTR_RE = /([\w:-]+)\s*=\s*("[^"]*"|'[^']*')/g
  * Route provider tokens and local paths to their restricted readers. Tag the
  * images so the UI can degrade gracefully on load failure.
  */
-export function rewriteQuotedImageSrcs(html: string, tabId: string): string {
+export function rewriteQuotedImageSrcs(
+  html: string,
+  tabId: string,
+  streamBasePath = '',
+): string {
   if (!html || !tabId) return html
   return html.replace(IMG_TAG_RE, (tag) => tag.replace(QUOTED_ATTR_RE, (attr, name: string, value: string) => {
     if (name.toLowerCase() !== 'src') return attr
     const src = value.slice(1, -1)
-    const quotedUrl = resolveQuotedImageUrl(tabId, src)
-    const url = quotedUrl ?? resolveLocalImageUrl(tabId, src)
+    const quotedUrl = resolveQuotedImageUrl(tabId, src, streamBasePath)
+    const url = quotedUrl ?? resolveLocalImageUrl(tabId, src, streamBasePath)
     if (url === null) return attr
     const marker = quotedUrl ? `data-quoted-img="${src}"` : 'data-local-img="1"'
     return `${name}=${value[0]}${url}${value[0]} ${marker}`

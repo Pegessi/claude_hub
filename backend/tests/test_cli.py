@@ -58,8 +58,116 @@ def test_help_lists_groups():
         "agent",
         "session",
         "lessons",
+        "quota",
     ):
         assert group in result.output
+
+
+QUOTA_SAMPLE = {
+    "providers": [
+        {
+            "provider": "codex",
+            "available": True,
+            "state": "near",
+            "message": "",
+            "as_of": "2026-10-15T04:07:36.155Z",
+            "stale": False,
+            "limits": [
+                {
+                    "scope": "weekly",
+                    "label": "Weekly limit",
+                    "state": "near",
+                    "used_percent": 82,
+                    "remaining_percent": 18,
+                    "resets_at": "2026-10-20T18:38:35Z",
+                }
+            ],
+            "plan": "pro",
+            "credit_balance": "62500.0000000000",
+            "enforcing": None,
+        },
+        {
+            "provider": "maso",
+            "available": False,
+            "state": "unavailable",
+            "message": "MASO quota is unavailable. Check the MASO service, then refresh.",
+            "as_of": None,
+            "stale": False,
+            "limits": [],
+            "plan": None,
+            "credit_balance": None,
+            "enforcing": None,
+        },
+    ]
+}
+
+
+def test_quota_json(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=QUOTA_SAMPLE)
+
+    captured = patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--json", "quota", "--refresh"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == QUOTA_SAMPLE
+    assert captured[0].url.path == "/api/quota"
+    assert captured[0].url.params["refresh"] == "true"
+
+
+def test_quota_table_shows_limits_and_unavailable_reason(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=QUOTA_SAMPLE)
+
+    captured = patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["quota"])
+    assert result.exit_code == 0, result.output
+    assert "codex: near" in result.output
+    assert "plan=pro" in result.output and "credit_balance=62500.0000000000" in result.output
+    assert "weekly" in result.output and "82" in result.output
+    assert "maso: unavailable" in result.output
+    assert "Check the MASO service" in result.output
+    assert "refresh" not in captured[0].url.params
+
+
+def test_quota_table_renders_booleans_json_style(monkeypatch):
+    payload = {
+        "providers": [
+            {
+                "provider": "maso",
+                "available": True,
+                "state": "within",
+                "message": "",
+                "as_of": None,
+                "stale": True,
+                "limits": [],
+                "plan": None,
+                "credit_balance": None,
+                "enforcing": True,
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["quota"])
+    assert result.exit_code == 0, result.output
+    assert "enforcing=true" in result.output
+    assert "stale=true" in result.output
+
+
+def test_quota_error_exits_nonzero(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "boom"})
+
+    patch_get_client(monkeypatch, handler)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["quota"])
+    assert result.exit_code != 0
 
 
 def test_workspace_list_json(monkeypatch):
@@ -125,6 +233,36 @@ def test_task_create_body(monkeypatch):
     assert body["agent_type"] == "codex"
     assert body["task_mode"] == "reviewed"
     assert body["execution_complexity"] == "auto"
+
+
+def test_task_create_explicit_session_kind(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "t1"})
+
+    patch_get_client(monkeypatch, handler)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "task",
+            "create",
+            "ws1",
+            "--title",
+            "Chat",
+            "--prompt",
+            "do it",
+            "--session-id",
+            "chat-session",
+            "--session-kind",
+            "chat",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["session_id"] == "chat-session"
+    assert bodies[0]["session_kind"] == "chat"
 
 
 def test_task_create_agent_tag_success(monkeypatch):
@@ -1249,7 +1387,9 @@ def test_session_send_payload_json_attachments(monkeypatch):
     payload = {"message": "from-json", "attachments": [{"filename": "a.txt"}]}
     result = runner.invoke(cli, ["session", "send", "s1", "--payload-json", json.dumps(payload)])
     assert result.exit_code == 0, result.output
-    assert bodies[0] == payload
+    assert bodies[0]["message"] == payload["message"]
+    assert bodies[0]["attachments"] == payload["attachments"]
+    assert isinstance(bodies[0]["call_id"], str)
 
 
 def test_lessons_summarize(monkeypatch):

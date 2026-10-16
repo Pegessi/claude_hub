@@ -54,9 +54,11 @@
         >
           Retry
         </button>
-        <span class="banner-guidance">{{ currentTab?.agent_type === 'maso'
-          ? 'Start the MASO HTTP service, then retry.'
-          : 'Create a Terminal session for native TUI access.' }}</span>
+        <span class="banner-guidance">{{ managedIdentityMissing
+          ? 'Return to Workspace and refresh managed sessions.'
+          : currentTab?.agent_type === 'maso'
+            ? 'Start the MASO HTTP service, then retry.'
+            : 'Create a Terminal session for native TUI access.' }}</span>
       </template>
     </div>
 
@@ -99,7 +101,7 @@
         <div
           v-for="{ turn, ordinal } in visibleTurns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, ordinal, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
+          v-memo="[turn.renderRevision, ordinal, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), expandedToolGroups.get(turn.key), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
           class="structured-turn"
           :data-turn-key="turn.key"
         >
@@ -196,8 +198,9 @@
                 <MarkdownContent
                   v-if="turn.userText"
                   :text="turn.userText"
-                  :tab-id="props.tabId"
+                  :tab-id="markdownImageScope"
                   compact
+                  @image-click="openImageLightbox"
                 />
                 <div
                   v-if="turn.attachments?.length"
@@ -298,13 +301,14 @@
             <details
               v-if="part.kind === 'thinking'"
               class="thinking-card"
+              :class="{ 'thinking-card--active': part.state === 'active' }"
             >
               <summary>
+                <ThinkingIndicator :state="part.state" />
                 <span
-                  class="thinking-indicator"
+                  class="thinking-chevron"
                   aria-hidden="true"
-                />
-                Thinking
+                >›</span>
               </summary>
               <!-- Thinking is rendered as plain text (no marked/DOMPurify) to
                    avoid re-parsing multi-kilobyte reasoning streams on every
@@ -330,9 +334,10 @@
               <div class="conversation-bubble conversation-bubble--assistant">
                 <MarkdownContent
                   :text="stripTrailingGoalProtocol(part.text)"
-                  :tab-id="props.tabId"
+                  :tab-id="markdownImageScope"
                   compact
                   :complete="turn.completed"
+                  @image-click="openImageLightbox"
                 />
               </div>
             </div>
@@ -345,7 +350,11 @@
                 class="conversation-avatar conversation-avatar--tool"
                 aria-hidden="true"
               >⌘</span>
-              <details class="tool-card tool-card--group">
+              <details
+                class="tool-card tool-card--group"
+                :open="expandedToolGroups.get(turn.key)?.has(part.key)"
+                @toggle="onToolGroupToggle(turn, part.key, $event)"
+              >
                 <summary
                   class="tool-header"
                   :class="{ 'tool-header--single': part.tools.length === 1 }"
@@ -355,48 +364,60 @@
                   </span>
                   <template v-if="part.tools.length > 1">
                     <span class="tool-group-names">
-                      {{ part.tools.map(t => t.name).join(', ') }}
+                      {{ toolGroupNames(part.tools) }}
                     </span>
                   </template>
                   <span
                     class="tool-status"
                     :class="toolGroupStatus(part.tools)"
-                  >{{ toolGroupStatus(part.tools) }}</span>
+                  >{{ toolStatusLabel(toolGroupStatus(part.tools)) }}</span>
+                  <span
+                    class="tool-chevron"
+                    aria-hidden="true"
+                  >›</span>
                 </summary>
-                <div
-                  v-for="tool in part.tools"
-                  :key="tool.key"
-                  class="tool-group-item"
-                >
-                  <div class="tool-group-item-header">
-                    <span class="tool-name">{{ tool.name }}</span>
-                    <span
-                      class="tool-status"
-                      :class="tool.status"
-                    >{{ tool.status }}</span>
-                  </div>
+                <template v-if="expandedToolGroups.get(turn.key)?.has(part.key)">
                   <div
-                    v-if="tool.argsText"
-                    class="tool-block"
+                    v-for="tool in part.tools"
+                    :key="tool.key"
+                    class="tool-group-item"
                   >
-                    <span>Input</span>
-                    <pre>{{ tool.argsText }}</pre>
+                    <div class="tool-group-item-header">
+                      <span class="tool-name">{{ tool.name }}</span>
+                      <span
+                        class="tool-status"
+                        :class="tool.status"
+                      >{{ toolStatusLabel(tool.status) }}</span>
+                    </div>
+                    <div
+                      v-if="tool.argsText"
+                      class="tool-block"
+                    >
+                      <span>Input</span>
+                      <pre
+                        tabindex="0"
+                        aria-label="Tool input"
+                      >{{ tool.argsText }}</pre>
+                    </div>
+                    <div
+                      v-if="tool.resultText"
+                      class="tool-block"
+                    >
+                      <span>Result</span>
+                      <pre
+                        tabindex="0"
+                        aria-label="Tool result"
+                      >{{ tool.resultText }}</pre>
+                    </div>
                   </div>
-                  <div
-                    v-if="tool.resultText"
-                    class="tool-block"
+                  <button
+                    type="button"
+                    class="details-collapse"
+                    @click="collapseDetails"
                   >
-                    <span>Result</span>
-                    <pre>{{ tool.resultText }}</pre>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  class="details-collapse"
-                  @click="collapseDetails"
-                >
-                  收起
-                </button>
+                    Collapse
+                  </button>
+                </template>
               </details>
             </div>
 
@@ -529,7 +550,7 @@
                       </div>
 
                       <template
-                        v-for="sub in thread.parts"
+                        v-for="sub in subthreadPartsFor(thread)"
                         :key="sub.key"
                       >
                         <div
@@ -549,13 +570,14 @@
                         <details
                           v-else-if="sub.kind === 'thinking'"
                           class="thinking-card subthread-thinking"
+                          :class="{ 'thinking-card--active': sub.state === 'active' }"
                         >
                           <summary>
+                            <ThinkingIndicator :state="sub.state" />
                             <span
-                              class="thinking-indicator"
+                              class="thinking-chevron"
                               aria-hidden="true"
-                            />
-                            Thinking
+                            >›</span>
                           </summary>
                           <pre class="thinking-body">{{ sub.text }}</pre>
                           <button
@@ -573,10 +595,18 @@
                         >
                           <MarkdownContent
                             :text="sub.text"
-                            :tab-id="props.tabId"
+                            :tab-id="markdownImageScope"
                             compact
                             :complete="subthreadTerminal(thread)"
+                            @image-click="openImageLightbox"
                           />
+                        </div>
+
+                        <div
+                          v-else-if="sub.kind === 'reasoning_status'"
+                          class="reasoning-status"
+                        >
+                          <ThinkingIndicator :state="sub.state" />
                         </div>
 
                         <div
@@ -589,6 +619,8 @@
                         <details
                           v-else-if="sub.kind === 'tool_group'"
                           class="tool-card tool-card--group"
+                          :open="expandedToolGroups.get(turn.key)?.has(sub.key)"
+                          @toggle="onToolGroupToggle(turn, sub.key, $event)"
                         >
                           <summary
                             class="tool-header"
@@ -599,48 +631,60 @@
                             </span>
                             <template v-if="sub.tools.length > 1">
                               <span class="tool-group-names">
-                                {{ sub.tools.map(t => t.name).join(', ') }}
+                                {{ toolGroupNames(sub.tools) }}
                               </span>
                             </template>
                             <span
                               class="tool-status"
                               :class="toolGroupStatus(sub.tools)"
-                            >{{ toolGroupStatus(sub.tools) }}</span>
+                            >{{ toolStatusLabel(toolGroupStatus(sub.tools)) }}</span>
+                            <span
+                              class="tool-chevron"
+                              aria-hidden="true"
+                            >›</span>
                           </summary>
-                          <div
-                            v-for="tool in sub.tools"
-                            :key="tool.key"
-                            class="tool-group-item"
-                          >
-                            <div class="tool-group-item-header">
-                              <span class="tool-name">{{ tool.name }}</span>
-                              <span
-                                class="tool-status"
-                                :class="tool.status"
-                              >{{ tool.status }}</span>
-                            </div>
+                          <template v-if="expandedToolGroups.get(turn.key)?.has(sub.key)">
                             <div
-                              v-if="tool.argsText"
-                              class="tool-block"
+                              v-for="tool in sub.tools"
+                              :key="tool.key"
+                              class="tool-group-item"
                             >
-                              <span>Input</span>
-                              <pre>{{ tool.argsText }}</pre>
+                              <div class="tool-group-item-header">
+                                <span class="tool-name">{{ tool.name }}</span>
+                                <span
+                                  class="tool-status"
+                                  :class="tool.status"
+                                >{{ toolStatusLabel(tool.status) }}</span>
+                              </div>
+                              <div
+                                v-if="tool.argsText"
+                                class="tool-block"
+                              >
+                                <span>Input</span>
+                                <pre
+                                  tabindex="0"
+                                  aria-label="Tool input"
+                                >{{ tool.argsText }}</pre>
+                              </div>
+                              <div
+                                v-if="tool.resultText"
+                                class="tool-block"
+                              >
+                                <span>Result</span>
+                                <pre
+                                  tabindex="0"
+                                  aria-label="Tool result"
+                                >{{ tool.resultText }}</pre>
+                              </div>
                             </div>
-                            <div
-                              v-if="tool.resultText"
-                              class="tool-block"
+                            <button
+                              type="button"
+                              class="details-collapse"
+                              @click="collapseDetails"
                             >
-                              <span>Result</span>
-                              <pre>{{ tool.resultText }}</pre>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            class="details-collapse"
-                            @click="collapseDetails"
-                          >
-                            Collapse
-                          </button>
+                              Collapse
+                            </button>
+                          </template>
                         </details>
 
                         <div
@@ -824,7 +868,7 @@
                   type="button"
                   class="approval-submit-btn"
                   :disabled="!canSubmitQuestion(part.approval) || isSending"
-                  @click="submitQuestionResponse(part.approval)"
+                  @click="submitQuestionResponse(turn, part.approval)"
                 >
                   提交选择
                 </button>
@@ -840,7 +884,23 @@
                 class="error-icon"
                 aria-hidden="true"
               >⚠</span>
-              <span>{{ part.message }}</span>
+              <span class="error-body">
+                <span>{{ part.message }}</span>
+                <!-- The provider's verbatim failure payload. De-emphasized:
+                     it is evidence for whoever debugs the run, not the
+                     statement the reader has to parse. -->
+                <code
+                  v-if="part.detail"
+                  class="error-detail"
+                >{{ part.detail }}</code>
+              </span>
+            </div>
+
+            <div
+              v-else-if="part.kind === 'reasoning_status'"
+              class="reasoning-status"
+            >
+              <ThinkingIndicator :state="part.state" />
             </div>
 
             <div
@@ -916,7 +976,7 @@
               >{{ copyFeedbackLabel(turn.key) }}</span>
             </button>
             <button
-              v-if="completedPlanText(turn)"
+              v-if="!isManagedChat && completedPlanText(turn)"
               type="button"
               class="turn-fork-button turn-implement-button"
               :disabled="implementingPlanKey !== null || turnInFlight || goalComposerLocked"
@@ -926,6 +986,7 @@
               {{ implementingPlanKey === turn.key ? 'Starting…' : 'Implement plan' }}
             </button>
             <button
+              v-if="!isManagedChat"
               type="button"
               class="turn-fork-button"
               :disabled="forkingOrdinal !== null"
@@ -952,8 +1013,9 @@
               <MarkdownContent
                 v-if="turn.userText"
                 :text="turn.userText"
-                :tab-id="props.tabId"
+                :tab-id="markdownImageScope"
                 compact
+                @image-click="openImageLightbox"
               />
               <div
                 v-if="turn.attachments?.length"
@@ -996,7 +1058,7 @@
 
 
     <GoalStatusBar
-      v-if="goal"
+      v-if="goal && !isManagedChat"
       :goal="goal"
       :busy="isGoalMutating"
       :error="goalError"
@@ -1004,6 +1066,8 @@
       @resume="resumeGoal"
       @complete="completeGoal"
       @clear="clearGoal"
+      @edit="isGoalEditing = true; isGoalSetupOpen = true"
+      @refresh="hydrateGoal"
     />
 
     <!-- Composer -->
@@ -1017,7 +1081,7 @@
           {{ modeChangeError }}
         </div>
         <div
-          v-if="goalError && !goal && !isGoalSetupOpen"
+          v-if="goalError && !goal && !isGoalSetupOpen && !isManagedChat"
           class="composer-mode-error"
           role="alert"
         >
@@ -1040,14 +1104,22 @@
             :key="att.id"
             class="attachment-chip"
           >
-            <img
-              :src="att.preview_url"
-              :alt="att.filename"
-              class="attachment-thumb"
+            <button
+              type="button"
+              class="attachment-preview"
+              :aria-label="`View ${att.filename}`"
+              @click="openImageLightbox(att.data_url, att.filename, $event)"
             >
+              <img
+                :src="att.preview_url"
+                :alt="att.filename"
+                class="attachment-thumb"
+              >
+            </button>
             <button
               type="button"
               class="attachment-remove"
+              :disabled="isSending || isGoalMutating || isPreparingAttachments"
               :aria-label="`Remove ${att.filename}`"
               @click="removeAttachment(att)"
             >
@@ -1065,13 +1137,21 @@
           {{ composerError }}
         </div>
 
-        <div
-          v-if="draftQueue.length > 0"
-          class="composer-queue"
-          aria-live="polite"
-        >
-          {{ draftQueue.length }} message{{ draftQueue.length === 1 ? '' : 's' }} queued
-        </div>
+        <ChatDraftQueue
+          :drafts="draftQueue"
+          :busy="isSending || isQueueSendInProgress || isPreparingAttachments"
+          :ready="isSubmissionReady && !goalInputBlocked"
+          :goal-active="goalSteerOnly"
+          :turn-in-flight="turnInFlight"
+          :editing-id="queuedChatState.editingDraftId"
+          :editing-message="queuedChatState.editingMessage"
+          @editing="setQueuedDraftEdit"
+          @update="updateQueuedDraft"
+          @cancel="cancelQueuedDraft"
+          @edit="editQueuedDraft"
+          @send="sendQueuedDraft"
+          @preview="(att, event) => openImageLightbox(att.data_url, att.filename, event)"
+        />
 
         <div class="composer-row">
           <textarea
@@ -1080,7 +1160,7 @@
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
-            :disabled="isSending || connectionState !== 'live' || goalInputBlocked"
+            :disabled="isSending || isGoalMutating || connectionState !== 'live' || goalInputBlocked"
             :title="goalInputBlocked ? goalComposerReason || undefined : undefined"
             @compositionstart="isComposing = true"
             @compositionend="isComposing = false"
@@ -1093,11 +1173,12 @@
           <div class="composer-tools">
             <ComposerAddMenu
               v-model:open="isAddMenuOpen"
-              :show-goal="!goal && Boolean(capabilities?.supports_goals)"
+              :show-goal="!isManagedChat && !goal && Boolean(capabilities?.supports_goals)"
+              :show-schedule="!isManagedChat"
               :attachment-disabled-reason="attachmentDisabledReason"
               :goal-disabled-reason="goalSetupDisabledReason"
               @attachment="triggerFilePicker"
-              @goal="isGoalSetupOpen = true"
+              @goal="isGoalEditing = false; isGoalSetupOpen = true"
               @schedule="appStore.openScheduledTasks(props.tabId)"
             />
             <input
@@ -1109,7 +1190,7 @@
               @change="handleFilePick"
             >
             <div
-              v-if="modeOptions.length > 0"
+              v-if="!isManagedChat && modeOptions.length > 0"
               ref="modePickerEl"
               class="composer-mode-picker"
             >
@@ -1298,9 +1379,9 @@
             class="composer-send-btn"
             :disabled="!canSend || isSending"
             :title="goalSteerOnly ? 'Send now as the next Goal turn' : goalComposerReason || undefined"
-            @click="() => submit(goalSteerOnly ? 'steer' : 'normal')"
+            @click="() => submit(isManagedChat ? 'normal' : (goalSteerOnly ? 'steer' : 'normal'))"
           >
-            {{ isSending ? 'Sending…' : (goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
+            {{ isSending ? 'Sending…' : (goalImageRecovery ? 'Recover Goal' : goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
           </button>
         </div>
         <div
@@ -1315,6 +1396,11 @@
             <span>⌘/Ctrl+Enter steer Goal</span>
             <span>Shift+Enter newline</span>
           </template>
+          <template v-else-if="isManagedChat">
+            <span>Enter / ⌘/Ctrl+Enter send</span>
+            <span v-if="turnInFlight">Busy turn follow-ups are durable</span>
+            <span>Shift+Enter newline</span>
+          </template>
           <template v-else>
             <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
             <span>⌘/Ctrl+Enter steer</span>
@@ -1325,22 +1411,88 @@
     </div>
 
     <GoalSetupDialog
+      v-if="!isManagedChat"
       :open="isGoalSetupOpen"
-      :busy="isGoalMutating"
-      :error="goalError"
+      :busy="isGoalMutating || isPreparingAttachments"
+      :error="goalError || (!isGoalEditing ? composerError : null)"
+      :editing="isGoalEditing"
+      :initial-objective="goal?.objective"
       @close="isGoalSetupOpen = false"
       @submit="startGoal"
-    />
+    >
+      <template #images>
+        <p v-if="isGoalEditing">
+          Send new images using Steer in the Chat composer.
+        </p>
+        <div
+          v-else
+          class="goal-image-picker"
+        >
+          <p>Images are sent with the first Goal turn.</p>
+          <button
+            type="button"
+            :disabled="Boolean(attachmentDisabledReason)"
+            @click="triggerFilePicker"
+          >
+            Add images
+          </button>
+          <div
+            v-for="att in attachments"
+            :key="att.id"
+            class="attachment-chip"
+          >
+            <button
+              type="button"
+              class="attachment-preview"
+              :aria-label="`View ${att.filename}`"
+              @click="openImageLightbox(att.data_url, att.filename, $event)"
+            >
+              <img
+                :src="att.preview_url"
+                :alt="att.filename"
+                class="attachment-thumb"
+              >
+            </button>
+            <button
+              type="button"
+              class="attachment-remove"
+              :disabled="isGoalMutating || isPreparingAttachments"
+              :aria-label="`Remove ${att.filename}`"
+              @click="removeAttachment(att)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      </template>
+    </GoalSetupDialog>
 
     <Teleport to="body">
       <div
         v-if="imageLightboxUrl"
+        ref="lightboxEl"
         class="structured-image-lightbox"
+        :class="{ 'structured-image-lightbox--actual': imageLightboxActualSize }"
         role="dialog"
         aria-modal="true"
         aria-label="Image preview"
         @click.self="closeImageLightbox"
       >
+        <div class="structured-image-lightbox-toolbar">
+          <span v-if="imageLightboxDimensions">{{ imageLightboxDimensions }}</span>
+          <button
+            type="button"
+            :aria-pressed="imageLightboxActualSize"
+            @click="imageLightboxActualSize = !imageLightboxActualSize"
+          >
+            {{ imageLightboxActualSize ? 'Fit image' : 'Actual size' }}
+          </button>
+          <a
+            :href="imageLightboxUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Open original</a>
+        </div>
         <button
           ref="lightboxCloseEl"
           type="button"
@@ -1355,6 +1507,7 @@
           :src="imageLightboxUrl"
           :alt="imageLightboxAlt"
           @click.stop
+          @load="onLightboxImageLoad"
           @error="closeImageLightbox"
         >
       </div>
@@ -1363,7 +1516,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, shallowReactive, toRef, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStreamAttachments'
 import { useChatGoal } from '@/composables/useChatGoal'
@@ -1385,6 +1538,7 @@ import {
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
+  createComposerDraftId,
   resolveComposerEnterAction,
 } from '@/utils/chatComposerInteraction'
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
@@ -1396,23 +1550,40 @@ import {
 } from '@/utils/agentStreamStopReset'
 import {
   useTerminalStore,
+  type QueuedChatDraft,
   type QueuedChatDraftAttachment,
 } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
+import ThinkingIndicator from '@/components/ThinkingIndicator.vue'
+import { createSubthreadThinkingPresenter, presentThinkingParts, type ThinkingDisplayPart, type ThinkingState } from '@/utils/thinkingPresentation'
+import ChatDraftQueue from '@/components/ChatDraftQueue.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
-  /** A top-level Chat tab owns its transcript directly. */
+  /** Display tab identity; ordinary Chat also uses it for stream identity. */
   tabId: string
+  /** Whether this pane belongs to Workspace-managed execution. */
+  managedChat?: boolean
+  /** ManagedSession.id; provider conversation IDs are never stream identity. */
+  managedSessionId?: string
   /** Keep queued drafts attached to the pane whose KeepAlive owns this instance. */
   paneId: string
 }>()
+const isManagedChat = computed(() => Boolean(props.managedChat))
+const managedIdentityMissing = computed(() => isManagedChat.value && !props.managedSessionId)
+const streamSource = computed(() => isManagedChat.value ? 'managed-session' as const : 'terminal-tab' as const)
+const streamSourceId = computed(() => isManagedChat.value ? props.managedSessionId ?? '' : props.tabId)
+const streamBasePath = computed(() => isManagedChat.value
+  ? `/api/workspaces/sessions/${encodeURIComponent(streamSourceId.value)}/stream`
+  : `/api/workspaces/tabs/${encodeURIComponent(streamSourceId.value)}/stream`)
+const markdownImageScope = computed(() => isManagedChat.value ? streamBasePath.value : props.tabId)
 
 const terminalStore = useTerminalStore()
 const appStore = useAppStore()
@@ -1447,12 +1618,14 @@ const {
   isMutating: isGoalMutating,
   hydrate: hydrateGoal,
   create: createGoal,
+  updateObjective: updateGoalObjective,
   pause: pauseGoal,
   resume: resumeGoal,
   complete: completeGoal,
   clear: clearGoal,
 } = useChatGoal(toRef(props, 'tabId'))
 const isGoalSetupOpen = ref(false)
+const isGoalEditing = ref(false)
 const isAddMenuOpen = ref(false)
 const goalPlanReason = computed(() => goalPlanLockReason(goal.value))
 const goalEditReason = computed(() => goal.value && (!isGoalTerminal(goal.value.status) || goalBlocksPlan(goal.value))
@@ -1463,15 +1636,29 @@ const goalComposerReason = computed(() => goalComposerLocked.value
   ? 'Pause or complete the active Goal before sending messages'
   : null)
 // An active Goal accepts text steers as its next turn; Enter queues instead.
-const goalSteerOnly = computed(() => goalComposerLocked.value && goal.value?.status === 'active')
+const goalImageRecovery = computed(() => Boolean(goal.value?.status === 'paused' && goal.value.pending_image_count))
+const goalSteerOnly = computed(() => goal.value?.status === 'active' || goalImageRecovery.value)
 const goalInputBlocked = computed(() => goalComposerLocked.value && !goalSteerOnly.value)
 
 async function startGoal(input: { objective: string }) {
+  if (isGoalEditing.value) {
+    if (await updateGoalObjective(input.objective)) isGoalSetupOpen.value = false
+    return
+  }
   if (goalSetupDisabledReason.value) {
     goalError.value = goalSetupDisabledReason.value
     return
   }
-  if (await createGoal(input)) isGoalSetupOpen.value = false
+  const imageSnapshot = [...attachments.value]
+  const saved = await createGoal({ ...input, attachments: imageSnapshot.map(toStreamSendAttachment) })
+  if (saved) {
+    attachments.value = []
+    isGoalSetupOpen.value = false
+  } else if (goal.value) {
+    // The server may have persisted the Goal before delivery failed. Keep
+    // originals in the composer so an explicit image steer can recover it.
+    isGoalSetupOpen.value = false
+  }
 }
 
 const {
@@ -1510,7 +1697,12 @@ const isHistoryVisible = computed(() =>
 )
 
 function startStream() {
-  void start(props.tabId, 'terminal-tab')
+  if (managedIdentityMissing.value) {
+    errorMessage.value = 'Managed Chat identity is not available yet. Refresh Workspace sessions and try again.'
+    connectionState.value = 'failed'
+    return
+  }
+  void start(streamSourceId.value, streamSource.value)
 }
 
 // ── Timeline grouping ───────────────────────────────────────────────────────
@@ -1579,6 +1771,7 @@ function completedPlanText(turn: TimelineTurn): string | null {
 }
 
 async function implementPlan(turn: TimelineTurn) {
+  if (isManagedChat.value) return
   const plan = completedPlanText(turn)
   if (!plan || implementingPlanKey.value || turnInFlight.value) return
   if (goalComposerLocked.value) {
@@ -1599,7 +1792,7 @@ async function implementPlan(turn: TimelineTurn) {
 }
 
 async function forkFromTurn(ordinal: number) {
-  if (forkingOrdinal.value !== null) return
+  if (isManagedChat.value || forkingOrdinal.value !== null) return
   forkingOrdinal.value = ordinal
   try {
     await terminalStore.forkTab(props.tabId, ordinal)
@@ -1659,6 +1852,46 @@ type PendingTurn = {
   attachments: { preview_url: string; mime_type: string }[]
 }
 
+type QuestionIdentity = { turnId: string; callId: string }
+
+type RetriableSend = {
+  clientTurnId: string
+  message: string
+  attachments: DraftAttachment[]
+  questionIdentity: QuestionIdentity | null
+  goalRecovery?: boolean
+}
+
+const retrySendAttempt = ref<RetriableSend | null>(null)
+
+function sameRetryAttachment(left: DraftAttachment, right: DraftAttachment): boolean {
+  return left.filename === right.filename &&
+    left.mime_type === right.mime_type &&
+    left.data_url === right.data_url &&
+    left.preview_data_url === right.preview_data_url
+}
+
+function reusableSendId(
+  message: string,
+  draftAtts: DraftAttachment[],
+  questionIdentity: QuestionIdentity | null,
+): string | null {
+  const attempt = retrySendAttempt.value
+  if (!attempt || attempt.message !== message || attempt.attachments.length !== draftAtts.length) {
+    return null
+  }
+  if (
+    attempt.questionIdentity?.turnId !== questionIdentity?.turnId ||
+    attempt.questionIdentity?.callId !== questionIdentity?.callId
+  ) {
+    return null
+  }
+  return attempt.attachments.every((attachment, index) =>
+    sameRetryAttachment(attachment, draftAtts[index]))
+    ? attempt.clientTurnId
+    : null
+}
+
 const pendingDirectTurns = ref<PendingTurn[]>([])
 const isUpdatingMode = ref(false)
 const modeChangeError = ref<string | null>(null)
@@ -1703,7 +1936,9 @@ const modelEnvVar = computed(() => {
 // Edit-resend truncates the provider's on-disk transcript, which is only wired
 // for providers whose rollout Hub can locate. TraeX transcripts live under
 // ~/.trae and are not wired this wave, so the control is hidden (it would 409).
-const supportsEditResend = computed(() => ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? ''))
+const supportsEditResend = computed(() =>
+  !isManagedChat.value && ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? '')
+)
 const currentModel = computed(() => {
   const env = currentTab.value?.env ?? {}
   const key = modelEnvVar.value
@@ -1937,15 +2172,15 @@ function handleViewportResize() {
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
 const queuedChatState = terminalStore.getQueuedChatState(props.paneId, props.tabId)
 const draftQueue = toRef(queuedChatState, 'drafts')
+const isEditingQueuedDraft = toRef(queuedChatState, 'editing')
 // Queue data lives in the store so bounded KeepAlive eviction cannot lose it.
 // QueuedChatObserver supplies the hidden completion edge; this full pane only
 // sends after its owning pane and Chat are active in the foreground.
 const isPaneActivated = ref(false)
 const isQueueSendInProgress = toRef(queuedChatState, 'sendInProgress')
-// A queued POST failure is delivery-uncertain: the provider may have accepted
-// it even when the browser did not receive the acknowledgement. Keep later
-// queued messages paused until the user deliberately sends the restored draft
-// and that explicit send succeeds.
+// A queued POST failure is delivery-uncertain: retain its visible card and
+// pause later messages until authoritative history confirms acceptance or the
+// user reviews/removes/edits the uncertain intent.
 const isDraftQueuePaused = toRef(queuedChatState, 'paused')
 const queueAutoActivationBlock = toRef(queuedChatState, 'autoActivationBlock')
 const isWaitingForQueuedChatActivation = computed(() =>
@@ -2051,8 +2286,8 @@ watch(events, (latest, previous) => {
         break
       }
     }
-    if (completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
-    else void hydrateGoal()
+    if (!isManagedChat.value && completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
+    else if (!isManagedChat.value) void hydrateGoal()
   }
 })
 
@@ -2082,7 +2317,7 @@ onActivated(() => {
   visibleHistoryStart.value = null
   resetActivation()
   startStream()
-  void hydrateGoal()
+  if (!isManagedChat.value) void hydrateGoal()
   void nextTick(() => {
     if (timelineDisposed) return
     observeTimelineGeometry()
@@ -2091,6 +2326,7 @@ onActivated(() => {
 
 onDeactivated(() => {
   isPaneActivated.value = false
+  dismissImageLightbox(false)
   isAddMenuOpen.value = false
   isGoalSetupOpen.value = false
   goalRefreshEpoch++
@@ -2123,7 +2359,11 @@ onUnmounted(() => {
 })
 
 function retry() {
-  void retryStream(props.tabId, 'terminal-tab')
+  if (managedIdentityMissing.value) {
+    startStream()
+    return
+  }
+  void retryStream(streamSourceId.value, streamSource.value)
 }
 
 /** Monotonically increasing epoch that advances on every source switch
@@ -2150,16 +2390,28 @@ const erroredAttachments = ref<Set<string>>(new Set())
 const erroredAgentImages = ref<Set<string>>(new Set())
 const imageLightboxUrl = ref<string | null>(null)
 const imageLightboxAlt = ref('')
+const imageLightboxActualSize = ref(false)
+const imageLightboxDimensions = ref('')
+const lightboxEl = ref<HTMLElement | null>(null)
 const lightboxCloseEl = ref<HTMLButtonElement | null>(null)
 let imageLightboxTrigger: HTMLElement | null = null
 
 function openImageLightbox(url: string, alt: string, event: MouseEvent) {
   imageLightboxUrl.value = url
   imageLightboxAlt.value = alt
-  imageLightboxTrigger = event.currentTarget instanceof HTMLElement
+  imageLightboxActualSize.value = false
+  imageLightboxDimensions.value = ''
+  const delegated = event.target instanceof Element
+    ? event.target.closest<HTMLElement>('button[data-image-preview]') : null
+  imageLightboxTrigger = delegated || (event.currentTarget instanceof HTMLElement
     ? event.currentTarget
-    : null
+    : null)
   void nextTick(() => lightboxCloseEl.value?.focus())
+}
+
+function onLightboxImageLoad(event: Event) {
+  const image = event.target as HTMLImageElement
+  imageLightboxDimensions.value = `${image.naturalWidth} × ${image.naturalHeight}`
 }
 
 function dismissImageLightbox(restoreFocus: boolean) {
@@ -2176,6 +2428,17 @@ function closeImageLightbox() {
 }
 
 function handleDocumentKeydown(event: KeyboardEvent) {
+  if (!isPaneActivated.value) return
+  if (event.key === 'Tab' && imageLightboxUrl.value) {
+    const controls = lightboxEl.value?.querySelectorAll<HTMLElement>('button, a[href]')
+    if (controls?.length) {
+      const index = Array.from(controls).indexOf(document.activeElement as HTMLElement)
+      const next = (index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length
+      event.preventDefault()
+      controls[next].focus()
+    }
+    return
+  }
   if (event.key === 'Escape' && isModelMenuOpen.value) {
     event.preventDefault()
     closeModelMenu(true)
@@ -2249,6 +2512,8 @@ const timelineLoadingMessage = computed(() => {
 })
 
 const isSubmissionReady = computed(() => connectionState.value === 'live' &&
+  (!goalImageRecovery.value || (!isGoalHydrating.value && !goalError.value)) &&
+  !isGoalMutating.value &&
   !isPreparingAttachments.value &&
   !isUpdatingMode.value &&
   !isUpdatingModel.value &&
@@ -2256,15 +2521,14 @@ const isSubmissionReady = computed(() => connectionState.value === 'live' &&
 
 const canSend = computed(() => isSubmissionReady.value &&
   !goalInputBlocked.value &&
-  (goalSteerOnly.value
-    ? draftMessage.value.trim().length > 0 && attachments.value.length === 0
-    : draftMessage.value.trim().length > 0 || attachments.value.length > 0))
+  (!goalImageRecovery.value || attachments.value.length > 0) &&
+  (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
 const attachmentDisabledReason = computed(() => {
   if (!supportsImages.value) return 'This chat does not support image attachments'
-  if (goalComposerLocked.value) return 'Pause or complete the active Goal before attaching images'
-  if (isSending.value || isPreparingAttachments.value) return 'Wait for the current upload or send to finish'
+  if (goalInputBlocked.value) return goalComposerReason.value
+  if (isSending.value || isPreparingAttachments.value || isGoalMutating.value) return 'Wait for the current upload or send to finish'
   return null
 })
 const goalSetupDisabledReason = computed(() => {
@@ -2363,9 +2627,8 @@ async function addFiles(files: FileList | File[]) {
     composerError.value = 'This chat does not support image attachments.'
     return
   }
-  // Pasted or dropped images would leave a steer unsendable.
-  if (goalComposerLocked.value) {
-    composerError.value = 'Pause or complete the active Goal before attaching images.'
+  if (goalInputBlocked.value) {
+    composerError.value = goalComposerReason.value
     return
   }
   // Serialize preparation batches: reject new input while a previous batch is
@@ -2547,7 +2810,7 @@ function removeAttachment(att: DraftAttachment) {
  */
 function attachmentUrl(attachmentId: string): string {
   const encId = encodeURIComponent(attachmentId)
-  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/attachments/${encId}`
+  return `${streamBasePath.value}/attachments/${encId}`
 }
 
 /**
@@ -2556,7 +2819,7 @@ function attachmentUrl(attachmentId: string): string {
  * validates magic bytes before serving, so this is not an arbitrary file read.
  */
 function agentImageUrl(path: string): string {
-  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/agent-image?path=${encodeURIComponent(path)}`
+  return `${streamBasePath.value}/agent-image?path=${encodeURIComponent(path)}`
 }
 
 /** Short file name for the image block's subtitle (full path stays on hover). */
@@ -2604,10 +2867,22 @@ function handleComposerEnter(event: KeyboardEvent) {
     altKey: event.altKey,
     turnInFlight: turnInFlight.value || goalSteerOnly.value,
     hasDraft: draftMessage.value.trim().length > 0 || attachments.value.length > 0,
+    hasQueuedDraft: draftQueue.value.length > 0,
     isMobile: isMobileViewport.value,
   })
   if (action === 'ignore' || action === 'newline') return
   event.preventDefault()
+  if (isManagedChat.value) {
+    // Managed Chat has no browser-only queue: every explicit Enter/Ctrl+Enter
+    // is a durable Hub mailbox intent, even while the provider owns a turn.
+    void submit('normal')
+    return
+  }
+  if (action === 'steer-queued') {
+    const first = draftQueue.value[0]
+    if (first) void sendQueuedDraft(first.id)
+    return
+  }
   if (action === 'queue') {
     enqueueDraft()
     return
@@ -2622,6 +2897,7 @@ function enqueueDraft() {
   }
   if (!canSend.value) return
   draftQueue.value.push({
+    id: createComposerDraftId(),
     message: draftMessage.value,
     attachments: [...attachments.value],
   })
@@ -2629,6 +2905,95 @@ function enqueueDraft() {
   attachments.value = []
   composerError.value = null
   void nextTick(() => syncComposerTextareaHeight())
+}
+
+function setQueuedDraftEdit(id: string | null, message: string) {
+  queuedChatState.editingDraftId = id
+  queuedChatState.editingMessage = message
+  isEditingQueuedDraft.value = Boolean(id)
+}
+
+function reconcileQueuedDeliveries() {
+  const observed = new Set(authoritativeTurns.value.map(turn => turn.turnId))
+  const accepted = draftQueue.value.filter(draft => draft.error && draft.id !== queuedChatState.editingDraftId && observed.has(draft.clientTurnId ?? draft.id))
+  if (!accepted.length) return
+  if (accepted.some(draft => draft.error === composerError.value)) composerError.value = null
+  const acceptedIds = new Set(accepted.map(draft => draft.id))
+  draftQueue.value = draftQueue.value.filter(draft => !acceptedIds.has(draft.id))
+  if (!draftQueue.value.some(draft => draft.error) && !draftMessage.value.trim() && !attachments.value.length) isDraftQueuePaused.value = false
+}
+
+watch([authoritativeTurns, () => draftQueue.value.map(draft => draft.error), isEditingQueuedDraft], reconcileQueuedDeliveries)
+
+function reconcileGoalRecovery() {
+  const attempt = retrySendAttempt.value
+  if (!attempt?.goalRecovery) return
+  const delivered = authoritativeTurns.value.some(turn => turn.turnId === attempt.clientTurnId)
+    || goal.value?.completed_turn_ids?.includes(attempt.clientTurnId)
+    || (goal.value?.current_turn_id === attempt.clientTurnId && goal.value?.dispatch_state === 'dispatched')
+  if (!delivered) return
+  if (reusableSendId(draftMessage.value, attachments.value, null) === attempt.clientTurnId) {
+    draftMessage.value = ''
+    attachments.value = []
+    composerError.value = null
+  }
+  retrySendAttempt.value = null
+}
+watch([goal, retrySendAttempt, authoritativeTurns], reconcileGoalRecovery)
+
+function updateQueuedDraft(id: string, message: string, nextAttachments: DraftAttachment[]) {
+  if (isSending.value || isQueueSendInProgress.value || isPreparingAttachments.value) return
+  const draft = draftQueue.value.find(item => item.id === id)
+  if (!draft) return
+  // An edit is a new intent; unchanged retries keep the original delivery ID.
+  if (message === draft.message && nextAttachments.length === draft.attachments.length && nextAttachments.every((att, i) => att.id === draft.attachments[i]?.id)) return
+  draft.clientTurnId = createComposerDraftId()
+  draft.message = message
+  draft.attachments = [...nextAttachments]
+  draft.error = undefined
+}
+
+function cancelQueuedDraft(id: string) {
+  if (isSending.value || isQueueSendInProgress.value || isPreparingAttachments.value) return
+  draftQueue.value = draftQueue.value.filter(item => item.id !== id)
+}
+
+function editQueuedDraft(id: string) {
+  if (isSending.value || isQueueSendInProgress.value || isPreparingAttachments.value) return
+  const draft = draftQueue.value.find(item => item.id === id)
+  if (!draft) return
+  // Preserve an existing composer draft instead of overwriting it.
+  const existing = draftMessage.value.trim() || attachments.value.length
+    ? { id: createComposerDraftId(), message: draftMessage.value, attachments: [...attachments.value] }
+    : null
+  draftQueue.value = draftQueue.value.filter(item => item.id !== id)
+  if (existing) draftQueue.value.push(existing)
+  isDraftQueuePaused.value = true
+  draftMessage.value = draft.message
+  attachments.value = [...draft.attachments]
+  // Moving is an explicit new intent, including when the old delivery is
+  // unconfirmed. Never disguise it as a native same-ID retry.
+  retrySendAttempt.value = null
+  composerError.value = draft.error ? 'Review the conversation before sending this as a new message.' : null
+  void nextTick(() => { syncComposerTextareaHeight(); composerTextareaEl.value?.focus() })
+}
+
+async function sendQueuedDraft(id: string) {
+  if (isSending.value || isQueueSendInProgress.value || !isSubmissionReady.value || goalInputBlocked.value || isEditingQueuedDraft.value) return
+  const draft = draftQueue.value.find(item => item.id === id)
+  if (!draft) return
+  if (draft.error) {
+    reconcileQueuedDeliveries()
+    return
+  }
+  isQueueSendInProgress.value = true
+  try {
+    const sent = await submit(turnInFlight.value || goalSteerOnly.value ? 'steer' : 'normal', undefined, 'queue', null, draft)
+    if (sent) {
+      draftQueue.value = draftQueue.value.filter(item => item.id !== id)
+      isDraftQueuePaused.value = draftQueue.value.some(item => Boolean(item.error))
+    }
+  } finally { isQueueSendInProgress.value = false }
 }
 
 function suspendStreamForDeactivation() {
@@ -2642,6 +3007,8 @@ async function flushDraftQueue() {
     && !isDraftQueuePaused.value
     && !turnInFlight.value
     && !isSending.value
+    && !isQueueSendInProgress.value
+    && !isEditingQueuedDraft.value
     && !goalComposerLocked.value
   ) {
     const activationRequestId = terminalStore.queuedChatActivationRequestId(
@@ -2651,11 +3018,10 @@ async function flushDraftQueue() {
     isQueueSendInProgress.value = true
     let sent = false
     try {
-      const next = draftQueue.value.shift()
+      const next = draftQueue.value[0]
       if (!next) break
-      draftMessage.value = next.message
-      attachments.value = next.attachments
-      sent = await submit('normal', undefined, 'queue')
+      sent = await submit('normal', undefined, 'queue', null, next)
+      if (sent) draftQueue.value = draftQueue.value.filter(item => item.id !== next.id)
     } finally {
       isQueueSendInProgress.value = false
       // The next ready hidden Chat may activate only after this one has
@@ -2669,7 +3035,7 @@ async function flushDraftQueue() {
 }
 
 function requestDraftQueueFlush() {
-  if (!isPaneActivated.value) {
+  if (!isPaneActivated.value || isEditingQueuedDraft.value) {
     terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
     return
   }
@@ -2687,6 +3053,7 @@ function requestDraftQueueFlush() {
     isSubmissionReady.value
     && isPaneActivated.value
     && !isWaitingForQueuedChatActivation.value
+    && !isEditingQueuedDraft.value
     && !isDraftQueuePaused.value
     && !turnInFlight.value
     && draftQueue.value.length > 0
@@ -2706,6 +3073,7 @@ watch(
     goalComposerLocked,
     isSubmissionReady,
     isDraftQueuePaused,
+    isEditingQueuedDraft,
     queueAutoActivationBlock,
     isPaneActivated,
     isWaitingForQueuedChatActivation,
@@ -2793,10 +3161,15 @@ function toggleTurnProcess(turn: TimelineTurn): void {
 }
 
 /** Parts to render for a turn, with its process folded away once it is history. */
-function turnPartsFor(turn: TimelineTurn): TimelinePart[] {
-  if (!isTurnFoldable(turn)) return turn.parts
-  return foldTurnParts(turn, isProcessExpanded(turn))
+function turnPartsFor(turn: TimelineTurn): ThinkingDisplayPart<TimelinePart>[] {
+  const parts = isTurnFoldable(turn) ? foldTurnParts(turn, isProcessExpanded(turn)) : turn.parts
+  const terminal: Exclude<ThinkingState, 'active'> | null =
+    turn.errors.length > 0 || ['failed', 'cancelled', 'interrupted'].includes(turn.completionStatus ?? '')
+      ? 'interrupted' : turn.completed ? 'done' : null
+  return presentThinkingParts(parts, terminal)
 }
+
+const subthreadPartsFor = createSubthreadThinkingPresenter()
 
 function turnFoldSignature(turn: TimelineTurn): string {
   // Turns with nothing foldable — including the active one — never depend on
@@ -2807,15 +3180,26 @@ function turnFoldSignature(turn: TimelineTurn): string {
   return `${isProcessExpanded(turn) ? 'open' : 'folded'}|${label}`
 }
 
-/**
- * Collapse the native ``<details>`` containing the clicked button.
- *
- * The thinking and tool cards stay uncontrolled: the browser owns their open
- * state, which is exactly what lets ``v-memo`` skip historical turns without
- * losing an expanded card. A footer "收起" button therefore reaches for the
- * enclosing element rather than introducing per-card Vue state that every
- * memo dependency would then have to track.
- */
+// visibleTurns creates a display copy on each stream update. Key folds by the
+// durable turn key (as process folds do), not that temporary object identity.
+// Only small group-key Sets are retained; no tool payloads or turn objects.
+const expandedToolGroups = shallowReactive(new Map<string, ReadonlySet<string>>())
+
+function onToolGroupToggle(turn: TimelineTurn, groupKey: string, event: Event): void {
+  const details = event.currentTarget
+  if (!(details instanceof HTMLDetailsElement)) return
+  const previous = expandedToolGroups.get(turn.key)
+  if (Boolean(previous?.has(groupKey)) === details.open) return
+  const next = new Set(previous)
+  if (details.open) next.add(groupKey)
+  else next.delete(groupKey)
+  if (next.size > 0) expandedToolGroups.set(turn.key, next)
+  else expandedToolGroups.delete(turn.key)
+}
+
+/** Collapse through the native control so tool toggle events also unmount the
+ *  lazy body. Tool open state is mirrored for remounts after process folding;
+ *  thinking and other details continue to use browser-owned state. */
 function collapseDetails(event: MouseEvent): void {
   const target = event.currentTarget
   if (target instanceof HTMLElement) {
@@ -2977,12 +3361,22 @@ function subthreadInstructionText(tool: TimelineTool): string {
   return tool.subagent?.prompt ?? tool.argsText
 }
 
-async function submitQuestionResponse(approval: TimelineApproval) {
+async function submitQuestionResponse(turn: TimelineTurn, approval: TimelineApproval) {
   if (!canSubmitQuestion(approval)) {
     composerError.value = '请选择所有问题的选项后再提交。'
     return
   }
-  const sent = await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))
+  if (!turn.turnId || !approval.callId) {
+    composerError.value = 'This provider question is missing its current request identity.'
+    return
+  }
+  const delivery = isManagedChat.value ? 'normal' : turnInFlight.value ? 'steer' : 'normal'
+  const sent = await submit(
+    delivery,
+    formatAskQuestionResponse(answersFor(approval.key)),
+    'user',
+    { turnId: turn.turnId, callId: approval.callId },
+  )
   if (sent) markResolved(approval.key)
 }
 
@@ -2995,7 +3389,7 @@ async function cancelActiveTurn() {
   isCancelling.value = true
   composerError.value = null
   try {
-    const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/cancel`, {
+    const res = await fetch(`${streamBasePath.value}/cancel`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -3015,19 +3409,17 @@ async function cancelActiveTurn() {
       }
       throw new Error(detail)
     }
-    // Consume the body (``{ ok, cancelled }``) but do NOT gate on
-    // ``cancelled``. A 200 means Stop intent was honored, and that includes the
-    // idempotent re-Stop that is the reported wedge (tab 896983b0): a prior Stop
-    // already persisted ``cancelled`` and released the Hub guard, so the backend
-    // answers ``cancelled:false`` ("nothing new to terminalize") while the
-    // browser is still stuck on Reconnecting and this very edge is stuck behind
-    // a wedged long-poll. Keying the reset on that boolean left the composer
-    // locked — the bug. So on ANY successful Stop: optimistically terminalize
-    // the turn we asked about (unlocks + marks Stopped) and nudge /wait so the
-    // real edge reconciles in one RTT. The backend already refuses to cancel a
-    // genuinely different LIVE turn via the expected_turn_id hint, so the only
-    // false-but-200 cases are already-terminal / idempotent — safe to resolve.
-    await res.json().catch(() => ({}))
+    const result: { cancelled?: boolean; outcome?: string } = await res.json().catch(() => ({}))
+    if (
+      isManagedChat.value &&
+      result?.cancelled !== true &&
+      result?.outcome !== 'already_terminal'
+    ) {
+      throw new Error('Stop did not match the current managed Chat turn.')
+    }
+    // Direct Chat preserves its legacy idempotent 200 contract. Managed Chat
+    // uses the explicit outcome so a stale Stop can never unlock a newer turn,
+    // while an already-terminal retry still repairs a wedged local view.
     if (cancelledTurnId) {
       optimisticCancelledTurnId.value = cancelledTurnId
     }
@@ -3065,8 +3457,9 @@ async function sendToStream(
   clientTurnId: string,
   delivery: 'normal' | 'steer' = 'normal',
   timeoutMs: number | null = null,
+  questionIdentity: QuestionIdentity | null = null,
 ) {
-  const base = `/api/workspaces/tabs/${props.tabId}/stream/send`
+  const base = `${streamBasePath.value}/send`
   const controller = new AbortController()
   const timer = timeoutMs === null ? null : setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
@@ -3081,6 +3474,8 @@ async function sendToStream(
         text: message,
         delivery,
         attachments: atts.map(toStreamSendAttachment),
+        question_turn_id: questionIdentity?.turnId,
+        question_call_id: questionIdentity?.callId,
       }),
     })
   } catch (error) {
@@ -3158,7 +3553,7 @@ async function submitEdit(turn: TimelineTurn) {
     ? crypto.randomUUID()
     : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
   try {
-    const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/edit-resend`, {
+    const res = await fetch(`${streamBasePath.value}/edit-resend`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
@@ -3183,7 +3578,7 @@ async function submitEdit(turn: TimelineTurn) {
     editingTurnKey.value = null
     editDraft.value = ''
     resetStream()
-    void start(props.tabId, 'terminal-tab')
+    void start(streamSourceId.value, streamSource.value)
   } catch (err) {
     editError.value = err instanceof Error ? err.message : 'Failed to resend message'
   } finally {
@@ -3195,6 +3590,8 @@ async function submit(
   delivery: 'normal' | 'steer' = 'normal',
   messageOverride?: string,
   source: 'user' | 'queue' = 'user',
+  questionIdentity: QuestionIdentity | null = null,
+  queuedDraft?: QueuedChatDraft,
 ): Promise<boolean> {
   if (isSending.value) return false
   if (!messageOverride && goalInputBlocked.value) {
@@ -3205,14 +3602,19 @@ async function submit(
   // entries call submit directly. Re-check the same availability boundary so
   // Enter cannot dispatch during hydration/attachment preparation, and queued
   // drafts cannot leave before recovery reaches the authoritative live state.
-  if (!messageOverride && !canSend.value) return false
+  if (queuedDraft ? !isSubmissionReady.value : !messageOverride && !canSend.value) return false
   // Approval answers and "Implement plan" use messageOverride and may bypass a
   // Goal's ordinary composer lock, but they still require a live transport.
   if (messageOverride && connectionState.value !== 'live') return false
-  const message = messageOverride ?? draftMessage.value
-  const hasContent = message.trim().length > 0 || attachments.value.length > 0
+  const message = queuedDraft?.message ?? messageOverride ?? draftMessage.value
+  const hasContent = message.trim().length > 0 || (queuedDraft?.attachments ?? attachments.value).length > 0
   if (!hasContent) return false
-  if (delivery === 'normal' && (turnInFlight.value || goalSteerOnly.value) && !messageOverride) {
+  if (
+    !isManagedChat.value &&
+    delivery === 'normal' &&
+    (turnInFlight.value || goalSteerOnly.value) &&
+    !messageOverride
+  ) {
     enqueueDraft()
     return false
   }
@@ -3223,7 +3625,7 @@ async function submit(
   // Snapshot the full draft attachments (including id, preview_url,
   // preview_data_url, size_bytes) so we can restore the composer exactly on
   // send failure — no reconstructed ids, no zeroed sizes.
-  const draftAtts: DraftAttachment[] = messageOverride ? [] : [...attachments.value]
+  const draftAtts: DraftAttachment[] = queuedDraft ? [...queuedDraft.attachments] : messageOverride ? [] : [...attachments.value]
   // The original data_url goes to the provider; preview_data_url is the
   // stored image (sendToStream flags it instead when it is the original).
   const atts: WorkspaceAttachmentCreate[] = draftAtts.map(
@@ -3239,11 +3641,19 @@ async function submit(
     preview_url,
     mime_type,
   }))
-  const clientTurnId = typeof crypto.randomUUID === 'function'
+  const recoveringGoal = goalImageRecovery.value
+  // Native provider turns do not deduplicate IDs. Only controller-backed
+  // delivery may retain a failed attempt; an ordinary resend is a new intent.
+  const goalControlledInput = !messageOverride && (recoveringGoal || goal.value?.status === 'active' || goal.value?.status === 'blocked')
+  const retainRetryId = isManagedChat.value || goalControlledInput
+  const reusableId = retainRetryId ? reusableSendId(message, draftAtts, questionIdentity) : null
+  const retainedClientTurnId = recoveringGoal && !retrySendAttempt.value?.goalRecovery ? null : (queuedDraft?.clientTurnId ?? queuedDraft?.id) ?? reusableId
+  const clientTurnId = retainedClientTurnId ?? (typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
-    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`)
+  if (queuedDraft) queuedDraft.clientTurnId = clientTurnId
   try {
-    if (!messageOverride) {
+    if (!messageOverride && !queuedDraft) {
       draftMessage.value = ''
       attachments.value = []
     }
@@ -3268,12 +3678,19 @@ async function submit(
       ]
     }
     requestLatestAnchor(true)
-    await sendToStream(message, atts, clientTurnId, delivery, source === 'queue' ? 15_000 : null)
-    if (messageOverride) await hydrateGoal()
-    // A successful explicit send resolves a previously uncertain queued item.
-    // Automatic queue sends never clear this flag; only deliberate user input
-    // may resume the remaining queue after an ambiguous POST failure.
-    if (!messageOverride && source === 'user') isDraftQueuePaused.value = false
+    await sendToStream(
+      message,
+      atts,
+      clientTurnId,
+      delivery,
+      source === 'queue' ? 15_000 : null,
+      questionIdentity,
+    )
+    retrySendAttempt.value = null
+    if (!isManagedChat.value && (messageOverride || (goal.value && delivery === 'steer'))) await hydrateGoal()
+    // Deliberate user input may resume a queue moved into the composer, but
+    // cannot silently release another item with unconfirmed delivery.
+    if (!messageOverride && source === 'user' && !draftQueue.value.some(draft => draft.error)) isDraftQueuePaused.value = false
     // The POST acknowledgement means provider dispatch has begun. Refresh the
     // backend-native tab status now rather than waiting for the 5s poll phase;
     // turn_started/completed/error boundaries above provide subsequent edges.
@@ -3283,12 +3700,29 @@ async function submit(
     return true
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
-    if (!messageOverride) {
+    if (!queuedDraft && retainRetryId) {
+      retrySendAttempt.value = {
+        goalRecovery: recoveringGoal,
+        clientTurnId,
+        message,
+        attachments: [...draftAtts],
+        questionIdentity: questionIdentity ? { ...questionIdentity } : null,
+      }
+    } else if (!queuedDraft) retrySendAttempt.value = null
+    if (queuedDraft) {
+      queuedDraft.error = err instanceof Error ? err.message : 'Failed to send message.'
+      isDraftQueuePaused.value = true
+    } else if (!messageOverride) {
       draftMessage.value = message
       attachments.value = draftAtts
-      if (source === 'queue') isDraftQueuePaused.value = true
     }
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
+    if (!isManagedChat.value && goal.value) {
+      await hydrateGoal()
+      // Only a successful authoritative refresh permits a new explicit
+      // recovery intent. A failed GET keeps the same attempt and blocks send.
+      if (recoveringGoal && !goalError.value && goalImageRecovery.value) retrySendAttempt.value = null
+    }
     return false
   } finally {
     isSending.value = false
@@ -3867,6 +4301,21 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.error-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.error-detail {
+  font-family: var(--ch-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--ch-color-text-subtle);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .event-status {
   display: flex;
   align-items: center;
@@ -4246,6 +4695,8 @@ onUnmounted(() => {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.attachment-preview { width: 100%; height: 100%; padding: 0; display: flex; border: 0; background: transparent; cursor: zoom-in; }
 
 .composer-queue {
   padding: 4px 10px 0;
@@ -4719,20 +5170,66 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 72px 24px 24px;
   background: rgb(0 0 0 / 78%);
   backdrop-filter: blur(4px);
 }
 
 .structured-image-lightbox-img {
   max-width: min(1200px, calc(100vw - 48px));
-  max-height: calc(100dvh - 48px);
+  max-height: calc(100dvh - 96px);
   width: auto;
   height: auto;
   object-fit: contain;
   border-radius: var(--ch-radius-sm);
   box-shadow: 0 18px 64px rgb(0 0 0 / 52%);
-  cursor: zoom-out;
+}
+
+.structured-image-lightbox-toolbar {
+  position: fixed;
+  z-index: 1;
+  top: 16px;
+  left: 16px;
+  right: 72px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  color: #fff;
+  font-size: 12px;
+}
+
+.structured-image-lightbox-toolbar button,
+.structured-image-lightbox-toolbar a {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: var(--ch-radius-sm);
+  background: rgb(24 24 24 / 96%);
+  color: #fff;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+@media (max-width: 480px) {
+  .structured-image-lightbox-toolbar > span {
+    display: none;
+  }
+}
+
+.structured-image-lightbox--actual {
+  display: block;
+  overflow: auto;
+}
+
+.structured-image-lightbox--actual .structured-image-lightbox-img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  margin: auto;
 }
 
 .structured-image-lightbox-close {
@@ -4984,11 +5481,29 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
 }
 
-.thinking-indicator {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ch-color-text-subtle);
+.reasoning-status {
+  display: inline-flex;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 5px 10px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+}
+
+.thinking-card--active {
+  border-style: solid;
+}
+
+.thinking-chevron {
+  margin-left: auto;
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 160ms ease;
+}
+
+.thinking-card[open] > summary .thinking-chevron {
+  transform: rotate(90deg);
 }
 
 .thinking-body {
@@ -5015,9 +5530,62 @@ onUnmounted(() => {
 .tool-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 12px;
+  transition: background-color 120ms ease;
+}
+
+.tool-card > .tool-header:hover,
+.tool-card[open] > .tool-header {
+  background: var(--ch-color-surface-soft);
+}
+
+.tool-chevron {
+  flex: 0 0 auto;
+  color: var(--ch-color-text-subtle);
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 140ms ease;
+}
+
+.tool-card[open] > .tool-header .tool-chevron {
+  transform: rotate(90deg);
+}
+
+/* Status is intentionally static: long histories must not retain hundreds of
+   independent animations. The text carries the state without relying on color. */
+.tool-card .tool-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  text-transform: none;
+  font-weight: 500;
+}
+
+.tool-card .tool-status::before {
+  content: '·';
+  width: 10px;
+  text-align: center;
+}
+
+.tool-card .tool-status.completed::before { content: '✓'; }
+.tool-card .tool-status.failed::before { content: '!'; }
+.tool-card .tool-status.cancelled::before { content: '–'; }
+.tool-card .tool-status.running::before { content: '◷'; }
+
+.tool-card .tool-block pre {
+  border: 1px solid var(--ch-color-border-muted);
+  white-space: pre;
+  word-break: normal;
+  overscroll-behavior: contain;
+  tab-size: 2;
+}
+
+.tool-card .tool-block pre:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
 }
 
 .tool-name {
@@ -5318,8 +5886,20 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.subthread-body > .tool-card {
+  width: 100%;
+  min-width: 0;
+}
+
 .subthread-thinking {
   margin: 0;
+}
+
+/* Native details hides its body but leaves CSS animation timelines running.
+   Remove only hidden child animations; a visible thinking summary still runs. */
+.subagent-region:not([open]) :deep(.thinking-indicator--active),
+.subagent-thread-row:not([open]) :deep(.thinking-indicator--active) {
+  animation: none;
 }
 
 .event-error {
@@ -5473,12 +6053,14 @@ onUnmounted(() => {
 
 @media (prefers-reduced-motion: reduce) {
   .agent-waiting-pulse i,
-  .banner-spinner,
-  .thinking-indicator {
+  .banner-spinner {
     animation: none;
   }
 
-  .turn-attachment-img {
+  .turn-attachment-img,
+  .thinking-chevron,
+  .tool-chevron,
+  .tool-header {
     transition: none;
   }
 }

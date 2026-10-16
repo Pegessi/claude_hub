@@ -71,6 +71,7 @@ class _ReviewMixin:
                 and reviewer.workspace_id == workspace.id
                 and reviewer.role == WorkspaceSessionRole.REVIEWER
                 and reviewer.status != ManagedSessionStatus.STOPPED
+                and not reviewer.chat_paused
                 and not self._reviewer_is_busy_with_other_task(reviewer, task.id)
                 and self._reviewer_matches_placement(reviewer, workspace, task)
             ):
@@ -83,12 +84,15 @@ class _ReviewMixin:
                     task.id,
                 )
         placement = self._reviewer_placement(workspace, task)
+        worker = self.sessions.get(task.session_id) if task.session_id else None
+        expected_kind = worker.session_kind if worker is not None else task.session_kind
         reviewer = self._first_available_reviewer(
             workspace.id,
             target=placement["target"],
             cwd=placement["cwd"],
             remote_profile_id=placement["remote_profile_id"],
             remote_cwd=placement["remote_cwd"],
+            session_kind=expected_kind,
         )
         if reviewer:
             return reviewer
@@ -104,7 +108,17 @@ class _ReviewMixin:
         return await self.ensure_workspace_agent(
             workspace.id,
             EnsureWorkspaceAgentRequest(
-                agent_type=task.agent_type,
+                agent_type=(
+                    worker.agent_type
+                    if worker is not None and worker.session_kind == SessionKind.CHAT
+                    else task.agent_type
+                ),
+                session_kind=expected_kind,
+                env=(
+                    dict(worker.env)
+                    if worker is not None and worker.session_kind == SessionKind.CHAT
+                    else {}
+                ),
                 title=f"{workspace.name} Temporary Reviewer",
                 role=WorkspaceSessionRole.REVIEWER,
                 reuse_existing=False,
@@ -112,7 +126,9 @@ class _ReviewMixin:
                 target=placement["target"],
                 remote_profile_id=placement["remote_profile_id"],
                 remote_cwd=placement["remote_cwd"],
-                remote_reconnect=placement["remote_reconnect"],
+                remote_reconnect=(
+                    None if expected_kind == SessionKind.CHAT else placement["remote_reconnect"]
+                ),
                 ephemeral=True,
                 caller_owned_ephemeral=False,
                 env_preset=worker_env_preset,
@@ -163,6 +179,10 @@ class _ReviewMixin:
         task: WorkspaceTask,
     ) -> bool:
         placement = self._reviewer_placement(workspace, task)
+        worker = self.sessions.get(task.session_id) if task.session_id else None
+        expected_kind = worker.session_kind if worker is not None else task.session_kind
+        if reviewer.session_kind != expected_kind:
+            return False
         if reviewer.target != placement["target"]:
             return False
         from ..workspace_identity import normalize_remote_cwd, resolve_path
