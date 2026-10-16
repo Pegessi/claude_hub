@@ -93,3 +93,44 @@ ordinary manual Chat input follows the native rule. New regression cases cover
 all three routes. The public composer browser's existing fresh-ID assertion also
 caught the pre-correction transplant. This source repair is later than the fixed
 merge records and receives its own independent review and final gate results.
+
+
+## Final integration verification
+
+The authorized native publication consists of fixed merge
+`afe2e9062d5ff5ed7d47bf6ac82ccb42d2156299` plus native retry repair
+`1e545cba2082ae047e1e27d4a16e62799208cca5`. Its merge-decision check has zero
+manual paths. The transplant and later repair were independently reviewed;
+ordinary native sends keep fresh identities, while actual Goal-controller
+retries retain their idempotency identity. None of the twelve commits unique to
+prior local main enter publication ancestry.
+
+The preserved local candidate additionally contains fixed CI merge `f99d686`,
+publication sync `4a12832`, retry repair `1953812`, and retry sync `ea53e6f`.
+Their decision records cover the changelog union and explicit retention of local
+Managed Chat transport/guards. The sync trees preserve their tested first-parent
+application/test bytes. Local browser assertion repair `9b4e92b` changes only the
+ordinary native fresh-ID expectation and is covered by the accepted browser run;
+its format check also passes. It does not change application source.
+
+| Final candidate | Canonical all | Backend default scope | Frontend unit | Mock browsers |
+| --- | --- | --- | --- | --- |
+| Native publication `1e545cb` | Exit 0, all nine targets | 3,569 passed / six opt-in skipped | 870 passed | 10 passed |
+| Local retained source `6b8fe70` | Exit 0, all nine targets | 3,822 passed / seven opt-in skipped | 885 passed | 11 passed on final browser assertion |
+
+Exact parent exits, reviewer closure and lifecycle evidence are retained under
+`/home/tiger/claude_hub_workspace/chat-queue-goal-controls/integration`.
+The accepted browser summaries are
+`final-native/browser/claude-hub-browser-mocks.zL92rC/run/summary.json` and
+`final-local/browser/claude-hub-browser-mocks.KbVHLF/run/summary.json`.
+Both record complete context/browser/driver cleanup, owned Vite exit 0, and a
+closed owned port; complete descendant process-tree exit remains unverified.
+Browser owners run serially because their refusal endpoint uses one fixed port.
+An initial concurrent owner was refused before scenarios, and the pre-correction
+native-ID assertion failure is retained rather than counted as a pass.
+
+`check-staged`, docs and the explicit fixed-merge decision checks pass. Live
+provider interruption, terminal HMR/replay, deployment, service restart and
+runtime migration are outside this publication. Publication requires a clean
+expected main tip and a normal Git fast-forward or reviewed PR merge; never
+push the combined local main containing unpublished commits.
