@@ -61,3 +61,19 @@ that decision to merge `84d914fd8f1c6e3b6d0c45db8023837ebf7e281b`.
 Re-review that immutable merge and the later record/log commit, then run the
 required full local and remote checks against the synchronized candidate before
 merging. Earlier checks remain historical evidence for their original SHA.
+
+The synchronized candidate exposed two test boundaries before merge. Local
+default coverage timed out while a cleanup test busy-polled pending state;
+the owning module and the independent full-import focused probe passed, so
+this is not evidence of a deterministic collection-policy regression. Await the
+exact owned cleanup task with the same two-second deadline, preserving the
+blocked-owner and cancellation assertions. Remote main `6de0b9c` and candidate
+`7f11244` both fail the same managed SSE test: absent Claude binaries select the
+unavailable stream before its intended incarnation-fence branch. Supply an
+explicit structured-capability double, retaining the real stream/fence and
+ensuring teardown even on failure. No production code, deadline, retry or test
+selection is changed. Preserve both first failures and scoped causal probes;
+review and verify the new exact candidate rather than relabeling old results.
+An isolated missing-Claude control reproduces the old SSE failure and passes
+with the explicit capability double. Both owning modules plus the collection
+guard pass together with default coverage (46 cases); format/types/docs pass.
