@@ -704,3 +704,26 @@ test('a lost Goal recovery response retains identity until authoritative reconci
   assert.equal(deps.attachments.value.length, 0)
   assert.equal(deps.retrySendAttempt.value, null)
 })
+
+for (const [label, goalSnapshot, reuse] of [
+  ['ordinary native resend', null, false],
+  ['manual native resend while Goal is paused', { status: 'paused', dispatch_state: 'idle' }, false],
+  ['Goal controller steer retry', { status: 'active', dispatch_state: 'dispatched' }, true],
+]) {
+  test(`${label} keeps the appropriate delivery identity`, async t => {
+    const deps = composerDeps()
+    deps.goal.value = goalSnapshot
+    const sent = []
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+      sent.push(JSON.parse(options.body))
+      if (sent.length === 1) throw new Error('accepted but acknowledgement lost')
+      return { ok: true }
+    })
+    const entries = (await loadComposerEntries())(deps)
+    assert.equal(await entries.submit(goalSnapshot?.status === 'active' ? 'steer' : 'normal'), false)
+    assert.equal(deps.draftMessage.value, 'hello')
+    assert.equal(await entries.submit('steer'), true)
+    assert.equal(sent[0].client_turn_id === sent[1].client_turn_id, reuse)
+    assert.deepEqual(sent.map(item => item.text), ['hello', 'hello'])
+  })
+}
