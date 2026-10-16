@@ -34,12 +34,14 @@ import json
 import logging
 import os
 import re
+import stat
 import time
 import uuid
 import weakref
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -51,7 +53,7 @@ from ...models import (
     ManagedSession,
     SessionKind,
 )
-from .attachments import AgentStreamAttachmentStore
+from .attachments import AgentStreamAttachmentStore, _sync_existing_directory
 from .base import (
     AgentStreamAdapter,
     NativeInputNotSubmittedError,
@@ -70,7 +72,7 @@ from .native import (
 )
 from .redaction import redact_event
 from .registry import get_adapter_for_session
-from .store import AgentStreamStore, TurnLifecycleState
+from .store import AgentStreamStore, TurnLifecycleState, _complete_io
 from .transcript_fork import (
     TranscriptForkError,
     discard_snapshot,
@@ -4105,26 +4107,77 @@ async def discard_session_stream(
     if provider_fenced is None:
         provider_fenced = await fence_session_stream(session_id)
 
-    # Delivery receipts outlive the event log and can make a reused friendly id
-    # look accepted or permanently uncertain. Validate them only after every
-    # in-process owner stopped successfully, but remove them last so any failure
-    # below preserves the evidence and prevents unsafe id reuse.
-    from .. import managed_chat
-
-    managed_chat.validate_delivery_state_discard(
+    validate_session_stream_cleanup(
         workspace_id,
         session_id,
         acknowledged_call_ids=acknowledged_call_ids or set(),
         provider_fenced=provider_fenced,
     )
-    await AgentStreamStore(workspace_id, session_id).clear()
-    # Drop any unconsumed fork-seed sidecar so a reused session id never seeds
-    # a fresh conversation with a deleted fork's history.
-    await asyncio.to_thread(discard_seed_sidecar, workspace_id, session_id)
-    # Also clear the session's bounded preview cache so a reused session id
-    # cannot surface another conversation's images.
-    await AgentStreamAttachmentStore(workspace_id, session_id).clear()
-    await asyncio.to_thread(managed_chat.discard_delivery_state, workspace_id, session_id)
+    await discard_retired_session_artifacts(workspace_id, session_id)
+
+
+def validate_session_stream_cleanup(
+    workspace_id: str,
+    session_id: str,
+    *,
+    acknowledged_call_ids: Set[str],
+    provider_fenced: bool,
+) -> None:
+    """Authorize artifact deletion before its owning identity is retired."""
+    from .. import managed_chat
+
+    managed_chat.validate_delivery_state_discard(
+        workspace_id,
+        session_id,
+        acknowledged_call_ids=acknowledged_call_ids,
+        provider_fenced=provider_fenced,
+    )
+
+
+def session_stream_has_owner(session_id: str) -> bool:
+    """Reject cleanup collisions without acquiring or stopping a new runtime."""
+    return any(manager.get_tailer(session_id) is not None for manager in _TAILER_MANAGERS)
+
+
+async def discard_retired_session_artifacts(workspace_id: str, session_id: str) -> None:
+    """Idempotently collect artifacts for an already-authorized retired owner.
+
+    Callers must retain their durable identity reservation until this finishes;
+    replay does not infer permission from missing process-local fence state.
+    """
+    from .. import managed_chat
+
+    store = AgentStreamStore(workspace_id, session_id)
+    configured_root = store.path.parent.parent.parent
+    root = configured_root.resolve()
+    # This one-shot cleanup store captures the trusted root alias; owned
+    # namespace children are derived lexically and still checked without follow.
+    store._path = root / store.path.relative_to(configured_root)
+    store._dir = store.path.parent
+    stream_directory = store.path.parent
+    for directory in (root, stream_directory.parent, stream_directory):
+        try:
+            mode = directory.lstat().st_mode
+        except FileNotFoundError:
+            break
+        if not stat.S_ISDIR(mode):
+            raise OSError("retired stream directory is not a real directory")
+    await store.clear()
+    await _complete_io(discard_snapshot, store.path.with_name(store.path.name + ".edit-bak"))
+    for suffix in (
+        ".fork-seed.json",
+        ".fork-seed.json.tmp",
+        ".managed-delivery.json",
+        ".maso-delivery.json",
+        ".maso-delivery.tmp",
+    ):
+        # Only fixed names derived from this captured stream identity. The
+        # ordinary seed helper is best effort and cannot authorize durable ACK.
+        await _complete_io(discard_snapshot, store.path.with_suffix(suffix))
+    await AgentStreamAttachmentStore(workspace_id, session_id).clear(strict=True)
+    managed_chat._turn_state_cache.pop(session_id, None)
+    # Confirm unlinks even when a previous failed sync already removed files.
+    await _complete_io(partial(_sync_existing_directory, trusted_root=root), stream_directory)
     _PROVIDER_FENCED_SESSION_IDS.discard(session_id)
     _DELETION_FENCED_SESSION_IDS.discard(session_id)
 

@@ -70,11 +70,10 @@ def backend_file_logging(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan - manage startup and shutdown."""
-    # Context managers enter left-to-right: a rejected duplicate never opens
-    # or rotates the active owner's log. They exit right-to-left so the file
-    # handler is flushed and closed before runtime ownership is released.
+async def _backend_runtime_ownership() -> AsyncIterator[None]:
+    """Drain submitted cleanup work before releasing single-instance ownership."""
+    # A rejected duplicate never opens the active owner's log. Cleanup also
+    # drains when startup fails before the lifespan reaches its yield.
     with (
         BackendInstanceLock(backend_lock_file),
         backend_file_logging(
@@ -83,12 +82,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             backup_count=settings.backend_log_backup_count,
         ),
     ):
+        async with ttyd_manager.cleanup_task_lifetime():
+            yield
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Application lifespan - manage startup and shutdown."""
+    async with _backend_runtime_ownership():
         logger.info("Logging to file: %s", log_file)
         # Startup
         logger.info("Starting Claude Hub Backend")
         from .api.agent_stream import _reset_tailer_manager
 
         _reset_tailer_manager()
+        # Schedule authorized cleanup before providers start; durable reserved
+        # ids let unrelated providers proceed while a slow disk job is pending.
+        ttyd_manager.schedule_pending_stream_cleanup()
         try:
             from .services.feishu_bot_websocket import prewarm_lark_sdk
 
