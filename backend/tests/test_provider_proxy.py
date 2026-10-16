@@ -191,6 +191,7 @@ def test_terminal_private_wrapper_hides_deployment_from_tab_and_argv(
         text=True,
         capture_output=True,
         check=True,
+        timeout=10,
     )
     assert json.loads(result.stdout)["HTTPS_PROXY"] == PROXY
     assert stat.S_IMODE(wrapper.stat().st_mode) == 0o600
@@ -284,7 +285,7 @@ def test_structured_error_diagnostics_hide_private_proxy(key: str) -> None:
 
 
 @pytest.mark.parametrize("url", [PROXY, "direct"])
-@pytest.mark.parametrize("shell", ["/bin/bash", "/bin/zsh"])
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/dash", "/bin/bash", "/bin/zsh"])
 def test_deployment_proxy_survives_login_shell(
     url: str, shell: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -309,6 +310,7 @@ def test_deployment_proxy_survives_login_shell(
         capture_output=True,
         text=True,
         check=True,
+        timeout=10,
     )
     assert json.loads(result.stdout) == ("" if url == "direct" else PROXY)
 
@@ -385,6 +387,7 @@ def test_session_home_profile_still_discovers_provider(
         capture_output=True,
         text=True,
         check=True,
+        timeout=10,
     )
     assert result.stdout == (
         "http://login.example.test:9090" if url is None else "" if url == "direct" else PROXY
