@@ -1201,16 +1201,7 @@ _MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20 MiB decoded per file
 _MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024  # 40 MiB total decoded per request
 
 
-class AgentStreamAttachment(BaseModel):
-    filename: str
-    mime_type: str
-    data_url: str
-    # Display image persisted to the attachment cache. ``data_url`` goes to the
-    # provider.
-    preview_data_url: Optional[str] = None
-    # Replaces ``preview_data_url`` when the original itself fits the cache,
-    # so the request carries those bytes once.
-    preview_is_original: bool = False
+from ..models.chat_image import ChatImageAttachment as AgentStreamAttachment
 
 
 class AgentStreamSendRequest(BaseModel):
@@ -1716,10 +1707,11 @@ async def _dispatch_tab_stream_input(
         goal = goal_manager.current(tab_id)
         session = _terminal_tab_session_or_404(tab_id)
         manager = _get_tab_tailer_manager()
-        if goal is not None and allow_question_answer and not payload.attachments:
+        if goal is not None and allow_question_answer:
             active = goal.status.value == "active"
             if (
                 active
+                and not payload.attachments
                 and goal.current_turn_id
                 and await manager.answer_pending_question(
                     session, payload.text, goal.current_turn_id
@@ -1729,12 +1721,17 @@ async def _dispatch_tab_stream_input(
             steer = False
             if active:
                 steer = payload.delivery == "steer" or bool(
-                    goal.current_turn_id
+                    not payload.attachments
+                    and goal.current_turn_id
                     and await manager.accepts_question_followup(
                         session, payload.text, goal.current_turn_id
                     )
                 )
-            elif goal.status.value == "blocked":
+            elif goal.status.value == "blocked" or (
+                goal.status.value == "paused"
+                and goal.pending_image_count
+                and payload.delivery == "steer"
+            ):
                 if payload.delivery != "steer" and await manager.turn_in_flight(session):
                     raise HTTPException(
                         status_code=409,
@@ -1751,14 +1748,22 @@ async def _dispatch_tab_stream_input(
                             f"{GOAL_STEER_INPUT_MAX_LENGTH} characters"
                         ),
                     )
-                await manager.resolve_answered_questions(session, payload.text)
+                from ..services.goal_run.images import goal_image_input, image_fingerprint
+                from .goal_runs import validate_goal_images
+
+                await validate_goal_images(tab_id, payload.attachments)
+                if not payload.attachments:
+                    await manager.resolve_answered_questions(session, payload.text)
                 try:
-                    goal = await goal_manager.steer(
-                        goal.id,
-                        f"steer:{payload.client_turn_id}",
-                        payload.text,
-                        payload.client_turn_id,
-                    )
+                    with goal_image_input(tab_id, payload.attachments):
+                        goal = await goal_manager.steer(
+                            goal.id,
+                            f"steer:{payload.client_turn_id}",
+                            payload.text,
+                            payload.client_turn_id,
+                            image_count=len(payload.attachments),
+                            image_digest=image_fingerprint(payload.attachments),
+                        )
                 except GoalPolicyError as exc:
                     raise HTTPException(
                         status_code=409,

@@ -7,6 +7,15 @@
 
 ## Released
 
+### feat(chat): control queued messages and edit image-aware Goals
+
+- Expand queued messages, edit text, cancel inputs, and preview/remove images;
+  Cmd/Ctrl+Enter steers the first queued item when the composer is empty.
+- Keep automatic queue sends from overwriting composer drafts, retain queued
+  edits through bounded Chat eviction, and reconcile uncertain deliveries safely.
+- Edit Goal objectives for the next turn and attach original images at creation
+  or steering, with explicit recovery when image dispatch is interrupted.
+
 ### fix(chat): bound formula parsing and preserve literal code
 
 - Avoid repeated suffix scans and token-array copies on long, incomplete math

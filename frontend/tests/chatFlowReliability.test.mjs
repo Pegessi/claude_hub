@@ -201,6 +201,9 @@ async function loadComposerEntries() {
     extractFunction(source, 'reusableSendId'),
     extractFunction(source, 'sendToStream'),
     extractFunction(source, 'submit'),
+    extractFunction(source, 'reconcileQueuedDeliveries'),
+    extractFunction(source, 'reconcileGoalRecovery'),
+    extractFunction(source, 'sendQueuedDraft'),
     extractFunction(source, 'suspendStreamForDeactivation'),
     extractFunction(source, 'flushDraftQueue'),
     extractFunction(source, 'requestDraftQueueFlush'),
@@ -210,7 +213,7 @@ async function loadComposerEntries() {
   const factory = new Function(
     'deps',
     'toStreamSendAttachment',
-    `const { isSending, goalComposerLocked, goalInputBlocked, goalSteerOnly, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, retrySendAttempt, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props, streamBasePath, isManagedChat } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush };`,
+    `const { isSending, goalComposerLocked, goalInputBlocked, goalSteerOnly, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, retrySendAttempt, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, isEditingQueuedDraft, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props, streamBasePath, isManagedChat, goal, goalImageRecovery, goalError, authoritativeTurns, queuedChatState } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush, reconcileQueuedDeliveries, reconcileGoalRecovery, sendQueuedDraft };`,
   )
   return (deps) => factory(deps, toStreamSendAttachment)
 }
@@ -291,6 +294,7 @@ function composerDeps(options = {}) {
     connectionState,
     isPaneActivated,
     isQueueSendInProgress: ref(false),
+    isEditingQueuedDraft: ref(false),
     queueAutoActivationBlock: ref(null),
     isWaitingForQueuedChatActivation: computed(() => activationPending && !activationOwner),
     activationCalls,
@@ -306,6 +310,11 @@ function composerDeps(options = {}) {
     props: { tabId: 'tab-a', paneId: 'pane-a' },
     streamBasePath: ref('/api/workspaces/tabs/tab-a/stream'),
     isManagedChat: ref(false),
+    authoritativeTurns: ref([]),
+    goal: ref(null),
+    goalImageRecovery: ref(false),
+    goalError: ref(null),
+    queuedChatState: { editingDraftId: null },
   }
 }
 
@@ -402,7 +411,7 @@ test('queue watcher waits for live recovery before sending', async t => {
   const unwatch = watchDraftQueue(deps, entries.requestDraftQueueFlush)
   t.after(unwatch)
 
-  deps.draftQueue.value = [{ message: 'queued while hidden', attachments: [] }]
+  deps.draftQueue.value = [{ id: 'queue-1', message: 'queued while hidden', attachments: [] }]
   await nextTick()
   assert.equal(sendCalls, 0)
   assert.equal(deps.draftQueue.value.length, 1)
@@ -430,10 +439,10 @@ test('a foreground queued Chat flushes once after activation ownership arrives',
   const unwatch = watchDraftQueue(deps, entries.requestDraftQueueFlush)
   t.after(unwatch)
 
-  deps.draftQueue.value = [{ message: 'queued for hidden Chat', attachments: [] }]
+  deps.draftQueue.value = [{ id: 'queue-1', message: 'queued for hidden Chat', attachments: [] }]
   await nextTick()
 
-  await waitFor(() => sendCalls === 1, 'queue did not flush after its Chat activated')
+  await waitFor(() => sendCalls === 1 && deps.draftQueue.value.length === 0, 'queue did not flush after its Chat activated')
   assert.deepEqual(deps.activationCalls, [], 'the foreground pane must not request activation')
   assert.equal(deps.draftQueue.value.length, 0)
   assert.equal(deps.pendingDirectTurns.value.length, 1)
@@ -443,7 +452,7 @@ test('deactivation always releases the full Chat stream to the minimal queue obs
   const makeEntries = await loadComposerEntries()
 
   const queued = composerDeps({ draftMessage: '' })
-  queued.draftQueue.value = [{ message: 'wait for current turn', attachments: [] }]
+  queued.draftQueue.value = [{ id: 'queue-1', message: 'wait for current turn', attachments: [] }]
   makeEntries(queued).suspendStreamForDeactivation()
   assert.equal(queued.getStopCalls(), 1, 'the full hidden pane must release its stream')
 
@@ -507,8 +516,8 @@ test('queue watcher preserves every item through attachment and model updates', 
   t.after(unwatch)
 
   deps.draftQueue.value = [
-    { message: 'first queued', attachments: [] },
-    { message: 'second queued', attachments: [] },
+    { id: 'queue-1', message: 'first queued', attachments: [] },
+    { id: 'queue-2', message: 'second queued', attachments: [] },
   ]
   await nextTick()
   assert.deepEqual(sentMessages, [])
@@ -540,16 +549,16 @@ test('attachment work cannot clear the durable pause after an uncertain queued s
   t.after(unwatch)
 
   deps.draftQueue.value = [
-    { message: 'possibly accepted first', attachments: [] },
-    { message: 'definitely not attempted second', attachments: [] },
+    { id: 'queue-1', message: 'possibly accepted first', attachments: [] },
+    { id: 'queue-2', message: 'definitely not attempted second', attachments: [] },
   ]
   await waitFor(
     () => deps.isDraftQueuePaused.value && !deps.isSending.value,
     'failed queued send did not pause the queue',
   )
   assert.equal(sendCalls, 1)
-  assert.equal(deps.draftMessage.value, 'possibly accepted first')
-  assert.deepEqual(deps.draftQueue.value.map(item => item.message), ['definitely not attempted second'])
+  assert.equal(deps.draftMessage.value, '')
+  assert.deepEqual(deps.draftQueue.value.map(item => item.message), ['possibly accepted first', 'definitely not attempted second'])
 
   // addFiles clears a generic composer error before preparing an attachment.
   // That unrelated mutation must not be interpreted as resolving uncertain
@@ -563,16 +572,17 @@ test('attachment work cannot clear the durable pause after an uncertain queued s
   await new Promise(resolve => setTimeout(resolve, 0))
 
   assert.equal(sendCalls, 1)
-  assert.equal(deps.draftMessage.value, 'possibly accepted first')
-  assert.deepEqual(deps.draftQueue.value.map(item => item.message), ['definitely not attempted second'])
+  assert.equal(deps.draftMessage.value, '')
+  assert.deepEqual(deps.draftQueue.value.map(item => item.message), ['possibly accepted first', 'definitely not attempted second'])
   assert.equal(deps.isDraftQueuePaused.value, true)
 
   // Only an explicit successful resend resolves the uncertain item. The next
   // queued item remains behind its newly active turn.
-  assert.equal(await entries.submit('normal'), true)
+  const first = deps.draftQueue.value[0]
+  assert.equal(await entries.submit('normal', undefined, 'queue', null, first), true)
   assert.equal(sendCalls, 2)
-  assert.equal(deps.isDraftQueuePaused.value, false)
-  assert.deepEqual(deps.draftQueue.value.map(item => item.message), ['definitely not attempted second'])
+  assert.equal(deps.isDraftQueuePaused.value, true)
+  assert.deepEqual(deps.draftQueue.value.map(item => item.message), ['possibly accepted first', 'definitely not attempted second'])
 })
 
 test('a hanging automatic queue POST times out into the delivery-uncertain pause', async t => {
@@ -588,7 +598,7 @@ test('a hanging automatic queue POST times out into the delivery-uncertain pause
     })
   )
   const deps = composerDeps({ draftMessage: '' })
-  deps.draftQueue.value = [{ message: 'timeout safely', attachments: [] }]
+  deps.draftQueue.value = [{ id: 'queue-1', message: 'timeout safely', attachments: [] }]
   const entries = makeEntries(deps)
 
   const flushing = entries.flushDraftQueue()
@@ -596,6 +606,101 @@ test('a hanging automatic queue POST times out into the delivery-uncertain pause
   await flushing
 
   assert.equal(deps.isDraftQueuePaused.value, true)
-  assert.equal(deps.draftMessage.value, 'timeout safely')
+  assert.equal(deps.draftMessage.value, '')
+  assert.equal(deps.draftQueue.value[0].message, 'timeout safely')
   assert.match(deps.composerError.value, /Delivery is uncertain/)
+})
+
+
+test('automatic queue send preserves composer text and images while awaiting acknowledgement', async t => {
+  const makeEntries = await loadComposerEntries()
+  const accepted = deferred()
+  let posted
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    posted = JSON.parse(options.body)
+    return accepted.promise
+  })
+  const deps = composerDeps({ draftMessage: 'Unsent composer draft' })
+  const image = { id: 'unsent-image', filename: 'new.png', data_url: 'data:image/png;base64,AA==', mime_type: 'image/png' }
+  deps.attachments.value = [image]
+  deps.draftQueue.value = [{ id: 'stable-queue-id', message: 'Send queued only', attachments: [] }]
+  const entries = makeEntries(deps)
+  const flushing = entries.flushDraftQueue()
+  assert.equal(posted.text, 'Send queued only')
+  assert.equal(posted.client_turn_id, 'stable-queue-id')
+  assert.equal(deps.draftQueue.value.length, 1, 'visible until server acknowledgement')
+  assert.equal(deps.draftMessage.value, 'Unsent composer draft')
+  assert.equal(deps.attachments.value[0].id, image.id)
+  accepted.resolve({ ok: true })
+  await flushing
+  assert.equal(deps.draftQueue.value.length, 0)
+  assert.equal(deps.draftMessage.value, 'Unsent composer draft')
+  assert.equal(deps.attachments.value[0].id, image.id)
+})
+
+test('uncertain queued input is reconciled by turn identity without retrying the provider', async t => {
+  const makeEntries = await loadComposerEntries()
+  let posts = 0
+  t.mock.method(globalThis, 'fetch', async () => { posts++; return { ok: true } })
+  const deps = composerDeps({ draftMessage: '' })
+  deps.draftQueue.value = [{ id: 'uncertain-id', message: 'May already be running', attachments: [], error: 'Lost response' }]
+  deps.isDraftQueuePaused.value = true
+  const entries = makeEntries(deps)
+  await entries.sendQueuedDraft('uncertain-id')
+  assert.equal(posts, 0, 'unconfirmed delivery must not be automatically retried as a steer')
+  assert.equal(deps.draftQueue.value.length, 1)
+  deps.authoritativeTurns.value = [{ turnId: 'uncertain-id' }]
+  await entries.sendQueuedDraft('uncertain-id')
+  assert.equal(posts, 0, 'an accepted message is acknowledged from history without another send')
+  assert.equal(deps.draftQueue.value.length, 0)
+})
+
+test('an unrelated explicit send cannot resume an uncertain queue', async t => {
+  const makeEntries = await loadComposerEntries()
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true }))
+  const deps = composerDeps({ draftMessage: 'A separate instruction' })
+  deps.draftQueue.value = [{ id: 'uncertain', message: 'Keep for review', attachments: [], error: 'Unknown delivery' }]
+  deps.isDraftQueuePaused.value = true
+  assert.equal(await makeEntries(deps).submit('normal'), true)
+  assert.equal(deps.isDraftQueuePaused.value, true)
+  assert.equal(deps.draftQueue.value[0].id, 'uncertain')
+})
+
+test('late delivery reconciliation preserves an unsaved replacement edit', async () => {
+  const deps = composerDeps({ draftMessage: '' })
+  deps.draftQueue.value = [{ id: 'late-id', message: 'Old message', attachments: [], error: 'Unknown' }]
+  deps.queuedChatState.editingDraftId = 'late-id'
+  deps.authoritativeTurns.value = [{ turnId: 'late-id' }]
+  const entries = (await loadComposerEntries())(deps)
+  entries.reconcileQueuedDeliveries()
+  assert.equal(deps.draftQueue.value.length, 1, 'editing buffer remains owned by the item')
+  deps.queuedChatState.editingDraftId = null
+  entries.reconcileQueuedDeliveries()
+  assert.equal(deps.draftQueue.value.length, 0)
+})
+
+test('a lost Goal recovery response retains identity until authoritative reconciliation', async t => {
+  const deps = composerDeps({ draftMessage: 'Recover using reference' })
+  deps.goalImageRecovery.value = true
+  deps.goal.value = { status: 'paused', pending_image_count: 1 }
+  const image = { id: 'image', filename: 'ref.png', mime_type: 'image/png', data_url: 'original' }
+  deps.attachments.value = [image]
+  deps.hydrateGoal = async () => { deps.goalError.value = 'Goal GET failed' }
+  const bodies = []
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    bodies.push(JSON.parse(options.body))
+    throw new Error('Recovery response lost')
+  })
+  const entries = (await loadComposerEntries())(deps)
+  assert.equal(await entries.submit('steer'), false)
+  assert.equal(deps.retrySendAttempt.value.goalRecovery, true)
+  // The actual UI blocks sends while Goal hydration has failed. Even a
+  // repeated imperative call must keep its Goal-controller idempotency key.
+  assert.equal(await entries.submit('steer'), false)
+  assert.equal(bodies[0].client_turn_id, bodies[1].client_turn_id)
+  deps.goal.value = { current_turn_id: bodies[0].client_turn_id, dispatch_state: 'dispatched' }
+  entries.reconcileGoalRecovery()
+  assert.equal(deps.draftMessage.value, '')
+  assert.equal(deps.attachments.value.length, 0)
+  assert.equal(deps.retrySendAttempt.value, null)
 })
