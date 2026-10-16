@@ -6,15 +6,20 @@ hand edits to card files are picked up on the next search.
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
+from .lessons import STOP_WORDS
 from .store import Card, DotStore
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
@@ -59,7 +64,8 @@ def query_terms(text: str) -> list[str]:
         else:
             pieces = [word]
         for piece in pieces:
-            if len(piece) < 3 or piece in seen:
+            # Common words match nearly every card and only push real hits out.
+            if len(piece) < 3 or piece in seen or piece in STOP_WORDS:
                 continue
             seen.add(piece)
             terms.append(piece)
@@ -77,8 +83,24 @@ class DotIndex:
 
     def _connect(self) -> sqlite3.Connection:
         self.store.ensure()
+        try:
+            return self._open()
+        except sqlite3.OperationalError:
+            raise
+        except sqlite3.DatabaseError:
+            # Not a database (a cut or garbled file): the index is rebuilt from the cards.
+            logger.warning("dot: index.sqlite is broken; rebuilding it")
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                Path(f"{self.store.index_path}{suffix}").unlink(missing_ok=True)
+            return self._open()
+
+    def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.store.index_path), timeout=10)
-        conn.executescript(_SCHEMA)
+        try:
+            conn.executescript(_SCHEMA)
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def sync(self) -> int:

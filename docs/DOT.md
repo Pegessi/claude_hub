@@ -42,9 +42,10 @@ index.sqlite        derived FTS5 search index (not in git)
 ```
 
 Markdown cards are the source of truth. The index is rebuilt lazily from
-file mtime and size, so Dot may also edit card files directly. A file changed
-in the last two seconds is read again on the next search, since a second
-quick edit can keep the same mtime.
+file mtime and size, so Dot may also edit card files directly. An index file
+that is not a database is dropped and rebuilt. A file changed in the last two
+seconds is read again on the next search, since a second quick edit can keep
+the same mtime.
 
 ### Compression levels
 
@@ -89,8 +90,10 @@ Values are JSON; a plain unquoted value is read as a string.
      rules from lessons, tool guide) —
      passed via `--append-system-prompt`, stable for the whole session;
    - build the **turn pack** (time, focus, open work, tasks waiting for
-     review, new inbox events, recalled cards, and on the first turn the
-     recent talk) — prepended in the hidden `<claude_hub_instructions>` block.
+     review, new inbox events, cards recalled by the user's words (not on
+     Hub wake-ups; common words like "the" do not count), and on the first
+     turn the recent talk) — prepended in the hidden
+     `<claude_hub_instructions>` block.
      Reviews come before events so a busy inbox cannot push them out; a
      section that does not fit is skipped, not the ones after it.
 3. After the turn completes, a post-persist observer appends the exchange to
@@ -103,8 +106,9 @@ Values are JSON; a plain unquoted value is read as a string.
 
 `claude-hub dot delegate` builds a brief from the template, registers and
 starts a Hub Task, and records it in `work.json` (before it starts, so a task
-that fails to start is still tracked; retry it with the same `--request-key`). `claude-hub dot watch
-<task_id>` (or the Work tab in the panel) adds a Hub Task you started yourself;
+that fails to start is still tracked; retry it with the same
+`--request-key`). `claude-hub dot watch <task_id>` (or the Work tab in the
+panel) adds a Hub Task you started yourself;
 `dot unwatch` stops tracking it. Watching a task Dot delegated keeps it a
 delegated task (only `--stall-hours` changes), so its review is not lost. A
 background watcher checks tracked tasks every 60 seconds; one task that cannot

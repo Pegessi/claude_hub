@@ -307,6 +307,12 @@ def test_identity_and_avatar_routes(
         cli, ["dot", "identity", "--name", "Jarvis", "--avatar-image", str(tmp_path / "no.png")]
     )
     assert result.exit_code == 1 and "Cannot read" in result.output
+    text = tmp_path / "notes.txt"
+    text.write_text("not a picture")
+    result = CliRunner().invoke(
+        cli, ["dot", "identity", "--name", "Jarvis", "--avatar-image", str(text)]
+    )
+    assert result.exit_code == 1
     assert client.get("/api/dot/identity").json()["name"] == "Friday"
 
 
