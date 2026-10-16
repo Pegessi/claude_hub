@@ -314,7 +314,6 @@ def test_prepare_turn_rotation_rules(store: DotStore) -> None:
         "[Dot tidy] go", service.store.read_state()["session_conversation_id"]
     )
     assert tidy.rotate
-    assert store.read_state()["last_tidy_at"]
     after = service.prepare_turn("morning", tidy.conversation_id)
     assert after.rotate, "the turn after a tidy starts a clean session"
 

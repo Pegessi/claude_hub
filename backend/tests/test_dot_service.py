@@ -384,16 +384,31 @@ async def test_a_failed_tidy_is_no_tidy(
     wm_module = importlib.import_module("claude_hub.services.workspace_manager")
     monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
     stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{TAB_ID}")
-    service.prepare_turn(TIDY_MESSAGE, None)
-    assert service.store.read_state().get("last_tidy_at")
-    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t1", summary="[Dot tidy]"))
-    await stream.append(
-        _event(AgentStreamEventType.TURN_COMPLETED, "t1", status="failed", assistant_text="500")
-    )
+    state = service.store.read_state
+
+    async def tidy(turn_id: str, **end: Any) -> None:
+        service.prepare_turn(TIDY_MESSAGE, None)
+        await stream.append(
+            _event(AgentStreamEventType.TURN_STARTED, turn_id, summary="[Dot tidy]")
+        )
+        await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, turn_id, **end))
+
+    await tidy("t1", status="failed", assistant_text="500")
     await service.sync_journal()
-    assert not service.store.read_state().get("last_tidy_at")
+    assert not state().get("last_tidy_at")
     by_name = {check["name"]: check for check in service.health()["checks"]}
     assert not by_name["tidy"]["ok"]
+    # Tidies read in one sync: two failures leave no tidy, and a failure never
+    # takes the place of one that worked.
+    await tidy("t2", status="failed", assistant_text="500")
+    await tidy("t3", status="failed", assistant_text="500")
+    await service.sync_journal()
+    assert not state().get("last_tidy_at")
+    await tidy("t4", assistant_text="[quiet]")
+    await tidy("t5", status="failed", assistant_text="500")
+    await service.sync_journal()
+    by_name = {check["name"]: check for check in service.health()["checks"]}
+    assert state().get("last_tidy_at") and by_name["tidy"]["ok"]
 
 
 # ── Claude Chat hook ───────────────────────────────────────────────────

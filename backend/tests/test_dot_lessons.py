@@ -114,6 +114,12 @@ def test_same_rule_finds_a_near_copy_only() -> None:
     assert same_rule(cjk, "Disable the cache for test runs") is None
     limits = [{"id": "e", "rule": "When retrying downloads, use at most three retries"}]
     assert same_rule(limits, "When retrying downloads, use no more than three retries")["id"] == "e"  # type: ignore[index]
+    # Two negations undo each other: "do not disable" is not "disable".
+    flaky = [{"id": "f", "rule": "Disable retries in the flaky test suite before running"}]
+    assert same_rule(flaky, "Do not disable retries in the flaky test suite before running") is None
+    assert (
+        same_rule([{"id": "g", "rule": "禁用自动重试在测试中"}], "不禁用自动重试在测试中") is None
+    )
 
 
 def test_store_lessons_vote_edit_drop_merge(service: DotService) -> None:
@@ -1030,7 +1036,8 @@ async def test_continue_messages_and_late_watches(
     def continued(report_id: str, message: str, at: Any) -> SimpleNamespace:
         # What the Hub writes when a person continues the task: the run's start time.
         report = _report(report_id, "working", message)
-        report.review_decision, report.created_at = None, at
+        # The model's default decision, as the Hub leaves it.
+        report.review_decision, report.created_at = SimpleNamespace(value="auto"), at
         return report
 
     # Sent back with the person's words, then back in review by hand with no word

@@ -135,7 +135,7 @@ def _continue_report(report: Any, task: Any) -> bool:
     started = getattr(task, "started_at", None)
     return (
         _report_state(report) == "working"
-        and getattr(report, "review_decision", None) is None
+        and getattr(report, "risk_level", None) != "system_audit"
         and started is not None
         and getattr(report, "created_at", None) == started
     )
@@ -399,8 +399,8 @@ class DotService:
             "first": new_session,
         }
         if tidy:
-            # A tidy that fails is no tidy: health must keep saying so.
-            sent["tidy_before"] = state.get("last_tidy_at")
+            # Counted as a tidy only when the turn ends well (see ``_turn_ended``).
+            sent["tidy"] = True
         updates: dict[str, Any] = {
             "session_conversation_id": conversation_id,
             "session_turns": turns,
@@ -411,8 +411,6 @@ class DotService:
         }
         if new_session:
             updates["session_started_at"] = now_iso()
-        if tidy:
-            updates["last_tidy_at"] = now_iso()
         self.store.update_state(**updates)
         return TurnPlan(
             rotate=rotate,
@@ -437,7 +435,8 @@ class DotService:
         if ended is None:
             return
         with self.store.lock:
-            sent = _sent_turns(self.store.read_state())
+            state = self.store.read_state()
+            sent = _sent_turns(state)
             limit = max(bound, ended) if bound is not None else ended
             before = [one for one in sent if (_parse_time(one.get("at")) or ended) <= limit]
             mine = [
@@ -455,8 +454,10 @@ class DotService:
             changes: dict[str, Any] = {"sent_turns": rest or None}
             if failed and turn.get("first"):
                 changes["rotate_requested"] = True
-            if failed and "tidy_before" in turn:
-                changes["last_tidy_at"] = turn["tidy_before"]
+            # A failed tidy is no tidy; two tidies may end out of order.
+            tidied, last = _parse_time(turn.get("at")), _parse_time(state.get("last_tidy_at"))
+            if turn.get("tidy") and not failed and tidied and (last is None or tidied > last):
+                changes["last_tidy_at"] = turn["at"]
             self.store.update_state(**changes)
         # Only a turn the provider took marked its events read; a later turn may have
         # shown and read them since a turn that was never taken.

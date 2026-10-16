@@ -481,6 +481,24 @@ Not changed: a fresh home reports no focus and no tidy yet (true, and says
 what to do); the first index fill is quadratic in card count (2,000 cards in
 about 2 s).
 
+### Review of round 17 (final)
+
+Last narrow review, only of the round-16 commit. Fixed:
+
+- The continue-message check never matched a real Hub report (it required no
+  review decision; the Hub writes `auto`). Now: a working, non-audit report
+  written at the task's start time. Checked against a real Hub flow.
+- "Do not disable X" counted as negated and so merged with "do not X"; the
+  check now counts negations and uses odd/even.
+- A failed tidy put back an older stamp, which was wrong when two tidies
+  overlap. Now the stamp is set only when a tidy turn ends well, never
+  moving back.
+
+Not changed: a restart overwrites the task start time, so continue messages
+from before it show as reports again (rare, harmless text); hand-made card ids
+with control characters cannot be archived; ids over 120 characters are cut in
+the session pack. After this round, further bugs are left to real use.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude
