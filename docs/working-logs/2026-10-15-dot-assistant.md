@@ -284,6 +284,31 @@ old code:
 Not changed: the journal sync counts stream lines on each completed turn
 (same pattern as the rest of the stream store; sessions rotate).
 
+### Review of round 8
+
+One reviewer attacked the round-7 commit, one the seams with the rest of the
+Hub (schedules, delegate, CLI, hooks for other tabs). Fixed, each with a test
+that fails on the old code:
+
+- A turn the provider never took ends with its start time, so it was not
+  matched and a failed first turn did not re-open the session. A turn is now
+  matched within its window (its start to the next start). Only events a
+  turn really delivered are given back, so a later turn's read is kept.
+- Events written last (round 7) could be lost when the event write failed.
+  Events go first again, with a key: the retry finds the same unread event
+  instead of adding a second one.
+- Deleting the Dot tab turned its schedules off for good; setup moved them
+  to the new tab but left them off. Moving them turns them on.
+- A deleted wake-up schedule left Dot asleep until a restart; a wake now
+  makes it again. A failed setup half-way could make a second wake-up
+  schedule. A tidy time the user picked is no longer reset on each start.
+- A delegated task that failed to start was a 500 and not tracked, so a
+  retry made a second task. It is tracked from creation; the error is a 400
+  naming the task.
+- `dot identity --name X --avatar-image <bad path>` renamed Dot, then failed.
+
+Not changed: other tabs see only no-op hooks; reviewers found no regression.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

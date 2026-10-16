@@ -759,10 +759,35 @@ async def test_a_failed_write_does_not_repeat_the_event(
         return upsert(task_id, **fields)
 
     monkeypatch.setattr(store, "upsert_work", flaky)
-    assert await service.check_work() == 0 and store.list_inbox() == []
+    assert await service.check_work() == 0 and len(store.list_inbox()) == 1
     assert await service.check_work() == 1
     assert await service.check_work() == 0
     assert len(store.list_inbox()) == 1
+
+    # The other way round: a failed event write leaves the change to be seen again.
+    monkeypatch.setattr(
+        workspace_manager,
+        "reports_for_task",
+        lambda _ws, _tid: [
+            _report("r1", "ready_for_review", "ok"),
+            _report("r2", "needs_input", "Which config?"),
+        ],
+    )
+    working = SimpleNamespace(status=SimpleNamespace(value="working"), title="t")
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-1": working})
+    store.upsert_work("task-1", status="working", closed=False)
+    add = store.add_inbox
+    lost = [OSError("disk full")]
+
+    def flaky_inbox(kind: str, text: str, **extra: Any) -> dict[str, Any]:
+        if lost:
+            raise lost.pop()
+        return add(kind, text, **extra)
+
+    monkeypatch.setattr(store, "add_inbox", flaky_inbox)
+    assert await service.check_work() == 0
+    assert await service.check_work() == 1
+    assert store.list_inbox()[-1]["kind"] == "task_needs_input"
 
 
 def test_unreadable_files_are_empty_for_readers_and_errors_for_writers(

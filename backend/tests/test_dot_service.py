@@ -245,17 +245,40 @@ def test_schedules_are_created_once_and_follow_the_tab(
     service.ensure_schedules(TAB_ID)
     assert len(schedules) == 2 and updates == [], "repeat setup reuses the schedules"
     service.ensure_schedules("tab-new")
-    assert sorted(updates) == [("s-1", {"tab_id": "tab-new"}), ("s-2", {"tab_id": "tab-new"})]
+    # The Hub turned them off when the old Chat was deleted; the new tab turns them on.
+    moved = {"tab_id": "tab-new", "enabled": True}
+    assert sorted(updates) == [("s-1", moved), ("s-2", moved)]
 
     # A home from before this change woke Dot every morning; setup moves it off that.
+    # A tidy time the user picked is kept.
     updates.clear()
     wake.cron, wake.interval_seconds = "3 9 * * *", None
+    tidy.cron = "5 4 * * *"
     service.ensure_schedules("tab-new")
     assert updates == [
         (
             wake.id,
             {"interval_seconds": service_module.WAKE_INTERVAL_SECONDS},
         )
+    ]
+
+    # One schedule made, the next one failed: a retry makes only the missing one.
+    del schedules[wake.id], schedules[tidy.id]
+    real_create = create
+
+    def failing_tidy(payload: Any) -> SimpleNamespace:
+        if payload.name == "Dot nightly tidy":
+            raise RuntimeError("scheduler busy")
+        return real_create(payload)
+
+    monkeypatch.setattr(workspace_manager, "create_scheduled_task", failing_tidy)
+    with pytest.raises(RuntimeError):
+        service.ensure_schedules("tab-new")
+    monkeypatch.setattr(workspace_manager, "create_scheduled_task", create)
+    service.ensure_schedules("tab-new")
+    assert sorted(item.payload.name for item in schedules.values()) == [
+        "Dot nightly tidy",
+        "Dot wake-up",
     ]
 
 
@@ -270,6 +293,27 @@ async def test_watch_wakes_dot_through_schedule(
     service.store.update_state(wake_schedule_id="sched-1")
     assert await service.wake()
     run.assert_awaited_once_with("sched-1")
+
+    # A deleted wake-up schedule is made again while the Dot tab is there.
+    schedules: dict[str, Any] = {}
+
+    def create(payload: Any) -> SimpleNamespace:
+        item = SimpleNamespace(
+            id=f"new-{len(schedules)}",
+            tab_id=payload.tab_id,
+            cron=payload.cron,
+            interval_seconds=payload.interval_seconds,
+        )
+        schedules[item.id] = item
+        return item
+
+    monkeypatch.setattr(workspace_manager, "scheduled_tasks", schedules)
+    monkeypatch.setattr(workspace_manager, "create_scheduled_task", create)
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: None)
+    assert not await service.wake(), "no Dot tab: nothing to wake"
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: object())
+    assert await service.wake()
+    run.assert_awaited_with("new-0")
 
 
 @pytest.mark.asyncio
@@ -609,3 +653,35 @@ async def test_a_failed_turn_gives_its_events_back(
     await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, "t2", assistant_text="Done."))
     await service.sync_journal()
     assert store.list_inbox() == [] and not store.read_state().get("sent_turns")
+
+
+@pytest.mark.asyncio
+async def test_a_turn_the_provider_never_took(
+    service: DotService, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+    store = service.store
+    stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{TAB_ID}")
+    event = store.add_inbox("task_done", "Paper — done", task_id="task-1")
+
+    # The Hub stamps the start, Dot prepares the turn, then delivery fails: the
+    # failed end carries the start time, which is before the turn was prepared.
+    started = _event(AgentStreamEventType.TURN_STARTED, "t1", summary="hello")
+    first = service.prepare_turn("hello", None)
+    assert first.rotate and first.delivered_event_ids == [event["id"]]
+    failed = _event(AgentStreamEventType.TURN_COMPLETED, "t1", status="failed")
+    failed = failed.model_copy(update={"created_at": started.created_at})
+    # The user sends again before the journal catches up; that turn is taken.
+    again = _event(AgentStreamEventType.TURN_STARTED, "t2", summary="hello?")
+    second = service.prepare_turn("hello?", first.conversation_id)
+    assert not second.rotate and second.delivered_event_ids == [event["id"]]
+    service.mark_delivered(second.delivered_event_ids)
+    for one in (started, failed, again):
+        await stream.append(one)
+    await service.sync_journal()
+
+    state = store.read_state()
+    assert state.get("rotate_requested"), "the first turn never opened the session"
+    assert len(state["sent_turns"]) == 1, "the second turn waits for its own end"
+    assert store.list_inbox() == [], "the second turn read the event"

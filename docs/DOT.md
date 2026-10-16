@@ -102,7 +102,8 @@ Values are JSON; a plain unquoted value is read as a string.
 ## Delegation and wake-up
 
 `claude-hub dot delegate` builds a brief from the template, registers and
-starts a Hub Task, and records it in `work.json`. `claude-hub dot watch
+starts a Hub Task, and records it in `work.json` (before it starts, so a task
+that fails to start is still tracked; retry it with the same `--request-key`). `claude-hub dot watch
 <task_id>` (or the Work tab in the panel) adds a Hub Task you started yourself;
 `dot unwatch` stops tracking it. Watching a task Dot delegated keeps it a
 delegated task (only `--stall-hours` changes), so its review is not lost. A
@@ -118,7 +119,11 @@ worker or the Hub reviewer asks), or looks stuck it:
   question,
 - runs the standing "Dot wake-up" Chat schedule now (queued behind any
   active turn; repeated wakes coalesce). The schedule has a ten-year interval
-  so it never fires on its own; events are the only way it runs.
+  so it never fires on its own; events are the only way it runs. A deleted
+  schedule is made again; a new Dot tab takes both schedules and turns them on.
+
+An event is written before the task's new state, with a key, so a failed
+write is retried without a second copy of the event.
 
 So Dot wakes often when many tasks move and rarely when few do. On a wake it
 tells the user only what needs them. When nothing does, it replies exactly

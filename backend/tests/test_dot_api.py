@@ -302,6 +302,13 @@ def test_identity_and_avatar_routes(
     shown = json.loads(result.output)
     assert shown["name"] == "Friday" and shown["avatar_image"] == image
 
+    # A bad picture path fails before anything changes.
+    result = CliRunner().invoke(
+        cli, ["dot", "identity", "--name", "Jarvis", "--avatar-image", str(tmp_path / "no.png")]
+    )
+    assert result.exit_code == 1 and "Cannot read" in result.output
+    assert client.get("/api/dot/identity").json()["name"] == "Friday"
+
 
 def test_watch_routes_and_cli(
     api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch
@@ -354,6 +361,8 @@ def test_delegate_route_and_cli(
     async def fake_start(task_id: str, request: Any) -> Any:
         if outcome.get("conflict"):
             raise TaskExecutionConflict("task_is_initiator_controlled")
+        if outcome.get("broken"):
+            raise RuntimeError("tmux server is gone")
         return SimpleNamespace(id=task_id, title="Paper", status=SimpleNamespace(value="queued"))
 
     monkeypatch.setattr(workspace_manager, "register_task", fake_register)
@@ -396,6 +405,12 @@ def test_delegate_route_and_cli(
     outcome["conflict"] = True
     body["workspace_id"] = "ws"
     assert client.post("/api/dot/delegate", json=body).status_code == 409
+    # A task that was made but did not start is a client error, and still tracked.
+    outcome.update(conflict=False, broken=True)
+    failed = client.post("/api/dot/delegate", json={**body, "title": "Broken"})
+    assert failed.status_code == 400 and "task-5" in failed.json()["detail"]
+    assert service.store.get_work("task-5")["title"] == "Broken"  # type: ignore[index]
+    outcome["broken"] = False
     assert client.post("/api/dot/delegate", json={**body, "goal": " "}).status_code == 400
     assert client.post("/api/dot/delegate", json={**body, "stall_hours": 0}).status_code == 422
 

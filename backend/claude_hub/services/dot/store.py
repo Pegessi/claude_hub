@@ -812,8 +812,13 @@ class DotStore:
         return items
 
     def add_inbox(self, kind: str, text: str, **extra: Any) -> dict[str, Any]:
+        """Add one event; one with the ``key`` of an unread event is that event."""
         with self._lock:
             items = self._read_json("inbox.json", [], update=True)
+            key = extra.get("key")
+            for entry in items:
+                if key and entry.get("key") == key and not entry.get("read"):
+                    return dict(entry)
             item = {
                 "id": f"e-{uuid.uuid4().hex[:8]}",
                 "at": now_iso(),
