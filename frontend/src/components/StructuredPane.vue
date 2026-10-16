@@ -1017,6 +1017,8 @@
       @resume="resumeGoal"
       @complete="completeGoal"
       @clear="clearGoal"
+      @edit="isGoalEditing = true; isGoalSetupOpen = true"
+      @refresh="hydrateGoal"
     />
 
     <!-- Composer -->
@@ -1053,14 +1055,22 @@
             :key="att.id"
             class="attachment-chip"
           >
-            <img
-              :src="att.preview_url"
-              :alt="att.filename"
-              class="attachment-thumb"
+            <button
+              type="button"
+              class="attachment-preview"
+              :aria-label="`View ${att.filename}`"
+              @click="openImageLightbox(att.data_url, att.filename, $event)"
             >
+              <img
+                :src="att.preview_url"
+                :alt="att.filename"
+                class="attachment-thumb"
+              >
+            </button>
             <button
               type="button"
               class="attachment-remove"
+              :disabled="isSending || isGoalMutating || isPreparingAttachments"
               :aria-label="`Remove ${att.filename}`"
               @click="removeAttachment(att)"
             >
@@ -1078,13 +1088,21 @@
           {{ composerError }}
         </div>
 
-        <div
-          v-if="draftQueue.length > 0"
-          class="composer-queue"
-          aria-live="polite"
-        >
-          {{ draftQueue.length }} message{{ draftQueue.length === 1 ? '' : 's' }} queued
-        </div>
+        <ChatDraftQueue
+          :drafts="draftQueue"
+          :busy="isSending || isQueueSendInProgress || isPreparingAttachments"
+          :ready="isSubmissionReady && !goalInputBlocked"
+          :goal-active="goalSteerOnly"
+          :turn-in-flight="turnInFlight"
+          :editing-id="queuedChatState.editingDraftId"
+          :editing-message="queuedChatState.editingMessage"
+          @editing="setQueuedDraftEdit"
+          @update="updateQueuedDraft"
+          @cancel="cancelQueuedDraft"
+          @edit="editQueuedDraft"
+          @send="sendQueuedDraft"
+          @preview="(att, event) => openImageLightbox(att.data_url, att.filename, event)"
+        />
 
         <div class="composer-row">
           <textarea
@@ -1093,7 +1111,7 @@
             class="composer-textarea"
             placeholder="Send a message…"
             rows="1"
-            :disabled="isSending || connectionState !== 'live' || goalInputBlocked"
+            :disabled="isSending || isGoalMutating || connectionState !== 'live' || goalInputBlocked"
             :title="goalInputBlocked ? goalComposerReason || undefined : undefined"
             @compositionstart="isComposing = true"
             @compositionend="isComposing = false"
@@ -1110,7 +1128,7 @@
               :attachment-disabled-reason="attachmentDisabledReason"
               :goal-disabled-reason="goalSetupDisabledReason"
               @attachment="triggerFilePicker"
-              @goal="isGoalSetupOpen = true"
+              @goal="isGoalEditing = false; isGoalSetupOpen = true"
               @schedule="appStore.openScheduledTasks(props.tabId)"
             />
             <input
@@ -1313,7 +1331,7 @@
             :title="goalSteerOnly ? 'Send now as the next Goal turn' : goalComposerReason || undefined"
             @click="() => submit(goalSteerOnly ? 'steer' : 'normal')"
           >
-            {{ isSending ? 'Sending…' : (goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
+            {{ isSending ? 'Sending…' : (goalImageRecovery ? 'Recover Goal' : goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
           </button>
         </div>
         <div
@@ -1339,11 +1357,59 @@
 
     <GoalSetupDialog
       :open="isGoalSetupOpen"
-      :busy="isGoalMutating"
-      :error="goalError"
+      :busy="isGoalMutating || isPreparingAttachments"
+      :error="goalError || (!isGoalEditing ? composerError : null)"
+      :editing="isGoalEditing"
+      :initial-objective="goal?.objective"
       @close="isGoalSetupOpen = false"
       @submit="startGoal"
-    />
+    >
+      <template #images>
+        <p v-if="isGoalEditing">
+          Send new images using Steer in the Chat composer.
+        </p>
+        <div
+          v-else
+          class="goal-image-picker"
+        >
+          <p>Images are sent with the first Goal turn.</p>
+          <button
+            type="button"
+            :disabled="Boolean(attachmentDisabledReason)"
+            @click="triggerFilePicker"
+          >
+            Add images
+          </button>
+          <div
+            v-for="att in attachments"
+            :key="att.id"
+            class="attachment-chip"
+          >
+            <button
+              type="button"
+              class="attachment-preview"
+              :aria-label="`View ${att.filename}`"
+              @click="openImageLightbox(att.data_url, att.filename, $event)"
+            >
+              <img
+                :src="att.preview_url"
+                :alt="att.filename"
+                class="attachment-thumb"
+              >
+            </button>
+            <button
+              type="button"
+              class="attachment-remove"
+              :disabled="isGoalMutating || isPreparingAttachments"
+              :aria-label="`Remove ${att.filename}`"
+              @click="removeAttachment(att)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      </template>
+    </GoalSetupDialog>
 
     <Teleport to="body">
       <div
@@ -1415,6 +1481,7 @@ import {
 import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
+  createComposerDraftId,
   resolveComposerEnterAction,
 } from '@/utils/chatComposerInteraction'
 import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
@@ -1426,12 +1493,14 @@ import {
 } from '@/utils/agentStreamStopReset'
 import {
   useTerminalStore,
+  type QueuedChatDraft,
   type QueuedChatDraftAttachment,
 } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import ChatDraftQueue from '@/components/ChatDraftQueue.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import GoalStatusBar from '@/components/GoalStatusBar.vue'
@@ -1477,12 +1546,14 @@ const {
   isMutating: isGoalMutating,
   hydrate: hydrateGoal,
   create: createGoal,
+  updateObjective: updateGoalObjective,
   pause: pauseGoal,
   resume: resumeGoal,
   complete: completeGoal,
   clear: clearGoal,
 } = useChatGoal(toRef(props, 'tabId'))
 const isGoalSetupOpen = ref(false)
+const isGoalEditing = ref(false)
 const isAddMenuOpen = ref(false)
 const goalPlanReason = computed(() => goalPlanLockReason(goal.value))
 const goalEditReason = computed(() => goal.value && (!isGoalTerminal(goal.value.status) || goalBlocksPlan(goal.value))
@@ -1493,15 +1564,29 @@ const goalComposerReason = computed(() => goalComposerLocked.value
   ? 'Pause or complete the active Goal before sending messages'
   : null)
 // An active Goal accepts text steers as its next turn; Enter queues instead.
-const goalSteerOnly = computed(() => goalComposerLocked.value && goal.value?.status === 'active')
+const goalImageRecovery = computed(() => Boolean(goal.value?.status === 'paused' && goal.value.pending_image_count))
+const goalSteerOnly = computed(() => goal.value?.status === 'active' || goalImageRecovery.value)
 const goalInputBlocked = computed(() => goalComposerLocked.value && !goalSteerOnly.value)
 
 async function startGoal(input: { objective: string }) {
+  if (isGoalEditing.value) {
+    if (await updateGoalObjective(input.objective)) isGoalSetupOpen.value = false
+    return
+  }
   if (goalSetupDisabledReason.value) {
     goalError.value = goalSetupDisabledReason.value
     return
   }
-  if (await createGoal(input)) isGoalSetupOpen.value = false
+  const imageSnapshot = [...attachments.value]
+  const saved = await createGoal({ ...input, attachments: imageSnapshot.map(toStreamSendAttachment) })
+  if (saved) {
+    attachments.value = []
+    isGoalSetupOpen.value = false
+  } else if (goal.value) {
+    // The server may have persisted the Goal before delivery failed. Keep
+    // originals in the composer so an explicit image steer can recover it.
+    isGoalSetupOpen.value = false
+  }
 }
 
 const {
@@ -1687,6 +1772,46 @@ type PendingTurn = {
   turnId: string
   userText: string
   attachments: { preview_url: string; mime_type: string }[]
+}
+
+type QuestionIdentity = { turnId: string; callId: string }
+
+type RetriableSend = {
+  clientTurnId: string
+  message: string
+  attachments: DraftAttachment[]
+  questionIdentity: QuestionIdentity | null
+  goalRecovery?: boolean
+}
+
+const retrySendAttempt = ref<RetriableSend | null>(null)
+
+function sameRetryAttachment(left: DraftAttachment, right: DraftAttachment): boolean {
+  return left.filename === right.filename &&
+    left.mime_type === right.mime_type &&
+    left.data_url === right.data_url &&
+    left.preview_data_url === right.preview_data_url
+}
+
+function reusableSendId(
+  message: string,
+  draftAtts: DraftAttachment[],
+  questionIdentity: QuestionIdentity | null,
+): string | null {
+  const attempt = retrySendAttempt.value
+  if (!attempt || attempt.message !== message || attempt.attachments.length !== draftAtts.length) {
+    return null
+  }
+  if (
+    attempt.questionIdentity?.turnId !== questionIdentity?.turnId ||
+    attempt.questionIdentity?.callId !== questionIdentity?.callId
+  ) {
+    return null
+  }
+  return attempt.attachments.every((attachment, index) =>
+    sameRetryAttachment(attachment, draftAtts[index]))
+    ? attempt.clientTurnId
+    : null
 }
 
 const pendingDirectTurns = ref<PendingTurn[]>([])
@@ -1967,15 +2092,15 @@ function handleViewportResize() {
 const composerTextareaEl = ref<HTMLTextAreaElement | null>(null)
 const queuedChatState = terminalStore.getQueuedChatState(props.paneId, props.tabId)
 const draftQueue = toRef(queuedChatState, 'drafts')
+const isEditingQueuedDraft = toRef(queuedChatState, 'editing')
 // Queue data lives in the store so bounded KeepAlive eviction cannot lose it.
 // QueuedChatObserver supplies the hidden completion edge; this full pane only
 // sends after its owning pane and Chat are active in the foreground.
 const isPaneActivated = ref(false)
 const isQueueSendInProgress = toRef(queuedChatState, 'sendInProgress')
-// A queued POST failure is delivery-uncertain: the provider may have accepted
-// it even when the browser did not receive the acknowledgement. Keep later
-// queued messages paused until the user deliberately sends the restored draft
-// and that explicit send succeeds.
+// A queued POST failure is delivery-uncertain: retain its visible card and
+// pause later messages until authoritative history confirms acceptance or the
+// user reviews/removes/edits the uncertain intent.
 const isDraftQueuePaused = toRef(queuedChatState, 'paused')
 const queueAutoActivationBlock = toRef(queuedChatState, 'autoActivationBlock')
 const isWaitingForQueuedChatActivation = computed(() =>
@@ -2303,6 +2428,8 @@ const timelineLoadingMessage = computed(() => {
 })
 
 const isSubmissionReady = computed(() => connectionState.value === 'live' &&
+  (!goalImageRecovery.value || (!isGoalHydrating.value && !goalError.value)) &&
+  !isGoalMutating.value &&
   !isPreparingAttachments.value &&
   !isUpdatingMode.value &&
   !isUpdatingModel.value &&
@@ -2310,15 +2437,14 @@ const isSubmissionReady = computed(() => connectionState.value === 'live' &&
 
 const canSend = computed(() => isSubmissionReady.value &&
   !goalInputBlocked.value &&
-  (goalSteerOnly.value
-    ? draftMessage.value.trim().length > 0 && attachments.value.length === 0
-    : draftMessage.value.trim().length > 0 || attachments.value.length > 0))
+  (!goalImageRecovery.value || attachments.value.length > 0) &&
+  (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
 
 const supportsImages = computed(() => capabilities.value?.supports_images ?? false)
 const attachmentDisabledReason = computed(() => {
   if (!supportsImages.value) return 'This chat does not support image attachments'
-  if (goalComposerLocked.value) return 'Pause or complete the active Goal before attaching images'
-  if (isSending.value || isPreparingAttachments.value) return 'Wait for the current upload or send to finish'
+  if (goalInputBlocked.value) return goalComposerReason.value
+  if (isSending.value || isPreparingAttachments.value || isGoalMutating.value) return 'Wait for the current upload or send to finish'
   return null
 })
 const goalSetupDisabledReason = computed(() => {
@@ -2417,9 +2543,8 @@ async function addFiles(files: FileList | File[]) {
     composerError.value = 'This chat does not support image attachments.'
     return
   }
-  // Pasted or dropped images would leave a steer unsendable.
-  if (goalComposerLocked.value) {
-    composerError.value = 'Pause or complete the active Goal before attaching images.'
+  if (goalInputBlocked.value) {
+    composerError.value = goalComposerReason.value
     return
   }
   // Serialize preparation batches: reject new input while a previous batch is
@@ -2658,10 +2783,16 @@ function handleComposerEnter(event: KeyboardEvent) {
     altKey: event.altKey,
     turnInFlight: turnInFlight.value || goalSteerOnly.value,
     hasDraft: draftMessage.value.trim().length > 0 || attachments.value.length > 0,
+    hasQueuedDraft: draftQueue.value.length > 0,
     isMobile: isMobileViewport.value,
   })
   if (action === 'ignore' || action === 'newline') return
   event.preventDefault()
+  if (action === 'steer-queued') {
+    const first = draftQueue.value[0]
+    if (first) void sendQueuedDraft(first.id)
+    return
+  }
   if (action === 'queue') {
     enqueueDraft()
     return
@@ -2676,6 +2807,7 @@ function enqueueDraft() {
   }
   if (!canSend.value) return
   draftQueue.value.push({
+    id: createComposerDraftId(),
     message: draftMessage.value,
     attachments: [...attachments.value],
   })
@@ -2683,6 +2815,95 @@ function enqueueDraft() {
   attachments.value = []
   composerError.value = null
   void nextTick(() => syncComposerTextareaHeight())
+}
+
+function setQueuedDraftEdit(id: string | null, message: string) {
+  queuedChatState.editingDraftId = id
+  queuedChatState.editingMessage = message
+  isEditingQueuedDraft.value = Boolean(id)
+}
+
+function reconcileQueuedDeliveries() {
+  const observed = new Set(authoritativeTurns.value.map(turn => turn.turnId))
+  const accepted = draftQueue.value.filter(draft => draft.error && draft.id !== queuedChatState.editingDraftId && observed.has(draft.clientTurnId ?? draft.id))
+  if (!accepted.length) return
+  if (accepted.some(draft => draft.error === composerError.value)) composerError.value = null
+  const acceptedIds = new Set(accepted.map(draft => draft.id))
+  draftQueue.value = draftQueue.value.filter(draft => !acceptedIds.has(draft.id))
+  if (!draftQueue.value.some(draft => draft.error) && !draftMessage.value.trim() && !attachments.value.length) isDraftQueuePaused.value = false
+}
+
+watch([authoritativeTurns, () => draftQueue.value.map(draft => draft.error), isEditingQueuedDraft], reconcileQueuedDeliveries)
+
+function reconcileGoalRecovery() {
+  const attempt = retrySendAttempt.value
+  if (!attempt?.goalRecovery) return
+  const delivered = authoritativeTurns.value.some(turn => turn.turnId === attempt.clientTurnId)
+    || goal.value?.completed_turn_ids?.includes(attempt.clientTurnId)
+    || (goal.value?.current_turn_id === attempt.clientTurnId && goal.value?.dispatch_state === 'dispatched')
+  if (!delivered) return
+  if (reusableSendId(draftMessage.value, attachments.value, null) === attempt.clientTurnId) {
+    draftMessage.value = ''
+    attachments.value = []
+    composerError.value = null
+  }
+  retrySendAttempt.value = null
+}
+watch([goal, retrySendAttempt, authoritativeTurns], reconcileGoalRecovery)
+
+function updateQueuedDraft(id: string, message: string, nextAttachments: DraftAttachment[]) {
+  if (isSending.value || isQueueSendInProgress.value || isPreparingAttachments.value) return
+  const draft = draftQueue.value.find(item => item.id === id)
+  if (!draft) return
+  // An edit is a new intent; unchanged retries keep the original delivery ID.
+  if (message === draft.message && nextAttachments.length === draft.attachments.length && nextAttachments.every((att, i) => att.id === draft.attachments[i]?.id)) return
+  draft.clientTurnId = createComposerDraftId()
+  draft.message = message
+  draft.attachments = [...nextAttachments]
+  draft.error = undefined
+}
+
+function cancelQueuedDraft(id: string) {
+  if (isSending.value || isQueueSendInProgress.value || isPreparingAttachments.value) return
+  draftQueue.value = draftQueue.value.filter(item => item.id !== id)
+}
+
+function editQueuedDraft(id: string) {
+  if (isSending.value || isQueueSendInProgress.value || isPreparingAttachments.value) return
+  const draft = draftQueue.value.find(item => item.id === id)
+  if (!draft) return
+  // Preserve an existing composer draft instead of overwriting it.
+  const existing = draftMessage.value.trim() || attachments.value.length
+    ? { id: createComposerDraftId(), message: draftMessage.value, attachments: [...attachments.value] }
+    : null
+  draftQueue.value = draftQueue.value.filter(item => item.id !== id)
+  if (existing) draftQueue.value.push(existing)
+  isDraftQueuePaused.value = true
+  draftMessage.value = draft.message
+  attachments.value = [...draft.attachments]
+  // Moving is an explicit new intent, including when the old delivery is
+  // unconfirmed. Never disguise it as a native same-ID retry.
+  retrySendAttempt.value = null
+  composerError.value = draft.error ? 'Review the conversation before sending this as a new message.' : null
+  void nextTick(() => { syncComposerTextareaHeight(); composerTextareaEl.value?.focus() })
+}
+
+async function sendQueuedDraft(id: string) {
+  if (isSending.value || isQueueSendInProgress.value || !isSubmissionReady.value || goalInputBlocked.value || isEditingQueuedDraft.value) return
+  const draft = draftQueue.value.find(item => item.id === id)
+  if (!draft) return
+  if (draft.error) {
+    reconcileQueuedDeliveries()
+    return
+  }
+  isQueueSendInProgress.value = true
+  try {
+    const sent = await submit(turnInFlight.value || goalSteerOnly.value ? 'steer' : 'normal', undefined, 'queue', null, draft)
+    if (sent) {
+      draftQueue.value = draftQueue.value.filter(item => item.id !== id)
+      isDraftQueuePaused.value = draftQueue.value.some(item => Boolean(item.error))
+    }
+  } finally { isQueueSendInProgress.value = false }
 }
 
 function suspendStreamForDeactivation() {
@@ -2696,6 +2917,8 @@ async function flushDraftQueue() {
     && !isDraftQueuePaused.value
     && !turnInFlight.value
     && !isSending.value
+    && !isQueueSendInProgress.value
+    && !isEditingQueuedDraft.value
     && !goalComposerLocked.value
   ) {
     const activationRequestId = terminalStore.queuedChatActivationRequestId(
@@ -2705,11 +2928,10 @@ async function flushDraftQueue() {
     isQueueSendInProgress.value = true
     let sent = false
     try {
-      const next = draftQueue.value.shift()
+      const next = draftQueue.value[0]
       if (!next) break
-      draftMessage.value = next.message
-      attachments.value = next.attachments
-      sent = await submit('normal', undefined, 'queue')
+      sent = await submit('normal', undefined, 'queue', null, next)
+      if (sent) draftQueue.value = draftQueue.value.filter(item => item.id !== next.id)
     } finally {
       isQueueSendInProgress.value = false
       // The next ready hidden Chat may activate only after this one has
@@ -2723,7 +2945,7 @@ async function flushDraftQueue() {
 }
 
 function requestDraftQueueFlush() {
-  if (!isPaneActivated.value) {
+  if (!isPaneActivated.value || isEditingQueuedDraft.value) {
     terminalStore.releaseQueuedChatActivation(props.paneId, props.tabId)
     return
   }
@@ -2741,6 +2963,7 @@ function requestDraftQueueFlush() {
     isSubmissionReady.value
     && isPaneActivated.value
     && !isWaitingForQueuedChatActivation.value
+    && !isEditingQueuedDraft.value
     && !isDraftQueuePaused.value
     && !turnInFlight.value
     && draftQueue.value.length > 0
@@ -2760,6 +2983,7 @@ watch(
     goalComposerLocked,
     isSubmissionReady,
     isDraftQueuePaused,
+    isEditingQueuedDraft,
     queueAutoActivationBlock,
     isPaneActivated,
     isWaitingForQueuedChatActivation,
@@ -3249,6 +3473,8 @@ async function submit(
   delivery: 'normal' | 'steer' = 'normal',
   messageOverride?: string,
   source: 'user' | 'queue' = 'user',
+  questionIdentity: QuestionIdentity | null = null,
+  queuedDraft?: QueuedChatDraft,
 ): Promise<boolean> {
   if (isSending.value) return false
   if (!messageOverride && goalInputBlocked.value) {
@@ -3259,12 +3485,12 @@ async function submit(
   // entries call submit directly. Re-check the same availability boundary so
   // Enter cannot dispatch during hydration/attachment preparation, and queued
   // drafts cannot leave before recovery reaches the authoritative live state.
-  if (!messageOverride && !canSend.value) return false
+  if (queuedDraft ? !isSubmissionReady.value : !messageOverride && !canSend.value) return false
   // Approval answers and "Implement plan" use messageOverride and may bypass a
   // Goal's ordinary composer lock, but they still require a live transport.
   if (messageOverride && connectionState.value !== 'live') return false
-  const message = messageOverride ?? draftMessage.value
-  const hasContent = message.trim().length > 0 || attachments.value.length > 0
+  const message = queuedDraft?.message ?? messageOverride ?? draftMessage.value
+  const hasContent = message.trim().length > 0 || (queuedDraft?.attachments ?? attachments.value).length > 0
   if (!hasContent) return false
   if (delivery === 'normal' && (turnInFlight.value || goalSteerOnly.value) && !messageOverride) {
     enqueueDraft()
@@ -3277,7 +3503,7 @@ async function submit(
   // Snapshot the full draft attachments (including id, preview_url,
   // preview_data_url, size_bytes) so we can restore the composer exactly on
   // send failure — no reconstructed ids, no zeroed sizes.
-  const draftAtts: DraftAttachment[] = messageOverride ? [] : [...attachments.value]
+  const draftAtts: DraftAttachment[] = queuedDraft ? [...queuedDraft.attachments] : messageOverride ? [] : [...attachments.value]
   // The original data_url goes to the provider; preview_data_url is the
   // stored image (sendToStream flags it instead when it is the original).
   const atts: WorkspaceAttachmentCreate[] = draftAtts.map(
@@ -3293,11 +3519,19 @@ async function submit(
     preview_url,
     mime_type,
   }))
-  const clientTurnId = typeof crypto.randomUUID === 'function'
+  const recoveringGoal = goalImageRecovery.value
+  // Native provider turns do not deduplicate IDs. Only controller-backed
+  // delivery may retain a failed attempt; an ordinary resend is a new intent.
+  const goalControlledInput = !messageOverride && (recoveringGoal || goal.value?.status === 'active' || goal.value?.status === 'blocked')
+  const retainRetryId = goalControlledInput
+  const reusableId = retainRetryId ? reusableSendId(message, draftAtts, questionIdentity) : null
+  const retainedClientTurnId = recoveringGoal && !retrySendAttempt.value?.goalRecovery ? null : (queuedDraft?.clientTurnId ?? queuedDraft?.id) ?? reusableId
+  const clientTurnId = retainedClientTurnId ?? (typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
-    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
+    : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`)
+  if (queuedDraft) queuedDraft.clientTurnId = clientTurnId
   try {
-    if (!messageOverride) {
+    if (!messageOverride && !queuedDraft) {
       draftMessage.value = ''
       attachments.value = []
     }
@@ -3322,12 +3556,18 @@ async function submit(
       ]
     }
     requestLatestAnchor(true)
-    await sendToStream(message, atts, clientTurnId, delivery, source === 'queue' ? 15_000 : null)
-    if (messageOverride) await hydrateGoal()
-    // A successful explicit send resolves a previously uncertain queued item.
-    // Automatic queue sends never clear this flag; only deliberate user input
-    // may resume the remaining queue after an ambiguous POST failure.
-    if (!messageOverride && source === 'user') isDraftQueuePaused.value = false
+    await sendToStream(
+      message,
+      atts,
+      clientTurnId,
+      delivery,
+      source === 'queue' ? 15_000 : null,
+    )
+    retrySendAttempt.value = null
+    if ((messageOverride || (goal.value && delivery === 'steer'))) await hydrateGoal()
+    // Deliberate user input may resume a queue moved into the composer, but
+    // cannot silently release another item with unconfirmed delivery.
+    if (!messageOverride && source === 'user' && !draftQueue.value.some(draft => draft.error)) isDraftQueuePaused.value = false
     // The POST acknowledgement means provider dispatch has begun. Refresh the
     // backend-native tab status now rather than waiting for the 5s poll phase;
     // turn_started/completed/error boundaries above provide subsequent edges.
@@ -3337,12 +3577,29 @@ async function submit(
     return true
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
-    if (!messageOverride) {
+    if (!queuedDraft && retainRetryId) {
+      retrySendAttempt.value = {
+        goalRecovery: recoveringGoal,
+        clientTurnId,
+        message,
+        attachments: [...draftAtts],
+        questionIdentity: questionIdentity ? { ...questionIdentity } : null,
+      }
+    } else if (!queuedDraft) retrySendAttempt.value = null
+    if (queuedDraft) {
+      queuedDraft.error = err instanceof Error ? err.message : 'Failed to send message.'
+      isDraftQueuePaused.value = true
+    } else if (!messageOverride) {
       draftMessage.value = message
       attachments.value = draftAtts
-      if (source === 'queue') isDraftQueuePaused.value = true
     }
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
+    if (goal.value) {
+      await hydrateGoal()
+      // Only a successful authoritative refresh permits a new explicit
+      // recovery intent. A failed GET keeps the same attempt and blocks send.
+      if (recoveringGoal && !goalError.value && goalImageRecovery.value) retrySendAttempt.value = null
+    }
     return false
   } finally {
     isSending.value = false
@@ -4315,6 +4572,8 @@ onUnmounted(() => {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.attachment-preview { width: 100%; height: 100%; padding: 0; display: flex; border: 0; background: transparent; cursor: zoom-in; }
 
 .composer-queue {
   padding: 4px 10px 0;

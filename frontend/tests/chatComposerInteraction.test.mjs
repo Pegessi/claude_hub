@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   autoresizeComposerTextarea,
+  createComposerDraftId,
   resolveComposerEnterAction,
 } from '../src/utils/chatComposerInteraction.ts'
 
@@ -83,9 +84,7 @@ test('resolveComposerEnterAction inserts a newline on mobile during an in-flight
   }), 'newline')
 })
 
-test('resolveComposerEnterAction inserts a newline on mobile even with a modifier held', () => {
-  // An external keyboard's ⌘/Ctrl+Enter must not steer/send on mobile — the
-  // Send button is the only send path there.
+test('resolveComposerEnterAction allows an external keyboard to steer on mobile', () => {
   assert.equal(resolveComposerEnterAction({
     isComposing: false,
     shiftKey: false,
@@ -95,7 +94,7 @@ test('resolveComposerEnterAction inserts a newline on mobile even with a modifie
     turnInFlight: true,
     hasDraft: true,
     isMobile: true,
-  }), 'newline')
+  }), 'steer')
 })
 
 test('resolveComposerEnterAction still ignores IME composition on mobile', () => {
@@ -134,4 +133,22 @@ test('autoresizeComposerTextarea caps height and enables scroll', () => {
   autoresizeComposerTextarea(el, 240)
   assert.equal(el.style.height, '240px')
   assert.equal(el.style.overflowY, 'auto')
+})
+
+for (const modifier of ['metaKey', 'ctrlKey']) {
+  test(`${modifier}+Enter steers the first queued item with an empty composer`, () => {
+    const context = { isComposing: false, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, turnInFlight: true, hasDraft: false, hasQueuedDraft: true, [modifier]: true }
+    assert.equal(resolveComposerEnterAction(context), 'steer-queued')
+    assert.equal(resolveComposerEnterAction({ ...context, isComposing: true }), 'ignore')
+    assert.equal(resolveComposerEnterAction({ ...context, hasQueuedDraft: false }), 'ignore')
+    assert.equal(resolveComposerEnterAction({ ...context, hasDraft: true }), 'steer')
+  })
+}
+
+test('draft IDs remain unique on a plain HTTP origin without randomUUID', t => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
+  Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {} })
+  t.after(() => Object.defineProperty(globalThis, 'crypto', descriptor))
+  assert.match(createComposerDraftId(), /^draft-/)
+  assert.notEqual(createComposerDraftId(), createComposerDraftId())
 })

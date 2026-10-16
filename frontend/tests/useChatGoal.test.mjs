@@ -104,3 +104,27 @@ test('Goal creation sends only an objective and idempotency key', async t => {
   assert.equal(await state.create({ objective: 'Ship the feature' }), true)
   assert.equal(state.goal.value.status, 'active')
 })
+
+test('objective edits retain request identity after a lost response and clear it after success', async t => {
+  const state = useChatGoal(ref('tab-1'))
+  t.after(state.dispose)
+  const mutations = []
+  let fail = true
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (!options.method) return response(snapshot({ objective: 'Old objective' }))
+    assert.equal(options.method, 'PATCH')
+    assert.equal(url, '/api/goals/goal-1/objective')
+    const body = JSON.parse(options.body)
+    mutations.push(body)
+    if (fail) throw new Error('response lost')
+    return response(snapshot({ objective: body.objective }))
+  })
+  await state.hydrate()
+  assert.equal(await state.updateObjective('New objective'), false)
+  fail = false
+  assert.equal(await state.updateObjective('New objective'), true)
+  assert.equal(mutations[0].client_request_id, mutations[1].client_request_id)
+  assert.equal(state.goal.value.objective, 'New objective')
+  await state.updateObjective('New objective')
+  assert.notEqual(mutations[1].client_request_id, mutations[2].client_request_id)
+})

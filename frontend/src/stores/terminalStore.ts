@@ -33,6 +33,9 @@ export interface QueuedChatDraftAttachment extends WorkspaceAttachmentCreate {
 }
 
 export interface QueuedChatDraft {
+  id: string
+  error?: string
+  clientTurnId?: string
   message: string
   attachments: QueuedChatDraftAttachment[]
 }
@@ -42,6 +45,9 @@ interface QueuedChatState {
   tabId: string
   drafts: QueuedChatDraft[]
   paused: boolean
+  editing: boolean
+  editingDraftId: string | null
+  editingMessage: string
   sendInProgress: boolean
   autoActivationBlock: 'stream-failed' | 'goal-locked' | null
 }
@@ -330,7 +336,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function queuedChatStateIsProtected(state: QueuedChatState): boolean {
-    return state.drafts.length > 0 || state.paused || state.sendInProgress
+    return state.drafts.length > 0 || state.paused || state.sendInProgress || state.editing
   }
 
   function getQueuedChatState(paneId: string, tabId: string): QueuedChatState {
@@ -341,6 +347,9 @@ export const useTerminalStore = defineStore('terminal', () => {
         tabId,
         drafts: [],
         paused: false,
+        editing: false,
+        editingDraftId: null,
+        editingMessage: '',
         sendInProgress: false,
         autoActivationBlock: null,
       })
@@ -383,6 +392,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         state.paneId === paneId
         && state.drafts.length > 0
         && !state.paused
+        && !state.editing
         && !state.sendInProgress
       )
       .map(state => state.tabId)
@@ -430,7 +440,8 @@ export const useTerminalStore = defineStore('terminal', () => {
   function ensureQueuedChatActivation() {
     let owner = queuedChatActivationOwner.value
     while (owner && (
-      !tabs.value.some(tab => tab.id === owner?.tabId)
+      queuedChatStates.value.some(state => state.tabId === owner?.tabId && state.editing)
+      || !tabs.value.some(tab => tab.id === owner?.tabId)
       || !panes.value.some(pane => pane.id === owner?.paneId)
     )) {
       queuedChatActivationRequests.value.shift()
@@ -442,6 +453,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function requestQueuedChatActivation(paneId: string, tabId: string) {
+    if (getQueuedChatState(paneId, tabId).editing) return
     if (!queuedChatActivationRequests.value.some(entry => entry.tabId === tabId)) {
       queuedChatActivationRequests.value.push({
         id: nextQueuedChatActivationRequestId++,
