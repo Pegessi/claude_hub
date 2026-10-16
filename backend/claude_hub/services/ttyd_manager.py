@@ -1924,10 +1924,11 @@ asyncio.run(_main())
             )
             script = (
                 "#!/bin/sh\n"
-                'if [ "${1:-}" = "--apply-env" ]; then\n'
+                'if [ "${_CLAUDE_HUB_APPLY_PROXY_ENV:-}" = "1" ]; then\n'
                 f"{clear_proxies}{proxy_exports}\nreturn 0\nfi\n"
                 f"set -eu\n{clear_proxies}{exports}\n"
-                'exec "${SHELL:-/bin/bash}" -lc \' . "$1" --apply-env; eval "$2"\' '
+                'exec "${SHELL:-/bin/bash}" -lc \'_CLAUDE_HUB_APPLY_PROXY_ENV=1; '
+                '. "$1"; unset _CLAUDE_HUB_APPLY_PROXY_ENV; eval "$2"\' '
                 f'claude-hub {shlex.quote(str(script_path))} "$1"\n'
             )
         else:
