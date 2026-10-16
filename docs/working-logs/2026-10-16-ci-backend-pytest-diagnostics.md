@@ -33,3 +33,6 @@ uses the original execution and logging path, allowing the test-name change to
 be checked independently of the temporary diagnostic settings. Candidate SHA,
 full validation results and independent review are recorded with PR #17 and its
 Task evidence.
+
+The [sync merge decision record](2026-10-16-ci-backend-pytest-merge-decisions.json)
+binds the reviewed CHANGELOG resolution to immutable merge `2c355f540617f966915a7c6d2e1265886f11960d`.
