@@ -322,6 +322,9 @@ class DotService:
         self.store.ensure()
         # Read-decide-write under the store lock so a concurrent rotation
         # request is not overwritten.
+        # A cold index can take seconds to fill; not while holding the lock every
+        # Dot route (on the event loop) waits for.
+        self.index.sync()
         with self.store.lock:
             return self._prepare_turn(text, conversation_id)
 
@@ -1030,25 +1033,53 @@ class DotService:
             and _report_state(returned[-1]) in _RETURN_REPORT_STATES
         )
         title = item.get("title") or task_id
-        if status in ("review", "failed") and (status != previous or again or rerun):
+        # The Hub reviewer moves a task to working and back to review (or a person then
+        # accepts it): that is the result already announced, not a new one.
+        result_id = getattr(result, "id", None) if _worker_report(result) else None
+        same_result = (
+            bool(result_id)
+            and result_id == item.get("announced_report_id")
+            and not returned
+            and not rerun
+            # A new end time is a re-run, except accepting a result announced for
+            # review (not news). Back in review without a reviewer step, someone sent
+            # the task back: ask again.
+            and (
+                any(_report_state(new).startswith("review_") for new in fresh)
+                if status == "review"
+                else ended == item.get("ended_at")
+                or (status == "done" and item.get("announced_status") == "review")
+            )
+        )
+        if (
+            status in ("review", "failed")
+            and (status != previous or again or rerun)
+            and not same_result
+        ):
             card = self._result_card(item, status, result)
-            changes["result_card"] = card.id
-            changes["review_due"] = review_due
+            changes.update(result_card=card.id, review_due=review_due)
+            changes.update(announced_report_id=result_id, announced_status=status)
             summary = _first_line(str(getattr(result, "message", "") or ""), 300)
             kind = "task_ready" if status == "review" else "task_failed"
             notices.append((kind, f"{title} — {summary or status}", card.id))
-        elif status == "done" and (previous not in ("review", "done") or rerun):
+        elif status == "done" and (previous not in ("review", "done") or rerun) and not same_result:
             card = self._result_card(item, status, result)
-            changes["result_card"] = card.id
-            changes["review_due"] = review_due
+            changes.update(result_card=card.id, review_due=review_due)
+            changes.update(announced_report_id=result_id, announced_status=status)
             notices.append(("task_done", f"{title} — done", card.id))
-        elif (
+        if (
             _report_state(latest) in _ATTENTION_REPORT_STATES
             and status not in _TERMINAL_TASK_STATES
+            # The Hub reviewer's question can come with the result it is about.
+            and (not notices or _report_state(latest) == "review_needs_input")
         ):
             question = _first_line(str(getattr(latest, "message", "") or ""), 300)
             notices.append(("task_needs_input", f"{title} — {question}", None))
-        elif status in _STALL_TASK_STATES and (activity := self._last_activity(item, task, report)):
+        elif (
+            not notices
+            and status in _STALL_TASK_STATES
+            and (activity := self._last_activity(item, task, report))
+        ):
             idle = utc_now() - activity
             limit = float(item.get("stall_hours") or DEFAULT_STALL_HOURS)
             # One alarm per stall: a new sign of life re-arms it.

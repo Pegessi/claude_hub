@@ -122,7 +122,11 @@ worker or the Hub reviewer asks), or looks stuck it:
   reviewer's; each part cut at 20,000 characters). The Hub's own "please review" reports (a task moved to
   review by hand, a review asked again, the stuck-review reaper) carry no
   result, so they neither fill the card, start a new round, nor count as a
-  question,
+  question. A result is announced once: the Hub reviewer taking the task
+  back to working and returning it, or a person accepting a result already
+  announced for review, is not news. A task a person sent back that returns
+  with no new report is asked for review again. A reviewer question is its own
+  event, even in the poll that announces the result,
 - runs the standing "Dot wake-up" Chat schedule now (queued behind any
   active turn; repeated wakes coalesce). The schedule has a ten-year interval
   so it never fires on its own; events are the only way it runs. A deleted
