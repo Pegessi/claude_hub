@@ -16,6 +16,12 @@
 - Edit Goal objectives for the next turn and attach original images at creation
   or steering, with explicit recovery when image dispatch is interrupted.
 
+### fix(ci): keep large test payloads out of verbose test names
+
+- Give oversized image and deeply nested registry cases short, descriptive pytest
+  IDs, so verbose CI output does not include megabytes of fixture data.
+- Preserve the original payloads, assertions and CI execution settings.
+
 ### fix(chat): bound formula parsing and preserve literal code
 
 - Avoid repeated suffix scans and token-array copies on long, incomplete math

@@ -74,6 +74,7 @@ async def test_registry_discovers_nonstandard_service_and_ignores_stale_exports(
 @pytest.mark.parametrize(
     "registry_text",
     [None, "not json", "[]", '{"old": {"port": "11004"}}', "[" * 10000 + "]" * 10000],
+    ids=["missing", "invalid-json", "wrong-root", "invalid-port", "excessive-nesting"],
 )
 async def test_legacy_default_remains_usable_without_valid_registry(local_services, registry_text):
     registry, state, _calls = local_services
