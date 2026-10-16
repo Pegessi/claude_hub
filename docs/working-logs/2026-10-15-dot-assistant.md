@@ -348,6 +348,24 @@ contract. Fixed, each with a test that fails on the old code:
 Left as is: opening the panel before Dot is set up creates the (empty) Dot
 home, which setup would create anyway.
 
+### Review of round 11
+
+One reviewer attacked the round-10 commit and the CLI against the API, one
+the Hub hooks (native session, watcher start/stop, setup, shared files).
+Non-Dot tabs: no behaviour change found. Fixed, each with a test that fails
+on the old code:
+
+- A card linking to a card later deleted (`forget --hard`) could not be
+  edited at all; only new links and files are checked now.
+- An image-only turn right after a restart ran without Dot's role; it now
+  loads the stored session pack.
+- Setup with the tab list full gave a 500; it is 429 like a normal new tab.
+
+Left as is: a `state.json` broken by hand makes the tab a plain Chat until
+setup (which then makes a new tab); the `[quiet]` filter would also hide a
+non-Dot turn whose user text starts with `[Dot ` and whose reply is exactly
+`[quiet]`.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

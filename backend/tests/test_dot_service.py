@@ -432,6 +432,20 @@ async def test_claude_hook_injects_packs_and_rotates(service: DotService) -> Non
 
 
 @pytest.mark.asyncio
+async def test_image_only_turn_after_restart_keeps_the_role(service: DotService) -> None:
+    from tests.test_agent_stream_native import _VALID_PNG
+
+    with patch.object(ClaudeNativeSession, "_spawn_oneshot", AsyncMock()):
+        await ClaudeNativeSession(_session(TAB_ID)).send_message("hello Dot", [])
+    restarted = ClaudeNativeSession(_session(TAB_ID))
+    mock_spawn = AsyncMock()
+    with patch.object(restarted, "_spawn_oneshot", mock_spawn):
+        await restarted.send_message("", [_VALID_PNG])
+    cmd = list(mock_spawn.await_args_list[0].args[0])
+    assert "You are Dot" in (_flag(cmd, "--append-system-prompt") or "")
+
+
+@pytest.mark.asyncio
 async def test_claude_hook_acks_events_after_send_and_hides_the_pack(
     service: DotService,
 ) -> None:

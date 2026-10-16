@@ -1371,6 +1371,8 @@ class ProviderSession(ABC):
         (empty text) defers injection to the first turn that carries text.
         """
         if not text:
+            # No prompt blocks, but provider session state is still kept.
+            await self._prepare_turn_context(text)
             return text, False
         prefix = ""
         seed_included = False
@@ -1989,12 +1991,16 @@ class ClaudeNativeSession(ProviderSession):
     async def _prepare_turn_context(self, text: str) -> str:
         """Dot tab only: fresh context pack, stable session pack and rotation."""
         self._dot_event_ids = []
-        if not text:
-            return ""
         from ..dot import get_dot_service
 
         service = get_dot_service()
         if not service.is_dot_tab(getattr(self.session, "tab_id", None)):
+            return ""
+        if not text:
+            # An image-only turn carries no pack, but keeps Dot's role (after a
+            # restart the session pack is not loaded yet).
+            if not self._dot_system_pack:
+                self._dot_system_pack = service.session_pack()
             return ""
         try:
             plan = await asyncio.to_thread(service.prepare_turn, text, self._conversation_id)

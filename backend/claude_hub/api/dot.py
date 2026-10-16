@@ -19,6 +19,7 @@ from ..models.schemas import User
 from ..services.dot import Card, DotService, get_dot_service
 from ..services.dot.service import DelegateNotStarted, LessonNotFound
 from ..services.dot.store import LESSON_RULE_LIMIT
+from ..services.ttyd_manager import TabLimitExceededError
 from ..services.workspace_manager._task_execution import TaskExecutionConflict
 
 router = APIRouter(prefix="/api/dot", tags=["dot"])
@@ -195,6 +196,8 @@ async def dot_setup(
             await switch_tab_env(tab_id, SwitchEnvRequest(env=env), current_user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+    except TabLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from None
     return service.status()
 
 
@@ -288,10 +291,16 @@ async def dot_save_card(
     existing = service.store.get_card(payload.id) if payload.id else None
     if payload.id and existing is None:
         raise HTTPException(status_code=404, detail="Card not found")
+    # Only new links and files are checked: one whose target was deleted since
+    # must not lock the card against every later edit.
     for link in payload.links:
+        if existing and link in existing.links:
+            continue
         if service.store.get_card(link) is None:
             raise HTTPException(status_code=400, detail=f"Linked card not found: {link}")
     for path in payload.files:
+        if existing and path in existing.files:
+            continue
         if service.store.resolve_home_path(path) is None:
             raise HTTPException(status_code=400, detail=f"File not found in Dot home: {path}")
     card = Card(

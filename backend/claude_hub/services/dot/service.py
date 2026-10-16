@@ -184,6 +184,10 @@ class DotService:
         value = self._peek_state().get("tab_id")
         return value if isinstance(value, str) and value else None
 
+    def session_pack(self) -> str:
+        """The current session's stable pack (no turn is counted)."""
+        return str(self._peek_state().get("session_pack") or "")
+
     def is_dot_tab(self, tab_id: Optional[str]) -> bool:
         return bool(tab_id) and tab_id == self.tab_id()
 
