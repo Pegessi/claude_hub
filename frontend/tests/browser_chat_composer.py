@@ -548,7 +548,7 @@ async def main(browser_run: BrowserRun) -> None:
         await composer.fill("Queued follow-up")
         await expect(send_button).to_be_enabled()
         await send_button.click()
-        await expect(page.locator(".composer-queue")).to_contain_text("1 message queued")
+        await expect(page.locator(".draft-queue")).to_contain_text("1 message queued")
         assert len(sends) == 1, "queueing must not issue a second send while a turn is live"
         await expect(composer).to_have_value("")
 
@@ -557,7 +557,7 @@ async def main(browser_run: BrowserRun) -> None:
         # Stop terminalizes the live turn, which releases the queued draft.
         await stop_button.click()
         assert len(interrupts) == 1, interrupts
-        await expect(page.locator(".composer-queue")).to_have_count(0)
+        await expect(page.locator(".draft-queue")).to_have_count(0)
         assert len(sends) == 2, sends
         assert sends[1]["text"] == "Queued follow-up", sends[1]
         assert sends[0]["client_turn_id"] != sends[1]["client_turn_id"], sends
@@ -645,10 +645,10 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(page.locator(".attachment-chip")).to_have_count(1)
         before_queue = len(sends)
         await send_button.click()
-        await expect(page.locator(".composer-queue")).to_contain_text("1 message queued")
+        await expect(page.locator(".draft-queue")).to_contain_text("1 message queued")
         assert len(sends) == before_queue
         await page.locator(".composer-stop-btn").click()
-        await expect(page.locator(".composer-queue")).to_have_count(0)
+        await expect(page.locator(".draft-queue")).to_have_count(0)
         assert len(sends) == before_queue + 1
         assert sends[-1]["text"] == "Queued image" and len(sends[-1]["attachments"]) == 1
         assert (

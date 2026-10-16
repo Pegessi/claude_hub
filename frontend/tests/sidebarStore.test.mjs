@@ -526,3 +526,20 @@ test('pinned group is still built for mobile-shaped chat data (presentation-agno
     groups.filter(group => !group.pinned).every(group => !group.tabs.some(tab => tab.id === 'a')),
   )
 })
+
+test('editing a hidden queue yields activation and cannot starve another ready Chat', t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.panes[0].id
+  const a = store.getQueuedChatState(paneId, 'a')
+  a.drafts.push({ id: 'a-draft', message: 'Keep until saved', attachments: [] })
+  a.editing = true
+  assert.equal(store.observedQueuedChatIds(paneId).includes('a'), false)
+  store.requestQueuedChatActivation(paneId, 'a')
+  assert.equal(store.queuedChatActivationOwner, null)
+  store.requestQueuedChatActivation(paneId, 'b')
+  assert.equal(store.queuedChatActivationOwner?.tabId, 'b')
+  assert.equal(a.drafts[0].message, 'Keep until saved')
+  a.editing = false
+  assert.equal(store.observedQueuedChatIds(paneId).includes('a'), true)
+})

@@ -1,5 +1,7 @@
+import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -318,6 +320,120 @@ def _steerable_goal(monkeypatch, tmp_path, **stream_methods):
     return manager, sent, resolved
 
 
+IMAGE = {
+    "filename": "reference.png",
+    "mime_type": "image/png",
+    "data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=",
+    "preview_is_original": True,
+}
+
+
+def test_goal_create_and_steer_send_original_images_without_snapshot_blobs(
+    goal_client, monkeypatch, tmp_path
+):
+    manager, sent, resolved = _steerable_goal(monkeypatch, tmp_path)
+
+    async def capabilities(*args):
+        return SimpleNamespace(supports_images=True)
+
+    monkeypatch.setattr(stream_api, "_capabilities_for", capabilities)
+    body = {"objective": "Use the reference", "client_request_id": "images", "attachments": [IMAGE]}
+    created = goal_client.post("/api/tabs/tab-1/goal", json=body)
+    assert created.status_code == 201, created.text
+    goal = created.json()
+    assert sent[-1][0].attachments[0].data_url == IMAGE["data_url"]
+    assert goal["pending_image_count"] == 0
+    assert goal_client.post("/api/tabs/tab-1/goal", json=body).json()["id"] == goal["id"]
+    assert len(sent) == 1
+
+    result = goal_client.post(
+        "/api/workspaces/tabs/tab-1/stream/send",
+        json={
+            "text": "",
+            "client_turn_id": "image-steer",
+            "delivery": "steer",
+            "attachments": [IMAGE],
+        },
+    )
+    assert result.status_code == 200, result.text
+    assert sent[-1][0].attachments[0].data_url == IMAGE["data_url"]
+    assert sent[-1][0].delivery == "steer"
+    assert resolved == []  # Images never accidentally answer a pending provider question.
+    current = manager.get(goal["id"])
+    assert current.status == GoalRunStatus.ACTIVE
+    assert current.current_turn_id == "image-steer"
+    assert "data:image" not in (tmp_path / "steer-goals.json").read_text()
+
+    edit = goal_client.patch(
+        f'/api/goals/{goal["id"]}/objective',
+        json={
+            "objective": "Updated outcome",
+            "client_request_id": "edit-objective",
+        },
+    )
+    assert edit.status_code == 200, edit.text
+    assert edit.json()["objective"] == "Updated outcome"
+    assert len(sent) == 2
+
+
+def test_interrupted_goal_images_require_reattachment_after_restart(
+    goal_client, monkeypatch, tmp_path
+):
+    manager, sent, _ = _steerable_goal(monkeypatch, tmp_path)
+
+    async def capabilities(*args):
+        return SimpleNamespace(supports_images=True)
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("acceptance unknown")
+
+    monkeypatch.setattr(stream_api, "_capabilities_for", capabilities)
+    monkeypatch.setattr(stream_api, "_send_to_native", fail)
+    result = goal_client.post(
+        "/api/tabs/tab-1/goal",
+        json={
+            "objective": "Use image",
+            "client_request_id": "interrupted",
+            "attachments": [IMAGE],
+        },
+    )
+    assert result.status_code == 503
+    current = manager.current("tab-1")
+    assert current.pending_image_count == 1
+    assert "data:image" not in (tmp_path / "steer-goals.json").read_text()
+    cold = GoalRunController(GoalRunStore(tmp_path / "steer-goals.json"))
+    from claude_hub.services.goal_run.images import pending_goal_images
+
+    with pytest.raises(ValueError, match="Reattach"):
+        pending_goal_images(cold.get(current.id))
+    resume = goal_client.post(
+        f"/api/goals/{current.id}/resume", json={"client_request_id": "resume"}
+    )
+    assert resume.status_code == 409
+    assert "Reattach" in resume.text
+    assert not sent
+
+    async def recovered_send(session, payload, manager_arg, **kwargs):
+        sent.append((payload, kwargs))
+
+    monkeypatch.setattr(stream_api, "_send_to_native", recovered_send)
+    recovered = goal_client.post(
+        "/api/workspaces/tabs/tab-1/stream/send",
+        json={
+            "text": "Continue using this image",
+            "client_turn_id": "explicit-recovery",
+            "delivery": "steer",
+            "attachments": [IMAGE],
+        },
+    )
+    assert recovered.status_code == 200, recovered.text
+    assert manager.current("tab-1").id == current.id
+    assert manager.current("tab-1").status == GoalRunStatus.ACTIVE
+    assert manager.current("tab-1").pending_image_count == 0
+    assert len(sent) == 1
+    assert sent[0][0].attachments[0].data_url == IMAGE["data_url"]
+
+
 def test_goal_question_followup_becomes_next_goal_turn(goal_client, monkeypatch, tmp_path):
     manager, sent, resolved = _steerable_goal(
         monkeypatch, tmp_path, accepts_question_followup=lambda *args: _return_true()
@@ -374,7 +490,8 @@ def test_active_goal_steer_and_blocked_reply_route_into_goal(goal_client, monkey
             ],
         },
     )
-    assert image.status_code == 409
+    assert image.status_code == 400
+    assert manager.get(goal["id"]).current_turn_id == goal["current_turn_id"]
     oversized = goal_client.post(
         url, json={"text": "x" * 32_001, "client_turn_id": "huge", "delivery": "steer"}
     )
@@ -455,3 +572,39 @@ def test_manual_turn_in_goal_chat_strips_goal_protocol(goal_client, monkeypatch,
     )
     assert sent[-1][0].delivery == "normal"
     assert sent[-1][1]["strip_goal_protocol"] is True
+
+
+@pytest.mark.asyncio
+async def test_goal_read_waits_for_in_progress_admission(goal_client, monkeypatch, tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def dispatch(goal, prompt):
+        entered.set()
+        await release.wait()
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "consistent-read.json"), dispatch)
+    monkeypatch.setattr(goal_api, "get_goal_manager", lambda: manager)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        create = asyncio.create_task(
+            client.post(
+                "/api/tabs/read-serialization/goal",
+                json={
+                    "objective": "Consistent state",
+                    "client_request_id": "create-read",
+                },
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        read = asyncio.create_task(client.get("/api/tabs/read-serialization/goal/current"))
+        await asyncio.sleep(0)
+        assert not read.done(), "GET must not expose a transient pending dispatch"
+        release.set()
+        created, observed = await asyncio.gather(create, read)
+        assert created.status_code == 201
+        assert observed.status_code == 200
+        assert observed.json()["dispatch_state"] == "dispatched"
+        assert observed.json()["current_turn_id"] == created.json()["current_turn_id"]

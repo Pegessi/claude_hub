@@ -9,8 +9,12 @@ All APIs are mocked. No Hub backend or provider is contacted.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import re
+import struct
 import sys
+import zlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -70,6 +74,23 @@ EVENTS = [
         f"{LIVE_TURN}:user",
     ),
 ]
+
+
+def fixture_png() -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 800, 600, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress((b"\0" + b"\x30\x80\xc0" * 800) * 600))
+        + chunk(b"IEND", b"")
+    )
+
+
+PNG_IMAGE = fixture_png()
 
 GOAL = {
     "id": "goal-steer",
@@ -131,6 +152,11 @@ async def main(browser_run: BrowserRun) -> None:
         "screenshots": [],
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
+    current_goal = dict(GOAL)
+    idle_fixture = False
+    fail_next_send = False
+    goal_updates = []
+    goal_creates = []
     failure: BaseException | None = None
     page = None
 
@@ -145,6 +171,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await socket.close(code=1000, reason="mocked goal smoke")
 
             async def route_all(route) -> None:
+                nonlocal current_goal, fail_next_send
                 request = route.request
                 parsed = urlparse(request.url)
                 if origin(request.url) != origin(base):
@@ -187,7 +214,12 @@ async def main(browser_run: BrowserRun) -> None:
                     }
                 elif path.endswith("/events"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
-                    rows = [item for item in EVENTS if item["stream_sequence"] > since]
+                    fixture_events = EVENTS + (
+                        [event(4, "turn_completed", LIVE_TURN, {"status": "completed"}, LIVE_TURN)]
+                        if idle_fixture
+                        else []
+                    )
+                    rows = [item for item in fixture_events if item["stream_sequence"] > since]
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
                     body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
                 elif path.endswith("/wait"):
@@ -201,9 +233,44 @@ async def main(browser_run: BrowserRun) -> None:
                     return
                 elif path.endswith("/stream/send") and request.method == "POST":
                     send_payloads.append(json.loads(request.post_data or "{}"))
+                    if fail_next_send:
+                        fail_next_send = False
+                        current_goal = {
+                            **current_goal,
+                            "status": "paused",
+                            "dispatch_state": "uncertain",
+                            "pending_image_count": 1,
+                        }
+                        await route.fulfill(
+                            status=503,
+                            content_type="application/json",
+                            body=json.dumps(
+                                {
+                                    "detail": "Image delivery interrupted; reattach images and recover"
+                                }
+                            ),
+                        )
+                        return
+                    if current_goal:
+                        current_goal = {
+                            **current_goal,
+                            "status": "active",
+                            "dispatch_state": "dispatched",
+                            "pending_image_count": 0,
+                        }
                     body = {"ok": True}
                 elif path.endswith("/goal/current"):
-                    body = GOAL
+                    body = current_goal
+                elif path.endswith("/objective") and request.method == "PATCH":
+                    update = json.loads(request.post_data or "{}")
+                    goal_updates.append(update)
+                    current_goal = {**current_goal, "objective": update["objective"]}
+                    body = current_goal
+                elif path.endswith("/goal") and request.method == "POST":
+                    creation = json.loads(request.post_data or "{}")
+                    goal_creates.append(creation)
+                    current_goal = {**GOAL, "objective": creation["objective"]}
+                    body = current_goal
                 elif path.endswith("/view"):
                     body = {"ok": True}
                 elif "network" in path:
@@ -222,6 +289,10 @@ async def main(browser_run: BrowserRun) -> None:
 
             await context.route_web_socket("**/*", block_websocket)
             await context.route("**/*", route_all)
+            # Match remote HTTP deployments where randomUUID is unavailable.
+            await context.add_init_script(
+                "Object.defineProperty(globalThis.crypto, 'randomUUID', {value: undefined, configurable: true})"
+            )
             page = await context.new_page()
             page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
             await page.goto(base + f"/?tab={TAB}", wait_until="domcontentloaded")
@@ -235,32 +306,118 @@ async def main(browser_run: BrowserRun) -> None:
 
             await composer.fill("Queue me for later")
             await composer.press("Enter")
-            await expect(page.locator(".composer-queue")).to_have_text("1 message queued")
-            await asyncio.sleep(0.3)
-            assert not send_payloads, send_payloads
-            await page.screenshot(path=str(output / "goal-steer-composer.png"), full_page=True)
-            report["screenshots"].append("goal-steer-composer.png")
+            queue = page.get_by_role("region", name="Queued messages")
+            await expect(queue).to_be_visible()
+            item = queue.locator(".queued-draft").first
+            await item.get_by_role("button", name="Edit", exact=True).click()
+            await item.get_by_role("textbox").fill("Updated queued instruction")
+            await item.get_by_role("button", name="Save", exact=True).click()
+            await expect(item.locator("summary")).to_contain_text("Updated queued instruction")
+            await composer.fill("Cancel this input")
+            await composer.press("Enter")
+            await queue.locator(".queued-draft").nth(1).get_by_role(
+                "button", name="Cancel", exact=True
+            ).click()
+            await expect(queue.locator(".queued-draft")).to_have_count(1)
+            assert not send_payloads
 
-            await composer.evaluate("""(el) => {
-                    const data = new DataTransfer()
-                    data.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'shot.png',
-                        { type: 'image/png' }))
-                    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true }))
-                }""")
-            await expect(page.locator(".composer-error")).to_have_text(
-                "Pause or complete the active Goal before attaching images."
+            await page.get_by_role("button", name="Edit Goal", exact=True).click()
+            dialog = page.get_by_role("dialog", name="Edit Goal", exact=True)
+            await dialog.get_by_role("textbox").fill("Updated Goal outcome")
+            await dialog.get_by_role("button", name="Save Goal", exact=True).click()
+            await expect(dialog).not_to_be_visible()
+            assert goal_updates[-1]["objective"] == "Updated Goal outcome"
+
+            # A queued image opens at original resolution and is steered without Stop.
+            await item.get_by_role("button", name="Cancel", exact=True).click()
+            await page.locator('input[type="file"]').set_input_files(
+                {
+                    "name": "shot.png",
+                    "mimeType": "image/png",
+                    "buffer": PNG_IMAGE,
+                }
             )
-            await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(0)
-
-            await composer.fill("Steer the Goal now")
+            await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(1)
+            await composer.fill("Look at this reference")
+            await composer.press("Enter")
+            item = queue.locator(".queued-draft").first
+            await item.locator("summary").click()
+            await item.get_by_role("button", name="View shot.png", exact=True).click()
+            await expect(page.get_by_role("dialog", name="Image preview")).to_be_visible()
+            await expect(page.locator(".structured-image-lightbox img")).to_have_attribute(
+                "src", re.compile("^data:image/png;base64,")
+            )
+            await page.get_by_role("button", name="Close image preview").click()
+            await page.screenshot(
+                path=str(output / "goal-queued-image-controls.png"), full_page=True
+            )
+            report["screenshots"].append("goal-queued-image-controls.png")
             await composer.press("Meta+Enter")
-            deadline = asyncio.get_running_loop().time() + 5
-            while not send_payloads and asyncio.get_running_loop().time() < deadline:
-                await asyncio.sleep(0.05)
+            await expect(queue).not_to_be_visible()
             assert len(send_payloads) == 1, send_payloads
-            assert send_payloads[0]["text"] == "Steer the Goal now"
+            assert send_payloads[0]["text"] == "Look at this reference"
             assert send_payloads[0]["delivery"] == "steer"
-            await expect(page.locator(".composer-queue")).to_have_text("1 message queued")
+            assert len(send_payloads[0]["attachments"]) == 1
+            assert not any(
+                path.endswith("/cancel") or path.endswith("/pause")
+                for _, path in report["api_requests"]
+            )
+            await expect(page.get_by_role("button", name="Pause", exact=True)).to_be_visible()
+
+            # Interrupted image steering offers explicit recovery with a new
+            # intent ID even when the exact same image is reattached.
+            await page.locator('input[type="file"]').set_input_files(
+                {"name": "recovery.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
+            )
+            await composer.fill("Recover using the same reference")
+            fail_next_send = True
+            await composer.press("Meta+Enter")
+            recover = page.get_by_role("button", name="Recover Goal", exact=True)
+            await expect(recover).to_be_enabled()
+            failed_id = send_payloads[-1]["client_turn_id"]
+            await page.get_by_role("button", name="Remove recovery.png", exact=True).click()
+            await page.locator('input[type="file"]').set_input_files(
+                {"name": "recovery.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
+            )
+            await expect(recover).to_be_enabled()
+            await recover.click()
+            await expect(recover).not_to_be_visible()
+            assert send_payloads[-1]["client_turn_id"] != failed_id
+            assert (
+                base64.b64decode(send_payloads[-1]["attachments"][0]["data_url"].split(",", 1)[1])
+                == PNG_IMAGE
+            )
+            await expect(page.get_by_role("button", name="Pause", exact=True)).to_be_visible()
+
+            # Goal creation includes composer images in its first request.
+            current_goal = None
+            idle_fixture = True
+            await page.reload(wait_until="domcontentloaded")
+            await expect(composer).to_be_enabled()
+            await page.get_by_role("button", name="Add to chat", exact=True).click()
+            await page.get_by_role("menuitem", name="Set a Goal").click()
+            dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+            await dialog.get_by_role("textbox").fill("Build from the attached reference")
+            await page.locator('input[type="file"]').set_input_files(
+                {
+                    "name": "goal-reference.png",
+                    "mimeType": "image/png",
+                    "buffer": PNG_IMAGE,
+                }
+            )
+            await expect(
+                dialog.get_by_role("button", name="View goal-reference.png")
+            ).to_be_visible()
+            await expect(
+                dialog.get_by_role("button", name="Start Goal", exact=True)
+            ).to_be_enabled()
+            await dialog.get_by_role("button", name="Start Goal", exact=True).click()
+            await expect(dialog).not_to_be_visible()
+            assert len(goal_creates[-1]["attachments"]) == 1
+            assert goal_creates[-1]["objective"] == "Build from the attached reference"
+            await page.set_viewport_size({"width": 390, "height": 844})
+            await page.screenshot(path=str(output / "goal-controls-mobile.png"), full_page=True)
+            report["screenshots"].append("goal-controls-mobile.png")
 
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]
