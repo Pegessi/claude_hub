@@ -210,3 +210,18 @@ The original main's run `38786712942` also had its backend job canceled after
 current cause or a passing remote result. Required local strict all checks and
 independent review are the publication evidence; remote backend CI remains an
 explicit unverified item. No branch protection/ruleset requires a remote status.
+
+## Updated remote base
+
+A later publication guard found origin/main advanced to
+`8f38b01eac83f736de563690b36cf92ab1d1cfd4` (published proxy environment
+compatibility). The earlier `4daae296` tip was not pushed over it.
+Fixed remote merge `d4ddf169b50b9a7476c98e9a2b2ad80a31d5ecf0` retains that remote main as
+first parent and the rich-content candidate as second parent. Only the changelog
+conflicts; both sides are retained by the accompanying remote-sync decision
+record. Fresh all/browser validation and independent review cover this new tree.
+
+The remote candidate still excludes the unrelated local-only managed Chat
+commits. Local main requires its own combined merge/review; a local combined
+tip must not be pushed as the remote candidate. No service restart, deployment
+or shared runtime migration is included.

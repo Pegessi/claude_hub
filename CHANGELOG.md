@@ -23,6 +23,15 @@
   scrolling for wide tables/formulas, and improved narrow-pane containment.
 - Load syntax highlighting only for messages containing code blocks.
 
+### fix(proxy): preserve proxy bypass rules in agent subprocesses
+
+- Fill missing proxy environment case aliases for inherited Chat processes and
+  Cursor model discovery, including `no_proxy` / `NO_PROXY`.
+- Carry the current proxy environment through protected local terminal wrappers
+  even when tmux predates the backend, preserving explicit session overrides.
+- Keep inherited settings out of saved tabs, Claude settings and remote launches;
+  preserve explicit empty values and provider network route selection.
+
 ### fix(chat): persist direct-tab cleanup obligations across failures and restart
 
 - Atomically retire a tab with a pending cleanup record, preserving retry after
