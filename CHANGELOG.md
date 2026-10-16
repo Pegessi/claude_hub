@@ -30,10 +30,13 @@
   `dot review` judges each returned task, and brief misses become fading
   lesson rules shown in later sessions. The Lessons tab shows them with the
   first-pass rate.
-- Lessons that match a brief are listed, never block it; votes and merges
-  count old strength at its faded value; a `change` review cause stays out of
-  the rate; returned tasks that come back again or restart ask for a new
-  verdict, and pending reviews always fit in the turn pack.
+- Lessons never block a brief; the strongest 8 are in every session, so Dot
+  sees them before sending. Votes and merges count old strength at its faded
+  value, and a dropped lesson cannot be voted back. A `change` review cause
+  stays out of the rate; a redo not blamed on the brief needs a note; `skip`
+  clears a result Dot cannot judge. An ok later turned into a redo is not a
+  first pass. Returned tasks that come back again, restart or re-run ask for
+  a new verdict, and pending reviews always fit in the turn pack.
 
 ### fix(config): load the MASO service URL from backend startup settings
 

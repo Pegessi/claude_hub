@@ -164,7 +164,9 @@ class _TaskUpdatesMixin:
                 update["reviewed_at"] = now
                 update["human_acceptance_requested_at"] = task.human_acceptance_requested_at or now
             elif status == WorkspaceTaskStatus.DONE:
-                update["completed_at"] = now
+                # Saving a done task as done again is not a new completion.
+                already_done = task.status == WorkspaceTaskStatus.DONE
+                update["completed_at"] = (task.completed_at if already_done else None) or now
                 update["human_accepted_at"] = now
 
         return _TaskEditPlan(

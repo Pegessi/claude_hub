@@ -12,14 +12,7 @@ from typing import Any, Optional
 
 from .context import TurnPack, build_session_pack, build_turn_pack
 from .index import DotIndex
-from .lessons import (
-    MATCH_MIN_SCORE,
-    lesson_score,
-    lint_brief,
-    match_lessons,
-    same_rule,
-    session_rules,
-)
+from .lessons import lesson_score, lint_brief, same_rule, session_rules
 from .prompts import BRIEF_TEMPLATE, QUIET_REPLY, TIDY_MESSAGE, WAKE_MESSAGE
 from .store import FOCUS_LIMIT, Card, DotStore, now_iso, utc_now
 
@@ -44,7 +37,8 @@ _ATTENTION_REPORT_STATES = {"needs_input", "blocked"}
 # Report states that hand the work back (a new round after a verdict).
 _RETURN_REPORT_STATES = {"ready_for_review", "completed", "failed"}
 _JOURNAL_TEXT_LIMIT = 20_000
-REVIEW_VERDICTS = ("ok", "redo")
+# skip: Dot cannot judge this one (say why in the note). Not counted anywhere.
+REVIEW_VERDICTS = ("ok", "redo", "skip")
 # change: the user changed what they want. No lesson, and not counted in the first-pass rate.
 REVIEW_CAUSES = ("brief", "env", "worker", "change")
 # First-pass rate covers the latest reviews only, so it shows the current trend.
@@ -435,11 +429,10 @@ class DotService:
     ) -> dict[str, Any]:
         """Check the brief, then register (and start) one Hub Task and track it.
 
-        Returns ``held`` (nothing sent), the brief ``warnings``, the matching
-        ``lessons`` and the tracked ``work`` item. A brief with warnings is held
-        until Dot fixes it or sends ``confirm``. Matching lessons are only shown:
-        a rule cannot tell when a brief already follows it, so it never blocks.
-        A retry with a known ``request_key`` is not checked again.
+        Returns ``held`` (nothing sent), the brief ``warnings`` and the tracked
+        ``work`` item. A brief with warnings is held until Dot fixes it or sends
+        ``confirm``. A retry with a known ``request_key`` is not checked again
+        and leaves the tracked status to the watcher.
         """
         from ...models.schemas import (
             AgentType,
@@ -455,17 +448,12 @@ class DotService:
             raise ValueError("title, goal and done_when are required")
         self.store.ensure()
         warnings = lint_brief(done_when=checks, context=context, output=output)
-        lessons = match_lessons(
-            self.store.list_lessons(),
-            " ".join([title, goal, context, output, out_of_scope, constraints, *checks]),
-            utc_now(),
-        )
         replay = bool(request_key) and any(
             item.get("request_key") == request_key
             for item in self.store.list_work(include_closed=True)
         )
         if warnings and not (confirm or replay):
-            return {"held": True, "warnings": warnings, "lessons": lessons, "work": None}
+            return {"held": True, "warnings": warnings, "work": None}
         brief = BRIEF_TEMPLATE.format(
             goal=goal.strip(),
             context=context.strip() or "(none given)",
@@ -500,14 +488,16 @@ class DotService:
             done_when=checks,
             output=output.strip() or None,
             agent_type=agent_type,
-            status=task.status.value,
+            # A replayed task may have moved on since the last poll; the watcher must
+            # still see that change, or its result event is lost.
+            status=None if replay else task.status.value,
             stall_hours=stall_hours,
             request_key=request_key,
             # Kept so a later review can see which warnings Dot sent past.
             brief_warnings=warnings or None,
         )
         await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
-        return {"held": False, "warnings": warnings, "lessons": lessons, "work": item}
+        return {"held": False, "warnings": warnings, "work": item}
 
     # ── review and lessons ──────────────────────────────────────────────
 
@@ -524,18 +514,29 @@ class DotService:
         """Record Dot's verdict on a returned task; a brief miss adds or votes a lesson.
 
         A new rule that says nearly the same as a live lesson votes that lesson
-        instead (``lesson_reused``). Raises KeyError for an unknown task,
-        LessonNotFound for an unknown lesson id, ValueError for a bad combination.
+        instead (``lesson_reused``). A redo not blamed on the brief needs a note,
+        so blaming the environment, the worker or a changed request is never
+        free. Raises KeyError for an unknown task, LessonNotFound for an unknown
+        lesson id, ValueError for a bad combination.
         """
         item = self.store.get_work(task_id)
         if item is None:
             raise KeyError(task_id)
+        if item.get("watched") or item.get("stopped"):
+            raise ValueError("only tasks Dot delegated and still tracks are reviewed")
         if verdict not in REVIEW_VERDICTS:
-            raise ValueError("verdict must be ok or redo")
+            raise ValueError("verdict must be ok, redo or skip")
         if cause is not None and cause not in REVIEW_CAUSES:
             raise ValueError("cause must be brief, env, worker or change")
         if verdict == "redo" and cause is None:
             raise ValueError("a redo needs a cause: brief, env, worker or change")
+        if verdict == "skip" and cause is not None:
+            raise ValueError("a skip has no cause")
+        if (verdict == "skip" or (verdict == "redo" and cause != "brief")) and not note.strip():
+            raise ValueError(
+                "say why in --note"
+                + (": what you could not judge" if verdict == "skip" else ": what went wrong")
+            )
         if not item.get("result_card"):
             raise ValueError("the task has not come back yet")
         if item.get("review") and not item.get("review_due"):
@@ -570,10 +571,13 @@ class DotService:
             "review": {key: value for key, value in record.items() if value is not None},
             "review_due": False,
         }
-        # The first verdict decides first-pass success; later rounds do not rewrite it.
-        if not item.get("first_verdict"):
+        # The first verdict decides first-pass success. A skip is no verdict yet.
+        if not item.get("first_verdict") and verdict != "skip":
             changes["first_verdict"] = verdict
             changes["first_cause"] = cause or ""
+        elif item.get("first_verdict") and verdict == "redo" and cause != "change":
+            # An ok that turned out wrong in a later round was not a first pass.
+            changes["late_redo"] = True
         updated = self.store.upsert_work(task_id, **changes)
         await asyncio.to_thread(self.store.commit, f"dot: review {task_id} {verdict}")
         return {
@@ -583,21 +587,22 @@ class DotService:
         }
 
     def lessons(self, *, include_dropped: bool = False) -> list[dict[str, Any]]:
-        """Lessons with their current score and reach, strongest first."""
+        """Lessons with their current score and reach, strongest first.
+
+        reach: ``always`` (in every session), ``hidden`` (too weak or outside the
+        top few; kept as history), ``dropped`` or ``merged``.
+        """
         now = utc_now()
         in_session = {lesson.get("id") for lesson in session_rules(self.store.list_lessons(), now)}
         rows = []
         for lesson in self.store.list_lessons(include_dropped=include_dropped):
             score = lesson_score(lesson, now)
-            reach = (
-                "always"
-                if lesson.get("id") in in_session
-                else (
-                    "on match"
-                    if score >= MATCH_MIN_SCORE and not lesson.get("dropped")
-                    else "faded"
-                )
-            )
+            if lesson.get("merged_into"):
+                reach = "merged"
+            elif lesson.get("dropped"):
+                reach = "dropped"
+            else:
+                reach = "always" if lesson.get("id") in in_session else "hidden"
             rows.append(
                 {
                     **lesson,
@@ -609,12 +614,16 @@ class DotService:
         return sorted(rows, key=lambda row: (bool(row.get("dropped")), -row["score"]))
 
     def review_stats(self) -> dict[str, Any]:
-        """First-pass rate over the latest reviews: ok at the first verdict, no question asked.
+        """First-pass rate over the latest reviews: ok at the first verdict, no question asked,
+        and no later redo.
 
-        Tasks whose first review said the user changed what they want are left
-        out. ``causes`` counts the first-round cause, so brief misses stand
-        apart from env and worker ones. ``judged`` / ``returned`` show how many
-        delegated tasks that came back got a verdict at all.
+        Tasks whose first review said the user changed what they want, and
+        skipped ones, are left out. ``causes`` counts the first-round cause, so
+        brief misses stand apart from env and worker ones. ``judged`` /
+        ``returned`` show how many delegated tasks that came back got a verdict
+        at all. ``confirmed`` / ``confirmed_first_pass`` cover briefs sent past
+        the brief check's warnings: if they pass as often as the rest, the check
+        is not worth its holds.
         """
         delegated = [
             item
@@ -627,10 +636,22 @@ class DotService:
         def first_cause(item: dict[str, Any]) -> str:
             return str(item.get("first_cause", item["review"].get("cause")) or "")
 
-        window = [item for item in reviewed if first_cause(item) != "change"][-STATS_WINDOW:]
-        first_pass = sum(
-            1 for item in window if item.get("first_verdict") == "ok" and not item.get("asked")
-        )
+        def first_verdict(item: dict[str, Any]) -> str:
+            return str(item.get("first_verdict", item["review"].get("verdict")) or "")
+
+        window = [
+            item
+            for item in reviewed
+            if first_cause(item) != "change" and first_verdict(item) in ("ok", "redo")
+        ][-STATS_WINDOW:]
+
+        def passed(item: dict[str, Any]) -> bool:
+            return (
+                first_verdict(item) == "ok" and not item.get("asked") and not item.get("late_redo")
+            )
+
+        first_pass = sum(1 for item in window if passed(item))
+        confirmed = [item for item in window if item.get("brief_warnings")]
         causes: dict[str, int] = {}
         for item in window:
             cause = first_cause(item)
@@ -644,6 +665,8 @@ class DotService:
             "pending": len(self.store.pending_reviews()),
             "judged": len(reviewed),
             "returned": len(delegated),
+            "confirmed": len(confirmed),
+            "confirmed_first_pass": sum(1 for item in confirmed if passed(item)),
             "window": STATS_WINDOW,
         }
 
@@ -669,6 +692,7 @@ class DotService:
             watched=True,
             watched_at=now_iso(),
             closed=False,
+            stopped=False,
             last_report_id=getattr(report, "id", None),
             stall_hours=stall_hours,
         )
@@ -839,11 +863,10 @@ class DotService:
                 changes["asked"] = True
             # Dot judges what it delegated; a watched task's brief was not Dot's.
             review_due = None if item.get("watched") else True
-            # After a verdict, a new final report in review/failed is the next round, even
-            # when the poll never saw the task working again.
+            # A new final report in review/failed is a new round, even when the poll never
+            # saw the task working again; before a verdict it refreshes the result card.
             again = (
                 status == previous
-                and bool(item.get("review"))
                 and report_id is not None
                 and report_id != last_seen
                 and _report_state(report) in _RETURN_REPORT_STATES

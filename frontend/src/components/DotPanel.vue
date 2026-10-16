@@ -451,7 +451,7 @@
                   class="ch-input"
                   placeholder="Add a rule for briefs"
                   aria-label="New lesson"
-                  maxlength="300"
+                  maxlength="200"
                 >
                 <button
                   type="submit"
@@ -480,7 +480,7 @@
                     v-model="lessonDraft"
                     class="ch-input"
                     aria-label="Lesson rule"
-                    maxlength="300"
+                    maxlength="200"
                   >
                   <button
                     type="submit"

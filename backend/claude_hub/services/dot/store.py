@@ -149,6 +149,19 @@ def _as_str_list(value: Any) -> list[str]:
     return []
 
 
+def _lesson_votes(lesson: dict[str, Any]) -> int:
+    # lessons.json is hand-editable; a bad count is 0, not a crash.
+    try:
+        return max(int(lesson.get("votes") or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _lesson_tasks(lesson: dict[str, Any]) -> list[str]:
+    tasks = lesson.get("tasks")
+    return [str(task) for task in tasks] if isinstance(tasks, list) else []
+
+
 def parse_card(text: str, path: Optional[Path] = None) -> Optional[Card]:
     """Parse a card file; tolerate hand edits. Returns None without a header."""
     lines = text.splitlines()
@@ -636,7 +649,9 @@ class DotStore:
         """The same miss happened again: one more vote, and the lesson is fresh again.
 
         A vote for a merged lesson goes to the lesson it was merged into. One
-        task votes a lesson once, however many review rounds it has.
+        task votes a lesson once, however many review rounds it has. Returns
+        None for an unknown id; raises ValueError when the lesson was dropped
+        (the user said it is wrong; a vote must not bring it back).
         """
         self.ensure()
         with self._lock:
@@ -648,15 +663,16 @@ class DotStore:
                 item, hops = by_id.get(item["merged_into"]), hops + 1
             if item is None:
                 return None
-            if task_id and task_id in item.get("tasks", []):
+            if item.get("dropped"):
+                raise ValueError(f"lesson {item.get('id')} is dropped; write a new rule instead")
+            if task_id and task_id in _lesson_tasks(item):
                 return dict(item)
             now = utc_now()
             item["weight"] = round(lesson_score(item, now) + 1, 3)
-            item["votes"] = int(item.get("votes") or 0) + 1
+            item["votes"] = _lesson_votes(item) + 1
             item["seen"] = now.isoformat(timespec="seconds")
-            item.pop("dropped", None)
             if task_id:
-                item["tasks"] = [*item.get("tasks", []), task_id][-20:]
+                item["tasks"] = [*_lesson_tasks(item), task_id][-20:]
             self._write_json("lessons.json", items)
             return dict(item)
 
@@ -704,10 +720,10 @@ class DotStore:
                 if item.get("dropped"):
                     continue
                 weight += lesson_score(item, now)
-                keep["votes"] = int(keep.get("votes") or 0) + int(item.get("votes") or 0)
-                keep["tasks"] = list(
-                    dict.fromkeys([*keep.get("tasks", []), *item.get("tasks", [])])
-                )[-20:]
+                keep["votes"] = _lesson_votes(keep) + _lesson_votes(item)
+                keep["tasks"] = list(dict.fromkeys([*_lesson_tasks(keep), *_lesson_tasks(item)]))[
+                    -20:
+                ]
                 item["dropped"] = True
                 item["merged_into"] = keep_id
             keep["weight"] = round(weight, 3)

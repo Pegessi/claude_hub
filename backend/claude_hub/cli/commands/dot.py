@@ -449,7 +449,7 @@ def dot_delegate(
     """Hand a job to a Hub Task with a full brief. Dot is woken when it ends.
 
     The Hub checks the brief first. Warnings hold the task (exit code 1); fix
-    the brief, or send again with --confirm. Matching lessons are only shown.
+    the brief, or send again with --confirm.
     """
     body: Dict[str, Any] = {
         "workspace_id": workspace_id,
@@ -478,11 +478,6 @@ def dot_delegate(
             click.echo("Not sent: the brief check held this task.")
         for warning in result.get("warnings") or []:
             click.echo(f"- {warning}")
-        lessons = result.get("lessons") or []
-        if lessons:
-            click.echo("Lessons from past briefs that may apply (check your brief):")
-            for lesson in lessons:
-                click.echo(f"- [{lesson.get('id')}] {lesson.get('rule')}")
         if result.get("held"):
             click.echo("Fix the brief and send again, or add --confirm if these do not apply.")
         else:
@@ -496,7 +491,12 @@ def dot_delegate(
 
 @dot.command("review")
 @click.argument("task_id")
-@click.option("--verdict", type=click.Choice(["ok", "redo"]), required=True)
+@click.option(
+    "--verdict",
+    type=click.Choice(["ok", "redo", "skip"]),
+    required=True,
+    help="skip: you cannot judge it (say why in --note); it is not counted.",
+)
 @click.option(
     "--cause",
     type=click.Choice(["brief", "env", "worker", "change"]),
@@ -504,7 +504,11 @@ def dot_delegate(
     help="Why it missed (required for redo): the brief, the environment, the worker, "
     "or the user changed what they want.",
 )
-@click.option("--note", default="", help="One line on what you saw.")
+@click.option(
+    "--note",
+    default="",
+    help="One line on what you saw. Required for skip and for a redo not caused by the brief.",
+)
 @click.option(
     "--lesson",
     default="",
@@ -562,12 +566,17 @@ def dot_lessons(ctx: click.Context, include_all: bool) -> None:
             f"judged {stats.get('judged', 0)}/{stats['returned']} returned tasks, "
             f"{stats.get('pending', 0)} waiting for review"
         )
+        if stats.get("confirmed"):
+            click.echo(
+                f"sent past brief warnings: first pass "
+                f"{stats.get('confirmed_first_pass', 0)}/{stats['confirmed']}"
+            )
     rows = [
         {
             "id": lesson.get("id"),
             "votes": lesson.get("votes"),
             "score": lesson.get("score"),
-            "shown": lesson.get("reach") or ("always" if lesson.get("in_session") else "on match"),
+            "shown": lesson.get("reach") or ("always" if lesson.get("in_session") else "hidden"),
             "rule": truncate(lesson.get("rule", "")),
         }
         for lesson in data.get("lessons") or []
