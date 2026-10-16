@@ -54,6 +54,16 @@ def test_card_lifecycle(api: tuple[TestClient, DotService]) -> None:
     assert client.post("/api/dot/cards", json={"id": "nope", "title": "x"}).status_code == 404
     bad_link = client.post("/api/dot/cards", json={"title": "x", "links": ["missing"]})
     assert bad_link.status_code == 400
+    # A link to a card deleted since does not lock the card against edits.
+    other = client.post("/api/dot/cards", json={"title": "Other"}).json()["id"]
+    linker = client.post("/api/dot/cards", json={"title": "Linker", "links": [other]}).json()
+    assert client.delete(f"/api/dot/cards/{other}", params={"hard": True}).status_code == 200
+    edited = client.post(
+        "/api/dot/cards",
+        json={"id": linker["id"], "title": "Linker", "links": [other], "summary": "new"},
+    )
+    assert edited.status_code == 200, edited.text
+    assert client.delete(f"/api/dot/cards/{linker['id']}", params={"hard": True}).status_code == 200
 
     assert client.delete(f"/api/dot/cards/{card_id}").json()["archived"]
     assert client.get("/api/dot/cards").json() == []
@@ -152,6 +162,17 @@ def test_setup_passes_provider_env_to_the_chat_tab(
     assert client.post("/api/dot/setup").status_code == 200
     assert len(calls) == 3
     assert client.post("/api/dot/setup", json={"env_preset": "no-such"}).status_code == 400
+
+    # A full tab list is the user's to fix, not a server error.
+    from claude_hub.services.ttyd_manager import TabLimitExceededError
+
+    async def full(**kwargs: Any) -> None:
+        raise TabLimitExceededError("Too many tabs")
+
+    tabs.clear()
+    monkeypatch.setattr(ttyd_manager, "create_tab", full)
+    limited = client.post("/api/dot/setup", json={"env": {"X": "1"}})
+    assert limited.status_code == 429 and limited.json()["detail"] == "Too many tabs"
 
 
 def _route_to_app(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
