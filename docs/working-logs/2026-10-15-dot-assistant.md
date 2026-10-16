@@ -383,6 +383,21 @@ with a test that fails on the old code:
 - A `state.json` nested very deep raised in every Chat turn's Dot check.
 - "hi" or "ok" recalled cards that only matched as substrings ("this").
 
+### Review of round 13
+
+One reviewer attacked the round-12 watcher change with a random simulator of
+worker, Hub reviewer and person steps (3000 runs); one checked the turn path.
+Fixed, each with a test that fails on the old code:
+
+- A Hub reviewer question that came in the same poll as the result was
+  hidden (only the result was announced).
+- The Hub reviewer's steps (to working and back to review) announced the same
+  result again and asked for a second verdict; so did a person accepting it.
+- The first turn after a lost index filled it while holding the store lock,
+  so every Dot route waited seconds. The index now fills before the lock.
+
+The simulator found 0 anomalies after the fix.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

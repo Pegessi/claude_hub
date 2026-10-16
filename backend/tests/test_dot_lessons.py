@@ -844,6 +844,60 @@ def test_cards_round_trip_odd_line_breaks_and_quick_edits(service: DotService) -
     assert [hit.id for hit in index.search("divider")] == [card.id]
 
 
+@pytest.mark.asyncio
+async def test_hub_reviewer_steps_are_not_new_results(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    reports: list[Any] = []
+    tasks: dict[str, Any] = {}
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _id: reports)
+
+    def poll(status: str, *new: Any, **times: Any) -> Any:
+        tasks["task-r"] = SimpleNamespace(status=SimpleNamespace(value=status), title="t", **times)
+        reports.extend(new)
+        return service.check_work()
+
+    store.upsert_work("task-r", workspace_id="ws", title="Port", status="working")
+    await poll("review", _report("r1", "ready_for_review", "ported"))
+    # The Hub reviewer starts (task back to working), then asks the user something.
+    await poll("working", _report("r2", "review_started", "Reviewer is checking"))
+    await poll("review", _report("r3", "review_needs_input", "Which API version?"))
+    events = store.list_inbox()
+    assert [event["kind"] for event in events] == ["task_ready", "task_needs_input"]
+    assert "Which API version?" in events[1]["text"]
+    # The reviewer passes it and a person accepts it: the same result, no news.
+    await poll("working", _report("r4", "review_started", "again"))
+    await poll("done", _report("r5", "review_passed", "fine"), completed_at=utc_now())
+    assert len(store.list_inbox()) == 2
+
+
+def test_turn_fills_a_cold_index_outside_the_store_lock(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    import threading
+
+    free: list[bool] = []
+    sync = service.index.sync
+
+    def try_lock() -> None:
+        got = service.store.lock.acquire(blocking=False)
+        if got:
+            service.store.lock.release()
+        free.append(got)
+
+    def spy() -> int:
+        probe = threading.Thread(target=try_lock)
+        probe.start()
+        probe.join()
+        return sync()
+
+    monkeypatch.setattr(service.index, "sync", spy)
+    service.prepare_turn("what about the paper notes", "conv-1")
+    assert free and free[0], "the first (slow) sync runs without the store lock"
+
+
 def test_broken_journal_index_and_folders_heal(service: DotService) -> None:
     import shutil
 
