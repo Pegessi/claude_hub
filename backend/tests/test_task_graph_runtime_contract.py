@@ -73,6 +73,7 @@ def persist_api(
             fake_tab.id: SimpleNamespace(
                 tab_id=fake_tab.id,
                 tmux_session=fake_tmux_session,
+                archived=False,
             )
         },
     )

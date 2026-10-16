@@ -682,6 +682,7 @@ async def test_live_publish_observes_high_level_events_only(manager, workspace):
     observer = AsyncMock(side_effect=manager.record_task_stream_event)
     store = SimpleNamespace(append=AsyncMock(side_effect=lambda event: event))
     tailer = SimpleNamespace(
+        _require_publishable_incarnation=Mock(),
         _store=store,
         _is_live=True,
         _image_references=ImageReferenceBuffer(),
@@ -694,6 +695,7 @@ async def test_live_publish_observes_high_level_events_only(manager, workspace):
         10, type=AgentStreamEventType.TURN_COMPLETED, payload={"status": "completed"}
     )
     await SessionTailer._persist_and_fanout(tailer, event)
+    tailer._require_publishable_incarnation.assert_called_once_with()
     observer.assert_awaited_once()
     assert manager.tasks[task.id].runtime_observation.status == "idle"
     assert manager.tasks[task.id].status == WorkspaceTaskStatus.WORKING
@@ -719,6 +721,7 @@ async def test_observer_error_does_not_fail_completion_publish(caplog):
     )
     store = SimpleNamespace(append=AsyncMock(side_effect=lambda value: value))
     tailer = SimpleNamespace(
+        _require_publishable_incarnation=Mock(),
         _store=store,
         _is_live=True,
         _image_references=ImageReferenceBuffer(),
@@ -728,6 +731,7 @@ async def test_observer_error_does_not_fail_completion_publish(caplog):
         _native_transport=SimpleNamespace(active_thread_id="main-thread"),
     )
     await SessionTailer._persist_and_fanout(tailer, event)
+    tailer._require_publishable_incarnation.assert_called_once_with()
     store.append.assert_awaited_once_with(event)
     tailer._fanout.assert_called_once_with(event)
     tailer._fanout_completion.assert_called_once_with(event)

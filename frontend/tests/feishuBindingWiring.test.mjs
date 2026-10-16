@@ -12,7 +12,7 @@ const brandMark = readFileSync(new URL('../src/components/FeishuBrandMark.vue', 
 
 test('local direct Chat surface mounts one Feishu binding panel beside its session name', () => {
   assert.match(pane, /class="pane-chrome"[\s\S]*class="pane-session-name"[\s\S]*<FeishuBindingPanel/)
-  assert.match(pane, /v-if="isChatSession"[\s\S]*:tab-id="pane\.tabId"/)
+  assert.match(pane, /v-if="isChatSession && !isManagedChat"[\s\S]*:tab-id="pane\.tabId"/)
   assert.match(pane, /import FeishuBindingPanel from '@\/components\/FeishuBindingPanel\.vue'/)
   assert.doesNotMatch(structuredPane, /<FeishuBindingPanel/)
   assert.doesNotMatch(structuredPane, /import FeishuBindingPanel/)

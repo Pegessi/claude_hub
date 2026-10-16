@@ -3,6 +3,7 @@ import base64
 import errno
 import glob
 import hashlib
+import ipaddress
 import itertools
 import json
 import logging
@@ -14,13 +15,17 @@ import socket
 import sqlite3  # noqa: F401  (re-exported indirectly for tests)
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections import namedtuple
 from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import cached_property, partial
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, TypedDict
+from urllib.parse import urlsplit
 
 from ..config import settings
 from ..models import (
@@ -39,6 +44,7 @@ from ..models.schemas import CHAT_REMOTE_UNSUPPORTED
 from . import pty_exec
 from ._cursor_verify import _cursor_id_exists
 from .agent_status_markers import codex_output_is_working
+from .provider_proxy import has_provider_proxy_settings, provider_subprocess_env
 from .proxy_rules import PROXY_ENV_KEYS, with_proxy_env_aliases
 from .remote_profiles import (
     profile_capabilities,
@@ -53,6 +59,20 @@ _RUNTIME_HOME = resolve_runtime_home()
 STATE_FILE = _RUNTIME_HOME / "tabs.json"
 ORDER_FILE = _RUNTIME_HOME / "tab_order.json"
 LAUNCH_ENV_DIR = _RUNTIME_HOME / "launch_env"
+
+
+def _write_private_launch_file(path: Path, content: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 TMUX_SESSION_PREFIX = "claude-hub-"
 _ORPHAN_TMUX_PRUNE_GRACE_SECONDS = 60.0
 _TMUX_CONTROL_TIMEOUT_SECONDS = 5.0
@@ -69,6 +89,20 @@ CURSOR_TRANSCRIPT_SCHEMA = "cli-transcript-v1"
 #: :data:`CURSOR_TRANSCRIPT_SCHEMA`. Pinned so an unknown CLI version fails
 #: closed rather than mis-normalizing rows.
 SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS: frozenset[str] = frozenset({"2026.08.25-3e8eec8"})
+
+
+def _is_loopback_url(value: str) -> bool:
+    """Return whether an HTTP service URL names this host's loopback interface."""
+
+    hostname = urlsplit(value).hostname
+    if hostname == "localhost":
+        return True
+    if hostname is None:
+        return False
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _promote_cursor_chat_transport(
@@ -1406,7 +1440,7 @@ def _agent_spawn_env() -> dict:
     Normalize the environment so panes always render with their full palette,
     regardless of how the backend itself was started.
     """
-    env = with_proxy_env_aliases(os.environ)
+    env = provider_subprocess_env("terminal", os.environ)
     env.pop("NO_COLOR", None)
     env["COLORTERM"] = "truecolor"
     env["FORCE_COLOR"] = "3"
@@ -1448,6 +1482,7 @@ class TTYDProcess:
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
+        managed_session_id: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         agent_session_id: Optional[str] = None,
         agent_session_id_verified: bool = False,
@@ -1485,6 +1520,7 @@ class TTYDProcess:
         self.workspace_id = workspace_id
         self.workspace_name = workspace_name
         self.workspace_role = workspace_role
+        self.managed_session_id = managed_session_id
         self.cursor_transport = (
             cursor_transport
             if cursor_transport in {"acp", "terminal_transcript", "native"}
@@ -1654,6 +1690,12 @@ class TTYDProcess:
             self.shell = os.environ.get("SHELL", "/bin/bash")
         else:
             self.shell = get_agent_command(agent_type)
+
+    @property
+    def is_managed_chat(self) -> bool:
+        """Whether this tab is a headless Workspace-managed Chat record."""
+
+        return self.workspace_role is not None and self.session_kind == SessionKind.CHAT
 
     @staticmethod
     def _clean_env(env: Dict[str, str]) -> Dict[str, str]:
@@ -1854,7 +1896,7 @@ asyncio.run(_main())
         inherited = {
             key: value for key, value in os.environ.items() if key.lower() in PROXY_ENV_KEYS
         }
-        return {**with_proxy_env_aliases(inherited), **child}
+        return provider_subprocess_env(self.agent_type.value, inherited, child)
 
     def _with_env(self, command: str) -> str:
         if self.target == ExecutionTarget.LOCAL:
@@ -1862,7 +1904,7 @@ asyncio.run(_main())
         return f"{self._env_shell_prefix()}{command}"
 
     def _with_local_env_wrapper(self, command: str) -> str:
-        LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        LAUNCH_ENV_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         script_path = LAUNCH_ENV_DIR / f"{self.tab_id}.sh"
         child = self._shell_child_env()
         absent_proxy_keys = sorted(
@@ -1872,14 +1914,30 @@ asyncio.run(_main())
         # even when this backend has no proxy settings at all.
         clear_proxies = f"unset {' '.join(absent_proxy_keys)}\n" if absent_proxy_keys else ""
         exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in child.items())
-        script = (
-            "#!/bin/sh\n"
-            "set -eu\n"
-            f"{clear_proxies}{exports}\n"
-            'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
-        )
-        script_path.write_text(script, encoding="utf-8")
-        os.chmod(script_path, 0o600)
+        if has_provider_proxy_settings(self.agent_type.value):
+            # Run login initialization first, then source this protected file
+            # to reassert deployment/session values in that same shell.
+            proxy_exports = "\n".join(
+                f"export {key}={shlex.quote(value)}"
+                for key, value in child.items()
+                if key.lower() in PROXY_ENV_KEYS
+            )
+            script = (
+                "#!/bin/sh\n"
+                'if [ "${_CLAUDE_HUB_APPLY_PROXY_ENV:-}" = "1" ]; then\n'
+                f"{clear_proxies}{proxy_exports}\nreturn 0\nfi\n"
+                f"set -eu\n{clear_proxies}{exports}\n"
+                'exec "${SHELL:-/bin/bash}" -lc \'_CLAUDE_HUB_APPLY_PROXY_ENV=1; '
+                '. "$1"; unset _CLAUDE_HUB_APPLY_PROXY_ENV; eval "$2"\' '
+                f'claude-hub {shlex.quote(str(script_path))} "$1"\n'
+            )
+        else:
+            script = (
+                "#!/bin/sh\nset -eu\n"
+                f"{clear_proxies}{exports}\n"
+                'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
+            )
+        _write_private_launch_file(script_path, script)
         return f"/bin/sh {shlex.quote(str(script_path))} {shlex.quote(command)}"
 
     def _write_launch_settings_file(self) -> Optional[Path]:
@@ -1893,17 +1951,23 @@ asyncio.run(_main())
         guarded like ``_claude_settings_arg`` (Claude + local + env present)
         and chmod 600 because it may contain API tokens.
         """
-        if self.agent_type != AgentType.CLAUDE or not self.env:
+        if self.agent_type != AgentType.CLAUDE:
             return None
         if self.target != ExecutionTarget.LOCAL:
             return None
-        LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        LAUNCH_ENV_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         settings_path = LAUNCH_ENV_DIR / f"{self.tab_id}.settings.json"
-        settings_path.write_text(
-            json.dumps({"env": self._child_env()}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        if not self.env and not has_provider_proxy_settings("claude"):
+            settings_path.unlink(missing_ok=True)
+            return None
+        _write_private_launch_file(
+            settings_path,
+            json.dumps(
+                {"env": provider_subprocess_env("claude", {}, self._child_env())},
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
-        os.chmod(settings_path, 0o600)
         return settings_path
 
     def _claude_settings_arg(self) -> str:
@@ -2012,6 +2076,8 @@ asyncio.run(_main())
         so stamping there would systematically under-estimate the codex
         session_meta timestamp by ~1 s.
         """
+        if self.is_managed_chat:
+            return False
         if await _tmux_session_exists_async(self.tmux_session):
             return False
 
@@ -2106,6 +2172,10 @@ asyncio.run(_main())
 
     async def start(self) -> None:
         """Start the ttyd process with tmux for session persistence."""
+        if self.is_managed_chat:
+            self.process = None
+            self.is_active = False
+            return
         if self.process and self.process.returncode is None:
             logger.warning(f"Process for tab {self.tab_id} already running")
             return
@@ -3111,6 +3181,12 @@ asyncio.run(_main())
             kill_tmux: If True, also kill the tmux session. Only use this when
                       deleting a tab or rolling back an unpersisted tab startup.
         """
+        if self.is_managed_chat:
+            # Managed Chat tabs deliberately own no ttyd/tmux lifecycle. Their
+            # native provider runtime is stopped by the agent-stream layer.
+            self.process = None
+            self.is_active = False
+            return
         if self.process and self.process.returncode is None:
             logger.info(f"Stopping ttyd for tab {self.tab_id} (PID {self.process.pid})")
             self.process.terminate()
@@ -3162,6 +3238,7 @@ asyncio.run(_main())
                 if isinstance(self.workspace_role, WorkspaceSessionRole)
                 else self.workspace_role
             ),
+            "managed_session_id": self.managed_session_id,
             "port": self.port,
             "created_at": self.created_at.isoformat(),
             "agent_session_id": self.agent_session_id,
@@ -3201,6 +3278,7 @@ asyncio.run(_main())
             workspace_id=self.workspace_id,
             workspace_name=self.workspace_name,
             workspace_role=self.workspace_role,
+            managed_session_id=self.managed_session_id,
             agent_session_id=self.agent_session_id,
             agent_session_id_verified=self.agent_session_id_verified,
             cursor_transport=self.cursor_transport,
@@ -3252,8 +3330,135 @@ def _event_turn_ordinals(events: List[AgentStreamEvent]) -> List[int]:
     return ordinals
 
 
+_TABS_STATE_VERSION = 2
+_TAB_CLEANUP_AUTHORIZATION = "stream-discard-validated-v1"
+_TAB_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+
+
+class TabStateError(RuntimeError):
+    """The tab snapshot cannot be trusted or safely overwritten."""
+
+
+class TabCleanupPendingError(RuntimeError):
+    """Deletion or its durable cleanup acknowledgment needs a retry."""
+
+
+class _TabStateCommitError(OSError):
+    def __init__(self, error: OSError, *, replaced: bool) -> None:
+        super().__init__(str(error))
+        self.replaced = replaced
+
+
+@dataclass(frozen=True)
+class _PendingTabCleanup:
+    tab_id: str
+    created_at: str
+    token: str
+    authorization: str = _TAB_CLEANUP_AUTHORIZATION
+
+
+def _parse_tabs_snapshot(value: Any) -> Tuple[List[Dict[str, Any]], Dict[str, _PendingTabCleanup]]:
+    """Validate the whole snapshot before publishing any runtime owner."""
+    if isinstance(value, list):
+        tabs, pending = value, []
+    elif (
+        isinstance(value, dict)
+        and set(value) == {"version", "tabs", "pending_stream_cleanup"}
+        and type(value["version"]) is int
+        and value["version"] == _TABS_STATE_VERSION
+    ):
+        tabs, pending = value["tabs"], value["pending_stream_cleanup"]
+    else:
+        raise TabStateError("unsupported or invalid tabs snapshot")
+    if not isinstance(tabs, list) or not isinstance(pending, list):
+        raise TabStateError("invalid tab or cleanup list")
+    live_ids: set[str] = set()
+    for tab in tabs:
+        if (
+            not isinstance(tab, dict)
+            or not isinstance(tab.get("id"), str)
+            or not _TAB_ID_RE.fullmatch(tab["id"])
+            or tab["id"] in live_ids
+            or not isinstance(tab.get("name"), str)
+            or type(tab.get("port")) is not int
+            or not isinstance(tab.get("created_at"), str)
+        ):
+            raise TabStateError("invalid or duplicate tab record")
+        datetime.fromisoformat(tab["created_at"])
+        live_ids.add(tab["id"])
+    records: Dict[str, _PendingTabCleanup] = {}
+    tokens: set[str] = set()
+    for raw in pending:
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"tab_id", "created_at", "token", "authorization"}
+            or any(not isinstance(item, str) for item in raw.values())
+            or not _TAB_ID_RE.fullmatch(raw["tab_id"])
+            or not re.fullmatch(r"[0-9a-f]{32}", raw["token"])
+            or raw["authorization"] != _TAB_CLEANUP_AUTHORIZATION
+            or raw["tab_id"] in records
+            or raw["tab_id"] in live_ids
+            or raw["token"] in tokens
+        ):
+            raise TabStateError("invalid, duplicate, or live-colliding cleanup obligation")
+        datetime.fromisoformat(raw["created_at"])
+        record = _PendingTabCleanup(**raw)
+        records[record.tab_id] = record
+        tokens.add(record.token)
+    return tabs, records
+
+
+def _write_tabs_snapshot(payload: Dict[str, Any]) -> None:
+    """Persist one snapshot; distinguish failure before/after replacement."""
+    text = json.dumps(payload)
+    # The configured runtime home may be an alias. Capture one real parent so
+    # temporary creation, replacement and durability confirmation agree.
+    parent = STATE_FILE.parent.resolve()
+    destination = parent / STATE_FILE.name
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".tabs-", suffix=".tmp", dir=parent)
+    replaced = False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        replaced = True
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as exc:
+        raise _TabStateCommitError(exc, replaced=replaced) from exc
+    finally:
+        if not replaced:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
 class TTYDManager:
     """Manages multiple ttyd processes with tmux-backed persistence."""
+
+    _state_error: Optional[str] = None
+    _state_confirmed = True
+    _cleanup_retry_offset = 0
+    _cleanup_scheduling_stopped = False
+
+    @cached_property
+    def _cleanup_tasks(self) -> Dict[Tuple[str, str], asyncio.Task[bool]]:
+        return {}
+
+    @cached_property
+    def _pending_stream_cleanup(self) -> Dict[str, _PendingTabCleanup]:
+        return {}
+
+    @cached_property
+    def _cleanup_locks(self) -> Dict[str, asyncio.Lock]:
+        return {}
 
     def __init__(self) -> None:
         self.processes: Dict[str, TTYDProcess] = {}
@@ -3271,14 +3476,17 @@ class TTYDManager:
         # state before the single-instance guard can reject it.
         self._load_state()
         self._load_order()
-        # Ensure all loaded tabs are in the order list
-        self._sync_order_with_processes()
+        # Do not rewrite tab snapshot/order files on load. Legacy process
+        # construction may still materialize provider launch settings.
+        if self._state_error is None:
+            self._sync_order_with_processes(persist=False)
 
     def _load_state(self) -> None:
         if STATE_FILE.exists():
             try:
                 with open(STATE_FILE, "r") as f:
-                    data = json.load(f)
+                    data, pending = _parse_tabs_snapshot(json.load(f))
+                    loaded: Dict[str, TTYDProcess] = {}
                     max_port = self._next_port
                     for tab_data in data:
                         agent_type_str = tab_data.get("agent_type", "claude")
@@ -3318,13 +3526,6 @@ class TTYDManager:
                             if workspace_role_str in [e.value for e in WorkspaceSessionRole]
                             else None
                         )
-                        if workspace_role is not None:
-                            # Workspace-managed task runners always own a raw
-                            # TUI.  Normalize accidental historical Chat rows
-                            # at the persistence boundary; direct top-level
-                            # Chat tabs have no managed workspace role.
-                            session_kind = SessionKind.TERMINAL
-                            chat_mode = ChatMode.DEFAULT
                         process = TTYDProcess(
                             tab_id=tab_data["id"],
                             port=tab_data["port"],
@@ -3345,6 +3546,7 @@ class TTYDManager:
                             workspace_id=tab_data.get("workspace_id"),
                             workspace_name=tab_data.get("workspace_name"),
                             workspace_role=workspace_role,
+                            managed_session_id=tab_data.get("managed_session_id"),
                             agent_session_id=tab_data.get("agent_session_id"),
                             agent_session_id_verified=tab_data.get(
                                 "agent_session_id_verified", False
@@ -3368,9 +3570,14 @@ class TTYDManager:
                             archived_at=_parse_optional_iso(tab_data.get("archived_at")),
                             last_viewed_at=_parse_optional_iso(tab_data.get("last_viewed_at")),
                         )
-                        self.processes[process.tab_id] = process
+                        loaded[process.tab_id] = process
                         if process.port > max_port:
                             max_port = process.port
+                    self.processes = loaded
+                    self._pending_stream_cleanup = pending
+                    # A prior process may have replaced this snapshot without
+                    # syncing its directory. Reading it is not durability proof.
+                    self._state_confirmed = not pending
                     self._next_port = max_port + 1
                 logger.info(f"Loaded {len(self.processes)} tabs from {STATE_FILE}")
                 for tab_id, process in self.processes.items():
@@ -3378,15 +3585,36 @@ class TTYDManager:
                         f"  - Tab: {process.name} (tmux: {process.tmux_session}, agent: {process.agent_type.value})"
                     )
             except Exception as e:
+                self._state_error = str(e)
                 logger.error(f"Failed to load state: {e}")
         else:
             logger.info(f"No state file at {STATE_FILE}, starting fresh")
 
+    def _require_valid_state(self) -> None:
+        if self._state_error is not None:
+            raise TabStateError("Tab state is invalid; refusing to overwrite cleanup evidence")
+
+    def _persist_state(self) -> None:
+        """All writers preserve the same live owners and cleanup obligations."""
+        self._require_valid_state()
+        payload = {
+            "version": _TABS_STATE_VERSION,
+            "tabs": [process.to_dict() for process in self.processes.values()],
+            "pending_stream_cleanup": [
+                asdict(record) for record in self._pending_stream_cleanup.values()
+            ],
+        }
+        _parse_tabs_snapshot(payload)
+        try:
+            _write_tabs_snapshot(payload)
+        except OSError:
+            self._state_confirmed = False
+            raise
+        self._state_confirmed = True
+
     def _save_state(self) -> None:
         try:
-            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(STATE_FILE, "w") as f:
-                json.dump([p.to_dict() for p in self.processes.values()], f)
+            self._persist_state()
             logger.debug(f"Saved {len(self.processes)} tabs to {STATE_FILE}")
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
@@ -3458,24 +3686,34 @@ class TTYDManager:
         workspace_id: Optional[str],
         workspace_name: Optional[str],
         workspace_role: Optional[WorkspaceSessionRole],
+        managed_session_id: Optional[str] = None,
     ) -> bool:
         """Attach workspace ownership metadata to an existing tab."""
         process = self.processes.get(tab_id)
         if not process:
             return False
-        if workspace_role is not None and process.session_kind != SessionKind.TERMINAL:
-            raise ValueError("managed workspace tabs must use Terminal")
-
+        if (
+            process.session_kind == SessionKind.CHAT
+            and workspace_role is not None
+            and not process.is_managed_chat
+        ):
+            # Metadata cannot tear down an existing direct Chat's terminal runtime.
+            raise ValueError("Direct Chat tabs cannot become managed Chat through metadata")
+        next_managed_session_id = (
+            None if workspace_id is None else managed_session_id or process.managed_session_id
+        )
         if (
             process.workspace_id == workspace_id
             and process.workspace_name == workspace_name
             and process.workspace_role == workspace_role
+            and process.managed_session_id == next_managed_session_id
         ):
             return True
 
         process.workspace_id = workspace_id
         process.workspace_name = workspace_name
         process.workspace_role = workspace_role
+        process.managed_session_id = next_managed_session_id
         self._save_state()
         return True
 
@@ -3529,7 +3767,7 @@ class TTYDManager:
         self._save_state()
         return True
 
-    def _sync_order_with_processes(self) -> None:
+    def _sync_order_with_processes(self, *, persist: bool = True) -> None:
         """Sync order list with current processes - add any missing tabs."""
         # Add any tabs that are in processes but not in order
         order_changed = False
@@ -3548,7 +3786,8 @@ class TTYDManager:
             order_changed = True
         if order_changed:
             logger.info(f"Synced tab order: {self._tab_order}")
-            self._save_order()
+            if persist:
+                self._save_order()
 
     def _get_next_port(self) -> int:
         while self._next_port <= _MAX_TCP_PORT:
@@ -3585,6 +3824,7 @@ class TTYDManager:
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: Optional[WorkspaceSessionRole] = None,
+        managed_session_id: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         agent_session_id: Optional[str] = None,
         cursor_transport: str = "terminal",
@@ -3599,13 +3839,26 @@ class TTYDManager:
         # non-fork creation cannot grow without limit. The per-source fork
         # cap is enforced in fork_tab; this catches everything else.
         self._check_live_tab_capacity()
+        self._require_valid_state()
         logger.info(
             f"create_tab called with: name={name}, solo_mode={solo_mode}, shell={shell}, cwd={cwd}, agent_type={agent_type}, session_kind={session_kind}, target={target}, remote_profile_id={remote_profile_id}, remote_forward_port={remote_forward_port}, workspace_id={workspace_id}, workspace_role={workspace_role}, agent_session_id={agent_session_id}"
         )
-        if workspace_role is not None and (
-            session_kind != SessionKind.TERMINAL or chat_mode != ChatMode.DEFAULT
+        if workspace_role is not None and chat_mode != ChatMode.DEFAULT:
+            raise ValueError("managed workspace Chat mode must use default")
+        if (
+            workspace_role is not None
+            and session_kind == SessionKind.CHAT
+            and agent_type
+            not in {
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+                AgentType.CURSOR,
+                AgentType.MASO,
+            }
         ):
-            raise ValueError("managed workspace tabs must use Terminal")
+            raise ValueError(
+                "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"
+            )
         if agent_type == AgentType.MASO and session_kind != SessionKind.CHAT:
             raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
         if agent_type == AgentType.MASO:
@@ -3616,7 +3869,15 @@ class TTYDManager:
             # A persisted opaque session belongs to one service, even when the
             # backend's global default changes before a later restart.
             env = dict(env or {})
-            env["MASO_BASE_URL"], _models, _default = await discover_maso_service(env)
+            if workspace_role is not None:
+                from .agent_stream.maso_http import maso_base_url
+
+                if not _is_loopback_url(maso_base_url(env)):
+                    raise ValueError("Managed MASO Chat requires a loopback-local MASO service")
+            base_url, _models, _default = await discover_maso_service(env)
+            if workspace_role is not None and not _is_loopback_url(base_url):
+                raise ValueError("Managed MASO Chat requires a loopback-local MASO service")
+            env["MASO_BASE_URL"] = base_url
         if session_kind == SessionKind.CHAT and target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
         if target == ExecutionTarget.REMOTE:
@@ -3632,7 +3893,12 @@ class TTYDManager:
         cursor_transport = _promote_cursor_chat_transport(
             session_kind, agent_type, target, cursor_transport
         )
-        tab_id = str(uuid.uuid4())
+        for _ in range(16):
+            tab_id = str(uuid.uuid4())
+            if tab_id not in self.processes and tab_id not in self._pending_stream_cleanup:
+                break
+        else:
+            raise RuntimeError("could not allocate an unreserved tab identity")
         port = self._get_next_port()
 
         process = TTYDProcess(
@@ -3653,6 +3919,7 @@ class TTYDManager:
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
             env=env,
             agent_session_id=agent_session_id,
             cursor_transport=cursor_transport,
@@ -3664,6 +3931,14 @@ class TTYDManager:
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
         )
+        if process.is_managed_chat:
+            # Managed Chat keeps the ordinary tab/session navigation identity,
+            # but its native ProviderSession is created lazily by the Chat
+            # runtime. Never create a ttyd listener, tmux seat, shell, or TUI.
+            self.processes[tab_id] = process
+            self._ensure_tab_in_order(tab_id)
+            self._save_state()
+            return process.to_schema()
         tmux_created = False
         process_stopped_without_tmux = False
         startup_deadline = asyncio.get_running_loop().time() + _TAB_CREATE_STARTUP_TIMEOUT_SECONDS
@@ -3976,35 +4251,211 @@ class TTYDManager:
             raise
 
     async def delete_tab(self, tab_id: str) -> bool:
-        """Delete a tab and explicitly kill its tmux session."""
-        async with self._locked_current_tab(tab_id) as process:
-            if process is None:
+        """Retire the tab and durably reserve its artifacts until cleanup succeeds."""
+        from .agent_stream.tailer import fence_session_stream, validate_session_stream_cleanup
+
+        self._require_valid_state()
+        expected = self.processes.get(tab_id)
+        expected_cleanup = self._pending_stream_cleanup.get(tab_id)
+        if expected is None and expected_cleanup is None:
+            return False
+        expected_created_at = expected.created_at if expected is not None else None
+        lock = self._cleanup_locks.setdefault(tab_id, asyncio.Lock())
+        async with lock:
+            pending = self._pending_stream_cleanup.get(tab_id)
+            current = self.processes.get(tab_id)
+            if pending is not None:
+                if (
+                    current is not None
+                    or (expected_cleanup is not None and pending != expected_cleanup)
+                    or (
+                        expected_created_at is not None
+                        and pending.created_at != expected_created_at.isoformat()
+                    )
+                ):
+                    raise TabCleanupPendingError(
+                        "cleanup identity conflicts with a live or newer owner"
+                    )
+                await self._finish_tab_cleanup(pending)
+                return True
+            if expected_cleanup is not None:
+                if current is not None:
+                    raise TabCleanupPendingError("cleanup identity conflicts with a live owner")
+                return True  # Another caller completed this exact retired obligation.
+            if (
+                current is not expected
+                or current is None
+                or current.created_at != expected_created_at
+            ):
                 return False
-            logger.warning(
-                f"User requested deletion of tab {tab_id}, killing tmux session {process.tmux_session}"
-            )
-            # Keep the registered owner on failure or cancellation so teardown can retry.
-            await process.stop(kill_tmux=True)
-            self.processes.pop(tab_id, None)
-            if tab_id in self._tab_order:
-                self._tab_order.remove(tab_id)
+
+            # Check captured identity BEFORE any fence: a stale waiter must not
+            # fence a replacement. Creation cannot reuse this live/reserved id.
+            provider_fenced = await fence_session_stream(f"terminal-tab-{tab_id}")
+            async with self._locked_current_tab(tab_id) as process:
+                if (
+                    process is None
+                    or process is not expected
+                    or process.created_at != expected_created_at
+                ):
+                    return False
+                await process.stop(kill_tmux=True)
+                validate_session_stream_cleanup(
+                    "terminal-tabs",
+                    f"terminal-tab-{tab_id}",
+                    acknowledged_call_ids=set(),
+                    provider_fenced=provider_fenced,
+                )
+                record = _PendingTabCleanup(
+                    tab_id, process.created_at.isoformat(), uuid.uuid4().hex
+                )
+                old_order = list(self._tab_order)
+                self.processes.pop(tab_id)
+                self._pending_stream_cleanup[tab_id] = record
+                self._tab_order = [item for item in self._tab_order if item != tab_id]
+                try:
+                    self._persist_state()
+                except Exception as exc:
+                    if not isinstance(exc, _TabStateCommitError) or not exc.replaced:
+                        self.processes[tab_id] = process
+                        self._pending_stream_cleanup.pop(tab_id)
+                        self._tab_order = old_order
+                        raise TabCleanupPendingError(
+                            "tab retirement was not committed; retry DELETE"
+                        ) from exc
+                    # The replaced snapshot is authoritative in memory too. No
+                    # ordinary writer may resurrect the tab/drop its obligation.
+                    raise TabCleanupPendingError(
+                        "tab retired; cleanup commit unconfirmed; retry DELETE"
+                    ) from exc
                 self._save_order()
-            self._save_state()
+            await self._finish_tab_cleanup(record)
+            return True
 
-        # The id is no longer discoverable. Do not add tailer/send locks to the tab lock.
+    async def _finish_tab_cleanup(self, record: _PendingTabCleanup) -> None:
+        """Run under the per-id cleanup lock; keep the reservation through ACK."""
+        from .agent_stream.tailer import discard_retired_session_artifacts, session_stream_has_owner
+
+        def require_owner() -> None:
+            self._require_valid_state()
+            if (
+                self._pending_stream_cleanup.get(record.tab_id) != record
+                or record.tab_id in self.processes
+                or session_stream_has_owner(f"terminal-tab-{record.tab_id}")
+            ):
+                raise TabCleanupPendingError(
+                    "cleanup identity conflicts with a live or newer owner"
+                )
+
+        require_owner()
         try:
-            from .agent_stream.tailer import discard_session_stream
+            if not self._state_confirmed:
+                self._persist_state()
+            await discard_retired_session_artifacts(
+                "terminal-tabs", f"terminal-tab-{record.tab_id}"
+            )
+            require_owner()
+            self._pending_stream_cleanup.pop(record.tab_id)
+            try:
+                self._persist_state()
+            except Exception:
+                # Even an ACK that reached replace but failed directory fsync
+                # keeps its obligation in memory. Ordinary saves preserve it.
+                self._pending_stream_cleanup[record.tab_id] = record
+                self._state_confirmed = False
+                raise
+        except TabCleanupPendingError:
+            raise
+        except Exception as exc:
+            raise TabCleanupPendingError(
+                "tab retired; artifact cleanup pending; retry DELETE"
+            ) from exc
 
-            await discard_session_stream("terminal-tabs", f"terminal-tab-{tab_id}")
-        except Exception:
-            logger.exception("Failed to discard structured stream for tab %s", tab_id)
-        return True
+    def schedule_pending_stream_cleanup(self, *, limit: int = 8) -> List[asyncio.Task[bool]]:
+        """Start bounded finite jobs without blocking provider startup or the monitor."""
+        self._require_valid_state()
+        capacity = min(limit, 8 - len(self._cleanup_tasks))
+        records = list(self._pending_stream_cleanup.values())
+        if self._cleanup_scheduling_stopped or not records or capacity <= 0:
+            return []
+        offset = self._cleanup_retry_offset % len(records)
+        started: List[asyncio.Task[bool]] = []
+        for index, record in enumerate(records[offset:] + records[:offset]):
+            self._cleanup_retry_offset = (offset + index + 1) % len(records)
+            key = (record.tab_id, record.token)
+            lock = self._cleanup_locks.setdefault(record.tab_id, asyncio.Lock())
+            if key in self._cleanup_tasks or lock.locked():
+                continue
+            task = asyncio.create_task(
+                self._run_tab_cleanup(record), name=f"retired-tab-cleanup-{record.tab_id}"
+            )
+            self._cleanup_tasks[key] = task
+            task.add_done_callback(partial(self._tab_cleanup_done, key))
+            started.append(task)
+            if len(started) >= capacity:
+                break
+        return started
+
+    async def _run_tab_cleanup(self, record: _PendingTabCleanup) -> bool:
+        async with self._cleanup_locks.setdefault(record.tab_id, asyncio.Lock()):
+            if self._pending_stream_cleanup.get(record.tab_id) != record:
+                return False
+            await self._finish_tab_cleanup(record)
+            return True
+
+    def _tab_cleanup_done(self, key: Tuple[str, str], task: asyncio.Task[bool]) -> None:
+        if self._cleanup_tasks.get(key) is task:
+            self._cleanup_tasks.pop(key)
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                logger.error(
+                    "Retired tab cleanup remains pending tab_id=%s", key[0], exc_info=error
+                )
+
+    @staticmethod
+    async def _await_cleanup_tasks(tasks: List[asyncio.Task[bool]]) -> List[bool | BaseException]:
+        joined = asyncio.gather(*tasks, return_exceptions=True)
+        cancellation: Optional[asyncio.CancelledError] = None
+        while not joined.done():
+            try:
+                await asyncio.shield(joined)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+        results = joined.result()
+        if cancellation is not None:
+            raise cancellation
+        return results
+
+    @asynccontextmanager
+    async def cleanup_task_lifetime(self) -> AsyncIterator[None]:
+        """Keep every submitted file operation inside backend runtime ownership."""
+        self._cleanup_scheduling_stopped = False
+        try:
+            yield
+        finally:
+            self._cleanup_scheduling_stopped = True
+            tasks = list(self._cleanup_tasks.values())
+            for task in tasks:
+                task.cancel()
+            # Cancellation cannot stop a disk thread. Join its owning job before
+            # BackendInstanceLock is released, including startup failure paths.
+            await self._await_cleanup_tasks(tasks)
+
+    async def retry_pending_stream_cleanup(self, *, limit: int = 8) -> int:
+        """Drain a scheduled batch explicitly; background callers only schedule."""
+        tasks = self.schedule_pending_stream_cleanup(limit=limit)
+        results = await self._await_cleanup_tasks(tasks)
+        return sum(result is True for result in results)
 
     async def archive_tab(self, tab_id: str) -> Optional[TerminalTab]:
         """Release a tab's runtime while retaining its record and structured history."""
         async with self._locked_current_tab(tab_id) as process:
             if process is None:
                 return None
+            from .restart_continuation import cancel_pending_continuation
+
+            cancel_pending_continuation(tab_id, None, veto_capture=True)
             if not process.archived:
                 process.archived = True
                 process.archived_at = datetime.now()
@@ -5253,6 +5704,20 @@ class TTYDManager:
         Phase F — Persist final state to tabs.json so the next restart can
         resume the correctly-pinned sids.
         """
+        self._require_valid_state()
+        runtime_processes = [
+            process for process in self.processes.values() if not process.is_managed_chat
+        ]
+        for process in self.processes.values():
+            if process.is_managed_chat:
+                process.process = None
+                process.is_active = False
+        if not runtime_processes:
+            # A headless managed Chat restore must not initialize tmux merely
+            # because a navigation tab record exists.
+            self._save_state()
+            return
+
         logger.info("Ensuring tmux server is running...")
         _ensure_tmux_server()
 
@@ -5286,7 +5751,7 @@ class TTYDManager:
         except Exception as e:
             logger.debug("Could not list tmux sessions: %s", e)
 
-        processes = list(self.processes.values())
+        processes = runtime_processes
         logger.info("Starting %d saved tabs", len(processes))
 
         # Partition into hot (session exists) / cold-codex / cold-non-codex.

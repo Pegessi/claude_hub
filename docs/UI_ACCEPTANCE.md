@@ -48,9 +48,10 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 | Scenario | Acceptance exercised |
 | --- | --- |
 | Task execution panel | Recording versus managed controls; progress/handoff and retry identity |
-| Workspace Task creation | Unknown outcome/replay; dialog closure and credential recovery; workspace changes; image paste, decoded preview, attachment-only payload and exact replay |
+| Workspace Task creation | Unknown outcome/replay; dialog closure and credential recovery; workspace changes; image paste, decoded preview, attachment-only payload and exact replay; managed Agent/Reviewer and Task Terminal/Chat selection, including MASO Chat and remote restrictions |
 | Native subagents | Full thread identity, parent-turn grouping, lifecycle display and English controls |
-| Chat composer in the full Chat page | MASO Chat-only selection, unavailable-service warning/create refusal, retry and preset recovery, existing-Chat service-loss explanation and model/effort provider keys; condensation retains visible output; send/queue/stop against a live turn; failed send keeps the text and retries under a new identity; mobile reachability |
+| Chat composer in the full Chat page | MASO Chat-only selection, unavailable-service warning/create refusal, retry and preset recovery, existing-Chat service-loss explanation and model/effort provider keys; condensation retains visible output; send/queue/stop against a live turn; failed send keeps the text and retries with the same request identity; mobile reachability; managed-session identity distinct from provider identity, managed mailbox send/cancel and durable busy-turn input |
+| Managed Chat question answer | A rendered blocking card uses normal delivery with exact turn/request identity; a lost HTTP response leaves the card unresolved, and retry retains the same client turn ID before resolution; managed mode/Goal/schedule controls stay hidden |
 | Message provenance in the full Chat page | Persisted Web/Feishu/unknown origins after binding changes; desktop/mobile/grid operation and text clearance |
 | Bot components | Settings/binding behavior, secret clearing and desktop/mobile layout |
 | Queued chat activation | A hidden queued Chat activates before sending; editing yields activation and survives bounded Chat eviction |

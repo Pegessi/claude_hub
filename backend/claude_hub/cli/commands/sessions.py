@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Dict, List, Optional
 
 import click
@@ -180,6 +181,11 @@ def _find_session_tab(client: Any, session_id: str) -> Optional[str]:
 @click.argument("session_id")
 @click.option("--message", default=None, help="Message to send to the session.")
 @click.option(
+    "--call-id",
+    default=None,
+    help="Stable retry id; generated and printed when omitted.",
+)
+@click.option(
     "--attachment-json",
     "attachment_json",
     multiple=True,
@@ -191,24 +197,36 @@ def session_send(
     ctx: click.Context,
     session_id: str,
     message: Optional[str],
+    call_id: Optional[str],
     attachment_json: tuple,
     payload_json: Optional[str],
 ) -> None:
     """Send a message to a managed session."""
-    body = merge_payload(payload_json, message=message)
+    if call_id is not None and not call_id.strip():
+        raise click.ClickException("--call-id must not be blank.")
+    body = merge_payload(payload_json, message=message, call_id=call_id)
     if attachment_json:
         body["attachments"] = parse_attachment_json(attachment_json)
     elif "attachments" not in body:
         body["attachments"] = []
     if not body.get("message"):
         raise click.ClickException("--message is required unless supplied by --payload-json.")
+    effective_call_id = body.get("call_id")
+    if effective_call_id is None:
+        effective_call_id = f"session-send:{uuid.uuid4()}"
+        body["call_id"] = effective_call_id
+    elif not isinstance(effective_call_id, str) or not effective_call_id.strip():
+        raise click.ClickException("call_id must be a non-blank string.")
+    # Emit before the request so a transport/error response cannot hide the
+    # retry identity the caller must reuse for safe delivery.
+    click.echo(f"call_id={effective_call_id}", err=True)
     try:
         with cli_main.get_client(ctx) as client:
             client.send_session(session_id, body)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     if cli_main.as_json(ctx):
-        emit({"ok": True}, True)
+        emit({"ok": True, "call_id": effective_call_id}, True)
     else:
         click.echo("sent")
 

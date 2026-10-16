@@ -44,6 +44,7 @@ class _TaskUpdatesMixin:
                 payload.related_task_id is not None,
                 payload.clear_context is not None,
                 payload.session_id is not None,
+                payload.session_kind is not None,
                 payload.parent_task_id is not None,
                 payload.depends_on_task_ids is not None,
                 "agent_tag" in payload.model_fields_set,
@@ -122,6 +123,21 @@ class _TaskUpdatesMixin:
                 update["session_id"] = payload.session_id
             else:
                 update["session_id"] = None
+        if payload.session_kind is not None:
+            if payload.session_kind == SessionKind.CHAT or task.agent_type == AgentType.MASO:
+                EnsureWorkspaceAgentRequest(
+                    agent_type=task.agent_type, session_kind=payload.session_kind
+                )
+            update["session_kind"] = payload.session_kind
+        selected_session_id = update.get("session_id", task.session_id)
+        selected_session = self.sessions.get(selected_session_id) if selected_session_id else None
+        if selected_session is not None and (
+            payload.session_kind is not None or payload.session_id is not None
+        ):
+            if payload.session_kind is None and payload.session_id:
+                update["session_kind"] = selected_session.session_kind
+            elif selected_session.session_kind != update.get("session_kind", task.session_kind):
+                raise ValueError("The selected agent does not match the Task execution surface")
         if "agent_tag" in payload.model_fields_set:
             update["agent_tag"] = payload.agent_tag
         if payload.goal_packet is not None:

@@ -213,7 +213,7 @@ async function loadComposerEntries() {
   const factory = new Function(
     'deps',
     'toStreamSendAttachment',
-    `const { isSending, goalComposerLocked, goalInputBlocked, goalSteerOnly, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, retrySendAttempt, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, isEditingQueuedDraft, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props, streamBasePath, goal, goalImageRecovery, goalError, authoritativeTurns, queuedChatState } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush, reconcileQueuedDeliveries, reconcileGoalRecovery, sendQueuedDraft };`,
+    `const { isSending, goalComposerLocked, goalInputBlocked, goalSteerOnly, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, retrySendAttempt, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, isEditingQueuedDraft, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props, streamBasePath, isManagedChat, goal, goalImageRecovery, goalError, authoritativeTurns, queuedChatState } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush, reconcileQueuedDeliveries, reconcileGoalRecovery, sendQueuedDraft };`,
   )
   return (deps) => factory(deps, toStreamSendAttachment)
 }
@@ -309,6 +309,7 @@ function composerDeps(options = {}) {
     canSend,
     props: { tabId: 'tab-a', paneId: 'pane-a' },
     streamBasePath: ref('/api/workspaces/tabs/tab-a/stream'),
+    isManagedChat: ref(false),
     authoritativeTurns: ref([]),
     goal: ref(null),
     goalImageRecovery: ref(false),
@@ -349,6 +350,53 @@ test('submit entry refuses Enter-driven sends while the composer is unavailable'
   assert.equal(sendCalls, 0)
   assert.equal(deps.draftMessage.value, 'hello')
   assert.equal(deps.pendingDirectTurns.value.length, 0)
+})
+
+test('explicit retries reuse the same client turn id after uncertain failure', async t => {
+  const makeEntries = await loadComposerEntries()
+  const ids = []
+  let attempt = 0
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    attempt += 1
+    ids.push(JSON.parse(options.body).client_turn_id)
+    if (attempt === 1) {
+      return { ok: false, status: 503, json: async () => ({ detail: 'delivery uncertain' }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  })
+  const deps = composerDeps()
+  deps.isManagedChat.value = true
+  deps.streamBasePath.value = '/api/workspaces/sessions/managed-a/stream'
+  const { submit } = makeEntries(deps)
+
+  assert.equal(await submit('normal'), false)
+  assert.equal(deps.draftMessage.value, 'hello')
+  assert.equal(await submit('normal'), true)
+
+  assert.equal(ids.length, 2)
+  assert.equal(ids[1], ids[0])
+  assert.equal(deps.retrySendAttempt.value, null)
+})
+
+test('successful same-content submissions receive distinct client turn ids', async t => {
+  const makeEntries = await loadComposerEntries()
+  const ids = []
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    ids.push(JSON.parse(options.body).client_turn_id)
+    return { ok: true, status: 200, json: async () => ({ ok: true }) }
+  })
+  const deps = composerDeps()
+  deps.isManagedChat.value = true
+  deps.streamBasePath.value = '/api/workspaces/sessions/managed-a/stream'
+  const { submit } = makeEntries(deps)
+
+  assert.equal(await submit('normal'), true)
+  deps.draftMessage.value = 'hello'
+  assert.equal(await submit('normal'), true)
+
+  assert.equal(ids.length, 2)
+  assert.notEqual(ids[1], ids[0])
+  assert.equal(deps.retrySendAttempt.value, null)
 })
 
 test('queue watcher waits for live recovery before sending', async t => {

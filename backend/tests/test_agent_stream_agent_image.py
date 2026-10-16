@@ -21,15 +21,30 @@ import importlib
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 
-from claude_hub.models import AgentStreamEventType, AgentType, ExecutionTarget, SessionKind
+from claude_hub.models import (
+    AgentRuntimeStatus,
+    AgentStreamEvent,
+    AgentStreamEventType,
+    AgentType,
+    EnsureWorkspaceAgentRequest,
+    ExecutionTarget,
+    ManagedSession,
+    ManagedSessionStatus,
+    SessionKind,
+    TerminalTab,
+    User,
+    WorkspaceCreate,
+    WorkspaceSessionRole,
+)
 
 # Keep a real image: retained output uses the attachment store's header and
 # dimension validation, and must round-trip the original bytes unchanged.
@@ -37,6 +52,7 @@ PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJ1kAAAAASUVORK5CYII="
 )
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+TAB_CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +69,7 @@ def _make_tab(
     return SimpleNamespace(
         id=tab_id,
         name=f"tab-{tab_id}",
+        created_at=TAB_CREATED_AT,
         cwd=cwd,
         remote_cwd=None,
         target=target,
@@ -60,6 +77,9 @@ def _make_tab(
         remote_reconnect=True,
         solo_mode=True,
         env={},
+        managed_session_id=None,
+        workspace_id=None,
+        workspace_role=None,
         agent_session_id="provider-session-id",
         agent_session_id_verified=False,
         cursor_transport="terminal",
@@ -575,3 +595,357 @@ async def test_remote_session_cannot_read(
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
     resp = await _get_image(client, "tab-r", "r.png")
     assert resp.status_code == 404
+
+
+def _managed_image_session(workspace_id: str, cwd: Path, *, created_at: datetime) -> ManagedSession:
+    return ManagedSession(
+        id="img-agent-1",
+        workspace_id=workspace_id,
+        tab_id="managed-image-tab",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        title="Managed image",
+        workspace_path=str(cwd),
+        tmux_session="",
+        target=ExecutionTarget.LOCAL,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_managed_image_response_is_no_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services.workspace_manager import WorkspaceManager
+
+    cwd = tmp_path / "managed"
+    cwd.mkdir()
+    (cwd / "managed.png").write_bytes(PNG_BYTES)
+    manager = WorkspaceManager()
+    session = _managed_image_session("managed-images", cwd, created_at=datetime.now(timezone.utc))
+    manager.sessions[session.id] = session
+    monkeypatch.setattr(agent_stream_api, "workspace_manager", manager)
+
+    response = await agent_stream_api.get_session_agent_image(
+        session.id,
+        "managed.png",
+        User(open_id="image-user", name="Image User", email="image@example.test"),
+    )
+
+    assert response.body == PNG_BYTES
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_managed_image_read_cannot_commit_after_delete_and_allocator_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services import agent_stream as agent_stream_service
+    from claude_hub.services.agent_stream import local_images
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+    from claude_hub.services.ttyd_manager import ttyd_manager
+    from claude_hub.services.workspace_manager import WorkspaceManager
+
+    cwd = tmp_path / "managed-race"
+    cwd.mkdir()
+    image = cwd / "managed.png"
+    image.write_bytes(PNG_BYTES)
+    manager = WorkspaceManager()
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_args: "")
+    workspace = manager.create_workspace(
+        WorkspaceCreate(name="Images", path=str(cwd), session_prefix="img")
+    )
+    old = _managed_image_session(workspace.id, cwd, created_at=datetime.now(timezone.utc))
+    manager.sessions[old.id] = old
+    monkeypatch.setattr(agent_stream_api, "workspace_manager", manager)
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_read = local_images._read_referenced_image
+
+    def delayed_read(session: ManagedSession, raw_path: str):
+        try:
+            result = original_read(session, raw_path)
+            entered.set()
+            assert release.wait(5), "blocked image read was not released"
+            return result
+        finally:
+            finished.set()
+
+    async def delete_tab(_tab_id: str) -> bool:
+        return True
+
+    tab_counter = 0
+
+    async def create_tab(**kwargs: Any) -> TerminalTab:
+        nonlocal tab_counter
+        tab_counter += 1
+        now = datetime.now(timezone.utc)
+        return TerminalTab(
+            id=f"fresh-image-tab-{tab_counter}",
+            name=str(kwargs["name"]),
+            cwd=str(cwd),
+            solo_mode=True,
+            agent_type=kwargs["agent_type"],
+            session_kind=kwargs["session_kind"],
+            target=ExecutionTarget.LOCAL,
+            port=19010 + tab_counter,
+            created_at=now,
+            is_active=True,
+            workspace_id=workspace.id,
+            workspace_name=workspace.name,
+            workspace_role=kwargs["workspace_role"],
+            managed_session_id=kwargs["managed_session_id"],
+        )
+
+    async def fence_session(_session_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(local_images, "_read_referenced_image", delayed_read)
+    monkeypatch.setattr(ttyd_manager, "delete_tab", delete_tab)
+    monkeypatch.setattr(ttyd_manager, "create_tab", create_tab)
+    monkeypatch.setattr(ttyd_manager, "list_tabs", lambda: [])
+    monkeypatch.setattr(ttyd_manager, "list_archived_tabs", lambda: [])
+    monkeypatch.setattr(agent_stream_service, "fence_session_stream", fence_session)
+    user = User(open_id="image-user", name="Image User", email="image@example.test")
+    request = asyncio.create_task(
+        agent_stream_api.get_session_agent_image(old.id, "managed.png", user)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        await manager.delete_session(old.id)
+        assert not AgentStreamAttachmentStore(old.workspace_id, old.id).has_residual_state()
+        fresh = await manager.ensure_workspace_agent(
+            workspace.id,
+            EnsureWorkspaceAgentRequest(
+                role=WorkspaceSessionRole.WORKER,
+                agent_type=AgentType.CLAUDE,
+                session_kind=SessionKind.CHAT,
+                reuse_existing=False,
+            ),
+        )
+        assert fresh.id == old.id
+        image.unlink()
+        release.set()
+        with pytest.raises(HTTPException) as stale_error:
+            await request
+        assert stale_error.value.status_code == 404
+        with pytest.raises(HTTPException) as fresh_error:
+            await agent_stream_api.get_session_agent_image(fresh.id, "managed.png", user)
+        assert fresh_error.value.status_code == 404
+        assert not AgentStreamAttachmentStore(fresh.workspace_id, fresh.id).has_residual_state()
+    finally:
+        release.set()
+        await asyncio.to_thread(finished.wait, 5)
+        if not request.done():
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+
+
+@pytest.mark.asyncio
+async def test_direct_image_read_cannot_leave_cache_after_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services.agent_stream import local_images
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+    from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
+
+    cwd = tmp_path / "direct-race"
+    cwd.mkdir()
+    image = cwd / "direct.png"
+    image.write_bytes(PNG_BYTES)
+    created_at = datetime.now(timezone.utc)
+    process = TTYDProcess(
+        tab_id="direct-delete-race",
+        port=19020,
+        name="Direct image",
+        cwd=str(cwd),
+        created_at=created_at,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    process.stop = AsyncMock()  # type: ignore[method-assign]
+    tabs = TTYDManager()
+    tabs.processes[process.tab_id] = process
+    tabs._tab_order = [process.tab_id]
+    monkeypatch.setattr(tabs, "_save_state", lambda: None)
+    monkeypatch.setattr(tabs, "_save_order", lambda: None)
+    monkeypatch.setattr(agent_stream_api, "ttyd_manager", tabs)
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_read = local_images._read_referenced_image
+
+    def delayed_read(session: ManagedSession, raw_path: str):
+        result = original_read(session, raw_path)
+        entered.set()
+        assert release.wait(5), "blocked image read was not released"
+        return result
+
+    monkeypatch.setattr(local_images, "_read_referenced_image", delayed_read)
+    user = User(open_id="image-user", name="Image User", email="image@example.test")
+    request = asyncio.create_task(
+        agent_stream_api.get_tab_agent_image(process.tab_id, "direct.png", user)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert await tabs.delete_tab(process.tab_id)
+        image.unlink()
+        release.set()
+        with pytest.raises(HTTPException) as stale_error:
+            await request
+        assert stale_error.value.status_code == 404
+        store = AgentStreamAttachmentStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
+        assert not store.has_residual_state()
+    finally:
+        release.set()
+        if not request.done():
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_read_cannot_publish_after_background_read_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services.agent_stream import local_images
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    cwd = tmp_path / "cancelled-read"
+    cwd.mkdir()
+    image = cwd / "cancelled.png"
+    image.write_bytes(PNG_BYTES)
+    tab = _make_tab("cancelled-image-tab", str(cwd))
+    current = {tab.id: tab}
+    monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", current.get)
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_read = local_images._read_referenced_image
+
+    def delayed_read(session: ManagedSession, raw_path: str):
+        try:
+            result = original_read(session, raw_path)
+            entered.set()
+            assert release.wait(5), "blocked image read was not released"
+            return result
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(local_images, "_read_referenced_image", delayed_read)
+    request = asyncio.create_task(
+        agent_stream_api.get_tab_agent_image(
+            tab.id,
+            "cancelled.png",
+            User(open_id="image-user", name="Image User", email="image@example.test"),
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    current.pop(tab.id)
+    store = AgentStreamAttachmentStore("terminal-tabs", f"terminal-tab-{tab.id}")
+    await store.clear()
+    release.set()
+    assert await asyncio.to_thread(finished.wait, 5)
+    await asyncio.sleep(0)
+    assert not store.has_residual_state()
+
+
+@pytest.mark.parametrize("blocked_phase", ["append", "capture"])
+@pytest.mark.asyncio
+async def test_tailer_image_capture_revalidates_session_incarnation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_phase: str,
+) -> None:
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.base import AgentStreamAdapter
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer, StructuredSourceUnavailable
+
+    now = datetime.now(timezone.utc)
+    session = _managed_image_session("tailer-image-workspace", tmp_path, created_at=now)
+    session.id = f"tailer-image-{blocked_phase}"
+    sessions = {session.id: session}
+    phase_entered = asyncio.Event()
+    release_phase = asyncio.Event()
+    cache_calls: list[tuple[str, list[str]]] = []
+    fanned_out: list[AgentStreamEvent] = []
+
+    class ControlledStore:
+        cursor_path = tmp_path / "cursor.json"
+
+        async def append(self, event: AgentStreamEvent) -> AgentStreamEvent:
+            if blocked_phase == "append":
+                phase_entered.set()
+                await release_phase.wait()
+            return event.model_copy(update={"stream_sequence": 1})
+
+    async def controlled_cache(
+        live: ManagedSession,
+        paths: list[str],
+        *,
+        owner_is_current=None,
+    ) -> None:
+        cache_calls.append((live.id, paths))
+        if blocked_phase == "capture":
+            phase_entered.set()
+            await release_phase.wait()
+
+    monkeypatch.setattr(tailer_module, "cache_image_paths", controlled_cache)
+    tailer = SessionTailer(
+        session.workspace_id,
+        session.id,
+        cast(AgentStreamAdapter, SimpleNamespace()),
+        lambda: sessions.get(session.id),
+        store=cast(AgentStreamStore, ControlledStore()),
+    )
+    tailer._is_live = True
+    monkeypatch.setattr(tailer, "_fanout", fanned_out.append)
+    event = AgentStreamEvent(
+        stream_sequence=-1,
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        type=AgentStreamEventType.TEXT_DELTA,
+        turn_id="image-turn",
+        message_id="image-turn:assistant",
+        run_epoch=1,
+        payload={"role": "assistant", "text": "[result](image.png)"},
+        created_at=now,
+    )
+    publishing = asyncio.create_task(tailer._persist_and_fanout(event))
+    await asyncio.wait_for(phase_entered.wait(), timeout=1)
+    sessions[session.id] = session.model_copy(
+        update={
+            "tab_id": "replacement-tab",
+            "created_at": now + timedelta(seconds=1),
+        }
+    )
+    release_phase.set()
+
+    with pytest.raises(StructuredSourceUnavailable, match="deleted or replaced"):
+        await asyncio.wait_for(publishing, timeout=1)
+    assert fanned_out == []
+    assert len(cache_calls) == (1 if blocked_phase == "capture" else 0)

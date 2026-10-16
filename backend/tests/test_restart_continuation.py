@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -85,6 +86,8 @@ async def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         archived=False,
         workspace_id=None,
         workspace_role=None,
+        managed_session_id=None,
+        created_at=datetime.now(),
     )
     monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: tab if tab_id == tab.id else None)
     providers: list[MemoryProvider] = []

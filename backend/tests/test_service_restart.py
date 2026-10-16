@@ -852,13 +852,13 @@ async def test_stream_shutdown_flushes_sessions_concurrently_before_returning():
 
     from claude_hub.services.agent_stream.tailer import TailerManager
 
-    manager = TailerManager.__new__(TailerManager)
-    manager._lock = asyncio.Lock()
+    manager = TailerManager(lambda _session_id: None)
     entered = set()
     flushed = set()
     all_entered = asyncio.Event()
 
-    async def stop(session_id):
+    async def stop(session_id, *, raise_errors=False):
+        assert raise_errors
         entered.add(session_id)
         if len(entered) == 8:
             all_entered.set()

@@ -51,7 +51,7 @@ test('TerminalPane keeps the full Chat cache bounded and mounts minimal queue ob
 })
 
 test('minimal queued observer requests foreground activation on completion or failure', () => {
-  assert.match(queuedObserver, /void start\(props\.tabId, 'terminal-tab'\)/)
+  assert.match(queuedObserver, /props\.managedChat \? 'managed-session' : 'terminal-tab'/)
   assert.match(
     queuedObserver,
     /connectionState\.value === 'live' && !turnInFlight\.value/,
@@ -92,7 +92,7 @@ test('switching back rearms latest before cached history reconciles', () => {
   const visibleHistoryStart = { value: 120 }
   const activate = new Function(
     'resetActivation', 'startStream', 'hydrateGoal', 'nextTick', 'observeTimelineGeometry',
-    'visibleHistoryStart', 'isPaneActivated', 'timelineDisposed', 'timelineVisit', body,
+    'visibleHistoryStart', 'isPaneActivated', 'timelineDisposed', 'timelineVisit', 'isManagedChat', body,
   )
   activate(
     () => calls.push('reset'),
@@ -100,7 +100,7 @@ test('switching back rearms latest before cached history reconciles', () => {
     () => calls.push('hydrate-goal'),
     () => {},
     () => {},
-    visibleHistoryStart, { value: false }, true, 0,
+    visibleHistoryStart, { value: false }, true, 0, { value: false },
   )
   assert.deepEqual(calls, ['reset', 'start', 'hydrate-goal'])
   assert.equal(visibleHistoryStart.value, null, 'a new visit starts with the latest history window')

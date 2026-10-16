@@ -60,6 +60,7 @@
         <span>Add attachment</span>
       </button>
       <button
+        v-if="showSchedule"
         type="button"
         role="menuitem"
         title="Create a scheduled message in this Chat"
@@ -115,12 +116,17 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   open: boolean
   showGoal: boolean
+  showSchedule?: boolean
   attachmentDisabledReason?: string | null
   goalDisabledReason?: string | null
-}>()
+}>(), {
+  showSchedule: true,
+  attachmentDisabledReason: null,
+  goalDisabledReason: null,
+})
 const emit = defineEmits<{
   'update:open': [value: boolean]
   attachment: []

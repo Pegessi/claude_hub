@@ -169,6 +169,31 @@
           >
             These review and autonomy policies are retained for a future Workspace handoff, but do not run while the initiator controls execution.
           </p>
+          <div
+            v-if="form.execution_control === 'workspace'"
+            class="modal-field"
+          >
+            <label>Execution surface</label>
+            <div class="segmented-control">
+              <button
+                type="button"
+                :class="['segment-button', { active: form.session_kind === 'terminal' }]"
+                @click="form.session_kind = 'terminal'; form.session_id = ''"
+              >
+                Terminal
+              </button>
+              <button
+                type="button"
+                :class="['segment-button', { active: form.session_kind === 'chat' }]"
+                @click="form.session_kind = 'chat'; form.session_id = ''"
+              >
+                Chat
+              </button>
+            </div>
+            <p class="modal-hint">
+              Chat uses the managed conversation stream. Terminal preserves the native CLI surface.
+            </p>
+          </div>
           <div class="modal-field">
             <label>Mode</label>
             <div class="segmented-control segmented-control--three">
@@ -287,7 +312,7 @@
                 Auto
               </option>
               <option
-                v-for="agent in workspaceAgents"
+                v-for="agent in workspaceAgents.filter(agent => agent.session_kind === form.session_kind)"
                 :key="agent.id"
                 :value="agent.id"
               >

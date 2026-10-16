@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "cfd6bc3ed2a099829df944ec1d3d16d5bd7f2ff2",
+  "parents": [
+    "cae8e53271e0b6a345dcbf40254ccff868ad5939",
+    "525b84e0a69c331de6e584f15c4a27284753d51a"
+  ],
+  "base": "a72cf9d45c88aa05865e9619140caec38c874d8b",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "fe046cf9a120aad7b816b7abb45a299f1dd233cf",
+  "reconstructed_tree": "f1e2672680ad027ee294ec7c6f2ef72fb5a2765d",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "100253df82cf731b5fc6ae7d8b211f80063f281a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9bb2ffcaa13a87dd9a69963740a81c6a5276565f"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a36c638acac8456be83ee63c5a6e6fbfc97b3fff"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4861dac366dcad2130b55f7a475e7a83a1393091"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ab94464174bdfa5ac6b06bc65f8f4b04c09ed614"
+      },
+      "reason": "Retain the Goal restart entry and all incoming main entries; document the independently reproduced proxy-evidence, effective-configuration and failed-deferral integration repairs.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/tailer.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4997d49a963ee272c0ef93d573ec24d821b3150d"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4997d49a963ee272c0ef93d573ec24d821b3150d"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4997d49a963ee272c0ef93d573ec24d821b3150d"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4997d49a963ee272c0ef93d573ec24d821b3150d"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1ce1b6483d74e09c08898c99a563fdac8afe9c81"
+      },
+      "reason": "Add a boolean runtime_interrupted marker only to Hub-generated runtime-loss errors. Preserve diagnostic redaction while allowing recovery to recognize the trusted cause without comparing potentially masked prose.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/restart_continuation.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6d564717bd136a0f8960eb2cd2d49f8f55033099"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "46fbc6fd60ab62c3a120841f53a3b28392273035"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6d564717bd136a0f8960eb2cd2d49f8f55033099"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "46fbc6fd60ab62c3a120841f53a3b28392273035"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b5e0cac227096d43099c8d6d1fd5792c5d85bb02"
+      },
+      "reason": "Keep the validated Goal continuation implementation; hash the shared effective provider environment including private deployment defaults, accept the strict interruption marker with exact legacy fallback, and join failed deferred cleanup under the original admission lock before queued objective edits can change identity. Preserve cancellation shielding and next-step objective semantics.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_goal_restart_continuation.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "07f62a83ff96168bd8170e80325eea8095887050"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "07f62a83ff96168bd8170e80325eea8095887050"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "cb73a49696a0493b2bd5046b36943fc7ec0ef196"
+      },
+      "reason": "Retain all feature regressions and add seven merge-specific cases: redacted interruption and private route changes across plain/direct/deferred modes, plus the queued objective edit versus expired deferred cleanup counterexample.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "docs/DEPLOYMENT.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f98bdf86ad56b59fd4794126c95a5b6efef4c606"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "834a162ab56cd93758ac2a4e07e7416425e77a04"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "96333ea9c6873e3d451e90bf3c4c15eea5ba713a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "955b3d6aecd190b60011fb2c3f2fc616a9fd8417"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fad313b95db91abd7730865822f517e2345e6bd5"
+      },
+      "reason": "Combine the Goal planned-restart documentation with incoming private proxy deployment guidance. Clarify that pause/resume/complete/clear revoke pending recovery, while objective edits queued during preparation retain next-step semantics.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "docs/working-logs/2026-10-16-goal-restart-continuation.md",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c65f6633de5f9651459333f4f9f2f550dfef3a71"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c65f6633de5f9651459333f4f9f2f550dfef3a71"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9fa6b843c09c29533434e33c4f8c9a794a83effa"
+      },
+      "reason": "Retain branch-delivery history and append authorized local-main integration scope, the three reproduced interactions, chosen behavior, exact canonical/browser/independent evidence and unverified live-provider boundary.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

@@ -26,10 +26,9 @@ import asyncio
 import json
 import logging
 import os
-from contextlib import AbstractAsyncContextManager, nullcontext
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, NoReturn, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Literal, NoReturn, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
@@ -44,7 +43,6 @@ from ..models import (
     AgentStreamEventType,
     AgentType,
     ChatMode,
-    ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
     ScheduledTask,
@@ -52,6 +50,7 @@ from ..models import (
     SessionKind,
     StreamCapabilities,
     User,
+    WorkspaceAttachmentCreate,
     WorkspaceSessionRole,
 )
 from ..models.schemas import TaskExecutionControl, TaskExecutionReference
@@ -64,7 +63,7 @@ from ..services.agent_stream import (
     quoted_images,
 )
 from ..services.agent_stream.attachments import AgentStreamAttachmentStore
-from ..services.agent_stream.base import discover_source_cached
+from ..services.agent_stream.base import NativeInputNotSubmittedError, discover_source_cached
 from ..services.agent_stream.local_images import AgentImageUnavailable, read_cached_agent_image
 
 logger = logging.getLogger(__name__)
@@ -133,6 +132,12 @@ def _persist_workspace_agent_session_id(session_id: str, conversation_id: str) -
     workspace_manager.set_session_agent_session_id(session_id, conversation_id)
 
 
+def _persist_workspace_chat_mode(session_id: str, mode: str) -> None:
+    """Persist the Task-controlled mode for a managed Chat session."""
+
+    workspace_manager.set_managed_chat_mode(session_id, mode)
+
+
 def _persist_tab_agent_session_id(stream_session_id: str, conversation_id: str) -> None:
     """Persist a provider-owned conversation id for an Agent tab."""
 
@@ -148,15 +153,24 @@ def _persist_tab_chat_mode(stream_session_id: str, mode: str) -> None:
 def _get_tailer_manager() -> TailerManager:
     global _tailer_manager
     if _native_input_shutting_down:
-        raise RuntimeError("service is shutting down; try again after it reconnects")
+        raise NativeInputNotSubmittedError(
+            "service is shutting down; try again after it reconnects"
+        )
     if _tailer_manager is None:
         _tailer_manager = TailerManager(
             session_getter=lambda sid: workspace_manager.sessions.get(sid),
             persist_session_id=_persist_workspace_agent_session_id,
+            persist_mode=_persist_workspace_chat_mode,
             post_persist_observers=[_notify_goal_turn_completed],
             task_activity_observer=_notify_task_activity,
         )
     return _tailer_manager
+
+
+def get_managed_tailer_manager() -> TailerManager:
+    """Return the sole structured-stream owner for managed sessions."""
+
+    return _get_tailer_manager()
 
 
 def _tab_stream_session_id(tab_id: str) -> str:
@@ -207,7 +221,7 @@ def _terminal_tab_stream_session(tab_id: str) -> Optional[ManagedSession]:
         cursor_cli_version=tab.cursor_cli_version,
         cursor_transcript_path=tab.cursor_transcript_path,
         cursor_transcript_schema=tab.cursor_transcript_schema,
-        created_at=now,
+        created_at=tab.created_at,
         updated_at=now,
     )
 
@@ -223,7 +237,9 @@ def _terminal_tab_stream_session_by_id(
 def _get_tab_tailer_manager() -> TailerManager:
     global _tab_tailer_manager
     if _native_input_shutting_down:
-        raise RuntimeError("service is shutting down; try again after it reconnects")
+        raise NativeInputNotSubmittedError(
+            "service is shutting down; try again after it reconnects"
+        )
     if _tab_tailer_manager is None:
         _tab_tailer_manager = TailerManager(
             session_getter=_terminal_tab_stream_session_by_id,
@@ -403,6 +419,16 @@ def _session_or_404(session_id: str) -> ManagedSession:
 
 
 def _terminal_tab_session_or_404(tab_id: str) -> ManagedSession:
+    tab = ttyd_manager.get_tab(tab_id)
+    if tab is None:
+        raise HTTPException(status_code=404, detail="Terminal tab not found")
+    if tab.session_kind == SessionKind.CHAT and (
+        tab.managed_session_id or tab.workspace_role is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Workspace-managed tabs must use their managed session stream",
+        )
     session = _terminal_tab_stream_session(tab_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Terminal tab not found")
@@ -518,6 +544,36 @@ def _raise_structured_unavailable(
     raise HTTPException(status_code=409, detail=_structured_failure_message(session_id, manager))
 
 
+@asynccontextmanager
+async def _managed_stream_interaction(
+    session: ManagedSession,
+    *,
+    require_chat: bool = False,
+) -> AsyncIterator[ManagedSession]:
+    """Map an incarnation disappearing before admission to a stable conflict."""
+    try:
+        async with workspace_manager.managed_chat_interaction_guard(
+            session, require_chat=require_chat
+        ) as live:
+            yield live
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Managed Chat session was deleted or replaced",
+            headers={CHAT_ERROR_REASON_HEADER: "structured_source_unavailable"},
+        ) from exc
+
+
+def _require_current_managed_session(session: ManagedSession, manager: TailerManager) -> None:
+    """Reject responses that crossed deletion or friendly-id reuse."""
+    if not manager.session_is_current(session):
+        raise HTTPException(
+            status_code=409,
+            detail="Managed Chat session was deleted or replaced",
+            headers={CHAT_ERROR_REASON_HEADER: "structured_source_unavailable"},
+        )
+
+
 def _closed_unavailable_stream(capabilities: StreamCapabilities, message: str) -> StreamingResponse:
     async def unavailable_stream() -> Any:
         yield _sse("hello", capabilities.model_dump())
@@ -544,6 +600,21 @@ class AgentStreamModeRequest(BaseModel):
 # ── capabilities ─────────────────────────────────────────────────────────────
 
 
+def _managed_default_mode_capabilities(capabilities: StreamCapabilities) -> StreamCapabilities:
+    """Project provider capabilities onto managed Task execution policy."""
+    return capabilities.model_copy(
+        update={
+            "available_modes": [
+                option
+                for option in capabilities.available_modes
+                if option.id == ChatMode.DEFAULT.value
+            ],
+            "current_mode": ChatMode.DEFAULT.value,
+            "supports_dynamic_modes": False,
+        }
+    )
+
+
 @router.get(
     "/sessions/{managed_session_id}/stream/capabilities",
     response_model=StreamCapabilities,
@@ -553,7 +624,11 @@ async def get_stream_capabilities(
     current_user: User = Depends(get_current_user),
 ) -> StreamCapabilities:
     session = _session_or_404(managed_session_id)
-    return await _capabilities_for(session)
+    manager = _get_tailer_manager()
+    async with _managed_stream_interaction(session) as live:
+        capabilities = await _capabilities_for(live, manager)
+    _require_current_managed_session(session, manager)
+    return _managed_default_mode_capabilities(capabilities)
 
 
 @router.get(
@@ -580,11 +655,9 @@ async def _retry_stream_for(
         await manager.retry(session)
     except (ValueError, StructuredSourceUnavailable, RuntimeError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return (
-        await _tab_capabilities_for(session, manager)
-        if direct_tab
-        else await _capabilities_for(session, manager)
-    )
+    if direct_tab:
+        return await _tab_capabilities_for(session, manager)
+    return _managed_default_mode_capabilities(await _capabilities_for(session, manager))
 
 
 @router.post(
@@ -598,7 +671,11 @@ async def retry_stream(
     """Explicitly replace a failed native provider transport."""
 
     session = _session_or_404(managed_session_id)
-    return await _retry_stream_for(session, _get_tailer_manager())
+    manager = _get_tailer_manager()
+    async with _managed_stream_interaction(session) as live:
+        capabilities = await _retry_stream_for(live, manager)
+    _require_current_managed_session(session, manager)
+    return capabilities
 
 
 @router.post(
@@ -630,6 +707,11 @@ async def _set_stream_mode_for(
         raise HTTPException(
             status_code=400, detail="mode is only available for native Chat sessions"
         )
+    if not direct_tab and mode != ChatMode.DEFAULT.value:
+        raise HTTPException(
+            status_code=409,
+            detail="Managed Chat mode is controlled by task execution",
+        )
     from ..services.goal_run import get_goal_admission_lock, get_goal_manager
 
     tab_id = session.tab_id
@@ -651,11 +733,9 @@ async def _set_stream_mode_for(
     except RuntimeError as exc:
         status_code = 409 if "in flight" in str(exc) else 503
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    return (
-        await _tab_capabilities_for(session, manager)
-        if direct_tab
-        else await _capabilities_for(session, manager)
-    )
+    if direct_tab:
+        return await _tab_capabilities_for(session, manager)
+    return _managed_default_mode_capabilities(await _capabilities_for(session, manager))
 
 
 @router.put(
@@ -668,7 +748,11 @@ async def set_stream_mode(
     current_user: User = Depends(get_current_user),
 ) -> StreamCapabilities:
     session = _session_or_404(managed_session_id)
-    return await _set_stream_mode_for(session, _get_tailer_manager(), payload.mode)
+    manager = _get_tailer_manager()
+    async with _managed_stream_interaction(session) as live:
+        capabilities = await _set_stream_mode_for(live, manager, payload.mode)
+    _require_current_managed_session(session, manager)
+    return capabilities
 
 
 @router.put(
@@ -729,9 +813,11 @@ async def get_stream_events(
     current_user: User = Depends(get_current_user),
 ) -> AgentStreamEventPage:
     session = _session_or_404(managed_session_id)
-    return await _stream_events_for(
-        session, _get_tailer_manager(), since_sequence, limit, compact=compact
-    )
+    manager = _get_tailer_manager()
+    async with _managed_stream_interaction(session) as live:
+        page = await _stream_events_for(live, manager, since_sequence, limit, compact=compact)
+    _require_current_managed_session(session, manager)
+    return page
 
 
 @router.get(
@@ -765,9 +851,10 @@ async def _wait_stream_events_for(
     session_exists: Callable[[], bool],
     payload: AgentStreamWaitRequest,
     allow_pending_source: bool = False,
+    capabilities: Optional[StreamCapabilities] = None,
 ) -> AgentStreamEventPage:
     since = payload.since_sequence
-    caps = await _capabilities_for(session, manager)
+    caps = capabilities or await _capabilities_for(session, manager)
     if not caps.structured and not allow_pending_source:
         return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
 
@@ -875,12 +962,18 @@ async def wait_stream_events(
     current_user: User = Depends(get_current_user),
 ) -> AgentStreamEventPage:
     session = _session_or_404(managed_session_id)
-    return await _wait_stream_events_for(
+    manager = _get_tailer_manager()
+    async with _managed_stream_interaction(session) as live:
+        capabilities = await _capabilities_for(live, manager)
+    page = await _wait_stream_events_for(
         session,
-        _get_tailer_manager(),
-        lambda: workspace_manager.sessions.get(session.id) is not None,
+        manager,
+        lambda: manager.session_is_current(session),
         payload,
+        capabilities=capabilities,
     )
+    _require_current_managed_session(session, manager)
+    return page
 
 
 @router.post(
@@ -914,6 +1007,8 @@ async def _stream_live_for(
     allow_pending_source: bool = False,
 ) -> StreamingResponse:
     caps = await _capabilities_for(session, manager)
+    if not session_exists():
+        return _closed_unavailable_stream(caps, missing_message)
     if not caps.structured and not allow_pending_source:
         return _closed_unavailable_stream(
             caps,
@@ -928,17 +1023,26 @@ async def _stream_live_for(
         return _closed_unavailable_stream(caps, _structured_failure_message(session.id, manager))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not session_exists():
+        manager.unsubscribe(session.id, queue)
+        return _closed_unavailable_stream(caps, missing_message)
     if allow_pending_source:
         caps = await _tab_capabilities_for(session, manager)
     store = manager.get_store(session.workspace_id, session.id)
 
     async def event_stream() -> Any:
         try:
+            if not session_exists():
+                yield _sse("error", {"message": missing_message})
+                return
             yield _sse("hello", caps.model_dump())
             delivered_sequence = since_sequence
 
             while True:
                 page = await store.read_since(delivered_sequence, limit=200)
+                if not session_exists():
+                    yield _sse("error", {"message": missing_message})
+                    return
                 for replay_event in page.events:
                     if replay_event.stream_sequence <= delivered_sequence:
                         continue
@@ -973,10 +1077,16 @@ async def _stream_live_for(
                         queue.get(), timeout=_SSE_HEALTH_POLL_S
                     )
                 except asyncio.TimeoutError:
+                    if not session_exists():
+                        yield _sse("error", {"message": missing_message})
+                        return
                     if loop.time() - last_heartbeat >= _SSE_HEARTBEAT_S:
                         yield ": ping\n\n"
                         last_heartbeat = loop.time()
                     continue
+                if not session_exists():
+                    yield _sse("error", {"message": missing_message})
+                    return
                 if event.stream_sequence <= delivered_sequence:
                     continue
                 delivered_sequence = event.stream_sequence
@@ -996,13 +1106,17 @@ async def stream_live(
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     session = _session_or_404(managed_session_id)
-    return await _stream_live_for(
-        session,
-        _get_tailer_manager(),
-        lambda: workspace_manager.sessions.get(session.id) is not None,
-        "session was deleted",
-        since_sequence,
-    )
+    manager = _get_tailer_manager()
+    async with _managed_stream_interaction(session) as live:
+        response = await _stream_live_for(
+            live,
+            manager,
+            lambda: manager.session_is_current(session),
+            "session was deleted or replaced",
+            since_sequence,
+        )
+    _require_current_managed_session(session, manager)
+    return response
 
 
 @router.get("/tabs/{tab_id}/stream/live")
@@ -1032,48 +1146,50 @@ async def get_stream_diagnostics(
 ) -> Dict[str, Any]:
     session = _session_or_404(managed_session_id)
     manager = _get_tailer_manager()
-    store = manager.get_store(session.workspace_id, session.id)
+    async with _managed_stream_interaction(session) as live:
+        store = manager.get_store(live.workspace_id, live.id)
+        adapter = get_adapter_for_session(live)
+        if adapter is None:
+            result = {
+                "adapter_id": "none",
+                "structured": False,
+                "schema_version": 0,
+                "event_count": await store.count(),
+                "last_event_at": await store.last_event_at(),
+            }
+        else:
+            structured = (await _capabilities_for(live, manager)).structured
+            tailer = manager.get_tailer(live.id)
+            tail_path: Optional[str] = None
+            last_error: Optional[str] = None
+            if tailer is not None:
+                source = tailer.current_source
+                if source is not None:
+                    tail_path = str(source)
+                last_error = tailer.last_error
+                # For CHAT sessions the native transport is the source; surface its
+                # error if the transport creation failed.
+                if tailer.native_error is not None and not last_error:
+                    last_error = tailer.native_error
+            else:
+                try:
+                    source = discover_source_cached(adapter, live)
+                except Exception:
+                    source = None
+                if source is not None:
+                    tail_path = str(source)
 
-    adapter = get_adapter_for_session(session)
-    if adapter is None:
-        return {
-            "adapter_id": "none",
-            "structured": False,
-            "schema_version": 0,
-            "event_count": await store.count(),
-            "last_event_at": await store.last_event_at(),
-        }
-
-    tailer = manager.get_tailer(session.id)
-    structured = (await _capabilities_for(session, manager)).structured
-    tail_path: Optional[str] = None
-    last_error: Optional[str] = None
-    if tailer is not None:
-        source = tailer.current_source
-        if source is not None:
-            tail_path = str(source)
-        last_error = tailer.last_error
-        # For CHAT sessions the native transport is the source; surface its
-        # error if the transport creation failed.
-        if tailer.native_error is not None and not last_error:
-            last_error = tailer.native_error
-    else:
-        try:
-            source = discover_source_cached(adapter, session)
-        except Exception:
-            source = None
-        if source is not None:
-            tail_path = str(source)
-
-    return {
-        "adapter_id": adapter.adapter_id,
-        "structured": structured,
-        "schema_version": adapter.schema_version,
-        "tail_path": tail_path,
-        "last_error": last_error,
-        "event_count": await store.count(),
-        "last_event_at": await store.last_event_at(),
-    }
+            result = {
+                "adapter_id": adapter.adapter_id,
+                "structured": structured,
+                "schema_version": adapter.schema_version,
+                "tail_path": tail_path,
+                "last_error": last_error,
+                "event_count": await store.count(),
+                "last_event_at": await store.last_event_at(),
+            }
+    _require_current_managed_session(session, manager)
+    return result
 
 
 # ── Native composer input (send) ────────────────────────────────────────────
@@ -1101,6 +1217,11 @@ class AgentStreamSendRequest(BaseModel):
     # ``normal``: fail with 409 when a turn is already in flight.
     # ``steer``: cancel the active turn, then deliver this message.
     delivery: str = Field(default="normal", pattern="^(normal|steer)$")
+    # Approval-card replies name both owners. Managed Chat uses these to route
+    # only the currently pending provider request; arbitrary text never gains
+    # an in-flight steer path.
+    question_turn_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    question_call_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
 
     @model_validator(mode="after")
     def _require_text_or_attachments(self) -> "AgentStreamSendRequest":
@@ -1108,6 +1229,8 @@ class AgentStreamSendRequest(BaseModel):
             raise ValueError("send request must include text or at least one attachment")
         if not self.client_turn_id.strip():
             raise ValueError("client_turn_id is required")
+        if (self.question_turn_id is None) != (self.question_call_id is None):
+            raise ValueError("question_turn_id and question_call_id must be provided together")
         return self
 
 
@@ -1435,14 +1558,120 @@ async def send_stream_input(
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     session = _session_or_404(managed_session_id)
-    manager = _get_tailer_manager()
-    try:
-        await _send_to_native(
-            session,
-            payload,
-            manager,
-            turn_metadata={"origin": "web"},
+    if payload.delivery != "normal":
+        raise HTTPException(
+            status_code=409,
+            detail="steering an active managed Chat turn is not supported",
+            headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
         )
+    manager = _get_tailer_manager()
+    if payload.question_turn_id is not None and payload.question_call_id is not None:
+        if payload.attachments:
+            raise HTTPException(
+                status_code=400, detail="question answers cannot include attachments"
+            )
+        try:
+            async with _managed_stream_interaction(session, require_chat=True) as live:
+                question_key = json.dumps(
+                    [payload.question_turn_id, payload.question_call_id], separators=(",", ":")
+                )
+                claimed_call = live.chat_question_answer_calls.get(question_key)
+                retry = claimed_call == payload.client_turn_id
+                # Legacy mailbox IDs may own a delivery without a fingerprint.
+                if (claimed_call is not None and not retry) or (
+                    not retry
+                    and (
+                        payload.client_turn_id in live.call_payload_fingerprints
+                        or payload.client_turn_id in live.pending_call_ids
+                        or payload.client_turn_id in live.processing_call_ids
+                        or payload.client_turn_id in live.delivered_call_ids
+                        or payload.client_turn_id in live.uncertain_call_ids
+                        or payload.client_turn_id in live.chat_question_answer_calls.values()
+                    )
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="The provider question or answer call already has another owner",
+                        headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
+                    )
+                if retry and payload.client_turn_id not in live.call_payload_fingerprints:
+                    raise RuntimeError("The claimed question answer has no mailbox envelope")
+                if not retry:
+                    consumed = await manager.answer_pending_question(
+                        live,
+                        payload.text,
+                        payload.question_turn_id,
+                        expected_call_id=payload.question_call_id,
+                    )
+                    if consumed:
+                        return {"ok": True, "answered_question": True}
+                    follows_card = await manager.accepts_question_followup(
+                        live,
+                        payload.text,
+                        payload.question_turn_id,
+                        expected_call_id=payload.question_call_id,
+                    )
+                    if not follows_card:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="The referenced provider question is no longer pending",
+                            headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
+                        )
+                    if await manager.turn_in_flight(live):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Wait for the current provider turn before submitting this answer",
+                            headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
+                        )
+                # Keep exact-card admission and its durable handoff indivisible.
+                # The public send method would reacquire our non-reentrant pump
+                # lock; use its locked body while retaining incarnation ownership.
+                await workspace_manager.send_chat_session_message_locked(
+                    live.id,
+                    payload.text,
+                    call_id=payload.client_turn_id,
+                    question_key=question_key,
+                )
+                await manager.resolve_answered_questions(
+                    live,
+                    payload.text,
+                    expected_turn_id=payload.question_turn_id,
+                    expected_call_id=payload.question_call_id,
+                )
+                return {"ok": True}
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="The managed Chat session changed while answering the provider question",
+                headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
+            ) from exc
+        except StructuredSourceUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _map_send_exception(exc) from exc
+    try:
+        await workspace_manager.send_chat_session_message(
+            managed_session_id,
+            payload.text,
+            attachments=[
+                WorkspaceAttachmentCreate(
+                    filename=attachment.filename,
+                    mime_type=attachment.mime_type,
+                    data_url=attachment.data_url,
+                )
+                for attachment in payload.attachments
+            ],
+            call_id=payload.client_turn_id,
+            expected_session=session,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="The managed Chat session changed while resolving the provider question",
+            headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
+        ) from exc
     except StructuredSourceUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except HTTPException:
@@ -1791,7 +2020,28 @@ async def cancel_stream_turn(
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     session = _session_or_404(managed_session_id)
-    return await _cancel_native_turn(session, _get_tailer_manager(), payload)
+    expected_turn_id = payload.expected_turn_id if payload is not None else None
+    try:
+        cancelled = await workspace_manager.cancel_chat_session(
+            managed_session_id,
+            expected_turn_id=expected_turn_id,
+        )
+        if not cancelled and expected_turn_id is not None:
+            active_turn_id = await _get_tailer_manager().active_turn_id(session)
+            if active_turn_id is not None and active_turn_id != expected_turn_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A newer managed Chat turn is active; the stale Stop was ignored",
+                    headers={CHAT_ERROR_REASON_HEADER: "stale_turn"},
+                )
+    except StructuredSourceUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    outcome = "cancelled_matching" if cancelled else "already_terminal"
+    return {"ok": True, "cancelled": cancelled, "outcome": outcome}
 
 
 @router.post("/tabs/{tab_id}/stream/cancel")
@@ -1856,34 +2106,12 @@ async def edit_resend_stream(
     payload: AgentStreamEditResendRequest,
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Edit a previously sent user message and rerun the conversation from there.
-
-    Truncates both the Hub event store and the provider transcript at the
-    identified turn, restarts the native transport, and delivers the edited
-    text as a new turn.
-
-    The operation is atomic with respect to failure: both planes are
-    snapshotted before truncation and fully restored (byte-identical) if any
-    step fails, so a failed edit-resend never loses conversation history.
-    Concurrent edit-resend attempts for the same session are serialized (the
-    second waits for the first). A turn whose provider delivery failed cannot
-    be mapped and is rejected with 409 before anything is truncated.
-    """
-    session = _session_or_404(managed_session_id)
-    manager = _get_tailer_manager()
-    try:
-        await manager.edit_resend(
-            session,
-            payload.text,
-            payload.client_turn_id,
-            payload.turn_id,
-            turn_metadata={"origin": "web"},
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _map_edit_resend_exception(exc) from exc
-    return {"ok": True}
+    """Reject history rewrites for Task-owned managed Chat sessions."""
+    _session_or_404(managed_session_id)
+    raise HTTPException(
+        status_code=409,
+        detail="Managed Chat history is owned by Task execution and cannot be rewritten",
+    )
 
 
 @router.post("/tabs/{tab_id}/stream/edit-resend")
@@ -2006,6 +2234,73 @@ def _agent_image_not_available() -> HTTPException:
     )
 
 
+def _same_session_incarnation(expected: ManagedSession, live: Optional[ManagedSession]) -> bool:
+    return bool(
+        live is not None
+        and live.workspace_id == expected.workspace_id
+        and live.tab_id == expected.tab_id
+        and live.created_at == expected.created_at
+    )
+
+
+def _managed_image_owner_is_current(expected: ManagedSession) -> bool:
+    return _same_session_incarnation(expected, workspace_manager.sessions.get(expected.id))
+
+
+def _tab_image_owner_is_current(expected: ManagedSession) -> bool:
+    tab = ttyd_manager.get_tab(expected.tab_id)
+    if tab is None or (
+        tab.session_kind == SessionKind.CHAT
+        and (tab.managed_session_id or tab.workspace_role is not None)
+    ):
+        return False
+    live = _terminal_tab_stream_session(expected.tab_id)
+    return _same_session_incarnation(expected, live)
+
+
+async def _serve_agent_image(
+    session: ManagedSession,
+    path: str,
+    *,
+    owner_is_current: Callable[[], bool],
+    cache_control: str,
+) -> Response:
+    try:
+        data, mime = await read_cached_agent_image(
+            session,
+            path,
+            owner_is_current=owner_is_current,
+        )
+    except AgentImageUnavailable:
+        raise _agent_image_not_available() from None
+    if not owner_is_current():
+        raise _agent_image_not_available()
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": cache_control,
+        },
+    )
+
+
+@router.get("/sessions/{managed_session_id}/stream/agent-image")
+async def get_session_agent_image(
+    managed_session_id: str,
+    path: str = Query(..., max_length=4096, description="Absolute or cwd-relative image path"),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Serve an agent image scoped to a managed session's working directory."""
+    session = _session_or_404(managed_session_id)
+    return await _serve_agent_image(
+        session,
+        path,
+        owner_is_current=lambda: _managed_image_owner_is_current(session),
+        cache_control=_ATTACHMENT_NO_STORE,
+    )
+
+
 @router.get("/tabs/{tab_id}/stream/agent-image")
 async def get_tab_agent_image(
     tab_id: str,
@@ -2015,21 +2310,14 @@ async def get_tab_agent_image(
     """Serve an image inside cwd or an assistant-quoted temporary image.
 
     Restricted reader for ``view_image``-style tool output — see
-    :func:`read_cached_agent_image` for the containment and content allowlist.
+    :func:`read_cached_agent_image` for containment, retention, and content validation.
     """
     session = _terminal_tab_session_or_404(tab_id)
-
-    try:
-        data, mime = await read_cached_agent_image(session, path)
-    except AgentImageUnavailable:
-        raise _agent_image_not_available() from None
-    return Response(
-        content=data,
-        media_type=mime,
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": _AGENT_IMAGE_CACHE_CONTROL,
-        },
+    return await _serve_agent_image(
+        session,
+        path,
+        owner_is_current=lambda: _tab_image_owner_is_current(session),
+        cache_control=_AGENT_IMAGE_CACHE_CONTROL,
     )
 
 
@@ -2068,22 +2356,7 @@ def _quoted_image_not_available() -> HTTPException:
     )
 
 
-@router.get("/tabs/{tab_id}/stream/quoted-image")
-async def get_tab_quoted_image(
-    tab_id: str,
-    key: str = Query(
-        ...,
-        max_length=quoted_images.QUOTED_IMAGE_KEY_MAX_LEN,
-        description="Bare provider image token, e.g. img_v3_0215v_…",
-    ),
-    current_user: User = Depends(get_current_user),
-) -> Response:
-    """Resolve and serve an agent-quoted bare-token image.
-
-    Provider-neutral entry point; dispatch, containment and content checks
-    live in :mod:`services.agent_stream.quoted_images`.
-    """
-    _terminal_tab_session_or_404(tab_id)
+def _serve_quoted_image(key: str) -> Response:
     try:
         result = quoted_images.resolve_quoted_image(key)
     except quoted_images.QuotedImageUnavailable:
@@ -2108,15 +2381,46 @@ async def get_tab_quoted_image(
             },
         )
     if isinstance(result, quoted_images.RedirectImage):
-        # Reserved for a future remote/CDN provider: hand the browser the
-        # provider URL instead of proxying bytes. nosniff stays on the
-        # redirect response itself.
         return RedirectResponse(
             url=result.location,
             status_code=307,
             headers={"X-Content-Type-Options": "nosniff"},
         )
     raise _quoted_image_not_available()
+
+
+@router.get("/sessions/{managed_session_id}/stream/quoted-image")
+async def get_session_quoted_image(
+    managed_session_id: str,
+    key: str = Query(
+        ...,
+        max_length=quoted_images.QUOTED_IMAGE_KEY_MAX_LEN,
+        description="Bare provider image token, e.g. img_v3_0215v_…",
+    ),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Resolve an agent-quoted image for an existing managed session."""
+    _session_or_404(managed_session_id)
+    return _serve_quoted_image(key)
+
+
+@router.get("/tabs/{tab_id}/stream/quoted-image")
+async def get_tab_quoted_image(
+    tab_id: str,
+    key: str = Query(
+        ...,
+        max_length=quoted_images.QUOTED_IMAGE_KEY_MAX_LEN,
+        description="Bare provider image token, e.g. img_v3_0215v_…",
+    ),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Resolve and serve an agent-quoted bare-token image.
+
+    Provider-neutral entry point; dispatch, containment and content checks
+    live in :mod:`services.agent_stream.quoted_images`.
+    """
+    _terminal_tab_session_or_404(tab_id)
+    return _serve_quoted_image(key)
 
 
 __all__ = [

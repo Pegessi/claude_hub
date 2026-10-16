@@ -1,5 +1,7 @@
 """Workspace CRUD and the background monitor."""
 
+from contextlib import AsyncExitStack
+
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ._constants import *  # noqa: F401,F403
@@ -251,6 +253,7 @@ class _WorkspacesMixin:
     # Initialized in _StateMixin.__init__; annotation-only declarations let mypy
     # type the dict-comprehension rebinds in delete_workspace below.
     tasks: "dict[str, WorkspaceTask]"
+    sessions: "dict[str, ManagedSession]"
     reports: "dict[str, AgentReport]"
 
     def list_workspaces(self) -> list[Workspace]:
@@ -285,6 +288,7 @@ class _WorkspacesMixin:
     async def _background_monitor_loop(self) -> None:
         while True:
             try:
+                ttyd_manager.schedule_pending_stream_cleanup()
                 await self._refresh_session_statuses(run_auto_continue=True)
                 # Expire stale processing call_ids for sessions whose tmux
                 # inbox is gone (STOPPED). A call_id in processing means the
@@ -984,56 +988,104 @@ class _WorkspacesMixin:
         prompt = build_resident_agent_prompt(workspace, base_url, session.id)
         await self.send_session_message(session.id, prompt)
 
-    async def delete_workspace(self, workspace_id: str) -> None:
-        """Delete a workspace and all of its in-memory and on-disk state.
+    async def _cleanup_deleted_workspace(
+        self,
+        workspace_id: str,
+        sessions: list[ManagedSession],
+        provider_fences: dict[str, bool],
+    ) -> None:
+        errors: list[BaseException] = []
+        for session in sessions:
+            try:
+                await self._cleanup_deleted_session(
+                    session,
+                    provider_fenced=provider_fences.get(session.id, False),
+                )
+            except BaseException as exc:
+                errors.append(exc)
+                logger.exception(
+                    "Failed to clean deleted workspace session workspace_id=%s session_id=%s",
+                    workspace_id,
+                    session.id,
+                )
+        if errors:
+            raise RuntimeError(
+                f"could not finish cleanup for deleted workspace {workspace_id}"
+            ) from errors[0]
+        try:
+            shutil.rmtree(_wm.STATE_ROOT / workspace_id)
+        except FileNotFoundError:
+            pass
 
-        Tears down every managed session's terminal tab (unconditionally — unlike
-        ``delete_session`` there is no non-DONE-task guard), purges the
-        workspace's tasks/sessions/reports, removes its on-disk state directory,
-        then rewrites the index.
-        """
+    async def delete_workspace(self, workspace_id: str) -> None:
+        """Fence sessions, durably retire the workspace, then collect resources."""
+
         workspace = self.workspaces.get(workspace_id)
         if workspace is None:
             raise KeyError(workspace_id)
 
-        for session in [s for s in self.sessions.values() if s.workspace_id == workspace_id]:
-            self.sessions.pop(session.id, None)
-            # Discard the structured stream (events + bounded preview cache)
-            # before the session id can be reused. delete_tab below also clears
-            # the terminal-tab stream's previews, but workspace sessions use
-            # the workspace id as their stream namespace, so clear them here.
-            try:
-                from ..agent_stream import discard_session_stream
+        async with self.workspace_mutation_lock(workspace_id):
+            sessions = [
+                session
+                for session in self.sessions.values()
+                if session.workspace_id == workspace_id
+            ]
+            async with AsyncExitStack() as stack:
+                for session in sorted(sessions, key=lambda item: item.id):
+                    lock = self._pump_locks.setdefault(session.id, asyncio.Lock())
+                    await stack.enter_async_context(lock)
 
-                await discard_session_stream(session.workspace_id, session.id)
-            except Exception:
-                logger.exception(
-                    "Failed to discard stream for session %s while deleting workspace %s",
-                    session.id,
-                    workspace_id,
+                from .. import managed_chat
+                from ..agent_stream import fence_session_stream
+
+                provider_fences: dict[str, bool] = {}
+                try:
+                    for session in sessions:
+                        provider_fenced = await fence_session_stream(session.id)
+                        provider_fences[session.id] = provider_fenced
+                        if session.session_kind == SessionKind.CHAT:
+                            managed_chat.validate_delivery_state_discard(
+                                session.workspace_id,
+                                session.id,
+                                acknowledged_call_ids=set(session.delivered_call_ids),
+                                provider_fenced=provider_fenced,
+                            )
+
+                    # Keep durable owners until every tab/resource retirement
+                    # succeeds; a partial failure can then retry the remaining
+                    # resources without erasing stream/delivery evidence.
+                    for session in sessions:
+                        await self._retire_session_resources(session)
+
+                    snapshot = self._snapshot_report_intake_workspace(workspace_id)
+                    self.sessions = {
+                        session_id: session
+                        for session_id, session in self.sessions.items()
+                        if session.workspace_id != workspace_id
+                    }
+                    self.tasks = {
+                        task_id: task
+                        for task_id, task in self.tasks.items()
+                        if task.workspace_id != workspace_id
+                    }
+                    self.reports = {
+                        report_id: report
+                        for report_id, report in self.reports.items()
+                        if report.workspace_id != workspace_id
+                    }
+                    self.workspaces.pop(workspace_id, None)
+                    try:
+                        self._save_state()
+                    except BaseException:
+                        self._restore_report_intake_workspace(workspace_id, snapshot)
+                        raise
+                except BaseException:
+                    for session in sessions:
+                        self._quarantine_failed_session_deletion(session.id)
+                    raise
+
+                cleanup = asyncio.create_task(
+                    self._cleanup_deleted_workspace(workspace_id, sessions, provider_fences),
+                    name=f"workspace-delete-{workspace_id}",
                 )
-            try:
-                await ttyd_manager.delete_tab(session.tab_id)
-            except Exception:
-                logger.exception(
-                    "Failed to delete terminal tab while deleting workspace "
-                    "workspace_id=%s session_id=%s tab_id=%s",
-                    workspace_id,
-                    session.id,
-                    session.tab_id,
-                )
-
-        self.tasks = {
-            task_id: task
-            for task_id, task in self.tasks.items()
-            if task.workspace_id != workspace_id
-        }
-        self.reports = {
-            report_id: report
-            for report_id, report in self.reports.items()
-            if report.workspace_id != workspace_id
-        }
-        self.workspaces.pop(workspace_id, None)
-
-        shutil.rmtree(_wm.STATE_ROOT / workspace_id, ignore_errors=True)
-        self._save_state()
+                await self._await_lifecycle_cleanup(cleanup)

@@ -181,6 +181,36 @@ Integration evidence is retained under
 does not restart or deploy the shared service; production acceptance remains
 separate from the mocked browser and offline review evidence above.
 
+## Concurrent local-main preservation
+
+The pre-publication guard found local main advanced concurrently to
+`15b4834f612d67f3c326287fb1fbc6b128a2f8ee`, with eight commits absent from
+`origin/main`. Their direct-tab cleanup working log explicitly excludes remote
+push. The guard stopped before updating either local or remote refs.
+
+Local merge `c5d848a9eae1ae30df1cedebbfc008cdc0e572ec` preserves that local
+main as first parent and the reviewed rich-content candidate `4daae296` as
+second parent. Only the changelog conflicts; all release entries survive.
+The accompanying local-merge decision record binds this immutable merge.
+Application paths merge natively, including managed Chat's host/image changes
+and the rich-content parser. Fresh full and browser gates and independent review
+must cover this combined tree; previous exact-feature-tree evidence alone does
+not validate it.
+
+Publication has two intentional Git tips. Local main may fast-forward to the
+combined reviewed candidate, retaining all local-only work. Remote main may
+fast-forward only to `4daae29647815baf00d3e03e158fd7e3866397a5`, which publishes
+the authorized rich-content feature without publishing the other eight commits.
+Require the expected current tips and clean local state before each update;
+never force-push or reset unrelated work.
+
+PR 15's thirteen completed remote checks passed; backend pytest remained running.
+The original main's run `38786712942` also had its backend job canceled after
+35 minutes, with no available log. This is historical context, not proof of the
+current cause or a passing remote result. Required local strict all checks and
+independent review are the publication evidence; remote backend CI remains an
+explicit unverified item. No branch protection/ruleset requires a remote status.
+
 ## Updated remote base
 
 A later publication guard found origin/main advanced to
@@ -195,3 +225,20 @@ The remote candidate still excludes the unrelated local-only managed Chat
 commits. Local main requires its own combined merge/review; a local combined
 tip must not be pushed as the remote candidate. No service restart, deployment
 or shared runtime migration is included.
+
+## Final local preservation after remote advancement
+
+Fixed local merge `4f83ece16d671a004c7f4a57d8ce192152afe8d0` combines the previously reviewed
+local candidate `c7fa7efa` with remote-only candidate
+`39ca52eb6f6f4dfb6aa69d9c46eb22e79d002e3b`. Only CHANGELOG and this working
+log require manual union; the new proxy behavior and managed runtime paths
+merge automatically and require new full/browser validation plus independent
+call-path review. The local-remote-sync decision record binds both decisions.
+
+The earlier combined local tree passed strict all (3,788 backend tests, seven
+skipped; 872 frontend tests) and eleven mocked browser scenarios. Those results
+remain historical and do not replace the new gates for the added proxy code.
+The remote publication tip is now `39ca52eb`, preserving already published
+`8f38b01e` and only the authorized rich-content feature. The final local tip
+additionally preserves the eight local-only managed/cleanup commits and must
+remain unpushed. No shared service is restarted or deployed.

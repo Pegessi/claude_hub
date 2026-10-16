@@ -10,7 +10,7 @@ import asyncio
 import json
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -118,6 +118,7 @@ def test_terminal_tab_stream_session_uses_tab_metadata(
         cursor_transcript_schema=None,
         agent_type=AgentType.CLAUDE,
         session_kind=SessionKind.CHAT,
+        created_at=datetime(2026, 1, 2, 3, 4, 5),
     )
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
 
@@ -130,6 +131,7 @@ def test_terminal_tab_stream_session_uses_tab_metadata(
     assert session.agent_type == AgentType.CLAUDE
     assert session.agent_session_id == "provider-session-id"
     assert session.workspace_path == "/tmp/direct"
+    assert session.created_at == tab.created_at
     assert get_adapter_for_session(session) is not None
 
 
@@ -187,6 +189,7 @@ def test_terminal_tab_stream_session_uses_backend_cwd_when_tab_cwd_is_unset(
         cursor_transcript_schema=None,
         agent_type=AgentType.CLAUDE,
         session_kind=SessionKind.CHAT,
+        created_at=datetime(2026, 1, 2, 3, 4, 5),
     )
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", lambda tab_id: tab)
     monkeypatch.setattr(agent_stream_api.os, "getcwd", lambda: "/preview/backend")
@@ -385,10 +388,12 @@ def test_tailer_manager_set_env_propagates_to_live_transport() -> None:
         "ws-env",
         session.id,
         MagicMock(),
-        lambda: None,
+        lambda: session,
         native_transport=transport,
     )
-    manager = TailerManager.__new__(TailerManager)
+    manager = TailerManager(
+        session_getter=lambda session_id: session if session_id == session.id else None
+    )
     manager._tailers = {session.id: tailer}
 
     manager.set_env(session, {"FOO": "bar"})
@@ -414,7 +419,9 @@ def test_tailer_manager_set_env_skips_when_tailer_missing_or_errored() -> None:
         native_transport=other_transport,
     )
     session_a = _native_session().model_copy(update={"id": "sess-env-missing"})
-    manager_a = TailerManager.__new__(TailerManager)
+    manager_a = TailerManager(
+        session_getter=lambda session_id: session_a if session_id == session_a.id else None
+    )
     manager_a._tailers = {"sess-other": other_tailer}
     manager_a.set_env(session_a, {"FOO": "bar"})  # must not raise
     other_transport.update_env.assert_not_called()
@@ -426,11 +433,13 @@ def test_tailer_manager_set_env_skips_when_tailer_missing_or_errored() -> None:
         "ws-env",
         session_b.id,
         MagicMock(),
-        lambda: None,
+        lambda: session_b,
         native_transport=transport_b,
         native_error="boom",
     )
-    manager_b = TailerManager.__new__(TailerManager)
+    manager_b = TailerManager(
+        session_getter=lambda session_id: session_b if session_id == session_b.id else None
+    )
     manager_b._tailers = {session_b.id: tailer_b}
     manager_b.set_env(session_b, {"FOO": "bar"})
     transport_b.update_env.assert_not_called()
@@ -2475,6 +2484,96 @@ class _FakeNativeTransport:
 def _as_provider_session(transport: _FakeNativeTransport) -> ProviderSession:
     # This test double intentionally implements only the observed transport contract.
     return cast(ProviderSession, transport)
+
+
+@pytest.mark.asyncio
+async def test_direct_tab_route_reuses_durable_tab_incarnation_and_rejects_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api import agent_stream as agent_stream_api
+    from claude_hub.services import goal_run as goal_run_service
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    created_at = datetime(2026, 1, 2, 3, 4, 5)
+    process = TTYDProcess(
+        tab_id="direct-incarnation",
+        port=12503,
+        name="Direct incarnation",
+        cwd=str(tmp_path),
+        created_at=created_at,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    tabs = TTYDManager.__new__(TTYDManager)
+    tabs.processes = {process.tab_id: process}
+    monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", tabs.get_tab)
+    goal_manager = SimpleNamespace(
+        current=lambda _tab_id: None,
+        has_goal_history=lambda _tab_id: False,
+    )
+    monkeypatch.setattr(goal_run_service, "get_goal_manager", lambda: goal_manager)
+
+    transport = _FakeNativeTransport()
+
+    def create_transport(session: ManagedSession, **_kwargs: Any) -> ProviderSession:
+        transport.session = session
+        transport.active_thread_id = None
+        return _as_provider_session(transport)
+
+    monkeypatch.setattr(tailer_module, "create_native_session", create_transport)
+    manager = TailerManager(agent_stream_api._terminal_tab_stream_session_by_id)
+    monkeypatch.setattr(agent_stream_api, "_tab_tailer_manager", manager)
+
+    first = agent_stream_api._terminal_tab_stream_session(process.tab_id)
+    second = agent_stream_api._terminal_tab_stream_session(process.tab_id)
+    assert first is not None and second is not None
+    assert first.created_at == second.created_at == process.created_at
+    owner = await manager._get_or_create(first)
+    assert await manager._get_or_create(second) is owner
+    assert owner.matches_session(second)
+
+    result = await agent_stream_api.send_tab_stream_input(
+        process.tab_id,
+        agent_stream_api.AgentStreamSendRequest(
+            text="hello",
+            client_turn_id="direct-incarnation-turn",
+        ),
+        User(open_id="ou-direct", name="Direct User", email="direct@example.test"),
+    )
+    assert result == {"ok": True}
+    assert transport.sent_messages == [("hello", [])]
+    assert manager.get_tailer(first.id) is owner
+
+    replacement = TTYDProcess(
+        tab_id=process.tab_id,
+        port=12504,
+        name="Replacement incarnation",
+        cwd=str(tmp_path),
+        created_at=created_at + timedelta(seconds=1),
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+    )
+    tabs.processes[process.tab_id] = replacement
+    replaced = agent_stream_api._terminal_tab_stream_session(process.tab_id)
+    assert replaced is not None
+    assert replaced.created_at != first.created_at
+    with pytest.raises(HTTPException) as exc_info:
+        await agent_stream_api.send_tab_stream_input(
+            process.tab_id,
+            agent_stream_api.AgentStreamSendRequest(
+                text="replacement",
+                client_turn_id="replacement-turn",
+            ),
+            User(open_id="ou-direct", name="Direct User", email="direct@example.test"),
+        )
+    assert exc_info.value.status_code == 409
+    assert transport.sent_messages == [("hello", [])]
+
+    tabs.processes[process.tab_id] = process
+    await manager.stop_all()
 
 
 def _native_session(agent_type: AgentType = AgentType.CLAUDE) -> ManagedSession:
@@ -4647,6 +4746,304 @@ async def test_native_codex_answer_emits_persisted_approval_resolved(
     # The raw JSON answer must not be sent as a genuine new turn.
     assert all(text != answer for text, _ in transport.sent_messages)
     await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_question_answer_is_bound_to_exact_card_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A delayed retry cannot consume a newer card with reused question ids."""
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    transport._turn_in_flight = True
+    transport.answer_pending_question = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    session = _native_session()
+    session.agent_type = AgentType.CODEX
+    tailer = SessionTailer(
+        workspace_id="ws-exact-question",
+        session_id=session.id,
+        adapter=CodexJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    tailer._active_turn_id = "turn-same"
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=1,
+        turn_id="turn-same",
+    )
+    for call_id in ("card-old", "card-new"):
+        tailer._record_approval_card(
+            ctx.event(
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                {"questions": [{"id": "q-reused"}]},
+                call_id=call_id,
+            )
+        )
+    answer = json.dumps(
+        {
+            "type": "ask_question_response",
+            "answers": [{"questionId": "q-reused", "selected": ["yes"]}],
+        }
+    )
+
+    assert await tailer.answer_pending_question(
+        answer,
+        "turn-same",
+        expected_call_id="card-old",
+    )
+    transport.answer_pending_question.assert_awaited_once_with(  # type: ignore[attr-defined]
+        [{"questionId": "q-reused", "selected": ["yes"]}],
+        expected_call_id="card-old",
+    )
+    assert "card-old" not in tailer._pending_approvals
+    assert "card-new" in tailer._pending_approvals
+
+    # Retrying the old card after it was resolved must not fall through to the
+    # still-pending newer request, despite identical turn and question ids.
+    assert not await tailer.answer_pending_question(
+        answer,
+        "turn-same",
+        expected_call_id="card-old",
+    )
+    assert transport.answer_pending_question.await_count == 1  # type: ignore[attr-defined]
+    assert (
+        tailer.accepts_question_followup(
+            answer,
+            "turn-same",
+            expected_call_id="card-new",
+        )
+        is False
+    )  # Codex answers in-turn; follow-ups are Claude/Cursor only.
+
+
+@pytest.mark.asyncio
+async def test_native_claude_exact_followup_rejects_stale_same_question_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    transport = _FakeNativeTransport()
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-exact-followup",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=1,
+        turn_id="turn-same",
+    )
+    for call_id in ("card-old", "card-new"):
+        tailer._record_approval_card(
+            ctx.event(
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                {"questions": [{"id": "q-reused"}]},
+                call_id=call_id,
+            )
+        )
+    answer = json.dumps(
+        {
+            "type": "ask_question_response",
+            "answers": [{"questionId": "q-reused", "selected": ["yes"]}],
+        }
+    )
+
+    await tailer.resolve_answered_questions(
+        answer,
+        expected_turn_id="turn-same",
+        expected_call_id="card-old",
+    )
+    assert "card-old" not in tailer._pending_approvals
+    assert "card-new" in tailer._pending_approvals
+    assert not tailer.accepts_question_followup(
+        answer,
+        "turn-same",
+        expected_call_id="card-old",
+    )
+    assert tailer.accepts_question_followup(
+        answer,
+        "turn-same",
+        expected_call_id="card-new",
+    )
+
+
+@pytest.mark.asyncio
+async def test_deletion_fence_survives_retry_after_runtime_is_detached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed state commit must not forget a completed provider fence."""
+    from claude_hub.services.agent_stream import tailer as tailer_module
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    session = _native_session()
+    session.id = "delete-fence-retry"
+    manager = TailerManager(
+        session_getter=lambda session_id: session if session_id == session.id else None
+    )
+    owner = SimpleNamespace(stop=AsyncMock())
+    manager._tailers[session.id] = owner  # type: ignore[assignment]
+
+    assert await tailer_module.fence_session_stream(session.id)
+    owner.stop.assert_awaited_once_with(raise_errors=True)
+    assert session.id not in manager._tailers
+    # This is the retry after durable state removal failed. There is no longer
+    # an attached tailer, but the successful strict fence is still authoritative.
+    assert await tailer_module.fence_session_stream(session.id)
+    with pytest.raises(tailer_module.StructuredSourceUnavailable, match="fenced for deletion"):
+        await manager._get_or_create(session)
+
+    await tailer_module.discard_session_stream(
+        session.workspace_id,
+        session.id,
+        provider_fenced=True,
+    )
+    assert session.id not in tailer_module._DELETION_FENCED_SESSION_IDS
+    assert session.id not in tailer_module._PROVIDER_FENCED_SESSION_IDS
+
+
+@pytest.mark.asyncio
+async def test_delayed_start_cannot_attach_to_reused_friendly_session_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    current = _native_session()
+    current.id = "delayed-start-reuse"
+    sessions = {current.id: current}
+    manager = TailerManager(session_getter=sessions.get)
+    transport = _FakeNativeTransport()
+    owner = SessionTailer(
+        workspace_id=current.workspace_id,
+        session_id=current.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: sessions.get(current.id),
+        native_transport=_as_provider_session(transport),
+    )
+    recovery_entered = asyncio.Event()
+    release_recovery = asyncio.Event()
+
+    async def blocked_recovery(_expected_turn_id: str | None = None) -> bool:
+        recovery_entered.set()
+        await release_recovery.wait()
+        return False
+
+    owner._recover_orphaned_turn_locked = blocked_recovery  # type: ignore[assignment]
+    manager._tailers[current.id] = owner
+    starting = asyncio.create_task(manager.ensure_started(current))
+    await asyncio.wait_for(recovery_entered.wait(), timeout=1)
+
+    assert await tailer_module.fence_session_stream(current.id)
+    sessions.pop(current.id)
+    await tailer_module.discard_session_stream(
+        current.workspace_id,
+        current.id,
+        provider_fenced=True,
+    )
+    fresh = current.model_copy(
+        update={
+            "tab_id": "fresh-tab",
+            "created_at": current.created_at + timedelta(seconds=1),
+        }
+    )
+    sessions[fresh.id] = fresh
+    release_recovery.set()
+
+    with pytest.raises(tailer_module.StructuredSourceUnavailable, match="deleted or replaced"):
+        await asyncio.wait_for(starting, timeout=1)
+    assert not owner.is_running()
+    assert manager.get_tailer(current.id) is None
+
+
+@pytest.mark.asyncio
+async def test_real_native_send_and_delete_follow_workspace_then_pump_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.services import agent_stream as agent_stream_service
+    from claude_hub.services import managed_chat
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+    from claude_hub.services.ttyd_manager import ttyd_manager
+    from claude_hub.services.workspace_manager import WorkspaceManager
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    workspace_manager = WorkspaceManager()
+    monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_assert_session_seat", lambda _session: "seat")
+    monkeypatch.setattr(workspace_manager, "_ensure_session_ready_for_send", AsyncMock())
+    session = _native_session().model_copy(
+        update={"session_kind": SessionKind.CHAT, "tmux_session": ""}
+    )
+    session.id = "send-delete-lock-order"
+    workspace_manager.sessions[session.id] = session
+    observer_entered = asyncio.Event()
+    release_observer = asyncio.Event()
+
+    async def observed(_event: AgentStreamEvent) -> None:
+        observer_entered.set()
+        await release_observer.wait()
+        async with workspace_manager.workspace_mutation_lock(session.workspace_id):
+            pass
+
+    tailers = TailerManager(
+        session_getter=workspace_manager.sessions.get,
+        task_activity_observer=observed,
+    )
+    transport = _FakeNativeTransport()
+    transport.active_thread_id = None  # type: ignore[attr-defined]
+    owner = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: workspace_manager.sessions.get(session.id),
+        native_transport=_as_provider_session(transport),
+        task_activity_observer=observed,
+    )
+    tailers._tailers[session.id] = owner
+    monkeypatch.setattr(managed_chat, "_manager", lambda: tailers)
+    retiring_events: list[AgentStreamEvent] = []
+    real_discard = agent_stream_service.discard_session_stream
+
+    async def capture_then_discard(*args: Any, **kwargs: Any) -> None:
+        page = await owner.store.read_since(-1, 100)
+        retiring_events.extend(page.events)
+        await real_discard(*args, **kwargs)
+
+    async def fake_delete_tab(_tab_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(agent_stream_service, "discard_session_stream", capture_then_discard)
+    monkeypatch.setattr(ttyd_manager, "delete_tab", fake_delete_tab)
+    sending = asyncio.create_task(
+        workspace_manager.send_session_message(session.id, "hello", call_id="ordered-call")
+    )
+    await asyncio.wait_for(observer_entered.wait(), timeout=1)
+    deleting = asyncio.create_task(workspace_manager.delete_session(session.id))
+    await asyncio.sleep(0)
+    assert not deleting.done()
+
+    release_observer.set()
+    await asyncio.wait_for(asyncio.gather(sending, deleting), timeout=2)
+    assert session.id not in workspace_manager.sessions
+    assert len(transport.sent_messages) == 1
+    assert transport.sent_messages[0][0].endswith("\nhello")
+    assert any(event.type == AgentStreamEventType.ERROR for event in retiring_events)
+    assert any(
+        event.type == AgentStreamEventType.TURN_COMPLETED
+        and event.payload.get("status") == "cancelled"
+        for event in retiring_events
+    )
 
 
 @pytest.mark.asyncio

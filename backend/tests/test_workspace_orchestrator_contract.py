@@ -249,6 +249,11 @@ def test_auto_continue_messages_carry_endpoint_when_sent(monkeypatch):
 
     monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_current_monitor_entities",
+        lambda current_session, current_task: (current_session, current_task),
+    )
     monkeypatch.setattr(workspace_manager, "_auto_continue_output_looks_busy", lambda _o: False)
     monkeypatch.setattr(workspace_manager, "_latest_report_state", lambda _t: None)
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
@@ -307,6 +312,11 @@ def test_auto_continue_reminder_call_id_stable_per_attempt_then_advances(monkeyp
 
     monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send)
+    monkeypatch.setattr(
+        workspace_manager,
+        "_current_monitor_entities",
+        lambda current_session, current_task: (current_session, current_task),
+    )
     monkeypatch.setattr(workspace_manager, "_auto_continue_output_looks_busy", lambda _o: False)
     monkeypatch.setattr(workspace_manager, "_latest_report_state", lambda _t: None)
     monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
