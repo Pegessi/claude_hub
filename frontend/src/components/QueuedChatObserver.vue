@@ -21,7 +21,7 @@ const reducer = new IncrementalTimelineReducer()
 const turnInFlight = computed(() => isChatModeLocked(false, reducer.reduce(events.value)))
 
 function reconcileQueue() {
-  if (queue.drafts.length === 0 || queue.paused || queue.sendInProgress) {
+  if (queue.drafts.length === 0 || queue.paused || queue.editing || queue.sendInProgress) {
     store.releaseQueuedChatActivation(props.paneId, props.tabId)
     stop()
     return
@@ -43,6 +43,7 @@ watch(
   [
     () => queue.drafts.length,
     () => queue.paused,
+    () => queue.editing,
     () => queue.sendInProgress,
     () => queue.autoActivationBlock,
     turnInFlight,
