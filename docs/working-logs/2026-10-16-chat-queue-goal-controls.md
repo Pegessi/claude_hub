@@ -80,3 +80,16 @@ the older native composer and test harness. The original branch's checks above
 refer to the local combined feature, not this separately validated native tree.
 No Managed Chat implementation or runtime-storage migration is published by
 this transplant. Integration gate results are recorded after the fixed merge.
+
+
+## Native retry identity review correction
+
+The publication review caught that copying a shared retry helper onto the older
+native baseline would newly retain IDs for ordinary provider sends. Native turns
+have no same-ID delivery deduplication; an explicit resend must get a new intent
+ID. Retention is now limited to actual active/blocked/recovery Goal-controller
+inputs, plus the local variant's durable Managed Chat mailbox. A paused Goal's
+ordinary manual Chat input follows the native rule. New regression cases cover
+all three routes. The public composer browser's existing fresh-ID assertion also
+caught the pre-correction transplant. This source repair is later than the fixed
+merge records and receives its own independent review and final gate results.
