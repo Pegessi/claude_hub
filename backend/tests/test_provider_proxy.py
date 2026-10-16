@@ -288,6 +288,8 @@ def test_structured_error_diagnostics_hide_private_proxy(key: str) -> None:
 def test_deployment_proxy_survives_login_shell(
     url: str, shell: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if not Path(shell).is_file():
+        pytest.skip("login shell is not installed on this platform")
     monkeypatch.setattr(
         provider_proxy, "settings", Settings(_env_file=None, cursor_proxy_url=SecretStr(url))
     )
