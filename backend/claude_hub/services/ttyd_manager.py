@@ -39,6 +39,7 @@ from ..models.schemas import CHAT_REMOTE_UNSUPPORTED
 from . import pty_exec
 from ._cursor_verify import _cursor_id_exists
 from .agent_status_markers import codex_output_is_working
+from .provider_proxy import provider_subprocess_env
 from .proxy_rules import PROXY_ENV_KEYS, with_proxy_env_aliases
 from .remote_profiles import (
     profile_capabilities,
@@ -1406,7 +1407,7 @@ def _agent_spawn_env() -> dict:
     Normalize the environment so panes always render with their full palette,
     regardless of how the backend itself was started.
     """
-    env = with_proxy_env_aliases(os.environ)
+    env = provider_subprocess_env("terminal", os.environ)
     env.pop("NO_COLOR", None)
     env["COLORTERM"] = "truecolor"
     env["FORCE_COLOR"] = "3"
@@ -1854,7 +1855,7 @@ asyncio.run(_main())
         inherited = {
             key: value for key, value in os.environ.items() if key.lower() in PROXY_ENV_KEYS
         }
-        return {**with_proxy_env_aliases(inherited), **child}
+        return provider_subprocess_env(self.agent_type.value, inherited, child)
 
     def _with_env(self, command: str) -> str:
         if self.target == ExecutionTarget.LOCAL:
@@ -1900,7 +1901,11 @@ asyncio.run(_main())
         LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
         settings_path = LAUNCH_ENV_DIR / f"{self.tab_id}.settings.json"
         settings_path.write_text(
-            json.dumps({"env": self._child_env()}, ensure_ascii=False, indent=2),
+            json.dumps(
+                {"env": provider_subprocess_env("claude", {}, self._child_env())},
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
         os.chmod(settings_path, 0o600)

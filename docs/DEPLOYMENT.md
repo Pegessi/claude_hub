@@ -151,6 +151,42 @@ cp .env.example backend/.env
 会话环境 preset 配置单个 Chat/Agent；它们分别由自己的组件管理。目前没有统一
 的启动配置页面。
 
+### 每个 provider 的私有代理
+
+原生 Claude / Codex / Cursor / TraeX 可以分别通过此部署的 `backend/.env`
+配置 `CLAUDE_PROXY_URL`、`CODEX_PROXY_URL`、`CURSOR_PROXY_URL`、`TRAEX_PROXY_URL`。
+每项接受 HTTP(S) CONNECT 代理 URL（可含认证信息）；未设置或空值沿用原有进程
+代理，值 `direct` 清空该 provider 的 HTTP/HTTPS/ALL 代理。可选的
+`CLAUDE_NO_PROXY`、`CODEX_NO_PROXY`、`CURSOR_NO_PROXY`、`TRAEX_NO_PROXY`
+覆盖对应 provider 的绕过列表；不设置则继承进程 `NO_PROXY`，显式空值则清空列表。
+
+这些字段由 Settings 读取，不需要 source `.env`，也不会全局修改 `os.environ`。
+优先级为：会话/preset 显式代理 > 部署的 provider 默认值 > 进程通用代理；同名
+provider 配置的进程变量仍优先于 `.env`。配置代理 URL 会同时替换大小写的
+HTTP/HTTPS 代理并清空旧 ALL_PROXY，避免不同库选择不同出口。现有原生 Chat 的
+`CLAUDE_HUB_PROVIDER_NETWORK_MODE` 路由策略继续生效；需要严格沿用代理环境时
+选择 `inherit`，`auto` 仍可能选择直连，`NO_PROXY` 仍然生效。
+
+例如，仅在远端部署填写 `CURSOR_PROXY_URL` 即可给远端 Cursor 指定代理；本机
+留空即可保持原来的网络设置。不要把真实地址或认证信息复制到示例、源码、提交或
+日志。`.env.example` 仅提供空字段；真实 `backend/.env` 应保持 Git 忽略并设置
+`chmod 600 backend/.env`。`check-staged` 和 `checkout-safety` 会拒绝根目录或
+backend 中的私有 `.env` 文件，即使用 `git add -f` 强制加入。
+
+部署代理只在启动时读取。按部署流程重启后端后，新的原生 provider 子进程和
+Cursor 模型目录探测都会读取同一份部署默认值；已有 Terminal agent 需重新启动
+才会更新。只修改这些 `.env` 字段不需要更改 launcher 的环境。
+Cursor 模型目录仍是实例级缓存，不读取单个会话的代理覆盖；不同出口的会话目录
+可能不同。较慢出口可以在该部署设置 `CURSOR_MODELS_PROBE_TIMEOUT_SECONDS=15`
+（默认 5，必须为正有限数），避免目录探测过早回退。
+
+本地 Terminal agent 也使用上述默认值，并通过权限为 600 的启动文件传入，
+不会回写到 tab/preset 或前端会话数据。Claude 的私有 launch settings 同样包含
+其部署代理，以覆盖 CLI 用户 settings 中旧的代理。配置字段从序列化输出中排除，
+所有 provider 的专用配置变量从子进程继承环境中移除，仅向目标 provider 传入
+解析后的通用代理变量。远程 SSH Terminal 不会转发本机部署代理；应在远端 Hub
+配置。MASO 是独立服务的 HTTP 通道，保持原来的直连行为，不使用这些 CLI 代理。
+
 ### 必需配置
 
 ```env
