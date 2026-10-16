@@ -263,6 +263,16 @@ def test_cli_remember_recall_and_merge(
     assert missing.exit_code != 0 and "--title is required" in missing.output
     gone = runner.invoke(cli, ["dot", "show", "no-such-card"])
     assert gone.exit_code != 0
+    # An empty --id (an unset shell variable) must not quietly make a new card.
+    cards = len(service.store.list_cards())
+    blank = runner.invoke(cli, ["dot", "remember", "--id", "", "--title", "t", "--summary", "s"])
+    assert blank.exit_code != 0 and "--id is empty" in blank.output
+    assert len(service.store.list_cards()) == cards
+    locked = tmp_path / "locked.txt"
+    locked.write_text("x")
+    locked.chmod(0)
+    unreadable = runner.invoke(cli, ["dot", "remember", "--title", "t", "--file", str(locked)])
+    assert unreadable.exit_code == 1 and "Cannot read" in unreadable.output
 
 
 def test_files_are_confined_and_only_images_render_inline(

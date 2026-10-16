@@ -92,7 +92,8 @@ Values are JSON; a plain unquoted value is read as a string.
      passed via `--append-system-prompt`, stable for the whole session;
    - build the **turn pack** (time, focus, open work, tasks waiting for
      review, new inbox events, cards recalled by the user's words (not on
-     Hub wake-ups; common words like "the" and a bare "hi" do not count), and on the first
+     Hub wake-ups; common words like "the" and a bare "hi" do not count; a locked
+     or broken index only loses the recall), and on the first
      turn the recent talk) — prepended in the hidden
      `<claude_hub_instructions>` block.
      Reviews come before events so a busy inbox cannot push them out; a
@@ -111,7 +112,8 @@ that fails to start is still tracked; retry it with the same
 `--request-key`). `claude-hub dot watch <task_id>` (or the Work tab in the
 panel) adds a Hub Task you started yourself;
 `dot unwatch` stops tracking it (the panel asks first when a review is
-waiting, since the review is dropped). Watching a task Dot delegated keeps it a
+waiting, since the review is dropped). Watching a watched task again keeps its
+place (unseen reports still raise events). Watching a task Dot delegated keeps it a
 delegated task (only `--stall-hours` changes), so its review is not lost. A
 background watcher checks tracked tasks every 60 seconds; one task that cannot
 be read does not stop the others. When one finishes, fails, needs input (the
@@ -122,11 +124,14 @@ worker or the Hub reviewer asks), or looks stuck it:
   reviewer's; each part cut at 20,000 characters). The Hub's own "please review" reports (a task moved to
   review by hand, a review asked again, the stuck-review reaper) carry no
   result, so they neither fill the card, start a new round, nor count as a
-  question. A result is announced once: the Hub reviewer taking the task
-  back to working and returning it, or a person accepting a result already
-  announced for review, is not news. A task a person sent back that returns
-  with no new report is asked for review again. A reviewer question is its own
-  event, even in the poll that announces the result,
+  question. In review or done the result is the worker's latest return
+  (ready for review, completed, failed), not progress posted after it. A
+  result is announced once: the Hub reviewer taking the task back to working
+  and returning it, or a person accepting (even again) a result already
+  announced, is not news; nor is the result a task had when it was watched. A
+  task a person sent back that returns with no new report is asked for review
+  again, and a re-run that fails again is a new failure. A reviewer question
+  is its own event, even in the poll that announces the result,
 - runs the standing "Dot wake-up" Chat schedule now (queued behind any
   active turn; repeated wakes coalesce). The schedule has a ten-year interval
   so it never fires on its own; events are the only way it runs. A deleted

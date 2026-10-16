@@ -322,7 +322,7 @@
                 <button
                   type="button"
                   class="ch-btn ch-btn--ghost ch-btn--sm dot-inline-btn"
-                  @click="selectedCard = null"
+                  @click="closeCard"
                 >
                   ← Back
                 </button>
@@ -825,11 +825,22 @@ function ackInbox() {
   })
 }
 
+// Only the latest open counts: a slower earlier load (or one left with Back) must
+// not show its card.
+let cardRequest = 0
+
 function openCard(cardId: string) {
   section.value = 'memory'
+  const request = ++cardRequest
   void run(async () => {
-    selectedCard.value = await loadDotCard(cardId)
+    const card = await loadDotCard(cardId)
+    if (request === cardRequest) selectedCard.value = card
   })
+}
+
+function closeCard() {
+  cardRequest++
+  selectedCard.value = null
 }
 
 function archiveCard(cardId: string) {
@@ -849,7 +860,7 @@ watch(
   () => props.open,
   isOpen => {
     if (isOpen) {
-      selectedCard.value = null
+      closeCard()
       editingIdentity.value = false
       editingLesson.value = null
       void loadSection()

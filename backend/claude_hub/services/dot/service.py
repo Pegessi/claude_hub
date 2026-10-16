@@ -118,6 +118,17 @@ def _worker_report(report: Any) -> bool:
     return not _hub_report(report) and not _report_state(report).startswith("review_")
 
 
+def _result_report(reports: list[Any], status: str) -> Any:
+    """The report a result is: in review or done the worker's latest return (a worker
+    may post progress after it), else the worker's latest report."""
+    workers = [report for report in reports if _worker_report(report)]
+    if status in ("review", "done"):
+        returns = [report for report in workers if _report_state(report) in _RETURN_REPORT_STATES]
+        if returns:
+            return returns[-1]
+    return workers[-1] if workers else (reports[-1] if reports else None)
+
+
 def _hub_report(report: Any) -> bool:
     """A report the Hub wrote to ask for a review: a manual move to review, a review
     asked again, or the stuck-review reaper. It carries no work and no question, so
@@ -324,7 +335,10 @@ class DotService:
         # request is not overwritten.
         # A cold index can take seconds to fill; not while holding the lock every
         # Dot route (on the event loop) waits for.
-        self.index.sync()
+        try:
+            self.index.sync()
+        except Exception:
+            logger.warning("dot: index sync failed", exc_info=True)
         with self.store.lock:
             return self._prepare_turn(text, conversation_id)
 
@@ -825,10 +839,17 @@ class DotService:
         existing = self.store.get_work(task.id)
         # Dot's own delegation stays one: it keeps its review and unseen events.
         delegated = existing is not None and not existing.get("watched")
-        if existing is not None and delegated and not existing.get("stopped"):
+        # A live watch keeps its place: watching it again must not skip unseen reports.
+        if (
+            existing is not None
+            and not existing.get("stopped")
+            and (delegated or not existing.get("closed"))
+        ):
             return self.store.upsert_work(task.id, stall_hours=stall_hours)
         # Old reports are history; only reports after this point raise events.
-        report = self._latest_report(task.workspace_id, task.id)
+        reports = self._reports(task.workspace_id, task.id)
+        report = reports[-1] if reports else None
+        result = _result_report(reports, status)
         item = self.store.upsert_work(
             task.id,
             workspace_id=task.workspace_id,
@@ -840,6 +861,9 @@ class DotService:
             closed=False,
             stopped=False,
             last_report_id=getattr(report, "id", None),
+            # ... and so is the result: the Hub reviewer going over it is not news.
+            announced_report_id=getattr(result, "id", None) if _worker_report(result) else None,
+            announced_status=status,
             stall_hours=stall_hours,
         )
         await asyncio.to_thread(self.store.commit, f"dot: watch {task.id}")
@@ -1008,7 +1032,7 @@ class DotService:
         last_seen = item.get("last_report_id")
         new_reports = reports[seen_ids.index(last_seen) + 1 :] if last_seen in seen_ids else reports
         # The Hub's own review requests carry no result, question or round.
-        result = next((old for old in reversed(reports) if _worker_report(old)), report)
+        result = _result_report(reports, status)
         fresh = [new for new in new_reports if not _hub_report(new)]
         latest = fresh[-1] if fresh else None
         # The Hub reviewer's reports (review_*) are not a round's result either.
@@ -1027,11 +1051,8 @@ class DotService:
         review_due = None if item.get("watched") else True
         # A new final report in review/failed is a new round, even when the poll never
         # saw the task working again; before a verdict it refreshes the result card.
-        again = (
-            status == previous
-            and bool(returned)
-            and _report_state(returned[-1]) in _RETURN_REPORT_STATES
-        )
+        new_result = any(_report_state(new) in _RETURN_REPORT_STATES for new in returned)
+        again = status == previous and new_result
         title = item.get("title") or task_id
         # The Hub reviewer moves a task to working and back to review (or a person then
         # accepts it): that is the result already announced, not a new one.
@@ -1039,16 +1060,18 @@ class DotService:
         same_result = (
             bool(result_id)
             and result_id == item.get("announced_report_id")
-            and not returned
-            and not rerun
-            # A new end time is a re-run, except accepting a result announced for
-            # review (not news). Back in review without a reviewer step, someone sent
-            # the task back: ask again.
+            and not new_result
+            # Back in review without a reviewer step, someone sent the task back: ask
+            # again. Accepting (again) a result announced for review or done is not news;
+            # failing again with no new report (a re-run that crashed) is.
             and (
                 any(_report_state(new).startswith("review_") for new in fresh)
                 if status == "review"
-                else ended == item.get("ended_at")
-                or (status == "done" and item.get("announced_status") == "review")
+                else (
+                    item.get("announced_status") in ("review", "done")
+                    if status == "done"
+                    else ended == item.get("ended_at")
+                )
             )
         )
         if (

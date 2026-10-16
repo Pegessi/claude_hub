@@ -871,6 +871,80 @@ async def test_hub_reviewer_steps_are_not_new_results(
     await poll("working", _report("r4", "review_started", "again"))
     await poll("done", _report("r5", "review_passed", "fine"), completed_at=utc_now())
     assert len(store.list_inbox()) == 2
+    # Reopened and accepted again between two polls, with nothing new: still no news.
+    await poll("done", completed_at=utc_now() + timedelta(minutes=5))
+    assert len(store.list_inbox()) == 2
+
+
+@pytest.mark.asyncio
+async def test_progress_after_a_result_is_not_the_result(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    reports: list[Any] = []
+    tasks: dict[str, Any] = {}
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _id: reports)
+
+    def poll(status: str, *new: Any) -> Any:
+        tasks["task-p"] = SimpleNamespace(status=SimpleNamespace(value=status), title="t")
+        reports.extend(new)
+        return service.check_work()
+
+    def card_body() -> str:
+        card = store.get_card(store.get_work("task-p")["result_card"])  # type: ignore[index]
+        assert card is not None
+        return card.body
+
+    store.upsert_work("task-p", workspace_id="ws", title="Port", status="working")
+    await poll("review", _report("r1", "ready_for_review", "ported"))
+    await service.review("task-p", verdict="ok")
+    # The worker posts progress while in review; the Hub reviewer then goes over it.
+    await poll("review", _report("r2", "working", "still polishing"))
+    await poll("working", _report("r3", "review_started", "checking"))
+    await poll("review", _report("r4", "review_passed", "fine"))
+    assert len(store.list_inbox()) == 1
+    assert "ported" in card_body() and "still polishing" not in card_body()
+    assert store.pending_reviews() == []
+    # A new result followed by progress in one poll is a new round, shown by its result.
+    await poll("review", _report("r5", "completed", "ported again"), _report("r6", "working", "x"))
+    assert [event["kind"] for event in store.list_inbox()] == ["task_ready", "task_ready"]
+    assert "ported again" in card_body()
+
+
+@pytest.mark.asyncio
+async def test_watching_keeps_old_results_and_unseen_reports_as_they_were(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    reports: list[Any] = []
+    tasks: dict[str, Any] = {}
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _id: reports)
+
+    def put(status: str, *new: Any) -> None:
+        tasks["task-w"] = SimpleNamespace(
+            id="task-w",
+            workspace_id="ws",
+            status=SimpleNamespace(value=status),
+            title="t",
+            agent_type=SimpleNamespace(value="claude"),
+        )
+        reports.extend(new)
+
+    # Watched while in review: the Hub reviewer going over the old result is not news.
+    put("review", _report("r1", "ready_for_review", "old result"))
+    await service.watch("task-w")
+    put("working", _report("r2", "review_started", "checking"))
+    await service.check_work()
+    put("review", _report("r3", "review_passed", "fine"))
+    await service.check_work()
+    assert store.list_inbox() == []
+    # Watching it again before the next poll keeps the reports it has not seen.
+    put("working", _report("r4", "needs_input", "Which branch?"))
+    await service.watch("task-w")
+    await service.check_work()
+    assert [event["kind"] for event in store.list_inbox()] == ["task_needs_input"]
 
 
 def test_turn_fills_a_cold_index_outside_the_store_lock(
@@ -896,6 +970,18 @@ def test_turn_fills_a_cold_index_outside_the_store_lock(
     monkeypatch.setattr(service.index, "sync", spy)
     service.prepare_turn("what about the paper notes", "conv-1")
     assert free and free[0], "the first (slow) sync runs without the store lock"
+
+    # A locked index costs the recall, not the turn's pack (inbox, review, rotation).
+    import sqlite3
+
+    def locked(*_args: Any, **_kwargs: Any) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    service.store.add_inbox("task_ready", "Port — ported", key="k1")
+    monkeypatch.setattr(service.index, "sync", locked)
+    monkeypatch.setattr(service.index, "search", locked)
+    plan = service.prepare_turn("what about the paper notes", "conv-1")
+    assert "Port — ported" in plan.turn_pack and plan.delivered_event_ids
 
 
 def test_broken_journal_index_and_folders_heal(service: DotService) -> None:
