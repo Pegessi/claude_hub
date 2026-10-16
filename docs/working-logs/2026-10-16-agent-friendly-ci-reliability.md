@@ -52,3 +52,12 @@ Two new 8 MiB regressions fail against the old plugin (`-q` and `-vv`), then pas
 with bounded diagnostics after the repair. A short-ID control preserves the
 original early collection failure and prevents test execution. Preserve the
 first failing review/probe and final fixed-SHA evidence in the Task receipt.
+
+After merge authorization, main had advanced to `6de0b9c`. Sync it without
+changing its runtime/test paths or the approved collection policy. The only
+manual resolution again retains both CHANGELOG additions; the
+[final sync record](2026-10-16-agent-friendly-ci-final-sync-decisions.json) binds
+that decision to merge `84d914fd8f1c6e3b6d0c45db8023837ebf7e281b`.
+Re-review that immutable merge and the later record/log commit, then run the
+required full local and remote checks against the synchronized candidate before
+merging. Earlier checks remain historical evidence for their original SHA.

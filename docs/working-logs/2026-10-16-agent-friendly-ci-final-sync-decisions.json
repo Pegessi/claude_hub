@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "84d914fd8f1c6e3b6d0c45db8023837ebf7e281b",
+  "parents": [
+    "f568de6b2e3af6d12e3f1c16fa2075664d7492c0",
+    "6de0b9cdbdd61bcb25fc24b0c532bb6b2621d353"
+  ],
+  "base": "4dff0c52555524b07c2b3472833f44eae7665426",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "ad2489aae64910daafdbc8becd20fce5baf130d0",
+  "reconstructed_tree": "7bea22fbc6aa654c45922b2998dd88a501061dbd",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6e71268d77fa73a2f6b313f6cc0de6c22902c698"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c0c3021fe70fea8a7266f1b018f71f7f7d89d9cf"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ab94464174bdfa5ac6b06bc65f8f4b04c09ed614"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "88dca8d24fb81a2f13f6fc5d31901d4b07c8b7cb"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bd6fc799e09b3d14ecf5da5a8de3fad3bbde5963"
+      },
+      "reason": "Both parents add independent entries at the top of Released. Retain the exact reviewed CI reliability entry from parent1 before all unchanged parent2 release entries; retain a single Released section. No code path is manually changed.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
