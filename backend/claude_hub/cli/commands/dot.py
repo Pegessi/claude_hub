@@ -188,7 +188,10 @@ def _upload(ctx: click.Context, path: str) -> str:
     file_path = Path(path).expanduser()
     if not file_path.is_file():
         raise click.ClickException(f"Not a file: {path}")
-    data = base64.b64encode(file_path.read_bytes()).decode("ascii")
+    try:
+        data = base64.b64encode(file_path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise click.ClickException(f"Cannot read {path}: {exc.strerror or exc}") from exc
     result = _call(ctx, "POST", "/files", json={"filename": file_path.name, "data_base64": data})
     return str(result["path"])
 
@@ -224,6 +227,8 @@ def dot_remember(
     if body == "-":
         body = click.get_text_stream("stdin").read()
     card: Dict[str, Any] = {}
+    if card_id is not None and not card_id.strip():
+        raise click.ClickException("--id is empty; leave it out to create a new card")
     if card_id:
         card = _call(ctx, "GET", f"/cards/{quote(card_id, safe='')}")
         card = {

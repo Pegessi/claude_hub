@@ -104,6 +104,9 @@ test('Dot panel covers focus, work, lessons, memory and health', () => {
   assert.match(panel, /newFocus\.value = ''\n {2}void run\(/)
   assert.match(panel, /newLesson\.value = ''\n {2}void run\(/)
   assert.ok(panel.includes('maxlength="2000"'))
+  // A slow card load (or one left with Back) must not replace the card shown now.
+  assert.ok(panel.includes('if (request === cardRequest) selectedCard.value = card'))
+  assert.ok(panel.includes('@click="closeCard"'))
 })
 
 test('Dot name and avatar are shared and editable', () => {

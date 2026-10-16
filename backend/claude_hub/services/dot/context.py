@@ -14,6 +14,7 @@ Both have hard size caps so memory growth never floods the conversation.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Optional
@@ -22,6 +23,8 @@ from .index import DotIndex, recallable
 from .lessons import session_rules
 from .prompts import DOT_CONTEXT_HEADER, TOOL_GUIDE
 from .store import DEFAULT_NAME, Card, DotStore, utc_now
+
+logger = logging.getLogger(__name__)
 
 SESSION_PACK_CHARS = 9000
 TURN_PACK_CHARS = 5000
@@ -183,8 +186,13 @@ def build_turn_pack(
         sections.append(("## Waiting for your review", reviews))
     if events:
         sections.append((_EVENTS_TITLE, _event_lines(events)))
-    if recall and recallable(text):
-        hits = index.search(text, limit=6) if index is not None else []
+    if recall and recallable(text) and index is not None:
+        try:
+            hits = index.search(text, limit=6)
+        except Exception:
+            # A locked or broken index costs the recall, not the turn's whole pack.
+            logger.warning("dot: recall failed", exc_info=True)
+            hits = []
         if hits:
             sections.append(
                 (

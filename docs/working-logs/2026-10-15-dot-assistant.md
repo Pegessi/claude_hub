@@ -398,6 +398,33 @@ Fixed, each with a test that fails on the old code:
 
 The simulator found 0 anomalies after the fix.
 
+### Review of round 14
+
+One reviewer attacked the round-13 watcher change by hand-written sequences;
+one went over the CLI, the API routes, the Chat hooks and the panel (the Chat
+hooks touch only the Dot tab). Fixed, each with a test that fails on the old
+code:
+
+- Worker progress posted after a result, then a Hub reviewer pass, replaced
+  the result card with the progress text and asked a second verdict. In
+  review or done the result is now the worker's latest return; a new return
+  followed by progress in one poll is a new round.
+- Reopening a done task and accepting it again between two polls announced
+  the same result again.
+- A watched task already in review was announced when the Hub reviewer went
+  over its old result; watching a watched task again skipped its unseen
+  reports.
+- The round-13 index fill ran on every turn, so a locked index (another
+  process) cost Hub wake-ups their whole pack. The fill and the recall now
+  only log and skip.
+- `dot remember --id ""` made a new card; an unreadable `--file` printed a
+  traceback.
+- In the panel, a slow card load (or one left with Back) replaced the card on
+  screen.
+
+Not changed: an `ok` verdict with a cause is a documented use ("passed, but
+the worker had to ask"); merging a lesson into itself is a no-op.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude
