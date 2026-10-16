@@ -88,6 +88,14 @@ def _checklist(value: Any) -> list[str]:
     return []
 
 
+def _ended_at(task: Any) -> Optional[str]:
+    """When the task's latest run failed or finished; each run sets its own stamp."""
+    status = getattr(getattr(task, "status", None), "value", None)
+    field = {"failed": "failed_at", "done": "completed_at"}.get(str(status))
+    moment = getattr(task, field, None) if field else None
+    return moment.isoformat() if isinstance(moment, datetime) else None
+
+
 def _report_state(report: Any) -> str:
     return str(getattr(getattr(report, "state", None), "value", "") or "")
 
@@ -781,9 +789,25 @@ class DotService:
         for item in self.store.list_work(include_closed=True):
             task_id = str(item.get("task_id") or "")
             task = workspace_manager.tasks.get(task_id)
+            # A re-run that ends the same way between two polls only shows as a new end time.
+            ended = _ended_at(task)
+            rerun = (
+                task is not None
+                and ended is not None
+                and task.status.value == item.get("status")
+                and "ended_at" in item
+                and ended != item["ended_at"]
+            )
             if item.get("closed"):
+                if ended and "ended_at" not in item and not item.get("stopped"):
+                    # Closed before end times were kept: remember it, no event.
+                    self.store.upsert_work(task_id, ended_at=ended)
                 # A closed task is looked at again only when it was restarted or re-run.
-                if item.get("stopped") or task is None or task.status.value == item.get("status"):
+                if (
+                    item.get("stopped")
+                    or task is None
+                    or (task.status.value == item.get("status") and not rerun)
+                ):
                     continue
             if task is None:
                 self.store.upsert_work(task_id, status="missing", closed=True)
@@ -824,7 +848,7 @@ class DotService:
                 and report_id != last_seen
                 and _report_state(report) in _RETURN_REPORT_STATES
             )
-            if status in ("review", "failed") and (status != previous or again):
+            if status in ("review", "failed") and (status != previous or again or rerun):
                 card = self._result_card(item, status, report)
                 changes["result_card"] = card.id
                 changes["review_due"] = review_due
@@ -837,7 +861,7 @@ class DotService:
                     card_id=card.id,
                 )
                 events += 1
-            elif status == "done" and previous not in ("review", "done"):
+            elif status == "done" and (previous not in ("review", "done") or rerun):
                 card = self._result_card(item, status, report)
                 changes["result_card"] = card.id
                 changes["review_due"] = review_due
@@ -881,6 +905,8 @@ class DotService:
                 changes["last_report_id"] = report_id
             if status in _TERMINAL_TASK_STATES:
                 changes["closed"] = True
+                if ended and ended != item.get("ended_at"):
+                    changes["ended_at"] = ended
             elif item.get("closed"):
                 changes["closed"] = False
             if changes:
