@@ -44,7 +44,11 @@ class GoalRunStore:
             self._goals = {goal.id: goal for goal in goals}
             self._create_requests = dict(payload.get("create_requests", {}))
             self._create_inputs = {
-                key: {name: value[name] for name in ("tab_id", "objective")}
+                key: {
+                    name: item
+                    for name, item in value.items()
+                    if name in {"tab_id", "objective", "images"}
+                }
                 for key, value in payload.get("create_inputs", {}).items()
             }
 
@@ -116,16 +120,24 @@ class GoalRunStore:
                     "objective": prior.objective,
                 },
             )
-            supplied = {"tab_id": tab_id, **request.model_dump(exclude={"client_request_id"})}
+            from .images import image_fingerprint
+
+            supplied: dict[str, object] = {"tab_id": tab_id, "objective": request.objective}
+            fingerprint = image_fingerprint(request.attachments)
+            if fingerprint:
+                supplied["images"] = fingerprint
             if original != supplied:
                 raise ValueError("client_request_id was already used for another create")
             return prior.model_copy(deep=True)
 
-    def create(self, goal: GoalRun, client_request_id: str) -> GoalRun:
+    def create(
+        self, goal: GoalRun, client_request_id: str, request: GoalRunCreate | None = None
+    ) -> GoalRun:
         with self._lock:
             replay = self.replay_create(
                 goal.tab_id,
-                GoalRunCreate(
+                request
+                or GoalRunCreate(
                     objective=goal.objective,
                     client_request_id=client_request_id,
                 ),
@@ -147,6 +159,8 @@ class GoalRunStore:
                 "tab_id": goal.tab_id,
                 "objective": goal.objective,
             }
+            if goal.pending_image_fingerprint:
+                self._create_inputs[client_request_id]["images"] = goal.pending_image_fingerprint
             try:
                 self._save()
             except Exception:
