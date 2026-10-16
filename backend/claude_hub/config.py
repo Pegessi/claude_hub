@@ -1,8 +1,9 @@
 import ipaddress
 import math
 from typing import List, Optional
+from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -20,6 +21,50 @@ class Settings(BaseSettings):
     # None/empty allows local discovery. Validate at readiness time so a bad
     # MASO address does not prevent other providers from starting.
     maso_base_url: Optional[str] = None
+
+    # Deployment-only defaults, never serialized into public settings or tabs.
+    # Empty/unset URL inherits the process proxy; "direct" disables it.
+    claude_proxy_url: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
+    codex_proxy_url: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
+    cursor_proxy_url: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
+    traex_proxy_url: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
+    claude_no_proxy: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
+    codex_no_proxy: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
+    cursor_no_proxy: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
+    traex_no_proxy: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
+    cursor_models_probe_timeout_seconds: float = 5.0
+
+    @field_validator("claude_proxy_url", "codex_proxy_url", "cursor_proxy_url", "traex_proxy_url")
+    @classmethod
+    def _provider_proxy_url(cls, value: Optional[SecretStr]) -> Optional[SecretStr]:
+        if value is None:
+            return None
+        raw = value.get_secret_value().strip()
+        if not raw or raw == "direct":
+            return SecretStr(raw)
+        try:
+            parsed = urlsplit(raw)
+            valid = (
+                parsed.scheme in {"http", "https"}
+                and bool(parsed.hostname)
+                and (parsed.port is None or 1 <= parsed.port <= 65535)
+                and parsed.path in {"", "/"}
+                and not parsed.query
+                and not parsed.fragment
+                and not any(char.isspace() or ord(char) < 32 for char in raw)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("provider proxy must be an HTTP(S) proxy URL or 'direct'") from None
+        return SecretStr(raw)
+
+    @field_validator("cursor_models_probe_timeout_seconds")
+    @classmethod
+    def _cursor_probe_timeout(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("cursor_models_probe_timeout_seconds must be positive and finite")
+        return value
 
     # Keep the long-lived backend log bounded. RotatingFileHandler retains the
     # active file plus ``backend_log_backup_count`` numbered backups.
@@ -184,6 +229,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        hide_input_in_errors = True
 
 
 settings = Settings()

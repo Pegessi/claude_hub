@@ -7,6 +7,15 @@
 
 ## Released
 
+### feat(proxy): configure private deployment defaults per provider
+
+- Read separate Claude, Codex, Cursor and TraeX proxy/bypass defaults from
+  backend/.env, shared by native launches and Cursor catalog discovery.
+- Preserve session overrides and unconfigured deployments; keep private values
+  out of tab data, serialized settings and other providers' inherited variables.
+- Configure the Cursor catalog deadline per deployment and reject forced
+  additions of private root/backend .env files in commit-safety checks.
+
 ### feat(chat): control queued messages and edit image-aware Goals
 
 - Expand queued messages, edit text, cancel inputs, and preview/remove images;
