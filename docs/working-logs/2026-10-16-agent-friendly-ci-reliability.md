@@ -39,3 +39,8 @@ Final format/type, complete suite, document, staged and
 independent-review results are recorded against the delivered SHA in the Task
 and delivery receipt. Live providers and production service behavior are outside
 this change's evidence.
+
+Before final verification, sync main `4dff0c5` to retain the independently
+published queue/Goal work. The only manual resolution preserves both CHANGELOG
+entries; the [fixed sync record](2026-10-16-agent-friendly-ci-merge-decisions.json)
+binds that decision to merge `a0c08bf3f893934c281a4355fc5c3124678cd533`.
