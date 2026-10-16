@@ -7,6 +7,13 @@
 
 ## Released
 
+### ci: make reliability guidance executable for agents
+
+- Add a focused CI reliability contract with check selection, cost comparison,
+  failure diagnosis and compact handoff evidence, linked from agent/contributor guides.
+- Reject payload-sized pytest IDs with bounded, actionable diagnostics; preserve
+  test data and report slow phases without adding a timing gate.
+
 ### fix(ci): keep large test payloads out of verbose test names
 
 - Give oversized image and deeply nested registry cases short, descriptive pytest

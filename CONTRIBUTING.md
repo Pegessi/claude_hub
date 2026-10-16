@@ -64,6 +64,11 @@ ci: add AGENTS.md <> CLAUDE.md sync check
 
 ### 5. Run validation
 
+For test and CI changes, follow the [CI reliability contract](docs/CI_RELIABILITY.md):
+choose the smallest meaningful check, keep IDs/output bounded, inspect cost and
+failure evidence, and report the exact verified scope. Collection automatically
+rejects oversized pytest IDs; slow-phase timings are diagnostic, not a time gate.
+
 Use the shared local/CI entry point from the feature worktree:
 
 ```bash
