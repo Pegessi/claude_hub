@@ -83,7 +83,8 @@ Values are JSON; a plain unquoted value is read as a string.
 1. Hub sends a user turn to the Dot tab.
 2. `ClaudeNativeSession` asks the Dot service to prepare the turn:
    - decide rotation (turn count, age, explicit request, `[Dot tidy]`);
-   - build the **session pack** (role, user profile, concepts, tool guide) —
+   - build the **session pack** (role, user profile, concepts, delegation
+     rules from lessons, tool guide) —
      passed via `--append-system-prompt`, stable for the whole session;
    - build the **turn pack** (time, focus, open work, tasks waiting for
      review, new inbox events, recalled cards, and on the first turn the
@@ -118,7 +119,7 @@ One loop makes briefs better over time:
 ```
 brief ──▶ worker ──▶ result card ──▶ review ──▶ lesson ──┐
   ▲                                                      │
-  └──────────── shown when the next brief is written ◀───┘
+  └──────── in every session, before the next brief ◀────┘
 ```
 
 1. **Brief.** `--done-when` is a checklist (repeat the flag, at most 7):
@@ -130,41 +131,53 @@ brief ──▶ worker ──▶ result card ──▶ review ──▶ lesson �
    (`held: true`, CLI exit 1) when a check is vague (`done`, `works`, `完成`…),
    there are more than 7 checks, or output or context is missing. Dot fixes
    the brief and sends again, or adds `--confirm`; overridden warnings are kept
-   on the work item. A retry with a known `--request-key` is not held again.
-   Past lessons that share words with the brief are listed but never hold it:
-   word overlap cannot tell whether the brief already follows the rule, so a
-   hold there could only be cleared with `--confirm`, and Dot would learn to
-   always add it.
+   on the work item. A retry with a known `--request-key` is not held again
+   and does not overwrite the tracked status, so a result that came back in
+   between still raises its event. Lessons never hold a brief: word overlap
+   cannot tell whether the brief already follows a rule. They are in the
+   session pack, so Dot sees them while writing the brief, not after sending.
 3. **Result card.** The done-when list is printed next to the worker's report,
    so each check can be held against its answer.
 4. **Review.** Every task Dot delegated stays under "Waiting for your review"
    in each turn pack until Dot runs
-   `claude-hub dot review <task> --verdict ok|redo [--cause brief|env|worker|change]`.
+   `claude-hub dot review <task> --verdict ok|redo|skip [--cause brief|env|worker|change]`.
    A redo needs a cause; `change` means the user changed what they want. A
    `brief` cause needs `--lesson "<rule>"` (new) or `--lesson-id <id>` (the
-   same miss again: one more vote). A new rule that says nearly the same as a
+   same miss again: one more vote). Any other redo needs `--note` on what went
+   wrong, so blaming the environment, the worker or the user is never free.
+   `skip` (with `--note`) is for a result Dot cannot judge; it clears the
+   reminder and counts nowhere. A new rule that says nearly the same as a
    live lesson votes that lesson instead. Watched tasks are not reviewed;
-   their brief was not Dot's. After a verdict, the next round asks again:
-   a new final report (even if the watcher never saw the task working again)
-   or a closed task that was restarted.
+   their brief was not Dot's. A redo is only a record: Dot then sends the fix
+   (`claude-hub task continue <task> --message ...` while the task is in
+   review or failed, or a new delegate). After a verdict, the next round asks
+   again: a new final report (even if the watcher never saw the task working
+   again; before a verdict it refreshes the result card) or a closed task
+   that was restarted. A closed task keeps the time it ended
+   (`failed_at` / `completed_at`); a new time means it ran again and ended the
+   same way between two polls, which also asks again. This is one in-memory
+   compare per closed task, no report read.
 5. **Lessons.** One rule each, "When <situation>, <what to put in the brief>",
    at most 200 characters. Score = strength, halved every 60 days without a
    new vote. A vote or merge first decays the old strength to today, then adds,
    so an old rule with many stale votes cannot jump ahead of fresh ones. One
    task votes a lesson once; a vote for a merged lesson goes to the lesson it
-   was merged into. The top 5 with score ≥ 0.5 are in every session pack
-   ("always"); weaker ones are listed when a brief shares their words ("on
-   match"); below 0.1 they are faded but kept as history. The nightly tidy
+   was merged into, and a vote for a dropped one is refused. The top 8 with
+   score ≥ 0.5 are in every session pack ("always", at most 200 characters
+   each); the rest are hidden but kept as history. The nightly tidy
    merges duplicates and sharpens wording (`dot lessons merge|edit|drop`). The
    user can edit them in the Lessons tab.
 
-The first-pass rate (ok at the first verdict and no question asked, over the
-latest 20 reviews) is the one number that says whether briefs are improving.
-A question counts even when it was answered before the watcher looked.
-Tasks whose first review said `change` are left out. `dot lessons` and the
-Lessons tab show it with the first-round miss causes (so brief misses stand
-apart from env and worker ones) and "judged N/M returned": a rate built on
-few verdicts says little.
+The first-pass rate (ok at the first verdict, no question asked and no later
+redo, over the latest 20 reviews) is the one number that says whether briefs
+are improving. A question counts even when it was answered before the
+watcher looked; an ok that a later round turned into a redo (not `change`)
+is not a first pass. Tasks whose first review said `change`, and skipped
+ones, are left out. `dot lessons` and the Lessons tab show it with the
+first-round causes (so brief misses stand apart from env and worker ones)
+and "judged N/M returned": a rate built on few verdicts says little. The CLI
+also shows how briefs sent past brief warnings (`--confirm`) did: if they
+pass as often as the rest, the check is holding briefs for nothing.
 
 A task looks stuck when it is queued or working with no progress (task update,
 progress report, runtime status change or new report) for `--stall-hours`

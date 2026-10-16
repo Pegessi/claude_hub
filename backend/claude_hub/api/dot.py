@@ -100,7 +100,7 @@ class DelegateRequest(BaseModel):
 class ReviewRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
-    verdict: Literal["ok", "redo"]
+    verdict: Literal["ok", "redo", "skip"]
     cause: Optional[Literal["brief", "env", "worker", "change"]] = None
     note: str = Field(default="", max_length=2000)
     lesson: str = Field(default="", max_length=LESSON_RULE_LIMIT)

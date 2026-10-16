@@ -465,6 +465,8 @@ def test_review_and_lessons_routes_and_cli(
         "pending": 0,
         "judged": 1,
         "returned": 1,
+        "confirmed": 0,
+        "confirmed_first_pass": 0,
         "window": 20,
     }
     lesson_id = lessons["lessons"][0]["id"]
@@ -482,8 +484,10 @@ def test_review_and_lessons_routes_and_cli(
     into_merged = {"keep": added["id"], "others": [lesson_id]}
     assert client.post("/api/dot/lessons/merge", json=into_merged).status_code == 400
 
+    store.upsert_work("task-1", brief_warnings=["No context"])
     listed = CliRunner().invoke(cli, ["dot", "lessons"])
     assert listed.exit_code == 0, listed.output
+    assert "sent past brief warnings: first pass 0/1" in listed.output
     assert "first pass: 0/1" in listed.output and lesson_id in listed.output
     assert "(misses: brief 1)" in listed.output and "judged 1/1 returned" in listed.output
     assert added["id"] not in listed.output
@@ -491,6 +495,11 @@ def test_review_and_lessons_routes_and_cli(
 
     assert CliRunner().invoke(cli, ["dot", "lessons", "drop", lesson_id]).exit_code == 0
     assert client.get("/api/dot/lessons").json()["lessons"] == []
+    store.upsert_work("task-2", workspace_id="ws", status="review", result_card="c-2",
+                      review_due=True)  # fmt: skip
+    revive = {"verdict": "redo", "cause": "brief", "lesson_id": added["id"]}
+    dropped = client.post("/api/dot/work/task-2/review", json=revive)
+    assert dropped.status_code == 400 and "dropped" in dropped.json()["detail"]
     assert client.delete("/api/dot/lessons/l-none").status_code == 404
     assert CliRunner().invoke(cli, ["dot", "lessons", "add", "Split big goals"]).exit_code == 0
     assert [row["rule"] for row in client.get("/api/dot/lessons").json()["lessons"]] == [

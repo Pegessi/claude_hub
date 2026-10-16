@@ -2,6 +2,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+import time
 import uuid
 from datetime import datetime, timedelta
 from importlib import import_module
@@ -3175,6 +3176,15 @@ def test_completed_skip_review_marks_review_without_reviewer(
     )
     assert done_response.status_code == 200
     assert done_response.json()["human_accepted_at"] is not None
+    completed_at = done_response.json()["completed_at"]
+    assert completed_at is not None
+
+    # Saving a done task as done again is not a new completion (Dot reads a new
+    # completed_at as a re-run).
+    time.sleep(0.01)
+    again = client.patch(f"/api/workspaces/tasks/{task['id']}", json={"status": "done"})
+    assert again.status_code == 200
+    assert again.json()["completed_at"] == completed_at
 
 
 def test_manual_feedback_reaper_promotes_lesson(

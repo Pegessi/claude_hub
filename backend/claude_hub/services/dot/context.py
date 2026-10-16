@@ -135,8 +135,9 @@ def _review_lines(store: DotStore) -> list[str]:
         lines.append(f"- ({len(pending) - _REVIEWS_PER_TURN} more)")
     lines.append(
         "- Judge each result against its done-when list, then "
-        "`claude-hub dot review <task-id> --verdict ok|redo [--cause brief|env|worker|change]`; "
-        "a brief miss needs `--lesson` or `--lesson-id`."
+        "`claude-hub dot review <task-id> --verdict ok|redo|skip [--cause brief|env|worker|change] "
+        '[--note "..."]`; a brief miss needs `--lesson` or `--lesson-id`, any other redo or a '
+        "skip needs `--note`."
     )
     return lines
 

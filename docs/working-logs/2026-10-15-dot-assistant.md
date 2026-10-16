@@ -185,6 +185,48 @@ returned". Left for later: parsing the worker's ✓/✗ answers in code and
 logging a reason for each `--confirm`. Not fixed by choice: Japanese, Korean
 and Cyrillic checks are not tokenized.
 
+Follow-up: a failed task that was re-run and failed again between two polls
+(never seen running) did not ask again. `execution_epoch` only moves on
+handoff, but `failed_at` / `completed_at` are reset on every dispatch and set
+on every end, so a closed item stores that time as `ended_at`; a different
+time reopens the review. Items closed before this change only get the time
+filled in, with no event.
+
+### Review of round 5
+
+A second code and design review read the round-4 commits. Fixed, each with a
+test that fails on the old code:
+
+- Watching a task again after `unwatch` left it `stopped`: a restart was
+  missed and it could never be reviewed. `watch` now clears `stopped`.
+- One bad number in a hand-edited `lessons.json` (`weight: "high"`, NaN,
+  `tasks: null`) broke every Dot turn. Bad values now count as votes, else 0.
+- A vote, direct or through a merged lesson, brought back a lesson the user
+  dropped. It is now refused (400).
+- A `--request-key` retry overwrote the tracked status; when the task had come
+  back since the last poll, its result event and card were lost.
+- A second return before any verdict kept the first round's result card.
+- Saving a done task as done again moved `completed_at`, which Dot now reads as
+  a re-run. The Hub keeps the first completion time.
+- The Lessons inputs allowed 300 characters; the API takes 200.
+
+From the design review:
+
+- Lesson matches arrived only after the task was sent, so they could not
+  change the brief. The match tier is gone; the top 8 lessons (was 5) are in
+  every session pack. `reach` is now always, hidden, dropped or merged.
+- An ok that a later round turned into a redo (not `change`) still counted as
+  a first pass (`late_redo` now).
+- Blaming env, worker or change was free: such a redo now needs `--note`.
+- `skip` (with a note) clears a result Dot cannot judge; it counts nowhere.
+- Stats show how briefs sent past warnings (`--confirm`) did, to test whether
+  the brief check earns its holds.
+- The tool guide says how to act on a redo (`task continue` or a new delegate).
+- Reviews of watched or stopped tasks are refused.
+
+Not taken: a code-computed ✓/✗ summary on the result card, and an example task
+per lesson in the UI.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

@@ -50,19 +50,23 @@ TOOL_GUIDE = """\
 --done-when "<check>" [--done-when "<check>" ...] --output "<what, and where it goes>" \
 [--context "..."] [--out-of-scope "..."] [--constraints "..."] [--agent codex|claude] \
 [--stall-hours N]`. One goal per task. Each done-when is one check a stranger can
-  verify (a file, a command, a number). The Hub checks the brief and lists
-  past lessons that share its words; it sends the task anyway, so read them
-  and fix the brief first if one applies. It holds a task only when the brief
-  check warns; fix the brief, or resend with `--confirm` when the warnings do
-  not apply.
-- `claude-hub dot review <task-id> --verdict ok|redo \
+  verify (a file, a command, a number). Check the brief against your
+  Delegation rules before sending. The Hub holds a task when its brief check
+  warns; fix the brief, or resend with `--confirm` when the warnings do not
+  apply.
+- `claude-hub dot review <task-id> --verdict ok|redo|skip \
 [--cause brief|env|worker|change] [--note "..."] [--lesson "<rule>" | --lesson-id <id>]` —
   judge every task you delegated once it comes back. When the brief caused
   the miss (the worker had to ask, guessed wrong, or delivered the wrong
   thing), add a lesson: one rule for future briefs, written "When <situation>,
   <what to put in the brief>" (max 200 characters), or `--lesson-id` to vote
   for an existing rule. Use `change` when the user changed what they want;
-  it teaches nothing and does not count against your briefs.
+  it teaches nothing and does not count against your briefs. Any redo not
+  caused by the brief needs `--note` saying what went wrong. Use `skip` with
+  `--note` only when you cannot judge the result at all.
+  A redo is only a record: then send the fix, with
+  `claude-hub task continue <task-id> --message "<what to fix>"` (same task,
+  while it is in review or failed), or a new `dot delegate` with a better brief.
 - `claude-hub dot lessons` — your brief lessons; `lessons edit|drop|merge` keep them tidy
 - `claude-hub dot watch <task-id> [--stall-hours N]` — watch an existing Hub task (default \
 stuck alarm: 2 hours without progress); `claude-hub dot unwatch <task-id>` stops it

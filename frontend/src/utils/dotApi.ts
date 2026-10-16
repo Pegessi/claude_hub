@@ -89,7 +89,8 @@ export interface DotWorkItem {
 export type DotReviewCause = 'brief' | 'env' | 'worker' | 'change'
 
 export interface DotReview {
-  verdict: 'ok' | 'redo'
+  // skip: Dot could not judge it (the note says why); not counted.
+  verdict: 'ok' | 'redo' | 'skip'
   cause?: DotReviewCause
   note?: string
   lesson_id?: string
@@ -111,8 +112,8 @@ export interface DotLesson {
   score: number
   // Among the few strongest rules shown in every session.
   in_session: boolean
-  // always: in every session; on match: listed when a brief shares its words; faded: history.
-  reach: 'always' | 'on match' | 'faded'
+  // always: in every session; hidden: too weak or outside the top few, kept as history.
+  reach: 'always' | 'hidden' | 'dropped' | 'merged'
   dropped?: boolean
   merged_into?: string
 }
@@ -127,6 +128,9 @@ export interface DotReviewStats {
   // Delegated tasks that came back, and how many of them got a verdict.
   judged: number
   returned: number
+  // Briefs sent past the brief check's warnings, and how many of them passed first time.
+  confirmed?: number
+  confirmed_first_pass?: number
   window: number
 }
 

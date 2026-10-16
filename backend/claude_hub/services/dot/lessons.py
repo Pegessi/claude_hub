@@ -3,9 +3,9 @@
 A lesson is one rule for writing briefs, learned when a delegated task came
 back wrong because of its brief. ``votes`` counts how often the same miss
 happened. The score halves every ``LESSON_HALF_LIFE_DAYS`` without a new vote,
-so a rule that stops mattering fades: first out of the always-on rules in the
-session pack, later out of the delegate-time matches. Faded lessons stay in
-the file as history.
+so a rule that stops mattering drops out of the session pack. Only the
+strongest few are shown, all the time: a lesson shown after a brief is sent
+could not change it. Hidden lessons stay in the file as history.
 
 A vote or merge first decays the old strength to today and stores it as
 ``weight`` (with ``seen`` = now), so an old, faded rule cannot jump ahead of
@@ -14,15 +14,14 @@ fresh ones just because it once had many votes.
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 LESSON_HALF_LIFE_DAYS = 60.0
-RULES_IN_SESSION = 5
+RULES_IN_SESSION = 8
 RULE_MIN_SCORE = 0.5
-MATCH_MIN_SCORE = 0.1
-MATCH_MIN_OVERLAP = 2
 SAME_RULE_MIN_JACCARD = 0.6
 MAX_DONE_WHEN = 7
 
@@ -73,9 +72,23 @@ def _parse_time(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _number(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def lesson_score(lesson: dict[str, Any], now: datetime) -> float:
-    """Strength (``weight``, else ``votes``), halved per half-life since last seen."""
-    weight = max(float(lesson.get("weight", lesson.get("votes")) or 0), 0.0)
+    """Strength (``weight``, else ``votes``), halved per half-life since last seen.
+
+    The file is hand-editable, so a bad number counts as the votes, else 0.
+    """
+    weight = _number(lesson.get("weight"))
+    if weight is None:
+        weight = _number(lesson.get("votes")) or 0.0
+    weight = max(weight, 0.0)
     seen = _parse_time(lesson.get("seen")) or _parse_time(lesson.get("created"))
     if seen is None:
         return weight
@@ -96,26 +109,12 @@ def session_rules(lessons: Iterable[dict[str, Any]], now: datetime) -> list[dict
 
 
 def tokens(text: str) -> set[str]:
-    """Words of 3+ letters and CJK character pairs, for a rough topic match."""
+    """Words of 3+ letters and CJK character pairs, to compare two rules."""
     lowered = text.lower()
     found = {word for word in _WORD_RE.findall(lowered) if len(word) >= 3} - _STOP_WORDS
     for run in _CJK_RUN_RE.findall(lowered):
         found.update(run[index : index + 2] for index in range(len(run) - 1))
     return found
-
-
-def match_lessons(
-    lessons: Iterable[dict[str, Any]], text: str, now: datetime, limit: int = 3
-) -> list[dict[str, Any]]:
-    """Lessons that share enough words with a brief, strongest first."""
-    wanted = tokens(text)
-    hits: list[tuple[float, dict[str, Any]]] = []
-    for score, lesson in ranked(lessons, now):
-        overlap = len(wanted & tokens(str(lesson.get("rule") or "")))
-        if score >= MATCH_MIN_SCORE and overlap >= MATCH_MIN_OVERLAP:
-            hits.append((score * overlap, lesson))
-    hits.sort(key=lambda pair: -pair[0])
-    return [lesson for _, lesson in hits[:limit]]
 
 
 def same_rule(lessons: Iterable[dict[str, Any]], rule: str) -> Optional[dict[str, Any]]:
