@@ -48,8 +48,46 @@ jobs:
       - name: Install locked backend dependencies
         working-directory: ./backend
         run: uv sync --frozen --extra dev --python "$(cat ../.python-test-version)"
+      - name: Prepare backend diagnostic evidence
+        if: matrix.target == 'backend-tests'
+        run: |
+          backend_evidence="$RUNNER_TEMP/claude-hub-backend-evidence"
+          mkdir -p "$backend_evidence"
+          echo "CLAUDE_HUB_VERIFY_ARTIFACT_ROOT=$backend_evidence" >> "$GITHUB_ENV"
+          {
+            uname -a
+            for tool in tmux ttyd node bash; do
+              command -v "$tool" || true
+            done
+          } > "$backend_evidence/runner-tools.txt"
       - name: Run unified backend check
-        run: ./scripts/verify.sh ${{ matrix.target }}
+        run: |
+          if [[ '${{ matrix.target }}' == 'backend-tests' ]]; then
+            ulimit -c 0
+            backend_status=0
+            PYTHONFAULTHANDLER=1 CLAUDE_HUB_PYTEST_TIMEOUT_SECONDS=300 \
+              ./scripts/verify.sh backend-tests \
+              > "$CLAUDE_HUB_VERIFY_ARTIFACT_ROOT/backend-step.log" 2>&1 || backend_status=$?
+            printf '%s\n' "$backend_status" > "$CLAUDE_HUB_VERIFY_ARTIFACT_ROOT/step-exit-code"
+            tail -n 200 "$CLAUDE_HUB_VERIFY_ARTIFACT_ROOT/backend-step.log"
+            exit "$backend_status"
+          else
+            ./scripts/verify.sh '${{ matrix.target }}'
+          fi
+      - name: Retain backend diagnostic logs
+        if: always() && matrix.target == 'backend-tests'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-pytest-diagnostics
+          path: |
+            ${{ env.CLAUDE_HUB_VERIFY_ARTIFACT_ROOT }}/runner-tools.txt
+            ${{ env.CLAUDE_HUB_VERIFY_ARTIFACT_ROOT }}/backend-step.log
+            ${{ env.CLAUDE_HUB_VERIFY_ARTIFACT_ROOT }}/step-exit-code
+            ${{ env.CLAUDE_HUB_VERIFY_ARTIFACT_ROOT }}/**/pytest.log
+            ${{ env.CLAUDE_HUB_VERIFY_ARTIFACT_ROOT }}/**/environment.txt
+            ${{ env.CLAUDE_HUB_VERIFY_ARTIFACT_ROOT }}/**/exit-code
+          if-no-files-found: warn
+          retention-days: 7
       - name: Upload backend coverage to Codecov
         if: matrix.target == 'backend-tests'
         uses: codecov/codecov-action@v5
