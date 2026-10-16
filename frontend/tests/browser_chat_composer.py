@@ -598,9 +598,9 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(composer).to_have_value("")
         assert sends[-1]["text"] == FAILING_TEXT, sends[-1]
 
-        # The explicit retry is the same durable intent. Reuse the idempotency
-        # key so losing the first HTTP response cannot duplicate provider work.
-        assert sends[-1]["client_turn_id"] == sends[-2]["client_turn_id"], sends[-2:]
+        # Native delivery has no identity deduplication. An explicit resend is
+        # a distinct intent; Goal/Managed Chat retention is tested separately.
+        assert sends[-1]["client_turn_id"] != sends[-2]["client_turn_id"], sends[-2:]
 
         # Mobile: the composer and both controls stay usable and on screen.
         await page.set_viewport_size({"width": 390, "height": 844})
