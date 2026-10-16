@@ -69,6 +69,7 @@ from ...models import (
     StreamReasoningEffortOption,
 )
 from ..agent_execution_policy import EXECUTION_POLICY
+from ..proxy_rules import with_proxy_env_aliases
 from .fork_seed import wrap_fork_seed_history
 from .provider_network import (
     PROVIDER_NETWORK_MODE_ENV,
@@ -730,6 +731,7 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
             "--list-models",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=with_proxy_env_aliases(os.environ),
         )
     except (OSError, NotImplementedError):
         return _group_cursor_model_options(_static_options("cursor")), True
@@ -1663,8 +1665,10 @@ class ProviderSession(ABC):
         ``session.env``) authoritative. This is process env only — it is never
         written back to the persisted tab env.
         """
-        env = dict(os.environ)
-        for key, value in self.session.env.items():
+        # Normalize each layer first: an explicit single-case session value
+        # (including an empty value) must replace both inherited spellings.
+        env = with_proxy_env_aliases(os.environ)
+        for key, value in with_proxy_env_aliases(self.session.env).items():
             if value is None:
                 env.pop(key, None)
             else:
