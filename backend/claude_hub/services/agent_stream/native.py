@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
 from uuid import uuid4
 
+from ...config import settings
 from ...models import (
     AgentType,
     ChatMode,
@@ -69,7 +70,7 @@ from ...models import (
     StreamReasoningEffortOption,
 )
 from ..agent_execution_policy import EXECUTION_POLICY
-from ..proxy_rules import with_proxy_env_aliases
+from ..provider_proxy import provider_subprocess_env, redact_provider_proxy_diagnostic
 from .fork_seed import wrap_fork_seed_history
 from .provider_network import (
     PROVIDER_NETWORK_MODE_ENV,
@@ -482,7 +483,6 @@ _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
 _MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
 _MODELS_NEGATIVE_TTL_S = 60.0  # failed probe (static fallback): 1 minute
-_MODELS_PROBE_TIMEOUT_S = 5.0
 _REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 _REASONING_LABELS = {
     "none": "None",
@@ -719,8 +719,8 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
     unparseable output) and the static curated list was returned instead; the
     caller applies the short negative TTL so recovery is quick.
 
-    The probe deliberately inherits the backend process environment rather
-    than the session env: the catalog is cached globally per agent type, so a
+    The probe uses the backend process plus deployment Cursor proxy defaults,
+    rather than the session env: the catalog is cached globally per agent type, so a
     session-specific ``agent`` binary or credentials would leak one session's
     models into another's. The backend runs as the user, so ``agent`` auth
     works.
@@ -731,12 +731,14 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
             "--list-models",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=with_proxy_env_aliases(os.environ),
+            env=provider_subprocess_env("cursor", os.environ),
         )
     except (OSError, NotImplementedError):
         return _group_cursor_model_options(_static_options("cursor")), True
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_MODELS_PROBE_TIMEOUT_S)
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=settings.cursor_models_probe_timeout_seconds
+        )
     except asyncio.CancelledError:
         # The calling task was cancelled mid-probe. ``wait_for`` propagates
         # this without killing the process, so do so explicitly to avoid a
@@ -1570,7 +1572,9 @@ class ProviderSession(ABC):
                 except Exception:
                     pass
             if returncode != 0:
-                stderr_text = self._stderr_buffer.decode("utf-8", errors="ignore").strip()
+                stderr_text = redact_provider_proxy_diagnostic(
+                    self._stderr_buffer.decode("utf-8", errors="ignore").strip()
+                )
                 self._exit_error = f"provider exited with code {returncode}" + (
                     f": {stderr_text}" if stderr_text else ""
                 )
@@ -1670,14 +1674,9 @@ class ProviderSession(ABC):
         ``session.env``) authoritative. This is process env only — it is never
         written back to the persisted tab env.
         """
-        # Normalize each layer first: an explicit single-case session value
-        # (including an empty value) must replace both inherited spellings.
-        env = with_proxy_env_aliases(os.environ)
-        for key, value in with_proxy_env_aliases(self.session.env).items():
-            if value is None:
-                env.pop(key, None)
-            else:
-                env[key] = value
+        # Apply deployment defaults before explicit session overrides;
+        # normalize each layer so single-case proxy overrides replace both.
+        env = provider_subprocess_env(self.session.agent_type.value, os.environ, self.session.env)
         tab_id = getattr(self.session, "tab_id", None)
         if tab_id:
             env.setdefault("CLAUDE_HUB_TAB_ID", tab_id)

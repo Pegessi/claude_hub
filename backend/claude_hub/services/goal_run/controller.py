@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import re
@@ -23,6 +24,7 @@ from ...models.goal_run import (
     GoalUsageQuality,
     utc_now,
 )
+from .images import image_fingerprint
 from .policy import GoalPolicyError, ensure_unfinished
 from .store import GoalRunStore
 
@@ -142,8 +144,11 @@ class GoalRunController:
             GoalRun(
                 tab_id=tab_id,
                 objective=request.objective,
+                pending_image_count=len(request.attachments),
+                pending_image_fingerprint=image_fingerprint(request.attachments),
             ),
             request.client_request_id,
+            request,
         )
 
     async def create_and_start(self, tab_id: str, request: GoalRunCreate) -> GoalRun:
@@ -265,6 +270,10 @@ class GoalRunController:
             raise GoalPolicyError("step_id must not be empty")
         async with self._mutation_lock_for(goal_id):
             existing = self.store.get(goal_id)
+            if existing.pending_image_count:
+                raise GoalPolicyError(
+                    "Image delivery interrupted. Reattach images and steer the Goal to continue."
+                )
             if client_request_id not in existing.idempotency:
                 ensure_unfinished(existing)
                 if (
@@ -324,7 +333,15 @@ class GoalRunController:
             return goal
         return self._prepare_dispatch_locked(goal.id, step_id=step_id, dispatch=dispatch)
 
-    async def steer(self, goal_id: str, client_request_id: str, text: str, turn_id: str) -> GoalRun:
+    async def steer(
+        self,
+        goal_id: str,
+        client_request_id: str,
+        text: str,
+        turn_id: str,
+        image_count: int = 0,
+        image_digest: str = "",
+    ) -> GoalRun:
         """Deliver user input as the next Goal turn without leaving Goal mode.
 
         Any running Goal turn is interrupted first. The Goal is parked as paused
@@ -336,12 +353,13 @@ class GoalRunController:
             raise ValueError(
                 f"Goal steer messages are limited to {GOAL_STEER_INPUT_MAX_LENGTH} characters"
             )
+        operation = "steer:" + hashlib.sha256((text + "\0" + image_digest).encode()).hexdigest()
         async with self._mutation_lock_for(goal_id):
             async with self._lock_for(goal_id):
                 existing = self.store.get(goal_id)
                 replay = existing.idempotency.get(client_request_id)
                 if replay is not None:
-                    if replay != "steer":
+                    if replay not in {"steer", operation}:
                         raise GoalPolicyError(
                             "client_request_id was already used for another mutation"
                         )
@@ -349,15 +367,23 @@ class GoalRunController:
 
                 def apply(goal: GoalRun) -> None:
                     ensure_unfinished(goal)
-                    if goal.status not in {GoalRunStatus.ACTIVE, GoalRunStatus.BLOCKED}:
+                    if goal.status not in {GoalRunStatus.ACTIVE, GoalRunStatus.BLOCKED} and not (
+                        goal.status == GoalRunStatus.PAUSED and goal.pending_image_count
+                    ):
                         raise GoalPolicyError("Resume the Goal before steering it")
                     goal.status = GoalRunStatus.PAUSED
                     goal.paused_at = utc_now()
                     goal.status_message = "steering the Goal with a new message"
+                    if goal.pending_image_count and not image_count:
+                        raise GoalPolicyError(
+                            "Reattach images before steering the interrupted Goal"
+                        )
                     goal.pending_input = text
+                    goal.pending_image_count = image_count
+                    goal.pending_image_fingerprint = image_digest
                     goal.resume_after_turn = False
 
-                goal = self._mutate_once(goal_id, client_request_id, "steer", apply)
+                goal = self._mutate_once(goal_id, client_request_id, operation, apply)
             goal = await self._cancel_current(goal)
             if goal.dispatch_state != GoalDispatchState.IDLE:
                 raise GoalPolicyError(goal.status_message or "Goal turn could not be reconciled")
@@ -371,6 +397,25 @@ class GoalRunController:
         if goal.dispatch_state == GoalDispatchState.PENDING:
             return await self._dispatch_prepared(goal)
         return goal
+
+    async def update_objective(
+        self, goal_id: str, client_request_id: str, objective: str
+    ) -> GoalRun:
+        operation = "objective:" + hashlib.sha256(objective.encode()).hexdigest()
+        async with self._mutation_lock_for(goal_id):
+            async with self._lock_for(goal_id):
+
+                def apply(goal: GoalRun) -> None:
+                    ensure_unfinished(goal)
+                    if goal.dispatch_state == GoalDispatchState.UNCERTAIN:
+                        raise GoalPolicyError(
+                            "Reconcile the current Goal turn before editing its objective"
+                        )
+                    if goal.objective != objective:
+                        goal.objective = objective
+                        goal.objective_revision += 1
+
+                return self._mutate_once(goal_id, client_request_id, operation, apply)
 
     async def complete(self, goal_id: str, client_request_id: str) -> GoalRun:
         async with self._mutation_lock_for(goal_id):
@@ -482,6 +527,9 @@ class GoalRunController:
         # forever. Older callbacks are still rejected by current_turn_id above.
         goal.completed_turn_ids = goal.completed_turn_ids[-GOAL_RECENT_TURN_IDS_LIMIT:]
         goal.turns_completed += 1
+        goal.pending_input = None
+        goal.pending_image_count = 0
+        goal.pending_image_fingerprint = ""
         goal.current_turn_id = None
         goal.dispatch_state = GoalDispatchState.IDLE
         goal.pending_step_id = None
@@ -517,6 +565,9 @@ class GoalRunController:
         protocol_tail = assistant_text[-(_MAX_CHECKPOINT_JSON_CHARS + 4096) :]
         status_start = protocol_tail.lower().rfind("<goal-status")
         match = _STATUS_RE.fullmatch(protocol_tail[status_start:]) if status_start >= 0 else None
+        if match is None and goal.dispatched_objective_revision != goal.objective_revision:
+            self.store.put(goal)
+            return self._prepare_dispatch_locked(goal.id)
         if match is None:
             goal.status = GoalRunStatus.FAILED
             goal.status_message = "assistant response omitted a valid trailing goal-status signal"
@@ -538,6 +589,9 @@ class GoalRunController:
 
         signal, message = match.group(1).lower(), match.group(2).strip() or None
         goal.status_message = message
+        if goal.dispatched_objective_revision != goal.objective_revision:
+            self.store.put(goal)
+            return self._prepare_dispatch_locked(goal.id)
         if signal == "complete":
             goal.status = GoalRunStatus.COMPLETE
             goal.completed_at = utc_now()
@@ -608,6 +662,7 @@ class GoalRunController:
         # synchronously can be correlated while dispatch is still pending.
         goal.current_turn_id = goal.pending_step_id
         goal.dispatch_state = GoalDispatchState.PENDING
+        goal.dispatched_objective_revision = goal.objective_revision
         return self.store.put(goal)
 
     async def _dispatch_prepared(
@@ -645,6 +700,9 @@ class GoalRunController:
                 goal.dispatch_state = GoalDispatchState.DISPATCHED
                 if goal.pending_input == prepared.pending_input:
                     goal.pending_input = None
+                if goal.pending_image_fingerprint == prepared.pending_image_fingerprint:
+                    goal.pending_image_count = 0
+                    goal.pending_image_fingerprint = ""
                 return self.store.put(goal)
         except (Exception, asyncio.CancelledError) as exc:
             async with self._lock_for(prepared.id):

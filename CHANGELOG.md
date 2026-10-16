@@ -16,6 +16,42 @@
 - Preserve user controls, waiting/uncertain states and claim-based no-replay
   behavior. Revoke pending recovery on new Goal controls or archive, including
   archive actions before the capture list is persisted.
+- Preserve interruption evidence through private proxy diagnostic redaction and
+  include effective deployment proxy defaults in restart configuration checks.
+- Finish failed deferred recovery before admitting queued objective edits.
+
+### fix(proxy): preserve login profiles and private diagnostic boundaries
+
+- Reassert configured provider proxies after login initialization while keeping
+  session HOME, SHELL and profile-based provider discovery intact.
+- Clear stale Claude launch settings when session overrides are removed, and
+  atomically create private launch files with restrictive permissions.
+- Mask proxy usernames and bypass hosts in error/status diagnostics; require
+  provider-specific network tests and private configuration during deployment.
+
+### feat(proxy): configure private deployment defaults per provider
+
+- Read separate Claude, Codex, Cursor and TraeX proxy/bypass defaults from
+  backend/.env, shared by native launches and Cursor catalog discovery.
+- Preserve session overrides and unconfigured deployments; keep private values
+  out of tab data, serialized settings and other providers' inherited variables.
+- Configure the Cursor catalog deadline per deployment and reject forced
+  additions of private root/backend .env files in commit-safety checks.
+
+### feat(chat): control queued messages and edit image-aware Goals
+
+- Expand queued messages, edit text, cancel inputs, and preview/remove images;
+  Cmd/Ctrl+Enter steers the first queued item when the composer is empty.
+- Keep automatic queue sends from overwriting composer drafts, retain queued
+  edits through bounded Chat eviction, and reconcile uncertain deliveries safely.
+- Edit Goal objectives for the next turn and attach original images at creation
+  or steering, with explicit recovery when image dispatch is interrupted.
+
+### fix(ci): keep large test payloads out of verbose test names
+
+- Give oversized image and deeply nested registry cases short, descriptive pytest
+  IDs, so verbose CI output does not include megabytes of fixture data.
+- Preserve the original payloads, assertions and CI execution settings.
 
 ### fix(chat): bound formula parsing and preserve literal code
 

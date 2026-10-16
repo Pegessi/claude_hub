@@ -17,9 +17,9 @@
       >
         <div>
           <h2 id="goal-dialog-title">
-            Set a Goal
+            {{ editing ? 'Edit Goal' : 'Set a Goal' }}
           </h2>
-          <p>What would you like to achieve?</p>
+          <p>{{ editing ? 'Changes apply to the next Goal turn. The current turn can finish.' : 'What would you like to achieve?' }}</p>
         </div>
         <label>
           Objective
@@ -33,6 +33,7 @@
             required
           />
         </label>
+        <slot name="images" />
         <div
           id="goal-dialog-tips"
           class="goal-dialog-tips"
@@ -61,7 +62,7 @@
             class="primary"
             :disabled="busy"
           >
-            {{ busy ? 'Starting…' : 'Start Goal' }}
+            {{ busy ? (editing ? 'Saving…' : 'Starting…') : (editing ? 'Save Goal' : 'Start Goal') }}
           </button>
         </div>
       </form>
@@ -72,7 +73,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 
-const props = defineProps<{ open: boolean; busy?: boolean; error?: string | null }>()
+const props = defineProps<{ open: boolean; busy?: boolean; error?: string | null; editing?: boolean; initialObjective?: string }>()
 const emit = defineEmits<{
   close: []
   submit: [value: { objective: string }]
@@ -107,6 +108,7 @@ function trapFocus(event: KeyboardEvent) {
 
 watch(() => props.open, open => {
   if (open) {
+    if (props.editing) objective.value = props.initialObjective ?? ''
     returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
     validationError.value = null
     void nextTick(() => objectiveEl.value?.focus())

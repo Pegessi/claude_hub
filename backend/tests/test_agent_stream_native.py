@@ -3710,7 +3710,7 @@ async def test_cursor_probe_failure_falls_back_to_static() -> None:
 async def test_cursor_probe_timeout_kills_process(monkeypatch: MonkeyPatch) -> None:
     """A hung probe is cancelled after the timeout, the process is killed, and
     the static fallback is returned."""
-    monkeypatch.setattr(native_module, "_MODELS_PROBE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(native_module.settings, "cursor_models_probe_timeout_seconds", 0.1)
 
     class _SlowProc(_FakeListModelsProc):
         async def communicate(self) -> tuple[bytes, bytes]:

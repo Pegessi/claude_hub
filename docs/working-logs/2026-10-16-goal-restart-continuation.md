@@ -116,3 +116,65 @@ Both bounded independent reviews found no remaining concrete blocker. Validation
 uses isolated local test services and provider doubles; there is no real external
 provider or shared-service planned-restart end-to-end result. Delivery is limited
 to the feature branch: no main integration, push, deployment or shared restart.
+
+## Authorized local-main integration
+
+After branch acceptance, the user authorized local-main integration. The fixed
+parents are feature `cae8e53271e0b6a345dcbf40254ccff868ad5939` and main
+`525b84e0a69c331de6e584f15c4a27284753d51a`, with merge base
+`a72cf9d45c88aa05865e9619140caec38c874d8b`. The fetched `origin/main` was an
+ancestor of that local main; no remote push is included.
+
+The native merge only conflicted in CHANGELOG; both sets of entries are retained.
+Incoming Goal images, objective editing, queue controls and private proxy settings
+remain intact. Independent integration review found three concrete interactions:
+
+1. Private proxy diagnostic redaction can mask a word in the trusted runtime-loss
+   message. Hub-generated interruption errors now retain a boolean
+   `runtime_interrupted` field through redaction. Recovery accepts that strict
+   marker or the legacy exact message, never arbitrary redacted prose.
+2. Private deployment proxy values are intentionally absent from tab data and
+   process environment. The recovery configuration digest now uses the shared
+   effective `provider_subprocess_env` calculation. Effective route changes veto
+   recovery; explicit overrides still win, and only a digest is persisted.
+3. A queued objective edit could change the Goal control digest before failed
+   deferred recovery reacquired admission for cleanup, leaving an active deferral.
+   Cleanup now runs and joins under the original admission lock, with the existing
+   cancellation shielding and identity checks. The edit then applies to a paused
+   Goal; a later explicit Resume still takes effect normally.
+
+Objective editing retains the incoming next-step contract. It does not gain an
+early pause/stop hook: an edit queued during successful recovery preparation
+applies to the following step. An edit persisted before recovery still invalidates
+the captured control digest. Accepted image inputs are not replayed, and pending
+image delivery still requires explicit reattachment.
+
+### Integration validation
+
+The repaired source remained pinned by the 43-file manifest
+`/tmp/goal-main-integration-candidate.json`, revision 1.
+
+- Canonical `all`: **3,925 backend tests passed, 10 skipped; 885 frontend tests
+  passed**; docs, checkout safety, formatting, types, lint and build passed.
+  Evidence: `/tmp/goal-merge-all-r1.log`, `/tmp/claude-hub-verify.udCiHX`.
+- Browser mocks: **11 runners passed**, owned Vite exited and its port closed.
+  Evidence: `/tmp/claude-hub-browser-mocks.Epu7KC/run/summary.json`.
+- Isolated terminal HMR/recovery: **12 passed**, no skips.
+  Evidence: `/tmp/claude-hub-verify.n3NkxY`.
+- Independent Goal/image/objective review: **234 passed**, plus **2** extra
+  repeated-cancellation/queued-control probes. Evidence:
+  `/tmp/claude-hub-verify.zzpE3b`, `/tmp/claude-hub-verify.LrEQYl`.
+- Independent proxy/native/recovery review: **222 passed, 2 platform skips**.
+  Evidence: `/tmp/claude-hub-verify.ib3bHv`; report:
+  `/tmp/goal-main-integration-review-7833-final.md`.
+- Parent verification: reproduced all six original proxy failures, then reran
+  those unchanged probes and the objective counterexample among **275 passing**
+  focused checks; separately reran the two cancellation/control probes.
+  Evidence: `/tmp/claude-hub-verify.OLblfi`, `/tmp/claude-hub-verify.gwkDhn`,
+  `/tmp/claude-hub-verify.vTRUDI`.
+
+Both bounded independent reviews found no remaining concrete blocker. Browser
+APIs and external providers remain mocked; the HMR gate uses its own real backend
+and private terminal runtime, not the shared service. No live external-provider
+planned restart, deployment, shared-service restart or remote push was performed.
+The immutable merge decision record is added in a following documentation commit.

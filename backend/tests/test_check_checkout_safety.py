@@ -72,7 +72,11 @@ def safety_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamesp
         ('"${CLAUDE_HUB_HOST:-::}"', "", False),
         (HOST, ' # --host "' + HOST + '"', False),
         ("'" + HOST + "'", ' # --host "' + HOST + '"', False),
-        ('"' + HOST + '"', " # CLAUDE_HUB_HOST=:: ./start.sh is an explicit override", True),
+        (
+            '"' + HOST + '"',
+            " # CLAUDE_HUB_HOST=:: ./start.sh is an explicit override",
+            True,
+        ),
     ],
 )
 def test_startup_contract_checks_real_quoted_argument_not_comment(
@@ -82,7 +86,9 @@ def test_startup_contract_checks_real_quoted_argument_not_comment(
     assert (not errors) is allowed
 
 
-def test_index_bytes_win_over_unstaged_worktree_changes(safety_case: SimpleNamespace) -> None:
+def test_index_bytes_win_over_unstaged_worktree_changes(
+    safety_case: SimpleNamespace,
+) -> None:
     case = safety_case
     good, bad = startup(), startup('"${CLAUDE_HUB_HOST:-::}"')
     case.stage("start.sh", good)
@@ -110,7 +116,9 @@ def test_untracked_local_yaml_is_allowed_but_forced_index_add_is_rejected(
     assert local.read_text() == "onlyBuiltDependencies: []\n"
 
 
-def test_commit_snapshot_is_independent_of_index_and_worktree(safety_case: SimpleNamespace) -> None:
+def test_commit_snapshot_is_independent_of_index_and_worktree(
+    safety_case: SimpleNamespace,
+) -> None:
     case = safety_case
     case.stage("start.sh", startup())
     good_commit = case.commit()
@@ -130,13 +138,36 @@ def test_commit_snapshot_is_independent_of_index_and_worktree(safety_case: Simpl
     )
 
 
-def test_unmerged_protected_index_entry_fails_closed(safety_case: SimpleNamespace) -> None:
+def test_unmerged_protected_index_entry_fails_closed(
+    safety_case: SimpleNamespace,
+) -> None:
     case = safety_case
     object_id = case.git("hash-object", "-w", "--stdin", data=startup()).decode().strip()
     records = "".join(f"100644 {object_id} {stage}\tstart.sh\n" for stage in (1, 2, 3))
     case.git("update-index", "--index-info", data=records.encode())
     with pytest.raises(ValueError, match="unmerged"):
         case.checker.check(case.repo, None)
+
+
+@pytest.mark.parametrize("path", [".env", "backend/.env", ".env.local", "backend/.env.production"])
+def test_private_env_is_rejected_from_index_and_commit_without_echoing_values(
+    safety_case: SimpleNamespace, path: str
+) -> None:
+    case = safety_case
+    case.stage("start.sh", startup())
+    case.stage(".env.example", b"CURSOR_PROXY_URL=\n")
+    assert not case.checker.check(case.repo, None)[1]
+    secret = b"CURSOR_PROXY_URL=http://user:private-password@private.example.test:8080\n"
+    destination = case.repo / path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(secret)
+    assert not case.checker.check(case.repo, None)[1]
+    case.git("add", "-f", "--", path)
+    for snapshot in (None, case.commit()):
+        errors = case.checker.check(case.repo, snapshot)[1]
+        assert any(path in error for error in errors)
+        assert "private-password" not in str(errors)
+        assert "private.example.test" not in str(errors)
 
 
 def test_other_startup_edits_and_line_continuation_remain_allowed(
@@ -148,13 +179,25 @@ def test_other_startup_edits_and_line_continuation_remain_allowed(
     assert not safety_case.checker.startup_errors(content)
 
 
-def test_cli_returns_failure_for_the_actual_staged_bytes(safety_case: SimpleNamespace) -> None:
+def test_cli_returns_failure_for_the_actual_staged_bytes(
+    safety_case: SimpleNamespace,
+) -> None:
     case = safety_case
-    for contents, expected in ((startup(), 0), (startup('"${CLAUDE_HUB_HOST:-::}"'), 1)):
+    for contents, expected in (
+        (startup(), 0),
+        (startup('"${CLAUDE_HUB_HOST:-::}"'), 1),
+    ):
         case.stage("start.sh", contents)
         before = (case.repo / ".git/index").read_bytes()
         result = subprocess.run(
-            [sys.executable, "-I", case.checker.__file__, "--repo", str(case.repo), "--staged"],
+            [
+                sys.executable,
+                "-I",
+                case.checker.__file__,
+                "--repo",
+                str(case.repo),
+                "--staged",
+            ],
             capture_output=True,
             timeout=10,
         )
@@ -162,7 +205,9 @@ def test_cli_returns_failure_for_the_actual_staged_bytes(safety_case: SimpleName
         assert (case.repo / ".git/index").read_bytes() == before
 
 
-def test_commit_replacement_cannot_hide_an_unsafe_snapshot(safety_case: SimpleNamespace) -> None:
+def test_commit_replacement_cannot_hide_an_unsafe_snapshot(
+    safety_case: SimpleNamespace,
+) -> None:
     case = safety_case
     case.stage("start.sh", startup('"${CLAUDE_HUB_HOST:-::}"'))
     bad = case.commit()
@@ -185,7 +230,14 @@ def test_cli_rejects_a_redirected_clean_index(
     alternate_before = alternate.read_bytes()
     monkeypatch.setenv("GIT_INDEX_FILE", str(alternate))
     result = subprocess.run(
-        [sys.executable, "-I", case.checker.__file__, "--repo", str(case.repo), "--staged"],
+        [
+            sys.executable,
+            "-I",
+            case.checker.__file__,
+            "--repo",
+            str(case.repo),
+            "--staged",
+        ],
         capture_output=True,
         timeout=10,
     )

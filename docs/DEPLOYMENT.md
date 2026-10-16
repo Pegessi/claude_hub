@@ -71,8 +71,9 @@
 保持暂停。
 
 用户主动暂停、停止、等待确认、已结束或交付状态不确定的工作不会被批量唤醒。
-重启前后新的 Goal 控制操作、归档、配置变化或已记录的新输入会撤销相应自动续跑。只有同一
-launcher 发起、保存了有效续跑记录的计划重启适用；普通崩溃和没有对应记录的旧版本
+暂停、继续、完成或清除 Goal、归档、配置变化及已记录的新输入会撤销相应自动续跑。
+修改目标内容仍按“下一步生效”处理；若编辑在恢复准备期间排队，会在当前恢复步骤之后应用。
+只有同一 launcher 发起、保存了有效续跑记录的计划重启适用；普通崩溃和没有对应记录的旧版本
 升级仍需手动恢复。取消勾选上述选项也会保留暂停状态。
 
 首次部署此功能需要在外部终端用新版 `./start.sh` 启动一次；已运行的旧进程
@@ -178,6 +179,72 @@ cp .env.example backend/.env
 传入。CLI 的 `~/.config/claude-hub/config.toml` 配置客户端连接及默认 preset，
 会话环境 preset 配置单个 Chat/Agent；它们分别由自己的组件管理。目前没有统一
 的启动配置页面。
+
+### 每个 provider 的私有代理
+
+原生 Claude / Codex / Cursor / TraeX 可以分别通过此部署的 `backend/.env`
+配置 `CLAUDE_PROXY_URL`、`CODEX_PROXY_URL`、`CURSOR_PROXY_URL`、`TRAEX_PROXY_URL`。
+每项接受 HTTP(S) CONNECT 代理 URL（可含认证信息）；未设置或空值沿用原有进程
+代理，值 `direct` 清空该 provider 的 HTTP/HTTPS/ALL 代理。可选的
+`CLAUDE_NO_PROXY`、`CODEX_NO_PROXY`、`CURSOR_NO_PROXY`、`TRAEX_NO_PROXY`
+覆盖对应 provider 的绕过列表；不设置则继承进程 `NO_PROXY`，显式空值则清空列表。
+
+这些字段由 Settings 读取，不需要 source `.env`，也不会全局修改 `os.environ`。
+优先级为：会话/preset 显式代理 > 部署的 provider 默认值 > 进程通用代理；同名
+provider 配置的进程变量仍优先于 `.env`。配置代理 URL 会同时替换大小写的
+HTTP/HTTPS 代理并清空旧 ALL_PROXY，避免不同库选择不同出口。现有原生 Chat 的
+`CLAUDE_HUB_PROVIDER_NETWORK_MODE` 路由策略继续生效；需要严格沿用代理环境时
+选择 `inherit`，`auto` 仍可能选择直连，`NO_PROXY` 仍然生效。
+
+例如，仅在远端部署填写 `CURSOR_PROXY_URL` 即可给远端 Cursor 指定代理；本机
+留空即可保持原来的网络设置。不要把真实地址或认证信息复制到示例、源码、提交或
+日志。`.env.example` 仅提供空字段；真实 `backend/.env` 应保持 Git 忽略并设置
+`chmod 600 backend/.env`。`check-staged` 和 `checkout-safety` 会拒绝根目录或
+backend 中的私有 `.env` 文件，即使用 `git add -f` 强制加入。
+
+部署代理只在启动时读取。按部署流程重启后端后，新的原生 provider 子进程和
+Cursor 模型目录探测都会读取同一份部署默认值；已有 Terminal agent 需重新启动
+才会更新。只修改这些 `.env` 字段不需要更改 launcher 的环境。
+Cursor 模型目录仍是实例级缓存，不读取单个会话的代理覆盖；不同出口的会话目录
+可能不同。较慢出口可以在该部署设置 `CURSOR_MODELS_PROBE_TIMEOUT_SECONDS=15`
+（默认 5，必须为正有限数），避免目录探测过早回退。
+
+本地 Terminal agent 也使用上述默认值，并通过权限为 600 的启动文件传入，
+不会回写到 tab/preset 或前端会话数据。Claude 的私有 launch settings 同样包含
+其部署代理，以覆盖 CLI 用户 settings 中旧的代理。配置字段从序列化输出中排除，
+所有 provider 的专用配置变量从子进程继承环境中移除，仅向目标 provider 传入
+解析后的通用代理变量。远程 SSH Terminal 不会转发本机部署代理；应在远端 Hub
+配置。MASO 是独立服务的 HTTP 通道，保持原来的直连行为，不使用这些 CLI 代理。
+
+#### 部署必做：测试并填写 provider 代理
+
+首次部署、迁移机器或更换出口时，以下步骤必须完成并记录结果，不能直接复制另一台
+机器的代理地址或把“进程已启动”当作网络验收：
+
+1. 核对目标部署的代码 SHA、运行用户、provider CLI 版本/登录状态，以及实际服务
+   启动环境。先确认该代码版本支持上述 `.env` 字段，再填写；不要把新字段写给不
+   兼容的旧后端。检查只输出是否配置，避免打印环境变量、认证 URL 或整个 `.env`。
+2. 对要使用的每个 provider，分别测试直连和候选代理。使用目标运行用户、相同 CLI
+   及凭据，在一次性子进程环境中测试；代理凭据从受保护文件读取，不放进命令参数、
+   shell 历史或日志。Cursor 必须核对完整模型 ID 集合和期望模型，而非只检查数量。
+3. 根据实测结果，在目标部署未跟踪的 `backend/.env` 填写对应 `*_PROXY_URL` 和
+   必要的 `*_NO_PROXY`。确认能直连且需要禁用继承代理时填写 `direct`；继续继承
+   已验证的进程代理时留空并记录这一选择。未测试的 provider 不要盲目套用新代理。
+   代理与绕过列表均不能提交到 Git；文件权限必须为 600，并保留原有其他配置。
+4. 用实际 Settings 和 provider 环境构建路径加载文件，验证只有目标 provider 改变，
+   会话覆盖符合优先级，内网和 loopback 绕过规则正确。较慢 Cursor 出口需按实测
+   填写 `CURSOR_MODELS_PROBE_TIMEOUT_SECONDS`，并在该期限内重复探测。
+5. 在空的、一次性工作目录执行最小无工具模型请求，核对成功完成和非空预期回复。
+   模型目录可见不等于推理成功；对期望使用的模型分别记录验收，不能据一项成功
+   宣称整个目录可用。测试失败时保留脱敏原因并修复配置，不能标记部署验收通过。
+6. 生效前检查该实例的活跃会话/任务，按授权的部署重启流程应用配置；重启后再次
+   核对 `/health`、SPA、Cursor 模型选项和实际请求。已有 Terminal 需重启其 agent，
+   并验证登录 shell 不会把代理覆盖回旧值。
+
+验收记录应包含部署位置、代码 SHA、CLI 版本、目标 provider/模型、直连/代理
+选择、目录集合比较、超时/重复探测结果、最小请求及重启后检查结果；仅记录代理
+已配置或脱敏标识，不记录真实代理地址、绕过域名或认证信息。本机与远端分别测试、
+分别填写，远端配置不应改变本机配置。
 
 ### 必需配置
 
