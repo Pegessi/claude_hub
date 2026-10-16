@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
+from uuid import uuid4
 
 from ...models import (
     AgentType,
@@ -1863,6 +1864,32 @@ class ClaudeNativeSession(ProviderSession):
         self._validated_tab_settings_payload: Optional[Dict[str, Any]] = None
         self._validated_claude_launch_env: Optional[Dict[str, str]] = None
         self._tab_endpoint_is_authoritative = False
+        self._input_message_uuid: Optional[str] = None
+
+    def accepts_notification(self, record: Dict[str, Any]) -> bool:
+        """Only the submitted input's result may release its turn guard.
+
+        A resumed Claude process can emit background-task results before it
+        answers stdin, including empty zero-turn results for batched notices.
+        Admitting those would retire stdout and discard the real answer.
+        Prefer explicit input correlation; older CLIs may only give provenance.
+        Unattributed legacy results and legitimate zero-turn commands still end
+        their turn. This runs before normalization can clear adapter state.
+        """
+        if record.get("type") != "result" or self._input_message_uuid is None:
+            return True
+        linked: set[str] = set()
+        singular = record.get("user_message_uuid")
+        if isinstance(singular, str) and singular:
+            linked.add(singular)
+        plural = record.get("user_message_uuids")
+        if isinstance(plural, list):
+            linked.update(value for value in plural if isinstance(value, str) and value)
+        if linked:
+            return self._input_message_uuid in linked
+        origin = record.get("origin")
+        kind = origin.get("kind") if isinstance(origin, dict) else None
+        return kind not in ("task-notification", "peer")
 
     def _tab_settings_path(self) -> Optional[Path]:
         tab_id = getattr(self.session, "tab_id", None)
@@ -2043,8 +2070,10 @@ class ClaudeNativeSession(ProviderSession):
                 }
             )
         content.append({"type": "text", "text": text})
+        self._input_message_uuid = str(uuid4())
         envelope = {
             "type": "user",
+            "uuid": self._input_message_uuid,
             "message": {"role": "user", "content": content},
             "parent_tool_use_id": None,
             "session_id": None,
