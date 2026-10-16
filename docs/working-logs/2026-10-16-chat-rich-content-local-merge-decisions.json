@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "c5d848a9eae1ae30df1cedebbfc008cdc0e572ec",
+  "parents": [
+    "15b4834f612d67f3c326287fb1fbc6b128a2f8ee",
+    "4daae29647815baf00d3e03e158fd7e3866397a5"
+  ],
+  "base": "2d14506f2e004fc5f382c8dde0361c23acadc594",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "33892c4cb68d000d2a4d94456eac482f48f00de9",
+  "reconstructed_tree": "f2fd8c7cac18a1cc7fa4c8b29430fb13cfa8cb1b",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7d877774d0948710da150db05b173b7f742b751c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "57b6ea9ed00dd59cad77a4b4f9547127f9bf5a4e"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "98e096f0bb137ad8d993a4ef0fc10294306b5762"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8d85497aba1baba1fa62caf6c10f0452a2bf860a"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ebf6138474991e55501f76022319ad9421d13a51"
+      },
+      "reason": "Retain both parents release entries. Place the newly integrated rich Markdown feature/fix entries first, followed by every local managed-Chat and cleanup entry in its original order. No application path is manually changed.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
