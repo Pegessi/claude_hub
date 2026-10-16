@@ -288,6 +288,7 @@ class _WorkspacesMixin:
     async def _background_monitor_loop(self) -> None:
         while True:
             try:
+                ttyd_manager.schedule_pending_stream_cleanup()
                 await self._refresh_session_statuses(run_auto_continue=True)
                 # Expire stale processing call_ids for sessions whose tmux
                 # inbox is gone (STOPPED). A call_id in processing means the

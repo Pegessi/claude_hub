@@ -18,7 +18,12 @@ from ..models import (
 )
 from ..services import chat_sidebar_preferences, ttyd_manager, workspace_manager
 from ..services.agent_stream.maso_http import MasoServiceUnavailable
-from ..services.ttyd_manager import TabLimitExceededError, TabStartupTimeoutError
+from ..services.ttyd_manager import (
+    TabCleanupPendingError,
+    TabLimitExceededError,
+    TabStartupTimeoutError,
+    TabStateError,
+)
 from .agent_stream import (
     _get_tab_tailer_manager,
     _get_tailer_manager,
@@ -540,7 +545,10 @@ async def delete_tab(
 ) -> None:
     """Delete a terminal tab."""
     _reject_managed_chat_tab_mutation(tab_id)
-    success = await ttyd_manager.delete_tab(tab_id)
+    try:
+        success = await ttyd_manager.delete_tab(tab_id)
+    except (TabCleanupPendingError, TabStateError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "5"}) from exc
     if not success:
         raise HTTPException(status_code=404, detail="Tab not found")
     try:

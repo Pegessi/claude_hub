@@ -29,6 +29,7 @@ def _empty_manager(monkeypatch: pytest.MonkeyPatch) -> TTYDManager:
     manager._status_cache = {}
     manager._start_locks = {}
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_persist_state", lambda: None)
     monkeypatch.setattr(manager, "_save_order", lambda: None)
     return manager
 
@@ -164,11 +165,13 @@ async def test_managed_chat_delete_safely_handles_headless_record(
     async def forbidden_kill(_name: str) -> None:
         pytest.fail("headless managed Chat deletion must not kill tmux")
 
-    async def discard(_workspace_id: str, _session_id: str, *, provider_fenced: bool) -> None:
+    async def discard(_workspace_id: str, _session_id: str) -> None:
         return None
 
     monkeypatch.setattr(ttyd_module, "_tmux_kill_session", forbidden_kill)
-    monkeypatch.setattr("claude_hub.services.agent_stream.tailer.discard_session_stream", discard)
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.tailer.discard_retired_session_artifacts", discard
+    )
 
     assert await manager.delete_tab(tab.id) is True
     assert tab.id not in manager.processes

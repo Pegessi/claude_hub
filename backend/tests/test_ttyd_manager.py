@@ -3471,7 +3471,7 @@ def test_backfill_pins_unambiguous_session(monkeypatch: MonkeyPatch, tmp_path) -
     assert process.agent_session_id == "real-convo"
     # Pinned id persisted so a subsequent reboot can resume.
     saved = json.loads((tmp_path / "tabs.json").read_text(encoding="utf-8"))
-    assert saved[0]["agent_session_id"] == "real-convo"
+    assert saved["tabs"][0]["agent_session_id"] == "real-convo"
 
 
 def test_backfill_skips_when_no_live_session(monkeypatch: MonkeyPatch, tmp_path) -> None:
@@ -3953,7 +3953,7 @@ async def test_switch_env_manager_persists_state(monkeypatch: MonkeyPatch, tmp_p
     assert result.solo_mode is True
     assert result.env["ANTHROPIC_MODEL"] == "new-model"
     assert state_file.exists()
-    saved = json.loads(state_file.read_text())
+    saved = json.loads(state_file.read_text())["tabs"]
     assert len(saved) == 1
     assert saved[0]["id"] == process.tab_id
     assert saved[0]["solo_mode"] is True
@@ -4632,16 +4632,7 @@ def test_delete_tab_keeps_process_registered_when_teardown_fails(
 def test_delete_tab_discards_structured_stream_via_tailer(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    """``delete_tab`` must purge the tab's structured stream through
-    ``discard_session_stream`` — which forgets the in-process tailer
-    *before* clearing events/previews — rather than clearing the
-    attachment store directly.
-
-    Causal invariant: if the tailer were not stopped first, an in-flight
-    send could rewrite previews/events after the clear, resurrecting
-    deleted state. ``discard_session_stream`` guarantees the
-    forget-then-clear ordering; ``delete_tab`` must delegate to it.
-    """
+    """Delegate artifact removal after fencing/retirement, not directly to the cache."""
     manager = TTYDManager.__new__(TTYDManager)
     manager._start_locks = {}
     process = SimpleNamespace(tmux_session="claude-hub-deadbeef", created_at=datetime.now())
@@ -4655,11 +4646,11 @@ def test_delete_tab_discards_structured_stream_via_tailer(
 
     discard_calls: list[tuple[str, str]] = []
 
-    async def _fake_discard(workspace_id: str, session_id: str, *, provider_fenced: bool) -> None:
+    async def _fake_discard(workspace_id: str, session_id: str) -> None:
         discard_calls.append((workspace_id, session_id))
 
     tailer_module = importlib.import_module("claude_hub.services.agent_stream.tailer")
-    monkeypatch.setattr(tailer_module, "discard_session_stream", _fake_discard)
+    monkeypatch.setattr(tailer_module, "discard_retired_session_artifacts", _fake_discard)
 
     # Prove the direct attachment-store clear is NOT used: if it were, this
     # spy would record a call.
@@ -4681,11 +4672,11 @@ def test_delete_tab_discards_structured_stream_via_tailer(
 
     _run_coro_in_isolated_thread(_exercise())
 
-    # delete_tab must route through discard_session_stream with the
+    # delete_tab must route through the retired-artifact helper with the
     # terminal-tabs workspace and the tab-scoped session id.
     assert discard_calls == [("terminal-tabs", "terminal-tab-deadbeef-tab")]
     # The attachment store must not be cleared directly from delete_tab;
-    # discard_session_stream owns that step (after forgetting the tailer).
+    # The retired-artifact helper owns that step after durable retirement.
     assert clear_calls == []
 
 
@@ -5340,7 +5331,7 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
     # Exercise the real manager save boundary (not just to_dict()) and verify
     # the persisted raw JSON contains the expected boolean for every row.
     manager._save_state()
-    saved_rows = json.loads(state_file.read_text(encoding="utf-8"))
+    saved_rows = json.loads(state_file.read_text(encoding="utf-8"))["tabs"]
     saved_by_id = {row["id"]: row for row in saved_rows}
 
     expected_explicit = {
@@ -5985,7 +5976,7 @@ async def test_delete_and_listener_recovery_share_tab_lifecycle_lock(
             first_entered.set()
             await release_first.wait()
 
-    async def fake_discard(workspace_id: str, session_id: str, *, provider_fenced: bool) -> None:
+    async def fake_discard(workspace_id: str, session_id: str) -> None:
         assert process.tab_id not in manager.processes
         assert not manager._start_locks[process.tab_id].locked()
         discards.append((workspace_id, session_id))
@@ -5997,10 +5988,10 @@ async def test_delete_and_listener_recovery_share_tab_lifecycle_lock(
     )
     monkeypatch.setattr(manager, "_save_order", lambda: None)
     monkeypatch.setattr(
-        manager, "_save_state", lambda: saved_states.append(list(manager.processes))
+        manager, "_persist_state", lambda: saved_states.append(list(manager.processes))
     )
     stream_module = importlib.import_module("claude_hub.services.agent_stream.tailer")
-    monkeypatch.setattr(stream_module, "discard_session_stream", fake_discard)
+    monkeypatch.setattr(stream_module, "discard_retired_session_artifacts", fake_discard)
 
     async def run_operation(operation: str, *, second: bool = False) -> object:
         if second:
@@ -6085,7 +6076,7 @@ def _make_lifecycle_subject(
         assert current is process
         await current.start()
 
-    async def discard(_workspace_id: str, _session_id: str, *, provider_fenced: bool) -> None:
+    async def discard(_workspace_id: str, _session_id: str) -> None:
         pass
 
     async def fence_stream(session_id: str) -> bool:
@@ -6104,10 +6095,11 @@ def _make_lifecycle_subject(
     monkeypatch.setattr(manager, "_start_missing_tab_identity_safe", start_missing)
     monkeypatch.setattr(manager, "_schedule_codex_discovery", lambda _process: None)
     monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_persist_state", lambda: None)
     monkeypatch.setattr(manager, "_save_order", lambda: None)
     monkeypatch.setattr(ttyd_manager_module, "_is_local_port_listening", lambda _port: False)
     stream = importlib.import_module("claude_hub.services.agent_stream.tailer")
-    monkeypatch.setattr(stream, "discard_session_stream", discard)
+    monkeypatch.setattr(stream, "discard_retired_session_artifacts", discard)
     monkeypatch.setattr(stream, "fence_session_stream", fence_stream)
     monkeypatch.setattr(stream, "stop_session_stream", stop_stream)
     return manager, process, calls

@@ -7,6 +7,16 @@
 
 ## Released
 
+### fix(chat): persist direct-tab cleanup obligations across failures and restart
+
+- Atomically retire a tab with a pending cleanup record, preserving retry after
+  partial file deletion, cancellation, or acknowledgment persistence failure.
+- Retry the same record on DELETE, startup and existing monitor ticks; reserve
+  pending identifiers and refuse cleanup of a replacement owner's artifacts.
+- Read legacy tab lists and save a versioned state envelope. Keep uncertain or
+  invalid state from losing cleanup evidence, and document the deployment backup
+  and old-binary downgrade boundary.
+
 ### fix(chat): serialize question answers and finish cleanup before session reuse
 
 - Bind each managed question to one durable answer call so concurrent answers,
@@ -59,6 +69,7 @@
 - Reset native provider context for unrelated reviews while retaining display
   history, inherit the execution agent's Chat configuration for auto-created
   reviewers, and preserve existing review and human-acceptance requirements.
+
 ### fix(chat): keep Claude background results from completing a user request
 
 - Correlate Claude result messages with the submitted input UUID, so a resumed
