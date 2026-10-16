@@ -19,6 +19,16 @@ _CONFIG_KEYS = frozenset(
 )
 
 
+def has_provider_proxy_settings(provider: str) -> bool:
+    if provider not in _PROVIDERS:
+        return False
+    url = getattr(settings, f"{provider}_proxy_url")
+    return (
+        bool(url and url.get_secret_value())
+        or getattr(settings, f"{provider}_no_proxy") is not None
+    )
+
+
 def provider_subprocess_env(
     provider: str,
     inherited: Mapping[str, str],
@@ -57,16 +67,30 @@ def redact_provider_proxy_diagnostic(text: str) -> str:
     for provider in _PROVIDERS:
         configured = getattr(settings, f"{provider}_proxy_url")
         url = configured.get_secret_value() if configured is not None else ""
-        if not url or url == "direct":
-            continue
-        parsed = urlsplit(url)
+        parsed = urlsplit(url) if url and url != "direct" else urlsplit("")
         # Provider CLI failures may print the full URL, just the DNS host,
         # or separate auth fields. Do not rely on token-prefix redaction.
-        secrets = {url, parsed.netloc, parsed.password or ""}
+        secrets = {
+            url if url != "direct" else "",
+            parsed.netloc,
+            parsed.password or "",
+            parsed.username or "",
+        }
+        if parsed.username:
+            secrets.add(unquote(parsed.username))
         if parsed.password:
             secrets.add(unquote(parsed.password))
+        bypass = getattr(settings, f"{provider}_no_proxy")
+        bypass_hosts: set[str] = set()
+        if bypass is not None:
+            for entry in bypass.get_secret_value().split(","):
+                entry = entry.strip()
+                if entry and entry != "*":
+                    bypass_hosts.update({entry, entry.lstrip("*.")})
         for secret in sorted(secrets - {""}, key=len, reverse=True):
             text = text.replace(secret, "[REDACTED]")
         if parsed.hostname:
             text = re.sub(re.escape(parsed.hostname), "[REDACTED]", text, flags=re.IGNORECASE)
+        for host in sorted(bypass_hosts - {""}, key=len, reverse=True):
+            text = re.sub(re.escape(host), "[REDACTED]", text, flags=re.IGNORECASE)
     return text
