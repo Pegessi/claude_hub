@@ -2,10 +2,11 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _MonitorMixin:
+class _MonitorMixin(_WorkspaceManagerBase):
     async def _refresh_session_statuses(
         self,
         workspace_id: Optional[str] = None,
@@ -182,9 +183,9 @@ class _MonitorMixin:
             # Session death and timeout apply to subagent tasks only. Reviewed /
             # autonomous WORKING tasks keep the existing recovery paths.
             if task.task_mode == WorkspaceTaskMode.SUBAGENT:
-                session = self.sessions.get(task.session_id) if task.session_id else None
+                worker_session = self.sessions.get(task.session_id) if task.session_id else None
                 if task.session_id and (
-                    session is None or session.status == ManagedSessionStatus.STOPPED
+                    worker_session is None or worker_session.status == ManagedSessionStatus.STOPPED
                 ):
                     failure_reason = "session died"
                 if failure_reason is None and task.timeout_seconds:

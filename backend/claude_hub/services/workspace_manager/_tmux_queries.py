@@ -4,10 +4,11 @@ import hashlib
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _TmuxQueriesMixin:
+class _TmuxQueriesMixin(_WorkspaceManagerBase):
     def reports_for_workspace(self, workspace_id: str) -> list[AgentReport]:
         return sorted(
             [report for report in self.reports.values() if report.workspace_id == workspace_id],

@@ -246,7 +246,10 @@ def _build_resident_master_prompt(
     )
 
 
-class _WorkspacesMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _WorkspacesMixin(_WorkspaceManagerBase):
     # Initialized in _StateMixin.__init__; annotation-only declaration (no value,
     # so no runtime attribute is created) lets mypy type the rebind below.
     _monitor_task: "asyncio.Task[None] | None"

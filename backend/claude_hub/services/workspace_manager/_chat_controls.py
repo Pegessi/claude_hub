@@ -6,10 +6,11 @@ from typing import AsyncIterator
 
 from ...models import ChatMode, ManagedSession, SessionKind
 from .. import managed_chat
+from ._base import _WorkspaceManagerBase
 from ._constants import _now
 
 
-class _ChatControlsMixin:
+class _ChatControlsMixin(_WorkspaceManagerBase):
     @asynccontextmanager
     async def managed_chat_interaction_guard(
         self,

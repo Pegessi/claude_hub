@@ -19,7 +19,10 @@ _CANONICAL_FP_RE = re.compile(r"^(workspace|family|global):[0-9a-f]{16}$")
 _MAX_FP_LEN_HARD = 64  # absolute ceiling — anything longer is treated as legacy
 
 
-class _FeedbackMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _FeedbackMixin(_WorkspaceManagerBase):
     _feedback_chat_busy: Callable[[], bool] | None = None
     _feedback_automation_task: asyncio.Task[None] | None = None
 
@@ -97,6 +100,7 @@ class _FeedbackMixin:
             controls = FeedbackAutomationStore(store.state_root)
             for workspace_id in list(self.workspaces):
                 try:
+                    active_run: FeedbackSummaryRun | None = None
                     state = controls.state(workspace_id, getattr(self, "_feedback_started_at", now))
                     if active_reapers:
                         if (
@@ -152,7 +156,7 @@ class _FeedbackMixin:
                         summary_input["_prompt_char_limit"] = 24_000
                         state.last_attempt_at = now
                         state.last_run_id = (
-                            active_run.id if active_reapers else summary_input["run_id"]
+                            active_run.id if active_run is not None else summary_input["run_id"]
                         )
                         state.last_outcome = "dispatching"
                         controls.save(workspace_id, state)

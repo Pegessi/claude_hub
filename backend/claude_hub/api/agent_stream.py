@@ -75,12 +75,12 @@ _SSE_HEADERS = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
-
 _DEFAULT_WAIT_TIMEOUT_S = 30.0
 _MAX_WAIT_TIMEOUT_S = 60.0
 _MAX_HISTORY_PAGE_SIZE = 5_000
 _SSE_HEALTH_POLL_S = 1.0
 _SSE_HEARTBEAT_S = 15.0
+_ChatLiveness = Literal["active", "dead", "terminalized", "unknown"]
 
 _tailer_manager: Optional[TailerManager] = None
 _tab_tailer_manager: Optional[TailerManager] = None
@@ -274,7 +274,7 @@ async def _dispatch_scheduled_chat_turn(run: ScheduledTaskRun, task: ScheduledTa
     )
 
 
-async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> Optional[str]:
+async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> _ChatLiveness | None:
     """Live liveness probe for the scheduler's stale-run reaper.
 
     Returns ``"active"`` when the provider is busy (this turn OR a newer

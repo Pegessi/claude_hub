@@ -2,10 +2,11 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _ReviewMixin:
+class _ReviewMixin(_WorkspaceManagerBase):
     def _reviewer_is_busy_with_other_task(
         self, reviewer: "ManagedSession", current_task_id: str
     ) -> bool:

@@ -837,10 +837,37 @@ def _gone() -> HTTPException:
 
 
 @router.api_route("/config/status", methods=["GET"])
-@router.api_route("/config", methods=["GET", "PUT", "DELETE"])
+async def removed_single_bot_config_status() -> None:
+    raise _gone()
+
+
+@router.get("/config")
+async def removed_single_bot_get_config() -> None:
+    raise _gone()
+
+
+@router.put("/config")
+async def removed_single_bot_put_config() -> None:
+    raise _gone()
+
+
+@router.delete("/config")
+async def removed_single_bot_delete_config() -> None:
+    raise _gone()
+
+
 @router.api_route("/bind/start", methods=["POST"])
-@router.api_route("/binding", methods=["GET", "DELETE"])
-async def removed_single_bot_interface() -> None:
+async def removed_single_bot_bind_start() -> None:
+    raise _gone()
+
+
+@router.get("/binding")
+async def removed_single_bot_get_binding() -> None:
+    raise _gone()
+
+
+@router.delete("/binding")
+async def removed_single_bot_delete_binding() -> None:
     raise _gone()
 
 

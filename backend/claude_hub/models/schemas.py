@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .task_mailbox import TaskEvent
 
@@ -665,8 +665,7 @@ class TerminalTab(TerminalTabBase):
         description="True when the tab's latest completed turn is newer than last_viewed_at.",
     )
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TerminalAgentStatus(BaseModel):

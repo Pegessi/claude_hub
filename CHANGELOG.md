@@ -7,6 +7,19 @@
 
 ## Released
 
+### refactor(repo): enforce AI-native maintenance boundaries
+
+- Add an executable AI-maintainability gate for entry-document size, source-file
+  growth, import-cycle growth, strict task-state schemas and WorkspaceManager
+  type-check settings; make cleaned Pydantic, FastAPI and HTTPX warning families
+  fail tests while filtering two pinned upstream websocket deprecations.
+- Replace WorkspaceManager's cross-mixin mypy exemptions with an explicit,
+  runtime-complete abstract host contract and typed scheduled-Chat callbacks.
+- Remove fake terminal-startup polling from broad workspace tests while keeping
+  the readiness state machine in focused tests.
+- Split the terminal proxy's embedded CSS and JavaScript across bounded owner
+  modules, preserving rendered bytes and adding focused injection contracts.
+
 ### feat(chat): refine tool cards and render details only when expanded
 
 - Mount tool input/output only while its native details card is open; preserve

@@ -15,7 +15,10 @@ from ._constants import *  # noqa: F401,F403
 _NON_MIGRATABLE_DISPATCH_REASONS = frozenset({"User selected target agent"})
 
 
-class _DispatchMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _DispatchMixin(_WorkspaceManagerBase):
     async def _start_task_workspace(
         self,
         task_id: str,
