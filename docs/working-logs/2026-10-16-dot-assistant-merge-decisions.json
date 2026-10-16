@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "74b87cc94ca5a09607ff641dc62442db08d57778",
+  "parents": [
+    "d33570fa6063f74176bc144ce725f4734412c243",
+    "11cc3bfebf2a8380b33bb132e90641b3ade1c43b"
+  ],
+  "base": "8079d3c19fdc057793a658615366b753967c92e4",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "e27719330e5ff5552a382d3fe5fe26c48b3e3027",
+  "reconstructed_tree": "9e22578bc531a9447279e5503e38aab3a3e2af2b",
+  "conflicts": [
+    "backend/claude_hub/api/__init__.py",
+    "scripts/verify_browser_mocks.py"
+  ],
+  "decisions": [
+    {
+      "path": "backend/claude_hub/api/__init__.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bb1c5b759ea06bbbf046613ba081e43c9060b377"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8e5791a94df33dcff7f8356d881e48deb8e258aa"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "03a7027fecf595a86708900bb899a662ab71919b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f706da20285ae7fc8227a37012f6cbb1c7fbe63d"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d98e05ee8485d14c01121b546658543609d95d83"
+      },
+      "reason": "Both sides appended a router after agent_stream_router; keep both (dot_router from the branch, quota_router from main).",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "scripts/verify_browser_mocks.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "29b58db76489c5bcd7bab8aaef81a1caf09e11be"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "facc639addb23ecb6202c30496d65b7782d61a95"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c13ef1e94166058761a3b8bcbec80732bc2e9c7b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "cf62c10f1bda724bee99202de0b2aa36312d4f7d"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0155e5bdff8637971e0d850ac4bd216f9d2e0d89"
+      },
+      "reason": "Both sides appended a browser scenario to RUNNERS; keep both (browser_dot_panel.py from the branch, browser_service_restart.py from main) so the registry matches discovery.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

@@ -499,6 +499,19 @@ from before it show as reports again (rare, harmless text); hand-made card ids
 with control characters cannot be archived; ids over 120 characters are cut in
 the session pack. After this round, further bugs are left to real use.
 
+### Merge of main (2026-10-16)
+
+Merged local `main` (11cc3bf). Two conflicts, both "both sides appended a
+line": the API router list (`dot_router` + `quota_router`) and the browser
+scenario registry (`browser_dot_panel.py` + `browser_service_restart.py`).
+Decisions: `2026-10-16-dot-assistant-merge-decisions.json`.
+
+`verify.sh browser-mocks` then showed seven scenarios failing on an unmocked
+`GET /api/dot/identity` (the Dot launcher in the tab bar asks for Dot's name
+and avatar on every page). This came from the branch, not the merge; each
+scenario now answers it with the default identity. All `verify.sh all`
+targets and all 12 browser scenarios pass (pnpm 9.15.9, Playwright Chromium).
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

@@ -261,6 +261,9 @@ async def main(browser_run: BrowserRun) -> None:
                         body = bot_pool(binding, pool_revision)
                     elif method == "GET" and path == goal_current_path and not query:
                         body = None
+                    elif method == "GET" and path == "/api/dot/identity" and not query:
+                        # The Dot launcher in the tab bar reads Dot's name and avatar.
+                        body = {"name": "Dot", "avatar": "", "avatar_image": None}
                     elif method == "POST" and path == viewed_path and not query:
                         if request.post_data not in {None, ""}:
                             report["unknown_api_requests"].append([method, request.url])
