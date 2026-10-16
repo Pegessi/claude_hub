@@ -1101,8 +1101,8 @@ def test_codex_tab_uses_codex_command() -> None:
     assert process.shell == "codex"
     last = process._build_ttyd_command(session_exists=False)[-1]
     assert last.endswith("codex")
-    # The tab-id overlay is always rendered so the agent can self-identify.
-    assert "CLAUDE_HUB_TAB_ID=tab-codex-normal" in last
+    # The protected wrapper carries the tab id so the agent can self-identify.
+    assert "export CLAUDE_HUB_TAB_ID=tab-codex-normal" in _wrapper_script(last)
 
 
 def test_tab_session_kind_defaults_to_terminal_and_round_trips() -> None:
@@ -1491,8 +1491,11 @@ def test_codex_solo_mode_command(monkeypatch: MonkeyPatch) -> None:
 
     assert cmd[-3:-1] == ["/bin/zsh", "-c"]
     last = cmd[-1]
-    assert "CLAUDE_HUB_TAB_ID=tab-codex-solo" in last
-    assert "codex --ask-for-approval never --sandbox danger-full-access; exec /bin/zsh" in last
+    assert "export CLAUDE_HUB_TAB_ID=tab-codex-solo" in _wrapper_script(last)
+    assert last.endswith("; exec /bin/zsh")
+    assert shlex.split(last.removesuffix("; exec /bin/zsh"))[2] == (
+        "codex --ask-for-approval never --sandbox danger-full-access"
+    )
 
 
 def test_codex_solo_mode_reattaches_existing_tmux_session() -> None:
@@ -1506,7 +1509,7 @@ def test_codex_solo_mode_reattaches_existing_tmux_session() -> None:
 
     last = process._build_ttyd_command(session_exists=True)[-1]
     assert last.endswith("codex")
-    assert "CLAUDE_HUB_TAB_ID=tab-codex-existing" in last
+    assert "export CLAUDE_HUB_TAB_ID=tab-codex-existing" in _wrapper_script(last)
 
 
 def test_custom_env_is_injected_and_serialized() -> None:
