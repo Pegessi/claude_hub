@@ -7,6 +7,16 @@
 
 ## Released
 
+### feat(chat): continue active Goals after a planned restart
+
+- Include eligible running Goals in the existing opt-in restart recovery, keeping
+  the same Goal, provider conversation and checkpoint with one guarded resume.
+- Finish an interrupted ordinary turn before releasing an already-deferred Goal;
+  cancelled or failed ordinary turns leave that Goal paused instead.
+- Preserve user controls, waiting/uncertain states and claim-based no-replay
+  behavior. Revoke pending recovery on new Goal controls or archive, including
+  archive actions before the capture list is persisted.
+
 ### fix(chat): bound formula parsing and preserve literal code
 
 - Avoid repeated suffix scans and token-array copies on long, incomplete math

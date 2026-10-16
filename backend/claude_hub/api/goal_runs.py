@@ -101,6 +101,16 @@ async def _ensure_goal_ready(tab_id: str, *, check_busy: bool = True) -> None:
         )
 
 
+def _cancel_restart_for_mutation(goal: GoalRun, request_id: str) -> None:
+    if request_id in goal.idempotency:
+        return
+    from ..services.restart_continuation import cancel_pending_continuation
+
+    # Revoke before waiting for admission: provider preparation may be holding
+    # that lock, but a new human control must still prevent its late submission.
+    cancel_pending_continuation(goal.tab_id, None, goal_id=goal.id)
+
+
 def _call(operation: Callable[..., GoalRun], *args: object) -> GoalRun:
     try:
         return operation(*args)
@@ -150,6 +160,7 @@ async def pause_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.pause(goal_id, body.client_request_id)
     except KeyError as exc:
@@ -165,6 +176,7 @@ async def resume_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             goal = manager.get(goal_id)
             if body.client_request_id in goal.idempotency or (
@@ -179,12 +191,9 @@ async def resume_goal(
             session = _terminal_tab_session_or_404(goal.tab_id)
             stream_manager = _get_tab_tailer_manager()
             if not await stream_manager.turn_in_flight(session):
-                if goal.resume_after_turn:
-                    return await manager.release_deferred_resume(goal_id)
                 return await manager.resume(goal_id, body.client_request_id)
-            if goal.resume_after_turn:
-                # Already resuming once the running Chat turn ends.
-                return goal
+            # Even an already-deferred no-op must record the accepted request;
+            # a later HTTP retry must not revoke a new restart generation.
             goal = await manager.resume(goal_id, body.client_request_id, after_current_turn=True)
             # The running turn may have ended before the deferral was stored.
             if not await stream_manager.turn_in_flight(session):
@@ -203,6 +212,7 @@ async def complete_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.complete(goal_id, body.client_request_id)
     except KeyError as exc:
@@ -218,6 +228,7 @@ async def clear_goal(
     try:
         manager = get_goal_manager()
         goal = manager.get(goal_id)
+        _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.clear(goal_id, body.client_request_id)
     except KeyError as exc:

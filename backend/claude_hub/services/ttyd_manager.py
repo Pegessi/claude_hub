@@ -4416,6 +4416,9 @@ class TTYDManager:
         async with self._locked_current_tab(tab_id) as process:
             if process is None:
                 return None
+            from .restart_continuation import cancel_pending_continuation
+
+            cancel_pending_continuation(tab_id, None, veto_capture=True)
             if not process.archived:
                 process.archived = True
                 process.archived_at = datetime.now()
