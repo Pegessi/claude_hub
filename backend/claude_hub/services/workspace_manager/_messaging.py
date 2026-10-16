@@ -113,10 +113,11 @@ import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time pa
 
 from .. import managed_chat
 from ..session_seat import SessionSeatMismatch, validate_session_seat
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _MessagingMixin:
+class _MessagingMixin(_WorkspaceManagerBase):
     async def send_session_message(
         self,
         session_id: str,

@@ -33,7 +33,10 @@ class _PreparedWorkspaceAttachment:
     content: bytes
 
 
-class _AttachmentsMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _AttachmentsMixin(_WorkspaceManagerBase):
     def _prepare_attachments(
         self,
         workspace_id: str,

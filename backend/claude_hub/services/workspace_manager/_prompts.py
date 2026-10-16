@@ -3,10 +3,11 @@
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 from claude_hub.services.agent_execution_policy import EXECUTION_POLICY
 
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _PromptsMixin:
+class _PromptsMixin(_WorkspaceManagerBase):
     async def spawn_worker(
         self,
         task_id: str,

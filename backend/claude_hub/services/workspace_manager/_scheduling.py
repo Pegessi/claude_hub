@@ -35,19 +35,20 @@ from pydantic import ValidationError
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ..task_dependencies import require_task_dependencies
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _SchedulingMixin:
+class _SchedulingMixin(_WorkspaceManagerBase):
     """Scheduled-task persistence, CRUD, scheduling, and firing."""
 
     scheduled_task_runs: dict[str, ScheduledTaskRun]
     _scheduled_chat_recovery_pending: bool
     _scheduled_chat_tab_locks: dict[str, asyncio.Lock]
-    _scheduled_chat_dispatch: Any
-    _scheduled_chat_readiness: Any
+    _scheduled_chat_dispatch: ScheduledChatDispatch | None
+    _scheduled_chat_readiness: ScheduledChatReadiness | None
     _sched_chat_redrain_tasks: dict[str, "asyncio.Task[None]"]
-    _scheduled_chat_liveness: Any
+    _scheduled_chat_liveness: ScheduledChatLiveness | None
     _sched_reap_checked_at: dict[str, datetime]
 
     # Minimum gap between fires of the same task. A concurrent fire (tick vs
@@ -261,11 +262,11 @@ class _SchedulingMixin:
             reverse=True,
         )
 
-    def configure_scheduled_chat_dispatch(self, callback: Any) -> None:
+    def configure_scheduled_chat_dispatch(self, callback: ScheduledChatDispatch) -> None:
         """Inject the native Chat transport without importing the API layer."""
         self._scheduled_chat_dispatch = callback
 
-    def configure_scheduled_chat_readiness(self, callback: Any) -> None:
+    def configure_scheduled_chat_readiness(self, callback: ScheduledChatReadiness) -> None:
         """Inject the native Chat runtime readiness probe without importing API.
 
         The callback is ``async (tab_id) -> bool``: it ensures the target Chat's
@@ -1088,7 +1089,7 @@ class _SchedulingMixin:
             return "unknown"
         return result if result in {"active", "dead", "terminalized"} else "unknown"
 
-    def configure_scheduled_chat_liveness(self, callback: Any) -> None:
+    def configure_scheduled_chat_liveness(self, callback: ScheduledChatLiveness) -> None:
         """Inject the live Chat turn-liveness probe without importing the API."""
         self._scheduled_chat_liveness = callback
 
@@ -1399,8 +1400,10 @@ class _SchedulingMixin:
             raise ValueError(f"Terminal tab '{tab_id}' not found")
         await self._send_tmux_message(_tmux_session_name(tab_id), message)
 
-    async def _best_effort_delete_session(self, session_id: str) -> None:
+    async def _best_effort_delete_session(self, session_id: str | None) -> None:
         """Best-effort teardown of an ephemeral session; never raises."""
+        if not session_id:
+            return
         try:
             await self.delete_session(session_id)
         except Exception:
@@ -1435,6 +1438,8 @@ class _SchedulingMixin:
     async def _fire_new_session(self, task: ScheduledTask) -> None:
         """Create a new session in the workspace and send it the message."""
         env_preset = self._resolve_fire_env_preset(task)
+        assert task.workspace_id is not None
+        assert task.message is not None
         session = await self.ensure_workspace_agent(
             task.workspace_id,
             EnsureWorkspaceAgentRequest(
@@ -1466,6 +1471,7 @@ class _SchedulingMixin:
         env_preset = self._resolve_fire_env_preset(task)
         # Validation at create/update time guarantees task_title and message are
         # set for hub_task; assert so the type checker sees non-Optional str.
+        assert task.workspace_id is not None
         assert task.task_title is not None
         assert task.message is not None
         internal_task = self._create_task(

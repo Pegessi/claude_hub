@@ -25,7 +25,10 @@ _ABORT_STATUSES = frozenset(
 )
 
 
-class _TasksMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _TasksMixin(_WorkspaceManagerBase):
     def create_task(self, workspace_id: str, payload: WorkspaceTaskCreate) -> WorkspaceTask:
         return self._create_task(workspace_id, payload)
 

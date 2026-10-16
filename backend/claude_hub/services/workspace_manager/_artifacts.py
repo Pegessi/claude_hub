@@ -4,10 +4,11 @@ import subprocess
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _ArtifactsMixin:
+class _ArtifactsMixin(_WorkspaceManagerBase):
     def preview_artifact(
         self,
         workspace_id: str,

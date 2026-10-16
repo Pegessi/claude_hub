@@ -45,7 +45,10 @@ def reporter_key_digest(value: str | None) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-class _TaskExecutionMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _TaskExecutionMixin(_WorkspaceManagerBase):
     def _workspace_owns_task(self, task: WorkspaceTask) -> bool:
         return task.execution_control == TaskExecutionControl.WORKSPACE
 

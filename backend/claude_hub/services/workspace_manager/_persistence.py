@@ -6,10 +6,11 @@ import tempfile
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
 from ..workspace_snapshot import render_workspace_snapshot
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _PersistenceMixin:
+class _PersistenceMixin(_WorkspaceManagerBase):
     def _task_dump_for_state(self, task: WorkspaceTask) -> dict[str, Any]:
         """Serialize a task for durable state without null optional metadata keys."""
 

@@ -22,7 +22,10 @@ class _UnknownTaskFieldsError(ValueError):
     """A persisted task contains fields this build cannot interpret."""
 
 
-class _StateMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _StateMixin(_WorkspaceManagerBase):
     scheduled_task_runs: dict[str, ScheduledTaskRun]
     _scheduled_chat_recovery_pending: bool
 
@@ -47,13 +50,13 @@ class _StateMixin:
         # scheduler monitor, run-now, and completion-observer drain attempts.
         self._scheduled_chat_tab_locks: dict[str, asyncio.Lock] = {}
         self._scheduled_chat_recovery_pending = False
-        self._scheduled_chat_dispatch: Any = None
+        self._scheduled_chat_dispatch: ScheduledChatDispatch | None = None
         # Injected readiness probe: ensures the target Chat's native runtime
         # (tailer + provider) is spawned and reports whether it is ready to
         # accept a turn. A cold/idle Chat is lazily spawned here and the run is
         # parked WAITING with a bounded redrain instead of delivered into a
         # runtime that does not exist yet.
-        self._scheduled_chat_readiness: Any = None
+        self._scheduled_chat_readiness: ScheduledChatReadiness | None = None
         # Per-tab self-cleaning task that re-runs the FIFO drain after a short
         # delay when the head run is waiting on a cold runtime to come up. At
         # most one is pending per tab, so cold-start polling cannot pile up.
@@ -62,7 +65,7 @@ class _StateMixin:
         # "active" (provider still owns the turn), "terminalized" (a dead
         # orphan was just terminalized and its completion observer will fire),
         # "dead" (no start edge and the provider is idle), or "unknown".
-        self._scheduled_chat_liveness: Any = None
+        self._scheduled_chat_liveness: ScheduledChatLiveness | None = None
         # Throttle transcript reaps for runs stuck in DISPATCHING/RUNNING:
         # run id -> last reconciliation attempt. Process-local; cold-restart
         # reconciliation runs once unthrottled at startup.
@@ -223,7 +226,7 @@ class _StateMixin:
         state_file: Path,
         index_item: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        raw = json.loads(state_file.read_text(encoding="utf-8"))
+        raw: dict[str, Any] = json.loads(state_file.read_text(encoding="utf-8"))
         needs_migration = state_has_legacy_orchestration_keys(raw) or (
             index_item is not None and index_has_legacy_keys(index_item)
         )

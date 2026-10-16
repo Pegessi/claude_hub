@@ -38,7 +38,10 @@ class ReportCallIdConflict(ValueError):
     """
 
 
-class _ReportsMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _ReportsMixin(_WorkspaceManagerBase):
     def _snapshot_report_intake_workspace(self, workspace_id: str) -> dict[str, Any]:
         """Snapshot the domains mutated by report and Task transactions."""
         workspace = self.workspaces.get(workspace_id)
@@ -903,7 +906,7 @@ class _ReportsMixin:
             return wake_targets
         acked = set(call_ids)
 
-        task = self.tasks.get(task_id)
+        task = self.tasks.get(task_id) if task_id else None
         session = self.sessions.get(session_id)
 
         session_call_ids: set[str] = set()
@@ -984,7 +987,7 @@ class _ReportsMixin:
                 for cid in to_ack:
                     if cid not in delivered:
                         delivered.append(cid)
-                self.tasks[task_id] = task.model_copy(
+                self.tasks[task.id] = task.model_copy(
                     update={
                         "pending_call_ids": pending,
                         "processing_call_ids": processing,
@@ -1136,7 +1139,7 @@ class _ReportsMixin:
             return
         rollback = set(call_ids)
 
-        task = self.tasks.get(task_id)
+        task = self.tasks.get(task_id) if task_id else None
         if task is not None:
             to_rollback = [c for c in task.processing_call_ids if c in rollback]
             if to_rollback:
@@ -1145,7 +1148,7 @@ class _ReportsMixin:
                 for cid in to_rollback:
                     if cid not in pending:
                         pending.append(cid)
-                self.tasks[task_id] = task.model_copy(
+                self.tasks[task.id] = task.model_copy(
                     update={
                         "pending_call_ids": pending,
                         "processing_call_ids": processing,

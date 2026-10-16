@@ -319,6 +319,7 @@ run_one() {
         echo "ERROR: CHANGELOG.md still has an '## Unreleased' heading; main is released" >&2
         return 1
       fi
+      python3 -I "$ROOT/scripts/check_ai_metrics.py" --root "$ROOT"
       ;;
     backend-format)
       check_backend_tools

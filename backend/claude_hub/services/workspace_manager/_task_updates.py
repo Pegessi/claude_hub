@@ -19,7 +19,10 @@ class _TaskEditPlan:
     removed_attachments: list[WorkspaceAttachment]
 
 
-class _TaskUpdatesMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _TaskUpdatesMixin(_WorkspaceManagerBase):
     async def update_task_status(
         self,
         task_id: str,
@@ -338,9 +341,10 @@ class _TaskUpdatesMixin:
                     task.id,
                     type(save_error).__name__,
                 )
-            current = self.tasks.get(task.id)
-            if current is None:
+            current_task = self.tasks.get(task.id)
+            if current_task is None:
                 raise KeyError(task.id)
+            current = current_task
             if status == WorkspaceTaskStatus.DONE and self._workspace_owns_task(current):
                 try:
                     self._write_task_record(current)
@@ -371,8 +375,12 @@ class _TaskUpdatesMixin:
             elif review_report is not None:
                 if current.status == WorkspaceTaskStatus.REVIEW:
                     await self._request_task_review(current, review_report)
-            current = self.tasks.get(task.id)
-            if status is not None and current is not None and self._workspace_owns_task(current):
+            latest_task = self.tasks.get(task.id)
+            if (
+                status is not None
+                and latest_task is not None
+                and self._workspace_owns_task(latest_task)
+            ):
                 await self.dispatch_workspace(task.workspace_id)
             return self.tasks[task.id]
         finally:

@@ -8,10 +8,11 @@ from ...models import TaskCleanupResult
 from ..remote_profiles import reject_unsupported_interactive
 from ..task_dependencies import TaskHasDependentsError
 from ..task_graph import TaskHasDescendantsError, task_has_descendants
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _SessionsMixin:
+class _SessionsMixin(_WorkspaceManagerBase):
     @staticmethod
     async def _await_lifecycle_cleanup(task: "asyncio.Task[Any]") -> None:
         """Finish committed cleanup even if its caller is cancelled."""

@@ -1176,13 +1176,19 @@ def test_history_refresh_done_carries_request_id(terminal_tab: dict, page: Page)
     )
 
 
-def test_forced_refresh_uses_fifo_queue_not_coalesced_pending_options() -> None:
-    """refreshHistoryFromTmux must enqueue per-request Promises (no single-slot coalesce)."""
+def _read_terminal_injection_source() -> str:
     from pathlib import Path
 
-    source = (
-        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal.py"
-    ).read_text()
+    api_dir = Path(__file__).resolve().parents[1] / "claude_hub" / "api"
+    return "\n".join(
+        (api_dir / name).read_text(encoding="utf-8")
+        for name in ("_terminal_injection_bootstrap.py", "_terminal_injection_runtime.py")
+    )
+
+
+def test_forced_refresh_uses_fifo_queue_not_coalesced_pending_options() -> None:
+    """refreshHistoryFromTmux must enqueue per-request Promises (no single-slot coalesce)."""
+    source = _read_terminal_injection_source()
     assert "forcedRefreshQueue" in source
     assert "enqueueForcedRefresh" in source
     assert "historySyncOwner" in source
@@ -1198,11 +1204,7 @@ def test_forced_refresh_uses_fifo_queue_not_coalesced_pending_options() -> None:
 
 def test_auto_resync_owner_order_and_remote_bootstrap_paths() -> None:
     """Auto resync must assign owner before activeAutoResyncId; remote bootstrap splits stable/working."""
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal.py"
-    ).read_text()
+    source = _read_terminal_injection_source()
     run_resync = source.split("async function runResync()", 1)[1].split("async function", 1)[0]
     owner_idx = run_resync.find("beginHistorySyncOwner()")
     active_idx = run_resync.find("activeAutoResyncId = resyncId")
@@ -1217,11 +1219,7 @@ def test_auto_resync_owner_order_and_remote_bootstrap_paths() -> None:
 
 def test_plain_terminal_authoritative_replay_skips_initial_setup_resync() -> None:
     """Successful plain/remote-stable coordinator replay must not trigger setup resync."""
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal.py"
-    ).read_text()
+    source = _read_terminal_injection_source()
     setup_block = source.split("function setupHistoryResync(term)", 1)[1].split(
         "async function runResync()", 1
     )[0]
@@ -1242,11 +1240,7 @@ def test_plain_terminal_authoritative_replay_skips_initial_setup_resync() -> Non
 
 def test_agent_replay_input_release_keeps_bootstrap_reconcile_gate() -> None:
     """Discarded initial WS frames require a successful authoritative refresh."""
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal.py"
-    ).read_text()
+    source = _read_terminal_injection_source()
     full_replay = source.split("function releaseReplayForUserInput()", 1)[1].split(
         "function hasExpectedReplayBuffer()", 1
     )[0]
