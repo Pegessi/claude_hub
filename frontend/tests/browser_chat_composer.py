@@ -561,7 +561,7 @@ async def main(browser_run: BrowserRun) -> None:
         await composer.fill("Queued follow-up")
         await expect(send_button).to_be_enabled()
         await send_button.click()
-        await expect(page.locator(".composer-queue")).to_contain_text("1 message queued")
+        await expect(page.locator(".draft-queue")).to_contain_text("1 message queued")
         assert len(sends) == 1, "queueing must not issue a second send while a turn is live"
         await expect(composer).to_have_value("")
 
@@ -570,7 +570,7 @@ async def main(browser_run: BrowserRun) -> None:
         # Stop terminalizes the live turn, which releases the queued draft.
         await stop_button.click()
         assert len(interrupts) == 1, interrupts
-        await expect(page.locator(".composer-queue")).to_have_count(0)
+        await expect(page.locator(".draft-queue")).to_have_count(0)
         assert len(sends) == 2, sends
         assert sends[1]["text"] == "Queued follow-up", sends[1]
         assert sends[0]["client_turn_id"] != sends[1]["client_turn_id"], sends
@@ -598,9 +598,9 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(composer).to_have_value("")
         assert sends[-1]["text"] == FAILING_TEXT, sends[-1]
 
-        # The explicit retry is the same durable intent. Reuse the idempotency
-        # key so losing the first HTTP response cannot duplicate provider work.
-        assert sends[-1]["client_turn_id"] == sends[-2]["client_turn_id"], sends[-2:]
+        # Native delivery has no identity deduplication. An explicit resend is
+        # a distinct intent; Goal/Managed Chat retention is tested separately.
+        assert sends[-1]["client_turn_id"] != sends[-2]["client_turn_id"], sends[-2:]
 
         # Mobile: the composer and both controls stay usable and on screen.
         await page.set_viewport_size({"width": 390, "height": 844})
@@ -659,10 +659,10 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(page.locator(".attachment-chip")).to_have_count(1)
         before_queue = len(sends)
         await send_button.click()
-        await expect(page.locator(".composer-queue")).to_contain_text("1 message queued")
+        await expect(page.locator(".draft-queue")).to_contain_text("1 message queued")
         assert len(sends) == before_queue
         await page.locator(".composer-stop-btn").click()
-        await expect(page.locator(".composer-queue")).to_have_count(0)
+        await expect(page.locator(".draft-queue")).to_have_count(0)
         assert len(sends) == before_queue + 1
         assert sends[-1]["text"] == "Queued image" and len(sends[-1]["attachments"]) == 1
         assert (
@@ -698,13 +698,13 @@ async def main(browser_run: BrowserRun) -> None:
         assert sends[-1]["delivery"] == "normal"
         await composer.fill("Managed queued shortcut")
         await composer.press("Control+Enter")
-        await expect(page.locator(".composer-queue")).to_have_count(0)
+        await expect(page.locator(".draft-queue")).to_have_count(0)
         assert len(sends) == managed_send_count + 2
         assert sends[-1]["text"] == "Managed queued shortcut"
         assert sends[-1]["delivery"] == "normal"
         await expect(page.locator(".composer-stop-btn")).to_be_visible()
         await page.locator(".composer-stop-btn").click()
-        await expect(page.locator(".composer-queue")).to_have_count(0)
+        await expect(page.locator(".draft-queue")).to_have_count(0)
         assert len(sends) == managed_send_count + 2
         assert ("GET", f"{MANAGED_BASE}/capabilities") in managed_stream_paths
         assert ("GET", f"{MANAGED_BASE}/events") in managed_stream_paths

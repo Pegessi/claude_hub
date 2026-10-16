@@ -1294,9 +1294,14 @@ class SessionTailer:
         # frontend and in orphan detection, so a later completion-write
         # failure still cannot leave the composer locked forever.
         if error_message is not None:
+            error_payload: dict[str, Any] = {"message": error_message}
+            if error_message == _RUNTIME_INTERRUPTED_MESSAGE:
+                # Private diagnostic redaction may change the visible message.
+                # Recovery must retain a machine-readable interruption cause.
+                error_payload["runtime_interrupted"] = True
             interrupted = ctx.event(
                 AgentStreamEventType.ERROR,
-                {"message": error_message},
+                error_payload,
             )
             try:
                 await self._publish(redact_event(interrupted))

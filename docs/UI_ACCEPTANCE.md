@@ -54,8 +54,8 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 | Managed Chat question answer | A rendered blocking card uses normal delivery with exact turn/request identity; a lost HTTP response leaves the card unresolved, and retry retains the same client turn ID before resolution; managed mode/Goal/schedule controls stay hidden |
 | Message provenance in the full Chat page | Persisted Web/Feishu/unknown origins after binding changes; desktop/mobile/grid operation and text clearance |
 | Bot components | Settings/binding behavior, secret clearing and desktop/mobile layout |
-| Queued chat activation | A hidden queued Chat activates before its draft is sent |
-| Goal steering | Steering a running Goal and resuming after a question is answered |
+| Queued chat activation | A hidden queued Chat activates before sending; editing yields activation and survives bounded Chat eviction |
+| Goal steering | Queue details/edit/cancel, original-image preview, empty-composer steering without Stop, objective editing, image-aware creation, and explicit interrupted-image recovery on an insecure-context API surface |
 | Chat images and rich Markdown | An original image is sent once, sized from the real preview; assistant images open at actual size; streamed formulas render with MathML, code and prices remain literal, code copies exactly, and wide tables/formulas scroll by keyboard on mobile and narrow panes |
 | Service restart | Default automatic Chat continuation and explicit opt-out; desktop/mobile restart controls; a lost POST response retains request identity; pending continuation remains observable; stream recovery preserves the unsent draft without another send or provider replacement |
 

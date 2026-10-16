@@ -61,8 +61,8 @@ def test_codex_usage_uses_per_turn_last_and_non_cached_total() -> None:
 
 
 def request(request_id: str = "create-1", **kwargs: object) -> GoalRunCreate:
-    return GoalRunCreate(
-        objective="Ship the requested feature", client_request_id=request_id, **kwargs
+    return GoalRunCreate.model_validate(
+        {"objective": "Ship the requested feature", "client_request_id": request_id, **kwargs}
     )
 
 
@@ -73,18 +73,88 @@ def arm_goal(manager: GoalRunController, goal_id: str, turn_id: str) -> None:
     manager.store.put(goal)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_response", [response_with_checkpoint("complete"), "Old answer"])
+async def test_objective_edit_keeps_goal_and_ignores_old_completion(tmp_path, old_response):
+    sent = []
+
+    async def dispatch(goal, prompt):
+        sent.append((goal, prompt))
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "edit.json"), dispatch)
+    initial = await manager.create_and_start("tab", request())
+    updated = await manager.update_objective(initial.id, "edit", "Verify the new outcome")
+    assert updated.id == initial.id
+    assert updated.current_turn_id == initial.current_turn_id
+    assert len(sent) == 1
+    await manager.on_turn_completed("tab", initial.current_turn_id, "completed", old_response)
+    current = manager.get(initial.id)
+    assert current.status == GoalRunStatus.ACTIVE
+    assert len(sent) == 2
+    assert "Verify the new outcome" in sent[-1][1]
+    assert current.objective_revision == current.dispatched_objective_revision == 1
+    assert (
+        await manager.update_objective(initial.id, "edit", "Verify the new outcome")
+    ).objective_revision == 1
+    with pytest.raises(GoalPolicyError, match="another mutation"):
+        await manager.update_objective(initial.id, "edit", "Different content")
+    await manager.on_turn_completed(
+        "tab", current.current_turn_id, "completed", response_with_checkpoint("complete")
+    )
+    assert manager.get(initial.id).status == GoalRunStatus.COMPLETE
+
+
 def test_contract_validation_and_create_idempotency(tmp_path: Path) -> None:
     manager = controller(tmp_path)
     first = manager.create("tab-1", request())
     assert manager.create("tab-1", request()).id == first.id
     with pytest.raises(ValueError, match="unfinished"):
         manager.create("tab-1", request("create-2"))
-    assert request().model_dump() == {
+    assert request().model_dump(exclude={"attachments"}) == {
         "objective": "Ship the requested feature",
         "client_request_id": "create-1",
     }
     with pytest.raises(ValidationError):
         GoalRunCreate(objective="x" * 4001, client_request_id="large")
+
+
+@pytest.mark.asyncio
+async def test_goal_images_are_released_from_inherited_provider_context():
+    import gc
+    import weakref
+
+    from claude_hub.models.chat_image import ChatImageAttachment
+    from claude_hub.models.goal_run import GoalRun
+    from claude_hub.services.goal_run.images import (
+        goal_image_input,
+        image_fingerprint,
+        pending_goal_images,
+    )
+
+    image = ChatImageAttachment(filename="a.png", mime_type="image/png", data_url="original")
+    reference = weakref.ref(image)
+    goal = GoalRun(
+        tab_id="tab",
+        objective="Inspect reference",
+        pending_image_count=1,
+        pending_image_fingerprint=image_fingerprint([image]),
+    )
+    release = asyncio.Event()
+
+    async def provider_reader():
+        await release.wait()
+        with pytest.raises(ValueError, match="Reattach"):
+            pending_goal_images(goal)
+
+    with goal_image_input("tab", [image]):
+        assert pending_goal_images(goal)[0] is image
+        reader = asyncio.create_task(provider_reader())
+    del image
+    gc.collect()
+    assert reference() is None
+    release.set()
+    await reader
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "ea53e6f9c9867104e37cd91d57b298d039e15ad5",
+  "parents": [
+    "195381230996b6d07a42df75d9b6e759c7e4583a",
+    "1e545cba2082ae047e1e27d4a16e62799208cca5"
+  ],
+  "base": "afe2e9062d5ff5ed7d47bf6ac82ccb42d2156299",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "1005ae26d37a9e42f23423db80b8134d1a09f2af",
+  "reconstructed_tree": "69e5f6bdbd880ff8aaf8a14aa1e4492725979398",
+  "conflicts": [
+    "frontend/src/components/StructuredPane.vue"
+  ],
+  "decisions": [
+    {
+      "path": "frontend/src/components/StructuredPane.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "dc9c581b8c9d19e2f6bcc5d093cdbba6b71a3c8c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7f9119c703899e90330969581327575b2408ac1b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8e5b2bee3e7c66ac62eb6f4dcf4b8c6b5ca9c487"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "70d233cbd7c6c6beeb1638356642c625d859778f"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7f9119c703899e90330969581327575b2408ac1b"
+      },
+      "reason": "Both parents contain the native fresh-ID repair and identical Goal retry behavior. Retain parent1 to additionally preserve local Managed Chat durable-mailbox retry identity; merged tracked tree is byte-identical to1953812.",
+      "disposition": "retain-parent",
+      "destinations": []
+    }
+  ]
+}

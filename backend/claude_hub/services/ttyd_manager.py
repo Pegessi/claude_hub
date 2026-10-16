@@ -44,6 +44,7 @@ from ..models.schemas import CHAT_REMOTE_UNSUPPORTED
 from . import pty_exec
 from ._cursor_verify import _cursor_id_exists
 from .agent_status_markers import codex_output_is_working
+from .provider_proxy import has_provider_proxy_settings, provider_subprocess_env
 from .proxy_rules import PROXY_ENV_KEYS, with_proxy_env_aliases
 from .remote_profiles import (
     profile_capabilities,
@@ -58,6 +59,20 @@ _RUNTIME_HOME = resolve_runtime_home()
 STATE_FILE = _RUNTIME_HOME / "tabs.json"
 ORDER_FILE = _RUNTIME_HOME / "tab_order.json"
 LAUNCH_ENV_DIR = _RUNTIME_HOME / "launch_env"
+
+
+def _write_private_launch_file(path: Path, content: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 TMUX_SESSION_PREFIX = "claude-hub-"
 _ORPHAN_TMUX_PRUNE_GRACE_SECONDS = 60.0
 _TMUX_CONTROL_TIMEOUT_SECONDS = 5.0
@@ -1425,7 +1440,7 @@ def _agent_spawn_env() -> dict:
     Normalize the environment so panes always render with their full palette,
     regardless of how the backend itself was started.
     """
-    env = with_proxy_env_aliases(os.environ)
+    env = provider_subprocess_env("terminal", os.environ)
     env.pop("NO_COLOR", None)
     env["COLORTERM"] = "truecolor"
     env["FORCE_COLOR"] = "3"
@@ -1881,7 +1896,7 @@ asyncio.run(_main())
         inherited = {
             key: value for key, value in os.environ.items() if key.lower() in PROXY_ENV_KEYS
         }
-        return {**with_proxy_env_aliases(inherited), **child}
+        return provider_subprocess_env(self.agent_type.value, inherited, child)
 
     def _with_env(self, command: str) -> str:
         if self.target == ExecutionTarget.LOCAL:
@@ -1889,7 +1904,7 @@ asyncio.run(_main())
         return f"{self._env_shell_prefix()}{command}"
 
     def _with_local_env_wrapper(self, command: str) -> str:
-        LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        LAUNCH_ENV_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         script_path = LAUNCH_ENV_DIR / f"{self.tab_id}.sh"
         child = self._shell_child_env()
         absent_proxy_keys = sorted(
@@ -1899,14 +1914,30 @@ asyncio.run(_main())
         # even when this backend has no proxy settings at all.
         clear_proxies = f"unset {' '.join(absent_proxy_keys)}\n" if absent_proxy_keys else ""
         exports = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in child.items())
-        script = (
-            "#!/bin/sh\n"
-            "set -eu\n"
-            f"{clear_proxies}{exports}\n"
-            'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
-        )
-        script_path.write_text(script, encoding="utf-8")
-        os.chmod(script_path, 0o600)
+        if has_provider_proxy_settings(self.agent_type.value):
+            # Run login initialization first, then source this protected file
+            # to reassert deployment/session values in that same shell.
+            proxy_exports = "\n".join(
+                f"export {key}={shlex.quote(value)}"
+                for key, value in child.items()
+                if key.lower() in PROXY_ENV_KEYS
+            )
+            script = (
+                "#!/bin/sh\n"
+                'if [ "${_CLAUDE_HUB_APPLY_PROXY_ENV:-}" = "1" ]; then\n'
+                f"{clear_proxies}{proxy_exports}\nreturn 0\nfi\n"
+                f"set -eu\n{clear_proxies}{exports}\n"
+                'exec "${SHELL:-/bin/bash}" -lc \'_CLAUDE_HUB_APPLY_PROXY_ENV=1; '
+                '. "$1"; unset _CLAUDE_HUB_APPLY_PROXY_ENV; eval "$2"\' '
+                f'claude-hub {shlex.quote(str(script_path))} "$1"\n'
+            )
+        else:
+            script = (
+                "#!/bin/sh\nset -eu\n"
+                f"{clear_proxies}{exports}\n"
+                'exec "${SHELL:-/bin/bash}" -lc "$1"\n'
+            )
+        _write_private_launch_file(script_path, script)
         return f"/bin/sh {shlex.quote(str(script_path))} {shlex.quote(command)}"
 
     def _write_launch_settings_file(self) -> Optional[Path]:
@@ -1920,17 +1951,23 @@ asyncio.run(_main())
         guarded like ``_claude_settings_arg`` (Claude + local + env present)
         and chmod 600 because it may contain API tokens.
         """
-        if self.agent_type != AgentType.CLAUDE or not self.env:
+        if self.agent_type != AgentType.CLAUDE:
             return None
         if self.target != ExecutionTarget.LOCAL:
             return None
-        LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        LAUNCH_ENV_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         settings_path = LAUNCH_ENV_DIR / f"{self.tab_id}.settings.json"
-        settings_path.write_text(
-            json.dumps({"env": self._child_env()}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        if not self.env and not has_provider_proxy_settings("claude"):
+            settings_path.unlink(missing_ok=True)
+            return None
+        _write_private_launch_file(
+            settings_path,
+            json.dumps(
+                {"env": provider_subprocess_env("claude", {}, self._child_env())},
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
-        os.chmod(settings_path, 0o600)
         return settings_path
 
     def _claude_settings_arg(self) -> str:

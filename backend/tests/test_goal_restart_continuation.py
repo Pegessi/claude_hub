@@ -537,3 +537,109 @@ async def test_human_deferred_release_retry_does_not_revoke_next_restart(setup):
     finally:
         release.set()
         await asyncio.gather(continuing, *([human] if human else []), return_exceptions=True)
+
+
+@pytest.mark.parametrize("mode", ["plain", "direct", "deferred"])
+async def test_private_diagnostic_redaction_preserves_restart_evidence(setup, mode):
+    from pydantic import SecretStr
+
+    from claude_hub.services import provider_proxy
+
+    h = setup
+    h.monkeypatch.setattr(provider_proxy.settings, "cursor_no_proxy", SecretStr("backend"))
+    if mode == "plain":
+        await h.work()
+    else:
+        await start_goal(h, deferred=mode == "deferred")
+    store = h.api._tab_tailer_manager.get_tailer(f"terminal-tab-{h.tab.id}").store
+    await cold_restart(h)
+    events = (await store.read_since(0, 500, compact=False)).events
+    interruption = next(
+        event for event in events if event.payload.get("runtime_interrupted") is True
+    )
+    assert "[REDACTED]" in interruption.payload["message"]
+    assert "backend" not in interruption.payload["message"]
+    await recovery.continue_interrupted_chats()
+    assert ticket(h)["state"] == "started"
+    assert len(h.providers[-1].inputs) == 1
+
+
+@pytest.mark.parametrize("mode", ["plain", "direct", "deferred"])
+async def test_private_provider_route_change_revokes_restart(setup, mode):
+    import json
+
+    from pydantic import SecretStr
+
+    from claude_hub.services import provider_proxy
+
+    h = setup
+    old_route, new_route = "http://old-route.invalid:8080", "http://new-route.invalid:8080"
+    h.monkeypatch.setattr(provider_proxy.settings, "claude_proxy_url", SecretStr(old_route))
+    if mode == "plain":
+        await h.work()
+    else:
+        await start_goal(h, deferred=mode == "deferred")
+    await cold_restart(h)
+    before = ticket(h)["config_digest"]
+    h.monkeypatch.setattr(provider_proxy.settings, "claude_proxy_url", SecretStr(new_route))
+    assert recovery._config_digest(h.tab) != before
+    await recovery.continue_interrupted_chats()
+    assert ticket(h)["state"] == "skipped"
+    assert len(h.providers) == 1
+    persisted = json.dumps(h.mailbox.read())
+    assert old_route not in persisted and new_route not in persisted
+
+
+async def test_queued_objective_edit_cannot_leave_expired_deferred_recovery_armed(setup):
+    from claude_hub.models.goal_run import GoalObjectiveUpdate
+
+    h = setup
+    original = await start_goal(h, deferred=True)
+    manager = await cold_restart(h)
+    entered, release = asyncio.Event(), asyncio.Event()
+    start = MemoryProvider.start
+
+    async def blocked_start(provider):
+        entered.set()
+        await release.wait()
+        await start(provider)
+
+    h.monkeypatch.setattr(MemoryProvider, "start", blocked_start)
+    resume = manager.resume
+
+    async def expire_after_own_resume(*args, **kwargs):
+        result = await resume(*args, **kwargs)
+        if kwargs.get("after_current_turn"):
+            with h.mailbox.locked() as state:
+                state["operation"]["chat_recovery"]["captured_at"] = 0
+        return result
+
+    h.monkeypatch.setattr(manager, "resume", expire_after_own_resume)
+    continuing = asyncio.create_task(recovery.continue_interrupted_chats())
+    editing = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        editing = asyncio.create_task(
+            goal_api.update_goal_objective(
+                original.id,
+                GoalObjectiveUpdate(
+                    objective="Edit only; do not resume",
+                    client_request_id="queued-edit-before-expiry",
+                ),
+            )
+        )
+        await asyncio.sleep(0)
+        assert not editing.done()
+        release.set()
+        await asyncio.wait_for(asyncio.gather(continuing, editing), 3)
+        goal = manager.get(original.id)
+        assert ticket(h)["state"] == "skipped"
+        assert h.providers[-1].inputs == []
+        assert goal.objective == "Edit only; do not resume"
+        assert (
+            goal.status == GoalRunStatus.PAUSED
+        ), "objective edit suppressed expiry cleanup despite not being Resume"
+        assert not goal.resume_after_turn
+    finally:
+        release.set()
+        await asyncio.gather(continuing, *([editing] if editing else []), return_exceptions=True)
