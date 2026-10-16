@@ -113,6 +113,11 @@ def _sent_turns(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [turn for turn in turns if isinstance(turn, dict)] if isinstance(turns, list) else []
 
 
+def _worker_report(report: Any) -> bool:
+    """A report from the worker itself: not a Hub review request, not the Hub reviewer."""
+    return not _hub_report(report) and not _report_state(report).startswith("review_")
+
+
 def _hub_report(report: Any) -> bool:
     """A report the Hub wrote to ask for a review: a manual move to review, a review
     asked again, or the stuck-review reaper. It carries no work and no question, so
@@ -174,7 +179,7 @@ class DotService:
             return cached
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return {}
         state = value if isinstance(value, dict) else {}
         self._state_cache = (key, state)
@@ -1000,9 +1005,11 @@ class DotService:
         last_seen = item.get("last_report_id")
         new_reports = reports[seen_ids.index(last_seen) + 1 :] if last_seen in seen_ids else reports
         # The Hub's own review requests carry no result, question or round.
-        result = next((old for old in reversed(reports) if not _hub_report(old)), report)
+        result = next((old for old in reversed(reports) if _worker_report(old)), report)
         fresh = [new for new in new_reports if not _hub_report(new)]
         latest = fresh[-1] if fresh else None
+        # The Hub reviewer's reports (review_*) are not a round's result either.
+        returned = [new for new in fresh if _worker_report(new)]
         changes: dict[str, Any] = {}
         notices: list[tuple[str, str, Optional[str]]] = []
         if status != previous:
@@ -1017,7 +1024,11 @@ class DotService:
         review_due = None if item.get("watched") else True
         # A new final report in review/failed is a new round, even when the poll never
         # saw the task working again; before a verdict it refreshes the result card.
-        again = status == previous and _report_state(latest) in _RETURN_REPORT_STATES
+        again = (
+            status == previous
+            and bool(returned)
+            and _report_state(returned[-1]) in _RETURN_REPORT_STATES
+        )
         title = item.get("title") or task_id
         if status in ("review", "failed") and (status != previous or again or rerun):
             card = self._result_card(item, status, result)

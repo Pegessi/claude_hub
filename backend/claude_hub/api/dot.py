@@ -288,8 +288,9 @@ async def dot_save_card(
     payload: CardWrite, current_user: User = Depends(get_current_user)
 ) -> dict[str, Any]:
     service = _service()
-    existing = service.store.get_card(payload.id) if payload.id else None
-    if payload.id and existing is None:
+    card_id = (payload.id or "").strip()
+    existing = service.store.get_card(card_id) if card_id else None
+    if card_id and existing is None:
         raise HTTPException(status_code=404, detail="Card not found")
     # Only new links and files are checked: one whose target was deleted since
     # must not lock the card against every later edit.
@@ -304,7 +305,7 @@ async def dot_save_card(
         if service.store.resolve_home_path(path) is None:
             raise HTTPException(status_code=400, detail=f"File not found in Dot home: {path}")
     card = Card(
-        id=payload.id or "",
+        id=card_id,
         kind=payload.kind,
         title=payload.title,
         summary=payload.summary.strip(),
@@ -390,7 +391,8 @@ async def dot_journal(
     text = ""
     if chosen:
         try:
-            text = store.journal_path(chosen).read_text(encoding="utf-8")
+            # A write cut off mid-character must not hide the whole day.
+            text = store.journal_path(chosen).read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
     return {"days": days, "day": chosen, "text": text}

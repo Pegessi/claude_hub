@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
-from .index import DotIndex
+from .index import DotIndex, recallable
 from .lessons import session_rules
 from .prompts import DOT_CONTEXT_HEADER, TOOL_GUIDE
 from .store import DEFAULT_NAME, Card, DotStore, utc_now
@@ -183,7 +183,7 @@ def build_turn_pack(
         sections.append(("## Waiting for your review", reviews))
     if events:
         sections.append((_EVENTS_TITLE, _event_lines(events)))
-    if recall and text.strip():
+    if recall and recallable(text):
         hits = index.search(text, limit=6) if index is not None else []
         if hits:
             sections.append(

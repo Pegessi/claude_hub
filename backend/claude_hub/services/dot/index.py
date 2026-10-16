@@ -76,6 +76,14 @@ def query_terms(text: str) -> list[str]:
     return terms
 
 
+def recallable(text: str) -> bool:
+    """Worth an automatic recall: a real search term, or CJK (short words need LIKE).
+
+    "hi" or "ok" alone would only match cards by accident ("this", "look").
+    """
+    return bool(query_terms(text)) or bool(_CJK_RE.search(text))
+
+
 class DotIndex:
     """Keep ``index.sqlite`` in step with the card files and search it."""
 
