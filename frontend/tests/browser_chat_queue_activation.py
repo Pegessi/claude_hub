@@ -213,7 +213,9 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(composer).to_be_enabled()
             await composer.fill("Queued after the first turn")
             await composer.press("Enter")
-            await expect(page.locator(".composer-queue")).to_have_text("1 message queued")
+            await expect(page.locator(".draft-queue .queue-heading")).to_contain_text(
+                "1 message queued"
+            )
 
             await page.locator(".chat-sidebar__show-more").click()
             for tab_id in OTHER_TABS:
@@ -229,7 +231,7 @@ async def main(browser_run: BrowserRun) -> None:
             completion_released.set()
             active_a = page.locator(f'.chat-sidebar__item[data-tab-id="{TAB_A}"]')
             await expect(active_a).to_have_class(re.compile(r"(^|\s)active(\s|$)"), timeout=5000)
-            await expect(page.locator(".composer-queue")).to_have_count(0, timeout=5000)
+            await expect(page.locator(".draft-queue")).to_have_count(0, timeout=5000)
             deadline = asyncio.get_running_loop().time() + 5
             while not send_payloads and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.05)
@@ -239,6 +241,32 @@ async def main(browser_run: BrowserRun) -> None:
             assert len(send_payloads) == 1, send_payloads
             await page.screenshot(path=str(output / "activated-and-sent.png"), full_page=True)
             report["screenshots"].append("activated-and-sent.png")
+
+            # Queue edit buffers survive bounded KeepAlive eviction and yield
+            # activation while hidden, without sending the old saved text.
+            await composer.fill("Do not send until reviewed")
+            await composer.press("Enter")
+            queued = page.locator(".queued-draft").first
+            await queued.get_by_role("button", name="Edit", exact=True).click()
+            await queued.get_by_role("textbox").fill("Persisted queue edit after eviction")
+            for tab_id in OTHER_TABS:
+                await page.locator(
+                    f'.chat-sidebar__item[data-tab-id="{tab_id}"] .chat-sidebar__item-main'
+                ).click()
+            await asyncio.sleep(0.3)
+            assert len(send_payloads) == 1
+            await expect(
+                page.locator(f'.chat-sidebar__item[data-tab-id="{OTHER_TABS[-1]}"]')
+            ).to_have_class(re.compile(r"(^|\s)active(\s|$)"))
+            await page.locator(
+                f'.chat-sidebar__item[data-tab-id="{TAB_A}"] .chat-sidebar__item-main'
+            ).click()
+            await expect(queued.get_by_role("textbox")).to_have_value(
+                "Persisted queue edit after eviction"
+            )
+            await queued.get_by_role("button", name="Cancel", exact=True).click()
+            await expect(page.locator(".draft-queue")).to_have_count(0)
+            assert len(send_payloads) == 1
 
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]
