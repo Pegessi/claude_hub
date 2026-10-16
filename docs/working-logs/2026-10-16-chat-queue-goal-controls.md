@@ -62,3 +62,21 @@ count-only UI; that scenario was updated to the new queue surface.
 No shared service restart, main merge, remote publication, or runtime migration
 is part of this task. Browser checks mock APIs and do not prove live provider
 interruption behavior.
+
+## Authorized native publication transplant
+
+The user subsequently authorized merging this feature. Local main contains
+unrelated Managed Chat and cleanup commits whose own task explicitly excludes
+remote publication. Preserve that local main and publish a native-only feature
+on remote main `47bdae723ee1984c8d50577f1ab9b4f5fa8c2561` instead of pushing the
+combined local tip. The new remote baseline includes the independently published
+short-pytest-ID CI fix; this task does not change that fix.
+
+The native transplant comes from feature `19e6c0780d40e04efe25660a243a763ec3652789`.
+Its manual adaptations retain the remote Goal API's existing services-module
+manager access, omit Managed Chat-only guards/scenarios/tests, preserve native
+approval request payloads, and carry the shared queue/recovery memo helpers into
+the older native composer and test harness. The original branch's checks above
+refer to the local combined feature, not this separately validated native tree.
+No Managed Chat implementation or runtime-storage migration is published by
+this transplant. Integration gate results are recorded after the fixed merge.
