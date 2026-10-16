@@ -73,9 +73,12 @@ async def test_monitor_and_other_cleanup_progress_while_submitted_unlink_is_bloc
             with pytest.raises(ReachedRefresh):
                 await monitoring
             assert refreshed.is_set()
-            await asyncio.wait_for(
-                wait_until(lambda: good.tab_id not in manager._pending_stream_cleanup), 2
-            )
+            # Wait for the owned I/O job rather than busy-polling shared state;
+            # the worker thread must make progress while coverage traces Python.
+            other_cleanup = manager._cleanup_tasks.get((good.tab_id, good.token))
+            if other_cleanup is not None:
+                assert await asyncio.wait_for(asyncio.shield(other_cleanup), 2)
+            assert good.tab_id not in manager._pending_stream_cleanup
             assert first.tab_id in manager._pending_stream_cleanup
             assert manager._cleanup_locks[first.tab_id].locked()
             assert (first.tab_id, first.token) in manager._cleanup_tasks
