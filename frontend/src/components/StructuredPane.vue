@@ -3576,7 +3576,12 @@ async function submit(
     mime_type,
   }))
   const recoveringGoal = goalImageRecovery.value
-  const retainedClientTurnId = recoveringGoal && !retrySendAttempt.value?.goalRecovery ? null : (queuedDraft?.clientTurnId ?? queuedDraft?.id) ?? reusableSendId(message, draftAtts, questionIdentity)
+  // Native provider turns do not deduplicate IDs. Only controller-backed
+  // delivery may retain a failed attempt; an ordinary resend is a new intent.
+  const goalControlledInput = !messageOverride && (recoveringGoal || goal.value?.status === 'active' || goal.value?.status === 'blocked')
+  const retainRetryId = isManagedChat.value || goalControlledInput
+  const reusableId = retainRetryId ? reusableSendId(message, draftAtts, questionIdentity) : null
+  const retainedClientTurnId = recoveringGoal && !retrySendAttempt.value?.goalRecovery ? null : (queuedDraft?.clientTurnId ?? queuedDraft?.id) ?? reusableId
   const clientTurnId = retainedClientTurnId ?? (typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
     : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`)
@@ -3629,7 +3634,7 @@ async function submit(
     return true
   } catch (err) {
     pendingDirectTurns.value = pendingDirectTurns.value.filter(turn => turn.turnId !== clientTurnId)
-    if (!queuedDraft) {
+    if (!queuedDraft && retainRetryId) {
       retrySendAttempt.value = {
         goalRecovery: recoveringGoal,
         clientTurnId,
@@ -3637,7 +3642,7 @@ async function submit(
         attachments: [...draftAtts],
         questionIdentity: questionIdentity ? { ...questionIdentity } : null,
       }
-    }
+    } else if (!queuedDraft) retrySendAttempt.value = null
     if (queuedDraft) {
       queuedDraft.error = err instanceof Error ? err.message : 'Failed to send message.'
       isDraftQueuePaused.value = true
