@@ -10,7 +10,9 @@ from typing import Any, cast
 import pytest
 
 
-def _run_pytest(tmp_path: Path, source: str) -> subprocess.CompletedProcess[str]:
+def _run_pytest(
+    tmp_path: Path, source: str, args: tuple[str, ...] = ("-q",)
+) -> subprocess.CompletedProcess[str]:
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "test_sample.py").write_text(source)
     env = os.environ.copy()
@@ -24,9 +26,10 @@ def _run_pytest(tmp_path: Path, source: str) -> subprocess.CompletedProcess[str]
             "-c",
             "import sys, pytest; sys.path.insert(0, sys.argv[1]); "
             "from tests import ci_health; "
-            "raise SystemExit(pytest.main(['-q', '--confcutdir=.', '.'], "
+            "raise SystemExit(pytest.main([*sys.argv[2:], '--confcutdir=.', '.'], "
             "plugins=[ci_health]))",
             str(Path(__file__).resolve().parents[1]),
+            *args,
         ],
         cwd=tmp_path,
         env=env,
@@ -56,6 +59,23 @@ def test_payload_id_stops_before_execution_with_bounded_diagnostics(tmp_path: Pa
     assert report["examples"][0]["node_id_chars"] > 8 * 1024 * 1024
     assert len(result.stdout) + len(result.stderr) < 4096
     assert not (tmp_path / "executed").exists()
+
+
+@pytest.mark.parametrize("args", [("--collect-only", "-q"), ("--collect-only", "-vv")])
+def test_collection_only_keeps_rejected_ids_out_of_terminal_reports(
+    tmp_path: Path, args: tuple[str, ...]
+) -> None:
+    result = _run_pytest(
+        tmp_path,
+        "import pytest\n"
+        "@pytest.mark.parametrize('payload', [b'x' * (8 * 1024 * 1024)])\n"
+        "def test_payload(payload):\n    assert False\n",
+        args=args,
+    )
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    assert _error(result)["code"] == "CI_NODE_ID_TOO_LONG"
+    output_length = len(result.stdout) + len(result.stderr)
+    assert output_length < 4096
 
 
 def test_short_id_preserves_large_input_and_executes_assertions(tmp_path: Path) -> None:

@@ -28,6 +28,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                 }
             )
     if count:
+        # pytest still calls collection-finish after UsageError; collection-only
+        # reporters would otherwise print the rejected IDs from session.items.
+        items.clear()
         raise pytest.UsageError(
             json.dumps(
                 {
