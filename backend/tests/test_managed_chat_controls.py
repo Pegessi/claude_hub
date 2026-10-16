@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+from contextlib import aclosing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from claude_hub.models import (
     ManagedSession,
     ManagedSessionStatus,
     SessionKind,
+    StreamCapabilities,
     SwitchEnvRequest,
     User,
     Workspace,
@@ -748,27 +750,33 @@ async def test_managed_sse_closes_before_serving_replaced_incarnation(
     manager, workspace = managed_workspace
     session = _managed_session(workspace, agent_type=AgentType.CLAUDE, tab_id="sse-owner")
     tailers, tailer = await _real_tailer_manager(manager, session, monkeypatch)
-    response = await stream_api.stream_live(
-        session.id,
-        -1,
-        User(open_id="user", name="User", email="user@example.com"),
-    )
-    manager.sessions[session.id] = session.model_copy(
-        update={"created_at": session.created_at + timedelta(seconds=1)}
-    )
+    transport = tailer.native_transport
+    assert transport is not None
+    # Incarnation fencing must exercise the subscribed stream independently of
+    # whether the developer/CI machine has a Claude executable on PATH.
+    monkeypatch.setattr(transport, "capabilities", lambda: StreamCapabilities(structured=True))
+    try:
+        response = await stream_api.stream_live(
+            session.id,
+            -1,
+            User(open_id="user", name="User", email="user@example.com"),
+        )
+        manager.sessions[session.id] = session.model_copy(
+            update={"created_at": session.created_at + timedelta(seconds=1)}
+        )
 
-    iterator = cast(
-        AsyncGenerator[str | bytes | memoryview, None], response.body_iterator.__aiter__()
-    )
-    first = await asyncio.wait_for(anext(iterator), timeout=2)
-    text = first.decode() if isinstance(first, bytes) else first
-    assert "event: error" in text
-    assert "session was deleted or replaced" in text
-    assert "event: hello" not in text
-    await iterator.aclose()
-
-    manager.sessions[session.id] = session
-    await _stop_tailers(tailers, tailer.native_transport)
+        iterator = cast(
+            AsyncGenerator[str | bytes | memoryview, None], response.body_iterator.__aiter__()
+        )
+        async with aclosing(iterator):
+            first = await asyncio.wait_for(anext(iterator), timeout=2)
+            text = first.decode() if isinstance(first, bytes) else first
+            assert "event: error" in text
+            assert "session was deleted or replaced" in text
+            assert "event: hello" not in text
+    finally:
+        manager.sessions[session.id] = session
+        await _stop_tailers(tailers, transport)
 
 
 @pytest.mark.asyncio
@@ -818,12 +826,17 @@ async def isolated_tab_manager(
     monkeypatch.setattr(ttyd_module, "STATE_FILE", tmp_path / "guard-tabs.json")
     monkeypatch.setattr(ttyd_module, "ORDER_FILE", tmp_path / "guard-order.json")
     monkeypatch.setattr(ttyd_module, "LAUNCH_ENV_DIR", tmp_path / "guard-launch")
+    # These cases prove API ownership guards, not terminal process startup.
+    monkeypatch.setattr(
+        ttyd_module.TTYDProcess, "ensure_tmux_session", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(ttyd_module.TTYDProcess, "start", AsyncMock())
+    monkeypatch.setattr(ttyd_module.TTYDProcess, "stop", AsyncMock())
     tabs = TTYDManager()
     try:
         yield tabs
     finally:
-        # Direct Chat still owns a ttyd process even when it only carries
-        # Workspace display metadata. Reap every test-owned tab on failures too.
+        # Exercise real record retirement even though process I/O is doubled.
         results = await asyncio.gather(
             *(tabs.delete_tab(tab_id) for tab_id in tuple(tabs.processes)),
             return_exceptions=True,
