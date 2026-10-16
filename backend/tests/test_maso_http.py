@@ -357,6 +357,7 @@ async def test_image_only_first_turn_defers_guidance_and_next_text_has_no_stale_
         (PNG_IMAGE + b"x" * (8 * 1024 * 1024), "8 MiB"),
         (b"not an image", "PNG, JPEG, GIF or WebP"),
     ],
+    ids=["unsupported-bmp", "oversized-png", "invalid-image"],
 )
 async def test_all_images_are_validated_before_any_provider_request(bad_image, error) -> None:
     server = MasoServer()
