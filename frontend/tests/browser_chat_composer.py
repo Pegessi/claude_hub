@@ -433,6 +433,9 @@ async def main(browser_run: BrowserRun) -> None:
                 body = []
             elif method == "GET" and path == f"/api/tabs/{TAB}/goal/current":
                 body = {"goal": None}
+            elif method == "GET" and path == "/api/dot/identity":
+                # The Dot launcher in the tab bar reads Dot's name and avatar.
+                body = {"name": "Dot", "avatar": "", "avatar_image": None}
             else:
                 unknown_requests.append((method, path))
                 await route.fulfill(

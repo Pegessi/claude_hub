@@ -240,6 +240,9 @@ async def main(browser_run: BrowserRun) -> None:
                     body = {"ok": True}
                 elif "network" in path:
                     body = {"hostname": "fixture", "addresses": []}
+                elif path == "/api/dot/identity" and request.method == "GET":
+                    # The Dot launcher in the tab bar reads Dot's name and avatar.
+                    body = {"name": "Dot", "avatar": "", "avatar_image": None}
                 else:
                     report["unknown_requests"].append([request.method, path])
                     await route.fulfill(status=501, body="unknown fixture route")
