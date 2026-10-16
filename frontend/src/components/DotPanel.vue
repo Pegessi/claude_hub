@@ -431,6 +431,9 @@
                 data-testid="dot-lesson-stats"
               >
                 {{ formatFirstPass(reviewStats) }}
+                <template v-if="reviewStats.returned">
+                  · {{ formatReviewCoverage(reviewStats) }}
+                </template>
                 <template v-if="causeText">
                   · misses: {{ causeText }}
                 </template>
@@ -498,7 +501,7 @@
                   <div class="dot-item__info">
                     <span class="dot-item__title">{{ lesson.rule }}</span>
                     <span class="dot-item__sub">
-                      {{ lessonReach(lesson) }} · score {{ lesson.score }} · seen {{ relativeTime(lesson.seen) }} ago
+                      {{ lesson.reach }} · score {{ lesson.score }} · seen {{ relativeTime(lesson.seen) }} ago
                     </span>
                   </div>
                   <div class="dot-item__actions">
@@ -565,7 +568,7 @@ import {
   clearDotAvatar,
   dropDotLesson,
   formatFirstPass,
-  lessonReach,
+  formatReviewCoverage,
   loadDotCard,
   loadDotCards,
   loadDotFocus,

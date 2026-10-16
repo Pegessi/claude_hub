@@ -427,7 +427,7 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
     default=None,
     help="Alert Dot when the task shows no progress this long (default: 2).",
 )
-@click.option("--confirm", is_flag=True, help="Send even if the brief check holds it.")
+@click.option("--confirm", is_flag=True, help="Send even if the brief check warns.")
 @click.pass_context
 def dot_delegate(
     ctx: click.Context,
@@ -448,8 +448,8 @@ def dot_delegate(
 ) -> None:
     """Hand a job to a Hub Task with a full brief. Dot is woken when it ends.
 
-    The Hub checks the brief first. Warnings or matching lessons hold the task
-    (exit code 1); fix the brief, or send again with --confirm.
+    The Hub checks the brief first. Warnings hold the task (exit code 1); fix
+    the brief, or send again with --confirm. Matching lessons are only shown.
     """
     body: Dict[str, Any] = {
         "workspace_id": workspace_id,
@@ -480,7 +480,7 @@ def dot_delegate(
             click.echo(f"- {warning}")
         lessons = result.get("lessons") or []
         if lessons:
-            click.echo("Lessons from past briefs that may apply:")
+            click.echo("Lessons from past briefs that may apply (check your brief):")
             for lesson in lessons:
                 click.echo(f"- [{lesson.get('id')}] {lesson.get('rule')}")
         if result.get("held"):
@@ -499,12 +499,17 @@ def dot_delegate(
 @click.option("--verdict", type=click.Choice(["ok", "redo"]), required=True)
 @click.option(
     "--cause",
-    type=click.Choice(["brief", "env", "worker"]),
+    type=click.Choice(["brief", "env", "worker", "change"]),
     default=None,
-    help="Why it missed (required for redo): the brief, the environment, or the worker.",
+    help="Why it missed (required for redo): the brief, the environment, the worker, "
+    "or the user changed what they want.",
 )
 @click.option("--note", default="", help="One line on what you saw.")
-@click.option("--lesson", default="", help="New rule for future briefs (cause brief).")
+@click.option(
+    "--lesson",
+    default="",
+    help='New rule for future briefs (cause brief): "When <situation>, <what to put in the brief>".',
+)
 @click.option("--lesson-id", default=None, help="Vote for an existing lesson instead.")
 @click.pass_context
 def dot_review(
@@ -527,6 +532,8 @@ def dot_review(
     click.echo(f"reviewed {task_id}: {verdict}" + (f" ({cause})" if cause else ""))
     saved = result.get("lesson")
     if saved:
+        if result.get("lesson_reused"):
+            click.echo("an existing lesson says the same; voted for it instead")
         click.echo(f"lesson [{saved['id']}] x{saved.get('votes')}: {saved.get('rule')}")
 
 
@@ -545,9 +552,14 @@ def dot_lessons(ctx: click.Context, include_all: bool) -> None:
         emit(data, True)
         return
     stats = data.get("stats") or {}
-    if stats.get("reviewed"):
+    if stats.get("returned"):
+        causes = ", ".join(
+            f"{cause} {count}" for cause, count in (stats.get("causes") or {}).items()
+        )
         click.echo(
-            f"first pass: {stats['first_pass']}/{stats['reviewed']} of the latest reviews; "
+            f"first pass: {stats.get('first_pass', 0)}/{stats.get('reviewed', 0)} of the latest "
+            f"reviews" + (f" (misses: {causes})" if causes else "") + "; "
+            f"judged {stats.get('judged', 0)}/{stats['returned']} returned tasks, "
             f"{stats.get('pending', 0)} waiting for review"
         )
     rows = [
@@ -555,7 +567,7 @@ def dot_lessons(ctx: click.Context, include_all: bool) -> None:
             "id": lesson.get("id"),
             "votes": lesson.get("votes"),
             "score": lesson.get("score"),
-            "shown": "always" if lesson.get("in_session") else "on match",
+            "shown": lesson.get("reach") or ("always" if lesson.get("in_session") else "on match"),
             "rule": truncate(lesson.get("rule", "")),
         }
         for lesson in data.get("lessons") or []
@@ -594,7 +606,7 @@ def dot_lessons_drop(ctx: click.Context, lesson_id: str) -> None:
 @click.argument("other_ids", nargs=-1, required=True)
 @click.pass_context
 def dot_lessons_merge(ctx: click.Context, keep_id: str, other_ids: Tuple[str, ...]) -> None:
-    """Fold lessons that say the same thing into KEEP_ID (votes add up)."""
+    """Fold lessons that say the same thing into KEEP_ID (strength and votes add up)."""
     body = {"keep": keep_id, "others": list(other_ids)}
     emit(_call(ctx, "POST", "/lessons/merge", json=body), cli_main.as_json(ctx))
 

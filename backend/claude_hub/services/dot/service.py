@@ -12,7 +12,14 @@ from typing import Any, Optional
 
 from .context import TurnPack, build_session_pack, build_turn_pack
 from .index import DotIndex
-from .lessons import lesson_score, lint_brief, match_lessons, session_rules
+from .lessons import (
+    MATCH_MIN_SCORE,
+    lesson_score,
+    lint_brief,
+    match_lessons,
+    same_rule,
+    session_rules,
+)
 from .prompts import BRIEF_TEMPLATE, QUIET_REPLY, TIDY_MESSAGE, WAKE_MESSAGE
 from .store import FOCUS_LIMIT, Card, DotStore, now_iso, utc_now
 
@@ -34,11 +41,18 @@ _TERMINAL_TASK_STATES = {"done", "failed"}
 # Only running tasks can look stuck; review waits on a person, todo was never started.
 _STALL_TASK_STATES = {"queued", "working"}
 _ATTENTION_REPORT_STATES = {"needs_input", "blocked"}
+# Report states that hand the work back (a new round after a verdict).
+_RETURN_REPORT_STATES = {"ready_for_review", "completed", "failed"}
 _JOURNAL_TEXT_LIMIT = 20_000
 REVIEW_VERDICTS = ("ok", "redo")
-REVIEW_CAUSES = ("brief", "env", "worker")
+# change: the user changed what they want. No lesson, and not counted in the first-pass rate.
+REVIEW_CAUSES = ("brief", "env", "worker", "change")
 # First-pass rate covers the latest reviews only, so it shows the current trend.
 STATS_WINDOW = 20
+
+
+class LessonNotFound(LookupError):
+    """A review named a lesson id that does not exist."""
 
 
 @dataclass
@@ -72,6 +86,10 @@ def _checklist(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item).strip()]
     return []
+
+
+def _report_state(report: Any) -> str:
+    return str(getattr(getattr(report, "state", None), "value", "") or "")
 
 
 def _first_line(text: str, limit: int = 200) -> str:
@@ -410,8 +428,10 @@ class DotService:
         """Check the brief, then register (and start) one Hub Task and track it.
 
         Returns ``held`` (nothing sent), the brief ``warnings``, the matching
-        ``lessons`` and the tracked ``work`` item. A brief with warnings or
-        matching lessons is held until Dot fixes it or sends ``confirm``.
+        ``lessons`` and the tracked ``work`` item. A brief with warnings is held
+        until Dot fixes it or sends ``confirm``. Matching lessons are only shown:
+        a rule cannot tell when a brief already follows it, so it never blocks.
+        A retry with a known ``request_key`` is not checked again.
         """
         from ...models.schemas import (
             AgentType,
@@ -432,7 +452,11 @@ class DotService:
             " ".join([title, goal, context, output, out_of_scope, constraints, *checks]),
             utc_now(),
         )
-        if (warnings or lessons) and not confirm:
+        replay = bool(request_key) and any(
+            item.get("request_key") == request_key
+            for item in self.store.list_work(include_closed=True)
+        )
+        if warnings and not (confirm or replay):
             return {"held": True, "warnings": warnings, "lessons": lessons, "work": None}
         brief = BRIEF_TEMPLATE.format(
             goal=goal.strip(),
@@ -470,6 +494,7 @@ class DotService:
             agent_type=agent_type,
             status=task.status.value,
             stall_hours=stall_hours,
+            request_key=request_key,
             # Kept so a later review can see which warnings Dot sent past.
             brief_warnings=warnings or None,
         )
@@ -490,7 +515,9 @@ class DotService:
     ) -> dict[str, Any]:
         """Record Dot's verdict on a returned task; a brief miss adds or votes a lesson.
 
-        Raises KeyError for an unknown task, ValueError for a bad combination.
+        A new rule that says nearly the same as a live lesson votes that lesson
+        instead (``lesson_reused``). Raises KeyError for an unknown task,
+        LessonNotFound for an unknown lesson id, ValueError for a bad combination.
         """
         item = self.store.get_work(task_id)
         if item is None:
@@ -498,9 +525,9 @@ class DotService:
         if verdict not in REVIEW_VERDICTS:
             raise ValueError("verdict must be ok or redo")
         if cause is not None and cause not in REVIEW_CAUSES:
-            raise ValueError("cause must be brief, env or worker")
+            raise ValueError("cause must be brief, env, worker or change")
         if verdict == "redo" and cause is None:
-            raise ValueError("a redo needs a cause: brief, env or worker")
+            raise ValueError("a redo needs a cause: brief, env, worker or change")
         if not item.get("result_card"):
             raise ValueError("the task has not come back yet")
         if item.get("review") and not item.get("review_due"):
@@ -514,11 +541,14 @@ class DotService:
             raise ValueError(
                 "a brief miss needs a lesson: a new rule, or the id of an old one it repeats"
             )
+        reused = False
+        if rule and (same := same_rule(self.store.list_lessons(), rule)):
+            lesson_id, reused = str(same["id"]), True
         saved = None
         if lesson_id:
             saved = self.store.vote_lesson(lesson_id, task_id)
             if saved is None:
-                raise ValueError(f"lesson not found: {lesson_id}")
+                raise LessonNotFound(lesson_id)
         elif rule:
             saved = self.store.add_lesson(rule, task_id)
         record = {
@@ -535,40 +565,67 @@ class DotService:
         # The first verdict decides first-pass success; later rounds do not rewrite it.
         if not item.get("first_verdict"):
             changes["first_verdict"] = verdict
+            changes["first_cause"] = cause or ""
         updated = self.store.upsert_work(task_id, **changes)
         await asyncio.to_thread(self.store.commit, f"dot: review {task_id} {verdict}")
-        return {"work": updated, "lesson": saved}
+        return {
+            "work": updated,
+            "lesson": saved,
+            "lesson_reused": reused,
+        }
 
     def lessons(self, *, include_dropped: bool = False) -> list[dict[str, Any]]:
-        """Lessons with their current score, strongest first."""
+        """Lessons with their current score and reach, strongest first."""
         now = utc_now()
-        lessons = self.store.list_lessons(include_dropped=include_dropped)
-        in_session = {lesson.get("id") for lesson in session_rules(lessons, now)}
-        rows = [
-            {
-                **lesson,
-                "score": round(lesson_score(lesson, now), 2),
-                "in_session": lesson.get("id") in in_session,
-            }
-            for lesson in lessons
-        ]
+        in_session = {lesson.get("id") for lesson in session_rules(self.store.list_lessons(), now)}
+        rows = []
+        for lesson in self.store.list_lessons(include_dropped=include_dropped):
+            score = lesson_score(lesson, now)
+            reach = (
+                "always"
+                if lesson.get("id") in in_session
+                else (
+                    "on match"
+                    if score >= MATCH_MIN_SCORE and not lesson.get("dropped")
+                    else "faded"
+                )
+            )
+            rows.append(
+                {
+                    **lesson,
+                    "score": round(score, 2),
+                    "in_session": reach == "always",
+                    "reach": reach,
+                }
+            )
         return sorted(rows, key=lambda row: (bool(row.get("dropped")), -row["score"]))
 
     def review_stats(self) -> dict[str, Any]:
-        """First-pass rate over the latest reviews: ok at the first verdict, no question asked."""
-        reviewed = [
+        """First-pass rate over the latest reviews: ok at the first verdict, no question asked.
+
+        Tasks whose first review said the user changed what they want are left
+        out. ``causes`` counts the first-round cause, so brief misses stand
+        apart from env and worker ones. ``judged`` / ``returned`` show how many
+        delegated tasks that came back got a verdict at all.
+        """
+        delegated = [
             item
             for item in self.store.list_work(include_closed=True)
-            if isinstance(item.get("review"), dict)
+            if not item.get("watched") and not item.get("stopped") and item.get("result_card")
         ]
+        reviewed = [item for item in delegated if isinstance(item.get("review"), dict)]
         reviewed.sort(key=lambda item: str(item["review"].get("at") or ""))
-        window = reviewed[-STATS_WINDOW:]
+
+        def first_cause(item: dict[str, Any]) -> str:
+            return str(item.get("first_cause", item["review"].get("cause")) or "")
+
+        window = [item for item in reviewed if first_cause(item) != "change"][-STATS_WINDOW:]
         first_pass = sum(
             1 for item in window if item.get("first_verdict") == "ok" and not item.get("asked")
         )
         causes: dict[str, int] = {}
         for item in window:
-            cause = item["review"].get("cause")
+            cause = first_cause(item)
             if cause:
                 causes[cause] = causes.get(cause, 0) + 1
         return {
@@ -577,6 +634,8 @@ class DotService:
             "rate": round(first_pass / len(window), 2) if window else None,
             "causes": causes,
             "pending": len(self.store.pending_reviews()),
+            "judged": len(reviewed),
+            "returned": len(delegated),
             "window": STATS_WINDOW,
         }
 
@@ -651,13 +710,16 @@ class DotService:
                 logger.exception("dot work watcher failed")
             await asyncio.sleep(WATCH_INTERVAL_SECONDS)
 
-    def _latest_report(self, workspace_id: str, task_id: str) -> Any:
+    def _reports(self, workspace_id: str, task_id: str) -> list[Any]:
         from .. import workspace_manager
 
         try:
-            reports = workspace_manager.reports_for_task(workspace_id, task_id)
+            return list(workspace_manager.reports_for_task(workspace_id, task_id))
         except KeyError:
-            return None
+            return []
+
+    def _latest_report(self, workspace_id: str, task_id: str) -> Any:
+        reports = self._reports(workspace_id, task_id)
         return reports[-1] if reports else None
 
     @staticmethod
@@ -716,9 +778,13 @@ class DotService:
         from .. import workspace_manager
 
         events = 0
-        for item in self.store.list_work():
+        for item in self.store.list_work(include_closed=True):
             task_id = str(item.get("task_id") or "")
             task = workspace_manager.tasks.get(task_id)
+            if item.get("closed"):
+                # A closed task is looked at again only when it was restarted or re-run.
+                if item.get("stopped") or task is None or task.status.value == item.get("status"):
+                    continue
             if task is None:
                 self.store.upsert_work(task_id, status="missing", closed=True)
                 self.store.add_inbox(
@@ -730,14 +796,35 @@ class DotService:
                 continue
             status = task.status.value
             previous = item.get("status")
-            report = self._latest_report(str(item.get("workspace_id") or ""), task_id)
+            reports = self._reports(str(item.get("workspace_id") or ""), task_id)
+            report = reports[-1] if reports else None
             report_id = getattr(report, "id", None)
+            seen_ids = [getattr(old, "id", None) for old in reports]
+            last_seen = item.get("last_report_id")
+            new_reports = (
+                reports[seen_ids.index(last_seen) + 1 :] if last_seen in seen_ids else reports
+            )
             changes: dict[str, Any] = {}
             if status != previous:
                 changes["status"] = status
+            # Any question since the last check, even one answered before this poll, counts
+            # against first pass (only until the first verdict).
+            if not item.get("first_verdict") and any(
+                _report_state(new) in _ATTENTION_REPORT_STATES for new in new_reports
+            ):
+                changes["asked"] = True
             # Dot judges what it delegated; a watched task's brief was not Dot's.
             review_due = None if item.get("watched") else True
-            if status in ("review", "failed") and status != previous:
+            # After a verdict, a new final report in review/failed is the next round, even
+            # when the poll never saw the task working again.
+            again = (
+                status == previous
+                and bool(item.get("review"))
+                and report_id is not None
+                and report_id != last_seen
+                and _report_state(report) in _RETURN_REPORT_STATES
+            )
+            if status in ("review", "failed") and (status != previous or again):
                 card = self._result_card(item, status, report)
                 changes["result_card"] = card.id
                 changes["review_due"] = review_due
@@ -763,8 +850,8 @@ class DotService:
                 events += 1
             elif (
                 report is not None
-                and report_id != item.get("last_report_id")
-                and getattr(getattr(report, "state", None), "value", "") in _ATTENTION_REPORT_STATES
+                and report_id != last_seen
+                and _report_state(report) in _ATTENTION_REPORT_STATES
                 and status not in _TERMINAL_TASK_STATES
             ):
                 self.store.add_inbox(
@@ -772,8 +859,6 @@ class DotService:
                     f"{item.get('title') or task_id} — {_first_line(str(report.message), 300)}",
                     task_id=task_id,
                 )
-                # Not a first-pass success any more, whatever the final verdict.
-                changes["asked"] = True
                 events += 1
             elif status in _STALL_TASK_STATES and (
                 activity := self._last_activity(item, task, report)
@@ -792,10 +877,12 @@ class DotService:
                     )
                     changes["stall_alarm_for"] = marker
                     events += 1
-            if report_id and report_id != item.get("last_report_id"):
+            if report_id and report_id != last_seen:
                 changes["last_report_id"] = report_id
             if status in _TERMINAL_TASK_STATES:
                 changes["closed"] = True
+            elif item.get("closed"):
+                changes["closed"] = False
             if changes:
                 self.store.upsert_work(task_id, **changes)
         if events:

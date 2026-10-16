@@ -1,11 +1,15 @@
 """Brief lessons and the brief check. Plain code, no model call.
 
 A lesson is one rule for writing briefs, learned when a delegated task came
-back wrong because of its brief. Votes count how often the same miss
+back wrong because of its brief. ``votes`` counts how often the same miss
 happened. The score halves every ``LESSON_HALF_LIFE_DAYS`` without a new vote,
 so a rule that stops mattering fades: first out of the always-on rules in the
 session pack, later out of the delegate-time matches. Faded lessons stay in
 the file as history.
+
+A vote or merge first decays the old strength to today and stores it as
+``weight`` (with ``seen`` = now), so an old, faded rule cannot jump ahead of
+fresh ones just because it once had many votes.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ RULES_IN_SESSION = 5
 RULE_MIN_SCORE = 0.5
 MATCH_MIN_SCORE = 0.1
 MATCH_MIN_OVERLAP = 2
+SAME_RULE_MIN_JACCARD = 0.6
 MAX_DONE_WHEN = 7
 
 _CJK = r"\u3400-\u9fff\uf900-\ufaff"
@@ -69,13 +74,13 @@ def _parse_time(value: Any) -> Optional[datetime]:
 
 
 def lesson_score(lesson: dict[str, Any], now: datetime) -> float:
-    """Votes, halved for every half-life since the lesson was last seen."""
-    votes = max(int(lesson.get("votes") or 0), 0)
+    """Strength (``weight``, else ``votes``), halved per half-life since last seen."""
+    weight = max(float(lesson.get("weight", lesson.get("votes")) or 0), 0.0)
     seen = _parse_time(lesson.get("seen")) or _parse_time(lesson.get("created"))
     if seen is None:
-        return float(votes)
+        return weight
     days = max((now - seen).total_seconds() / 86400, 0.0)
-    return float(votes * 0.5 ** (days / LESSON_HALF_LIFE_DAYS))
+    return float(weight * 0.5 ** (days / LESSON_HALF_LIFE_DAYS))
 
 
 def ranked(lessons: Iterable[dict[str, Any]], now: datetime) -> list[tuple[float, dict[str, Any]]]:
@@ -111,6 +116,20 @@ def match_lessons(
             hits.append((score * overlap, lesson))
     hits.sort(key=lambda pair: -pair[0])
     return [lesson for _, lesson in hits[:limit]]
+
+
+def same_rule(lessons: Iterable[dict[str, Any]], rule: str) -> Optional[dict[str, Any]]:
+    """A live lesson that says nearly the same as ``rule`` (most shared words), if any."""
+    wanted = tokens(rule)
+    if len(wanted) < 2:
+        return None
+    best: tuple[float, Optional[dict[str, Any]]] = (0.0, None)
+    for lesson in lessons:
+        theirs = tokens(str(lesson.get("rule") or ""))
+        similarity = len(wanted & theirs) / len(wanted | theirs) if theirs else 0.0
+        if similarity >= SAME_RULE_MIN_JACCARD and similarity > best[0]:
+            best = (similarity, lesson)
+    return best[1]
 
 
 def _checkable(item: str) -> bool:
