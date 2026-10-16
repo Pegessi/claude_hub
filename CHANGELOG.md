@@ -7,6 +7,17 @@
 
 ## Released
 
+### ci: make reliability guidance executable for agents
+
+- Add a focused CI reliability contract with check selection, cost comparison,
+  failure diagnosis and compact handoff evidence, linked from agent/contributor guides.
+- Reject payload-sized pytest IDs with bounded, actionable diagnostics; preserve
+  test data, cover partial collections after early errors, and report slow
+  phases without adding a timing gate.
+- Make managed stream/control regressions independent of installed provider and
+  terminal binaries; wait for owned cleanup completion without busy-polling
+  under coverage.
+
 ### feat(chat): continue active Goals after a planned restart
 
 - Include eligible running Goals in the existing opt-in restart recovery, keeping

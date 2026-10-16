@@ -14,6 +14,8 @@ import requests
 from httpx import ASGITransport, AsyncClient
 from playwright.sync_api import Page
 
+pytest_plugins = ["tests.ci_health"]
+
 _EXTERNAL_TEST_BACKEND = os.environ.get("CLAUDE_HUB_TEST_BACKEND_URL")
 _OWNED_TEST_RUNTIME: Path | None = None
 if _EXTERNAL_TEST_BACKEND:

@@ -75,6 +75,8 @@ init_forbid_extra = true
 warn_required_dynamic_aliases = true
 
 [tool.pytest.ini_options]
+# Report existing timing data; this is diagnostic output, not a timing gate.
+addopts = "--durations=10 --durations-min=1.0"
 # Emit actionable stacks for stalled tests without bypassing fixture cleanup.
 faulthandler_timeout = 60
 asyncio_mode = "auto"

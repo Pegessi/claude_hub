@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "a0c08bf3f893934c281a4355fc5c3124678cd533",
+  "parents": [
+    "23bece8c7cf74cd04e594dc981ddcc8381b7e0ed",
+    "4dff0c52555524b07c2b3472833f44eae7665426"
+  ],
+  "base": "47bdae723ee1984c8d50577f1ab9b4f5fa8c2561",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "8364bf6f934c75a9555486d7f021a811472cd7ce",
+  "reconstructed_tree": "fe1aa0804483ed5dbaacab2d6e2adf7fc340126e",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "59783e188d7218135da5db555c6c334ba038f3c2"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f4853c5be9862968a231d2ee6d49219d33eb2161"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6e71268d77fa73a2f6b313f6cc0de6c22902c698"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "15ea63491630ffa29a47ae18023f8633fcac1d53"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a31c2e79dabe66185a648aeccdaf836a1bdee9ba"
+      },
+      "reason": "Preserve the agent-friendly CI entry and current main queue/image-aware Goal entry together under the single Released heading.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
