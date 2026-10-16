@@ -225,3 +225,20 @@ The remote candidate still excludes the unrelated local-only managed Chat
 commits. Local main requires its own combined merge/review; a local combined
 tip must not be pushed as the remote candidate. No service restart, deployment
 or shared runtime migration is included.
+
+## Final local preservation after remote advancement
+
+Fixed local merge `4f83ece16d671a004c7f4a57d8ce192152afe8d0` combines the previously reviewed
+local candidate `c7fa7efa` with remote-only candidate
+`39ca52eb6f6f4dfb6aa69d9c46eb22e79d002e3b`. Only CHANGELOG and this working
+log require manual union; the new proxy behavior and managed runtime paths
+merge automatically and require new full/browser validation plus independent
+call-path review. The local-remote-sync decision record binds both decisions.
+
+The earlier combined local tree passed strict all (3,788 backend tests, seven
+skipped; 872 frontend tests) and eleven mocked browser scenarios. Those results
+remain historical and do not replace the new gates for the added proxy code.
+The remote publication tip is now `39ca52eb`, preserving already published
+`8f38b01e` and only the authorized rich-content feature. The final local tip
+additionally preserves the eight local-only managed/cleanup commits and must
+remain unpushed. No shared service is restarted or deployed.
