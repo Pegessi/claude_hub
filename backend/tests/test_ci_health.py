@@ -78,6 +78,40 @@ def test_collection_only_keeps_rejected_ids_out_of_terminal_reports(
     assert output_length < 4096
 
 
+@pytest.mark.parametrize("verbosity", ["-q", "-vv"])
+def test_early_collection_error_keeps_partial_ids_out_of_terminal_reports(
+    tmp_path: Path, verbosity: str
+) -> None:
+    (tmp_path / "test_t_error.py").write_text("raise RuntimeError('collection-sentinel')\n")
+    (tmp_path / "test_z_tail.py").write_text("def test_tail():\n    assert False\n")
+    result = _run_pytest(
+        tmp_path,
+        "import pytest\nfrom pathlib import Path\n"
+        "@pytest.mark.parametrize('payload', [b'x' * (8 * 1024 * 1024)])\n"
+        "def test_payload(payload):\n    Path('executed').touch()\n",
+        args=("--collect-only", verbosity, "-x"),
+    )
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    assert _error(result)["code"] == "CI_NODE_ID_TOO_LONG"
+    assert "collection-sentinel" in result.stdout + result.stderr
+    assert len(result.stdout) + len(result.stderr) < 4096
+    assert not (tmp_path / "executed").exists()
+
+
+def test_short_ids_preserve_early_collection_failure(tmp_path: Path) -> None:
+    (tmp_path / "test_t_error.py").write_text("raise RuntimeError('collection-sentinel')\n")
+    (tmp_path / "test_z_tail.py").write_text("def test_tail():\n    assert False\n")
+    result = _run_pytest(
+        tmp_path,
+        "from pathlib import Path\n" "def test_payload():\n    Path('executed').touch()\n",
+        args=("--collect-only", "-q", "-x"),
+    )
+    assert result.returncode == pytest.ExitCode.TESTS_FAILED
+    assert "collection-sentinel" in result.stdout + result.stderr
+    assert "CI_NODE_ID_TOO_LONG" not in result.stdout + result.stderr
+    assert not (tmp_path / "executed").exists()
+
+
 def test_short_id_preserves_large_input_and_executes_assertions(tmp_path: Path) -> None:
     result = _run_pytest(
         tmp_path,

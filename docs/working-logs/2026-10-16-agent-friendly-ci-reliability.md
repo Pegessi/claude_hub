@@ -44,3 +44,11 @@ Before final verification, sync main `4dff0c5` to retain the independently
 published queue/Goal work. The only manual resolution preserves both CHANGELOG
 entries; the [fixed sync record](2026-10-16-agent-friendly-ci-merge-decisions.json)
 binds that decision to merge `a0c08bf3f893934c281a4355fc5c3124678cd533`.
+
+A second independent cross-review of `08d01c4` found that `--collect-only -x`
+can skip item modification after a collection error and still print previously
+collected payload IDs. Reuse the guard at the start of collection-finish as well.
+Two new 8 MiB regressions fail against the old plugin (`-q` and `-vv`), then pass
+with bounded diagnostics after the repair. A short-ID control preserves the
+original early collection failure and prevents test execution. Preserve the
+first failing review/probe and final fixed-SHA evidence in the Task receipt.

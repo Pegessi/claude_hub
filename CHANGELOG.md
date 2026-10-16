@@ -12,7 +12,8 @@
 - Add a focused CI reliability contract with check selection, cost comparison,
   failure diagnosis and compact handoff evidence, linked from agent/contributor guides.
 - Reject payload-sized pytest IDs with bounded, actionable diagnostics; preserve
-  test data and report slow phases without adding a timing gate.
+  test data, cover partial collections after early errors, and report slow
+  phases without adding a timing gate.
 
 ### feat(chat): control queued messages and edit image-aware Goals
 
