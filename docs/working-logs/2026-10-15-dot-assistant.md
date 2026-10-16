@@ -136,20 +136,54 @@ and rules must fade or the prompt fills with stale advice.
   the worker answers each check by number with ✓/✗ and evidence. The result
   card puts the checklist next to the report.
 - Delegate gate (`lessons.lint_brief` + `match_lessons`, plain code): vague
-  checks, more than 7 checks, no output, no context, or a matching lesson hold
-  the task; `--confirm` sends anyway and the warnings stay on the work item.
+  checks, more than 7 checks, no output or no context hold the task;
+  `--confirm` sends anyway and the warnings stay on the work item. (A matching
+  lesson held it too at first; see the review below.)
 - `dot review` records ok/redo and the cause (brief/env/worker). Only a brief
   miss writes a lesson (new rule or a vote on an old one), so lessons always
   have a verdict behind them. Pending reviews are listed in every turn pack.
 - `lessons.json`: votes with a 60-day half-life. Top 5 (score ≥ 0.5) go into
-  the session pack; weaker ones only hold a matching brief; faded ones stay as
-  history. The nightly tidy merges and sharpens them.
+  the session pack; weaker ones are listed for a matching brief; faded ones
+  stay as history. The nightly tidy merges and sharpens them.
 - First-pass rate (ok at first verdict, no question asked, last 20 reviews) in
   `dot lessons` and the new Lessons tab, where rules can be added, edited
   and dropped.
 - Tests: `test_dot_lessons.py` (lint, match, decay, store, gate, the whole
   review loop with a second round), API/CLI routes, node API cases, and the
   browser run now covers the Lessons tab.
+
+### Review of round 4
+
+Two reviewers (code and design) read the round-4 commit. Fixed, each with a
+test that fails on the old code:
+
+- A lesson match held a clean brief on every send, and fixing the brief could
+  not clear it, so only `--confirm` worked. Matches are now listed, not held;
+  only lint warnings hold. A retry with a known request key is not held.
+- A vote for a merged lesson revived it as a duplicate; it now goes to the
+  lesson it was merged into. Merging into a dropped lesson is refused.
+- One task could vote a lesson twice (second round). Now once per task.
+- Votes and merges added raw votes, so an old faded rule could become the
+  strongest. Strength is decayed to today first (`weight`).
+- `lessons --all` counted dropped lessons for "always", pushing live ones out.
+  The API now returns `reach`, so the UI no longer re-derives it from a
+  rounded score.
+- A full inbox could push "Waiting for your review" out of the turn pack.
+  Reviews now come before events, and a section that does not fit is skipped
+  instead of ending the pack.
+- A question answered before the next poll was missed (only the latest report
+  was read); every new report is now scanned. A redo that came straight back
+  to `review`, or a closed task that was restarted, never asked for a new
+  verdict; both do now.
+- Smaller: an unknown lesson id in a review is 404, not 400; the rule limit is
+  200 characters everywhere (it was 300 stored, 240 shown).
+
+From the design review, also taken: a `change` cause (the user changed what
+they want: no lesson, not in the rate), a new rule that nearly copies a live
+lesson votes it instead, and stats show first-round causes and "judged N/M
+returned". Left for later: parsing the worker's ✓/✗ answers in code and
+logging a reason for each `--confirm`. Not fixed by choice: Japanese, Korean
+and Cyrillic checks are not tokenized.
 
 ## Risks
 

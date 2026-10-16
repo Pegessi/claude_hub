@@ -73,12 +73,11 @@ test('Dot launcher sits in the app bar and opens the Dot Chat tab', () => {
   assert.match(launcher, /<DotPanel[\s\S]*:open="panelOpen"/)
 })
 
-test('first-pass rate and lesson reach read plainly', () => {
+test('first-pass rate and review coverage read plainly', () => {
   assert.equal(api.formatFirstPass({ reviewed: 0, first_pass: 0, rate: null }), 'No reviews yet')
   assert.equal(api.formatFirstPass({ reviewed: 4, first_pass: 3, rate: 0.75 }), 'First pass 3/4 (75%)')
-  assert.equal(api.lessonReach({ score: 2, in_session: true }), 'always')
-  assert.equal(api.lessonReach({ score: 0.3, in_session: false }), 'on match')
-  assert.equal(api.lessonReach({ score: 0.05, in_session: false }), 'faded')
+  assert.equal(api.formatReviewCoverage({ judged: 4, returned: 5 }), 'judged 4/5 returned')
+  assert.equal(api.formatReviewCoverage({ judged: 0, returned: 0 }), '')
 })
 
 test('Dot panel covers focus, work, lessons, memory and health', () => {
@@ -89,6 +88,7 @@ test('Dot panel covers focus, work, lessons, memory and health', () => {
   for (const call of [
     'recallDot(', 'archiveDotCard(', 'updateDotFocus(', 'ackDotInbox(', 'loadDotHealth(',
     'loadDotLessons(', 'addDotLesson(', 'updateDotLesson(', 'dropDotLesson(', 'formatFirstPass(',
+    'formatReviewCoverage(', 'lesson.reach',
   ]) {
     assert.ok(panel.includes(call), call)
   }

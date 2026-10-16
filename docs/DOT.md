@@ -85,9 +85,11 @@ Values are JSON; a plain unquoted value is read as a string.
    - decide rotation (turn count, age, explicit request, `[Dot tidy]`);
    - build the **session pack** (role, user profile, concepts, tool guide) —
      passed via `--append-system-prompt`, stable for the whole session;
-   - build the **turn pack** (time, focus, open work, new inbox events,
-     recalled cards, and on the first turn the recent talk) — prepended in the
-     hidden `<claude_hub_instructions>` block.
+   - build the **turn pack** (time, focus, open work, tasks waiting for
+     review, new inbox events, recalled cards, and on the first turn the
+     recent talk) — prepended in the hidden `<claude_hub_instructions>` block.
+     Reviews come before events so a busy inbox cannot push them out; a
+     section that does not fit is skipped, not the ones after it.
 3. After the turn completes, a post-persist observer appends the exchange to
    the journal and commits the Dot home.
 
@@ -126,26 +128,43 @@ brief ──▶ worker ──▶ result card ──▶ review ──▶ lesson �
    check by number, `1. ✓ <evidence>` or `1. ✗ <why not>`.
 2. **Check before sending.** Plain code, no model call. The task is held
    (`held: true`, CLI exit 1) when a check is vague (`done`, `works`, `完成`…),
-   there are more than 7 checks, output or context is missing, or a past lesson
-   shares words with the brief. Dot fixes the brief and sends again, or adds
-   `--confirm`; overridden warnings are kept on the work item.
+   there are more than 7 checks, or output or context is missing. Dot fixes
+   the brief and sends again, or adds `--confirm`; overridden warnings are kept
+   on the work item. A retry with a known `--request-key` is not held again.
+   Past lessons that share words with the brief are listed but never hold it:
+   word overlap cannot tell whether the brief already follows the rule, so a
+   hold there could only be cleared with `--confirm`, and Dot would learn to
+   always add it.
 3. **Result card.** The done-when list is printed next to the worker's report,
    so each check can be held against its answer.
 4. **Review.** Every task Dot delegated stays under "Waiting for your review"
    in each turn pack until Dot runs
-   `claude-hub dot review <task> --verdict ok|redo [--cause brief|env|worker]`.
-   A redo needs a cause. A `brief` cause needs `--lesson "<rule>"` (new) or
-   `--lesson-id <id>` (the same miss again: one more vote). Watched tasks are
-   not reviewed; their brief was not Dot's.
-5. **Lessons.** Score = votes, halved every 60 days without a new vote. The
-   top 5 with score ≥ 0.5 are in every session pack ("always"); weaker ones
-   only hold a matching brief ("on match"); below 0.1 they are faded but kept
-   as history. The nightly tidy merges duplicates and sharpens wording
-   (`dot lessons merge|edit|drop`). The user can edit them in the Lessons tab.
+   `claude-hub dot review <task> --verdict ok|redo [--cause brief|env|worker|change]`.
+   A redo needs a cause; `change` means the user changed what they want. A
+   `brief` cause needs `--lesson "<rule>"` (new) or `--lesson-id <id>` (the
+   same miss again: one more vote). A new rule that says nearly the same as a
+   live lesson votes that lesson instead. Watched tasks are not reviewed;
+   their brief was not Dot's. After a verdict, the next round asks again:
+   a new final report (even if the watcher never saw the task working again)
+   or a closed task that was restarted.
+5. **Lessons.** One rule each, "When <situation>, <what to put in the brief>",
+   at most 200 characters. Score = strength, halved every 60 days without a
+   new vote. A vote or merge first decays the old strength to today, then adds,
+   so an old rule with many stale votes cannot jump ahead of fresh ones. One
+   task votes a lesson once; a vote for a merged lesson goes to the lesson it
+   was merged into. The top 5 with score ≥ 0.5 are in every session pack
+   ("always"); weaker ones are listed when a brief shares their words ("on
+   match"); below 0.1 they are faded but kept as history. The nightly tidy
+   merges duplicates and sharpens wording (`dot lessons merge|edit|drop`). The
+   user can edit them in the Lessons tab.
 
 The first-pass rate (ok at the first verdict and no question asked, over the
 latest 20 reviews) is the one number that says whether briefs are improving.
-`dot lessons` and the Lessons tab show it with the miss causes.
+A question counts even when it was answered before the watcher looked.
+Tasks whose first review said `change` are left out. `dot lessons` and the
+Lessons tab show it with the first-round miss causes (so brief misses stand
+apart from env and worker ones) and "judged N/M returned": a rate built on
+few verdicts says little.
 
 A task looks stuck when it is queued or working with no progress (task update,
 progress report, runtime status change or new report) for `--stall-hours`

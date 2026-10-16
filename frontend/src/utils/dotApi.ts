@@ -85,7 +85,8 @@ export interface DotWorkItem {
   updated: string
 }
 
-export type DotReviewCause = 'brief' | 'env' | 'worker'
+// change: the user changed what they want (no lesson, not in the first-pass rate).
+export type DotReviewCause = 'brief' | 'env' | 'worker' | 'change'
 
 export interface DotReview {
   verdict: 'ok' | 'redo'
@@ -99,14 +100,19 @@ export interface DotReview {
 export interface DotLesson {
   id: string
   rule: string
+  // How many tasks missed this.
   votes: number
+  // Strength as of the last vote or merge (older strength already decayed).
+  weight?: number
   tasks: string[]
   created: string
   seen: string
-  // Votes halved every 60 days without a new vote.
+  // Strength halved every 60 days without a new vote.
   score: number
   // Among the few strongest rules shown in every session.
   in_session: boolean
+  // always: in every session; on match: listed when a brief shares its words; faded: history.
+  reach: 'always' | 'on match' | 'faded'
   dropped?: boolean
   merged_into?: string
 }
@@ -115,8 +121,12 @@ export interface DotReviewStats {
   reviewed: number
   first_pass: number
   rate: number | null
+  // First-round causes of the reviews in the window.
   causes: Partial<Record<DotReviewCause, number>>
   pending: number
+  // Delegated tasks that came back, and how many of them got a verdict.
+  judged: number
+  returned: number
   window: number
 }
 
@@ -263,10 +273,9 @@ export function formatFirstPass(stats: DotReviewStats): string {
   return `First pass ${stats.first_pass}/${stats.reviewed} (${Math.round((stats.rate ?? 0) * 100)}%)`
 }
 
-// Same rule as the backend: strong lessons are always shown, weaker ones only on a match.
-export function lessonReach(lesson: Pick<DotLesson, 'score' | 'in_session'>): 'always' | 'on match' | 'faded' {
-  if (lesson.in_session) return 'always'
-  return lesson.score >= 0.1 ? 'on match' : 'faded'
+// "judged 4/5 returned": a rate is only honest when most returned tasks got a verdict.
+export function formatReviewCoverage(stats: Pick<DotReviewStats, 'judged' | 'returned'>): string {
+  return stats.returned ? `judged ${stats.judged}/${stats.returned} returned` : ''
 }
 
 // Same as the backend QUIET_REPLY: a Hub wake or tidy turn where nothing needed the user.

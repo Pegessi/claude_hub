@@ -20,6 +20,7 @@ from claude_hub.services.dot.lessons import (
     lesson_score,
     lint_brief,
     match_lessons,
+    same_rule,
     session_rules,
 )
 from claude_hub.services.dot.store import utc_now
@@ -92,6 +93,16 @@ def test_match_needs_shared_words() -> None:
     assert [hit["id"] for hit in match_lessons(lessons, "總結這篇論文，輸出到 docs", now)] == ["zh"]
 
 
+def test_same_rule_finds_a_near_copy_only() -> None:
+    lessons = [
+        {"id": "a", "rule": "When summarizing a paper, name the paper version"},
+        {"id": "b", "rule": "When training, give the GPU budget"},
+    ]
+    assert same_rule(lessons, "When summarizing papers, name the paper version")["id"] == "a"  # type: ignore[index]
+    assert same_rule(lessons, "When summarizing a paper, name the output path") is None
+    assert same_rule(lessons, "paper") is None, "too short to judge"
+
+
 def test_store_lessons_vote_edit_drop_merge(service: DotService) -> None:
     store = service.store
     first = store.add_lesson("  Say the  output path ", "task-1")
@@ -102,19 +113,62 @@ def test_store_lessons_vote_edit_drop_merge(service: DotService) -> None:
     assert voted is not None and voted["votes"] == 2 and voted["tasks"] == ["task-1", "task-2"]
     assert store.vote_lesson("l-none") is None
 
+    again = store.vote_lesson(first["id"], "task-2")
+    assert again is not None and again["votes"] == 2, "one task votes a lesson once"
+
     second = store.add_lesson("Give the output location", "task-3")
     merged = store.merge_lessons(first["id"], [second["id"]])
     assert merged["votes"] == 3 and merged["tasks"] == ["task-1", "task-2", "task-3"]
+    assert merged["weight"] == pytest.approx(3, abs=0.01)
     assert [lesson["id"] for lesson in store.list_lessons()] == [first["id"]]
     assert store.get_lesson(second["id"])["merged_into"] == first["id"]  # type: ignore[index]
     with pytest.raises(KeyError):
         store.merge_lessons(first["id"], ["l-none"])
+    with pytest.raises(ValueError, match="merged into"):
+        store.merge_lessons(second["id"], [first["id"]])
+
+    # A vote for a merged lesson goes to the lesson it was merged into.
+    forwarded = store.vote_lesson(second["id"], "task-4")
+    assert forwarded is not None and forwarded["id"] == first["id"] and forwarded["votes"] == 4
+    assert store.get_lesson(second["id"])["dropped"]  # type: ignore[index]
+    assert [lesson["id"] for lesson in store.list_lessons()] == [first["id"]]
 
     assert store.update_lesson(first["id"], rule="State the output path")["rule"].startswith("State")  # type: ignore[index]
     assert store.update_lesson(first["id"], dropped=True)["dropped"]  # type: ignore[index]
     assert store.list_lessons() == []
+    with pytest.raises(ValueError, match="dropped"):
+        store.merge_lessons(first["id"], [store.add_lesson("Other rule")["id"]])
     # The same miss again brings a dropped lesson back.
     assert not store.vote_lesson(first["id"]).get("dropped")  # type: ignore[union-attr]
+
+
+def test_votes_and_merges_count_old_strength_at_its_faded_value(service: DotService) -> None:
+    store = service.store
+    long_ago = (utc_now() - timedelta(days=LESSON_HALF_LIFE_DAYS * 4)).isoformat()
+    old = store.add_lesson("When writing a paper summary, name the paper version")
+    fresh = store.add_lesson("When summarizing, say where the output goes")
+    store._change_lesson(old["id"], lambda item: item.update(votes=8, seen=long_ago))
+    # 8 votes four half-lives ago are worth 0.5 today, not 8.
+    merged = store.merge_lessons(fresh["id"], [old["id"]])
+    assert merged["votes"] == 9 and merged["weight"] == pytest.approx(1.5, abs=0.01)
+    other = store.add_lesson("When training, give the GPU budget")
+    store._change_lesson(other["id"], lambda item: item.update(votes=8, seen=long_ago))
+    voted = store.vote_lesson(other["id"], "task-9")
+    assert voted is not None and voted["weight"] == pytest.approx(1.5, abs=0.01)
+    assert lesson_score(voted, utc_now()) == pytest.approx(1.5, abs=0.01)
+
+
+def test_lesson_rows_show_reach_from_live_lessons_only(service: DotService) -> None:
+    store = service.store
+    for index in range(RULES_IN_SESSION):
+        store.add_lesson(f"Rule number {index}")
+    big = store.add_lesson("Dropped but strong")
+    store._change_lesson(big["id"], lambda item: item.update(votes=9))
+    store.update_lesson(big["id"], dropped=True)
+    rows = {row["id"]: row for row in service.lessons(include_dropped=True)}
+    assert rows[big["id"]]["reach"] == "faded" and not rows[big["id"]]["in_session"]
+    assert sum(row["in_session"] for row in rows.values()) == RULES_IN_SESSION
+    assert {row["reach"] for row in service.lessons()} == {"always"}
 
 
 # ── delegate gate ──────────────────────────────────────────────────────
@@ -165,13 +219,19 @@ async def test_delegate_holds_a_weak_brief_until_fixed_or_confirmed(
     work = result["work"]
     assert work["done_when"] == GOOD["done_when"] and "brief_warnings" not in work
 
-    # A matching lesson holds even a clean brief once, so Dot reads it.
+    # A matching lesson is shown, never held: a rule cannot tell if the brief follows it.
     lesson = service.store.add_lesson("FA3 summaries: cite the section for each bullet")
     again = await service.delegate(**base, **GOOD)
-    assert again["held"] and [hit["id"] for hit in again["lessons"]] == [lesson["id"]]
-    confirmed = await service.delegate(**base, done_when=["done"], confirm=True)
-    assert not confirmed["held"] and len(sent) == 2
+    assert not again["held"] and [hit["id"] for hit in again["lessons"]] == [lesson["id"]]
+    assert len(sent) == 2
+    confirmed = await service.delegate(
+        **base, done_when=["done"], confirm=True, request_key="retry-1"
+    )
+    assert not confirmed["held"] and len(sent) == 3
     assert len(confirmed["work"]["brief_warnings"]) == 3, "overridden warnings are kept"
+    # A retry with the same request key is not held again.
+    replay = await service.delegate(**base, done_when=["done"], request_key="retry-1")
+    assert not replay["held"] and len(sent) == 4
 
     with pytest.raises(ValueError):
         await service.delegate(**base, done_when=["  "])
@@ -223,7 +283,7 @@ async def test_review_loop_learns_from_brief_misses(
     await service.check_work()
     for task_id in tasks:
         tasks[task_id] = task("review")
-        reports.setdefault(task_id, []).append(_report(f"{task_id}-r", "done", "1. ✓ written"))
+        reports.setdefault(task_id, []).append(_report(f"{task_id}-r", "completed", "1. ✓ written"))
     await service.check_work()
 
     card = store.get_card(store.get_work("task-2")["result_card"])  # type: ignore[index]
@@ -259,6 +319,8 @@ async def test_review_loop_learns_from_brief_misses(
         "rate": 0.33,
         "causes": {"brief": 2},
         "pending": 0,
+        "judged": 3,
+        "returned": 3,
         "window": service_module.STATS_WINDOW,
     }
 
@@ -277,6 +339,103 @@ async def test_review_loop_learns_from_brief_misses(
     await service.review("task-2", verdict="ok")
     assert store.get_work("task-2")["first_verdict"] == "redo"  # type: ignore[index]
     assert service.review_stats()["first_pass"] == 1
+
+
+@pytest.mark.asyncio
+async def test_watcher_catches_quick_questions_redo_rounds_and_restarts(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    tasks: dict[str, Any] = {}
+    reports: dict[str, list[Any]] = {}
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(
+        workspace_manager, "reports_for_task", lambda _ws, tid: reports.get(tid, [])
+    )
+
+    def task(status: str) -> SimpleNamespace:
+        return SimpleNamespace(status=SimpleNamespace(value=status), title="t")
+
+    for task_id in ("task-a", "task-b", "task-c"):
+        store.upsert_work(task_id, workspace_id="ws", title=task_id, status="working")
+        tasks[task_id] = task("working")
+
+    # task-a asks and is answered between two polls, then comes back.
+    reports["task-a"] = [_report("a1", "needs_input", "Which?"), _report("a2", "completed", "ok")]
+    tasks["task-a"] = task("review")
+    # task-b fails.
+    tasks["task-b"] = task("failed")
+    reports["task-b"] = [_report("b1", "failed", "no GPU")]
+    tasks["task-c"] = task("review")
+    reports["task-c"] = [_report("c1", "completed", "done")]
+    await service.check_work()
+    item_a = store.get_work("task-a")
+    assert item_a is not None and item_a["asked"] and item_a["review_due"]
+    assert store.get_work("task-b")["closed"]  # type: ignore[index]
+
+    # task-a: redo, and the next report lands while the task still looks "review".
+    await service.review("task-a", verdict="redo", cause="worker")
+    reports["task-a"].append(_report("a3", "ready_for_review", "fixed"))
+    store.mark_inbox_read([event["id"] for event in store.list_inbox()])
+    await service.check_work()
+    assert store.get_work("task-a")["review_due"]  # type: ignore[index]
+    assert [event["kind"] for event in store.list_inbox()] == ["task_ready"]
+
+    # task-b: closed as failed, then restarted and returned.
+    await service.review("task-b", verdict="redo", cause="env")
+    tasks["task-b"] = task("working")
+    await service.check_work()
+    assert not store.get_work("task-b")["closed"]  # type: ignore[index]
+    tasks["task-b"] = task("review")
+    reports["task-b"].append(_report("b2", "ready_for_review", "ran"))
+    await service.check_work()
+    assert store.get_work("task-b")["review_due"]  # type: ignore[index]
+
+    # task-c: the user changed their mind. Not a brief miss, not in the rate.
+    with pytest.raises(ValueError, match="only for brief"):
+        await service.review("task-c", verdict="redo", cause="change", lesson="x y z")
+    await service.review("task-c", verdict="redo", cause="change")
+    await service.review("task-a", verdict="ok")
+    await service.review("task-b", verdict="ok")
+    stats = service.review_stats()
+    assert (stats["reviewed"], stats["first_pass"], stats["judged"]) == (2, 0, 3)
+    assert stats["causes"] == {"worker": 1, "env": 1}
+
+
+@pytest.mark.asyncio
+async def test_review_reuses_a_lesson_that_says_the_same(service: DotService) -> None:
+    store = service.store
+    old = store.add_lesson("When summarizing a paper, name the paper version", "task-0")
+    for task_id in ("task-1", "task-2"):
+        store.upsert_work(task_id, status="review", result_card="c", review_due=True)
+    result = await service.review(
+        "task-1",
+        verdict="redo",
+        cause="brief",
+        lesson="When summarizing papers, name the paper version",
+    )
+    assert result["lesson_reused"] and result["lesson"]["id"] == old["id"]
+    assert result["lesson"]["votes"] == 2 and len(store.list_lessons()) == 1
+    with pytest.raises(service_module.LessonNotFound):
+        await service.review("task-2", verdict="redo", cause="brief", lesson_id="l-none")
+
+
+def test_reviews_survive_a_full_inbox(service: DotService) -> None:
+    store = service.store
+    for index in range(8):
+        title = f"Paper {index} " + "p" * 100
+        store.upsert_work(
+            f"task-{index}", title=title, status="review", result_card="c", review_due=True
+        )
+    for index in range(7):
+        store.add_focus(f"Goal {index}", why="y" * 150)
+    for index in range(12):
+        store.add_inbox("task_done", f"event {index} " + "x" * 390)
+    built = build_turn_pack(store, None, "", first_turn=False, session_turn=2)
+    assert all(f"- [task-{index}] Paper {index}" in built.text for index in range(8))
+    assert "a brief miss needs `--lesson`" in built.text
+    assert len(built.text) <= 5000
+    assert 0 < len(built.delivered_event_ids) < 12, "the rest of the events wait for a later turn"
 
 
 def test_old_lessons_leave_the_session_pack(service: DotService, monkeypatch: MonkeyPatch) -> None:

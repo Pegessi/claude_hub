@@ -17,6 +17,8 @@ from ..auth.dependencies import get_current_user
 from ..config import settings
 from ..models.schemas import User
 from ..services.dot import Card, DotService, get_dot_service
+from ..services.dot.service import LessonNotFound
+from ..services.dot.store import LESSON_RULE_LIMIT
 from ..services.workspace_manager._task_execution import TaskExecutionConflict
 
 router = APIRouter(prefix="/api/dot", tags=["dot"])
@@ -91,7 +93,7 @@ class DelegateRequest(BaseModel):
     start: bool = True
     request_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
     stall_hours: Optional[float] = Field(default=None, gt=0, le=720)
-    # Send even when the brief check has warnings or matching lessons.
+    # Send even when the brief check has warnings.
     confirm: bool = False
 
 
@@ -99,16 +101,16 @@ class ReviewRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     verdict: Literal["ok", "redo"]
-    cause: Optional[Literal["brief", "env", "worker"]] = None
+    cause: Optional[Literal["brief", "env", "worker", "change"]] = None
     note: str = Field(default="", max_length=2000)
-    lesson: str = Field(default="", max_length=300)
+    lesson: str = Field(default="", max_length=LESSON_RULE_LIMIT)
     lesson_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
 
 
 class LessonWrite(BaseModel):
     model_config = {"extra": "forbid"}
 
-    rule: str = Field(min_length=1, max_length=300)
+    rule: str = Field(min_length=1, max_length=LESSON_RULE_LIMIT)
 
 
 class LessonMerge(BaseModel):
@@ -452,6 +454,8 @@ async def dot_review(
 ) -> dict[str, Any]:
     try:
         return await _service().review(task_id, **payload.model_dump())
+    except LessonNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Lesson not found: {exc.args[0]}") from None
     except KeyError:
         raise HTTPException(status_code=404, detail="Dot is not tracking this task") from None
     except ValueError as exc:
@@ -522,6 +526,8 @@ async def dot_merge_lessons(
         lesson = service.store.merge_lessons(payload.keep, payload.others)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Lesson not found: {exc.args[0]}") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     await _commit(service, f"dot: merge lessons into {payload.keep}")
     return lesson
 

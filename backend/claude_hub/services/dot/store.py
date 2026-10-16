@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from ..runtime_isolation import resolve_runtime_home
+from .lessons import lesson_score
 from .prompts import DEFAULT_ROLE
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ NAME_LIMIT = 40
 # Code points, not characters: one emoji may be several code points.
 AVATAR_TEXT_LIMIT = 16
 AVATAR_IMAGE_BYTES = 2 * 1024 * 1024
-LESSON_RULE_LIMIT = 300
+LESSON_RULE_LIMIT = 200
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -632,16 +633,32 @@ class DotStore:
     def vote_lesson(
         self, lesson_id: str, task_id: Optional[str] = None
     ) -> Optional[dict[str, Any]]:
-        """The same miss happened again: one more vote, and the lesson is fresh again."""
+        """The same miss happened again: one more vote, and the lesson is fresh again.
 
-        def vote(item: dict[str, Any]) -> None:
+        A vote for a merged lesson goes to the lesson it was merged into. One
+        task votes a lesson once, however many review rounds it has.
+        """
+        self.ensure()
+        with self._lock:
+            items = [item for item in self._read_json("lessons.json", []) if isinstance(item, dict)]
+            by_id = {item.get("id"): item for item in items}
+            item = by_id.get(lesson_id)
+            hops = 0
+            while item is not None and item.get("merged_into") and hops < len(items):
+                item, hops = by_id.get(item["merged_into"]), hops + 1
+            if item is None:
+                return None
+            if task_id and task_id in item.get("tasks", []):
+                return dict(item)
+            now = utc_now()
+            item["weight"] = round(lesson_score(item, now) + 1, 3)
             item["votes"] = int(item.get("votes") or 0) + 1
-            item["seen"] = now_iso()
+            item["seen"] = now.isoformat(timespec="seconds")
             item.pop("dropped", None)
-            if task_id and task_id not in item.setdefault("tasks", []):
-                item["tasks"] = [*item["tasks"], task_id][-20:]
-
-        return self._change_lesson(lesson_id, vote)
+            if task_id:
+                item["tasks"] = [*item.get("tasks", []), task_id][-20:]
+            self._write_json("lessons.json", items)
+            return dict(item)
 
     def update_lesson(
         self, lesson_id: str, *, rule: Optional[str] = None, dropped: Optional[bool] = None
@@ -659,7 +676,10 @@ class DotStore:
         return self._change_lesson(lesson_id, update)
 
     def merge_lessons(self, keep_id: str, other_ids: Iterable[str]) -> dict[str, Any]:
-        """Fold lessons that say the same thing into one; votes and tasks add up."""
+        """Fold lessons that say the same thing into one; strength, votes and tasks add up.
+
+        Raises KeyError for an unknown id, ValueError when ``keep_id`` is dropped.
+        """
         others = [other for other in dict.fromkeys(other_ids) if other != keep_id]
         self.ensure()
         with self._lock:
@@ -669,18 +689,29 @@ class DotStore:
             missing = [other for other in others if other not in by_id]
             if keep is None or missing:
                 raise KeyError(keep_id if keep is None else missing[0])
+            if keep.get("dropped"):
+                where = keep.get("merged_into")
+                raise ValueError(
+                    f"{keep_id} was merged into {where}; merge into that"
+                    if where
+                    else f"{keep_id} is dropped; keep a live lesson"
+                )
+            now = utc_now()
+            # Strength is decayed to today first, so old votes count for what they are worth now.
+            weight = lesson_score(keep, now)
             for other in others:
                 item = by_id[other]
                 if item.get("dropped"):
                     continue
+                weight += lesson_score(item, now)
                 keep["votes"] = int(keep.get("votes") or 0) + int(item.get("votes") or 0)
-                keep["seen"] = max(str(keep.get("seen") or ""), str(item.get("seen") or ""))
                 keep["tasks"] = list(
                     dict.fromkeys([*keep.get("tasks", []), *item.get("tasks", [])])
                 )[-20:]
                 item["dropped"] = True
                 item["merged_into"] = keep_id
-            keep.pop("dropped", None)
+            keep["weight"] = round(weight, 3)
+            keep["seen"] = now.isoformat(timespec="seconds")
             self._write_json("lessons.json", items)
             return dict(keep)
 

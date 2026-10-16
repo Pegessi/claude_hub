@@ -5,8 +5,8 @@ Two packs keep Dot's mind small and fresh:
 * the **session pack** (role, tool guide, delegation rules, user profile,
   concepts) is passed as the system prompt and stays fixed for one provider
   session;
-* the **turn pack** (time, focus, open work, new events, tasks waiting for
-  review, recalled cards and, on a session's first turn, the recent talk) is
+* the **turn pack** (time, focus, open work, tasks waiting for review, new
+  events, recalled cards and, on a session's first turn, the recent talk) is
   rebuilt for every turn.
 
 Both have hard size caps so memory growth never floods the conversation.
@@ -135,7 +135,7 @@ def _review_lines(store: DotStore) -> list[str]:
         lines.append(f"- ({len(pending) - _REVIEWS_PER_TURN} more)")
     lines.append(
         "- Judge each result against its done-when list, then "
-        "`claude-hub dot review <task-id> --verdict ok|redo [--cause brief|env|worker]`; "
+        "`claude-hub dot review <task-id> --verdict ok|redo [--cause brief|env|worker|change]`; "
         "a brief miss needs `--lesson` or `--lesson-id`."
     )
     return lines
@@ -164,7 +164,7 @@ def build_turn_pack(
     now: Optional[datetime] = None,
     recall: bool = True,
 ) -> TurnPack:
-    """Assemble the per-turn context; sections are dropped from the end when over budget."""
+    """Assemble the per-turn context; a section that does not fit is cut or skipped."""
     moment = (now or datetime.now()).astimezone()
     header = (
         f"{DOT_CONTEXT_HEADER}\n"
@@ -175,11 +175,12 @@ def build_turn_pack(
         ("## Focus (what matters now)", _focus_lines(store) or ["- (empty — ask what matters)"]),
         ("## Delegated work", _work_lines(store) or ["- (none)"]),
     ]
-    if events:
-        sections.append((_EVENTS_TITLE, _event_lines(events)))
+    # Reviews go before events: a busy inbox must not push them out of the pack.
     reviews = _review_lines(store)
     if reviews:
         sections.append(("## Waiting for your review", reviews))
+    if events:
+        sections.append((_EVENTS_TITLE, _event_lines(events)))
     if recall and text.strip():
         hits = index.search(text, limit=6) if index is not None else []
         if hits:
@@ -206,7 +207,7 @@ def build_turn_pack(
     for title, lines in sections:
         kept = _take_lines(lines, max(budget - len(title) - 2, 0))
         if not kept:
-            break
+            continue
         if title == _EVENTS_TITLE:
             shown_events = len(kept) - (len(events) > _EVENTS_PER_TURN)
         block = title + "\n" + "\n".join(kept)

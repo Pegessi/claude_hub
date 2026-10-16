@@ -76,6 +76,7 @@ async def main(browser_run: BrowserRun) -> None:
             "seen": NOW,
             "score": 2.0,
             "in_session": True,
+            "reach": "always",
         }
     ]
     review_stats = {
@@ -84,6 +85,8 @@ async def main(browser_run: BrowserRun) -> None:
         "rate": 0.75,
         "causes": {"brief": 1},
         "pending": 1,
+        "judged": 4,
+        "returned": 5,
         "window": 20,
     }
     writes: list[list] = []
@@ -241,6 +244,7 @@ async def main(browser_run: BrowserRun) -> None:
                             "seen": NOW,
                             "score": 1.0,
                             "in_session": True,
+                            "reach": "always",
                         }
                     )
                     body = lessons[-1]
@@ -344,6 +348,9 @@ async def main(browser_run: BrowserRun) -> None:
                 "First pass 3/4 (75%)"
             )
             await expect(page.get_by_test_id("dot-lesson-stats")).to_contain_text("brief 1")
+            await expect(page.get_by_test_id("dot-lesson-stats")).to_contain_text(
+                "judged 4/5 returned"
+            )
             rows = page.get_by_test_id("dot-lesson")
             await expect(rows).to_have_count(1)
             await expect(rows.first).to_contain_text("always")

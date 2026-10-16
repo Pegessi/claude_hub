@@ -50,14 +50,19 @@ TOOL_GUIDE = """\
 --done-when "<check>" [--done-when "<check>" ...] --output "<what, and where it goes>" \
 [--context "..."] [--out-of-scope "..."] [--constraints "..."] [--agent codex|claude] \
 [--stall-hours N]`. One goal per task. Each done-when is one check a stranger can
-  verify (a file, a command, a number). The Hub checks the brief and shows
-  lessons that match; if it holds the task, fix the brief, or resend with
-  `--confirm` when the warnings do not apply.
-- `claude-hub dot review <task-id> --verdict ok|redo [--cause brief|env|worker] \
-[--note "..."] [--lesson "<rule>" | --lesson-id <id>]` — judge every task you
-  delegated once it comes back. When the brief caused the miss (the worker had
-  to ask, guessed wrong, or delivered the wrong thing), add a lesson: one rule
-  for future briefs, or `--lesson-id` to vote for an existing rule.
+  verify (a file, a command, a number). The Hub checks the brief and lists
+  past lessons that share its words; it sends the task anyway, so read them
+  and fix the brief first if one applies. It holds a task only when the brief
+  check warns; fix the brief, or resend with `--confirm` when the warnings do
+  not apply.
+- `claude-hub dot review <task-id> --verdict ok|redo \
+[--cause brief|env|worker|change] [--note "..."] [--lesson "<rule>" | --lesson-id <id>]` —
+  judge every task you delegated once it comes back. When the brief caused
+  the miss (the worker had to ask, guessed wrong, or delivered the wrong
+  thing), add a lesson: one rule for future briefs, written "When <situation>,
+  <what to put in the brief>" (max 200 characters), or `--lesson-id` to vote
+  for an existing rule. Use `change` when the user changed what they want;
+  it teaches nothing and does not count against your briefs.
 - `claude-hub dot lessons` — your brief lessons; `lessons edit|drop|merge` keep them tidy
 - `claude-hub dot watch <task-id> [--stall-hours N]` — watch an existing Hub task (default \
 stuck alarm: 2 hours without progress); `claude-hub dot unwatch <task-id>` stops it
@@ -126,7 +131,8 @@ unless you found something that needs me; then say it in a line or two.
 5. Update `user` cards when you learned something new about the user.
 6. Lessons (`claude-hub dot lessons`): merge ones that say the same thing
    (`claude-hub dot lessons merge <keep-id> <other-id>...`) and sharpen vague
-   wording (`claude-hub dot lessons edit`). Each lesson is one rule for briefs.
+   wording (`claude-hub dot lessons edit`). Each lesson is one rule for briefs:
+   "When <situation>, <what to put in the brief>".
 """
 
 DOT_CONTEXT_HEADER = "Dot context (fresh, built by Claude Hub for this turn)"

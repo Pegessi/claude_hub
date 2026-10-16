@@ -441,6 +441,11 @@ def test_review_and_lessons_routes_and_cli(
     assert client.post("/api/dot/work/task-1/review", json={"verdict": "meh"}).status_code == 422
     store.upsert_work("task-1", status="review", result_card="c-1", review_due=True)
     assert client.get("/api/dot/lessons").json()["stats"]["pending"] == 1
+    unknown = {"verdict": "redo", "cause": "brief", "lesson_id": "l-none"}
+    missing = client.post("/api/dot/work/task-1/review", json=unknown)
+    assert missing.status_code == 404 and "Lesson not found" in missing.json()["detail"]
+    too_long = {**review, "lesson": "x" * 201}
+    assert client.post("/api/dot/work/task-1/review", json=too_long).status_code == 422
 
     result = CliRunner().invoke(
         cli,
@@ -458,10 +463,12 @@ def test_review_and_lessons_routes_and_cli(
         "rate": 0.0,
         "causes": {"brief": 1},
         "pending": 0,
+        "judged": 1,
+        "returned": 1,
         "window": 20,
     }
     lesson_id = lessons["lessons"][0]["id"]
-    assert lessons["lessons"][0]["in_session"]
+    assert lessons["lessons"][0]["in_session"] and lessons["lessons"][0]["reach"] == "always"
 
     added = client.post("/api/dot/lessons", json={"rule": "Give the output location"}).json()
     assert client.post("/api/dot/lessons", json={"rule": ""}).status_code == 422
@@ -472,10 +479,13 @@ def test_review_and_lessons_routes_and_cli(
     assert client.post("/api/dot/lessons/merge", json=merge).json()["votes"] == 2
     bad_merge = {"keep": lesson_id, "others": ["l-none"]}
     assert client.post("/api/dot/lessons/merge", json=bad_merge).status_code == 404
+    into_merged = {"keep": added["id"], "others": [lesson_id]}
+    assert client.post("/api/dot/lessons/merge", json=into_merged).status_code == 400
 
     listed = CliRunner().invoke(cli, ["dot", "lessons"])
     assert listed.exit_code == 0, listed.output
     assert "first pass: 0/1" in listed.output and lesson_id in listed.output
+    assert "(misses: brief 1)" in listed.output and "judged 1/1 returned" in listed.output
     assert added["id"] not in listed.output
     assert added["id"] in CliRunner().invoke(cli, ["dot", "lessons", "--all"]).output
 
