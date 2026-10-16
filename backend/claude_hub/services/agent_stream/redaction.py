@@ -11,7 +11,8 @@ import re
 from copy import deepcopy
 from typing import Any, Dict
 
-from ...models import AgentStreamEvent
+from ...models import AgentStreamEvent, AgentStreamEventType
+from ..provider_proxy import redact_provider_proxy_diagnostic
 
 # Payload keys whose values are environment-variable maps. We keep the keys
 # (so the UI can show which vars were set) but drop every value.
@@ -61,6 +62,8 @@ def _redact_value(key: str, value: Any) -> Any:
         if _SENSITIVE_KEY_RE.search(key):
             return "[REDACTED]"
         masked = _mask_string(value)
+        if key.lower() in {"message", "error", "detail", "stderr", "reason"}:
+            masked = redact_provider_proxy_diagnostic(masked)
         if len(masked) > MAX_FIELD_CHARS:
             return masked[: MAX_FIELD_CHARS - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
         return masked
@@ -72,4 +75,8 @@ def redact_event(event: AgentStreamEvent) -> AgentStreamEvent:
     if not event.payload:
         return event.model_copy(update={"redacted": True})
     redacted_payload: Dict[str, Any] = {k: _redact_value(k, v) for k, v in event.payload.items()}
+    if event.type in {AgentStreamEventType.STATUS, AgentStreamEventType.ERROR}:
+        text = redacted_payload.get("text")
+        if isinstance(text, str):
+            redacted_payload["text"] = redact_provider_proxy_diagnostic(text)
     return event.model_copy(update={"payload": redacted_payload, "redacted": True})

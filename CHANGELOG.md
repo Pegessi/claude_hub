@@ -15,6 +15,37 @@
   test data, cover partial collections after early errors, and report slow
   phases without adding a timing gate.
 
+### feat(chat): continue active Goals after a planned restart
+
+- Include eligible running Goals in the existing opt-in restart recovery, keeping
+  the same Goal, provider conversation and checkpoint with one guarded resume.
+- Finish an interrupted ordinary turn before releasing an already-deferred Goal;
+  cancelled or failed ordinary turns leave that Goal paused instead.
+- Preserve user controls, waiting/uncertain states and claim-based no-replay
+  behavior. Revoke pending recovery on new Goal controls or archive, including
+  archive actions before the capture list is persisted.
+- Preserve interruption evidence through private proxy diagnostic redaction and
+  include effective deployment proxy defaults in restart configuration checks.
+- Finish failed deferred recovery before admitting queued objective edits.
+
+### fix(proxy): preserve login profiles and private diagnostic boundaries
+
+- Reassert configured provider proxies after login initialization while keeping
+  session HOME, SHELL and profile-based provider discovery intact.
+- Clear stale Claude launch settings when session overrides are removed, and
+  atomically create private launch files with restrictive permissions.
+- Mask proxy usernames and bypass hosts in error/status diagnostics; require
+  provider-specific network tests and private configuration during deployment.
+
+### feat(proxy): configure private deployment defaults per provider
+
+- Read separate Claude, Codex, Cursor and TraeX proxy/bypass defaults from
+  backend/.env, shared by native launches and Cursor catalog discovery.
+- Preserve session overrides and unconfigured deployments; keep private values
+  out of tab data, serialized settings and other providers' inherited variables.
+- Configure the Cursor catalog deadline per deployment and reject forced
+  additions of private root/backend .env files in commit-safety checks.
+
 ### feat(chat): control queued messages and edit image-aware Goals
 
 - Expand queued messages, edit text, cancel inputs, and preview/remove images;
@@ -54,6 +85,69 @@
   even when tmux predates the backend, preserving explicit session overrides.
 - Keep inherited settings out of saved tabs, Claude settings and remote launches;
   preserve explicit empty values and provider network route selection.
+
+### fix(chat): persist direct-tab cleanup obligations across failures and restart
+
+- Atomically retire a tab with a pending cleanup record, preserving retry after
+  partial file deletion, cancellation, or acknowledgment persistence failure.
+- Retry the same record on DELETE, startup and existing monitor ticks; reserve
+  pending identifiers and refuse cleanup of a replacement owner's artifacts.
+- Read legacy tab lists and save a versioned state envelope. Keep uncertain or
+  invalid state from losing cleanup evidence, and document the deployment backup
+  and old-binary downgrade boundary.
+
+### fix(chat): serialize question answers and finish cleanup before session reuse
+
+- Bind each managed question to one durable answer call so concurrent answers,
+  provider-handoff failures and retries cannot enqueue contradictory follow-ups.
+- Skip a paused previous reviewer when dispatching the next review, preserving
+  explicit Stop while selecting an available or newly created reviewer.
+- Stop direct Chat streams while their tab owner remains discoverable, and retain
+  failed runtime stops for retry across delete, retry, edit and archive paths.
+- Finish outstanding event-log I/O before cleanup or identifier reuse, including
+  cancellation, so old writes cannot enter a replacement session's history.
+
+### fix(chat): fence image cache ownership and retry proven-unsent restart input
+
+- Prevent deleted or cancelled Chat image reads from restoring retired cache
+  entries, including background writes and reused managed session IDs. Disable
+  browser caching of managed image responses.
+- Keep shutdown admission rejection retryable only when provider input was not
+  submitted, including lazy manager creation and rejection after a recorded start.
+  Preserve the same mailbox call ID and retain ambiguous delivery evidence.
+- Finalize test-owned terminal resources on failures and preserve planned-restart
+  continuation behavior when integrating managed Workspace Chat.
+
+### fix(workspace): preserve managed Chat ownership across controls and failures
+
+- Bind question answers to the active turn and exact provider request instead of
+  treating them as arbitrary steering or a new Task message.
+- Keep managed model changes, durable queued messages and retries on the actual
+  ManagedSession; distinguish stale Stop from an already completed turn.
+- Reject direct-tab lifecycle/history mutations for managed Chat, serve generated
+  images through its own stream, and reconcile panes after Agent deletion.
+- Fence failed initialization and deletion before releasing identities; retain
+  delivery evidence until durable removal prevents replay after a failed save.
+- Apply the same provider/surface rules to Task creation and start overrides, and
+  keep managed execution modes under Task control.
+- Keep ordinary Chat descriptors tied to persisted tab creation, and preserve
+  reviewer escalation when automatic recovery limits are reached.
+
+### feat(workspace): run managed agents and reviewers through Chat
+
+- Add an explicit Terminal/Chat execution choice for local Workspace agents,
+  including execution agents and independent reviewers. Existing configurations
+  retain Terminal behavior; MASO is available through local HTTP Chat only.
+- Keep managed Chat tabs as navigation records without starting ttyd, tmux or a
+  terminal shell. Reuse the managed-session stream for messages, tools, image
+  previews, approvals and persistent history.
+- Route Chat assignments and followups through the durable Workspace mailbox.
+  Separate provider handoff evidence from Task reports, preserve ambiguous
+  deliveries without automatic replay, and make Stop pause queued delivery until
+  an explicit continuation.
+- Reset native provider context for unrelated reviews while retaining display
+  history, inherit the execution agent's Chat configuration for auto-created
+  reviewers, and preserve existing review and human-acceptance requirements.
 
 ### fix(chat): keep Claude background results from completing a user request
 

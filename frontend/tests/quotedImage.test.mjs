@@ -106,6 +106,21 @@ test('resolve returns null for non-bare/foreign srcs and empty tab', () => {
   assert.equal(resolveQuotedImageUrl('', KEY), null)
 })
 
+test('managed stream scope routes quoted and local images through the managed session', () => {
+  const base = '/api/workspaces/sessions/managed%20session/stream'
+  assert.equal(
+    resolveQuotedImageUrl(base, KEY),
+    `${base}/quoted-image?key=${encodeURIComponent(KEY)}`,
+  )
+  const out = rewriteQuotedImageSrcs(
+    `<img src="${KEY}"><img src="/tmp/managed.png">`,
+    base,
+  )
+  assert.ok(out.includes(`${base}/quoted-image?key=${KEY}`))
+  assert.ok(out.includes(`${base}/agent-image?path=${encodeURIComponent('/tmp/managed.png')}`))
+  assert.ok(!out.includes('/api/workspaces/tabs/'))
+})
+
 // ── rewriteQuotedImageSrcs ────────────────────────────────────────────────
 
 test('rewrites a bare img_v3 img src and tags the element', () => {

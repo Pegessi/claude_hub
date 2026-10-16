@@ -19,7 +19,14 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import ValidationError
 
-from ..models import TERMINAL_GOAL_STATUSES, AgentType, SessionKind
+from ..models import (
+    TERMINAL_GOAL_STATUSES,
+    AgentType,
+    GoalDispatchState,
+    GoalRun,
+    GoalRunStatus,
+    SessionKind,
+)
 from . import service_restart as restart
 from .service_restart import ChatContinuation, ChatRecovery
 
@@ -58,6 +65,8 @@ def _operation_matches(operation: Any, *, capturing: bool) -> bool:
 
 
 def _config_digest(tab: Any) -> str:
+    from .provider_proxy import provider_subprocess_env
+
     # Include launch identity/configuration, never mutable timestamps, display
     # names or live status. Only its digest is retained, never credentials.
     values = {
@@ -77,7 +86,7 @@ def _config_digest(tab: Any) -> str:
             "cursor_cli_version",
         )
     }
-    effective_env = {**os.environ, **tab.env}
+    effective_env = provider_subprocess_env(AgentType(tab.agent_type).value, os.environ, tab.env)
     values["provider_environment"] = {
         key: value
         for key, value in effective_env.items()
@@ -149,7 +158,22 @@ def _cursor_database_exists(transport: Any) -> bool:
         return False
 
 
-def _eligible_tab(tab_id: str) -> Any:
+def _goal_control_digest(goal: GoalRun, tab: Any, continuation_id: str | None = None) -> str:
+    # Shutdown/recovery may change status and accounting. Human mutations use
+    # durable idempotency entries; only this recovery's own resume is exempt.
+    mutations = dict(goal.idempotency)
+    if continuation_id is not None and mutations.get(continuation_id) == "resume":
+        mutations.pop(continuation_id)
+    identity = {
+        "goal_id": goal.id,
+        "goal_created_at": goal.created_at,
+        "tab_created_at": tab.created_at,
+        "mutations": mutations,
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _eligible_tab(tab_id: str, *, goal_id: str | None = None) -> Any:
     from . import ttyd_manager, workspace_manager
     from .goal_run import get_goal_manager
 
@@ -168,7 +192,10 @@ def _eligible_tab(tab_id: str) -> Any:
     if any(session.tab_id == tab_id for session in workspace_manager.sessions.values()):
         raise ContinuationSkipped("Managed work retains its own recovery owner")
     goal = get_goal_manager().current(tab_id)
-    if goal is not None and (
+    if goal_id is not None:
+        if goal is None or goal.id != goal_id:
+            raise ContinuationSkipped("The original Goal is no longer current")
+    elif goal is not None and (
         goal.status not in TERMINAL_GOAL_STATUSES or goal.dispatch_state.value != "idle"
     ):
         raise ContinuationSkipped("The Goal retains its own recovery controls")
@@ -183,6 +210,7 @@ def _eligible_tab(tab_id: str) -> Any:
 async def capture_interrupted_chats() -> None:
     """Called after send admission closes, before tailers terminalize turns."""
     from ..api import agent_stream as api
+    from .goal_run import get_goal_manager
 
     state = restart.get_store().read()
     operation = state.get("operation") or {}
@@ -212,19 +240,40 @@ async def capture_interrupted_chats() -> None:
                 or tailer._pending_approvals
                 or tailer._blocking_approval_call_ids
                 or tailer._waiting_for_model_capacity
-                or tailer._goal_protocol_turn
                 or getattr(transport, "_delivery_uncertain", False)
             ):
                 continue
             try:
-                tab = _eligible_tab(transport.session.tab_id)
+                goal = get_goal_manager().current(transport.session.tab_id)
+                goal_deferred = False
+                if goal is not None and goal.status == GoalRunStatus.ACTIVE:
+                    goal_deferred = (
+                        goal.dispatch_state == GoalDispatchState.IDLE
+                        and goal.resume_after_turn
+                        and not tailer._goal_protocol_turn
+                    )
+                    if not goal_deferred and not (
+                        goal.dispatch_state == GoalDispatchState.DISPATCHED
+                        and goal.current_turn_id == turn_id
+                        and goal.pending_step_id == turn_id
+                        and tailer._goal_protocol_turn
+                    ):
+                        continue
+                else:
+                    goal = None
+                    if tailer._goal_protocol_turn:
+                        continue
+                tab = _eligible_tab(transport.session.tab_id, goal_id=goal.id if goal else None)
                 if transport._conversation_id != tab.agent_session_id:
                     continue
+                goal_digest = _goal_control_digest(goal, tab) if goal else None
                 turn = await tailer.store.find_turn_with_metadata(turn_id)
-                if turn is None or turn[4].get("origin", "web") not in {
-                    "web",
-                    "restart_continuation",
-                }:
+                origins = (
+                    {"goal"}
+                    if goal is not None and not goal_deferred
+                    else {"web", "restart_continuation"}
+                )
+                if turn is None or turn[4].get("origin", "web") not in origins:
                     continue
                 target = ChatContinuation(
                     tab_id=tab.id,
@@ -232,6 +281,9 @@ async def capture_interrupted_chats() -> None:
                     start_sequence=turn[0],
                     conversation_id=tab.agent_session_id,
                     config_digest=_config_digest(tab),
+                    goal_id=goal.id if goal else None,
+                    goal_control_digest=goal_digest,
+                    goal_deferred=goal_deferred,
                     continuation_id=str(
                         uuid5(
                             NAMESPACE_URL,
@@ -254,7 +306,11 @@ async def capture_interrupted_chats() -> None:
                 ChatRecovery(
                     launcher_id=launcher_id,
                     captured_at=time.time(),
-                    targets=[ChatContinuation.model_validate(row) for row in targets],
+                    targets=[
+                        ChatContinuation.model_validate(row)
+                        for row in targets
+                        if row["tab_id"] not in live.get("chat_recovery_vetoes", [])
+                    ],
                 ).model_dump(),
             )
 
@@ -290,6 +346,7 @@ def _assert_claim(operation_id: str, target: ChatContinuation) -> None:
         recovery.launcher_id == os.environ.get("CLAUDE_HUB_LAUNCHER_ID")
         and state.get("launcher_id") == recovery.launcher_id
         and operation.get("id") == operation_id
+        and target.tab_id not in operation.get("chat_recovery_vetoes", [])
         and _operation_matches(operation, capturing=False)
     ):
         for row in operation.get("chat_recovery", {}).get("targets", []):
@@ -319,9 +376,9 @@ async def _verify_interruption(store: Any, target: ChatContinuation) -> None:
             if event.type == "turn_started":
                 latest_start = event
             if event.turn_id == target.turn_id:
-                if (
-                    event.type == "error"
-                    and event.payload.get("message") == _RUNTIME_INTERRUPTED_MESSAGE
+                if event.type == "error" and (
+                    event.payload.get("runtime_interrupted") is True
+                    or event.payload.get("message") == _RUNTIME_INTERRUPTED_MESSAGE
                 ):
                     interrupted = True
                 if event.type == "turn_completed":
@@ -337,71 +394,195 @@ async def _verify_interruption(store: Any, target: ChatContinuation) -> None:
         or not cancelled
     ):
         raise ContinuationSkipped("The original turn was completed, stopped, or superseded")
+    metadata = latest_start.payload.get("metadata", {})
+    origins = (
+        {"goal"}
+        if target.goal_id is not None and not target.goal_deferred
+        else {"web", "restart_continuation"}
+    )
+    if not isinstance(metadata, dict) or metadata.get("origin", "web") not in origins:
+        raise ContinuationSkipped("The interrupted turn belongs to a different recovery owner")
+
+
+def _validate_goal(target: ChatContinuation, tab: Any) -> GoalRun:
+    from .goal_run import get_goal_manager
+
+    goal = get_goal_manager().current(target.tab_id)
+    if (
+        goal is None
+        or goal.id != target.goal_id
+        or _goal_control_digest(goal, tab, target.continuation_id) != target.goal_control_digest
+    ):
+        raise ContinuationSkipped("The Goal or its user controls changed")
+    resumed = goal.idempotency.get(target.continuation_id) == "resume"
+    if not resumed:
+        if goal.status != GoalRunStatus.PAUSED:
+            raise ContinuationSkipped("The interrupted Goal is no longer paused")
+    elif goal.status != GoalRunStatus.ACTIVE:
+        raise ContinuationSkipped("The resumed Goal was stopped or completed")
+    elif target.goal_deferred:
+        if not goal.resume_after_turn or goal.dispatch_state != GoalDispatchState.IDLE:
+            raise ContinuationSkipped("The deferred Goal already advanced")
+    elif goal.current_turn_id != target.continuation_id:
+        raise ContinuationSkipped("A different Goal step is current")
+    return goal
+
+
+async def _park_failed_deferred_goal(target: ChatContinuation) -> None:
+    """Park only our own deferral while the caller holds Goal admission."""
+    if not target.goal_id or not target.goal_deferred:
+        return
+    from . import ttyd_manager
+    from .goal_run import get_goal_manager
+
+    tab = ttyd_manager.get_tab(target.tab_id)
+    if tab is None:
+        return
+    try:
+        goal = _validate_goal(target, tab)
+    except ContinuationSkipped:
+        return
+    if goal.resume_after_turn and goal.idempotency.get(target.continuation_id) == "resume":
+        await get_goal_manager().pause(goal.id, target.continuation_id + ":failed")
 
 
 async def _continue_chat(operation_id: str, target: ChatContinuation) -> None:
     from ..api import agent_stream as api
     from .agent_stream.store import AgentStreamStore
-    from .goal_run import get_goal_admission_lock
+    from .goal_run import get_goal_admission_lock, get_goal_manager
 
     transport = None
+    handed_off = False
     try:
         async with get_goal_admission_lock(target.tab_id):
+            try:
 
-            def validate_identity() -> None:
-                _assert_claim(operation_id, target)
-                if api._native_input_shutting_down:
-                    raise ContinuationSkipped("The service is shutting down")
-                if transport is not None and (
-                    manager.get_tailer(session.id) is not tailer
-                    or tailer.native_transport is not transport
-                ):
-                    raise ContinuationSkipped("The Chat runtime was replaced")
-                tab = _eligible_tab(target.tab_id)
-                if (
-                    tab.agent_session_id != target.conversation_id
-                    or _config_digest(tab) != target.config_digest
-                ):
-                    raise ContinuationSkipped("Chat configuration or conversation changed")
+                def validate_identity() -> None:
+                    _assert_claim(operation_id, target)
+                    if api._native_input_shutting_down:
+                        raise ContinuationSkipped("The service is shutting down")
+                    if transport is not None and (
+                        manager.get_tailer(session.id) is not tailer
+                        or tailer.native_transport is not transport
+                    ):
+                        raise ContinuationSkipped("The Chat runtime was replaced")
+                    tab = _eligible_tab(target.tab_id, goal_id=target.goal_id)
+                    if target.goal_id is not None:
+                        _validate_goal(target, tab)
+                    if (
+                        tab.agent_session_id != target.conversation_id
+                        or _config_digest(tab) != target.config_digest
+                    ):
+                        raise ContinuationSkipped("Chat configuration or conversation changed")
 
-            async def validate() -> None:
-                validate_identity()
-                await _verify_interruption(store, target)
-                if transport is not None and session.agent_type == AgentType.CURSOR:
-                    if not await asyncio.to_thread(_cursor_database_exists, transport):
-                        raise ContinuationSkipped(
-                            "The original Cursor conversation store could not be verified"
-                        )
-                _assert_claim(operation_id, target)
+                async def validate() -> None:
+                    validate_identity()
+                    await _verify_interruption(store, target)
+                    if transport is not None and session.agent_type == AgentType.CURSOR:
+                        if not await asyncio.to_thread(_cursor_database_exists, transport):
+                            raise ContinuationSkipped(
+                                "The original Cursor conversation store could not be verified"
+                            )
+                    _assert_claim(operation_id, target)
 
-            session = api._terminal_tab_session_or_404(target.tab_id)
-            store = AgentStreamStore(session.workspace_id, session.id)
-            await validate()
-            manager = api._get_tab_tailer_manager()
-            tailer = await manager.ensure_started(
-                session, required_conversation_id=target.conversation_id
-            )
-            transport = tailer.native_transport
-            if transport is None:
-                raise ContinuationSkipped("Native provider is unavailable")
-            transport.require_resumed_conversation(
-                target.conversation_id, before_delivery=validate_identity
-            )
-            await transport.start()
-            transport.check_resumed_conversation()
-            await manager.send_message(
-                session,
-                CONTINUATION_TEXT,
-                [],
-                target.continuation_id,
-                before_send=validate,
-                before_delivery=validate_identity,
-                turn_metadata={
+                session = api._terminal_tab_session_or_404(target.tab_id)
+                store = AgentStreamStore(session.workspace_id, session.id)
+                await validate()
+                manager = api._get_tab_tailer_manager()
+                tailer = await manager.ensure_started(
+                    session, required_conversation_id=target.conversation_id
+                )
+                transport = tailer.native_transport
+                if transport is None:
+                    raise ContinuationSkipped("Native provider is unavailable")
+                transport.require_resumed_conversation(
+                    target.conversation_id, before_delivery=validate_identity
+                )
+                await transport.start()
+                transport.check_resumed_conversation()
+                await validate()
+                metadata = {
                     "origin": "restart_continuation",
                     "restart_id": operation_id,
                     "interrupted_turn_id": target.turn_id,
-                },
-            )
+                }
+                if target.goal_id is not None and not target.goal_deferred:
+                    dispatch_failure: Exception | None = None
+
+                    async def dispatch_goal(goal: GoalRun, prompt: str) -> str:
+                        nonlocal handed_off, dispatch_failure
+                        if (
+                            goal.id != target.goal_id
+                            or goal.pending_step_id != target.continuation_id
+                        ):
+                            raise ContinuationSkipped("The restart Goal step was superseded")
+                        try:
+                            await manager.send_message(
+                                session,
+                                prompt,
+                                [],
+                                target.continuation_id,
+                                visible_text="Continue active Goal",
+                                before_send=validate,
+                                before_delivery=validate_identity,
+                                turn_metadata={
+                                    **metadata,
+                                    "origin": "goal",
+                                    "protocol": "goal-continuation-v1",
+                                },
+                            )
+                        except Exception as exc:
+                            dispatch_failure = exc
+                            raise
+                        handed_off = True
+                        # A fast completion may dispatch the next normal Goal step
+                        # before resume() returns. Its input must not inherit this guard.
+                        transport.require_resumed_conversation(None)
+                        return target.continuation_id
+
+                    await get_goal_manager().resume(
+                        target.goal_id,
+                        target.continuation_id,
+                        step_id=target.continuation_id,
+                        dispatch=dispatch_goal,
+                    )
+                    if not handed_off:
+                        if dispatch_failure is not None:
+                            raise dispatch_failure
+                        raise ContinuationSkipped("The Goal continuation was not dispatched")
+                else:
+                    if target.goal_id is not None:
+                        await get_goal_manager().resume(
+                            target.goal_id, target.continuation_id, after_current_turn=True
+                        )
+                    await manager.send_message(
+                        session,
+                        CONTINUATION_TEXT,
+                        [],
+                        target.continuation_id,
+                        before_send=validate,
+                        before_delivery=validate_identity,
+                        turn_metadata=metadata,
+                    )
+                    handed_off = True
+                    transport.require_resumed_conversation(None)
+            finally:
+                if transport is not None:
+                    transport.require_resumed_conversation(None)
+                if not handed_off and target.goal_deferred:
+                    # Finish our deferral before a queued objective edit changes
+                    # the control digest without intentionally resuming the Goal.
+                    cleanup = asyncio.create_task(_park_failed_deferred_goal(target))
+                    cancelled = False
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    cleanup.result()
+                    if cancelled:
+                        raise asyncio.CancelledError
+
         _change_target(operation_id, target, "started")
     except ContinuationSkipped as exc:
         _change_target(operation_id, target, "skipped", str(exc))
@@ -422,9 +603,6 @@ async def _continue_chat(operation_id: str, target: ChatContinuation) -> None:
             "failed",
             "Automatic continuation failed; check the Chat before continuing",
         )
-    finally:
-        if transport is not None:
-            transport.require_resumed_conversation(None)
 
 
 async def continue_interrupted_chats() -> None:
@@ -470,13 +648,30 @@ async def continue_interrupted_chats() -> None:
     await asyncio.gather(*(attempt(target) for target in targets))
 
 
-def cancel_pending_continuation(tab_id: str, expected_turn_id: str | None) -> str | None:
-    """A human Stop also retires the corresponding queued/started continuation."""
+def cancel_pending_continuation(
+    tab_id: str,
+    expected_turn_id: str | None,
+    *,
+    goal_id: str | None = None,
+    veto_capture: bool = False,
+) -> str | None:
+    """Revoke recovery without letting stale controls target a different Goal."""
     with restart.get_store().locked() as current:
         operation = current.get("operation") or {}
-        if not _operation_matches(operation, capturing=False) or _recovery(operation) is None:
+        recovering = _operation_matches(operation, capturing=False)
+        if not (recovering or _operation_matches(operation, capturing=True)):
+            return None
+        if veto_capture:
+            # Capture builds candidates across awaits. Archive must also veto
+            # candidates not yet published, even after a subsequent unarchive.
+            vetoes = operation.setdefault("chat_recovery_vetoes", [])
+            if tab_id not in vetoes:
+                vetoes.append(tab_id)
+        if _recovery(operation) is None:
             return None
         for row in operation.get("chat_recovery", {}).get("targets", []):
+            if goal_id is not None and row.get("goal_id") != goal_id:
+                continue
             if row.get("tab_id") == tab_id and expected_turn_id is None:
                 if row.get("state") in {"pending", "claimed"}:
                     row.update(state="skipped", reason="Stopped by the user")
@@ -489,5 +684,7 @@ def cancel_pending_continuation(tab_id: str, expected_turn_id: str | None) -> st
                 and expected_turn_id in {None, row.get("turn_id"), row.get("continuation_id")}
             ):
                 row.update(state="skipped", reason="Stopped by the user")
-                return str(row["continuation_id"])
+                # Before shutdown the original turn still owns the transport;
+                # only the replacement instance may translate Stop to its new id.
+                return str(row["continuation_id"]) if recovering else None
     return None

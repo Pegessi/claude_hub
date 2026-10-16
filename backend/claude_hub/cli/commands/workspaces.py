@@ -543,6 +543,13 @@ def agent_status(ctx: click.Context, workspace_id: str, role: Optional[str]) -> 
 @agent.command("create")
 @click.argument("workspace_id")
 @click.option("--agent-type", default="codex", help="Agent type to run.")
+@click.option(
+    "--session-kind",
+    type=click.Choice(["terminal", "chat"]),
+    default="terminal",
+    show_default=True,
+    help="Managed session surface.",
+)
 @click.option("--title", default=None, help="Optional session title.")
 @click.option(
     "--role",
@@ -599,6 +606,7 @@ def agent_create(
     ctx: click.Context,
     workspace_id: str,
     agent_type: str,
+    session_kind: str,
     title: str,
     role: str,
     reuse_existing: bool,
@@ -626,6 +634,7 @@ def agent_create(
     body: Dict[str, Any] = merge_payload(
         payload_json,
         agent_type=agent_type,
+        session_kind=session_kind,
         role=role,
         reuse_existing=effective_reuse,
         cwd=resolved_cwd,

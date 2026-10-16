@@ -2,19 +2,41 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
-from claude_hub.models.schemas import AgentType, ExecutionTarget, ManagedSession
+from claude_hub.models.schemas import (
+    CHAT_REMOTE_UNSUPPORTED,
+    AgentType,
+    ExecutionTarget,
+    ManagedSession,
+    SessionKind,
+)
 from claude_hub.models.task_session import ExecutorCapabilities, ManagedExecutorConfig
+
+
+def validate_config_admission(config: ManagedExecutorConfig) -> None:
+    """Validate the provider, surface, and execution target combination."""
+
+    if config.agent_type in {AgentType.TERMINAL, AgentType.TRAEX}:
+        raise ValueError(f"Unsupported managed session agent_type: {config.agent_type.value}")
+    if config.agent_type == AgentType.MASO and config.session_kind != SessionKind.CHAT:
+        raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+    if config.session_kind == SessionKind.CHAT:
+        if config.agent_type not in {
+            AgentType.CLAUDE,
+            AgentType.CODEX,
+            AgentType.CURSOR,
+            AgentType.MASO,
+        }:
+            raise ValueError(
+                "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"
+            )
+        if config.target == ExecutionTarget.REMOTE:
+            raise ValueError(CHAT_REMOTE_UNSUPPORTED)
 
 
 def launch_env(config: ManagedExecutorConfig) -> dict[str, str]:
     """Return the exact persisted launch environment for ``config``."""
 
-    if config.agent_type == AgentType.TERMINAL:
-        raise ValueError("managed sessions do not support the terminal executor")
-    if config.agent_type not in {AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR}:
-        raise ValueError(f"Unsupported managed session agent_type: {config.agent_type.value}")
+    validate_config_admission(config)
 
     result = dict(config.env)
     model = config.model.strip() if config.model else None
@@ -28,7 +50,9 @@ def launch_env(config: ManagedExecutorConfig) -> dict[str, str]:
     elif config.agent_type == AgentType.CODEX:
         key = "CODEX_MODEL"
     else:
-        raise ValueError("Cursor executor does not support an explicit model override")
+        raise ValueError(
+            f"{config.agent_type.value.capitalize()} executor does not support an explicit model override"
+        )
     configured = result.get(key)
     if configured is not None and configured != model:
         raise ValueError(f"executor_config.model conflicts with executor_config.env[{key!r}]")
@@ -47,6 +71,7 @@ def config_from_session(session: ManagedSession) -> ManagedExecutorConfig:
         model = env.pop("CODEX_MODEL", None)
     return ManagedExecutorConfig(
         agent_type=session.agent_type,
+        session_kind=session.session_kind,
         model=model,
         env=env,
         solo_mode=session.solo_mode,
@@ -83,7 +108,9 @@ def resolve_config_for_workspace(
                 ),
             }
         )
-    return config.model_copy(update=updates)
+    resolved = config.model_copy(update=updates)
+    validate_config_admission(resolved)
+    return resolved
 
 
 def validate_session_matches_config(
@@ -100,6 +127,8 @@ def validate_session_matches_config(
         mismatches.append("workspace_id")
     if session.agent_type != config.agent_type:
         mismatches.append("agent_type")
+    if session.session_kind != config.session_kind:
+        mismatches.append("session_kind")
     if session.solo_mode != config.solo_mode:
         mismatches.append("solo_mode")
     if session.target != config.target:
@@ -133,6 +162,14 @@ def managed_executor_capabilities() -> ExecutorCapabilities:
             AgentType.CLAUDE,
             AgentType.CODEX,
             AgentType.CURSOR,
+            AgentType.MASO,
+        ],
+        supported_session_kinds=[SessionKind.TERMINAL, SessionKind.CHAT],
+        chat_supported_agent_types=[
+            AgentType.CLAUDE,
+            AgentType.CODEX,
+            AgentType.CURSOR,
+            AgentType.MASO,
         ],
         model_configurable_agent_types=[AgentType.CLAUDE, AgentType.CODEX],
     )

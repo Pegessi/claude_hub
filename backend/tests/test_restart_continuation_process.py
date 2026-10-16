@@ -21,6 +21,7 @@ def test_planned_restart_continues_once_across_backend_processes(
     fixture = tmp_path / "server.py"
     fixture.write_text(dedent("""
         import json, os
+        from datetime import datetime
         from pathlib import Path
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
@@ -44,6 +45,7 @@ def test_planned_restart_continues_once_across_backend_processes(
                 cursor_cli_version=None, cursor_transcript_path=None, cursor_transcript_schema=None,
                 agent_session_id='provider-' + tab_id, agent_session_id_verified=True,
                 archived=False, workspace_id=None, workspace_role=None,
+                managed_session_id=None, created_at=datetime.now(),
             )
         ttyd_manager.get_tab = tabs.get
         ttyd_manager.start_all_tabs = AsyncMock()

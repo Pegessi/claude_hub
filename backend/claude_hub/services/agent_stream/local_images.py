@@ -19,11 +19,11 @@ import re
 import tempfile
 import weakref
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from ...models import AgentStreamEvent, ExecutionTarget, ManagedSession
-from .attachments import AgentStreamAttachmentStore
+from .attachments import AgentStreamAttachmentStore, AttachmentOwnerUnavailable
 from .attachments import _magic_mime as sniff_image_mime
 from .store import AgentStreamStore
 
@@ -33,7 +33,7 @@ _AGENT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 # finish after a newer one and overwrite the retained version. Weak values
 # release idle locks instead of retaining one per image for the process life.
 _SOURCE_LOCKS: weakref.WeakValueDictionary[
-    Tuple[asyncio.AbstractEventLoop, str, str, str], asyncio.Lock
+    Tuple[asyncio.AbstractEventLoop, str, str, str, str], asyncio.Lock
 ] = weakref.WeakValueDictionary()
 
 _TEMP_IMAGE_ROOTS = (Path(tempfile.gettempdir()), Path("/tmp"))
@@ -128,6 +128,14 @@ def referenced_temporary_image(session: ManagedSession, raw_path: str) -> Option
 
 class AgentImageUnavailable(ValueError):
     """Uniform denial of a local image, without exposing filesystem details."""
+
+
+OwnerIsCurrent = Callable[[], bool]
+
+
+def _require_current_owner(owner_is_current: Optional[OwnerIsCurrent]) -> None:
+    if owner_is_current is not None and not owner_is_current():
+        raise AgentImageUnavailable()
 
 
 def image_tool_path(payload: Dict[str, Any]) -> Optional[str]:
@@ -279,7 +287,12 @@ def _read_referenced_image(session: ManagedSession, raw_path: str) -> Tuple[byte
         return _read_agent_image(session, raw_path, referenced_image=referenced)
 
 
-async def read_cached_agent_image(session: ManagedSession, raw_path: str) -> Tuple[bytes, str]:
+async def read_cached_agent_image(
+    session: ManagedSession,
+    raw_path: str,
+    *,
+    owner_is_current: Optional[OwnerIsCurrent] = None,
+) -> Tuple[bytes, str]:
     """Preserve original bytes in the existing attachment LRU, never re-encode.
 
     Live files take precedence so overwriting a screenshot does not freeze an
@@ -287,42 +300,89 @@ async def read_cached_agent_image(session: ManagedSession, raw_path: str) -> Tup
     Originals exceeding the configured storage bounds remain source-only;
     they are never silently downsampled to squeeze into the cache.
     """
+    _require_current_owner(owner_is_current)
     key = _source_key(session, raw_path)
-    identity = (asyncio.get_running_loop(), session.workspace_id, session.id, key)
+    identity = (
+        asyncio.get_running_loop(),
+        session.workspace_id,
+        session.id,
+        session.created_at.isoformat(),
+        key,
+    )
     lock = _SOURCE_LOCKS.setdefault(identity, asyncio.Lock())
     async with lock:
-        return await _read_cached_image_locked(session, raw_path, key)
+        _require_current_owner(owner_is_current)
+        return await _read_cached_image_locked(
+            session,
+            raw_path,
+            key,
+            owner_is_current=owner_is_current,
+        )
 
 
 async def _read_cached_image_locked(
-    session: ManagedSession, raw_path: str, key: str
+    session: ManagedSession,
+    raw_path: str,
+    key: str,
+    *,
+    owner_is_current: Optional[OwnerIsCurrent],
 ) -> Tuple[bytes, str]:
     store = AgentStreamAttachmentStore(session.workspace_id, session.id)
+    _require_current_owner(owner_is_current)
     try:
         data, mime = await asyncio.to_thread(_read_referenced_image, session, raw_path)
     except AgentImageUnavailable:
+        _require_current_owner(owner_is_current)
         if await asyncio.to_thread(_source_exists, session, raw_path):
             # A replacement that is oversized, invalid or denied must not
             # resurrect the previous picture after that replacement is gone.
-            await _discard_cached_source(store, key)
+            try:
+                await _discard_cached_source(
+                    store,
+                    key,
+                    owner_is_current=owner_is_current,
+                )
+            except AttachmentOwnerUnavailable:
+                raise AgentImageUnavailable() from None
             raise
         try:
-            return await store.read_source(key)
-        except (KeyError, ValueError, OSError):
+            return await store.read_source(key, owner_is_current=owner_is_current)
+        except (AttachmentOwnerUnavailable, KeyError, ValueError, OSError):
             raise AgentImageUnavailable() from None
+    _require_current_owner(owner_is_current)
     try:
-        await store.save(mime, data, source_key=key)
+        await store.save(
+            mime,
+            data,
+            source_key=key,
+            owner_is_current=owner_is_current,
+        )
+    except AttachmentOwnerUnavailable:
+        raise AgentImageUnavailable() from None
     except (ValueError, OSError):
         # Retention is best effort; a full-size source can still be viewed
         # when its dimensions/bytes exceed the existing cache's per-file cap.
         logger.debug("Agent image is source-only for session %s", session.id, exc_info=True)
-        await _discard_cached_source(store, key)
+        try:
+            await _discard_cached_source(
+                store,
+                key,
+                owner_is_current=owner_is_current,
+            )
+        except AttachmentOwnerUnavailable:
+            raise AgentImageUnavailable() from None
+    _require_current_owner(owner_is_current)
     return data, mime
 
 
-async def _discard_cached_source(store: AgentStreamAttachmentStore, key: str) -> None:
+async def _discard_cached_source(
+    store: AgentStreamAttachmentStore,
+    key: str,
+    *,
+    owner_is_current: Optional[OwnerIsCurrent],
+) -> None:
     try:
-        await store.discard_source(key)
+        await store.discard_source(key, owner_is_current=owner_is_current)
     except OSError:
         # Storage failure must not hide an original already read successfully
         # or change a denied source into a server error.
@@ -399,15 +459,33 @@ class ImageReferenceBuffer:
         return _image_paths_from_text(combined, after=len(prefix))
 
 
-async def cache_event_images(session: ManagedSession, event: AgentStreamEvent) -> None:
+async def cache_event_images(
+    session: ManagedSession,
+    event: AgentStreamEvent,
+    *,
+    owner_is_current: Optional[OwnerIsCurrent] = None,
+) -> None:
     """Capture live image output before temporary files can be cleaned up."""
-    await cache_image_paths(session, image_paths_from_event(event))
+    await cache_image_paths(
+        session,
+        image_paths_from_event(event),
+        owner_is_current=owner_is_current,
+    )
 
 
-async def cache_image_paths(session: ManagedSession, paths: List[str]) -> None:
+async def cache_image_paths(
+    session: ManagedSession,
+    paths: List[str],
+    *,
+    owner_is_current: Optional[OwnerIsCurrent] = None,
+) -> None:
     """Cache references selected from this session's persisted assistant output."""
     for path in paths:
         try:
-            await read_cached_agent_image(session, path)
+            await read_cached_agent_image(
+                session,
+                path,
+                owner_is_current=owner_is_current,
+            )
         except (AgentImageUnavailable, OSError, ValueError):
             continue

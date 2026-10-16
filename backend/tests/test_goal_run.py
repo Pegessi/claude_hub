@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from claude_hub.models import (
     GOAL_RECENT_TURN_IDS_LIMIT,
     GoalDispatchState,
+    GoalRun,
     GoalRunCreate,
     GoalRunStatus,
     GoalUsageQuality,
@@ -984,3 +985,264 @@ async def test_resume_during_chat_turn_waits_for_that_turn_boundary(tmp_path: Pa
     # Releasing twice is a no-op.
     await manager.release_deferred_resume(goal.id)
     assert len(dispatched) == 3
+
+
+@pytest.mark.asyncio
+async def test_resume_fixed_step_override_is_persisted_and_only_used_once(tmp_path: Path) -> None:
+    calls: list[tuple[str, str | None]] = []
+    snapshot = tmp_path / "goals.json"
+
+    async def normal_dispatch(goal: GoalRun, prompt: str) -> str | None:
+        calls.append(("normal", goal.pending_step_id))
+        return goal.pending_step_id
+
+    async def resumed_dispatch(goal: GoalRun, prompt: str) -> str | None:
+        persisted = GoalRunStore(snapshot).get(goal.id)
+        assert persisted.pending_step_id == persisted.current_turn_id == "restart-step"
+        assert persisted.dispatch_state == GoalDispatchState.PENDING
+        assert persisted.idempotency["restart-resume"] == "resume"
+        assert goal.objective in prompt
+        assert manager.dispatch is normal_dispatch
+        calls.append(("restart", goal.pending_step_id))
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(snapshot), dispatch=normal_dispatch)
+    goal = manager.create("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    resumed = await manager.resume(
+        goal.id, "restart-resume", step_id="restart-step", dispatch=resumed_dispatch
+    )
+    assert resumed.current_turn_id == "restart-step"
+    assert calls == [("restart", "restart-step")]
+    replay = await manager.resume(
+        goal.id, "restart-resume", step_id="restart-step", dispatch=resumed_dispatch
+    )
+    assert replay.current_turn_id == "restart-step"
+    assert calls == [("restart", "restart-step")]
+
+    continued = await manager.on_turn_completed(
+        "tab-1", "restart-step", "completed", response_with_checkpoint()
+    )
+    assert continued is not None
+    assert continued.current_turn_id != "restart-step"
+    assert calls == [("restart", "restart-step"), ("normal", continued.current_turn_id)]
+    assert manager.dispatch is normal_dispatch
+
+
+@pytest.mark.asyncio
+async def test_fixed_step_resume_replay_cannot_override_a_later_pending_step(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    async def normal_dispatch(goal: GoalRun, prompt: str) -> str | None:
+        calls.append("normal")
+        return goal.pending_step_id
+
+    async def resumed_dispatch(goal: GoalRun, prompt: str) -> str | None:
+        calls.append("restart")
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch=normal_dispatch)
+    goal = manager.create("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    await manager.resume(goal.id, "restart", step_id="restart-step", dispatch=resumed_dispatch)
+    # Reconstruct the durable boundary before a later ordinary Goal dispatch is
+    # submitted; the old resume request has no authority over this step.
+    later = manager.get(goal.id)
+    later.current_turn_id = None
+    later.pending_step_id = None
+    later.dispatch_state = GoalDispatchState.IDLE
+    manager.store.put(later)
+    prepared = manager._prepare_dispatch_locked(goal.id)
+    replay = await manager.resume(
+        goal.id, "restart", step_id="restart-step", dispatch=resumed_dispatch
+    )
+    assert replay.pending_step_id == prepared.pending_step_id != "restart-step"
+    assert replay.dispatch_state == GoalDispatchState.PENDING
+    assert calls == ["restart"]
+    await manager._dispatch_prepared(prepared)
+    assert calls == ["restart", "normal"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_fixed_resume_claims_override_acceptance_once(tmp_path: Path) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls: list[str | None] = []
+
+    async def dispatch(goal: GoalRun, prompt: str) -> str | None:
+        calls.append(goal.pending_step_id)
+        entered.set()
+        await release.wait()
+        return goal.pending_step_id
+
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    first = asyncio.create_task(
+        manager.resume(goal.id, "restart", step_id="restart-step", dispatch=dispatch)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        replay = await manager.resume(goal.id, "restart", step_id="restart-step", dispatch=dispatch)
+        assert replay.dispatch_state == GoalDispatchState.PENDING
+        assert calls == ["restart-step"]
+        release.set()
+        assert (await first).dispatch_state == GoalDispatchState.DISPATCHED
+        assert manager.dispatch is None
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+    # The temporary callback cannot silently become the normal Goal scheduler.
+    completed = await manager.on_turn_completed(
+        "tab-1", "restart-step", "completed", response_with_checkpoint()
+    )
+    assert completed is not None and completed.status == GoalRunStatus.PAUSED
+    assert completed.status_message == "automatic continuation is not connected"
+    assert calls == ["restart-step"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_failed_fixed_resume_retains_identity_and_does_not_retry_implicitly(
+    tmp_path: Path, cancelled: bool
+) -> None:
+    attempts: list[str | None] = []
+    cancellations: list[str | None] = []
+
+    async def cancel(goal: GoalRun) -> None:
+        cancellations.append(goal.current_turn_id)
+
+    async def dispatch(goal: GoalRun, prompt: str) -> str | None:
+        attempts.append(goal.pending_step_id)
+        if len(attempts) == 1:
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise RuntimeError("provider acceptance is uncertain")
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), cancel=cancel)
+    goal = manager.create("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await manager.resume(goal.id, "restart", step_id="restart-step", dispatch=dispatch)
+    else:
+        await manager.resume(goal.id, "restart", step_id="restart-step", dispatch=dispatch)
+    uncertain = manager.get(goal.id)
+    assert uncertain.status == GoalRunStatus.PAUSED
+    assert uncertain.dispatch_state == GoalDispatchState.UNCERTAIN
+    assert uncertain.pending_step_id == uncertain.current_turn_id == "restart-step"
+    assert not manager._acceptances
+    replay = await manager.resume(goal.id, "restart", step_id="restart-step", dispatch=dispatch)
+    assert replay.dispatch_state == GoalDispatchState.UNCERTAIN
+    assert attempts == ["restart-step"]
+    retried = await manager.resume(
+        goal.id, "explicit-retry", step_id="restart-step", dispatch=dispatch
+    )
+    assert cancellations == ["restart-step"]
+    assert attempts == ["restart-step", "restart-step"]
+    assert retried.dispatch_state == GoalDispatchState.DISPATCHED
+    assert retried.current_turn_id == "restart-step"
+    assert manager.dispatch is None
+
+
+@pytest.mark.asyncio
+async def test_fixed_resume_synchronous_completion_uses_normal_next_dispatch(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    async def normal_dispatch(goal: GoalRun, prompt: str) -> str | None:
+        calls.append("normal")
+        return goal.pending_step_id
+
+    async def resumed_dispatch(goal: GoalRun, prompt: str) -> str | None:
+        calls.append("restart")
+        assert goal.current_turn_id == "restart-step"
+        await manager.on_turn_completed(
+            "tab-1", "restart-step", "completed", response_with_checkpoint()
+        )
+        return "restart-step"
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch=normal_dispatch)
+    goal = manager.create("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    resumed = await manager.resume(
+        goal.id, "restart", step_id="restart-step", dispatch=resumed_dispatch
+    )
+    assert resumed.dispatch_state == GoalDispatchState.DISPATCHED
+    assert resumed.current_turn_id != "restart-step"
+    assert resumed.turns_completed == 1
+    assert calls == ["restart", "normal"]
+    assert manager.dispatch is normal_dispatch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status", ["complete", "completed", "success", "succeeded", "cancelled", "failed", "error"]
+)
+async def test_deferred_boundary_deduplicates_without_charging_goal_usage(
+    tmp_path: Path, status: str
+) -> None:
+    calls: list[str | None] = []
+
+    async def dispatch(goal: GoalRun, prompt: str) -> str | None:
+        calls.append(goal.pending_step_id)
+        return goal.pending_step_id
+
+    manager = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch=dispatch)
+    goal = manager.create("tab-1", request())
+    goal.turns_completed = 7
+    goal.token_usage = 100
+    goal.usage_quality = GoalUsageQuality.EXACT
+    goal.completed_turn_ids = [f"older-{index}" for index in range(GOAL_RECENT_TURN_IDS_LIMIT)]
+    manager.store.put(goal)
+    await manager.pause(goal.id, "pause")
+    await manager.resume(goal.id, "defer", after_current_turn=True)
+    result = await manager.on_turn_completed(
+        "tab-1", "ordinary-turn", status, "ordinary answer", {"total_tokens": 999}
+    )
+    assert result is not None
+    assert result.turns_completed == 7
+    assert result.token_usage == 100
+    assert result.usage_quality == GoalUsageQuality.EXACT
+    assert not result.resume_after_turn
+    assert result.completed_turn_ids[-1] == "ordinary-turn"
+    assert len(result.completed_turn_ids) == GOAL_RECENT_TURN_IDS_LIMIT
+    succeeded = status in {"complete", "completed", "success", "succeeded"}
+    assert len(calls) == int(succeeded)
+    if succeeded:
+        assert result.status == GoalRunStatus.ACTIVE
+        assert result.dispatch_state == GoalDispatchState.DISPATCHED
+    else:
+        assert result.status == GoalRunStatus.PAUSED
+        assert result.dispatch_state == GoalDispatchState.IDLE
+        assert result.paused_at is not None
+        assert status in str(result.status_message)
+
+    await manager.pause(goal.id, "pause-again")
+    await manager.resume(goal.id, "defer-again", after_current_turn=True)
+    # A duplicate successful notification cannot release the next deferral,
+    # including when the first notification was cancelled or failed.
+    replay = await manager.on_turn_completed("tab-1", "ordinary-turn", "completed", "late")
+    assert replay is not None and replay.resume_after_turn
+    assert replay.dispatch_state == GoalDispatchState.IDLE
+    assert len(calls) == int(succeeded)
+    assert replay.turns_completed == 7 and replay.token_usage == 100
+
+
+@pytest.mark.asyncio
+async def test_fixed_resume_options_reject_deferral_without_mutating_goal(tmp_path: Path) -> None:
+    manager = controller(tmp_path)
+    goal = manager.create("tab-1", request())
+    await manager.pause(goal.id, "pause")
+    with pytest.raises(GoalPolicyError, match="immediate"):
+        await manager.resume(goal.id, "invalid", after_current_turn=True, step_id="fixed")
+    with pytest.raises(GoalPolicyError, match="empty"):
+        await manager.resume(goal.id, "empty", step_id=" ")
+    with pytest.raises(GoalPolicyError, match="fixed step_id"):
+        await manager.resume(goal.id, "missing-step", dispatch=lambda goal, prompt: None)
+    unchanged = manager.get(goal.id)
+    assert unchanged.status == GoalRunStatus.PAUSED
+    assert unchanged.idempotency == {"pause": "pause"}

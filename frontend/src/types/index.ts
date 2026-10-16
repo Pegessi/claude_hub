@@ -167,6 +167,7 @@ export interface TerminalTab {
   workspace_id?: string | null
   workspace_name?: string | null
   workspace_role?: WorkspaceSessionRole | null
+  managed_session_id?: string | null
   agent_session_id?: string | null
   cursor_transport?: string
   cursor_data_dir?: string | null
@@ -527,6 +528,7 @@ export interface WorkspaceTask {
   goal_packet?: GoalPacket | null
   review_profiles?: ReviewProfile[]
   agent_type: AgentType
+  session_kind: SessionKind
   task_mode: WorkspaceTaskMode
   execution_complexity: WorkspaceTaskExecutionComplexity
   origin?: WorkspaceTaskOrigin
@@ -577,6 +579,7 @@ export interface WorkspaceTask {
 
 export interface WorkspaceTaskCreate {
   execution_control?: WorkspaceTaskExecutionControl
+  session_kind?: SessionKind
   reporter_key?: string
   request_key?: string | null
   source?: WorkspaceTaskSource | null
@@ -599,6 +602,7 @@ export interface WorkspaceTaskCreate {
 
 export interface WorkspaceTaskUpdate {
   title?: string
+  session_kind?: SessionKind
   prompt?: string
   status?: WorkspaceTaskStatus
   add_attachments?: WorkspaceAttachmentCreate[]
@@ -729,6 +733,7 @@ export interface ScheduledTaskRunResult {
 
 export interface EnsureWorkspaceAgentRequest {
   agent_type: AgentType
+  session_kind?: SessionKind
   title?: string | null
   role?: WorkspaceSessionRole
   reuse_existing?: boolean
@@ -749,6 +754,7 @@ export interface ManagedSession {
   tab_id: string
   role: WorkspaceSessionRole
   agent_type: AgentType
+  session_kind: SessionKind
   status: ManagedSessionStatus
   runtime_status: AgentRuntimeStatus
   current_task_id?: string | null

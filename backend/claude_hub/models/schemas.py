@@ -612,6 +612,10 @@ class TerminalTab(TerminalTabBase):
         None,
         description="Managed workspace role for this tab",
     )
+    managed_session_id: Optional[str] = Field(
+        None,
+        description="Managed Workspace session id; distinct from the provider conversation id",
+    )
     agent_session_id: Optional[str] = Field(
         None,
         description="Stable agent CLI conversation id (Claude --session-id); used for /resume and diagnostics.",
@@ -936,6 +940,21 @@ class TaskExecutionHandoffRequest(BaseModel):
         return value
 
 
+def validate_workspace_session_surface(agent_type: AgentType, session_kind: SessionKind) -> None:
+    """Keep task creation, start overrides, and managed admission on the same surface rules."""
+    if agent_type == AgentType.TRAEX:
+        raise ValueError("TraeX is not supported for workspace agents")
+    if agent_type == AgentType.MASO and session_kind != SessionKind.CHAT:
+        raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+    if session_kind == SessionKind.CHAT and agent_type not in {
+        AgentType.CLAUDE,
+        AgentType.CODEX,
+        AgentType.CURSOR,
+        AgentType.MASO,
+    }:
+        raise ValueError("Managed Chat supports only local Claude, Codex, Cursor, or MASO agents")
+
+
 class WorkspaceTaskCreate(BaseModel):
     """Payload for creating a workspace task."""
 
@@ -951,6 +970,7 @@ class WorkspaceTaskCreate(BaseModel):
     title: str
     prompt: str
     agent_type: AgentType = AgentType.CODEX
+    session_kind: SessionKind = SessionKind.TERMINAL
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
     execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
     origin: WorkspaceTaskOrigin = WorkspaceTaskOrigin.HUMAN
@@ -983,6 +1003,11 @@ class WorkspaceTaskCreate(BaseModel):
     def _validate_agent_tag_create(cls, value: Any) -> Optional[str]:
         return normalize_agent_tag(value, allow_clear=False)
 
+    @model_validator(mode="after")
+    def _validate_session_surface(self) -> "WorkspaceTaskCreate":
+        validate_workspace_session_surface(self.agent_type, self.session_kind)
+        return self
+
 
 class WorkspaceAttachmentCreate(BaseModel):
     """Browser-provided task attachment data."""
@@ -1012,6 +1037,7 @@ class WorkspaceTaskUpdate(BaseModel):
     status: Optional[WorkspaceTaskStatus] = None
     goal_packet: Optional[GoalPacket] = None
     task_mode: Optional[WorkspaceTaskMode] = None
+    session_kind: Optional[SessionKind] = None
     execution_complexity: Optional[WorkspaceTaskExecutionComplexity] = None
     review_profiles: Optional[List[ReviewProfile]] = None
     autonomy_policy: Optional[AutonomyPolicy] = None
@@ -1062,6 +1088,7 @@ class WorkspaceTask(BaseModel):
     goal_packet: Optional[GoalPacket] = None
     review_profiles: List[ReviewProfile] = Field(default_factory=list)
     agent_type: AgentType
+    session_kind: SessionKind = SessionKind.TERMINAL
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
     execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
     origin: WorkspaceTaskOrigin = WorkspaceTaskOrigin.HUMAN
@@ -1179,6 +1206,7 @@ class ManagedSession(BaseModel):
     agent_type: AgentType
     session_kind: SessionKind = SessionKind.TERMINAL
     chat_mode: ChatMode = ChatMode.DEFAULT
+    chat_paused: bool = False
     status: ManagedSessionStatus
     runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE
     current_task_id: Optional[str] = None
@@ -1300,6 +1328,11 @@ class ManagedSession(BaseModel):
     # detected as conflicting. Raw bytes are NOT stored in the fingerprint
     # (only the digest), so the JSON state stays small.
     call_payload_fingerprints: Dict[str, str] = Field(default_factory=dict)
+    # Exact [turn_id, tool_call_id] JSON key -> answer client call_id. Persisted
+    # with the mailbox envelope, not provider completion, so a failed handoff
+    # cannot admit a competing answer. Retained for this session's lifetime,
+    # like fingerprints; legacy sessions start without claims.
+    chat_question_answer_calls: Dict[str, str] = Field(default_factory=dict)
     # Report intake idempotency: call_id → report_id. Populated by
     # ``create_report`` when the payload carries a call_id. Lets a retry
     # after an error-response (report was durably committed but the
@@ -1759,6 +1792,7 @@ class EnsureWorkspaceAgentRequest(BaseModel):
     """Payload for ensuring a resident workspace agent session."""
 
     agent_type: AgentType = AgentType.CODEX
+    session_kind: SessionKind = SessionKind.TERMINAL
     title: Optional[str] = None
     role: WorkspaceSessionRole = WorkspaceSessionRole.ORCHESTRATOR
     reuse_existing: bool = Field(
@@ -1794,13 +1828,22 @@ class EnsureWorkspaceAgentRequest(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _reject_chat_surface_fields(cls, value: Any) -> Any:
-        if isinstance(value, dict) and ({"session_kind", "chat_mode"} & value.keys()):
-            raise ValueError("Workspace managed sessions always use Terminal")
+    def _reject_managed_chat_mode(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "chat_mode" in value:
+            raise ValueError("Managed Chat mode is controlled by task execution")
         return value
 
     @model_validator(mode="after")
-    def _validate_caller_owned_provenance(self) -> "EnsureWorkspaceAgentRequest":
+    def _validate_managed_session_admission(self) -> "EnsureWorkspaceAgentRequest":
+        validate_workspace_session_surface(self.agent_type, self.session_kind)
+        if self.session_kind == SessionKind.CHAT:
+            if (
+                self.target == ExecutionTarget.REMOTE
+                or self.remote_profile_id is not None
+                or self.remote_cwd is not None
+                or self.remote_reconnect is not None
+            ):
+                raise ValueError(CHAT_REMOTE_UNSUPPORTED)
         if self.caller_owned_ephemeral and not self.ephemeral:
             raise ValueError("caller_owned_ephemeral requires ephemeral=True")
         if self.agent_session_id is not None:
@@ -1883,7 +1926,15 @@ class SendSessionMessageRequest(BaseModel):
     """Payload for sending a message to a managed session."""
 
     message: str
+    call_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
     attachments: List[WorkspaceAttachmentCreate] = Field(default_factory=list)
+
+    @field_validator("call_id")
+    @classmethod
+    def _nonblank_call_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("call_id must not be blank")
+        return value
 
 
 class RetryUncertainDeliveryRequest(BaseModel):

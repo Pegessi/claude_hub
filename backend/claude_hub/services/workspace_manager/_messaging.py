@@ -1,4 +1,10 @@
-"""Session messaging and tmux output capture.
+"""Managed session messaging and terminal output capture.
+
+Managed Chat uses the same durable envelope, payload fingerprint and report
+ACK contract. Native provider handoff evidence replaces tmux receipts: known
+unsent calls may retry, accepted calls await ACK, and ambiguous calls block
+further input. Chat pumps one turn at a time and preserves paused/queued work.
+The terminal-specific receipt and recovery details below remain unchanged.
 
 Delivery semantics: **at-least-once with fail-closed uncertainty**.
 
@@ -105,6 +111,7 @@ import time
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from .. import managed_chat
 from ..session_seat import SessionSeatMismatch, validate_session_seat
 from ._constants import *  # noqa: F401,F403
 
@@ -147,10 +154,62 @@ class _MessagingMixin:
             absent (→ ``pending_call_ids`` for one safe re-delivery).
           (Receipt present → stays in ``processing``, no repaste.)
         """
+        # A duplicate caller must not wait behind a provider side effect that
+        # already owns this call id. This lock-free fast path is read-only; all
+        # mutations and every first delivery still serialize below. The locked
+        # implementation repeats the fingerprint/state validation.
+        current = self.sessions.get(session_id)
+        if current is None:
+            raise KeyError(session_id)
+        expected_tab_id = current.tab_id
+        expected_created_at = current.created_at
+        if call_id:
+            existing_fp = current.call_payload_fingerprints.get(call_id)
+            if existing_fp is not None:
+                new_fp = self._compute_payload_fingerprint(message, attachments or [])
+                if new_fp != existing_fp:
+                    raise ValueError(
+                        f"call_id {call_id} already used with a different payload; "
+                        "cannot mutate a committed delivery. Use a new call_id for a "
+                        "different message."
+                    )
+                if call_id in current.processing_call_ids or call_id in current.delivered_call_ids:
+                    return
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with self.workspace_mutation_lock(current.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != expected_tab_id
+                    or live.created_at != expected_created_at
+                ):
+                    raise KeyError(f"session {session_id} was deleted or replaced")
+                await self._send_session_message_locked(
+                    session_id,
+                    message,
+                    attachments,
+                    call_id,
+                )
+
+    async def _send_session_message_locked(
+        self,
+        session_id: str,
+        message: str,
+        attachments: list[WorkspaceAttachmentCreate] | None = None,
+        call_id: str | None = None,
+        *,
+        question_key: str | None = None,
+    ) -> None:
+        """Persist and deliver input while the per-session pump lock is held."""
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
         self._assert_session_seat(session)
+        if session.session_kind == SessionKind.CHAT:
+            # Native transports cannot queue a second model turn themselves.
+            # Even unkeyed bootstrap/follow-up input uses the durable inbox.
+            call_id = call_id or f"chat:{uuid.uuid4().hex}"
 
         if call_id:
             # Compute the canonical payload fingerprint (message text +
@@ -250,7 +309,7 @@ class _MessagingMixin:
                     )
                 if call_id in session.pending_call_ids:
                     # Same payload, still pending: pump the stored envelope.
-                    await self._pump_session_messages(session_id)
+                    await self._pump_session_messages_locked(session_id)
                     session = self.sessions[session_id]
                     if call_id in session.uncertain_call_ids:
                         raise DeliveryUncertain(
@@ -306,19 +365,26 @@ class _MessagingMixin:
                 pending_call_ids.append(call_id)
             call_payload_fingerprints = dict(session.call_payload_fingerprints)
             call_payload_fingerprints[call_id] = new_fp
+            question_answer_calls = dict(session.chat_question_answer_calls)
+            if question_key is not None:
+                question_answer_calls[question_key] = call_id
             self.sessions[session_id] = session.model_copy(
                 update={
                     "pending_messages": pending_messages,
                     "pending_attachments": pending_attachments,
                     "pending_call_ids": pending_call_ids,
                     "call_payload_fingerprints": call_payload_fingerprints,
+                    # One state write claims both the answer and its envelope.
+                    # Pump or card-resolution failure must not reopen admission.
+                    "chat_question_answer_calls": question_answer_calls,
                 }
             )
             self._save_state()
             session = self.sessions[session_id]
 
-            # Kick the receiver pump to deliver the message.
-            await self._pump_session_messages(session_id)
+            # Kick the receiver pump to deliver the message while retaining the
+            # same lock that protected the durable enqueue.
+            await self._pump_session_messages_locked(session_id)
             # After the pump, check whether the call_id landed in
             # uncertain_call_ids (ambiguous tmux send failure). If so, raise
             # DeliveryUncertain so the caller knows the dispatch failed and
@@ -372,6 +438,23 @@ class _MessagingMixin:
         Returns ``True`` if the call_id was found and handled (pumped or
         no-op), ``False`` if it is absent.
         """
+        expected = self.sessions.get(session_id)
+        if expected is None:
+            raise KeyError(f"session {session_id} not found")
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with self.workspace_mutation_lock(expected.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != expected.tab_id
+                    or live.created_at != expected.created_at
+                ):
+                    raise KeyError(f"session {session_id} was deleted or replaced")
+                return await self._resume_existing_call_locked(session_id, call_id)
+
+    async def _resume_existing_call_locked(self, session_id: str, call_id: str) -> bool:
+        """Resume a persisted call while the per-session pump lock is held."""
         if session_id not in self.sessions:
             raise KeyError(f"session {session_id} not found")
         session = self.sessions[session_id]
@@ -388,7 +471,7 @@ class _MessagingMixin:
                 "resume_existing_call call_id=%s pending; pumping stored " "envelope",
                 call_id,
             )
-            await self._pump_session_messages(session_id)
+            await self._pump_session_messages_locked(session_id)
             session = self.sessions[session_id]
             if call_id in session.uncertain_call_ids:
                 raise DeliveryUncertain(
@@ -473,11 +556,21 @@ class _MessagingMixin:
         if not session:
             return
 
-        # Serialize pump cycles per session so two concurrent calls cannot
-        # both send the same pending call_id to tmux.
+        # Every producer uses workspace -> pump ordering. Native Chat publish
+        # observers re-enter the workspace lock inline while the pump owns the
+        # provider send, so deletion can never hold workspace while waiting on
+        # this pump.
         lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            await self._pump_session_messages_locked(session_id)
+        async with self.workspace_mutation_lock(session.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != session.tab_id
+                    or live.created_at != session.created_at
+                ):
+                    return
+                await self._pump_session_messages_locked(session_id)
 
     async def _pump_session_messages_locked(self, session_id: str) -> None:
         """Inner pump logic — caller must hold ``self._pump_locks[session_id]``."""
@@ -497,6 +590,14 @@ class _MessagingMixin:
             if call_id not in session.pending_call_ids:
                 # Already claimed by a concurrent pump cycle.
                 continue
+            if session.session_kind == SessionKind.CHAT and (
+                session.chat_paused
+                or session.uncertain_call_ids
+                or managed_chat.is_turn_running(session)
+            ):
+                # Leave the envelope pending. A busy turn is not an ambiguous
+                # delivery, and later input must not bypass an uncertain turn.
+                return
 
             message = session.pending_messages.get(call_id)
             if message is None:
@@ -572,7 +673,19 @@ class _MessagingMixin:
             self.sessions[session_id] = session.model_copy(update=session_update)
             if task is not None and task_update:
                 self.tasks[task.id] = task.model_copy(update=task_update)
-            self._save_state()
+            try:
+                self._save_state()
+            except BaseException:
+                if session.session_kind == SessionKind.CHAT:
+                    # No provider side effect has started. Restore only this
+                    # intent transition, retaining its admitted envelope/claim,
+                    # so an immediate retry cannot mistake it for an accepted
+                    # in-flight send. Even a partially committed save is safe:
+                    # the next pump must persist intent again before delivery.
+                    self.sessions[session_id] = session
+                    if task is not None and task_update:
+                        self.tasks[task.id] = task
+                raise
 
             # ---- SEND to tmux ----
             # The [call_id:<id>] marker lets the worker correlate its ACK.
@@ -587,6 +700,14 @@ class _MessagingMixin:
                 self._assert_session_seat(self.sessions[session_id])
                 await self._ensure_session_ready_for_send(self.sessions[session_id])
                 full_message = f"{marker}\n{message}"
+                native_attachments: list[WorkspaceAttachment] = []
+                if session.session_kind == SessionKind.CHAT:
+                    native_attachments = [
+                        item for item in persisted if item.mime_type.startswith("image/")
+                    ]
+                    persisted = [
+                        item for item in persisted if not item.mime_type.startswith("image/")
+                    ]
                 full_message = self._append_attachment_block(full_message, persisted)
             except SessionSeatMismatch:
                 logger.exception(
@@ -607,8 +728,40 @@ class _MessagingMixin:
                     call_id,
                     session_id,
                 )
+                if session.session_kind == SessionKind.CHAT:
+                    self._rollback_chat_processing_to_pending(session_id, [call_id])
+                    raise
                 self._rollback_processing_to_pending(session.task_id, session_id, [call_id])
                 continue
+
+            if session.session_kind == SessionKind.CHAT:
+                try:
+                    await managed_chat.send_message(
+                        self.sessions[session_id], full_message, native_attachments, call_id
+                    )
+                except (Exception, asyncio.CancelledError) as exc:
+                    state = self._chat_delivery_state(self.sessions[session_id], call_id)
+                    if state == "not_sent":
+                        self._rollback_chat_processing_to_pending(session_id, [call_id])
+                        raise
+                    if (
+                        state != "accepted"
+                        and call_id in self.sessions[session_id].processing_call_ids
+                    ):
+                        self._mark_processing_as_uncertain(session_id, [call_id])
+                    # Cancellation must propagate after the mailbox records
+                    # uncertainty; callers must not mistake it for acceptance.
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    logger.exception(
+                        "Chat delivery failed for call_id=%s session=%s state=%s",
+                        call_id,
+                        session_id,
+                        state,
+                    )
+                # A model turn can outlive send_message. The monitor pumps
+                # the next envelope only after this native turn has ended.
+                return
 
             try:
                 # Use the receipt-aware delivery primitive. The tmux server
@@ -642,6 +795,48 @@ class _MessagingMixin:
             # We do NOT move it to delivered — only the worker's ACK does
             # that. If we crash here, cold recovery moves it to
             # uncertain_call_ids (fail-closed).
+
+    def _chat_delivery_state(
+        self, session: ManagedSession, call_id: str
+    ) -> managed_chat.DeliveryState:
+        try:
+            return managed_chat.delivery_state(session, call_id)
+        except RuntimeError:
+            logger.exception(
+                "Cannot read Chat delivery evidence for call_id=%s session=%s",
+                call_id,
+                session.id,
+            )
+            return "uncertain"
+
+    def _rollback_chat_processing_to_pending(self, session_id: str, call_ids: list[str]) -> None:
+        """Retry proven-unsent envelopes ahead of later queued Chat input."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        retry_ids = [call_id for call_id in session.processing_call_ids if call_id in call_ids]
+        self._rollback_processing_to_pending(session.task_id, session_id, retry_ids)
+        session = self.sessions[session_id]
+        self.sessions[session_id] = session.model_copy(
+            update={
+                "pending_call_ids": retry_ids
+                + [call_id for call_id in session.pending_call_ids if call_id not in retry_ids]
+            }
+        )
+        task = self.tasks.get(session.task_id) if session.task_id else None
+        if task is not None:
+            task_retry_ids = [call_id for call_id in retry_ids if call_id in task.pending_call_ids]
+            self.tasks[task.id] = task.model_copy(
+                update={
+                    "pending_call_ids": task_retry_ids
+                    + [
+                        call_id
+                        for call_id in task.pending_call_ids
+                        if call_id not in task_retry_ids
+                    ]
+                }
+            )
+        self._save_state()
 
     def _expire_processing_leases(self, session_id: str, max_age_seconds: float = 300.0) -> int:
         """Move stale ``processing_call_ids`` to ``uncertain_call_ids``.
@@ -718,6 +913,10 @@ class _MessagingMixin:
         session = self.sessions.get(session_id)
         if not session or not session.processing_call_ids:
             return 0
+        if session.session_kind == SessionKind.CHAT:
+            lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+            async with lock:
+                return self._recover_chat_processing_via_receipt(session_id)
 
         to_pending: list[str] = []
         to_uncertain: list[str] = []
@@ -770,6 +969,27 @@ class _MessagingMixin:
             self._mark_processing_as_uncertain(session_id, to_uncertain)
             changed += len(to_uncertain)
         return changed
+
+    def _recover_chat_processing_via_receipt(self, session_id: str) -> int:
+        """Reconcile provider handoff evidence without using UI or tmux history."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            return 0
+        to_pending: list[str] = []
+        to_uncertain: list[str] = []
+        for call_id in session.processing_call_ids:
+            state = self._chat_delivery_state(session, call_id)
+            if state == "not_sent":
+                to_pending.append(call_id)
+            elif state != "accepted":
+                # The pump lock excludes live sends. Persisted in-flight
+                # evidence after a crash cannot prove provider acceptance.
+                to_uncertain.append(call_id)
+        if to_pending:
+            self._rollback_chat_processing_to_pending(session_id, to_pending)
+        if to_uncertain:
+            self._mark_processing_as_uncertain(session_id, to_uncertain)
+        return len(to_pending) + len(to_uncertain)
 
     def _mark_processing_as_uncertain(self, session_id: str, call_ids: list[str]) -> None:
         """Move call_ids from ``processing_call_ids`` to ``uncertain_call_ids``.
@@ -934,6 +1154,35 @@ class _MessagingMixin:
         HTTP 204 success. The uncertain state and original payload are
         preserved for another explicit operator retry.
         """
+        expected = self.sessions.get(session_id)
+        if expected is None:
+            raise KeyError(f"session {session_id} not found")
+        lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+        async with self.workspace_mutation_lock(expected.workspace_id):
+            async with lock:
+                live = self.sessions.get(session_id)
+                if (
+                    live is None
+                    or live.tab_id != expected.tab_id
+                    or live.created_at != expected.created_at
+                ):
+                    raise KeyError(f"session {session_id} was deleted or replaced")
+                await self._retry_uncertain_delivery_locked(
+                    session_id,
+                    call_id,
+                    reason=reason,
+                    actor=actor,
+                )
+
+    async def _retry_uncertain_delivery_locked(
+        self,
+        session_id: str,
+        call_id: str,
+        *,
+        reason: str,
+        actor: str,
+    ) -> None:
+        """Retry an uncertain call while the per-session pump lock is held."""
         session = self.sessions.get(session_id)
         if session is None:
             raise KeyError(f"session {session_id} not found")
@@ -1006,16 +1255,25 @@ class _MessagingMixin:
         #   * session gone /   -> cannot prove either way. Fail closed:
         #     unqueryable         stay uncertain, raise DeliveryUncertain.
         receipt_present: Optional[bool] = None
-        try:
-            receipt_present = await self._query_tmux_receipt(session.tmux_session, call_id)
-        except RuntimeError:
-            # tmux session gone or query failed — fail closed.
-            raise DeliveryUncertain(
-                f"cannot retry call_id={call_id} on session {session_id}: "
-                "tmux session is gone or unqueryable; delivery remains "
-                "uncertain. Operator must verify the worker state before "
-                "deciding whether to re-dispatch."
-            )
+        if session.session_kind == SessionKind.CHAT:
+            state = self._chat_delivery_state(session, call_id)
+            if state not in {"not_sent", "accepted"}:
+                raise DeliveryUncertain(
+                    f"cannot retry call_id={call_id} on Chat session {session_id}: "
+                    "provider acceptance is unknown; automatic replay is unsafe"
+                )
+            receipt_present = state == "accepted"
+        else:
+            try:
+                receipt_present = await self._query_tmux_receipt(session.tmux_session, call_id)
+            except RuntimeError:
+                # tmux session gone or query failed — fail closed.
+                raise DeliveryUncertain(
+                    f"cannot retry call_id={call_id} on session {session_id}: "
+                    "tmux session is gone or unqueryable; delivery remains "
+                    "uncertain. Operator must verify the worker state before "
+                    "deciding whether to re-dispatch."
+                )
 
         if receipt_present:
             # The original paste already happened. A second paste would
@@ -1086,6 +1344,11 @@ class _MessagingMixin:
                     call_id,
                 )
                 raise
+
+            if session.session_kind == SessionKind.CHAT:
+                # The provider has already accepted this turn. Only the
+                # agent's report ACK may commit it; no resubmit or key press.
+                return
 
             # The paste ran but the Hub may have died before the submit
             # verification loop could nudge additional Enter keys. Ensure the
@@ -1239,7 +1502,7 @@ class _MessagingMixin:
 
         # Pump through the normal delivery path. If the re-send hits another
         # ambiguous failure, the call_id returns to uncertain_call_ids.
-        await self._pump_session_messages(session_id)
+        await self._pump_session_messages_locked(session_id)
 
         # Fail-closed: re-fetch the session and verify the call_id did NOT
         # land back in uncertain_call_ids. If it did, the retry hit another
@@ -1344,6 +1607,8 @@ class _MessagingMixin:
 
     async def _ensure_session_ready_for_send(self, session: ManagedSession) -> None:
         self._assert_session_seat(session)
+        if session.session_kind == SessionKind.CHAT:
+            return
         from ..ttyd_manager import _tmux_session_exists_async
 
         # Send paths must not create a same-name pane and pour into it.
@@ -1424,6 +1689,9 @@ class _MessagingMixin:
         showing when the wait expires, fail closed so bootstrap Enter cannot
         confirm ``npm install -g``.
         """
+        if session.session_kind == SessionKind.CHAT:
+            self._assert_session_seat(session)
+            return
         deadline = time.monotonic() + AGENT_PROMPT_WAIT_SECONDS
         saw_update_dialog = False
         last_output = ""

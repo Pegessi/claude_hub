@@ -1964,7 +1964,11 @@ class _ReportsMixin:
                 "last_hard_recovery_at": None,
                 "prompt_retry_task_id": None,
                 "prompt_retry_attempted_at": None,
-                "last_review_task_id": task.id,
+                "last_review_task_id": (
+                    previous_review_task_id
+                    if reviewer.session_kind == SessionKind.CHAT
+                    else task.id
+                ),
                 "updated_at": now,
                 "last_activity_at": now,
             }
@@ -2004,8 +2008,12 @@ class _ReportsMixin:
                     user_requested_clear,
                     unrelated_prior_review,
                 )
-                await self.send_session_message(reviewer.id, "/clear")
-                await asyncio.sleep(0.5)
+                await self._reset_session_context(self.sessions[reviewer.id])
+            if reviewer.session_kind == SessionKind.CHAT:
+                self.sessions[reviewer.id] = self.sessions[reviewer.id].model_copy(
+                    update={"last_review_task_id": task.id}
+                )
+                self._save_state()
             await self.send_session_message(
                 reviewer.id,
                 self._build_review_prompt(

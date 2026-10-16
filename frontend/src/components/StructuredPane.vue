@@ -54,9 +54,11 @@
         >
           Retry
         </button>
-        <span class="banner-guidance">{{ currentTab?.agent_type === 'maso'
-          ? 'Start the MASO HTTP service, then retry.'
-          : 'Create a Terminal session for native TUI access.' }}</span>
+        <span class="banner-guidance">{{ managedIdentityMissing
+          ? 'Return to Workspace and refresh managed sessions.'
+          : currentTab?.agent_type === 'maso'
+            ? 'Start the MASO HTTP service, then retry.'
+            : 'Create a Terminal session for native TUI access.' }}</span>
       </template>
     </div>
 
@@ -196,7 +198,7 @@
                 <MarkdownContent
                   v-if="turn.userText"
                   :text="turn.userText"
-                  :tab-id="props.tabId"
+                  :tab-id="markdownImageScope"
                   compact
                   @image-click="openImageLightbox"
                 />
@@ -331,7 +333,7 @@
               <div class="conversation-bubble conversation-bubble--assistant">
                 <MarkdownContent
                   :text="stripTrailingGoalProtocol(part.text)"
-                  :tab-id="props.tabId"
+                  :tab-id="markdownImageScope"
                   compact
                   :complete="turn.completed"
                   @image-click="openImageLightbox"
@@ -575,7 +577,7 @@
                         >
                           <MarkdownContent
                             :text="sub.text"
-                            :tab-id="props.tabId"
+                            :tab-id="markdownImageScope"
                             compact
                             :complete="subthreadTerminal(thread)"
                             @image-click="openImageLightbox"
@@ -827,7 +829,7 @@
                   type="button"
                   class="approval-submit-btn"
                   :disabled="!canSubmitQuestion(part.approval) || isSending"
-                  @click="submitQuestionResponse(part.approval)"
+                  @click="submitQuestionResponse(turn, part.approval)"
                 >
                   提交选择
                 </button>
@@ -928,7 +930,7 @@
               >{{ copyFeedbackLabel(turn.key) }}</span>
             </button>
             <button
-              v-if="completedPlanText(turn)"
+              v-if="!isManagedChat && completedPlanText(turn)"
               type="button"
               class="turn-fork-button turn-implement-button"
               :disabled="implementingPlanKey !== null || turnInFlight || goalComposerLocked"
@@ -938,6 +940,7 @@
               {{ implementingPlanKey === turn.key ? 'Starting…' : 'Implement plan' }}
             </button>
             <button
+              v-if="!isManagedChat"
               type="button"
               class="turn-fork-button"
               :disabled="forkingOrdinal !== null"
@@ -964,7 +967,7 @@
               <MarkdownContent
                 v-if="turn.userText"
                 :text="turn.userText"
-                :tab-id="props.tabId"
+                :tab-id="markdownImageScope"
                 compact
                 @image-click="openImageLightbox"
               />
@@ -1009,7 +1012,7 @@
 
 
     <GoalStatusBar
-      v-if="goal"
+      v-if="goal && !isManagedChat"
       :goal="goal"
       :busy="isGoalMutating"
       :error="goalError"
@@ -1032,7 +1035,7 @@
           {{ modeChangeError }}
         </div>
         <div
-          v-if="goalError && !goal && !isGoalSetupOpen"
+          v-if="goalError && !goal && !isGoalSetupOpen && !isManagedChat"
           class="composer-mode-error"
           role="alert"
         >
@@ -1124,7 +1127,8 @@
           <div class="composer-tools">
             <ComposerAddMenu
               v-model:open="isAddMenuOpen"
-              :show-goal="!goal && Boolean(capabilities?.supports_goals)"
+              :show-goal="!isManagedChat && !goal && Boolean(capabilities?.supports_goals)"
+              :show-schedule="!isManagedChat"
               :attachment-disabled-reason="attachmentDisabledReason"
               :goal-disabled-reason="goalSetupDisabledReason"
               @attachment="triggerFilePicker"
@@ -1140,7 +1144,7 @@
               @change="handleFilePick"
             >
             <div
-              v-if="modeOptions.length > 0"
+              v-if="!isManagedChat && modeOptions.length > 0"
               ref="modePickerEl"
               class="composer-mode-picker"
             >
@@ -1329,7 +1333,7 @@
             class="composer-send-btn"
             :disabled="!canSend || isSending"
             :title="goalSteerOnly ? 'Send now as the next Goal turn' : goalComposerReason || undefined"
-            @click="() => submit(goalSteerOnly ? 'steer' : 'normal')"
+            @click="() => submit(isManagedChat ? 'normal' : (goalSteerOnly ? 'steer' : 'normal'))"
           >
             {{ isSending ? 'Sending…' : (goalImageRecovery ? 'Recover Goal' : goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
           </button>
@@ -1346,6 +1350,11 @@
             <span>⌘/Ctrl+Enter steer Goal</span>
             <span>Shift+Enter newline</span>
           </template>
+          <template v-else-if="isManagedChat">
+            <span>Enter / ⌘/Ctrl+Enter send</span>
+            <span v-if="turnInFlight">Busy turn follow-ups are durable</span>
+            <span>Shift+Enter newline</span>
+          </template>
           <template v-else>
             <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
             <span>⌘/Ctrl+Enter steer</span>
@@ -1356,6 +1365,7 @@
     </div>
 
     <GoalSetupDialog
+      v-if="!isManagedChat"
       :open="isGoalSetupOpen"
       :busy="isGoalMutating || isPreparingAttachments"
       :error="goalError || (!isGoalEditing ? composerError : null)"
@@ -1507,11 +1517,23 @@ import GoalStatusBar from '@/components/GoalStatusBar.vue'
 import type { AgentStreamEvent, StreamModelOption, WorkspaceAttachmentCreate } from '@/types'
 
 const props = defineProps<{
-  /** A top-level Chat tab owns its transcript directly. */
+  /** Display tab identity; ordinary Chat also uses it for stream identity. */
   tabId: string
+  /** Whether this pane belongs to Workspace-managed execution. */
+  managedChat?: boolean
+  /** ManagedSession.id; provider conversation IDs are never stream identity. */
+  managedSessionId?: string
   /** Keep queued drafts attached to the pane whose KeepAlive owns this instance. */
   paneId: string
 }>()
+const isManagedChat = computed(() => Boolean(props.managedChat))
+const managedIdentityMissing = computed(() => isManagedChat.value && !props.managedSessionId)
+const streamSource = computed(() => isManagedChat.value ? 'managed-session' as const : 'terminal-tab' as const)
+const streamSourceId = computed(() => isManagedChat.value ? props.managedSessionId ?? '' : props.tabId)
+const streamBasePath = computed(() => isManagedChat.value
+  ? `/api/workspaces/sessions/${encodeURIComponent(streamSourceId.value)}/stream`
+  : `/api/workspaces/tabs/${encodeURIComponent(streamSourceId.value)}/stream`)
+const markdownImageScope = computed(() => isManagedChat.value ? streamBasePath.value : props.tabId)
 
 const terminalStore = useTerminalStore()
 const appStore = useAppStore()
@@ -1625,7 +1647,12 @@ const isHistoryVisible = computed(() =>
 )
 
 function startStream() {
-  void start(props.tabId, 'terminal-tab')
+  if (managedIdentityMissing.value) {
+    errorMessage.value = 'Managed Chat identity is not available yet. Refresh Workspace sessions and try again.'
+    connectionState.value = 'failed'
+    return
+  }
+  void start(streamSourceId.value, streamSource.value)
 }
 
 // ── Timeline grouping ───────────────────────────────────────────────────────
@@ -1694,6 +1721,7 @@ function completedPlanText(turn: TimelineTurn): string | null {
 }
 
 async function implementPlan(turn: TimelineTurn) {
+  if (isManagedChat.value) return
   const plan = completedPlanText(turn)
   if (!plan || implementingPlanKey.value || turnInFlight.value) return
   if (goalComposerLocked.value) {
@@ -1714,7 +1742,7 @@ async function implementPlan(turn: TimelineTurn) {
 }
 
 async function forkFromTurn(ordinal: number) {
-  if (forkingOrdinal.value !== null) return
+  if (isManagedChat.value || forkingOrdinal.value !== null) return
   forkingOrdinal.value = ordinal
   try {
     await terminalStore.forkTab(props.tabId, ordinal)
@@ -1858,7 +1886,9 @@ const modelEnvVar = computed(() => {
 // Edit-resend truncates the provider's on-disk transcript, which is only wired
 // for providers whose rollout Hub can locate. TraeX transcripts live under
 // ~/.trae and are not wired this wave, so the control is hidden (it would 409).
-const supportsEditResend = computed(() => ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? ''))
+const supportsEditResend = computed(() =>
+  !isManagedChat.value && ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? '')
+)
 const currentModel = computed(() => {
   const env = currentTab.value?.env ?? {}
   const key = modelEnvVar.value
@@ -2206,8 +2236,8 @@ watch(events, (latest, previous) => {
         break
       }
     }
-    if (completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
-    else void hydrateGoal()
+    if (!isManagedChat.value && completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
+    else if (!isManagedChat.value) void hydrateGoal()
   }
 })
 
@@ -2237,7 +2267,7 @@ onActivated(() => {
   visibleHistoryStart.value = null
   resetActivation()
   startStream()
-  void hydrateGoal()
+  if (!isManagedChat.value) void hydrateGoal()
   void nextTick(() => {
     if (timelineDisposed) return
     observeTimelineGeometry()
@@ -2279,7 +2309,11 @@ onUnmounted(() => {
 })
 
 function retry() {
-  void retryStream(props.tabId, 'terminal-tab')
+  if (managedIdentityMissing.value) {
+    startStream()
+    return
+  }
+  void retryStream(streamSourceId.value, streamSource.value)
 }
 
 /** Monotonically increasing epoch that advances on every source switch
@@ -2726,7 +2760,7 @@ function removeAttachment(att: DraftAttachment) {
  */
 function attachmentUrl(attachmentId: string): string {
   const encId = encodeURIComponent(attachmentId)
-  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/attachments/${encId}`
+  return `${streamBasePath.value}/attachments/${encId}`
 }
 
 /**
@@ -2735,7 +2769,7 @@ function attachmentUrl(attachmentId: string): string {
  * validates magic bytes before serving, so this is not an arbitrary file read.
  */
 function agentImageUrl(path: string): string {
-  return `/api/workspaces/tabs/${encodeURIComponent(props.tabId)}/stream/agent-image?path=${encodeURIComponent(path)}`
+  return `${streamBasePath.value}/agent-image?path=${encodeURIComponent(path)}`
 }
 
 /** Short file name for the image block's subtitle (full path stays on hover). */
@@ -2788,6 +2822,12 @@ function handleComposerEnter(event: KeyboardEvent) {
   })
   if (action === 'ignore' || action === 'newline') return
   event.preventDefault()
+  if (isManagedChat.value) {
+    // Managed Chat has no browser-only queue: every explicit Enter/Ctrl+Enter
+    // is a durable Hub mailbox intent, even while the provider owns a turn.
+    void submit('normal')
+    return
+  }
   if (action === 'steer-queued') {
     const first = draftQueue.value[0]
     if (first) void sendQueuedDraft(first.id)
@@ -3255,12 +3295,22 @@ function subthreadInstructionText(tool: TimelineTool): string {
   return tool.subagent?.prompt ?? tool.argsText
 }
 
-async function submitQuestionResponse(approval: TimelineApproval) {
+async function submitQuestionResponse(turn: TimelineTurn, approval: TimelineApproval) {
   if (!canSubmitQuestion(approval)) {
     composerError.value = '请选择所有问题的选项后再提交。'
     return
   }
-  const sent = await submit(turnInFlight.value ? 'steer' : 'normal', formatAskQuestionResponse(answersFor(approval.key)))
+  if (!turn.turnId || !approval.callId) {
+    composerError.value = 'This provider question is missing its current request identity.'
+    return
+  }
+  const delivery = isManagedChat.value ? 'normal' : turnInFlight.value ? 'steer' : 'normal'
+  const sent = await submit(
+    delivery,
+    formatAskQuestionResponse(answersFor(approval.key)),
+    'user',
+    { turnId: turn.turnId, callId: approval.callId },
+  )
   if (sent) markResolved(approval.key)
 }
 
@@ -3273,7 +3323,7 @@ async function cancelActiveTurn() {
   isCancelling.value = true
   composerError.value = null
   try {
-    const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/cancel`, {
+    const res = await fetch(`${streamBasePath.value}/cancel`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -3293,19 +3343,17 @@ async function cancelActiveTurn() {
       }
       throw new Error(detail)
     }
-    // Consume the body (``{ ok, cancelled }``) but do NOT gate on
-    // ``cancelled``. A 200 means Stop intent was honored, and that includes the
-    // idempotent re-Stop that is the reported wedge (tab 896983b0): a prior Stop
-    // already persisted ``cancelled`` and released the Hub guard, so the backend
-    // answers ``cancelled:false`` ("nothing new to terminalize") while the
-    // browser is still stuck on Reconnecting and this very edge is stuck behind
-    // a wedged long-poll. Keying the reset on that boolean left the composer
-    // locked — the bug. So on ANY successful Stop: optimistically terminalize
-    // the turn we asked about (unlocks + marks Stopped) and nudge /wait so the
-    // real edge reconciles in one RTT. The backend already refuses to cancel a
-    // genuinely different LIVE turn via the expected_turn_id hint, so the only
-    // false-but-200 cases are already-terminal / idempotent — safe to resolve.
-    await res.json().catch(() => ({}))
+    const result: { cancelled?: boolean; outcome?: string } = await res.json().catch(() => ({}))
+    if (
+      isManagedChat.value &&
+      result?.cancelled !== true &&
+      result?.outcome !== 'already_terminal'
+    ) {
+      throw new Error('Stop did not match the current managed Chat turn.')
+    }
+    // Direct Chat preserves its legacy idempotent 200 contract. Managed Chat
+    // uses the explicit outcome so a stale Stop can never unlock a newer turn,
+    // while an already-terminal retry still repairs a wedged local view.
     if (cancelledTurnId) {
       optimisticCancelledTurnId.value = cancelledTurnId
     }
@@ -3343,8 +3391,9 @@ async function sendToStream(
   clientTurnId: string,
   delivery: 'normal' | 'steer' = 'normal',
   timeoutMs: number | null = null,
+  questionIdentity: QuestionIdentity | null = null,
 ) {
-  const base = `/api/workspaces/tabs/${props.tabId}/stream/send`
+  const base = `${streamBasePath.value}/send`
   const controller = new AbortController()
   const timer = timeoutMs === null ? null : setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
@@ -3359,6 +3408,8 @@ async function sendToStream(
         text: message,
         delivery,
         attachments: atts.map(toStreamSendAttachment),
+        question_turn_id: questionIdentity?.turnId,
+        question_call_id: questionIdentity?.callId,
       }),
     })
   } catch (error) {
@@ -3436,7 +3487,7 @@ async function submitEdit(turn: TimelineTurn) {
     ? crypto.randomUUID()
     : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
   try {
-    const res = await fetch(`/api/workspaces/tabs/${props.tabId}/stream/edit-resend`, {
+    const res = await fetch(`${streamBasePath.value}/edit-resend`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
@@ -3461,7 +3512,7 @@ async function submitEdit(turn: TimelineTurn) {
     editingTurnKey.value = null
     editDraft.value = ''
     resetStream()
-    void start(props.tabId, 'terminal-tab')
+    void start(streamSourceId.value, streamSource.value)
   } catch (err) {
     editError.value = err instanceof Error ? err.message : 'Failed to resend message'
   } finally {
@@ -3492,7 +3543,12 @@ async function submit(
   const message = queuedDraft?.message ?? messageOverride ?? draftMessage.value
   const hasContent = message.trim().length > 0 || (queuedDraft?.attachments ?? attachments.value).length > 0
   if (!hasContent) return false
-  if (delivery === 'normal' && (turnInFlight.value || goalSteerOnly.value) && !messageOverride) {
+  if (
+    !isManagedChat.value &&
+    delivery === 'normal' &&
+    (turnInFlight.value || goalSteerOnly.value) &&
+    !messageOverride
+  ) {
     enqueueDraft()
     return false
   }
@@ -3523,7 +3579,7 @@ async function submit(
   // Native provider turns do not deduplicate IDs. Only controller-backed
   // delivery may retain a failed attempt; an ordinary resend is a new intent.
   const goalControlledInput = !messageOverride && (recoveringGoal || goal.value?.status === 'active' || goal.value?.status === 'blocked')
-  const retainRetryId = goalControlledInput
+  const retainRetryId = isManagedChat.value || goalControlledInput
   const reusableId = retainRetryId ? reusableSendId(message, draftAtts, questionIdentity) : null
   const retainedClientTurnId = recoveringGoal && !retrySendAttempt.value?.goalRecovery ? null : (queuedDraft?.clientTurnId ?? queuedDraft?.id) ?? reusableId
   const clientTurnId = retainedClientTurnId ?? (typeof crypto.randomUUID === 'function'
@@ -3562,9 +3618,10 @@ async function submit(
       clientTurnId,
       delivery,
       source === 'queue' ? 15_000 : null,
+      questionIdentity,
     )
     retrySendAttempt.value = null
-    if ((messageOverride || (goal.value && delivery === 'steer'))) await hydrateGoal()
+    if (!isManagedChat.value && (messageOverride || (goal.value && delivery === 'steer'))) await hydrateGoal()
     // Deliberate user input may resume a queue moved into the composer, but
     // cannot silently release another item with unconfirmed delivery.
     if (!messageOverride && source === 'user' && !draftQueue.value.some(draft => draft.error)) isDraftQueuePaused.value = false
@@ -3594,7 +3651,7 @@ async function submit(
       attachments.value = draftAtts
     }
     composerError.value = err instanceof Error ? err.message : 'Failed to send message.'
-    if (goal.value) {
+    if (!isManagedChat.value && goal.value) {
       await hydrateGoal()
       // Only a successful authoritative refresh permits a new explicit
       // recovery intent. A failed GET keeps the same attempt and blocks send.

@@ -141,8 +141,9 @@ Stage the intended files explicitly, then run:
 
 This reads the index's blobs, not the working tree. Git environment variables that
 redirect the repository, index or object database must be unset explicitly; the
-check refuses them instead of inspecting a different snapshot. It rejects the machine-local
-`frontend/pnpm-workspace.yaml` and checks the production host argument of a tracked
+check refuses them instead of inspecting a different snapshot. It rejects private
+root/backend `.env` files and the machine-local `frontend/pnpm-workspace.yaml`,
+and checks the production host argument of a tracked
 `start.sh`, when present. The repository default remains
 `"${CLAUDE_HUB_HOST:-0.0.0.0}"`; setting `CLAUDE_HUB_HOST=::` in the deployment
 environment is permitted. Intentional changes to that startup contract need a

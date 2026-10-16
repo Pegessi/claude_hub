@@ -1,0 +1,455 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "9668717249fa5f12a6a36518ab3133a91c164e7b",
+  "parents": [
+    "f77a637f33fd81f935e17f32af83a6e752a917b2",
+    "407acd8a6ab5447b04ec780460ba4d32d898f16c"
+  ],
+  "base": "a89dd7870e256fb871ff9edb8bd94f9887479922",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "70699ca1a627f70380f59235b1ce1500b026349c",
+  "reconstructed_tree": "af8d8d9afb81f668d3d1a7f415f1ab09af3ccef0",
+  "conflicts": [
+    "CHANGELOG.md",
+    "backend/claude_hub/api/agent_stream.py",
+    "backend/claude_hub/services/agent_stream/tailer.py",
+    "backend/tests/test_agent_stream_agent_image.py"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c8e7ae97a1e956190237004abf11974fb56079ba"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "60aad2ca975a42c5c2770f84b7593a351c827806"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ffc932f52dd5f78d0eeebe09a2ec907628716377"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "86785022b2c6723d9f5b19ada550c449f1a01419"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1439e5c4378d25abcd70ea6f0b5f446a78afbbb0"
+      },
+      "reason": "Preserve both parents under one Released heading and document the independently verified image-lifetime and proven-unsent restart-admission repairs.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/api/agent_stream.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1c7442cd27e0c59b850cf35bbe0c310c0cfac1c8"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8556347fb1c07543bc95be026832bf0d6f390230"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f79ccdcc0e21ece88ba27ec334fdc66df9896a0e"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9d3577c8971a66093b1339742da95b4899a5bd1c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8678843a5a745fc8f5282a5e4f109d2316ccee6e"
+      },
+      "reason": "Combine managed session ownership and image routes with latest-main retention and restart quiesce. Bind image I/O to exact workspace/tab/created_at ownership, use no-store for managed images, and raise the narrow pre-input rejection from both lazy manager getters before creating any owner. Preserve direct containment and restart admission checks.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/api/goal_runs.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d29d4612c9990d3eca60ca203b9e67f8bdc914d4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d29d4612c9990d3eca60ca203b9e67f8bdc914d4"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d29d4612c9990d3eca60ca203b9e67f8bdc914d4"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d29d4612c9990d3eca60ca203b9e67f8bdc914d4"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c537436a4d094dfa33d128c0baf6a6be328a4ef1"
+      },
+      "reason": "Import the existing ttyd_manager singleton from its defining module so static typing resolves the object rather than the services submodule; runtime ownership and API behavior stay unchanged.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/api/terminal.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "176c970a889ee6abaae210615f2c18172cab549b"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "176c970a889ee6abaae210615f2c18172cab549b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "176c970a889ee6abaae210615f2c18172cab549b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "176c970a889ee6abaae210615f2c18172cab549b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c5720b54e34c43fd6f63d6b0346da23c8da68d83"
+      },
+      "reason": "Import the existing ttyd_manager singleton from its defining module to preserve runtime behavior and make its object type explicit to the full type gate.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/attachments.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "28d62cb3244388f1753ec6aed5843917827807d3"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7f03e8939654989ef5fc7361dc0ffcafd2872b1e"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7565bcae800b81e6fdb051b7ebd391e9aa76ef4a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "59fed76f81019ef73d74a95ef9a9b4b581ac8c98"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3526edbcfe373d3c43104dcf93be09559d3c9b2e"
+      },
+      "reason": "Preserve target-main retained image data, source versions and shared quotas while serializing owner checks with read/save/discard mutation. A cleared or retired owner cannot publish bytes from delayed background I/O.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/base.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f6d450bc53bf3452aed54d51c6b57030356d0f96"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f6d450bc53bf3452aed54d51c6b57030356d0f96"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f6d450bc53bf3452aed54d51c6b57030356d0f96"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f6d450bc53bf3452aed54d51c6b57030356d0f96"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "337ac5308da95361c60491b4f667024574453795"
+      },
+      "reason": "Introduce NativeInputNotSubmittedError as the exact shared contract for admission rejected before provider input; generic failures must not gain retry permission.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/local_images.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a1704a12b6ebdbafab772ccdaee39baff526eae0"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a1704a12b6ebdbafab772ccdaee39baff526eae0"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fd1080cf6d2ecdd6c192c9928e0d5995300e3c2d"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fd1080cf6d2ecdd6c192c9928e0d5995300e3c2d"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "16becd8ba88974b39b304612db71599cd09fbd85"
+      },
+      "reason": "Keep latest-main local image discovery, containment and retention; propagate captured owner guards through detached reads and cancelled thread-backed work so late completion cannot recreate a retired namespace.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/tailer.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0422e56090e9b009e1a439b44946cd5fd5c187a1"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3d884baa6a601bd2975c7d6d8f698e535bde62d2"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "faee5ced3b9291f3f55a5a60c2fc1495ad145318"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4945db9dca5ac79734f758d42ac7e775b47e3616"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bd78d5a8585269cd1623477b1ba4006fa1639e10"
+      },
+      "reason": "Preserve managed incarnation fencing and task-owned controls alongside latest-main streamed-image capture and restart continuation. Recheck owner after awaited store/capture operations and use narrow proven-unsent rejection at initialized-manager and per-tailer shutdown admission boundaries.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/managed_chat.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2b735366c3472a5da38a5dab4d8941866bcc8e56"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2b735366c3472a5da38a5dab4d8941866bcc8e56"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ec9adb667db9d327830e2c51474b4eee6f862e3d"
+      },
+      "reason": "Remove only the current attempt when the exact pre-input admission exception proves no provider input occurred. The existing mailbox not_sent path can retry the same call ID; generic exceptions and cancellation remain uncertain.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_agent_stream_agent_image.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bf6753582be1d41330264e3a99c9ba8125150979"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "868a3b1eae45c7ced8c84187aa3100f5b9686d28"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9d1bf97a2060e9083761da1dfa50e9e94c4fd92a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "81e2068484c05c2598bbaa8f6a58b0943a711b27"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f14311e453876d16cb43e052fc0d64d55896d653"
+      },
+      "reason": "Retain both parents image and managed-route cases and add actual delete/reuse, stale direct/managed reads, cancelled background publication and managed no-store coverage. Align fixture identity and optional/model annotations with the production interfaces.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_managed_chat_controls.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "99052e07f0d16f8e6e34e29ad623f04e5e99b2b4"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "99052e07f0d16f8e6e34e29ad623f04e5e99b2b4"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a7dd31cf5e8e8d4b26fd95493a16303f68e5119a"
+      },
+      "reason": "Use an async isolated TTYDManager fixture that owns and finalizes every created tab, including assertion failure, without changing production lifecycle authorization.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_managed_chat_orchestration.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e54670cf990ac81ba5b6a52a3335706531957f44"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e54670cf990ac81ba5b6a52a3335706531957f44"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "489bd1de17243e132a37fe7957d7bc3c89a291f2"
+      },
+      "reason": "Exercise actual Workspace mailbox and bridge/API admission composition. Lazy shutdown rejection leaves the same call pending/not uncertain without provider creation, and retry submits once; reset fixtures include the required lifecycle state.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_managed_chat_runtime.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "729788216e7dd5bac6dee32f82a0a6d75273d7d3"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "729788216e7dd5bac6dee32f82a0a6d75273d7d3"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5ce612c0f3078954d31f390c0a3330b6263aa157"
+      },
+      "reason": "Cover narrow manager/tailer rejection, late persisted turn_started rollback and same-call retry while retaining generic/cancel uncertainty. Keep runtime fixtures consistent with typed native and managed session contracts.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_restart_continuation.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "be24fafeb1916e6612acbcbe833de6b9d5a771a8"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "be24fafeb1916e6612acbcbe833de6b9d5a771a8"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0db6ded6d92352fcff5a4dc9ec89a00582eaf880"
+      },
+      "reason": "Preserve latest-main restart tests and supply persisted tab created_at and explicit managed_session_id identity in direct-tab fixtures, matching the integrated descriptor contract.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_restart_continuation_process.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ac6730fb7a8ca668c456bb231a11ea2b96082a83"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ac6730fb7a8ca668c456bb231a11ea2b96082a83"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "15af51ffbde610b09da850462f8d37ac528d90de"
+      },
+      "reason": "Preserve process-level restart continuation verification and supply persisted direct-tab created_at and managed_session_id fields instead of weakening the production descriptor identity checks.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "docs/working-logs/2026-10-16-managed-chat-integration-repairs.md",
+      "base": null,
+      "parent1": null,
+      "parent2": null,
+      "reconstructed": null,
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d520207a1e6ff9d063302a54c07c4d58692b089f"
+      },
+      "reason": "Record fixed input commits, repair contracts, independent counterexample checks, full-gate evidence and explicit no-main-update/no-deployment limitations for this candidate.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
