@@ -864,6 +864,7 @@ export interface ChatGoal {
   checkpoint_history?: ChatGoalCheckpoint[]
   checkpoint_warning?: string | null
   status_message?: string | null
+  pending_image_count?: number
   pending_input?: string | null
   resume_after_turn?: boolean
   created_at: string
@@ -873,6 +874,7 @@ export interface ChatGoal {
 }
 
 export interface ChatGoalCreate {
+  attachments?: (WorkspaceAttachmentCreate & { preview_is_original?: boolean })[]
   objective: string
   client_request_id: string
 }
