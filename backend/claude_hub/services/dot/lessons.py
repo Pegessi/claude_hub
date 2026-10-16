@@ -39,7 +39,7 @@ _NEGATION_RE = re.compile(
 # Words that hold a negation character or word but do not negate the rule.
 _NOT_NEGATION_RE = re.compile(
     r"\bno (?:more|less|fewer|later|earlier) than\b"
-    r"|不[同仅僅但断斷久]|[特区區分差类類级級识識告个個性][别別]"
+    r"|不同(?!意)|不[仅僅但断斷久]|[特区區分差类類级級识識告个個性][别別]"
 )
 _VAGUE = frozenset(
     {
@@ -127,7 +127,8 @@ def tokens(text: str) -> set[str]:
 
 
 def _negated(text: str) -> bool:
-    return bool(_NEGATION_RE.search(_NOT_NEGATION_RE.sub(" ", text.lower())))
+    """Odd number of negations: "do not disable X" says the opposite of "disable X"."""
+    return len(_NEGATION_RE.findall(_NOT_NEGATION_RE.sub(" ", text.lower()))) % 2 == 1
 
 
 def same_rule(lessons: Iterable[dict[str, Any]], rule: str) -> Optional[dict[str, Any]]:
