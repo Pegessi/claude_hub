@@ -7,6 +7,26 @@
 
 ## Released
 
+### feat(chat): refine tool cards and render details only when expanded
+
+- Mount tool input/output only while its native details card is open; preserve
+  expansion through streamed updates and historical process remounts.
+- Bound grouped-tool summaries to three names, use static readable status marks,
+  and keep hover/chevron transitions brief with reduced-motion support.
+- Make plain-text tool payloads keyboard-scrollable and keep nested cards within
+  narrow panes. No new timers, parsers, highlighting libraries, or dependencies.
+
+### feat(chat): compact reasoning status and animate active thinking cards
+
+- Combine adjacent reasoning-only updates into one compact indicator; keep
+  interruptions and tool, answer, error, turn and child-thread boundaries visible.
+- Show active thinking inside the plaintext card instead of a duplicate status
+  row, preserve expanded cards across snapshots, and respect reduced motion.
+- Preserve reasoning status metadata and cache unchanged child-thread projections
+  so sibling activity does not repeatedly rebuild their displayed thinking.
+- Stop hidden child-thinking CSS animations when a thread or its region is folded,
+  restoring the indicator only while its summary is visible.
+
 ### ci: make reliability guidance executable for agents
 
 - Add a focused CI reliability contract with check selection, cost comparison,

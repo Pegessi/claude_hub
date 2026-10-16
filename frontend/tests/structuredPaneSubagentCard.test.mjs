@@ -40,8 +40,8 @@ test('dispatch status and child-turn lifecycle are rendered separately', () => {
 
 test('expanding a child retains prompt, prose, thinking, tools and images', () => {
   assert.match(regionBlock, /subthreadInstructionText\(thread\.launchTool\)/)
-  assert.match(regionBlock, /v-for="sub in thread\.parts"/)
-  for (const kind of ['instruction', 'thinking', 'text', 'status', 'tool_group', 'agent_image']) {
+  assert.match(regionBlock, /v-for="sub in subthreadPartsFor\(thread\)"/)
+  for (const kind of ['instruction', 'thinking', 'reasoning_status', 'text', 'status', 'tool_group', 'agent_image']) {
     assert.match(regionBlock, new RegExp(`sub\\.kind === '${kind}'`))
   }
   assert.match(regionBlock, /:complete="subthreadTerminal\(thread\)"/)
