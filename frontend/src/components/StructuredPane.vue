@@ -101,7 +101,7 @@
         <div
           v-for="{ turn, ordinal } in visibleTurns"
           :key="turn.key"
-          v-memo="[turn.renderRevision, ordinal, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
+          v-memo="[turn.renderRevision, ordinal, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), expandedToolGroups.get(turn.key), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
           class="structured-turn"
           :data-turn-key="turn.key"
         >
@@ -301,13 +301,14 @@
             <details
               v-if="part.kind === 'thinking'"
               class="thinking-card"
+              :class="{ 'thinking-card--active': part.state === 'active' }"
             >
               <summary>
+                <ThinkingIndicator :state="part.state" />
                 <span
-                  class="thinking-indicator"
+                  class="thinking-chevron"
                   aria-hidden="true"
-                />
-                Thinking
+                >›</span>
               </summary>
               <!-- Thinking is rendered as plain text (no marked/DOMPurify) to
                    avoid re-parsing multi-kilobyte reasoning streams on every
@@ -349,7 +350,11 @@
                 class="conversation-avatar conversation-avatar--tool"
                 aria-hidden="true"
               >⌘</span>
-              <details class="tool-card tool-card--group">
+              <details
+                class="tool-card tool-card--group"
+                :open="expandedToolGroups.get(turn.key)?.has(part.key)"
+                @toggle="onToolGroupToggle(turn, part.key, $event)"
+              >
                 <summary
                   class="tool-header"
                   :class="{ 'tool-header--single': part.tools.length === 1 }"
@@ -359,48 +364,60 @@
                   </span>
                   <template v-if="part.tools.length > 1">
                     <span class="tool-group-names">
-                      {{ part.tools.map(t => t.name).join(', ') }}
+                      {{ toolGroupNames(part.tools) }}
                     </span>
                   </template>
                   <span
                     class="tool-status"
                     :class="toolGroupStatus(part.tools)"
-                  >{{ toolGroupStatus(part.tools) }}</span>
+                  >{{ toolStatusLabel(toolGroupStatus(part.tools)) }}</span>
+                  <span
+                    class="tool-chevron"
+                    aria-hidden="true"
+                  >›</span>
                 </summary>
-                <div
-                  v-for="tool in part.tools"
-                  :key="tool.key"
-                  class="tool-group-item"
-                >
-                  <div class="tool-group-item-header">
-                    <span class="tool-name">{{ tool.name }}</span>
-                    <span
-                      class="tool-status"
-                      :class="tool.status"
-                    >{{ tool.status }}</span>
-                  </div>
+                <template v-if="expandedToolGroups.get(turn.key)?.has(part.key)">
                   <div
-                    v-if="tool.argsText"
-                    class="tool-block"
+                    v-for="tool in part.tools"
+                    :key="tool.key"
+                    class="tool-group-item"
                   >
-                    <span>Input</span>
-                    <pre>{{ tool.argsText }}</pre>
+                    <div class="tool-group-item-header">
+                      <span class="tool-name">{{ tool.name }}</span>
+                      <span
+                        class="tool-status"
+                        :class="tool.status"
+                      >{{ toolStatusLabel(tool.status) }}</span>
+                    </div>
+                    <div
+                      v-if="tool.argsText"
+                      class="tool-block"
+                    >
+                      <span>Input</span>
+                      <pre
+                        tabindex="0"
+                        aria-label="Tool input"
+                      >{{ tool.argsText }}</pre>
+                    </div>
+                    <div
+                      v-if="tool.resultText"
+                      class="tool-block"
+                    >
+                      <span>Result</span>
+                      <pre
+                        tabindex="0"
+                        aria-label="Tool result"
+                      >{{ tool.resultText }}</pre>
+                    </div>
                   </div>
-                  <div
-                    v-if="tool.resultText"
-                    class="tool-block"
+                  <button
+                    type="button"
+                    class="details-collapse"
+                    @click="collapseDetails"
                   >
-                    <span>Result</span>
-                    <pre>{{ tool.resultText }}</pre>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  class="details-collapse"
-                  @click="collapseDetails"
-                >
-                  收起
-                </button>
+                    Collapse
+                  </button>
+                </template>
               </details>
             </div>
 
@@ -533,7 +550,7 @@
                       </div>
 
                       <template
-                        v-for="sub in thread.parts"
+                        v-for="sub in subthreadPartsFor(thread)"
                         :key="sub.key"
                       >
                         <div
@@ -553,13 +570,14 @@
                         <details
                           v-else-if="sub.kind === 'thinking'"
                           class="thinking-card subthread-thinking"
+                          :class="{ 'thinking-card--active': sub.state === 'active' }"
                         >
                           <summary>
+                            <ThinkingIndicator :state="sub.state" />
                             <span
-                              class="thinking-indicator"
+                              class="thinking-chevron"
                               aria-hidden="true"
-                            />
-                            Thinking
+                            >›</span>
                           </summary>
                           <pre class="thinking-body">{{ sub.text }}</pre>
                           <button
@@ -585,6 +603,13 @@
                         </div>
 
                         <div
+                          v-else-if="sub.kind === 'reasoning_status'"
+                          class="reasoning-status"
+                        >
+                          <ThinkingIndicator :state="sub.state" />
+                        </div>
+
+                        <div
                           v-else-if="sub.kind === 'status'"
                           class="event-status subthread-status"
                         >
@@ -594,6 +619,8 @@
                         <details
                           v-else-if="sub.kind === 'tool_group'"
                           class="tool-card tool-card--group"
+                          :open="expandedToolGroups.get(turn.key)?.has(sub.key)"
+                          @toggle="onToolGroupToggle(turn, sub.key, $event)"
                         >
                           <summary
                             class="tool-header"
@@ -604,48 +631,60 @@
                             </span>
                             <template v-if="sub.tools.length > 1">
                               <span class="tool-group-names">
-                                {{ sub.tools.map(t => t.name).join(', ') }}
+                                {{ toolGroupNames(sub.tools) }}
                               </span>
                             </template>
                             <span
                               class="tool-status"
                               :class="toolGroupStatus(sub.tools)"
-                            >{{ toolGroupStatus(sub.tools) }}</span>
+                            >{{ toolStatusLabel(toolGroupStatus(sub.tools)) }}</span>
+                            <span
+                              class="tool-chevron"
+                              aria-hidden="true"
+                            >›</span>
                           </summary>
-                          <div
-                            v-for="tool in sub.tools"
-                            :key="tool.key"
-                            class="tool-group-item"
-                          >
-                            <div class="tool-group-item-header">
-                              <span class="tool-name">{{ tool.name }}</span>
-                              <span
-                                class="tool-status"
-                                :class="tool.status"
-                              >{{ tool.status }}</span>
-                            </div>
+                          <template v-if="expandedToolGroups.get(turn.key)?.has(sub.key)">
                             <div
-                              v-if="tool.argsText"
-                              class="tool-block"
+                              v-for="tool in sub.tools"
+                              :key="tool.key"
+                              class="tool-group-item"
                             >
-                              <span>Input</span>
-                              <pre>{{ tool.argsText }}</pre>
+                              <div class="tool-group-item-header">
+                                <span class="tool-name">{{ tool.name }}</span>
+                                <span
+                                  class="tool-status"
+                                  :class="tool.status"
+                                >{{ toolStatusLabel(tool.status) }}</span>
+                              </div>
+                              <div
+                                v-if="tool.argsText"
+                                class="tool-block"
+                              >
+                                <span>Input</span>
+                                <pre
+                                  tabindex="0"
+                                  aria-label="Tool input"
+                                >{{ tool.argsText }}</pre>
+                              </div>
+                              <div
+                                v-if="tool.resultText"
+                                class="tool-block"
+                              >
+                                <span>Result</span>
+                                <pre
+                                  tabindex="0"
+                                  aria-label="Tool result"
+                                >{{ tool.resultText }}</pre>
+                              </div>
                             </div>
-                            <div
-                              v-if="tool.resultText"
-                              class="tool-block"
+                            <button
+                              type="button"
+                              class="details-collapse"
+                              @click="collapseDetails"
                             >
-                              <span>Result</span>
-                              <pre>{{ tool.resultText }}</pre>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            class="details-collapse"
-                            @click="collapseDetails"
-                          >
-                            Collapse
-                          </button>
+                              Collapse
+                            </button>
+                          </template>
                         </details>
 
                         <div
@@ -855,6 +894,13 @@
                   class="error-detail"
                 >{{ part.detail }}</code>
               </span>
+            </div>
+
+            <div
+              v-else-if="part.kind === 'reasoning_status'"
+              class="reasoning-status"
+            >
+              <ThinkingIndicator :state="part.state" />
             </div>
 
             <div
@@ -1470,7 +1516,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, shallowReactive, toRef, watch } from 'vue'
 import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/composables/useAgentStream'
 import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStreamAttachments'
 import { useChatGoal } from '@/composables/useChatGoal'
@@ -1510,6 +1556,9 @@ import { useAppStore } from '@/stores/appStore'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
+import ThinkingIndicator from '@/components/ThinkingIndicator.vue'
+import { createSubthreadThinkingPresenter, presentThinkingParts, type ThinkingDisplayPart, type ThinkingState } from '@/utils/thinkingPresentation'
 import ChatDraftQueue from '@/components/ChatDraftQueue.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
@@ -3111,10 +3160,15 @@ function toggleTurnProcess(turn: TimelineTurn): void {
 }
 
 /** Parts to render for a turn, with its process folded away once it is history. */
-function turnPartsFor(turn: TimelineTurn): TimelinePart[] {
-  if (!isTurnFoldable(turn)) return turn.parts
-  return foldTurnParts(turn, isProcessExpanded(turn))
+function turnPartsFor(turn: TimelineTurn): ThinkingDisplayPart<TimelinePart>[] {
+  const parts = isTurnFoldable(turn) ? foldTurnParts(turn, isProcessExpanded(turn)) : turn.parts
+  const terminal: Exclude<ThinkingState, 'active'> | null =
+    turn.errors.length > 0 || ['failed', 'cancelled', 'interrupted'].includes(turn.completionStatus ?? '')
+      ? 'interrupted' : turn.completed ? 'done' : null
+  return presentThinkingParts(parts, terminal)
 }
+
+const subthreadPartsFor = createSubthreadThinkingPresenter()
 
 function turnFoldSignature(turn: TimelineTurn): string {
   // Turns with nothing foldable — including the active one — never depend on
@@ -3125,15 +3179,26 @@ function turnFoldSignature(turn: TimelineTurn): string {
   return `${isProcessExpanded(turn) ? 'open' : 'folded'}|${label}`
 }
 
-/**
- * Collapse the native ``<details>`` containing the clicked button.
- *
- * The thinking and tool cards stay uncontrolled: the browser owns their open
- * state, which is exactly what lets ``v-memo`` skip historical turns without
- * losing an expanded card. A footer "收起" button therefore reaches for the
- * enclosing element rather than introducing per-card Vue state that every
- * memo dependency would then have to track.
- */
+// visibleTurns creates a display copy on each stream update. Key folds by the
+// durable turn key (as process folds do), not that temporary object identity.
+// Only small group-key Sets are retained; no tool payloads or turn objects.
+const expandedToolGroups = shallowReactive(new Map<string, ReadonlySet<string>>())
+
+function onToolGroupToggle(turn: TimelineTurn, groupKey: string, event: Event): void {
+  const details = event.currentTarget
+  if (!(details instanceof HTMLDetailsElement)) return
+  const previous = expandedToolGroups.get(turn.key)
+  if (Boolean(previous?.has(groupKey)) === details.open) return
+  const next = new Set(previous)
+  if (details.open) next.add(groupKey)
+  else next.delete(groupKey)
+  if (next.size > 0) expandedToolGroups.set(turn.key, next)
+  else expandedToolGroups.delete(turn.key)
+}
+
+/** Collapse through the native control so tool toggle events also unmount the
+ *  lazy body. Tool open state is mirrored for remounts after process folding;
+ *  thinking and other details continue to use browser-owned state. */
 function collapseDetails(event: MouseEvent): void {
   const target = event.currentTarget
   if (target instanceof HTMLElement) {
@@ -5415,11 +5480,29 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-sm);
 }
 
-.thinking-indicator {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ch-color-text-subtle);
+.reasoning-status {
+  display: inline-flex;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 5px 10px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+}
+
+.thinking-card--active {
+  border-style: solid;
+}
+
+.thinking-chevron {
+  margin-left: auto;
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 160ms ease;
+}
+
+.thinking-card[open] > summary .thinking-chevron {
+  transform: rotate(90deg);
 }
 
 .thinking-body {
@@ -5446,9 +5529,62 @@ onUnmounted(() => {
 .tool-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 12px;
+  transition: background-color 120ms ease;
+}
+
+.tool-card > .tool-header:hover,
+.tool-card[open] > .tool-header {
+  background: var(--ch-color-surface-soft);
+}
+
+.tool-chevron {
+  flex: 0 0 auto;
+  color: var(--ch-color-text-subtle);
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 140ms ease;
+}
+
+.tool-card[open] > .tool-header .tool-chevron {
+  transform: rotate(90deg);
+}
+
+/* Status is intentionally static: long histories must not retain hundreds of
+   independent animations. The text carries the state without relying on color. */
+.tool-card .tool-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  text-transform: none;
+  font-weight: 500;
+}
+
+.tool-card .tool-status::before {
+  content: '·';
+  width: 10px;
+  text-align: center;
+}
+
+.tool-card .tool-status.completed::before { content: '✓'; }
+.tool-card .tool-status.failed::before { content: '!'; }
+.tool-card .tool-status.cancelled::before { content: '–'; }
+.tool-card .tool-status.running::before { content: '◷'; }
+
+.tool-card .tool-block pre {
+  border: 1px solid var(--ch-color-border-muted);
+  white-space: pre;
+  word-break: normal;
+  overscroll-behavior: contain;
+  tab-size: 2;
+}
+
+.tool-card .tool-block pre:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
 }
 
 .tool-name {
@@ -5749,8 +5885,20 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.subthread-body > .tool-card {
+  width: 100%;
+  min-width: 0;
+}
+
 .subthread-thinking {
   margin: 0;
+}
+
+/* Native details hides its body but leaves CSS animation timelines running.
+   Remove only hidden child animations; a visible thinking summary still runs. */
+.subagent-region:not([open]) :deep(.thinking-indicator--active),
+.subagent-thread-row:not([open]) :deep(.thinking-indicator--active) {
+  animation: none;
 }
 
 .event-error {
@@ -5904,12 +6052,14 @@ onUnmounted(() => {
 
 @media (prefers-reduced-motion: reduce) {
   .agent-waiting-pulse i,
-  .banner-spinner,
-  .thinking-indicator {
+  .banner-spinner {
     animation: none;
   }
 
-  .turn-attachment-img {
+  .turn-attachment-img,
+  .thinking-chevron,
+  .tool-chevron,
+  .tool-header {
     transition: none;
   }
 }

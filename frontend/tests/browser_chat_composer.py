@@ -39,7 +39,15 @@ MANAGED_SESSION = "fixture-managed-session"
 MANAGED_BASE = f"/api/workspaces/sessions/{MANAGED_SESSION}/stream"
 
 
-def event(sequence, event_type, payload, *, turn_id=TURN_ONE, message_id=None, agent_type="maso"):
+def event(
+    sequence,
+    event_type,
+    payload,
+    *,
+    turn_id=TURN_ONE,
+    message_id=None,
+    agent_type="maso",
+):
     return {
         "stream_sequence": sequence,
         "session_id": SESSION,
@@ -253,7 +261,10 @@ async def main(browser_run: BrowserRun) -> None:
                 model_changes.append(payload)
                 tab["env"] = payload["env"]
                 body = tab
-            elif method == "GET" and path in {f"{BASE}/events", f"{MANAGED_BASE}/events"}:
+            elif method == "GET" and path in {
+                f"{BASE}/events",
+                f"{MANAGED_BASE}/events",
+            }:
                 body = {
                     "events": state["events"],
                     "next_sequence": len(state["events"]),
@@ -310,7 +321,10 @@ async def main(browser_run: BrowserRun) -> None:
                     event(
                         sequence + 1,
                         "turn_started",
-                        {"summary": payload.get("text", ""), "attachments": attachments},
+                        {
+                            "summary": payload.get("text", ""),
+                            "attachments": attachments,
+                        },
                         turn_id=turn_id,
                     )
                 )
@@ -330,7 +344,10 @@ async def main(browser_run: BrowserRun) -> None:
                 else:
                     await route.fulfill(status=200, content_type="image/png", body=preview)
                 return
-            elif method == "POST" and path in {f"{BASE}/cancel", f"{MANAGED_BASE}/cancel"}:
+            elif method == "POST" and path in {
+                f"{BASE}/cancel",
+                f"{MANAGED_BASE}/cancel",
+            }:
                 interrupts.append(json.loads(request.post_data or "{}"))
                 sequence = len(state["events"])
                 interrupted_turn = next(
@@ -720,6 +737,650 @@ async def main(browser_run: BrowserRun) -> None:
           useTerminalStore().setActiveTab('{TAB}')
         }}""")
         await expect(composer).to_be_visible()
+
+        # Reasoning presentation is exercised through the same mocked history
+        # and long-poll routes as a real Chat. Start from a bounded transcript so
+        # every assertion below belongs to one deliberate stream snapshot.
+        thinking_turn = "fixture-thinking-opaque"
+        plaintext_turn = "fixture-thinking-plaintext"
+        interrupted_turn = "fixture-thinking-interrupted"
+        error_turn = "fixture-thinking-error"
+        sequence = 0
+        state["events"] = []
+        state["turn_open"] = False
+
+        def append_thinking_event(event_type, payload, *, turn_id, message_id=None):
+            nonlocal sequence
+            sequence += 1
+            state["events"].append(
+                event(
+                    sequence,
+                    event_type,
+                    payload,
+                    turn_id=turn_id,
+                    message_id=message_id,
+                )
+            )
+
+        # Snapshot one: opaque reasoning is a single compact active row with an
+        # animated, visibly labelled indicator.
+        append_thinking_event(
+            "turn_started", {"summary": "Opaque reasoning"}, turn_id=thinking_turn
+        )
+        append_thinking_event(
+            "status",
+            {"text": "Thinking…", "provider_status": "reasoning", "snapshot": True},
+            turn_id=thinking_turn,
+            message_id="reasoning:opaque-active",
+        )
+        await page.reload()
+        opaque_turn = page.locator(".structured-turn").filter(has_text="Opaque reasoning")
+        opaque_status = opaque_turn.locator(".reasoning-status")
+        await expect(opaque_status).to_have_count(1)
+        await expect(opaque_status).to_contain_text("Thinking…")
+        active_indicator = opaque_status.locator(".thinking-indicator--active")
+        await expect(active_indicator).to_be_visible()
+        assert await active_indicator.evaluate(
+            "element => getComputedStyle(element).animationName !== 'none'"
+        ), "active thinking indicator must animate when motion is allowed"
+        await page.screenshot(path=str(output / "thinking-opaque-active.png"), full_page=True)
+
+        # Snapshot two: providers can emit a burst of separate terminal
+        # snapshots. Ten adjacent Done records still represent one reasoning
+        # run, so the transcript must keep one compact row.
+        for index in range(10):
+            append_thinking_event(
+                "status",
+                {
+                    "text": "Done thinking",
+                    "provider_status": "reasoning",
+                    "snapshot": True,
+                },
+                turn_id=thinking_turn,
+                message_id=f"reasoning:opaque-done-{index}",
+            )
+        await page.reload()
+        opaque_turn = page.locator(".structured-turn").filter(has_text="Opaque reasoning")
+        opaque_status = opaque_turn.locator(".reasoning-status")
+        await expect(opaque_status).to_have_count(1)
+        await expect(opaque_status).to_contain_text("Thought")
+        await expect(opaque_status.locator(".thinking-indicator--active")).to_have_count(0)
+        append_thinking_event(
+            "turn_completed",
+            {"status": "completed"},
+            turn_id=thinking_turn,
+            message_id=thinking_turn,
+        )
+
+        # Plaintext reasoning incorporates the live state in its own summary;
+        # there is no duplicate opaque status row. A streamed Done update must
+        # not close details the reader already opened.
+        append_thinking_event(
+            "turn_started", {"summary": "Plaintext reasoning"}, turn_id=plaintext_turn
+        )
+        append_thinking_event(
+            "status",
+            {"text": "Thinking…", "provider_status": "reasoning", "snapshot": True},
+            turn_id=plaintext_turn,
+            message_id="reasoning:plaintext",
+        )
+        append_thinking_event(
+            "thinking_delta",
+            {"text": "Inspect the fixture without exposing another status row."},
+            turn_id=plaintext_turn,
+            message_id="plaintext-detail",
+        )
+        plaintext = page.locator(".structured-turn").filter(has_text="Plaintext reasoning")
+        card = plaintext.locator(".thinking-card")
+        await expect(card).to_have_count(1)
+        await expect(plaintext.locator(".reasoning-status")).to_have_count(0)
+        await expect(card.locator("summary")).to_contain_text("Thinking…")
+        await card.locator("summary").click()
+        assert await card.evaluate("element => element.open")
+        await expect(card.locator(".thinking-body")).to_contain_text("Inspect the fixture")
+        await page.screenshot(path=str(output / "thinking-plaintext-active.png"), full_page=True)
+        append_thinking_event(
+            "status",
+            {"text": "Done thinking", "provider_status": "reasoning", "snapshot": True},
+            turn_id=plaintext_turn,
+            message_id="reasoning:plaintext",
+        )
+        await expect(card.locator("summary")).to_contain_text("Thought")
+        assert await card.evaluate(
+            "element => element.open"
+        ), "stream update closed opened reasoning"
+        await page.screenshot(path=str(output / "thinking-plaintext-done.png"), full_page=True)
+
+        # A tool is a hard boundary: later opaque reasoning stays a separate
+        # run instead of being folded into the earlier plaintext card.
+        append_thinking_event(
+            "tool_call_started",
+            {
+                "name": "Read",
+                "args": {"path": "/fixture"},
+                "tool_call_id": "thinking-tool",
+            },
+            turn_id=plaintext_turn,
+            message_id="thinking-tool",
+        )
+        append_thinking_event(
+            "tool_call_completed",
+            {
+                "name": "Read",
+                "result": "ok",
+                "status": "completed",
+                "tool_call_id": "thinking-tool",
+            },
+            turn_id=plaintext_turn,
+            message_id="thinking-tool",
+        )
+        append_thinking_event(
+            "status",
+            {"text": "Thinking…", "provider_status": "reasoning", "snapshot": True},
+            turn_id=plaintext_turn,
+            message_id="reasoning:after-tool",
+        )
+        append_thinking_event(
+            "status",
+            {"text": "Done thinking", "provider_status": "reasoning", "snapshot": True},
+            turn_id=plaintext_turn,
+            message_id="reasoning:after-tool",
+        )
+        await expect(plaintext.locator(".thinking-card")).to_have_count(1)
+        await expect(plaintext.locator(".reasoning-status")).to_have_count(1)
+        await expect(plaintext.locator(".tool-card")).to_contain_text("Read")
+        await expect(plaintext.locator(".reasoning-status")).to_contain_text("Thought")
+        append_thinking_event(
+            "text_delta",
+            {"text": "Plaintext answer."},
+            turn_id=plaintext_turn,
+            message_id="plaintext-answer",
+        )
+        append_thinking_event(
+            "turn_completed",
+            {"status": "completed"},
+            turn_id=plaintext_turn,
+            message_id=plaintext_turn,
+        )
+
+        # Terminal and error boundaries stop active animation and use the
+        # interrupted label. The separate turns also prove that reasoning runs
+        # are scoped by turn rather than merged globally.
+        append_thinking_event(
+            "turn_started", {"summary": "Cancelled reasoning"}, turn_id=interrupted_turn
+        )
+        append_thinking_event(
+            "status",
+            {"text": "Thinking…", "provider_status": "reasoning", "snapshot": True},
+            turn_id=interrupted_turn,
+            message_id="reasoning:cancelled",
+        )
+        append_thinking_event(
+            "status",
+            {
+                "text": "Thinking…",
+                "provider_status": "reasoning",
+                "snapshot": True,
+                "subagent_thread": "thinking-child-done",
+            },
+            turn_id=interrupted_turn,
+            message_id="reasoning:child-done",
+        )
+        append_thinking_event(
+            "status",
+            {
+                "text": "Done thinking",
+                "provider_status": "reasoning",
+                "snapshot": True,
+                "subagent_thread": "thinking-child-done",
+            },
+            turn_id=interrupted_turn,
+            message_id="reasoning:child-done",
+        )
+        append_thinking_event(
+            "status",
+            {
+                "text": "Thinking…",
+                "provider_status": "reasoning",
+                "snapshot": True,
+                "subagent_thread": "thinking-child-cancelled",
+            },
+            turn_id=interrupted_turn,
+            message_id="reasoning:child-cancelled",
+        )
+        append_thinking_event(
+            "status",
+            {
+                "text": "Sub-agent turn cancelled",
+                "provider_status": "subagent_lifecycle",
+                "subagent_status": "cancelled",
+                "subagent_thread": "thinking-child-cancelled",
+            },
+            turn_id=interrupted_turn,
+            message_id="lifecycle:child-cancelled",
+        )
+        append_thinking_event(
+            "status",
+            {
+                "text": "Thinking…",
+                "provider_status": "reasoning",
+                "snapshot": True,
+                "subagent_thread": "thinking-child-still-active",
+            },
+            turn_id=interrupted_turn,
+            message_id="reasoning:child-still-active",
+        )
+        append_thinking_event(
+            "turn_completed",
+            {"status": "interrupted"},
+            turn_id=interrupted_turn,
+            message_id=interrupted_turn,
+        )
+        cancelled = page.locator(".structured-turn").filter(has_text="Cancelled reasoning")
+        main_cancelled_status = cancelled.locator(":scope > .reasoning-status")
+        await expect(main_cancelled_status).to_contain_text("Thinking interrupted")
+        await expect(main_cancelled_status.locator(".thinking-indicator--active")).to_have_count(0)
+        child_region = cancelled.get_by_test_id("subagent-region")
+        await expect(child_region).to_have_count(1)
+        hidden_indicator = child_region.locator(".thinking-indicator--active")
+        await expect(hidden_indicator).to_have_count(1)
+        await expect(hidden_indicator).to_have_css("animation-name", "none")
+        assert await hidden_indicator.evaluate("element => element.getAnimations().length === 0")
+        await child_region.locator(":scope > summary").click()
+        child_rows = child_region.locator(".subagent-thread-row")
+        await expect(child_rows).to_have_count(3)
+        done_child = child_region.locator(
+            '.subagent-thread-row[data-subagent-thread-id="thinking-child-done"]'
+        )
+        cancelled_child = child_region.locator(
+            '.subagent-thread-row[data-subagent-thread-id="thinking-child-cancelled"]'
+        )
+        active_child = child_region.locator(
+            '.subagent-thread-row[data-subagent-thread-id="thinking-child-still-active"]'
+        )
+        await expect(done_child.locator(".reasoning-status")).to_contain_text("Thought")
+        await expect(cancelled_child.locator(".reasoning-status")).to_contain_text(
+            "Thinking interrupted"
+        )
+        await expect(cancelled_child.locator(".subthread-status")).to_contain_text(
+            "Sub-agent turn cancelled"
+        )
+        await expect(active_child.locator(".reasoning-status")).to_contain_text("Thinking…")
+        await expect(active_child.locator(".thinking-indicator--active")).to_have_count(1)
+        # Expand each scoped thread with ordinary summary clicks before the
+        # narrow-layout visual check. Hidden details content can retain layout
+        # boxes under its sticky summary; it is not readable evidence until the
+        # user opens the thread.
+        for child in (done_child, cancelled_child, active_child):
+            await child.locator(":scope > summary").click()
+            assert await child.evaluate("element => element.open")
+
+        # Native details keeps hidden CSS timelines alive unless the ancestor
+        # explicitly disables them. Test both the thread and whole-region fold.
+        active_indicator = active_child.locator(".thinking-indicator--active")
+        await expect(active_indicator).not_to_have_css("animation-name", "none")
+        assert await active_indicator.evaluate(
+            "element => element.getAnimations().some(animation => animation.playState === 'running')"
+        )
+        for fold in (active_child, child_region):
+            await fold.locator(":scope > summary").click()
+            await expect(active_indicator).to_have_css("animation-name", "none")
+            assert await active_indicator.evaluate(
+                "element => element.getAnimations().length === 0"
+            )
+            await fold.locator(":scope > summary").click()
+            await expect(active_indicator).not_to_have_css("animation-name", "none")
+
+        await page.emulate_media(reduced_motion="reduce")
+        append_thinking_event("turn_started", {"summary": "Errored reasoning"}, turn_id=error_turn)
+        append_thinking_event(
+            "status",
+            {"text": "Thinking…", "provider_status": "reasoning", "snapshot": True},
+            turn_id=error_turn,
+            message_id="reasoning:error",
+        )
+        errored = page.locator(".structured-turn").filter(has_text="Errored reasoning")
+        reduced_indicator = errored.locator(".thinking-indicator--active")
+        await expect(reduced_indicator).to_be_visible()
+        assert await reduced_indicator.evaluate(
+            "element => getComputedStyle(element).animationName === 'none'"
+        ), "reduced motion must disable the active indicator animation"
+        append_thinking_event(
+            "error",
+            {
+                "message": "Fixture provider failed",
+                "detail": "bounded acceptance error",
+            },
+            turn_id=error_turn,
+            message_id="thinking-error",
+        )
+        await expect(errored.locator(".reasoning-status")).to_contain_text("Thinking interrupted")
+        await expect(errored.locator(".thinking-indicator--active")).to_have_count(0)
+        await expect(errored).to_contain_text("Fixture provider failed")
+
+        # The compact rows remain contained at the narrow breakpoint. This is
+        # screenshot evidence for active/done/plaintext/tool/error presentation.
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.wait_for_function(
+            "document.querySelector('.chat-sidebar').classList.contains('mobile-drawer')"
+        )
+        sidebar = page.locator(".chat-sidebar")
+        if "mobile-drawer--open" in (await sidebar.get_attribute("class") or ""):
+            await page.get_by_role("button", name="Close sessions", exact=True).click()
+        await page.wait_for_function(
+            "document.querySelector('.chat-sidebar').getBoundingClientRect().right <= 1"
+        )
+        thinking_rows = page.locator(".reasoning-status, .thinking-card")
+        for row in await thinking_rows.all():
+            await row.scroll_into_view_if_needed()
+            bounds = await row.bounding_box()
+            assert bounds is not None and bounds["x"] >= 0
+            assert bounds["x"] + bounds["width"] <= 391, bounds
+            coverage = await row.evaluate("""element => {
+              const bounds = element.getBoundingClientRect()
+              const hit = document.elementFromPoint(
+                bounds.left + bounds.width / 2,
+                bounds.top + bounds.height / 2,
+              )
+              return {
+                visible: hit !== null && (hit === element || element.contains(hit)),
+                rowClass: element.className,
+                rowText: element.textContent,
+                bounds: bounds.toJSON(),
+                hitTag: hit?.tagName ?? null,
+                hitClass: hit?.className ?? null,
+                hitText: hit?.textContent ?? null,
+              }
+            }""")
+            if not coverage["visible"]:
+                await page.screenshot(
+                    path=str(output / "thinking-mobile-covered-debug.png"),
+                    full_page=True,
+                )
+            assert coverage["visible"], coverage
+        assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        await page.screenshot(
+            path=str(output / "thinking-mobile-reduced-motion.png"), full_page=True
+        )
+        await page.emulate_media(reduced_motion="no-preference")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+
+        # Tool details are deliberately expensive and must only exist while the
+        # native details card is open. Keep screenshots for this bounded fixture
+        # separate from the composer evidence above.
+        tool_evidence = output / "chat-tool-ui"
+        tool_evidence.mkdir()
+        bulk_turn = "fixture-tool-bulk"
+        later_turn = "fixture-tool-later"
+        live_tool_turn = "fixture-tool-live"
+        sequence = 0
+        state["events"] = []
+        large_input = "INPUT-BODY-" + ("0123456789abcdef" * 1024)
+        large_result = "\n".join(f"result-line-{line:04d}" for line in range(1100))
+
+        append_thinking_event("turn_started", {"summary": "Bulk tools"}, turn_id=bulk_turn)
+        for index in range(120):
+            tool_id = f"bulk-tool-{index:03d}"
+            tool_name = f"Tool{index:03d}"
+            append_thinking_event(
+                "tool_call_started",
+                {
+                    "name": tool_name,
+                    "args": {
+                        "marker": f"INPUT-{index:03d}-START",
+                        "blob": large_input,
+                        "end": f"INPUT-{index:03d}-END",
+                    },
+                    "tool_call_id": tool_id,
+                },
+                turn_id=bulk_turn,
+                message_id=tool_id,
+            )
+            status = "failed" if index == 1 else "completed"
+            append_thinking_event(
+                "tool_call_completed",
+                {
+                    "name": tool_name,
+                    "result": (f"RESULT-{index:03d}-START\n{large_result}\nRESULT-{index:03d}-END"),
+                    "status": status,
+                    "tool_call_id": tool_id,
+                },
+                turn_id=bulk_turn,
+                message_id=tool_id,
+            )
+        append_thinking_event(
+            "text_delta",
+            {"text": "Bulk tool answer."},
+            turn_id=bulk_turn,
+            message_id="bulk-answer",
+        )
+        append_thinking_event(
+            "turn_completed",
+            {"status": "completed"},
+            turn_id=bulk_turn,
+            message_id=bulk_turn,
+        )
+        append_thinking_event("turn_started", {"summary": "Later turn"}, turn_id=later_turn)
+        append_thinking_event(
+            "text_delta",
+            {"text": "Later answer."},
+            turn_id=later_turn,
+            message_id="later-answer",
+        )
+        append_thinking_event(
+            "turn_completed",
+            {"status": "completed"},
+            turn_id=later_turn,
+            message_id=later_turn,
+        )
+        await page.reload()
+
+        bulk = page.locator(".structured-turn").filter(has_text="Bulk tools")
+        process_fold = bulk.locator(".process-fold")
+        await expect(process_fold).to_have_attribute("aria-expanded", "false")
+        await process_fold.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "true")
+        bulk_card = bulk.locator(".tool-card--group")
+        await expect(bulk_card).to_have_count(1)
+        await expect(bulk_card.locator(".tool-group-item")).to_have_count(0)
+        await expect(bulk_card.locator(".tool-block")).to_have_count(0)
+        bulk_names = bulk_card.locator(":scope > summary .tool-group-names")
+        await expect(bulk_names).to_contain_text("Tool000")
+        await expect(bulk_names).to_contain_text("Tool001")
+        await expect(bulk_names).to_contain_text("Tool002")
+        await expect(bulk_names).to_contain_text("117 more")
+        await expect(bulk_names).not_to_contain_text("Tool003")
+        await page.screenshot(path=str(tool_evidence / "bulk-collapsed.png"), full_page=True)
+
+        # This historical turn is memoized, but its native details toggle must
+        # still mount all complete tool text on an ordinary click.
+        await bulk_card.locator(":scope > summary").click()
+        assert await bulk_card.evaluate("element => element.open")
+        await expect(bulk_card.locator(".tool-group-item")).to_have_count(120)
+        await expect(bulk_card.locator(".tool-block")).to_have_count(240)
+        completed_item = bulk_card.locator(".tool-group-item").nth(0)
+        failed_item = bulk_card.locator(".tool-group-item").nth(1)
+        second_completed_item = bulk_card.locator(".tool-group-item").nth(2)
+        await expect(completed_item.locator(".tool-status")).to_have_text("Completed")
+        await expect(failed_item.locator(".tool-status")).to_have_text("Failed")
+        await expect(second_completed_item.locator(".tool-status")).to_have_text("Completed")
+        for item in (completed_item, failed_item, second_completed_item):
+            assert await item.locator(".tool-status").evaluate(
+                "element => getComputedStyle(element).animationName === 'none'"
+            ), "tool status must be a static indicator"
+
+        tool_input = completed_item.locator('pre[aria-label="Tool input"]')
+        tool_result = completed_item.locator('pre[aria-label="Tool result"]')
+        await expect(tool_input).to_have_attribute("tabindex", "0")
+        await expect(tool_result).to_have_attribute("tabindex", "0")
+        await expect(tool_input).to_contain_text("INPUT-000-START")
+        await expect(tool_input).to_contain_text("INPUT-000-END")
+        await expect(tool_result).to_contain_text("RESULT-000-START")
+        await expect(tool_result).to_contain_text("RESULT-000-END")
+        assert await tool_input.evaluate("element => element.scrollWidth > element.clientWidth")
+        await tool_input.focus()
+        for _ in range(12):
+            await tool_input.press("ArrowRight")
+        assert await tool_input.evaluate("element => element.scrollLeft > 0")
+        assert await tool_result.evaluate("element => element.scrollHeight > element.clientHeight")
+        await tool_result.focus()
+        await tool_result.press("PageDown")
+        assert await tool_result.evaluate("element => element.scrollTop > 0")
+        await page.screenshot(path=str(tool_evidence / "bulk-expanded.png"), full_page=True)
+
+        # Folding the memoized historical process unmounts the card, but its
+        # controlled native-open state survives the remount with complete body
+        # content. Two rapid native summary clicks must likewise leave the DOM
+        # synchronized with the final details.open value.
+        await process_fold.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "false")
+        await expect(bulk_card).to_have_count(0)
+        await process_fold.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "true")
+        await expect(bulk_card).to_have_count(1)
+        assert await bulk_card.evaluate("element => element.open")
+        await expect(bulk_card.locator(".tool-group-item")).to_have_count(120)
+        await bulk_card.locator(":scope > summary").dblclick()
+        open_after_double_click = await bulk_card.evaluate("element => element.open")
+        expected_item_count = 120 if open_after_double_click else 0
+        await expect(bulk_card.locator(".tool-group-item")).to_have_count(expected_item_count)
+
+        if open_after_double_click:
+            await bulk_card.locator(":scope > summary").click()
+        assert not await bulk_card.evaluate("element => element.open")
+        await expect(bulk_card.locator(".tool-group-item")).to_have_count(0)
+        await expect(bulk_card.locator(".tool-block")).to_have_count(0)
+
+        # A live card stays open while its completion event replaces Running
+        # with Completed and mounts the full result.
+        live_tool_id = "live-tool"
+        append_thinking_event("turn_started", {"summary": "Live tool"}, turn_id=live_tool_turn)
+        append_thinking_event(
+            "tool_call_started",
+            {
+                "name": "LiveRead",
+                "args": {"marker": "LIVE-INPUT", "blob": large_input},
+                "tool_call_id": live_tool_id,
+            },
+            turn_id=live_tool_turn,
+            message_id=live_tool_id,
+        )
+        live_turn = page.locator(".structured-turn").filter(has_text="Live tool")
+        live_card = live_turn.locator(".tool-card--group")
+        live_summary_status = live_card.locator(":scope > summary .tool-status")
+        await expect(live_summary_status).to_have_text("Running")
+        assert await live_summary_status.evaluate(
+            "element => getComputedStyle(element).animationName === 'none'"
+        )
+        await expect(live_card.locator(".tool-group-item")).to_have_count(0)
+        await live_card.locator(":scope > summary").click()
+        assert await live_card.evaluate("element => element.open")
+        await expect(live_card.locator(".tool-group-item")).to_have_count(1)
+        await expect(live_card.locator('pre[aria-label="Tool input"]')).to_contain_text(
+            "LIVE-INPUT"
+        )
+        append_thinking_event(
+            "tool_call_completed",
+            {
+                "name": "LiveRead",
+                "result": f"LIVE-RESULT-START\n{large_result}\nLIVE-RESULT-END",
+                "status": "completed",
+                "tool_call_id": live_tool_id,
+            },
+            turn_id=live_tool_turn,
+            message_id=live_tool_id,
+        )
+        await expect(live_summary_status).to_have_text("Completed")
+        assert await live_card.evaluate("element => element.open"), "stream update closed tool"
+        await expect(live_card.locator('pre[aria-label="Tool result"]')).to_contain_text(
+            "LIVE-RESULT-END"
+        )
+
+        # Child-thread groups use the same lazy body contract and compact name
+        # summary, independently of the main tool card.
+        child_thread = "fixture-tool-child"
+        for index in range(4):
+            tool_id = f"child-tool-{index}"
+            append_thinking_event(
+                "tool_call_started",
+                {
+                    "name": f"ChildTool{index}",
+                    "args": {"marker": f"CHILD-INPUT-{index}"},
+                    "tool_call_id": tool_id,
+                    "subagent_thread": child_thread,
+                },
+                turn_id=live_tool_turn,
+                message_id=tool_id,
+            )
+            append_thinking_event(
+                "tool_call_completed",
+                {
+                    "name": f"ChildTool{index}",
+                    "result": f"CHILD-RESULT-{index}",
+                    "status": "completed",
+                    "tool_call_id": tool_id,
+                    "subagent_thread": child_thread,
+                },
+                turn_id=live_tool_turn,
+                message_id=tool_id,
+            )
+        child_region = live_turn.get_by_test_id("subagent-region")
+        await child_region.locator(":scope > summary").click()
+        child_row = child_region.locator(
+            f'.subagent-thread-row[data-subagent-thread-id="{child_thread}"]'
+        )
+        await child_row.locator(":scope > summary").click()
+        child_card = child_row.locator(".tool-card--group")
+        await expect(child_card).to_have_count(1)
+        await expect(child_card.locator(".tool-group-item")).to_have_count(0)
+        await expect(child_card.locator(".tool-block")).to_have_count(0)
+        await expect(child_card.locator(".tool-group-names")).to_contain_text("ChildTool0")
+        await expect(child_card.locator(".tool-group-names")).to_contain_text("ChildTool1")
+        await expect(child_card.locator(".tool-group-names")).to_contain_text("ChildTool2")
+        await expect(child_card.locator(".tool-group-names")).to_contain_text("1 more")
+        await expect(child_card.locator(".tool-group-names")).not_to_contain_text("ChildTool3")
+        await child_card.locator(":scope > summary").click()
+        assert await child_card.evaluate("element => element.open")
+        await expect(child_card.locator(".tool-group-item")).to_have_count(4)
+        await expect(child_card.locator('pre[aria-label="Tool result"]')).to_have_count(4)
+        await expect(child_card.locator('pre[aria-label="Tool result"]').last).to_contain_text(
+            "CHILD-RESULT-3"
+        )
+        await child_card.locator(":scope > summary").click()
+        await expect(child_card.locator(".tool-group-item")).to_have_count(0)
+
+        # Narrow summaries and the one deliberately open live body stay inside
+        # the viewport and are not covered by the closed mobile drawer.
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.wait_for_function(
+            "document.querySelector('.chat-sidebar').classList.contains('mobile-drawer')"
+        )
+        sidebar = page.locator(".chat-sidebar")
+        if "mobile-drawer--open" in (await sidebar.get_attribute("class") or ""):
+            await page.get_by_role("button", name="Close sessions", exact=True).click()
+        await page.wait_for_function(
+            "document.querySelector('.chat-sidebar').getBoundingClientRect().right <= 1"
+        )
+        for card in await page.locator(".tool-card--group").all():
+            await card.scroll_into_view_if_needed()
+            bounds = await card.bounding_box()
+            assert bounds is not None and bounds["x"] >= 0
+            assert bounds["x"] + bounds["width"] <= 391, bounds
+            assert await card.locator(":scope > summary").evaluate("""summary => {
+              const bounds = summary.getBoundingClientRect()
+              const hit = document.elementFromPoint(
+                bounds.left + bounds.width / 2,
+                bounds.top + bounds.height / 2,
+              )
+              return hit !== null && (hit === summary || summary.contains(hit))
+            }"""), "tool summary center is covered at the narrow breakpoint"
+        for block in await live_card.locator(".tool-block").all():
+            bounds = await block.bounding_box()
+            assert bounds is not None and bounds["x"] >= 0
+            assert bounds["x"] + bounds["width"] <= 391, bounds
+        assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        await page.screenshot(path=str(tool_evidence / "mobile.png"), full_page=True)
+        await page.set_viewport_size({"width": 1280, "height": 900})
 
         # The create dialog must show common directories even when the input
         # starts with a different path. Codex history stays unloaded until the
