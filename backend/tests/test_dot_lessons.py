@@ -100,6 +100,9 @@ def test_same_rule_finds_a_near_copy_only() -> None:
     assert same_rule(lessons, "When summarizing papers, name the paper version")["id"] == "a"  # type: ignore[index]
     assert same_rule(lessons, "When summarizing a paper, name the output path") is None
     assert same_rule(lessons, "paper") is None, "too short to judge"
+    # The same words that say the opposite are not the same rule.
+    assert same_rule(lessons, "When summarizing a paper, do not name the paper version") is None
+    assert same_rule(lessons, "When summarizing a paper, don’t name the paper version") is None
 
 
 def test_store_lessons_vote_edit_drop_merge(service: DotService) -> None:
@@ -910,6 +913,79 @@ async def test_progress_after_a_result_is_not_the_result(
     await poll("review", _report("r5", "completed", "ported again"), _report("r6", "working", "x"))
     assert [event["kind"] for event in store.list_inbox()] == ["task_ready", "task_ready"]
     assert "ported again" in card_body()
+
+
+@pytest.mark.asyncio
+async def test_what_the_watcher_shows_after_send_backs_and_failures(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    reports: dict[str, list[Any]] = {}
+    tasks: dict[str, Any] = {}
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(
+        workspace_manager, "reports_for_task", lambda _ws, tid: reports.setdefault(tid, [])
+    )
+
+    def poll(task_id: str, status: str, *new: Any, **extra: Any) -> Any:
+        tasks[task_id] = SimpleNamespace(status=SimpleNamespace(value=status), title="t", **extra)
+        reports.setdefault(task_id, []).extend(new)
+        return service.check_work()
+
+    def kinds() -> list[str]:
+        return [event["kind"] for event in store.list_inbox()]
+
+    def card(task_id: str) -> str:
+        found = store.get_card(store.get_work(task_id)["result_card"])  # type: ignore[index]
+        assert found is not None
+        return found.body
+
+    # Sent back, some progress, then moved to review by hand: the card shows the
+    # newest word, not the old round's result as if it were new.
+    store.upsert_work("a", workspace_id="ws", title="A", status="working")
+    await poll("a", "review", _report("a1", "completed", "round one done"))
+    await service.review("a", verdict="ok")
+    await poll("a", "working", _report("a2", "working", "Task continued from review"))
+    await poll("a", "review", _report("a3", "working", "half done, API error loop"))
+    assert kinds() == ["task_ready", "task_ready"]
+    assert "half done" in card("a") and store.get_work("a")["review_due"]  # type: ignore[index]
+
+    # A reviewer question, then late worker progress in the same poll: still asked.
+    store.upsert_work("b", workspace_id="ws", title="B", status="working")
+    await poll("b", "review", _report("b1", "completed", "done"))
+    await poll("b", "working", _report("b2", "review_started", "checking"))
+    await poll(
+        "b",
+        "review",
+        _report("b3", "review_needs_input", "Which API version?"),
+        _report("b4", "working", "polishing"),
+    )
+    assert kinds()[-2:] == ["task_ready", "task_needs_input"]
+
+    # Sent back, a new result and accepted, all between two polls: the new result.
+    store.upsert_work("c", workspace_id="ws", title="C", status="working")
+    await poll("c", "review", _report("c1", "completed", "first try"))
+    await poll("c", "done", _report("c2", "completed", "second try"), completed_at=utc_now())
+    assert kinds()[-1] == "task_done" and "second try" in card("c")
+
+    # The Hub failed it (session died) after a continue: the card says why.
+    store.upsert_work("d", workspace_id="ws", title="D", status="working")
+    await poll(
+        "d",
+        "failed",
+        _report("d1", "working", "Task continued after failure"),
+        failed_at=utc_now(),
+        failure_reason="session died",
+    )
+    events = store.list_inbox()
+    assert events[-1]["kind"] == "task_failed" and "session died" in events[-1]["text"]
+    assert "## Failure\nsession died" in card("d")
+
+    # Moved to failed by hand (no end time) after a result in review: still news.
+    store.upsert_work("e", workspace_id="ws", title="E", status="working")
+    await poll("e", "review", _report("e1", "completed", "done"))
+    await poll("e", "failed")
+    assert kinds()[-1] == "task_failed"
 
 
 @pytest.mark.asyncio

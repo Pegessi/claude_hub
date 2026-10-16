@@ -425,6 +425,35 @@ code:
 Not changed: an `ok` verdict with a cause is a documented use ("passed, but
 the worker had to ask"); merging a lesson into itself is a no-op.
 
+### Review of round 15
+
+One reviewer attacked the round-14 watcher with a larger simulator (worker
+progress, send-backs, reopen, Hub review requests, watched tasks); one went
+over the store, delegate, rotation and lessons (turn bookkeeping, rotation,
+focus limits and lesson decay held). Fixed, each with a test that fails on
+the old code:
+
+- A task sent back that came back to review with no new result showed the
+  old round's result as if new. "Same result" now means no new return since
+  the one announced; with no new return the card shows the newest report.
+- A Hub failure (session died, timeout) after a continue showed "Task
+  continued after failure" as the reason. The card and event now say why.
+- A reviewer question followed by worker progress in one poll was hidden.
+- Sent back, a new result and accepted between two polls: the new result was
+  never announced. A watched result accepted later, and a move to failed by
+  hand (no end time), were judged wrongly too.
+- A lesson saying "do not X" counted as a vote for "X".
+- A home with a broken `.git` inside another checkout committed Dot's files
+  into that repo.
+- Text with a line shaped like a journal header read as a forged turn; a
+  stray `journal/README.md` pushed real days out of the recent talk.
+- Focus items of the same priority came in random order.
+- A failed write after a delegated task started said it did not start; the
+  new tab's first commit ran on the event loop.
+
+Not changed: a home deleted by hand gets its git back only after a restart;
+a send-back followed by a Hub review in one poll counts as the same result.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

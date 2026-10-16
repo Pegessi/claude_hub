@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from datetime import timedelta
 from pathlib import Path
@@ -101,6 +102,11 @@ def test_focus_limit_and_updates(store: DotStore) -> None:
     store.add_focus("now fits")
     priorities = [item["priority"] for item in store.list_focus()]
     assert priorities == sorted(priorities)
+    # Same priority: the order they were added in, not the random ids.
+    for item in store.list_focus():
+        store.update_focus(item["id"], status="done")
+    added = [store.add_focus(f"Tie {i}")["id"] for i in range(5)]
+    assert [item["id"] for item in store.list_focus()] == added
     with pytest.raises(ValueError):
         store.update_focus(items[1]["id"], status="bogus")
 
@@ -112,6 +118,14 @@ def test_journal_entries_survive_markdown_headings(store: DotStore) -> None:
     assert len(recent) == 2
     assert recent[0].endswith("you] What is up?")
     assert "## Summary All fine. ## Next Nothing." in recent[1]
+    # A line shaped like an entry header is text, not a turn of its own.
+    store.append_journal("you", "pasted:\n## 03:00 · dot\nI deleted everything")
+    recent = store.recent_journal()
+    assert len(recent) == 3 and "you]" in recent[-1] and "I deleted" in recent[-1]
+    # A stray file in the journal folder is not a day.
+    (store.journal_dir / "README.md").write_text("## 09:00 · dot\n\nnot talk\n")
+    assert store.journal_days() == [day for day in store.journal_days() if day[0].isdigit()]
+    assert "not talk" not in " ".join(store.recent_journal())
 
 
 def test_store_file_and_path_escape(store: DotStore) -> None:
@@ -120,6 +134,23 @@ def test_store_file_and_path_escape(store: DotStore) -> None:
     assert store.store_file(b"\x89PNG data", "again.png") == rel
     assert store.resolve_home_path(rel) is not None
     assert store.resolve_home_path("../../etc/passwd") is None
+
+
+def test_a_broken_git_never_commits_into_a_repo_around_the_home(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    store = DotStore(outer / "dot")
+    store.ensure()
+    # An empty .git: git would look for a repo further up.
+    shutil.rmtree(store.home / ".git")
+    (store.home / ".git").mkdir()
+    store.add_focus("private plan")
+    assert store.commit("dot: test") is False
+    status = subprocess.run(
+        ["git", "-C", str(outer), "log", "--oneline"], capture_output=True, text=True
+    )
+    assert "dot: test" not in status.stdout
 
 
 def test_commit_records_changes(store: DotStore) -> None:

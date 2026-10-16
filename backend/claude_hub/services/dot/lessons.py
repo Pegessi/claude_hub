@@ -32,6 +32,7 @@ STOP_WORDS = frozenset(
     "the and for with that this are not when must should from into each all any "
     "you your what where how its has have was were will can".split()
 )
+_NEGATION_RE = re.compile(r"\b(?:not|no|never|cannot|without|avoid)\b|n['’]t|[不別别勿沒没]")
 _VAGUE = frozenset(
     {
         "done",
@@ -117,13 +118,23 @@ def tokens(text: str) -> set[str]:
     return found
 
 
+def _negated(text: str) -> bool:
+    return bool(_NEGATION_RE.search(text.lower()))
+
+
 def same_rule(lessons: Iterable[dict[str, Any]], rule: str) -> Optional[dict[str, Any]]:
-    """A live lesson that says nearly the same as ``rule`` (most shared words), if any."""
+    """A live lesson that says nearly the same as ``rule`` (most shared words), if any.
+
+    "Do X" and "do not X" share every word but say the opposite: never the same.
+    """
     wanted = tokens(rule)
     if len(wanted) < 2:
         return None
+    negated = _negated(rule)
     best: tuple[float, Optional[dict[str, Any]]] = (0.0, None)
     for lesson in lessons:
+        if _negated(str(lesson.get("rule") or "")) != negated:
+            continue
         theirs = tokens(str(lesson.get("rule") or ""))
         similarity = len(wanted & theirs) / len(wanted | theirs) if theirs else 0.0
         if similarity >= SAME_RULE_MIN_JACCARD and similarity > best[0]:

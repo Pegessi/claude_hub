@@ -36,6 +36,7 @@ MAX_FILE_BYTES = 50 * 1024 * 1024
 _FRONTMATTER = "---"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _JOURNAL_HEADER_RE = re.compile(r"(?m)^## (\d{2}:\d{2}) · (\w+)[ \t]*$")
+_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _GITIGNORE = "index.sqlite*\n*.tmp\n.lock\n"
 DEFAULT_NAME = "Dot"
 NAME_LIMIT = 40
@@ -570,7 +571,8 @@ class DotStore:
         items = [item for item in self._read_json("focus.json", []) if isinstance(item, dict)]
         if not include_closed:
             items = [item for item in items if item.get("status", "active") == "active"]
-        return sorted(items, key=lambda item: (_priority(item), str(item.get("id", ""))))
+        # Stable: same priority keeps the order items were added in.
+        return sorted(items, key=_priority)
 
     def add_focus(self, title: str, why: str = "", priority: int = 3) -> dict[str, Any]:
         title = title.strip()
@@ -881,7 +883,9 @@ class DotStore:
         self.ensure()
         moment = (at or utc_now()).astimezone()
         path = self.journal_path(moment.strftime("%Y-%m-%d"))
-        entry = f"## {moment.strftime('%H:%M')} · {who}\n\n{text.strip()}\n\n"
+        # A line in the text that looks like an entry header would read as a turn of its own.
+        body = _JOURNAL_HEADER_RE.sub(lambda match: " " + match.group(0), text.strip())
+        entry = f"## {moment.strftime('%H:%M')} · {who}\n\n{body}\n\n"
         # The folder may have been removed by hand since ``ensure`` ran.
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, path.open("a", encoding="utf-8") as stream:
@@ -889,7 +893,10 @@ class DotStore:
 
     def journal_days(self) -> list[str]:
         self.ensure()
-        return sorted(path.stem for path in self.journal_dir.glob("*.md"))
+        # Day files only: a README or notes file dropped in by hand is not a day.
+        return sorted(
+            path.stem for path in self.journal_dir.glob("*.md") if _DAY_RE.fullmatch(path.stem)
+        )
 
     def recent_journal(self, max_entries: int = 8, max_chars: int = 400) -> list[str]:
         """Return the newest journal entries (oldest first), each shortened."""
@@ -932,6 +939,9 @@ class DotStore:
             capture_output=True,
             text=True,
             timeout=30,
+            # Never fall through to a repo above the home (a broken .git in a home
+            # inside another checkout would commit Dot's files there).
+            env={**os.environ, "GIT_CEILING_DIRECTORIES": str(self.home.resolve().parent)},
             check=False,
         )
 

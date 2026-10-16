@@ -124,14 +124,17 @@ worker or the Hub reviewer asks), or looks stuck it:
   reviewer's; each part cut at 20,000 characters). The Hub's own "please review" reports (a task moved to
   review by hand, a review asked again, the stuck-review reaper) carry no
   result, so they neither fill the card, start a new round, nor count as a
-  question. In review or done the result is the worker's latest return
-  (ready for review, completed, failed), not progress posted after it. A
-  result is announced once: the Hub reviewer taking the task back to working
-  and returning it, or a person accepting (even again) a result already
-  announced, is not news; nor is the result a task had when it was watched. A
-  task a person sent back that returns with no new report is asked for review
-  again, and a re-run that fails again is a new failure. A reviewer question
-  is its own event, even in the poll that announces the result,
+  question. A new return (ready for review, completed, failed) is the result,
+  even with progress posted after it; with no new return the card shows the
+  worker's newest report. A failed card also says why the Hub failed it
+  (session died, timeout). A result is announced once: the Hub reviewer
+  taking the task back to working and returning it, or a person accepting
+  (even again) a result that was not a failure, is not news; nor is the
+  result a task had when it was watched. A task a person sent back that
+  returns with no new return is asked for review again, and a re-run that
+  fails again (or a move to failed by hand) is a new failure. A reviewer
+  question is its own event, even in the poll that announces the result or
+  with worker progress after it,
 - runs the standing "Dot wake-up" Chat schedule now (queued behind any
   active turn; repeated wakes coalesce). The schedule has a ten-year interval
   so it never fires on its own; events are the only way it runs. A deleted
