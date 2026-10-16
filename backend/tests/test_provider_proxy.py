@@ -16,7 +16,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from claude_hub.config import Settings
-from claude_hub.models import AgentType, ExecutionTarget
+from claude_hub.models import AgentStreamEventType, AgentType, ExecutionTarget, SessionKind
 from claude_hub.services import provider_proxy
 from claude_hub.services.agent_stream import native as native_module
 from claude_hub.services.agent_stream.native import (
@@ -25,9 +25,10 @@ from claude_hub.services.agent_stream.native import (
     CursorNativeSession,
     TraexNativeSession,
 )
-from claude_hub.services.agent_stream.redaction import _redact_value
+from claude_hub.services.agent_stream.redaction import _redact_value, redact_event
 from claude_hub.services.proxy_rules import PROXY_ENV_KEYS
 from claude_hub.services.ttyd_manager import TTYDProcess, _agent_spawn_env
+from tests.test_agent_stream import _ctx
 from tests.test_agent_stream_native import _SAMPLE_LIST_MODELS, _FakeListModelsProc, _session
 
 PROXY = "http://user:private-password@cursor-proxy.example.test:8080"
@@ -280,3 +281,109 @@ def test_structured_error_diagnostics_hide_private_proxy(key: str) -> None:
     assert "proxy failed" in redacted
     # Ordinary content keeps its existing redaction contract.
     assert _redact_value("text", "private-password") == "private-password"
+
+
+@pytest.mark.parametrize("url", [PROXY, "direct"])
+@pytest.mark.parametrize("shell", ["/bin/bash", "/bin/zsh"])
+def test_deployment_proxy_survives_login_shell(
+    url: str, shell: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        provider_proxy, "settings", Settings(_env_file=None, cursor_proxy_url=SecretStr(url))
+    )
+    home = tmp_path / "login-home"
+    home.mkdir()
+    rc = "export HTTPS_PROXY=http://login.example.test:9090\n"
+    (home / ".zprofile").write_text(rc)
+    (home / ".bash_profile").write_text(rc)
+    process = TTYDProcess(
+        tab_id="login-proxy", port=12345, name="login", agent_type=AgentType.CURSOR
+    )
+    probe = "import os,json;print(json.dumps(os.environ.get('HTTPS_PROXY')))"
+    command = process._with_env(shlex.join([sys.executable, "-c", probe]))
+    result = subprocess.run(
+        shlex.split(command),
+        env={"HOME": str(home), "ZDOTDIR": str(home), "SHELL": shell},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout) == ("" if url == "direct" else PROXY)
+
+
+@pytest.mark.asyncio
+async def test_clear_claude_override_restores_deployment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        provider_proxy, "settings", Settings(_env_file=None, claude_proxy_url=SecretStr(PROXY))
+    )
+    process = TTYDProcess(
+        tab_id="clear-claude",
+        port=12345,
+        name="clear",
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        env={"HTTPS_PROXY": "http://prior.example.test:8080"},
+    )
+    await process.switch_env({})
+    path = process._write_launch_settings_file()
+    assert path is not None
+    assert json.loads(path.read_text())["env"]["HTTPS_PROXY"] == PROXY
+
+
+def test_codex_status_error_redacts_proxy_components(monkeypatch: pytest.MonkeyPatch) -> None:
+    from claude_hub.services.agent_stream.codex_jsonl import CodexJsonlAdapter
+
+    config = Settings(
+        _env_file=None,
+        codex_proxy_url=SecretStr(PROXY),
+        codex_no_proxy=SecretStr(".private-bypass.example.test"),
+    )
+    monkeypatch.setattr(provider_proxy, "settings", config)
+    message = f"Reconnecting... 1/5: {PROXY} user user bypass PRIVATE-BYPASS.EXAMPLE.TEST"
+    events = CodexJsonlAdapter().normalize_line(
+        {"method": "error", "params": {"error": {"message": message}}}, _ctx()
+    )
+    assert events
+    assert events[0].type == AgentStreamEventType.STATUS
+    assert "text" in events[0].payload
+    payload = json.dumps([redact_event(e).payload for e in events])
+    for value in ("private-password", "cursor-proxy.example.test", "private-bypass.example.test"):
+        assert value not in payload.lower()
+    assert "[REDACTED]" in payload
+
+
+@pytest.mark.parametrize("url", [None, PROXY, "direct"])
+def test_session_home_profile_still_discovers_provider(
+    url: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        provider_proxy,
+        "settings",
+        Settings(_env_file=None, cursor_proxy_url=SecretStr(url) if url else None),
+    )
+    home = tmp_path / "session-home"
+    (home / "bin").mkdir(parents=True)
+    (home / ".bash_profile").write_text(
+        'export PATH="$HOME/bin:$PATH"\nexport HTTPS_PROXY=http://login.example.test:9090\n'
+    )
+    fake = home / "bin/ch-proxy-fake-provider"
+    fake.write_text('#!/bin/sh\nprintf "%s" "$HTTPS_PROXY"\n')
+    fake.chmod(0o700)
+    process = TTYDProcess(
+        tab_id="session-home-proxy",
+        port=12345,
+        name="home",
+        agent_type=AgentType.CURSOR,
+        env={"HOME": str(home), "SHELL": "/bin/bash"},
+    )
+    command = process._with_env("ch-proxy-fake-provider")
+    result = subprocess.run(
+        shlex.split(command),
+        env={"HOME": str(tmp_path), "SHELL": "/bin/sh", "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout == (
+        "http://login.example.test:9090" if url is None else "" if url == "direct" else PROXY
+    )

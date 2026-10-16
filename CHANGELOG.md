@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(proxy): preserve login profiles and private diagnostic boundaries
+
+- Reassert configured provider proxies after login initialization while keeping
+  session HOME, SHELL and profile-based provider discovery intact.
+- Clear stale Claude launch settings when session overrides are removed, and
+  atomically create private launch files with restrictive permissions.
+- Mask proxy usernames and bypass hosts in error/status diagnostics; require
+  provider-specific network tests and private configuration during deployment.
+
 ### feat(proxy): configure private deployment defaults per provider
 
 - Read separate Claude, Codex, Cursor and TraeX proxy/bypass defaults from
