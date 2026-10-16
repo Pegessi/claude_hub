@@ -14,7 +14,7 @@ import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 from .lessons import STOP_WORDS
 from .store import Card, DotStore
@@ -41,6 +41,8 @@ _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 _MAX_TERMS = 24
 _SETTLE_NS = 2_000_000_000
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -83,16 +85,21 @@ class DotIndex:
 
     def _connect(self) -> sqlite3.Connection:
         self.store.ensure()
+        return self._open()
+
+    def _healing(self, run: Callable[[], _T]) -> _T:
+        """Run ``run``; on a damaged index (anywhere in the file) drop it and run again."""
         try:
-            return self._open()
+            return run()
         except sqlite3.OperationalError:
             raise
         except sqlite3.DatabaseError:
-            # Not a database (a cut or garbled file): the index is rebuilt from the cards.
+            # Not a database or a damaged page: the index is rebuilt from the cards.
             logger.warning("dot: index.sqlite is broken; rebuilding it")
-            for suffix in ("", "-journal", "-wal", "-shm"):
-                Path(f"{self.store.index_path}{suffix}").unlink(missing_ok=True)
-            return self._open()
+            with self._lock:
+                for suffix in ("", "-journal", "-wal", "-shm"):
+                    Path(f"{self.store.index_path}{suffix}").unlink(missing_ok=True)
+            return run()
 
     def _open(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.store.index_path), timeout=10)
@@ -105,6 +112,9 @@ class DotIndex:
 
     def sync(self) -> int:
         """Re-index changed card files; drop removed ones. Returns the change count."""
+        return self._healing(self._sync)
+
+    def _sync(self) -> int:
         with self._lock, closing(self._connect()) as conn, conn:
             known = {row[0]: row[1] for row in conn.execute("SELECT path, mtime FROM cards")}
             changes = 0
@@ -163,7 +173,12 @@ class DotIndex:
         limit: int = 8,
         include_archived: bool = False,
     ) -> list[SearchHit]:
-        self.sync()
+        return self._healing(lambda: self._search(text, kind, limit, include_archived))
+
+    def _search(
+        self, text: str, kind: Optional[str], limit: int, include_archived: bool
+    ) -> list[SearchHit]:
+        self._sync()
         terms = query_terms(text)
         filters = []
         params: list[object] = []
@@ -208,6 +223,9 @@ class DotIndex:
         ]
 
     def count(self) -> int:
-        self.sync()
+        return self._healing(self._count)
+
+    def _count(self) -> int:
+        self._sync()
         with closing(self._connect()) as conn:
             return int(conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0])

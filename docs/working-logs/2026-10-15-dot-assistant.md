@@ -329,6 +329,25 @@ code:
 - Common words ("what", "the") recalled nearly every card, and every wake-up
   recalled cards for its fixed text. Both are gone.
 
+### Review of round 10
+
+One reviewer attacked the round-9 commit, one the panel and its API
+contract. Fixed, each with a test that fails on the old code:
+
+- An index with a good header but a damaged page opened fine and failed on
+  the first read, so every turn lost its whole context pack. Any read that
+  finds a damaged index now drops it and rebuilds.
+- A double Enter on Add (focus or lesson) added the item twice; the draft is
+  now cleared before the request and put back if it fails.
+- Times under a minute read "just now ago".
+- A 422 (for example a search over 2000 characters) showed only "Dot request
+  failed (422)"; the message is shown and the search box is capped.
+- Stop on a delegated task waiting for review dropped the review in one tap;
+  it now asks first.
+
+Left as is: opening the panel before Dot is set up creates the (empty) Dot
+home, which setup would create anyway.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude
