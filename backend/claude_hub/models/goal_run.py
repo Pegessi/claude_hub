@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .chat_image import ChatImageAttachment
+
 GOAL_OBJECTIVE_MAX_LENGTH = 4000
 GOAL_STEER_INPUT_MAX_LENGTH = 32_000
 GOAL_CHECKPOINT_HISTORY_LIMIT = 10
@@ -84,6 +86,10 @@ class GoalRun(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     tab_id: str
     objective: str = Field(min_length=1, max_length=GOAL_OBJECTIVE_MAX_LENGTH)
+    objective_revision: int = 0
+    dispatched_objective_revision: int = 0
+    pending_image_count: int = Field(default=0, ge=0, le=10)
+    pending_image_fingerprint: str = ""
     status: GoalRunStatus = GoalRunStatus.ACTIVE
     token_usage: int | None = Field(default=None, ge=0)
     usage_quality: GoalUsageQuality = GoalUsageQuality.UNAVAILABLE
@@ -117,6 +123,20 @@ class GoalRun(BaseModel):
 
 
 class GoalRunCreate(BaseModel):
+    attachments: list[ChatImageAttachment] = Field(default_factory=list, max_length=10)
+    objective: str = Field(min_length=1, max_length=GOAL_OBJECTIVE_MAX_LENGTH)
+    client_request_id: str = Field(min_length=1, max_length=128)
+
+    @field_validator("objective", "client_request_id")
+    @classmethod
+    def strip_nonempty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be blank")
+        return value
+
+
+class GoalObjectiveUpdate(BaseModel):
     objective: str = Field(min_length=1, max_length=GOAL_OBJECTIVE_MAX_LENGTH)
     client_request_id: str = Field(min_length=1, max_length=128)
 
