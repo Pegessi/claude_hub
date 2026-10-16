@@ -151,3 +151,32 @@ passed, with 3,534 backend tests passed / 7 skipped and 857 frontend tests passe
 safety check are checked again after the final evidence notes. The cross-review
 fix is committed separately from the original feature; integration and a
 production restart remain outside this handoff.
+
+## Authorized main integration
+
+After cross-validation, the user authorized integration. Fetched `origin/main`
+and clean local main both remained `2d14506f2e004fc5f382c8dde0361c23acadc594`.
+The dedicated checkout is `~/claude_hub_worktree/chat-rich-content-main-integration`,
+branch `codex/chat-rich-content-main-integration`; the same Task remains under
+initiator control with its configured review policy retained.
+
+Fixed merge `735c001d2376f64ee7d4bfbc09ae1c665609f109` has that main commit
+as first parent and reviewed feature `1b4bc751a947aac7f45d7cc3f02c7a117144b33f`
+as second parent. Its tree `73cef1424a4f345f8224afa065f4a4bcf715bc74` is identical
+to the validated feature tree. Git's native reconstruction has no conflicts or
+manual decision paths; `verify.sh merge-decisions` passes with decision count 0,
+so no decision record is needed. This mechanical result is distinct from
+independent review of the resulting call paths and evidence.
+
+The existing strict all-target and ten-scenario browser results apply unchanged
+to that exact merge tree; no application, test or dependency files change during
+integration. This documentation-only follow-up records the immutable merge and
+is checked with the docs and staged-index gates. Independent final integration
+review includes both the fixed merge and this follow-up. Before publication,
+re-fetch and require clean main to fast-forward from the reviewed first parent;
+never overwrite new remote work or force-push.
+
+Integration evidence is retained under
+`/home/tiger/claude_hub_workspace/chat-rich-content/integration/`. Git publication
+does not restart or deploy the shared service; production acceptance remains
+separate from the mocked browser and offline review evidence above.
