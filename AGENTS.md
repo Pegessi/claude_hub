@@ -103,6 +103,7 @@ independent review and human-acceptance requirements.
 - [UI acceptance: when user-visible work needs a browser gate, how to write
   one, and evidence boundaries](docs/UI_ACCEPTANCE.md)
 - [Development change boundaries: ownership, small changes and maintainable checks](docs/AGENT_WORKFLOW.md#choosing-a-change-boundary)
+- [CI reliability: test cost, bounded output, failure diagnosis and agent evidence](docs/CI_RELIABILITY.md)
 - [Detailed workflow, commands, runtime pitfalls and task-specific document index](docs/AGENT_WORKFLOW.md)
 - [Unified Task execution and Agent workflow](docs/working-logs/2026-10-07-agent-workflow-v2.md)
 - [Task UI, Bot pool, pairing and callback safety](docs/working-logs/2026-10-07-bot-pool-and-task-ui.md)
