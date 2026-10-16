@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Generator
+from typing import Any, Generator, Optional
 
 import pytest
 from pytest import MonkeyPatch
@@ -541,3 +542,156 @@ def test_old_lessons_leave_the_session_pack(service: DotService, monkeypatch: Mo
     monkeypatch.setattr("claude_hub.services.dot.context.utc_now", lambda: later)
     assert "Say where the result goes" not in build_session_pack(service.store)
     assert service.store.get_lesson(lesson["id"]) is not None, "faded lessons stay as history"
+
+
+@pytest.mark.asyncio
+async def test_watching_a_delegated_task_keeps_its_review(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    task = SimpleNamespace(
+        id="task-d",
+        workspace_id="ws",
+        title="d",
+        agent_type=SimpleNamespace(value="codex"),
+        status=SimpleNamespace(value="review"),
+    )
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-d": task})
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _tid: [])
+    store.upsert_work("task-d", workspace_id="ws", title="d", status="review", result_card="c",
+                      review_due=True, last_report_id="r1")  # fmt: skip
+    item = await service.watch("task-d", stall_hours=4)
+    assert not item.get("watched") and item["review_due"] and item["last_report_id"] == "r1"
+    assert item["stall_hours"] == 4
+    assert [entry["task_id"] for entry in store.pending_reviews()] == ["task-d"]
+    await service.review("task-d", verdict="ok", note="fine")
+    # A watched task is never judged, even if an old file marks it due.
+    store.upsert_work("task-w", status="review", watched=True, review_due=True)
+    assert store.pending_reviews() == []
+
+
+def _hub_request(report_id: str, message: str, reason: Optional[str] = None) -> SimpleNamespace:
+    report = _report(report_id, "ready_for_review", message)
+    report.validation = None
+    report.risks = None
+    report.review_decision = SimpleNamespace(value="request")
+    report.review_reason = reason or message
+    return report
+
+
+@pytest.mark.asyncio
+async def test_hub_review_requests_are_not_results(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    tasks: dict[str, Any] = {}
+    reports: dict[str, list[Any]] = {}
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(
+        workspace_manager, "reports_for_task", lambda _ws, tid: reports.get(tid, [])
+    )
+
+    def task(status: str) -> SimpleNamespace:
+        return SimpleNamespace(status=SimpleNamespace(value=status), title="t")
+
+    for task_id in ("task-1", "task-2"):
+        store.upsert_work(task_id, workspace_id="ws", title=task_id, status="working")
+        tasks[task_id] = task("working")
+    tasks["task-1"] = task("review")
+    reports["task-1"] = [_report("w1", "ready_for_review", "1. ✓ table written")]
+    await service.check_work()
+    store.mark_inbox_read()
+
+    # The user asks the Hub reviewer to look again: no new round, the card keeps the work.
+    reports["task-1"].append(_hub_request("h1", "Human requested reviewer checks."))
+    # task-2 is moved to review by hand; its result is what the worker said last.
+    tasks["task-2"] = task("review")
+    reports["task-2"] = [
+        _report("w2", "working", "half the rows done"),
+        _hub_request("h2", "Task manually moved to review status.",
+                     "Manual status transition to REVIEW."),  # fmt: skip
+    ]
+    await service.check_work()
+    events = store.list_inbox()
+    assert [(event["kind"], event["task_id"]) for event in events] == [("task_ready", "task-2")]
+    assert "half the rows done" in events[0]["text"]
+    for task_id, said in (("task-1", "table written"), ("task-2", "half the rows done")):
+        card = store.get_card(store.get_work(task_id)["result_card"])  # type: ignore[index]
+        assert card is not None and said in card.body and "Human requested" not in card.body
+
+
+@pytest.mark.asyncio
+async def test_one_bad_task_does_not_stop_the_watcher(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    huge = _report("r1", "ready_for_review", "x" * 300_000)
+    huge.validation = "v" * 300_000
+
+    def reports(_ws: str, task_id: str) -> list[Any]:
+        if task_id == "task-bad":
+            raise RuntimeError("broken report file")
+        return [huge] if task_id == "task-big" else []
+
+    review = SimpleNamespace(status=SimpleNamespace(value="review"), title="t")
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-bad": review, "task-big": review})
+    monkeypatch.setattr(workspace_manager, "reports_for_task", reports)
+    for task_id in ("task-bad", "task-big"):
+        store.upsert_work(task_id, workspace_id="ws", title=task_id, status="working")
+    assert await service.check_work() == 1
+    card = store.get_card(store.get_work("task-big")["result_card"])  # type: ignore[index]
+    assert card is not None and len(card.body) < 50_000
+
+
+@pytest.mark.asyncio
+async def test_a_reviewer_question_is_news_but_not_a_worker_question(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    reports = [_report("q1", "review_needs_input", "Which baseline counts?")]
+    task = SimpleNamespace(status=SimpleNamespace(value="review"), title="t")
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-q": task})
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _tid: reports)
+    store.upsert_work("task-q", workspace_id="ws", title="q", status="review", result_card="c",
+                      review_due=True, last_report_id="r0")  # fmt: skip
+    await service.check_work()
+    assert [event["kind"] for event in store.list_inbox()] == ["task_needs_input"]
+    assert not store.get_work("task-q").get("asked")  # type: ignore[union-attr]
+
+
+def test_a_tidy_turn_leaves_events_for_the_user(service: DotService) -> None:
+    event = service.store.add_inbox("task_done", "Paper — done", task_id="task-1")
+    plan = service.prepare_turn("[Dot tidy] Nightly memory tidy.", "conv-1")
+    assert plan.delivered_event_ids == [] and "Paper — done" not in plan.turn_pack
+    plan = service.prepare_turn("hi", None)
+    assert plan.delivered_event_ids == [event["id"]]
+
+
+def test_a_broken_hand_edit_is_kept_aside_not_erased(service: DotService) -> None:
+    store = service.store
+    (store.home / "work.json").write_text('[{"task_id": "task-1",}]', encoding="utf-8")
+    assert store.list_work() == []
+    store.upsert_work("task-2", status="working")
+    kept = list(store.home.glob("work.json.corrupt-*"))
+    assert len(kept) == 1 and '"task-1"' in kept[0].read_text(encoding="utf-8")
+    assert [item["task_id"] for item in store.list_work()] == ["task-2"]
+
+    # Stray values inside a list, odd numbers and a read event without an id do not crash.
+    (store.home / "focus.json").write_text(
+        '[1, {"id": "f-1", "title": "a", "priority": "high"}]', encoding="utf-8"
+    )
+    assert [item["id"] for item in store.list_focus()] == ["f-1"]
+    store.add_focus("b")
+    (store.home / "inbox.json").write_text(
+        json.dumps([{"read": True} for _ in range(201)]), encoding="utf-8"
+    )
+    store.add_inbox("task_done", "x")
+    assert lesson_score({"weight": 10**400, "votes": 2}, utc_now()) == 2
+    cards = store.memory_dir / "knowledge"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / "k.md").write_text(
+        '---\nid: "k"\ntitle: "k"\nimportance: 1e999\n---\nbody\n', encoding="utf-8"
+    )
+    (cards / "latin1.md").write_bytes(b'---\nid: "x"\ntitle: "caf\xe9"\n---\n')
+    assert store.get_card("k") is not None and store.get_card("latin1") is None
+    assert [card.id for card in store.list_cards()] == ["k"]

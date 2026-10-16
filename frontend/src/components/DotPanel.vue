@@ -790,7 +790,8 @@ function unwatchTask(taskId: string) {
 
 function ackInbox() {
   void run(async () => {
-    await ackDotInbox()
+    // Only what is on screen: an event that arrived since must stay unread.
+    await ackDotInbox(inbox.value.map(event => event.id))
     inbox.value = await loadDotInbox()
   })
 }

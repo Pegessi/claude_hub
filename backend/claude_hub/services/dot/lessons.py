@@ -75,7 +75,7 @@ def _parse_time(value: Any) -> Optional[datetime]:
 def _number(value: Any) -> Optional[float]:
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
 

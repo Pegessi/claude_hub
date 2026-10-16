@@ -164,6 +164,7 @@ def build_turn_pack(
     session_turn: int,
     now: Optional[datetime] = None,
     recall: bool = True,
+    inbox: bool = True,
 ) -> TurnPack:
     """Assemble the per-turn context; a section that does not fit is cut or skipped."""
     moment = (now or datetime.now()).astimezone()
@@ -171,7 +172,7 @@ def build_turn_pack(
         f"{DOT_CONTEXT_HEADER}\n"
         f"Now: {moment.strftime('%Y-%m-%d %a %H:%M %Z')} · session turn {session_turn}"
     )
-    events = store.list_inbox()
+    events = store.list_inbox() if inbox else []
     sections: list[tuple[str, list[str]]] = [
         ("## Focus (what matters now)", _focus_lines(store) or ["- (empty — ask what matters)"]),
         ("## Delegated work", _work_lines(store) or ["- (none)"]),

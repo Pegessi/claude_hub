@@ -341,6 +341,8 @@ async def main(browser_run: BrowserRun) -> None:
             assert wrote("POST", "/api/dot/work/task-7/unwatch") == [None]
             await panel.get_by_role("button", name="Mark read").click()
             await expect(panel.locator(".dot-item__badge--warn")).to_have_count(0)
+            # Only the events on screen; one that arrived since stays unread.
+            assert wrote("POST", "/api/dot/inbox/ack") == [{"ids": ["e-1"]}]
 
             # Lessons: first-pass rate, add, edit and drop a rule for briefs.
             await panel.get_by_role("tab", name="Lessons").click()

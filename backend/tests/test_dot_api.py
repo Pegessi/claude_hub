@@ -505,3 +505,16 @@ def test_review_and_lessons_routes_and_cli(
     assert [row["rule"] for row in client.get("/api/dot/lessons").json()["lessons"]] == [
         "Split big goals"
     ]
+
+
+def test_odd_paths_and_titles_are_client_errors(api: tuple[TestClient, DotService]) -> None:
+    client, _ = api
+    # A NUL byte or an over-long name is "no such file", not a server error.
+    assert client.get("/api/dot/files/a%00b.png").status_code == 404
+    assert client.get("/api/dot/files/" + "a" * 5000).status_code == 404
+    bad_file = client.post("/api/dot/cards", json={"title": "x", "files": ["files/a\u0000b"]})
+    assert bad_file.status_code == 400, bad_file.text
+    assert client.post("/api/dot/focus", json={"title": "   "}).status_code == 400
+    item = client.post("/api/dot/focus", json={"title": "Real"}).json()
+    assert client.patch(f"/api/dot/focus/{item['id']}", json={"title": "  "}).status_code == 400
+    assert client.get("/api/dot/focus").json()[0]["title"] == "Real"
