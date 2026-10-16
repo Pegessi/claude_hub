@@ -180,3 +180,33 @@ Integration evidence is retained under
 `/home/tiger/claude_hub_workspace/chat-rich-content/integration/`. Git publication
 does not restart or deploy the shared service; production acceptance remains
 separate from the mocked browser and offline review evidence above.
+
+## Concurrent local-main preservation
+
+The pre-publication guard found local main advanced concurrently to
+`15b4834f612d67f3c326287fb1fbc6b128a2f8ee`, with eight commits absent from
+`origin/main`. Their direct-tab cleanup working log explicitly excludes remote
+push. The guard stopped before updating either local or remote refs.
+
+Local merge `c5d848a9eae1ae30df1cedebbfc008cdc0e572ec` preserves that local
+main as first parent and the reviewed rich-content candidate `4daae296` as
+second parent. Only the changelog conflicts; all release entries survive.
+The accompanying local-merge decision record binds this immutable merge.
+Application paths merge natively, including managed Chat's host/image changes
+and the rich-content parser. Fresh full and browser gates and independent review
+must cover this combined tree; previous exact-feature-tree evidence alone does
+not validate it.
+
+Publication has two intentional Git tips. Local main may fast-forward to the
+combined reviewed candidate, retaining all local-only work. Remote main may
+fast-forward only to `4daae29647815baf00d3e03e158fd7e3866397a5`, which publishes
+the authorized rich-content feature without publishing the other eight commits.
+Require the expected current tips and clean local state before each update;
+never force-push or reset unrelated work.
+
+PR 15's thirteen completed remote checks passed; backend pytest remained running.
+The original main's run `38786712942` also had its backend job canceled after
+35 minutes, with no available log. This is historical context, not proof of the
+current cause or a passing remote result. Required local strict all checks and
+independent review are the publication evidence; remote backend CI remains an
+explicit unverified item. No branch protection/ruleset requires a remote status.
