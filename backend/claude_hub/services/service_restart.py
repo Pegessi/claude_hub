@@ -7,10 +7,10 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .runtime_isolation import resolve_runtime_home
 
@@ -25,9 +25,20 @@ class ChatContinuation(BaseModel):
     conversation_id: str
     config_digest: str
     continuation_id: str
+    goal_id: str | None = Field(default=None, min_length=1)
+    goal_control_digest: str | None = Field(default=None, pattern="^[a-f0-9]{64}$")
+    goal_deferred: bool = False
     state: Literal["pending", "claimed", "started", "skipped", "failed"] = "pending"
     claimed_by_instance_id: str | None = None
     reason: str = ""
+
+    @model_validator(mode="after")
+    def validate_goal_identity(self) -> Self:
+        if (self.goal_id is None) != (self.goal_control_digest is None):
+            raise ValueError("Goal recovery requires both identity and control digest")
+        if self.goal_deferred and self.goal_id is None:
+            raise ValueError("Deferred Goal recovery requires a Goal identity")
+        return self
 
 
 class ChatRecovery(BaseModel):
@@ -95,6 +106,7 @@ def public_status(state: dict[str, Any]) -> dict[str, Any]:
     operation = state.get("operation")
     if isinstance(operation, dict):
         operation = dict(operation)
+        operation.pop("chat_recovery_vetoes", None)
         if "chat_recovery" in operation:
             recovery = operation.pop("chat_recovery")
             invalid = 0
