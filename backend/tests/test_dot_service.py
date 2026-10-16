@@ -26,8 +26,9 @@ from claude_hub.models import (
 from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.agent_stream.native import ClaudeNativeSession
 from claude_hub.services.agent_stream.store import AgentStreamStore
-from claude_hub.services.dot import DotService, DotStore, reset_dot_service
+from claude_hub.services.dot import Card, DotService, DotStore, reset_dot_service
 from claude_hub.services.dot import service as service_module
+from claude_hub.services.dot.prompts import TIDY_MESSAGE
 
 TAB_ID = "tab-1"
 
@@ -365,6 +366,34 @@ def test_health_flags_problems(service: DotService) -> None:
     assert not by_name["focus_size"]["ok"]
     assert not by_name["tidy"]["ok"]
     assert by_name["git"]["ok"] and by_name["index"]["ok"]
+    # A note dropped into a card folder is not an index problem.
+    (service.store.memory_dir / "knowledge" / "README.md").write_text("notes\n")
+    by_name = {check["name"]: check for check in service.health()["checks"]}
+    assert by_name["index"]["ok"] and "1 .md file(s) without" in by_name["index"]["detail"]
+    # A profile too long for the session pack is flagged.
+    for i in range(40):
+        service.store.save_card(Card(id="", kind="user", title=f"fact {i}", summary="s" * 100))
+    by_name = {check["name"]: check for check in service.health()["checks"]}
+    assert not by_name["session_pack"]["ok"] and "profile" in by_name["session_pack"]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tidy_is_no_tidy(
+    service: DotService, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+    stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{TAB_ID}")
+    service.prepare_turn(TIDY_MESSAGE, None)
+    assert service.store.read_state().get("last_tidy_at")
+    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t1", summary="[Dot tidy]"))
+    await stream.append(
+        _event(AgentStreamEventType.TURN_COMPLETED, "t1", status="failed", assistant_text="500")
+    )
+    await service.sync_journal()
+    assert not service.store.read_state().get("last_tidy_at")
+    by_name = {check["name"]: check for check in service.health()["checks"]}
+    assert not by_name["tidy"]["ok"]
 
 
 # ── Claude Chat hook ───────────────────────────────────────────────────

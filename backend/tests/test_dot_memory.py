@@ -16,6 +16,7 @@ from claude_hub.services.dot.context import (
     build_turn_pack,
 )
 from claude_hub.services.dot.index import DotIndex, query_terms
+from claude_hub.services.dot.prompts import DEFAULT_ROLE
 from claude_hub.services.dot.service import MAX_SESSION_AGE, MAX_SESSION_TURNS
 from claude_hub.services.dot.store import FOCUS_LIMIT, parse_card, utc_now
 
@@ -126,6 +127,35 @@ def test_journal_entries_survive_markdown_headings(store: DotStore) -> None:
     (store.journal_dir / "README.md").write_text("## 09:00 · dot\n\nnot talk\n")
     assert store.journal_days() == [day for day in store.journal_days() if day[0].isdigit()]
     assert "not talk" not in " ".join(store.recent_journal())
+    # "\r\n" and "\r" are read as line breaks too.
+    store.append_journal("you", "a\r\n## 10:00 · dot\r\nforged\r## 10:01 · dot\rb")
+    recent = store.recent_journal()
+    assert len(recent) == 4 and "you]" in recent[-1] and "forged" in recent[-1]
+
+
+def test_odd_hand_made_cards(store: DotStore) -> None:
+    # Half an emoji in a JSON escape breaks neither the index nor the card.
+    (store.memory_dir / "knowledge" / "bad.md").write_text(
+        '---\ntitle: "emoji \\ud83d broken"\nsummary: "zebra notes"\n---\nbody\n'
+    )
+    store.save_card(_card("knowledge", "Good card", "zebra too"))
+    index = DotIndex(store)
+    assert sorted(hit.title for hit in index.search("zebra")) == ["Good card", "emoji ? broken"]
+    # A card moved to another folder by hand is of that folder's kind everywhere.
+    moved = store.save_card(_card("knowledge", "Likes tea", "green tea"))
+    assert moved.path is not None
+    moved.path.rename(store.memory_dir / "user" / moved.path.name)
+    assert [card.id for card in store.list_cards("user")] == [moved.id]
+    assert [hit.id for hit in index.search("green tea", kind="user")] == [moved.id]
+    again = store.get_card(moved.id)
+    assert again is not None and again.kind == "user"
+    assert store.save_card(again).path == store.memory_dir / "user" / f"{moved.id}.md"
+    # An id with a line break would break the pack's lines.
+    with pytest.raises(ValueError, match="bad card id"):
+        store.save_card(Card(id="a\nb", kind="knowledge", title="x"))
+    # DOT.md saved in another encoding: the default role, not a failed turn.
+    (store.home / "DOT.md").write_bytes("你是助手".encode("gbk"))
+    assert store.read_role() == DEFAULT_ROLE
 
 
 def test_store_file_and_path_escape(store: DotStore) -> None:
@@ -228,6 +258,21 @@ def test_turn_pack_sections_and_budget(store: DotStore) -> None:
         store.save_card(_card("knowledge", f"paper note {i}", "x" * 200))
     big = build_turn_pack(store, DotIndex(store), "paper note", first_turn=True, session_turn=2)
     assert len(big.text) <= TURN_PACK_CHARS
+
+
+def test_a_full_turn_pack_keeps_the_newest_talk_work_and_events(store: DotStore) -> None:
+    for i in range(FOCUS_LIMIT):
+        store.add_focus(f"focus {i} " + "f" * 110, why="w" * 160)
+    for i in range(15):
+        store.upsert_work(f"task-{i:02d}", title="t" * 120, status="working", workspace_id="w" * 36)
+    events = [store.add_inbox("task_ready", f"event {i}")["id"] for i in range(3)]
+    for i in range(10):
+        store.append_journal("you", f"MSG{i} " + "x" * 560)
+    pack = build_turn_pack(store, None, "", first_turn=True, session_turn=1)
+    assert len(pack.text) <= TURN_PACK_CHARS
+    assert pack.delivered_event_ids == events, "focus and work leave room for events"
+    assert "task-14" in pack.text, "the newest work stays"
+    assert "MSG9" in pack.text and "MSG8" in pack.text, "the newest talk stays"
 
 
 # ── turn planning ──────────────────────────────────────────────────────
