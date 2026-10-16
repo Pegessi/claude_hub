@@ -11,6 +11,16 @@ MAX_EXAMPLES = 5
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Reject payload-sized IDs before pytest prints verbose case names."""
+    _check_node_ids(items)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Also guard partial collections when an early error skips modifyitems."""
+    _check_node_ids(session.items)
+
+
+def _check_node_ids(items: list[pytest.Item]) -> None:
     count = 0
     examples: list[dict[str, str | int | None]] = []
     for item in items:

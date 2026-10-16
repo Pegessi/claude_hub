@@ -37,8 +37,11 @@ including collection-only runs. Failure exits with pytest usage-error status 4
 and a JSON diagnostic containing `code: CI_NODE_ID_TOO_LONG`, the limit, count,
 and at most five file/line/length examples. The diagnostic omits the actual IDs.
 On rejection it clears the pending items before aborting, so collection-finish
-reporters cannot echo the rejected names. This remains a failed collection,
-never an empty-suite success.
+reporters cannot echo the rejected names. An early collection-finish hook also
+checks partial collections, including when `-x` stops on an import error before
+the normal item-modification hook. This remains a failed collection, never an
+empty-suite success. Ordinary collection errors keep their original failure
+behavior when the collected IDs are within budget.
 
 512 is this repository's readability budget, not a GitHub platform limit or a
 test-data size limit. At adoption, the default collection had 3569 cases and a
@@ -137,6 +140,8 @@ runtime store or an enforced JSON schema:
 {
   "head_sha": "<exact verified commit>",
   "base_sha": null,
+  "cwd": "<task worktree>",
+  "worktree_dirty": null,
   "check": "backend-tests",
   "scope": "default|focused|integration",
   "command": ["./scripts/verify.sh", "backend-tests"],
@@ -149,7 +154,9 @@ runtime store or an enforced JSON schema:
 ```
 
 Set `base_sha` to the compared commit for a cost comparison; leave it `null`
-when no comparable baseline was measured.
+when no comparable baseline was measured. Record the working directory and
+dirty state; if verification includes uncommitted changes, link the exact patch.
+A HEAD SHA alone does not identify those changes.
 
 The reviewer verifies the final SHA and required scope, preserved assertions and
 inputs, added cost, actual failure-path evidence, and any changed gate or retry
@@ -164,6 +171,6 @@ another organization's timing limits, test percentages or infrastructure:
 
 - [Software Engineering at Google: testing overview](https://abseil.io/resources/swe-book/html/ch11.html): resource size and behavioral scope are different; prefer the least costly reliable proof.
 - [Google: flaky tests](https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html): retries/quarantine can reduce noise while hiding defects and increasing feedback time.
-- [pytest parameter IDs](https://docs.pytest.org/en/9.0.x/example/parametrize.html#different-options-for-test-ids), [output and durations](https://docs.pytest.org/en/9.0.x/how-to/output.html), and [fault handling](https://docs.pytest.org/en/9.0.x/how-to/failures.html#fault-handler): use the locked tool's existing ID and diagnostic facilities.
+- [pytest parameter IDs](https://docs.pytest.org/en/9.0.x/example/parametrize.html#different-options-for-test-ids), [output](https://docs.pytest.org/en/9.0.x/how-to/output.html), [durations](https://docs.pytest.org/en/9.0.x/how-to/usage.html#profiling-test-execution-duration), and [fault handling](https://docs.pytest.org/en/9.0.x/how-to/failures.html#fault-handler): use the locked tool's existing ID and diagnostic facilities.
 - [GitHub job deadlines](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes) and [artifacts](https://docs.github.com/en/actions/concepts/workflows-and-actions/workflow-artifacts): execution limits and retained evidence are distinct mechanisms.
 - [AGENTS.md format](https://agents.md/): keep agent entry instructions discoverable and give concrete test commands; this guide holds the task-specific details.
