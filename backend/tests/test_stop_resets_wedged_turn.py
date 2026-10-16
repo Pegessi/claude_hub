@@ -137,11 +137,12 @@ async def test_live_never_closing_turn_survives_watchdogs_but_stop_releases_now(
 def _orphan_tailer(store, *, observers=None) -> SessionTailer:
     # native_transport=None models a backend that restarted and owns no live
     # provider guard; only the durable stream can still hold an open turn.
+    session = _session()
     return SessionTailer(
         workspace_id="ws-wedge",
         session_id="sess-wedge",
         adapter=TraexJsonlAdapter(),
-        session_getter=_session,
+        session_getter=lambda: session,
         store=store,
         native_transport=None,
         post_persist_observers=observers or [],

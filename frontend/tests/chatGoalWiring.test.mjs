@@ -6,9 +6,9 @@ const pane = readFileSync(new URL('../src/components/StructuredPane.vue', import
 const composable = readFileSync(new URL('../src/composables/useChatGoal.ts', import.meta.url), 'utf8')
 const statusBar = readFileSync(new URL('../src/components/GoalStatusBar.vue', import.meta.url), 'utf8')
 
-test('StructuredPane renders Goal setup and persistent status independently of provider type', () => {
-  assert.match(pane, /<GoalStatusBar[\s\S]*v-if="goal"/)
-  assert.match(pane, /<GoalSetupDialog/)
+test('StructuredPane keeps Goal controls on ordinary Chat rather than managed Task Chat', () => {
+  assert.match(pane, /<GoalStatusBar[\s\S]*v-if="goal && !isManagedChat"/)
+  assert.match(pane, /<GoalSetupDialog[\s\S]*v-if="!isManagedChat"/)
   assert.doesNotMatch(composable, /agent_type|agentType/)
 })
 
@@ -71,8 +71,8 @@ test('turn completion uses bounded version-aware Goal reconciliation', () => {
 
 test('active Goal accepts steers while queued drafts wait for the Goal to stop', () => {
   assert.ok(pane.includes('goalBlocksPlan(goal.value)'))
-  assert.ok(pane.includes("goalComposerLocked.value && goal.value?.status === 'active'"))
-  assert.match(pane, /:disabled="isSending \|\| connectionState !== 'live' \|\| goalInputBlocked"/)
+  assert.ok(pane.includes("goal.value?.status === 'active'"))
+  assert.match(pane, /:disabled="isSending \|\| isGoalMutating \|\| connectionState !== 'live' \|\| goalInputBlocked"/)
   assert.match(
     pane,
     /async function flushDraftQueue\(\)[\s\S]*?isSubmissionReady\.value[\s\S]*?!isDraftQueuePaused\.value[\s\S]*?!goalComposerLocked\.value/,
@@ -80,16 +80,17 @@ test('active Goal accepts steers while queued drafts wait for the Goal to stop',
   assert.ok(pane.includes('if (!messageOverride && goalInputBlocked.value)'))
   // Enter queues and ⌘/Ctrl+Enter steers while the Goal runs.
   assert.ok(pane.includes('turnInFlight: turnInFlight.value || goalSteerOnly.value'))
-  assert.ok(pane.includes("(turnInFlight.value || goalSteerOnly.value) && !messageOverride"))
-  assert.ok(pane.includes("submit(goalSteerOnly ? 'steer' : 'normal')"))
-  assert.ok(pane.includes('⌘/Ctrl+Enter steer Goal'))
-  // Goal turns cannot carry images, including pasted or dropped ones.
-  assert.ok(pane.includes('draftMessage.value.trim().length > 0 && attachments.value.length === 0'))
-  assert.ok(pane.includes('Pause or complete the active Goal before sending messages'))
   assert.match(
     pane,
-    /async function addFiles\([\s\S]*?if \(goalComposerLocked\.value\) \{\s*composerError\.value = 'Pause or complete the active Goal before attaching images\.'\s*return/,
+    /if \(\s*!isManagedChat\.value &&\s*delivery === 'normal' &&\s*\(turnInFlight\.value \|\| goalSteerOnly\.value\) &&\s*!messageOverride\s*\) \{\s*enqueueDraft\(\)/,
   )
+  // Direct Goal turns keep steering; managed Task turns always use normal delivery.
+  assert.ok(pane.includes("submit(isManagedChat ? 'normal' : (goalSteerOnly ? 'steer' : 'normal'))"))
+  assert.ok(pane.includes('⌘/Ctrl+Enter steer Goal'))
+  // Images use the same provider original and display-preview pipeline.
+  assert.ok(pane.includes('imageSnapshot.map(toStreamSendAttachment)'))
+  assert.match(pane, /async function addFiles\([\s\S]*?if \(goalInputBlocked\.value\)/)
+
 })
 
 test('assistant text hides an unsanitized trailing Goal envelope', () => {

@@ -23,9 +23,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "image-quality-tab"
+OTHER_TAB = "other-image-tab"
 TURN = "cursor-turn"
 NOW = "2026-10-12T08:00:00Z"
 REPORT = "Run B regressed on 3 cases."
+OUTPUT_PATH = "/tmp/dotbm/dot-mobile-work.png"
+OUTPUT_TEXT = "[View screenshot](/tmp/result.png)\n\n![Missing screenshot](/tmp/missing.png)"
+RICH_PREFIX = "Rich content preview\n\n\\[\\frac{1}{"
+CODE_TEXT = 'formula = r"\\[x\\]"\nprint("<tag> & $HOME")\n'
+RICH_SUFFIX = (
+    "2}\\]\n\n"
+    r"Inline $x_1^2$ and \(p=\frac{1}{2}\). Prices $5 and $10. Literal `$x$`."
+    '\n\nShell $HOME.${USER}; echo "$HOME" "$USER"; echo "$?".'
+    "\n\n\\[\\Delta=\\mathrm{KL}(A|EVO)-\\mathrm{KL}(A|B)\\]\n\n"
+    "$$\\begin{pmatrix}1 & 2 \\\\ 3 & 4\\end{pmatrix}$$\n\n"
+    "\\[" + "+".join([r"\frac{a_i^2+b_i^2}{1+\sqrt{c_i}}"] * 20) + "\\]\n\n"
+    "| Formula | A | B | C | D | E | F | G |\n"
+    "| --- | ---: | :---: | --- | --- | --- | --- | --- |\n"
+    "| $z^3$ | alpha | beta | gamma | delta | epsilon | zeta | eta |\n\n"
+    "```python\n" + CODE_TEXT + "```\n\n"
+    r"\[\notARealCommand{<img src=x onerror=alert(1)>}\]"
+    "\n\n[Formula $x$](/tmp/result.png)"
+    '\n\n<span onclick="window.__unsafe=true">Sanitized text</span>'
+)
 
 
 def origin(url: str) -> tuple[str, str | None, int | None]:
@@ -64,7 +84,7 @@ def event(sequence: int, event_type: str, payload: dict, message_id: str, turn: 
         "type": event_type,
         "turn_id": turn,
         "message_id": message_id,
-        "call_id": "task-1" if event_type.startswith("tool_call") else None,
+        "call_id": (payload.get("tool_call_id") if event_type.startswith("tool_call") else None),
         "payload": payload,
         "created_at": NOW,
         "redacted": False,
@@ -72,7 +92,12 @@ def event(sequence: int, event_type: str, payload: dict, message_id: str, turn: 
 
 
 EVENTS = [
-    event(0, "turn_started", {"summary": "Compare runs", "mode": "default"}, f"{TURN}:user"),
+    event(
+        0,
+        "turn_started",
+        {"summary": "Compare runs", "mode": "default"},
+        f"{TURN}:user",
+    ),
     event(
         1,
         "tool_call_started",
@@ -104,7 +129,29 @@ EVENTS = [
         },
         "task-1",
     ),
-    event(3, "turn_completed", {"status": "completed"}, TURN),
+    event(
+        3,
+        "tool_call_started",
+        {
+            "tool_call_id": "image-read",
+            "name": "Read",
+            "args": {"file_path": OUTPUT_PATH},
+        },
+        "image-read",
+    ),
+    event(
+        4,
+        "tool_call_completed",
+        {"tool_call_id": "image-read", "status": "completed"},
+        "image-read",
+    ),
+    event(5, "text_delta", {"text": OUTPUT_TEXT}, f"{TURN}:assistant"),
+    event(
+        6,
+        "turn_completed",
+        {"status": "completed", "assistant_text": OUTPUT_TEXT},
+        TURN,
+    ),
 ]
 
 
@@ -139,6 +186,7 @@ async def main(browser_run: BrowserRun) -> None:
             "created_at": NOW,
         }
     ]
+    tabs.append({**tabs[0], "id": OTHER_TAB, "name": "Other Image Chat"})
     send_payloads: list[dict] = []
     report: dict = {
         "result": "FAIL",
@@ -149,10 +197,12 @@ async def main(browser_run: BrowserRun) -> None:
         "page_errors": [],
         "sends": [],
         "screenshots": [],
+        "renderer_requests": [],
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
     failure: BaseException | None = None
     page = None
+    output_image = png(1920, 1080)
 
     async with browser_run.context(
         viewport={"width": 1280, "height": 900},
@@ -173,6 +223,8 @@ async def main(browser_run: BrowserRun) -> None:
                     return
                 path = parsed.path
                 if not path.startswith("/api/"):
+                    if "/katex" in path or "highlight__js" in path or "highlight.js" in path:
+                        report["renderer_requests"].append(path)
                     await route.continue_()
                     return
                 report["api_requests"].append([request.method, path, parsed.query])
@@ -208,14 +260,34 @@ async def main(browser_run: BrowserRun) -> None:
                 elif path.endswith("/events"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     rows = [item for item in EVENTS if item["stream_sequence"] > since]
+                    if f"/tabs/{OTHER_TAB}/" in path:
+                        rows = []
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
-                    body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
+                    body = {
+                        "events": rows,
+                        "next_sequence": next_sequence,
+                        "has_more": False,
+                    }
+                elif path.endswith("/stream/agent-image"):
+                    image_path = parse_qs(parsed.query).get("path", [""])[0]
+                    await route.fulfill(
+                        status=404 if image_path == "/tmp/missing.png" else 200,
+                        content_type="image/png",
+                        body=b"" if image_path == "/tmp/missing.png" else output_image,
+                    )
+                    return
                 elif path.endswith("/wait"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     await asyncio.sleep(0.2)
                     rows = [item for item in EVENTS if item["stream_sequence"] > since]
+                    if f"/tabs/{OTHER_TAB}/" in path:
+                        rows = []
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
-                    body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
+                    body = {
+                        "events": rows,
+                        "next_sequence": next_sequence,
+                        "has_more": False,
+                    }
                 elif path.endswith("/live"):
                     await route.fulfill(
                         status=200, content_type="text/event-stream", body=": mock\n\n"
@@ -227,11 +299,21 @@ async def main(browser_run: BrowserRun) -> None:
                     turn = payload["client_turn_id"]
                     EVENTS.append(
                         event(
-                            len(EVENTS), "turn_started", {"mode": "default"}, f"{turn}:user", turn
+                            len(EVENTS),
+                            "turn_started",
+                            {"mode": "default"},
+                            f"{turn}:user",
+                            turn,
                         )
                     )
                     EVENTS.append(
-                        event(len(EVENTS), "turn_completed", {"status": "completed"}, turn, turn)
+                        event(
+                            len(EVENTS),
+                            "turn_completed",
+                            {"status": "completed"},
+                            turn,
+                            turn,
+                        )
                     )
                     body = {"ok": True}
                 elif path.endswith("/goal/current"):
@@ -255,6 +337,9 @@ async def main(browser_run: BrowserRun) -> None:
             await context.route_web_socket("**/*", block_websocket)
             await context.route("**/*", route_all)
             page = await context.new_page()
+            await page.add_init_script("""window.__copiedCode = [];
+                Object.defineProperty(navigator, 'clipboard', { configurable: true,
+                  value: { writeText: async text => window.__copiedCode.push(text) } });""")
             page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
             await page.goto(base + f"/?tab={TAB}", wait_until="domcontentloaded")
 
@@ -267,11 +352,279 @@ async def main(browser_run: BrowserRun) -> None:
             await page.screenshot(path=str(output / "cursor-subagent-card.png"), full_page=True)
             report["screenshots"].append("cursor-subagent-card.png")
 
+            # Ordinary local image links and Read screenshots both render as
+            # real images. The encoded bytes stay original; only CSS fits the
+            # thumbnail. Missing images leave an explicit quiet placeholder.
+            preview = page.get_by_role("button", name="Open image View screenshot", exact=True)
+            await expect(preview).to_be_visible()
+            await expect(page.locator(".agent-image-card img")).to_have_count(1)
+            await expect(page.locator(".quoted-img-missing")).to_contain_text("image unavailable")
+            assert await preview.locator("img").evaluate("img => img.naturalWidth") == 1920
+            await preview.click()
+            dialog = page.get_by_role("dialog", name="Image preview", exact=True)
+            await expect(dialog).to_be_visible()
+            original = dialog.get_by_role("link", name="Open original")
+            assert await original.get_attribute("href") == await dialog.locator(
+                "img"
+            ).get_attribute("src")
+            await dialog.get_by_role("button", name="Actual size").click()
+            assert (
+                await dialog.locator("img").evaluate("img => img.getBoundingClientRect().width")
+                == 1920
+            )
+            await dialog.get_by_role("button", name="Fit image").click()
+            assert await dialog.locator("img").evaluate(
+                "img => img.getBoundingClientRect().width < innerWidth"
+            )
+            await page.keyboard.press("Escape")
+            await expect(preview).to_be_focused()
+            await page.set_viewport_size({"width": 390, "height": 844})
+            await expect(preview).to_be_visible()
+            await preview.focus()
+            await page.keyboard.press("Enter")
+            await expect(dialog).to_be_visible()
+            await expect(dialog.get_by_role("button", name="Close image preview")).to_be_focused()
+            await page.keyboard.press("Tab")
+            assert await dialog.evaluate("el => el.contains(document.activeElement)")
+            await expect(dialog.get_by_role("button", name="Actual size")).to_be_in_viewport()
+            await expect(original).to_be_in_viewport()
+            await page.screenshot(path=str(output / "assistant-image-mobile.png"), full_page=True)
+            report["screenshots"].append("assistant-image-mobile.png")
+            await dialog.get_by_role("button", name="Close image preview").click()
+            await expect(preview).to_be_focused()
+            assert await page.locator(".structured-pane").evaluate(
+                "el => el.scrollWidth <= el.clientWidth"
+            )
+            report["assistant_images"] = {
+                "natural_width": 1920,
+                "actual_size_width": 1920,
+                "mobile_width": 390,
+                "plain_link_preview": True,
+                "read_preview": True,
+                "missing_placeholder": True,
+            }
+            await page.set_viewport_size({"width": 1280, "height": 900})
+
+            # A queued Chat can activate while a KeepAlive instance owns an
+            # open Teleport dialog. The old pane must release its window and
+            # keyboard trap without restoring focus into the hidden Chat.
+            await preview.click()
+            await expect(dialog).to_be_visible()
+            await page.evaluate(
+                """async tabId => {
+                const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+                useTerminalStore().setActiveTab(tabId)
+            }""",
+                OTHER_TAB,
+            )
+            await expect(dialog).to_have_count(0)
+            active_composer = page.locator(".composer-textarea:visible").first
+            await active_composer.focus()
+            await page.keyboard.press("Tab")
+            assert await page.evaluate(
+                "!document.activeElement.closest('.structured-image-lightbox')"
+            )
+            await page.evaluate(
+                """async tabId => {
+                const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+                useTerminalStore().setActiveTab(tabId)
+            }""",
+                TAB,
+            )
+            await expect(preview).to_be_visible()
+            report["chat_activation_closes_image"] = True
+
+            # Real streamed Markdown: a partial formula remains readable;
+            # arriving delimiters replace it with KaTeX without another send.
+            assert not report["renderer_requests"], report["renderer_requests"]
+            rich_turn = "rich-markdown-turn"
+            EVENTS.extend(
+                [
+                    event(
+                        len(EVENTS),
+                        "turn_started",
+                        {"summary": "Render Markdown"},
+                        rich_turn,
+                        rich_turn,
+                    ),
+                    event(
+                        len(EVENTS) + 1,
+                        "text_delta",
+                        {"text": RICH_PREFIX},
+                        rich_turn + ":assistant",
+                        rich_turn,
+                    ),
+                ]
+            )
+            rich = page.locator(".markdown-content:visible").filter(has_text="Rich content preview")
+            await expect(rich).to_contain_text("frac")
+            await expect(rich.locator(".katex")).to_have_count(0)
+            EVENTS.extend(
+                [
+                    event(
+                        len(EVENTS),
+                        "text_delta",
+                        {"text": RICH_SUFFIX},
+                        rich_turn + ":assistant",
+                        rich_turn,
+                    ),
+                    event(
+                        len(EVENTS) + 1,
+                        "turn_completed",
+                        {
+                            "status": "completed",
+                            "assistant_text": RICH_PREFIX + RICH_SUFFIX,
+                        },
+                        rich_turn,
+                        rich_turn,
+                    ),
+                ]
+            )
+            await expect(rich.locator(".katex")).to_have_count(7)
+            await page.evaluate("document.fonts.ready")
+            await expect(rich).to_contain_text("Prices $5 and $10")
+            await expect(rich).to_contain_text(
+                'Shell $HOME.${USER}; echo "$HOME" "$USER"; echo "$?".'
+            )
+            await expect(rich.locator("code").filter(has_text="$x$")).to_have_count(1)
+            await expect(rich.locator(".math-source")).to_contain_text("notARealCommand")
+            await expect(rich.locator('img[alt="Formula $x$"]')).to_have_count(1)
+            assert await rich.locator(".katex-mathml math").count() == 7
+            assert await rich.locator("[onclick], img[src=x], script").count() == 0
+            assert (
+                await rich.locator('th[align="right"]').evaluate(
+                    "el => getComputedStyle(el).textAlign"
+                )
+                == "right"
+            )
+            assert (
+                await rich.locator('td[align="center"]').evaluate(
+                    "el => getComputedStyle(el).textAlign"
+                )
+                == "center"
+            )
+            assert not await page.evaluate("Boolean(window.__unsafe)")
+            assert any("katex" in path for path in report["renderer_requests"])
+            code = rich.locator(".markdown-code-block")
+            await expect(code.locator("pre code")).to_have_text(CODE_TEXT)
+            await expect(code.locator(".hljs-string").first).to_be_attached()
+            copy = code.get_by_role("button", name="Copy code", exact=True)
+            await copy.scroll_into_view_if_needed()
+            await copy.click()
+            await expect(copy).to_have_text("Copied")
+            assert await page.evaluate("window.__copiedCode.at(-1)") == CODE_TEXT
+            # A tall review viewport keeps the entire message above clipping
+            # scroll containers. Capture the formula/table/code portion as PNG.
+            await page.set_viewport_size({"width": 1280, "height": 1600})
+            await rich.scroll_into_view_if_needed()
+            await rich.screenshot(path=str(output / "rich-markdown-desktop.png"))
+            bounds = await rich.bounding_box()
+            code_bounds = await code.bounding_box()
+            assert bounds and code_bounds
+            await page.screenshot(
+                path=str(output / "rich-markdown-preview.png"),
+                clip={
+                    "x": bounds["x"],
+                    "y": bounds["y"],
+                    "width": bounds["width"],
+                    "height": code_bounds["y"] + code_bounds["height"] - bounds["y"],
+                },
+            )
+            report["screenshots"].append("rich-markdown-desktop.png")
+            report["screenshots"].append("rich-markdown-preview.png")
+            report["adversarial_markdown"] = await page.evaluate(r"""async () => {
+                const { MarkdownBlockCache, joinBlocks } = await import('/src/utils/markdownBlocks.ts')
+                const input = '\\['.repeat(32768) + '\\\\]'
+                const cache = new MarkdownBlockCache()
+                const start = performance.now()
+                cache.render(input, { complete: true })
+                const elapsedMs = performance.now() - start
+                const dollarInput = '$a '.repeat(16000) + '$'
+                const dollarCache = new MarkdownBlockCache()
+                const dollarStart = performance.now()
+                dollarCache.render(dollarInput, { complete: true })
+                const dollarElapsedMs = performance.now() - dollarStart
+                const literalCache = new MarkdownBlockCache()
+                const literalHtml = joinBlocks(literalCache.render(
+                  'Literal <code>$x$</code> and <kbd>\\(y\\)</kbd>.', { complete: true }
+                ))
+                const literalTemplate = document.createElement('template')
+                literalTemplate.innerHTML = literalHtml
+                const hostile = '<a href="javascript:alert(1)" onclick="alert(1)">bad</a>\n\n'
+                  + '\\[\\href{javascript:alert(1)}{bad}\\]\n\n'
+                  + '<img src="javascript:alert(1)" onerror="alert(1)">'
+                const template = document.createElement('template')
+                template.innerHTML = joinBlocks(new MarkdownBlockCache().render(hostile, {
+                  complete: true, linkMarkdownPaths: true, quotedTabId: 'image-quality-tab',
+                }))
+                return { input_bytes: input.length, elapsed_ms: elapsedMs,
+                  incomplete_has_math: cache.hasMath,
+                  dollar_input_bytes: dollarInput.length, dollar_elapsed_ms: dollarElapsedMs,
+                  dollar_has_math: dollarCache.hasMath,
+                  raw_code_has_math: literalCache.hasMath,
+                  raw_code_text: literalTemplate.content.querySelector('code')?.textContent,
+                  raw_kbd_text: literalTemplate.content.querySelector('kbd')?.textContent,
+                  dangerous_nodes: template.content.querySelectorAll(
+                    'script,[onclick],[onerror],[href^="javascript:"],[src^="javascript:"]'
+                  ).length }
+                }""")
+            assert not report["adversarial_markdown"]["incomplete_has_math"]
+            assert not report["adversarial_markdown"]["dollar_has_math"]
+            assert not report["adversarial_markdown"]["raw_code_has_math"]
+            assert report["adversarial_markdown"]["raw_code_text"] == "$x$"
+            # Native Marked still applies ordinary punctuation escaping in
+            # inline HTML; the math extension must leave that behavior intact.
+            assert report["adversarial_markdown"]["raw_kbd_text"] == "(y)"
+            assert report["adversarial_markdown"]["dangerous_nodes"] == 0
+            # Broad freeze guard, not a device-level performance claim. The
+            # original extension blocks for >10s on this 64KiB fixture.
+            assert report["adversarial_markdown"]["elapsed_ms"] < 5000
+            assert report["adversarial_markdown"]["dollar_elapsed_ms"] < 5000
+            for width in (390, 280):
+                await page.set_viewport_size({"width": width, "height": 844})
+                table = rich.get_by_role("region", name="Scrollable table")
+                assert await table.evaluate("el => el.scrollWidth > el.clientWidth")
+                await table.focus()
+                await page.keyboard.press("ArrowRight")
+                await asyncio.sleep(0.1)
+                assert await table.evaluate("el => el.scrollLeft > 0")
+                wide_math = rich.locator(".markdown-math-display").nth(3)
+                assert await wide_math.evaluate("el => el.scrollWidth > el.clientWidth")
+                await wide_math.focus()
+                await page.keyboard.press("ArrowRight")
+                await asyncio.sleep(0.1)
+                assert await wide_math.evaluate("el => el.scrollLeft > 0")
+                assert await page.locator(".structured-pane:visible").evaluate(
+                    "el => el.scrollWidth <= el.clientWidth"
+                )
+                await code.screenshot(path=str(output / f"rich-code-{width}.png"))
+                await page.set_viewport_size({"width": width, "height": 1800})
+                await rich.screenshot(path=str(output / f"rich-markdown-{width}.png"))
+                report["screenshots"].append(f"rich-markdown-{width}.png")
+            report["rich_markdown"] = {
+                "rendered_formulas": 7,
+                "streamed_partial_completed": True,
+                "code_currency_preserved": True,
+                "copy_exact_code": True,
+                "clipboard": "mock writeText; real click and code extraction",
+                "sanitized": True,
+                "keyboard_scroll_widths": [390, 280],
+                "lazy_renderers": True,
+            }
+            await page.set_viewport_size({"width": 1280, "height": 900})
+
             composer = page.locator(".composer-textarea").first
             file_input = page.locator(".composer-file-input").first
-            for name, (width, height) in (("screen.png", (1600, 1000)), ("wide.png", (9000, 40))):
+            for name, (width, height) in (
+                ("screen.png", (1600, 1000)),
+                ("wide.png", (9000, 40)),
+            ):
                 await file_input.set_input_files(
-                    {"name": name, "mimeType": "image/png", "buffer": png(width, height)}
+                    {
+                        "name": name,
+                        "mimeType": "image/png",
+                        "buffer": png(width, height),
+                    }
                 )
                 await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(
                     1

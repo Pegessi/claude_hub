@@ -25,6 +25,52 @@ execution cwd is separate; explicitly pass the feature worktree.
 4. After the task reaches a terminal state, `claude-hub task cleanup TASK_ID`
    cleans task-owned ephemeral sessions. Never delete shared or persistent agents.
 
+## Managed Chat execution
+
+Workspace execution agents and reviewers may use a fixed Chat surface. Choose
+**Chat** when adding the agent, or pass `--session-kind chat` to `agent create`
+or `task run`. The default remains `terminal`; existing sessions are not migrated.
+For example, from the intended feature worktree:
+
+```bash
+claude-hub agent create WORKSPACE_ID --agent-type claude --session-kind chat --cwd .
+```
+
+Local Claude, Codex and Cursor support both surfaces. MASO supports Chat only,
+with a loopback service endpoint for managed execution; see [MASO](MASO.md).
+SSH execution remains Terminal-only. Provider, model, environment preset and
+execution directory retain their existing explicit selection rules.
+
+Managed Chat stores no terminal process: its tab identifies navigation while
+`/sessions/{managed_session_id}/stream/…` owns the conversation. Assignments and
+manual input use the Workspace mailbox, and completion still requires structured
+reports and the existing independent-review/human-acceptance gates. Native
+`turn_started` proves display intent, not provider receipt; uncertain delivery
+is never automatically replayed.
+
+A blocking question answer targets its exact provider request and turn; it is
+handled as an in-turn response, not arbitrary steering or a queued Task message.
+Busy-turn user input is sent to the durable Workspace mailbox, and a retry after
+an uncertain HTTP response must reuse its call ID. Use Workspace Agent controls
+for managed lifecycle changes: direct-tab stream, edit/fork and destructive tab
+routes reject managed Chat backing IDs. Managed execution mode remains Task-owned.
+Model/reasoning changes apply to the actual ManagedSession while idle; changing
+persistent Codex process environment requires a new session rather than a silent
+partial hot-swap.
+
+Stop pauses queued delivery as well as cancelling the current turn. An explicit
+message or Task continuation resumes the session. A finished model turn without
+a required Task report is shown as needing input, not automatically declared
+complete or retried using terminal heuristics. Unrelated reviews rotate the
+provider context without deleting display history; same-task review cycles keep
+context. This feature does not change first-turn Hub instruction injection.
+
+Agent deletion is fail-closed when native or Terminal resource retirement cannot
+be confirmed: the session remains visible for inspection and retry instead of
+releasing its identity while the old runtime may still exist. This tightens the
+previous best-effort Terminal deletion failure behavior; successful Terminal
+operations and default surface selection are unchanged.
+
 ## Delegation and evidence handoff
 
 Use the smallest workflow that can validate the result. Simple tasks run directly;

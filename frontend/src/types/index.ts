@@ -167,6 +167,7 @@ export interface TerminalTab {
   workspace_id?: string | null
   workspace_name?: string | null
   workspace_role?: WorkspaceSessionRole | null
+  managed_session_id?: string | null
   agent_session_id?: string | null
   cursor_transport?: string
   cursor_data_dir?: string | null
@@ -236,6 +237,50 @@ export interface NetworkAddress {
 export interface NetworkAccessInfo {
   hostname: string
   addresses: NetworkAddress[]
+}
+
+/**
+ * One quota window reported by a provider (`GET /api/quota`).
+ *
+ * `state` is an open string: known values are `within`, `near`, `over`,
+ * `no_limit`, `no_data` and `unknown`. Percentages are null whenever the
+ * provider did not report a number; null is not zero.
+ */
+export interface QuotaLimit {
+  /** Codex uses a window name such as `weekly`; MASO uses the model name. */
+  scope: string
+  label: string
+  state: string
+  used_percent: number | null
+  remaining_percent: number | null
+  resets_at: string | null
+}
+
+/**
+ * One provider's quota reading. `available: false` means the Hub could not read
+ * the provider at all and `message` carries the reason; the request still
+ * succeeds so one broken provider never hides the other.
+ */
+export interface ProviderQuota {
+  provider: string
+  available: boolean
+  /** Same values as `QuotaLimit.state`, plus `unavailable`. */
+  state: string
+  message: string
+  /** When this reading was taken, not when it was requested. */
+  as_of: string | null
+  stale: boolean
+  limits: QuotaLimit[]
+  /** Codex subscription plan, e.g. `pro`. */
+  plan: string | null
+  /** Codex prepaid balance as reported; the unit is not part of the contract. */
+  credit_balance: string | null
+  /** MASO: whether reaching a limit actually refuses requests. */
+  enforcing: boolean | null
+}
+
+export interface QuotaResponse {
+  providers: ProviderQuota[]
 }
 
 export interface TerminalAgentStatus {
@@ -483,6 +528,7 @@ export interface WorkspaceTask {
   goal_packet?: GoalPacket | null
   review_profiles?: ReviewProfile[]
   agent_type: AgentType
+  session_kind: SessionKind
   task_mode: WorkspaceTaskMode
   execution_complexity: WorkspaceTaskExecutionComplexity
   origin?: WorkspaceTaskOrigin
@@ -533,6 +579,7 @@ export interface WorkspaceTask {
 
 export interface WorkspaceTaskCreate {
   execution_control?: WorkspaceTaskExecutionControl
+  session_kind?: SessionKind
   reporter_key?: string
   request_key?: string | null
   source?: WorkspaceTaskSource | null
@@ -555,6 +602,7 @@ export interface WorkspaceTaskCreate {
 
 export interface WorkspaceTaskUpdate {
   title?: string
+  session_kind?: SessionKind
   prompt?: string
   status?: WorkspaceTaskStatus
   add_attachments?: WorkspaceAttachmentCreate[]
@@ -685,6 +733,7 @@ export interface ScheduledTaskRunResult {
 
 export interface EnsureWorkspaceAgentRequest {
   agent_type: AgentType
+  session_kind?: SessionKind
   title?: string | null
   role?: WorkspaceSessionRole
   reuse_existing?: boolean
@@ -705,6 +754,7 @@ export interface ManagedSession {
   tab_id: string
   role: WorkspaceSessionRole
   agent_type: AgentType
+  session_kind: SessionKind
   status: ManagedSessionStatus
   runtime_status: AgentRuntimeStatus
   current_task_id?: string | null
@@ -814,6 +864,7 @@ export interface ChatGoal {
   checkpoint_history?: ChatGoalCheckpoint[]
   checkpoint_warning?: string | null
   status_message?: string | null
+  pending_image_count?: number
   pending_input?: string | null
   resume_after_turn?: boolean
   created_at: string
@@ -823,6 +874,7 @@ export interface ChatGoal {
 }
 
 export interface ChatGoalCreate {
+  attachments?: (WorkspaceAttachmentCreate & { preview_is_original?: boolean })[]
   objective: string
   client_request_id: string
 }

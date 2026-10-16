@@ -79,15 +79,25 @@ import math
 import os
 import re
 import stat
+import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 def _state_root() -> Path:
     wm = importlib.import_module("claude_hub.services.workspace_manager")
     return Path(wm.STATE_ROOT)
+
+
+class AttachmentOwnerUnavailable(RuntimeError):
+    """The cache owner was deleted or replaced before an atomic operation."""
+
+
+def _require_current_owner(owner_is_current: Optional[Callable[[], bool]]) -> None:
+    if owner_is_current is not None and not owner_is_current():
+        raise AttachmentOwnerUnavailable("attachment cache owner was deleted or replaced")
 
 
 def _index_path() -> Path:
@@ -295,22 +305,23 @@ def _resolve_attachment_path(workspace_id: str, session_id: str, attachment_id: 
 def _write_bytes_0600(path: Path, data: bytes) -> None:
     """Atomically write ``data`` to ``path`` with mode 0600.
 
-    Uses a temp file + ``os.replace`` for atomicity. The temp file is created
-    with ``os.open(..., 0o600)`` and then chmod'd to 0600 to defeat umask.
+    The exclusive temporary file cannot follow a preexisting ``.tmp`` symlink
+    or overwrite a hard-linked file owned by another session.
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), 0o600)
             f.write(data)
-    except BaseException:
+        os.replace(tmp, path)
+    finally:
         try:
-            os.unlink(tmp)
+            tmp.unlink(missing_ok=True)
         except OSError:
+            # Preserve the original write/replace failure. Session-directory
+            # cleanup still covers a leftover temporary preview file.
             pass
-        raise
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
 
 
 def _session_dir_chain_is_real(workspace_id: str, session_id: str) -> bool:
@@ -339,7 +350,27 @@ def _session_dir_chain_is_real(workspace_id: str, session_id: str) -> bool:
     return True
 
 
-def _safe_rmtree(path: Path) -> None:
+def _sync_existing_directory(path: Path, *, trusted_root: Path) -> None:
+    """Confirm removal while following only an operator-configured root alias."""
+    # Resolve the trusted configuration boundary, never a derived namespace
+    # child. Descendants retain O_NOFOLLOW even when missing parents are retried.
+    path = trusted_root.resolve() / path.relative_to(trusted_root)
+    while True:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            if path.parent == path:
+                raise
+            path = path.parent
+            continue
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return
+
+
+def _safe_rmtree(path: Path, *, strict: bool = False) -> None:
     """Remove a directory tree without following symlinks.
 
     The preview layout has no subdirectories under the session directory, so
@@ -353,28 +384,43 @@ def _safe_rmtree(path: Path) -> None:
     if not path.exists() or path.is_symlink():
         try:
             path.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            if strict and not isinstance(exc, FileNotFoundError):
+                raise
         return
     try:
         entries = list(os.scandir(path))
-    except OSError:
+    except OSError as exc:
+        if strict and not isinstance(exc, FileNotFoundError):
+            raise
         return
     for entry in entries:
         if entry.is_symlink() or entry.is_file(follow_symlinks=False):
             try:
                 os.unlink(entry.path)
-            except OSError:
-                pass
+            except OSError as exc:
+                if strict and not isinstance(exc, FileNotFoundError):
+                    raise
         elif entry.is_dir(follow_symlinks=False):
-            _safe_rmtree(Path(entry.path))
+            _safe_rmtree(Path(entry.path), strict=strict)
     try:
         os.rmdir(path)
-    except OSError:
-        pass
+    except OSError as exc:
+        if strict and not isinstance(exc, FileNotFoundError):
+            raise
 
 
-def _safe_clear_session_dir(workspace_id: str, session_id: str) -> None:
+def _safe_clear_session_dir(workspace_id: str, session_id: str, *, strict: bool = False) -> None:
+    _clear_session_dir_no_follow(workspace_id, session_id, strict=strict)
+    if strict:
+        # Directory sync must also run when a previous attempt removed the files
+        # but failed before confirming that removal. Never ACK from exists() alone.
+        _sync_existing_directory(
+            _attachments_root() / _hash_component(workspace_id), trusted_root=_state_root()
+        )
+
+
+def _clear_session_dir_no_follow(workspace_id: str, session_id: str, *, strict: bool) -> None:
     """Remove a session's preview directory without following symlinks in the
     ancestor chain.
 
@@ -401,10 +447,13 @@ def _safe_clear_session_dir(workspace_id: str, session_id: str) -> None:
         # The root should never be a symlink; unlink it and stop.
         try:
             os.unlink(root)
-        except OSError:
-            pass
+        except OSError as exc:
+            if strict and not isinstance(exc, FileNotFoundError):
+                raise
         return
     if not stat.S_ISDIR(st.st_mode):
+        if strict:
+            raise OSError("preview root is not a directory")
         return
 
     # Check the workspace hash component.
@@ -418,15 +467,17 @@ def _safe_clear_session_dir(workspace_id: str, session_id: str) -> None:
         # follow it into whatever it points at.
         try:
             os.unlink(ws_dir)
-        except OSError:
-            pass
+        except OSError as exc:
+            if strict and not isinstance(exc, FileNotFoundError):
+                raise
         return
     if not stat.S_ISDIR(st.st_mode):
         # A non-directory entry (e.g. a file). Remove it.
         try:
             os.unlink(ws_dir)
-        except OSError:
-            pass
+        except OSError as exc:
+            if strict and not isinstance(exc, FileNotFoundError):
+                raise
         return
 
     # Check the session hash component.
@@ -439,19 +490,21 @@ def _safe_clear_session_dir(workspace_id: str, session_id: str) -> None:
         # Session dir is a symlink. Unlink it and return.
         try:
             os.unlink(sess_dir)
-        except OSError:
-            pass
+        except OSError as exc:
+            if strict and not isinstance(exc, FileNotFoundError):
+                raise
         return
     if not stat.S_ISDIR(st.st_mode):
         try:
             os.unlink(sess_dir)
-        except OSError:
-            pass
+        except OSError as exc:
+            if strict and not isinstance(exc, FileNotFoundError):
+                raise
         return
 
     # All ancestors are real directories. Now safely remove the session
     # directory's contents (unlinking any symlinks found inside).
-    _safe_rmtree(sess_dir)
+    _safe_rmtree(sess_dir, strict=strict)
 
 
 # ── MIME whitelist + magic-byte validation ──────────────────────────────────
@@ -664,7 +717,7 @@ def _normalize_entry(entry: Any) -> Optional[Dict[str, Any]]:
     ):
         last_used_at = created_at
 
-    return {
+    normalized = {
         "id": att_id,
         "workspace_id": ws,
         "session_id": sess,
@@ -675,6 +728,15 @@ def _normalize_entry(entry: Any) -> Optional[Dict[str, Any]]:
         "created_at": float(created_at),
         "last_used_at": float(last_used_at),
     }
+    # Agent outputs share this manifest and its quotas. Only hashes are kept;
+    # a source filename never becomes a manifest-controlled filesystem path.
+    if "source_key" in entry:
+        for field in ("source_key", "source_digest"):
+            value = entry.get(field)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                return None
+            normalized[field] = value
+    return normalized
 
 
 def _lru_key(entry: Dict[str, Any]) -> Tuple[float, float]:
@@ -770,15 +832,19 @@ class AgentStreamAttachmentStore:
     # ── index helpers ─────────────────────────────────────────────────────
 
     @staticmethod
-    def _read_index() -> List[Dict[str, Any]]:
+    def _read_index(*, strict: bool = False) -> List[Dict[str, Any]]:
         path = _index_path()
-        if not path.exists():
-            return []
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
         except (OSError, json.JSONDecodeError):
+            if strict:
+                raise
             return []
         if not isinstance(data, list):
+            if strict:
+                raise ValueError("invalid attachment index")
             return []
         # Normalize every entry; drop anything malformed so it cannot poison
         # eviction math or serving.
@@ -787,6 +853,8 @@ class AgentStreamAttachmentStore:
             entry = _normalize_entry(raw)
             if entry is not None:
                 normalized.append(entry)
+            elif strict:
+                raise ValueError("invalid attachment index entry")
         return normalized
 
     @staticmethod
@@ -808,6 +876,12 @@ class AgentStreamAttachmentStore:
 
     # ── public API ────────────────────────────────────────────────────────
 
+    def has_residual_state(self) -> bool:
+        """Whether files or manifest rows still reserve this session identity."""
+        if self._session_dir.exists():
+            return True
+        return bool(self._session_entries(self._read_index()))
+
     async def save(
         self,
         mime_type: str,
@@ -815,11 +889,12 @@ class AgentStreamAttachmentStore:
         *,
         width: Optional[int] = None,
         height: Optional[int] = None,
+        source_key: Optional[str] = None,
+        owner_is_current: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """Persist a bounded preview and return its opaque metadata.
 
-        The caller is responsible for supplying the bounded preview (the
-        frontend resamples to max edge 1024px). The backend enforces the
+        The caller supplies an original or bounded display image. The backend enforces the
         per-preview byte cap, the MIME whitelist, magic-byte consistency, and
         server-side dimension bounds (1..MAX_PREVIEW_EDGE).
 
@@ -835,6 +910,9 @@ class AgentStreamAttachmentStore:
         dimensions are outside 1..MAX_PREVIEW_EDGE, or the declared
         dimensions disagree with the parsed header.
         """
+        if source_key is not None and re.fullmatch(r"[0-9a-f]{64}", source_key) is None:
+            raise ValueError("source_key must be a SHA-256 digest")
+        source_digest = hashlib.sha256(preview_bytes).hexdigest() if source_key else None
         if len(preview_bytes) > self.max_preview_bytes:
             raise ValueError(
                 f"preview exceeds per-file cap: {len(preview_bytes)} > {self.max_preview_bytes} bytes"
@@ -857,7 +935,40 @@ class AgentStreamAttachmentStore:
             )
 
         async with _get_global_lock():
+            _require_current_owner(owner_is_current)
             index = self._read_index()
+            if source_key is not None and _session_dir_chain_is_real(
+                self.workspace_id, self.session_id
+            ):
+                for existing in self._session_entries(index):
+                    if (
+                        existing.get("source_key") != source_key
+                        or existing.get("source_digest") != source_digest
+                    ):
+                        continue
+                    cached = _resolve_attachment_path(
+                        self.workspace_id, self.session_id, existing["id"]
+                    )
+                    if cached.is_symlink() or not cached.is_file():
+                        continue
+                    now = time.time()
+                    if (
+                        self.max_age_seconds is not None
+                        and now - existing["created_at"] >= self.max_age_seconds
+                    ):
+                        # An expired source is a new capture, not a cache hit.
+                        # Continue through normal publication/eviction below.
+                        continue
+                    if now - existing["last_used_at"] >= _LRU_TOUCH_INTERVAL_SECONDS:
+                        existing["last_used_at"] = now
+                        self._write_index(index)
+                    return {
+                        "id": existing["id"],
+                        "mime_type": existing["mime_type"],
+                        "bytes": existing["size"],
+                        "width": existing["width"],
+                        "height": existing["height"],
+                    }
             attachment_id = uuid.uuid4().hex
             created_at = time.time()
 
@@ -885,6 +996,8 @@ class AgentStreamAttachmentStore:
                 "created_at": created_at,
                 "last_used_at": created_at,
             }
+            if source_key is not None:
+                entry.update(source_key=source_key, source_digest=source_digest)
 
             # Publish the file and the manifest atomically: if the manifest
             # write fails (or anything else raises before the index is
@@ -919,7 +1032,16 @@ class AgentStreamAttachmentStore:
             # manifest rewrite. When ``max_age_seconds`` is ``None``,
             # ``_evict_aged`` returns immediately without scanning.
             try:
-                changed = self._evict_aged(index)
+                changed = False
+                if source_key is not None:
+                    # A path URL denotes its latest retained contents. Remove
+                    # superseded versions so evicting the current one cannot
+                    # silently resurrect an older screenshot at that URL.
+                    for old in list(self._session_entries(index)):
+                        if old.get("source_key") == source_key and old["id"] != attachment_id:
+                            self._delete_entry(index, old, persist=False)
+                            changed = True
+                changed = self._evict_aged(index) or changed
                 changed = self._evict_session(index) or changed
                 changed = self._evict_global(index) or changed
                 if changed:
@@ -960,6 +1082,50 @@ class AgentStreamAttachmentStore:
                 "height": parsed_height,
             }
 
+    async def discard_source(
+        self,
+        source_key: str,
+        *,
+        owner_is_current: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """Forget superseded output when its replacement cannot be retained."""
+        async with _get_global_lock():
+            _require_current_owner(owner_is_current)
+            index = self._read_index()
+            entries = [
+                entry
+                for entry in self._session_entries(index)
+                if entry.get("source_key") == source_key
+            ]
+            for entry in entries:
+                self._delete_entry(index, entry, persist=False)
+            if entries:
+                self._write_index(index)
+
+    async def read_source(
+        self,
+        source_key: str,
+        *,
+        owner_is_current: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[bytes, str]:
+        """Read the latest retained version of a source in this session.
+
+        Works after the original file is gone. The regular read refreshes
+        LRU recency and enforces the same ownership and symlink checks.
+        """
+        async with _get_global_lock():
+            _require_current_owner(owner_is_current)
+            index = self._read_index()
+            entries = [
+                entry
+                for entry in self._session_entries(index)
+                if entry.get("source_key") == source_key
+            ]
+            if not entries:
+                raise KeyError(source_key)
+            entry = max(entries, key=lambda entry: entry["created_at"])
+            return self._read_entry(index, entry)
+
     async def read(self, attachment_id: str) -> Tuple[bytes, str]:
         """Return ``(preview_bytes, mime_type)`` for an existing attachment.
 
@@ -981,40 +1147,42 @@ class AgentStreamAttachmentStore:
             )
             if entry is None:
                 raise KeyError(attachment_id)
-            # Refuse to follow a symlink placed at the workspace or session
-            # hash component: it would redirect the read to another session's
-            # directory. Treat as missing.
-            if not _session_dir_chain_is_real(self.workspace_id, self.session_id):
-                raise KeyError(attachment_id)
-            # Build the path from hashed components; the raw ids from the
-            # index are never interpolated into the filesystem path.
+            return self._read_entry(index, entry)
+
+    def _read_entry(self, index: List[Dict[str, Any]], entry: Dict[str, Any]) -> Tuple[bytes, str]:
+        attachment_id = entry["id"]
+        # Refuse to follow a symlink placed at the workspace or session
+        # hash component: it would redirect the read to another session's
+        # directory. Treat as missing.
+        if not _session_dir_chain_is_real(self.workspace_id, self.session_id):
+            raise KeyError(attachment_id)
+        # Build the path from hashed components; the raw ids from the
+        # index are never interpolated into the filesystem path.
+        try:
+            path = _resolve_attachment_path(entry["workspace_id"], entry["session_id"], entry["id"])
+        except ValueError:
+            # Corrupt index entry (bad attachment id) — drop it and fail
+            # closed.
+            index = [e for e in index if e.get("id") != attachment_id]
+            self._write_index(index)
+            raise KeyError(attachment_id)
+        if path.is_symlink() or not path.is_file():
+            # Index says it exists but the entry is gone, is a symlink,
+            # or is an unexpected directory/device. Treat it as stale;
+            # preview reads serve regular files only.
+            index = [e for e in index if e.get("id") != attachment_id]
+            self._write_index(index)
+            raise KeyError(attachment_id)
+        data = path.read_bytes()
+        now = time.time()
+        if now - entry["last_used_at"] >= _LRU_TOUCH_INTERVAL_SECONDS:
+            entry["last_used_at"] = now
             try:
-                path = _resolve_attachment_path(
-                    entry["workspace_id"], entry["session_id"], entry["id"]
-                )
-            except ValueError:
-                # Corrupt index entry (bad attachment id) — drop it and fail
-                # closed.
-                index = [e for e in index if e.get("id") != attachment_id]
                 self._write_index(index)
-                raise KeyError(attachment_id)
-            if path.is_symlink() or not path.is_file():
-                # Index says it exists but the entry is gone, is a symlink,
-                # or is an unexpected directory/device. Treat it as stale;
-                # preview reads serve regular files only.
-                index = [e for e in index if e.get("id") != attachment_id]
-                self._write_index(index)
-                raise KeyError(attachment_id)
-            data = path.read_bytes()
-            now = time.time()
-            if now - entry["last_used_at"] >= _LRU_TOUCH_INTERVAL_SECONDS:
-                entry["last_used_at"] = now
-                try:
-                    self._write_index(index)
-                except OSError:
-                    # Recency is advisory; a failed refresh must not fail the read.
-                    pass
-            return data, entry["mime_type"]
+            except OSError:
+                # Recency is advisory; a failed refresh must not fail the read.
+                pass
+        return data, entry["mime_type"]
 
     async def _delete_by_id(self, attachment_id: str) -> None:
         """Delete a single preview by id from the index and disk.
@@ -1055,7 +1223,7 @@ class AgentStreamAttachmentStore:
             index[:] = [e for e in index if e.get("id") != attachment_id]
             self._write_index(index)
 
-    async def clear(self) -> None:
+    async def clear(self, *, strict: bool = False) -> None:
         """Remove all previews for this session (called on session deletion).
 
         The session directory is derived from hashed workspace/session ids,
@@ -1066,9 +1234,13 @@ class AgentStreamAttachmentStore:
         directory does it remove the session directory's contents. This
         prevents a symlink at the workspace or session hash component from
         causing deletion outside the preview root.
+
+        Durable deletion uses ``strict=True``: invalid index data and filesystem
+        failures propagate, and index ownership is retained until physical
+        removal succeeds. Legacy callers keep the existing best-effort behavior.
         """
         async with _get_global_lock():
-            index = self._read_index()
+            index = self._read_index(strict=True) if strict else self._read_index()
             index = [
                 e
                 for e in index
@@ -1077,10 +1249,22 @@ class AgentStreamAttachmentStore:
                     and e.get("workspace_id") == self.workspace_id
                 )
             ]
+            if strict:
+                # Keep manifest ownership when physical deletion fails. The
+                # durable retirement ledger must never ACK surviving previews.
+                _safe_clear_session_dir(self.workspace_id, self.session_id, strict=True)
             self._write_index(index)
+            if strict:
+                fd = os.open(_index_path(), os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                _sync_existing_directory(_index_path().parent, trusted_root=_state_root())
             # Remove the entire hashed session directory. We never iterate
             # over manifest-derived attachment ids here.
-            _safe_clear_session_dir(self.workspace_id, self.session_id)
+            if not strict:
+                _safe_clear_session_dir(self.workspace_id, self.session_id)
 
     async def gc(self) -> None:
         """Global garbage collection.

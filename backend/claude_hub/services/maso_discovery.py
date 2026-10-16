@@ -17,8 +17,13 @@ MAX_REGISTRY_BYTES = 64 * 1024
 MAX_CANDIDATES = 16
 
 
-def local_maso_candidates() -> list[str]:
-    candidates = {maso_http.DEFAULT_MASO_BASE_URL}
+def local_maso_registry_ports() -> list[int]:
+    """Return the loopback ports recorded in the local MASO registry.
+
+    Entries are hints that MASO is installed on this host, never readiness
+    evidence. An absent or unparseable registry yields no ports; an oversized
+    one is refused so a runaway file cannot drive discovery.
+    """
     try:
         with (Path.home() / ".maso" / "instances.json").open("rb") as source:
             raw = source.read(MAX_REGISTRY_BYTES + 1)
@@ -28,13 +33,21 @@ def local_maso_candidates() -> list[str]:
             )
         rows = json.loads(raw)
     except (OSError, ValueError, RecursionError):
-        # Older installations have no registry. Keep their standard endpoint.
-        return sorted(candidates)
+        # Older installations have no registry.
+        return []
+    ports: list[int] = []
     if isinstance(rows, dict):
         for row in rows.values():
             port = row.get("port") if isinstance(row, dict) else None
             if type(port) is int and 1 <= port <= 65535:
-                candidates.add(f"http://127.0.0.1:{port}")
+                ports.append(port)
+    return ports
+
+
+def local_maso_candidates() -> list[str]:
+    # Installations without a usable registry keep their standard endpoint.
+    candidates = {maso_http.DEFAULT_MASO_BASE_URL}
+    candidates.update(f"http://127.0.0.1:{port}" for port in local_maso_registry_ports())
     if len(candidates) > MAX_CANDIDATES:
         raise maso_http.MasoServiceUnavailable(
             "Too many local MASO instances. Set MASO_BASE_URL explicitly, then retry."

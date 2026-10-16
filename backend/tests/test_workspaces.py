@@ -25,6 +25,7 @@ from claude_hub.models import (
     ManagedSession,
     ManagedSessionStatus,
     RemoteProfile,
+    SessionKind,
     TerminalAgentStatus,
     TerminalTab,
     User,
@@ -135,6 +136,7 @@ def stub_workspace_terminal(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -143,6 +145,7 @@ def stub_workspace_terminal(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
         env: Optional[Dict[str, str]] = None,
         agent_session_id: Optional[str] = None,
         cursor_transport: str = "terminal",
@@ -160,6 +163,7 @@ def stub_workspace_terminal(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -170,6 +174,7 @@ def stub_workspace_terminal(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
             agent_session_id=agent_session_id,
             cursor_transport=cursor_transport,
             cursor_data_dir=cursor_data_dir,
@@ -2321,6 +2326,7 @@ def test_completed_report_creates_temporary_reviewer(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -2329,6 +2335,7 @@ def test_completed_report_creates_temporary_reviewer(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         created_tabs.append(name)
         return TerminalTab(
@@ -2338,6 +2345,7 @@ def test_completed_report_creates_temporary_reviewer(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -2348,6 +2356,7 @@ def test_completed_report_creates_temporary_reviewer(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -3015,6 +3024,7 @@ def test_agent_review_gate_states_trigger_reviewer(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -3023,6 +3033,7 @@ def test_agent_review_gate_states_trigger_reviewer(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         created_tabs.append(name)
         return TerminalTab(
@@ -3032,6 +3043,7 @@ def test_agent_review_gate_states_trigger_reviewer(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -3042,6 +3054,7 @@ def test_agent_review_gate_states_trigger_reviewer(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -4635,6 +4648,7 @@ def test_review_passed_keeps_task_in_review(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -4643,6 +4657,7 @@ def test_review_passed_keeps_task_in_review(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         created_tabs.append(name)
         return TerminalTab(
@@ -4652,6 +4667,7 @@ def test_review_passed_keeps_task_in_review(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -4662,6 +4678,7 @@ def test_review_passed_keeps_task_in_review(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -4767,6 +4784,7 @@ def test_review_failed_returns_feedback_to_original_agent(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -4775,6 +4793,7 @@ def test_review_failed_returns_feedback_to_original_agent(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         created_tabs.append(name)
         return TerminalTab(
@@ -4784,6 +4803,7 @@ def test_review_failed_returns_feedback_to_original_agent(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -4794,6 +4814,7 @@ def test_review_failed_returns_feedback_to_original_agent(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -4941,6 +4962,7 @@ def test_start_task_dispatches_to_resident_agent(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -4949,6 +4971,7 @@ def test_start_task_dispatches_to_resident_agent(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-agent",
@@ -4957,6 +4980,7 @@ def test_start_task_dispatches_to_resident_agent(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -4967,10 +4991,13 @@ def test_start_task_dispatches_to_resident_agent(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     sent_messages: list[tuple[str, str]] = []
-    tab_metadata_updates: list[tuple[str, str | None, str | None, WorkspaceSessionRole | None]] = []
+    tab_metadata_updates: list[
+        tuple[str, str | None, str | None, WorkspaceSessionRole | None, str | None]
+    ] = []
     renamed_tabs: list[tuple[str, str | None]] = []
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -5005,8 +5032,11 @@ def test_start_task_dispatches_to_resident_agent(
         workspace_id: str | None,
         workspace_name: str | None,
         workspace_role: WorkspaceSessionRole | None,
+        managed_session_id: str | None = None,
     ) -> bool:
-        tab_metadata_updates.append((tab_id, workspace_id, workspace_name, workspace_role))
+        tab_metadata_updates.append(
+            (tab_id, workspace_id, workspace_name, workspace_role, managed_session_id)
+        )
         return True
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
@@ -5085,6 +5115,7 @@ def test_start_task_dispatches_to_resident_agent(
         workspace_response.json()["id"],
         "Resident Repo",
         WorkspaceSessionRole.ORCHESTRATOR,
+        "resident-agent-1",
     )
 
     report_response = client.post(
@@ -5800,6 +5831,7 @@ def test_start_task_prefers_related_task_agent(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -5808,6 +5840,7 @@ def test_start_task_prefers_related_task_agent(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         tab_id = f"related{len(created_tabs) + 1}-tab"
         created_tabs.append(tab_id)
@@ -5818,6 +5851,7 @@ def test_start_task_prefers_related_task_agent(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -5828,6 +5862,7 @@ def test_start_task_prefers_related_task_agent(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     sent_messages: list[tuple[str, str]] = []
@@ -5930,6 +5965,7 @@ def test_related_task_clear_context_checkbox_sends_clear(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -5938,6 +5974,7 @@ def test_related_task_clear_context_checkbox_sends_clear(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         tab_id = f"clrctx{len(created_tabs) + 1}-tab"
         created_tabs.append(tab_id)
@@ -5948,6 +5985,7 @@ def test_related_task_clear_context_checkbox_sends_clear(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -5958,6 +5996,7 @@ def test_related_task_clear_context_checkbox_sends_clear(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     sent_messages: list[tuple[str, str]] = []
@@ -6057,6 +6096,7 @@ def test_start_task_skips_offline_related_task_agent(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -6065,6 +6105,7 @@ def test_start_task_skips_offline_related_task_agent(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         tab_id = f"offline-related{len(created_tabs) + 1}"
         created_tabs.append(tab_id)
@@ -6075,6 +6116,7 @@ def test_start_task_skips_offline_related_task_agent(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -6085,6 +6127,7 @@ def test_start_task_skips_offline_related_task_agent(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -6427,6 +6470,7 @@ def test_dispatch_workspace_serializes_concurrent_dispatches(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -6435,6 +6479,7 @@ def test_dispatch_workspace_serializes_concurrent_dispatches(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-race",
@@ -6443,6 +6488,7 @@ def test_dispatch_workspace_serializes_concurrent_dispatches(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -6453,6 +6499,7 @@ def test_dispatch_workspace_serializes_concurrent_dispatches(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_update_tab(
@@ -6612,6 +6659,7 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -6620,6 +6668,7 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-api-error",
@@ -6628,6 +6677,7 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -6638,6 +6688,7 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -6757,6 +6808,7 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -6765,6 +6817,7 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-idle-no-error",
@@ -6773,6 +6826,7 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -6783,6 +6837,7 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -6891,6 +6946,7 @@ def test_completed_idle_working_agent_is_prompted_to_report(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -6899,6 +6955,7 @@ def test_completed_idle_working_agent_is_prompted_to_report(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-report-missing",
@@ -6907,6 +6964,7 @@ def test_completed_idle_working_agent_is_prompted_to_report(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -6917,6 +6975,7 @@ def test_completed_idle_working_agent_is_prompted_to_report(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -7032,6 +7091,7 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -7040,6 +7100,7 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-review-in-flight",
@@ -7048,6 +7109,7 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -7058,6 +7120,7 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -7184,6 +7247,7 @@ def test_bound_reviewer_on_reopened_task_is_not_auto_prompted(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -7192,6 +7256,7 @@ def test_bound_reviewer_on_reopened_task_is_not_auto_prompted(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         suffix = "reviewer" if workspace_role == WorkspaceSessionRole.REVIEWER else "worker"
         return TerminalTab(
@@ -7201,6 +7266,7 @@ def test_bound_reviewer_on_reopened_task_is_not_auto_prompted(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -7211,6 +7277,7 @@ def test_bound_reviewer_on_reopened_task_is_not_auto_prompted(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -8135,6 +8202,7 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -8143,6 +8211,7 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-api-limit",
@@ -8151,6 +8220,7 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -8161,6 +8231,7 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -8276,6 +8347,7 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -8284,6 +8356,7 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-review-agent",
@@ -8292,6 +8365,7 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -8302,6 +8376,7 @@ def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -8433,6 +8508,7 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -8441,6 +8517,7 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-review-continued",
@@ -8449,6 +8526,7 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -8459,6 +8537,7 @@ def test_review_passed_task_does_not_reopen_when_agent_has_new_activity(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -8580,6 +8659,7 @@ def test_review_passed_reconciles_stale_working_task(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -8588,6 +8668,7 @@ def test_review_passed_reconciles_stale_working_task(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-stale-working",
@@ -8596,6 +8677,7 @@ def test_review_passed_reconciles_stale_working_task(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -8606,6 +8688,7 @@ def test_review_passed_reconciles_stale_working_task(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -8862,6 +8945,7 @@ def _stub_workspace_terminal_for_late_reports(monkeypatch: MonkeyPatch, repo: Pa
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -8870,6 +8954,7 @@ def _stub_workspace_terminal_for_late_reports(monkeypatch: MonkeyPatch, repo: Pa
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id=f"tab-{name}",
@@ -8878,6 +8963,7 @@ def _stub_workspace_terminal_for_late_reports(monkeypatch: MonkeyPatch, repo: Pa
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -8888,6 +8974,7 @@ def _stub_workspace_terminal_for_late_reports(monkeypatch: MonkeyPatch, repo: Pa
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -9148,6 +9235,7 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -9156,6 +9244,7 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-fresh-ready",
@@ -9164,6 +9253,7 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -9174,6 +9264,7 @@ def test_fresh_ready_report_is_not_immediately_reopened_by_runtime_working(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -9285,6 +9376,7 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -9293,6 +9385,7 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-completed-review",
@@ -9301,6 +9394,7 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -9311,6 +9405,7 @@ def test_completed_review_passed_task_stays_in_review_despite_runtime_activity(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -9425,6 +9520,7 @@ def test_continue_task_marks_working_before_send_verification_failure(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -9433,6 +9529,7 @@ def test_continue_task_marks_working_before_send_verification_failure(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-continue-agent",
@@ -9441,6 +9538,7 @@ def test_continue_task_marks_working_before_send_verification_failure(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -9451,6 +9549,7 @@ def test_continue_task_marks_working_before_send_verification_failure(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -9600,6 +9699,7 @@ def test_remote_workspace_default_agent_uses_local_tab(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -9608,6 +9708,7 @@ def test_remote_workspace_default_agent_uses_local_tab(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         created_tabs.append(
             {
@@ -9626,6 +9727,7 @@ def test_remote_workspace_default_agent_uses_local_tab(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -9636,6 +9738,7 @@ def test_remote_workspace_default_agent_uses_local_tab(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -9725,6 +9828,7 @@ def test_remote_workspace_explicit_remote_agent_uses_remote_tab_and_forwarded_re
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -9733,6 +9837,7 @@ def test_remote_workspace_explicit_remote_agent_uses_remote_tab_and_forwarded_re
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         created_tabs.append(
             {
@@ -9751,6 +9856,7 @@ def test_remote_workspace_explicit_remote_agent_uses_remote_tab_and_forwarded_re
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -9761,6 +9867,7 @@ def test_remote_workspace_explicit_remote_agent_uses_remote_tab_and_forwarded_re
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, message: str) -> None:
@@ -9854,6 +9961,7 @@ def test_create_agent_can_override_target_and_yolo_mode(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -9862,6 +9970,7 @@ def test_create_agent_can_override_target_and_yolo_mode(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         created_tabs.append(
             {
@@ -9883,6 +9992,7 @@ def test_create_agent_can_override_target_and_yolo_mode(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -9893,6 +10003,7 @@ def test_create_agent_can_override_target_and_yolo_mode(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(_tmux_session: str, _message: str) -> None:
@@ -9981,6 +10092,7 @@ def test_start_task_does_not_dispatch_to_stopped_resident_agent(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -9989,6 +10101,7 @@ def test_start_task_does_not_dispatch_to_stopped_resident_agent(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         tab_id = f"tab-agent-{len(created_tabs) + 1}"
         created_tabs.append(tab_id)
@@ -9999,6 +10112,7 @@ def test_start_task_does_not_dispatch_to_stopped_resident_agent(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -10009,6 +10123,7 @@ def test_start_task_does_not_dispatch_to_stopped_resident_agent(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     sent_messages: list[tuple[str, str]] = []
@@ -10099,6 +10214,7 @@ def test_delete_task_removes_reports_and_unlinks_session(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -10107,6 +10223,7 @@ def test_delete_task_removes_reports_and_unlinks_session(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-delete-agent",
@@ -10115,6 +10232,7 @@ def test_delete_task_removes_reports_and_unlinks_session(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -10125,6 +10243,7 @@ def test_delete_task_removes_reports_and_unlinks_session(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:
@@ -10210,6 +10329,7 @@ def test_done_task_writes_delete_safe_task_record(
         cwd: Optional[str] = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: Optional[str] = None,
         remote_cwd: Optional[str] = None,
@@ -10218,6 +10338,7 @@ def test_done_task_writes_delete_safe_task_record(
         workspace_id: Optional[str] = None,
         workspace_name: Optional[str] = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         return TerminalTab(
             id="tab-record-agent",
@@ -10226,6 +10347,7 @@ def test_done_task_writes_delete_safe_task_record(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -10236,6 +10358,7 @@ def test_done_task_writes_delete_safe_task_record(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:

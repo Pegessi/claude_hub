@@ -6,6 +6,7 @@ and rewrites its trajectory; only root ``agent_end`` completes a Hub turn.
 
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,12 +15,80 @@ from typing import Any, Dict, List, Optional, Tuple
 from ...models import AgentStreamEvent, AgentStreamEventType, ManagedSession
 from .base import AgentStreamAdapter, NormalizeContext
 
+# Fields a provider failure frame uses for its human-readable description, most
+# specific first. MASO reports ``agent_error`` as ``str(exception)``; when the
+# failure came from a provider frame its exception argument is that frame's
+# mapping, so the string Hub receives is a Python repr of it.
+_ERROR_DESCRIPTION_KEYS = ("message", "error", "detail", "reason", "description")
+
+# Nesting bound for the description search. Provider frames wrap the real
+# failure one or two levels deep ({"error": {"message": ...}}); deeper is
+# payload structure, not prose.
+_ERROR_DESCRIPTION_DEPTH = 3
+
 
 @dataclass
 class _Message:
     index: int = 0
     content: str = ""
     reasoning: str = ""
+
+
+def _as_json(value: Any) -> Optional[str]:
+    """Render upstream evidence as JSON so no Python repr can reach the user."""
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        # Unreachable for SSE frames (always json.loads output), but a raise
+        # here would make the tailer drop the whole error record.
+        return None
+
+
+def _error_mapping(error: Any) -> Optional[Dict[str, Any]]:
+    """Return ``error`` as a mapping, recovering one MASO stringified away."""
+    if isinstance(error, dict):
+        return error
+    if isinstance(error, str):
+        text = error.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError, TypeError):
+                return None  # ordinary prose that merely looks like a frame
+            if isinstance(parsed, dict):
+                return parsed  # a set literal parses too, and is not a frame
+    return None
+
+
+def _mapping_description(mapping: Dict[str, Any], depth: int) -> str:
+    for key in _ERROR_DESCRIPTION_KEYS:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict) and depth > 1:
+            nested = _mapping_description(value, depth - 1)
+            if nested:
+                return nested
+    return ""
+
+
+def _describe_error(error: Any) -> Tuple[str, Optional[str]]:
+    """Split MASO's ``error`` field into (description, verbatim evidence).
+
+    The description is empty when the provider reported no prose — a failure
+    frame such as ``{'sequence_number': 1, 'type': 'error'}`` carries none. Hub
+    cannot invent the cause, so the caller says so instead of printing the raw
+    frame as if it were the error. The evidence is kept alongside, as JSON,
+    because the adapter must not decide which upstream field a reader needs.
+    """
+    mapping = _error_mapping(error)
+    if mapping is not None:
+        return _mapping_description(mapping, _ERROR_DESCRIPTION_DEPTH), _as_json(mapping)
+    if isinstance(error, str):
+        return error.strip(), None
+    if error is None:
+        return "", None
+    return "", _as_json(error)
 
 
 class MasoEventAdapter(AgentStreamAdapter):
@@ -194,19 +263,38 @@ class MasoEventAdapter(AgentStreamAdapter):
                 )
             ]
         if kind == "agent_error":
-            if child:
-                return [
-                    event(
-                        AgentStreamEventType.STATUS,
-                        {
-                            "text": str(data.get("error", "MASO child failed")),
-                            "provider_status": "error",
-                        },
-                    )
-                ]
+            description, evidence = _describe_error(data.get("error"))
+            stop_reason = data.get("stop_reason")
+            # MASO pins stop_reason to "error" whenever it fires this hook, so
+            # naming it would only repeat the sentence. Anything else means the
+            # contract moved and the reader should see it.
+            qualifier = (
+                f" (stop reason: {stop_reason})"
+                if isinstance(stop_reason, str) and stop_reason not in ("", "error")
+                else ""
+            )
+            subject = "MASO sub-agent" if child else "MASO run"
+            if description:
+                text = f"{subject} failed{qualifier}: {description}"
+            else:
+                text = f"{subject} failed{qualifier} and reported no error description."
+                if not child:
+                    # The only honest advice left: Hub knows nothing the user
+                    # can act on, and the cause is in MASO's own logs.
+                    text += " Retry the turn; if it repeats, check the MASO service logs."
+            # A child failure is context inside the child's timeline, never a
+            # terminal error for the parent Chat.
+            failure: Dict[str, Any] = (
+                {"text": text, "provider_status": "error"} if child else {"message": text}
+            )
+            if evidence is not None:
+                failure["detail"] = evidence
+            if isinstance(stop_reason, str) and stop_reason:
+                failure["stop_reason"] = stop_reason
             return [
                 event(
-                    AgentStreamEventType.ERROR, {"message": str(data.get("error", "MASO failed"))}
+                    AgentStreamEventType.STATUS if child else AgentStreamEventType.ERROR,
+                    failure,
                 )
             ]
         if kind == "hub_transport_error":

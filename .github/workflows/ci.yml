@@ -104,10 +104,11 @@ jobs:
     name: Browser / mocked UI acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/claude-hub-browsers
-      CLAUDE_HUB_VERIFY_ARTIFACT_ROOT: ${{ runner.temp }}/claude-hub-browser-evidence
     steps:
+      - name: Set runner-local browser and evidence paths
+        run: |
+          echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/claude-hub-browsers" >> "$GITHUB_ENV"
+          echo "CLAUDE_HUB_VERIFY_ARTIFACT_ROOT=$RUNNER_TEMP/claude-hub-browser-evidence" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - id: uv-version
         name: Read declared uv version
@@ -166,9 +167,11 @@ jobs:
     timeout-minutes: 30
     env:
       CLAUDE_HUB_E2E_TIMEOUT_SCALE: "3"
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/claude-hub-browsers
-      CLAUDE_HUB_VERIFY_ARTIFACT_ROOT: ${{ runner.temp }}/claude-hub-hmr-evidence
     steps:
+      - name: Set runner-local browser and evidence paths
+        run: |
+          echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/claude-hub-browsers" >> "$GITHUB_ENV"
+          echo "CLAUDE_HUB_VERIFY_ARTIFACT_ROOT=$RUNNER_TEMP/claude-hub-hmr-evidence" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - id: uv-version
         name: Read declared uv version

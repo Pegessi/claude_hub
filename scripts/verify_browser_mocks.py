@@ -28,12 +28,14 @@ RUNNERS = (
     ("browser_agent_workspace_task_create.py", "/tests/agent_workspace_task_create_harness.html"),
     ("browser_chat_subagent_region.py", ""),
     ("browser_chat_composer.py", ""),
+    ("browser_managed_chat_question.py", ""),
     ("browser_feishu_provenance.py", ""),
     ("browser_feishu_bot_components.py", "/tests/feishu_bot_components_harness.html"),
     ("browser_chat_queue_activation.py", ""),
     ("browser_chat_goal_steer.py", ""),
     ("browser_chat_image_quality.py", ""),
     ("browser_dot_panel.py", ""),
+    ("browser_service_restart.py", ""),
 )
 
 # A scenario's entry page cannot be derived from its filename, so the table

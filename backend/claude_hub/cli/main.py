@@ -200,6 +200,7 @@ def _register() -> None:
         clipboard,
         filesystem,
         fs,
+        quota,
         remote,
         system,
         tab,
@@ -213,6 +214,7 @@ def _register() -> None:
 
     cli.add_command(auth)
     cli.add_command(system)
+    cli.add_command(quota)
     cli.add_command(tab)
     cli.add_command(terminal)
     cli.add_command(filesystem)

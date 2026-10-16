@@ -2,16 +2,17 @@
 
 The selector works only with a caller-supplied subprocess environment.  It
 never mutates :data:`os.environ`, and it never retries a provider turn.  A
-short unauthenticated ``HEAD`` request proves transport reachability; every
-HTTP response is considered reachable because authorization, rate limits, and
-model/path errors are application outcomes rather than routing failures.
+short unauthenticated ``HEAD`` request can prove transport reachability, but
+a timeout is inconclusive. In automatic mode a timeout on the effective route
+preserves the provider's original environment so the real request can proceed.
+Explicit routes and configuration errors remain strict. Application errors
+such as authorization and rate limits are not routing failures.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import ipaddress
 import json
 import logging
 import shutil
@@ -25,6 +26,8 @@ from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpx
+
+from ..proxy_rules import bypasses_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +154,7 @@ def _log_selection(
         "returned_env_has_proxy": _has_nonempty_proxy(selected_env),
     }
     message = json.dumps(record, ensure_ascii=True, separators=(",", ":"))
-    if decision == "compatibility_inherit":
+    if decision in {"compatibility_inherit", "timeout_inherit"}:
         logger.warning("provider_network_selection %s", message)
     else:
         logger.info("provider_network_selection %s", message)
@@ -362,7 +365,10 @@ class ProviderNetworkSelector:
             raise
         else:
             async with self._lock:
-                self._store_cache(key, selection, self._success_ttl)
+                ttl = (
+                    self._failure_ttl if selection.route == "timeout_inherit" else self._success_ttl
+                )
+                self._store_cache(key, selection, ttl)
             return selection
         finally:
             async with self._lock:
@@ -404,13 +410,19 @@ class ProviderNetworkSelector:
 
             parsed = _parse_endpoint(endpoint)
             proxy_url, no_proxy = _proxy_for_endpoint(parsed, env)
-            if proxy_url is not None and _bypasses_proxy(parsed, no_proxy):
-                raise _selection_error(endpoint, direct=direct, proxy_note="bypassed by NO_PROXY")
-            if proxy_url is None:
-                raise _selection_error(endpoint, direct=direct, proxy_note="not configured")
+            if proxy_url is None or bypasses_proxy(parsed, no_proxy):
+                if mode == "auto" and direct is not None and direct.phase == "timeout":
+                    return _Selection(route="timeout_inherit", direct=direct)
+                note = "not configured" if proxy_url is None else "bypassed by NO_PROXY"
+                raise _selection_error(endpoint, direct=direct, proxy_note=note)
             proxied = await self._probe(endpoint, proxy_url)
             if proxied.reachable:
                 return _Selection(route="proxy", direct=direct, proxy=proxied)
+            if mode == "auto" and proxied.phase == "timeout":
+                # The probe has a deliberately short budget. Preserve the
+                # configured route rather than treating a slow HEAD response
+                # as proof that the actual provider request cannot succeed.
+                return _Selection(route="timeout_inherit", direct=direct, proxy=proxied)
             raise _selection_error(endpoint, direct=direct, proxy=proxied)
 
 
@@ -781,49 +793,6 @@ def _proxy_for_endpoint(
         if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.hostname:
             raise ProviderNetworkError("configured provider proxy is not a valid supported URL")
     return proxy, no_proxy
-
-
-def _bypasses_proxy(endpoint: SplitResult, no_proxy: Optional[str]) -> bool:
-    if not no_proxy:
-        return False
-    host = (endpoint.hostname or "").rstrip(".").casefold()
-    port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
-    for raw_entry in no_proxy.split(","):
-        entry = raw_entry.strip().casefold()
-        if not entry:
-            continue
-        if entry == "*":
-            return True
-        entry_host, entry_port = _split_no_proxy_entry(entry)
-        if entry_port is not None and entry_port != port:
-            continue
-        try:
-            if "/" in entry_host and ipaddress.ip_address(host) in ipaddress.ip_network(
-                entry_host, strict=False
-            ):
-                return True
-        except ValueError:
-            pass
-        normalized = entry_host.removeprefix("*.").lstrip(".").rstrip(".")
-        if normalized and (host == normalized or host.endswith(f".{normalized}")):
-            return True
-    return False
-
-
-def _split_no_proxy_entry(entry: str) -> Tuple[str, Optional[int]]:
-    if entry.startswith("["):
-        closing = entry.find("]")
-        if closing != -1:
-            host = entry[1:closing]
-            suffix = entry[closing + 1 :]
-            if suffix.startswith(":") and suffix[1:].isdigit():
-                return host, int(suffix[1:])
-            return host, None
-    if entry.count(":") == 1:
-        host, raw_port = entry.rsplit(":", 1)
-        if raw_port.isdigit():
-            return host, int(raw_port)
-    return entry, None
 
 
 def _without_proxy(env: Mapping[str, str]) -> Dict[str, str]:

@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "4f83ece16d671a004c7f4a57d8ce192152afe8d0",
+  "parents": [
+    "c7fa7efa46fded1bc393b04e2bade7e9c027c1d7",
+    "39ca52eb6f6f4dfb6aa69d9c46eb22e79d002e3b"
+  ],
+  "base": "4daae29647815baf00d3e03e158fd7e3866397a5",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "45905f15b4e83146fa63bf9a1512262d99166852",
+  "reconstructed_tree": "53cc3e4bed20ee26c3c6cbd2c52e2221cdf731bc",
+  "conflicts": [
+    "CHANGELOG.md",
+    "docs/working-logs/2026-10-16-chat-rich-content.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "98e096f0bb137ad8d993a4ef0fc10294306b5762"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ebf6138474991e55501f76022319ad9421d13a51"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a2cf26e6c77fbc1d4df6aaa41c83990a82b4e46f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "db7c18f5cc15581c11b8fa7ef7a2b42e5a5d5ccb"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "100253df82cf731b5fc6ae7d8b211f80063f281a"
+      },
+      "reason": "Retain rich Markdown, remote proxy and all local managed-Chat release entries, preserving each parent relative order.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "docs/working-logs/2026-10-16-chat-rich-content.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f708eaadcf5b4fdb31a9e45c6f51053bae3ad832"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "53f875abc9e69b53bc5bc8fefb5a03b1d60f9d30"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c3625a76916a180d305e6c62e1e7068594d7e9c9"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e64e7c6ec2aa6fc848d948bf4368de03d805538d"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9656e00b64318b56f8f2295029ad9f8a6febf300"
+      },
+      "reason": "Retain the local-only publication boundary and prior fixed-merge evidence, then append the newer remote-base preservation section. No application code is manually changed.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

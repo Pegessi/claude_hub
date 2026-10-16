@@ -456,9 +456,15 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
 @click.option("--prompt", required=True, help="Task prompt.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "terminal"]),
+    type=click.Choice(["claude", "codex", "cursor", "maso", "terminal"]),
     default="codex",
     help="Agent type.",
+)
+@click.option(
+    "--session-kind",
+    type=click.Choice(["terminal", "chat"]),
+    default=None,
+    help="Managed session surface (omitted to use backend default or bound-session surface).",
 )
 @click.option(
     "--task-mode",
@@ -515,6 +521,7 @@ def task_create(
     title: str,
     prompt: str,
     agent_type: str,
+    session_kind: Optional[str],
     task_mode: str,
     execution_complexity: str,
     review_profiles: tuple,
@@ -534,6 +541,7 @@ def task_create(
         title=title,
         prompt=prompt,
         agent_type=agent_type,
+        session_kind=session_kind,
         task_mode=task_mode,
         execution_complexity=execution_complexity,
         review_profiles=list(review_profiles),
@@ -568,9 +576,16 @@ def task_create(
 @click.option("--prompt", required=True, help="Task prompt.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "terminal"]),
+    type=click.Choice(["claude", "codex", "cursor", "maso", "terminal"]),
     default="claude",
     help="Agent type (default: claude).",
+)
+@click.option(
+    "--session-kind",
+    type=click.Choice(["terminal", "chat"]),
+    default="terminal",
+    show_default=True,
+    help="Managed session surface.",
 )
 @click.option(
     "--task-mode",
@@ -622,6 +637,7 @@ def task_run(
     title: str,
     prompt: str,
     agent_type: str,
+    session_kind: str,
     task_mode: str,
     execution_complexity: str,
     cwd: Optional[str],
@@ -664,6 +680,7 @@ def task_run(
             # 1. Ensure an agent (reuse compatible idle orchestrator if available).
             agent_body: Dict[str, Any] = {
                 "agent_type": agent_type,
+                "session_kind": session_kind,
                 "reuse_existing": True,
                 "role": "orchestrator",
             }
@@ -682,6 +699,7 @@ def task_run(
                 title=title,
                 prompt=prompt,
                 agent_type=agent_type,
+                session_kind=session_kind,
                 task_mode=task_mode,
                 execution_complexity=execution_complexity,
                 related_task_id=related_task_id,
@@ -805,6 +823,12 @@ def task_continue(
     help="Task automation mode.",
 )
 @click.option(
+    "--session-kind",
+    type=click.Choice(["terminal", "chat"]),
+    default=None,
+    help="Managed session surface (todo tasks only).",
+)
+@click.option(
     "--execution-complexity",
     type=click.Choice(["auto", "simple", "complex"]),
     default=None,
@@ -850,6 +874,7 @@ def task_update(
     prompt: Optional[str],
     status: Optional[str],
     task_mode: Optional[str],
+    session_kind: Optional[str],
     execution_complexity: Optional[str],
     review_profiles: tuple,
     related_task_id: Optional[str],
@@ -871,6 +896,7 @@ def task_update(
         prompt=prompt,
         status=status,
         task_mode=task_mode,
+        session_kind=session_kind,
         execution_complexity=execution_complexity,
         related_task_id=related_task_id,
         agent_tag=agent_tag,

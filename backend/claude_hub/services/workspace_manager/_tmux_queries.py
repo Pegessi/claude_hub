@@ -419,6 +419,11 @@ class _TmuxQueriesMixin:
         that exits Claude Code entirely.  Errors are logged but not raised so that
         bookkeeping abort can still proceed.
         """
+        if session.session_kind == SessionKind.CHAT:
+            from .. import managed_chat
+
+            await managed_chat.cancel(session)
+            return
         tmux_name = session.tmux_session
         try:
             await self._run_tmux("send-keys", "-t", tmux_name, "Escape")
@@ -707,6 +712,8 @@ class _TmuxQueriesMixin:
                 continue
             if session.agent_type != payload.agent_type:
                 continue
+            if session.session_kind != payload.session_kind or session.chat_paused:
+                continue
             if session.solo_mode != payload.solo_mode:
                 continue
             if session.status == ManagedSessionStatus.STOPPED:
@@ -825,7 +832,7 @@ class _TmuxQueriesMixin:
         if not task.review_session_id:
             return False
         reviewer = self.sessions.get(task.review_session_id)
-        if not reviewer or not reviewer.tmux_session:
+        if not reviewer or reviewer.session_kind == SessionKind.CHAT or not reviewer.tmux_session:
             return False
         try:
             output = await self._capture_tmux_output(reviewer.tmux_session)
@@ -1265,6 +1272,7 @@ class _TmuxQueriesMixin:
         cwd: str,
         remote_profile_id: str | None = None,
         remote_cwd: str | None = None,
+        session_kind: SessionKind | None = None,
     ) -> Optional[ManagedSession]:
         """Internal review dispatch only — not CLI agent-create reuse.
 
@@ -1281,6 +1289,8 @@ class _TmuxQueriesMixin:
             session
             for session in self._sessions_for_workspace_raw(workspace_id)
             if session.role == WorkspaceSessionRole.REVIEWER
+            and (session_kind is None or session.session_kind == session_kind)
+            and not session.chat_paused
             and session.status != ManagedSessionStatus.STOPPED
             and session.runtime_status == AgentRuntimeStatus.IDLE
             and not session.task_id
@@ -1393,4 +1403,5 @@ class _TmuxQueriesMixin:
             workspace_id=workspace.id,
             workspace_name=workspace.name,
             workspace_role=session.role,
+            managed_session_id=session.id,
         )

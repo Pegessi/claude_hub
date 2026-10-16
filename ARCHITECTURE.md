@@ -430,14 +430,21 @@ These are separate lifecycle owners even when they share a Workspace or tab.
 
 ## Environment & Proxy Handling
 
-The backend clears all proxy environment variables at import time in `terminal.py`:
-```python
-os.environ["NO_PROXY"] = "localhost,127.0.0.1"
-os.environ.pop("HTTP_PROXY", None)  # etc.
-```
-And uses `httpx.AsyncClient(trust_env=False, proxy=None)`.
+Backend-local ttyd requests use `httpx.AsyncClient(trust_env=False, proxy=None)`
+so a system proxy cannot redirect localhost traffic. This does not clear the
+process environment or determine the route used by provider subprocesses.
 
-**Why**: Dev machines often run system proxies (e.g. Clash on port 7890). Without this, httpx would route localhost ttyd requests through the proxy, causing 502 errors.
+Native CLI Chat providers select their subprocess environment in
+`services/agent_stream/provider_network.py`. `CLAUDE_HUB_PROVIDER_NETWORK_MODE`
+supports `auto`, `direct`, `proxy` and `inherit`. Automatic selection prefers a
+reachable direct route, then the configured proxy, respecting `NO_PROXY`. A
+three-second unauthenticated HEAD timeout on the effective route is inconclusive:
+`auto` preserves the original environment and lets the provider handle the real
+request, warning with redacted probe details and rechecking after the short
+failure-cache TTL. No prompt is replayed. Explicit `direct`/`proxy` modes and
+configuration or non-timeout failures retain their errors; `inherit` skips
+selection. Claude's generated settings preserve lowercase proxy precedence,
+including an empty lowercase value that explicitly disables an uppercase proxy.
 
 ## CI Pipeline
 

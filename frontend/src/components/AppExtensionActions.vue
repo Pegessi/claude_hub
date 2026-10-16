@@ -52,6 +52,7 @@
     <span>Feishu Bot settings</span>
   </button>
   <NetworkAccessMenu variant="menu" />
+  <QuotaMenu />
   <button
     type="button"
     class="extension-action"
@@ -77,6 +78,7 @@
 
 <script setup lang="ts">
 import NetworkAccessMenu from '@/components/NetworkAccessMenu.vue'
+import QuotaMenu from '@/components/QuotaMenu.vue'
 import { useAppStore } from '@/stores/appStore'
 
 const appStore = useAppStore()

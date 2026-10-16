@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ..auth.dependencies import get_current_user
 from ..models import (
+    ManagedSession,
     SwitchEnvRequest,
     TerminalAgentStatus,
     TerminalTab,
@@ -15,14 +16,80 @@ from ..models import (
     TerminalTabUpdate,
     User,
 )
-from ..services import chat_sidebar_preferences, ttyd_manager
+from ..services import chat_sidebar_preferences, ttyd_manager, workspace_manager
 from ..services.agent_stream.maso_http import MasoServiceUnavailable
-from ..services.ttyd_manager import TabLimitExceededError, TabStartupTimeoutError
-from .agent_stream import _get_tab_tailer_manager, _terminal_tab_stream_session
+from ..services.ttyd_manager import (
+    TabCleanupPendingError,
+    TabLimitExceededError,
+    TabStartupTimeoutError,
+    TabStateError,
+)
+from .agent_stream import (
+    _get_tab_tailer_manager,
+    _get_tailer_manager,
+    _terminal_tab_stream_session,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/tabs", tags=["tabs"])
+
+_MANAGED_CODEX_HOT_ENV_KEYS = frozenset({"CODEX_MODEL", "CODEX_REASONING_EFFORT"})
+
+
+def _managed_chat_session_for_tab(tab_id: str) -> ManagedSession | None:
+    tab = ttyd_manager.get_tab(tab_id)
+    if tab is None or tab.session_kind.value != "chat":
+        return None
+    # A direct Chat may carry ``workspace_id`` purely as display/grouping
+    # metadata. Runtime ownership is proven only by the managed identity or a
+    # managed Workspace role; never fence a direct Chat on workspace_id alone.
+    if not tab.managed_session_id and tab.workspace_role is None:
+        return None
+    if not tab.managed_session_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Managed Chat backing tab is missing its managed session identity",
+        )
+    session = workspace_manager.sessions.get(tab.managed_session_id)
+    if session is None or session.tab_id != tab.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Managed Chat backing tab is not attached to a live managed session",
+        )
+    return session
+
+
+def _reject_managed_chat_tab_mutation(tab_id: str) -> None:
+    if _managed_chat_session_for_tab(tab_id) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Use the Workspace session controls to modify a managed Chat tab",
+        )
+
+
+def _validate_managed_chat_env_update(session: ManagedSession, req: SwitchEnvRequest) -> None:
+    if session.agent_type.value != "codex":
+        return
+    changed = {
+        key
+        for key in session.env.keys() | req.env.keys()
+        if session.env.get(key) != req.env.get(key)
+    }
+    unsupported = sorted(changed - _MANAGED_CODEX_HOT_ENV_KEYS)
+    if unsupported:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Codex managed Chat can change only model/reasoning settings in place; "
+                "create a new session to change: " + ", ".join(unsupported)
+            ),
+        )
+    if req.solo_mode is not None and req.solo_mode != session.solo_mode:
+        raise HTTPException(
+            status_code=409,
+            detail="Create a new Codex managed Chat session to change solo mode",
+        )
 
 
 class TabOrderUpdate(BaseModel):
@@ -243,6 +310,7 @@ async def duplicate_tab(
     Returns 404 if the source tab is missing and 429 at the live tab limit.
     """
     logger.info(f"Duplicating tab {tab_id}, user={current_user.email}")
+    _reject_managed_chat_tab_mutation(tab_id)
     try:
         tab = await ttyd_manager.duplicate_tab(tab_id)
     except TabLimitExceededError as exc:
@@ -271,6 +339,7 @@ async def fork_tab(
     reached.
     """
     logger.info(f"Forking tab {tab_id} at ordinal {req.ordinal}, user={current_user.email}")
+    _reject_managed_chat_tab_mutation(tab_id)
     try:
         tab = await ttyd_manager.fork_tab(tab_id, req.ordinal)
     except TabLimitExceededError as exc:
@@ -303,19 +372,57 @@ async def switch_tab_env(
         req.solo_mode,
         current_user.email,
     )
+    managed_session = _managed_chat_session_for_tab(tab_id)
     try:
-        tab = await ttyd_manager.switch_env(tab_id, req.env, solo_mode=req.solo_mode)
+        if managed_session is None:
+            tab = await ttyd_manager.switch_env(tab_id, req.env, solo_mode=req.solo_mode)
+        else:
+            async with workspace_manager.managed_chat_configuration_guard(
+                managed_session.id
+            ) as guarded_session:
+                manager = _get_tailer_manager()
+                if await manager.turn_in_flight(guarded_session):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Wait for the managed Chat turn before changing configuration",
+                    )
+                _validate_managed_chat_env_update(guarded_session, req)
+                previous_tab = ttyd_manager.get_tab(tab_id)
+                if previous_tab is None:
+                    raise KeyError(tab_id)
+                tab = await ttyd_manager.switch_env(tab_id, req.env, solo_mode=req.solo_mode)
+                try:
+                    updated = workspace_manager.update_managed_chat_configuration(
+                        guarded_session.id,
+                        tab_id=tab.id,
+                        env=dict(tab.env),
+                        solo_mode=tab.solo_mode,
+                    )
+                except Exception:
+                    try:
+                        await ttyd_manager.switch_env(
+                            tab_id,
+                            dict(previous_tab.env),
+                            solo_mode=previous_tab.solo_mode,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to roll back managed Chat tab configuration tab_id=%s",
+                            tab_id,
+                        )
+                    raise
+                manager.set_env(updated, dict(updated.env))
     except KeyError:
-        raise HTTPException(status_code=404, detail="Tab not found")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail="Tab not found") from None
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status_code = 409 if managed_session is not None else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
-    # For native Chat sessions the provider transport owns the subprocess and
-    # reads session.env per turn. Push the updated env into the live transport
-    # so the next turn picks it up without a restart.
-    if tab.session_kind.value == "chat":
+    if managed_session is None and tab.session_kind.value == "chat":
         session = _terminal_tab_stream_session(tab_id)
         if session is not None:
             _get_tab_tailer_manager().set_env(session, dict(tab.env))
@@ -345,6 +452,7 @@ async def archive_tab(
     JSONL conversation log is retained so it can be restored later.
     """
     logger.info(f"Archiving tab {tab_id}, user={current_user.email}")
+    _reject_managed_chat_tab_mutation(tab_id)
     tab = await ttyd_manager.archive_tab(tab_id)
     if not tab:
         raise HTTPException(status_code=404, detail="Tab not found")
@@ -361,6 +469,7 @@ async def unarchive_tab(
     Returns 404 if the tab is missing and 429 at the live tab limit.
     """
     logger.info(f"Unarchiving tab {tab_id}, user={current_user.email}")
+    _reject_managed_chat_tab_mutation(tab_id)
     try:
         tab = await ttyd_manager.unarchive_tab(tab_id)
     except TabLimitExceededError as exc:
@@ -407,6 +516,7 @@ async def update_tab(
     current_user: User = Depends(get_current_user),
 ) -> TerminalTab:
     """Update a terminal tab."""
+    _reject_managed_chat_tab_mutation(tab_id)
     try:
         tab = await ttyd_manager.update_tab(
             tab_id,
@@ -434,7 +544,11 @@ async def delete_tab(
     current_user: User = Depends(get_current_user),
 ) -> None:
     """Delete a terminal tab."""
-    success = await ttyd_manager.delete_tab(tab_id)
+    _reject_managed_chat_tab_mutation(tab_id)
+    try:
+        success = await ttyd_manager.delete_tab(tab_id)
+    except (TabCleanupPendingError, TabStateError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "5"}) from exc
     if not success:
         raise HTTPException(status_code=404, detail="Tab not found")
     try:

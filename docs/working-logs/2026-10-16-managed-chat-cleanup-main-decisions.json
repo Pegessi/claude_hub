@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "f8d06c44f4dff4b4d373db89cb56c43246da44cf",
+  "parents": [
+    "8e65ebc2f9f2aac8be22ffec9b94ff23d60c597b",
+    "2d14506f2e004fc5f382c8dde0361c23acadc594"
+  ],
+  "base": "407acd8a6ab5447b04ec780460ba4d32d898f16c",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "2801dde34dcf4dd4a18bbf17a602d39744b94fe4",
+  "reconstructed_tree": "2640236fb5f87aba7bb5e32b1aeb3e22586d4281",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ffc932f52dd5f78d0eeebe09a2ec907628716377"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4d90ab1db6c29dc03db829036963cf6664db820b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7d877774d0948710da150db05b173b7f742b751c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8801141feb1cca233dc166baae7a7368824f0def"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "452a877f92319711ae7e4e9b48a3c28dd8f5ee05"
+      },
+      "reason": "Retain both parents entries in the single Released section: the feature-side managed Chat and adversarial repairs and latest-main Claude result/input ownership entry. Native implementation and regression tests are the native automatic merge; independently checked against both parents.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

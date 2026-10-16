@@ -96,7 +96,7 @@ export type TimelineSubthreadPart =
   // A child's in-flight process status (e.g. "Thinking…"). The stable
   // messageId + snapshot lets a later update (or the turn's terminal
   // finalization) replace it in place rather than appending a second row.
-  | { kind: 'status'; key: string; text: string; messageId?: string | null; isError?: boolean }
+  | { kind: 'status'; key: string; text: string; messageId?: string | null; providerStatus?: string; isError?: boolean }
 
 export type TimelineSubagentLifecycle =
   | 'unknown'
@@ -113,6 +113,8 @@ export interface TimelineSubthread {
   launchTool: TimelineTool | null
   /** Provider-observed child-turn lifecycle; never inferred from parent state. */
   lifecycleStatus: TimelineSubagentLifecycle
+  /** Child-local revision so sibling stream updates can reuse display projections. */
+  renderRevision: number
 }
 
 export type TimelinePart =
@@ -140,8 +142,10 @@ export type TimelinePart =
   // is the filesystem path the scoped agent-image endpoint serves.
   | { kind: 'agent_image'; key: string; tool: TimelineTool; path: string }
   | { kind: 'approval'; key: string; approval: TimelineApproval }
-  | { kind: 'error'; key: string; message: string }
-  | { kind: 'status'; key: string; text: string; messageId?: string | null }
+  // ``detail`` is the provider's verbatim failure payload, kept beside the
+  // message because an adapter's summary of it is necessarily lossy.
+  | { kind: 'error'; key: string; message: string; detail?: string }
+  | { kind: 'status'; key: string; text: string; messageId?: string | null; providerStatus?: string }
   // Synthetic part produced by ``foldTurnParts`` — never emitted by the
   // reducer. It is the folded working region's header: the toggle that both
   // reveals and hides the detail beneath it.
@@ -420,6 +424,7 @@ function ensureSubthread(
       parts: [],
       launchTool: null,
       lifecycleStatus: 'unknown',
+      renderRevision: 0,
     }
     child = { thread, tools: [], toolMap: new Map() }
     byThread.set(threadId, child)
@@ -597,7 +602,8 @@ function applySubthreadEvent(
     case 'status': {
       const text = statusText(event)
       if (!text) return lifecycleChanged
-      const isError = payloadString(event, 'provider_status') === 'error'
+      const providerStatus = payloadString(event, 'provider_status') || undefined
+      const isError = providerStatus === 'error'
       const parts = child.thread.parts
       // Stable in-place snapshot: replace an existing child status with the
       // same messageId rather than appending a second row.
@@ -606,9 +612,11 @@ function applySubthreadEvent(
           part => part.kind === 'status' && part.messageId === event.message_id,
         )
         if (existing?.kind === 'status') {
-          if (existing.text === text && Boolean(existing.isError) === isError) return lifecycleChanged
+          if (existing.text === text && Boolean(existing.isError) === isError &&
+              existing.providerStatus === providerStatus) return lifecycleChanged
           existing.text = text
           existing.isError = isError
+          existing.providerStatus = providerStatus
           return true
         }
       }
@@ -617,6 +625,7 @@ function applySubthreadEvent(
         key: `sub-status-${event.message_id ?? 'event'}-${event.stream_sequence}`,
         text,
         messageId: event.message_id,
+        ...(providerStatus ? { providerStatus } : {}),
         ...(isError ? { isError: true } : {}),
       })
       return true
@@ -721,6 +730,8 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
   const routedThreadId = subThreadIdOf(event)
   if (routedThreadId !== null) {
     if (applySubthreadEvent(state, turn, routedThreadId, event, toolMapKey)) {
+      const child = state.threadsByTurn.get(toolMapKey)?.get(routedThreadId)
+      if (child) child.thread.renderRevision += 1
       turn.renderRevision += 1
     }
     return
@@ -1037,21 +1048,24 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     }
     case 'error': {
       const message = payloadString(event, 'message') || 'An error occurred.'
+      const detail = payloadString(event, 'detail')
       const errKey = `error-${event.message_id ?? 'event'}-${event.stream_sequence}`
       turn.errors.push({ key: errKey, message })
-      turn.parts.push({ kind: 'error', key: errKey, message })
+      turn.parts.push({ kind: 'error', key: errKey, message, detail: detail || undefined })
       mutated = true
       break
     }
     case 'status': {
       const text = statusText(event)
+      const providerStatus = payloadString(event, 'provider_status') || undefined
       if (event.payload.snapshot === true && event.message_id) {
         const existing = turn.parts.find(part =>
           part.kind === 'status' && part.messageId === event.message_id,
         )
         if (existing?.kind === 'status') {
-          if (existing.text === text) break
+          if (existing.text === text && existing.providerStatus === providerStatus) break
           existing.text = text
+          existing.providerStatus = providerStatus
           const stored = turn.statuses.find(status => status.key === existing.key)
           if (stored) stored.text = text
           mutated = true
@@ -1060,7 +1074,10 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       }
       const statusKey = `status-${event.message_id ?? 'event'}-${event.stream_sequence}`
       turn.statuses.push({ key: statusKey, text })
-      turn.parts.push({ kind: 'status', key: statusKey, text, messageId: event.message_id })
+      turn.parts.push({
+        kind: 'status', key: statusKey, text, messageId: event.message_id,
+        ...(providerStatus ? { providerStatus } : {}),
+      })
       mutated = true
       break
     }

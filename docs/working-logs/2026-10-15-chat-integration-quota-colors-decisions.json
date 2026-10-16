@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "99d4aa9ad937526001b40508afc20d1b849c9186",
+  "parents": [
+    "9d88e0c42a987995f83f50e9827b664bf7af0c9d",
+    "6d4b3441818deb373675124166279027bd4c4a04"
+  ],
+  "base": "a89dd7870e256fb871ff9edb8bd94f9887479922",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "bb1f2f9f9bdd423deff0b453c1e6cd5af79db0b8",
+  "reconstructed_tree": "bb1f2f9f9bdd423deff0b453c1e6cd5af79db0b8",
+  "conflicts": [],
+  "decisions": []
+}

@@ -387,6 +387,7 @@ def test_perform_hard_recovery_uses_verdict_fallback_when_no_trigger(
     monkeypatch.setattr(workspace_manager, "send_session_message", fake_send)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     workspace_manager.workspaces[workspace.id] = workspace
+    workspace_manager.sessions[session.id] = session
     workspace_manager.tasks[task.id] = task
     try:
         update = asyncio.run(
@@ -401,8 +402,10 @@ def test_perform_hard_recovery_uses_verdict_fallback_when_no_trigger(
         )
     finally:
         workspace_manager.workspaces.pop(workspace.id, None)
+        workspace_manager.sessions.pop(session.id, None)
         workspace_manager.tasks.pop(task.id, None)
 
+    assert update is not None
     assert update["hard_recovery_attempts"] == 1
     assert len(sent) == 2
     assert sent[0] == "/clear"

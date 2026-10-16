@@ -7,6 +7,7 @@ app-server and Cursor stream-json parsing.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,10 @@ from claude_hub.services.agent_stream.native import (
     wrap_hub_runtime_guidance,
     wrap_image_attachment_guidance,
     wrap_question_protocol_guidance,
+)
+from claude_hub.services.agent_stream.provider_network import (
+    ProbeResult,
+    ProviderNetworkSelector,
 )
 
 
@@ -662,6 +667,119 @@ async def test_claude_selection_reads_and_overrides_high_precedence_settings(
 
 
 @pytest.mark.asyncio
+async def test_claude_auto_probe_timeouts_launch_one_turn_with_existing_proxy(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    for key in (
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    env = {
+        "ANTHROPIC_BASE_URL": "https://provider.example",
+        "ANTHROPIC_MODEL": "configured-model",
+        "ANTHROPIC_API_KEY": "test-credential",
+        "HTTPS_PROXY": "http://proxy.example:7890",
+        "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "auto",
+    }
+    settings = launch_dir / "tab-1.settings.json"
+    settings.write_text(json.dumps({"env": env}), encoding="utf-8")
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+    probes: list[Optional[str]] = []
+
+    async def timeout_probe(endpoint: str, proxy: Optional[str]) -> ProbeResult:
+        probes.append(proxy)
+        return ProbeResult(False, "timeout")
+
+    selector = ProviderNetworkSelector(probe=timeout_probe)
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", selector.select)
+    session = _session(AgentType.CLAUDE)
+    session.env = dict(env)
+    native = ClaudeNativeSession(session)
+    launches: list[tuple[list[str], str]] = []
+
+    async def capture_spawn(cmd: list[str], stdin: str) -> None:
+        launches.append((cmd, stdin))
+        prepared = native._prepared_provider_env
+        assert prepared is not None
+        assert prepared["HTTPS_PROXY"] == env["HTTPS_PROXY"]
+        selected_settings = Path(cmd[cmd.index("--settings") + 1])
+        selected_env = json.loads(selected_settings.read_text())["env"]
+        for key, value in env.items():
+            assert selected_env[key] == value
+
+    monkeypatch.setattr(native, "_spawn_oneshot", capture_spawn)
+    try:
+        await native.send_message("test turn", [])
+        assert len(launches) == 1
+        envelope = json.loads(launches[0][1])
+        assert "test turn" in envelope["message"]["content"][-1]["text"]
+        assert probes == [None, env["HTTPS_PROXY"]]
+        assert native.last_error is None
+        assert json.loads(settings.read_text())["env"] == env
+    finally:
+        for path in launch_dir.glob("*.network-*.settings.json"):
+            path.unlink()
+        await native.stop()
+
+
+@pytest.mark.asyncio
+async def test_claude_timeout_fallback_keeps_explicitly_disabled_proxies_disabled(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    launch_dir = tmp_path / "launch_env"
+    launch_dir.mkdir()
+    env = {
+        "ANTHROPIC_BASE_URL": "https://provider.example",
+        "CLAUDE_HUB_PROVIDER_NETWORK_MODE": "auto",
+        "http_proxy": "",
+        "HTTP_PROXY": "http://disabled.example:7890",
+        "https_proxy": "",
+        "HTTPS_PROXY": "http://disabled.example:7890",
+        "all_proxy": "",
+        "ALL_PROXY": "http://disabled.example:7890",
+    }
+    (launch_dir / "tab-1.settings.json").write_text(json.dumps({"env": env}))
+    monkeypatch.setattr(native_module, "_runtime_home", lambda: tmp_path)
+
+    async def timeout_probe(endpoint: str, proxy: Optional[str]) -> ProbeResult:
+        assert proxy is None
+        return ProbeResult(False, "timeout")
+
+    selector = ProviderNetworkSelector(probe=timeout_probe)
+    monkeypatch.setattr(native_module, "select_provider_subprocess_env", selector.select)
+    session = _session(AgentType.CLAUDE)
+    session.env = dict(env)
+    native = ClaudeNativeSession(session)
+
+    selected = await native._build_provider_env()
+    assert all(selected[key] == value for key, value in env.items())
+    selected_settings = native._write_selected_settings(selected)
+    assert selected_settings is not None
+    try:
+        settings_env = json.loads(selected_settings.read_text())["env"]
+        for key in (
+            "http_proxy",
+            "HTTP_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+        ):
+            assert settings_env[key] == ""
+    finally:
+        selected_settings.unlink()
+
+
+@pytest.mark.asyncio
 async def test_claude_uses_same_settings_snapshot_when_file_changes_after_probe(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -1002,6 +1120,121 @@ def test_claude_result_emits_turn_completed() -> None:
     assert events[0].type == AgentStreamEventType.TURN_COMPLETED
 
 
+@pytest.mark.parametrize(
+    ("fields", "accepted"),
+    [
+        ({"origin": {"kind": "task-notification"}, "num_turns": 0, "result": ""}, False),
+        ({"origin": {"kind": "task-notification"}, "is_error": True}, False),
+        ({"origin": {"kind": "peer"}}, False),
+        ({"user_message_uuid": "previous-input"}, False),
+        ({"user_message_uuids": ["previous-input"]}, False),
+        ({"user_message_uuid": "CURRENT"}, True),
+        ({"user_message_uuid": "previous-input", "user_message_uuids": ["CURRENT"]}, True),
+        ({"user_message_uuid": "CURRENT", "origin": {"kind": "task-notification"}}, True),
+        ({"user_message_uuid": "CURRENT", "is_error": True}, True),
+        ({"origin": {"kind": "human"}, "num_turns": 0, "result": ""}, True),
+        ({"local_command": "clear", "num_turns": 0, "result": ""}, True),
+        ({"origin": {"kind": "unclassified"}}, True),
+        ({"origin": {"kind": "future-kind"}}, True),
+        ({}, True),
+    ],
+)
+def test_claude_result_belongs_to_input(fields, accepted) -> None:
+    native = ClaudeNativeSession(_session())
+    envelope = json.loads(native._build_stdin("hello"))
+    current = envelope["uuid"]
+    assert isinstance(current, str) and current
+    record = json.loads(
+        json.dumps({"type": "result", "subtype": "success", **fields}).replace(
+            '"CURRENT"', json.dumps(current)
+        )
+    )
+    assert native.accepts_notification(record) is accepted
+    # Provenance must not hide real assistant/tool progress.
+    assert native.accepts_notification({**record, "type": "assistant"}) is True
+    assert json.loads(native._build_stdin("next"))["uuid"] != current
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("background_error", [False, True])
+async def test_claude_background_result_does_not_retire_user_stream(
+    tmp_path: Path, monkeypatch: MonkeyPatch, background_error: bool
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    native = ClaudeNativeSession(_session())
+    proc = _FakeProcess(stdout_lines=[])
+    monkeypatch.setattr(native, "_build_provider_env", AsyncMock(return_value={"PATH": "/bin"}))
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    store = AgentStreamStore("ws-1", "sess-1")
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id="sess-1",
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: native.session,
+        store=store,
+        native_transport=native,
+    )
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        queue = await tailer.subscribe()
+        try:
+            await tailer.send_message("hello", [], client_turn_id="user-turn")
+            assert (
+                await asyncio.wait_for(queue.get(), 1)
+            ).type == AgentStreamEventType.TURN_STARTED
+            generation = native._stdout_generation
+            proc.stdout.push(
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": background_error,
+                        "origin": {"kind": "task-notification"},
+                        "num_turns": 0,
+                        "result": "",
+                    }
+                ).encode()
+                + b"\n"
+            )
+            proc.stdout.push(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "id": "answer",
+                            "content": [{"type": "text", "text": "Actual user reply"}],
+                        },
+                    }
+                ).encode()
+                + b"\n"
+            )
+            event = await asyncio.wait_for(queue.get(), 1)
+            assert event.type == AgentStreamEventType.TEXT_DELTA
+            assert event.payload["text"] == "Actual user reply"
+            assert native._stdout_generation == generation
+            assert native.turn_in_flight is True
+            envelope = json.loads(b"".join(proc.stdin.written))
+            proc.stdout.push(
+                json.dumps(
+                    {"type": "result", "subtype": "success", "user_message_uuid": envelope["uuid"]}
+                ).encode()
+                + b"\n"
+            )
+            done = await asyncio.wait_for(queue.get(), 1)
+            assert done.type == AgentStreamEventType.TURN_COMPLETED
+            assert done.turn_id == "user-turn"
+            assert done.payload["assistant_text"] == "Actual user reply"
+            assert native.turn_in_flight is False
+            page = await store.read_since(-1, 100)
+            assert [e.type for e in page.events].count(AgentStreamEventType.TURN_COMPLETED) == 1
+            assert not any(e.type == AgentStreamEventType.ERROR for e in page.events)
+        finally:
+            await tailer.stop()
+
+
 def test_claude_unknown_stream_event_is_skipped() -> None:
     adapter = ClaudeJsonlAdapter()
     raw = {"type": "stream_event", "event": {"type": "content_block_start", "index": 0}}
@@ -1088,6 +1321,52 @@ class _FakeProcess:
 
 def _codex_session() -> CodexNativeSession:
     return CodexNativeSession(_session(AgentType.CODEX))
+
+
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_codex_checks_automatic_admission_after_async_start(
+    monkeypatch: MonkeyPatch, revoke: bool
+) -> None:
+    native = _codex_session()
+    native._conversation_id = "original-thread"
+    native._conversation_id_verified = True
+    native._thread_id = "original-thread"
+    revoked = False
+
+    def admit() -> None:
+        if revoked:
+            raise RuntimeError("automatic continuation was stopped")
+
+    native.require_resumed_conversation("original-thread", before_delivery=admit)
+    proc = _FakeProcess(
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"turn": {"id": "turn"}}}).encode()
+            + b"\n"
+        ]
+    )
+
+    async def start() -> None:
+        nonlocal revoked
+        await asyncio.sleep(0)
+        revoked = revoke
+        native._started = True
+        native._process = cast(asyncio.subprocess.Process, proc)
+        native._reader_task = asyncio.create_task(native._drain_stdout())
+
+    monkeypatch.setattr(native, "start", start)
+    try:
+        if revoke:
+            with pytest.raises(RuntimeError, match="continuation was stopped"):
+                await native._send_text("Please continue.")
+            assert proc.stdin.written == []
+            assert native._pending_requests == {}
+        else:
+            await native._send_text("Please continue.")
+            requests = _written_requests(proc)
+            assert [request["method"] for request in requests] == ["turn/start"]
+            assert requests[0]["params"]["threadId"] == "original-thread"
+    finally:
+        await native.stop()
 
 
 def _written_requests(proc: _FakeProcess) -> List[Dict[str, Any]]:
@@ -2762,6 +3041,34 @@ async def test_codex_answer_pending_question_sends_jsonrpc_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_answer_pending_question_requires_exact_card_call_id() -> None:
+    """Reused question ids cannot redirect a retry to a newer request."""
+    sess = _codex_session()
+    proc = _FakeProcess(stdout_lines=[])
+    sess._process = cast(asyncio.subprocess.Process, proc)
+    old = _codex_question_request(42)["params"]
+    old["itemId"] = "item-old"
+    new = _codex_question_request(43)["params"]
+    new["itemId"] = "item-new"
+    sess._pending_questions[42] = old
+    sess._pending_questions[43] = new
+    answers = [{"questionId": "q1", "selected": ["red"]}]
+
+    assert await sess.answer_pending_question(answers, expected_call_id="item-old")
+    responses = [message for message in _written_requests(proc) if "method" not in message]
+    assert [message["id"] for message in responses] == [42]
+    assert set(sess._pending_questions) == {43}
+
+    # A delayed retry for the consumed card must not match item-new merely
+    # because its question id is also q1.
+    assert not await sess.answer_pending_question(answers, expected_call_id="item-old")
+    assert set(sess._pending_questions) == {43}
+    assert await sess.answer_pending_question(answers, expected_call_id="item-new")
+    responses = [message for message in _written_requests(proc) if "method" not in message]
+    assert [message["id"] for message in responses] == [42, 43]
+
+
+@pytest.mark.asyncio
 async def test_codex_answer_pending_question_dismissal_empty_answers() -> None:
     """An empty answers list (dismissal) yields ``{"answers": {}}``."""
     sess = _codex_session()
@@ -3403,7 +3710,7 @@ async def test_cursor_probe_failure_falls_back_to_static() -> None:
 async def test_cursor_probe_timeout_kills_process(monkeypatch: MonkeyPatch) -> None:
     """A hung probe is cancelled after the timeout, the process is killed, and
     the static fallback is returned."""
-    monkeypatch.setattr(native_module, "_MODELS_PROBE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(native_module.settings, "cursor_models_probe_timeout_seconds", 0.1)
 
     class _SlowProc(_FakeListModelsProc):
         async def communicate(self) -> tuple[bytes, bytes]:

@@ -33,6 +33,9 @@ export interface QueuedChatDraftAttachment extends WorkspaceAttachmentCreate {
 }
 
 export interface QueuedChatDraft {
+  id: string
+  error?: string
+  clientTurnId?: string
   message: string
   attachments: QueuedChatDraftAttachment[]
 }
@@ -42,6 +45,9 @@ interface QueuedChatState {
   tabId: string
   drafts: QueuedChatDraft[]
   paused: boolean
+  editing: boolean
+  editingDraftId: string | null
+  editingMessage: string
   sendInProgress: boolean
   autoActivationBlock: 'stream-failed' | 'goal-locked' | null
 }
@@ -330,7 +336,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function queuedChatStateIsProtected(state: QueuedChatState): boolean {
-    return state.drafts.length > 0 || state.paused || state.sendInProgress
+    return state.drafts.length > 0 || state.paused || state.sendInProgress || state.editing
   }
 
   function getQueuedChatState(paneId: string, tabId: string): QueuedChatState {
@@ -341,6 +347,9 @@ export const useTerminalStore = defineStore('terminal', () => {
         tabId,
         drafts: [],
         paused: false,
+        editing: false,
+        editingDraftId: null,
+        editingMessage: '',
         sendInProgress: false,
         autoActivationBlock: null,
       })
@@ -383,6 +392,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         state.paneId === paneId
         && state.drafts.length > 0
         && !state.paused
+        && !state.editing
         && !state.sendInProgress
       )
       .map(state => state.tabId)
@@ -430,7 +440,8 @@ export const useTerminalStore = defineStore('terminal', () => {
   function ensureQueuedChatActivation() {
     let owner = queuedChatActivationOwner.value
     while (owner && (
-      !tabs.value.some(tab => tab.id === owner?.tabId)
+      queuedChatStates.value.some(state => state.tabId === owner?.tabId && state.editing)
+      || !tabs.value.some(tab => tab.id === owner?.tabId)
       || !panes.value.some(pane => pane.id === owner?.paneId)
     )) {
       queuedChatActivationRequests.value.shift()
@@ -442,6 +453,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function requestQueuedChatActivation(paneId: string, tabId: string) {
+    if (getQueuedChatState(paneId, tabId).editing) return
     if (!queuedChatActivationRequests.value.some(entry => entry.tabId === tabId)) {
       queuedChatActivationRequests.value.push({
         id: nextQueuedChatActivationRequestId++,
@@ -524,18 +536,15 @@ export const useTerminalStore = defineStore('terminal', () => {
   // Get the active pane (for mobile controls to know which terminal to send keys to)
   const activePane = computed(() => panes.value.find(p => p.id === activePaneId.value) || null)
 
-  // True when the active pane hosts a native structured Chat session rather
-  // than a raw PTY terminal. Mirrors TerminalPane's isChatSession boundary:
-  // a top-level chat session owns the StructuredPane surface, and workspace
-  // runners (which carry a workspace_role) always stay on their Terminal
-  // surface. Mobile-only affordances that inject terminal keys (the floating
-  // keyboard ball) are useless on the chat surface and must stay hidden there.
+  // True when the active pane hosts a structured Chat session rather than a
+  // raw PTY terminal. Managed Chat requires the managed session identity used
+  // by its canonical stream endpoint; ordinary Chat remains tab-scoped.
   const activePaneIsChat = computed(() => {
     const pane = activePane.value
     if (!pane || !pane.tabId) return false
     const tab = tabs.value.find(t => t.id === pane.tabId)
     if (!tab) return false
-    return tab.session_kind === 'chat' && !tab.workspace_role
+    return tab.session_kind === 'chat'
   })
 
   // Manual per-pane reconnect bookkeeping (Terminal surface only). The store
@@ -578,6 +587,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   // (the two floating panels mount at once, poll-driven refreshes overlap)
   // coalesce onto one in-flight request and share its result.
   let tabsFetchPromise: Promise<void> | null = null
+  let tabSnapshotGeneration = 0
   let sidebarPreferencesFetchPromise: Promise<void> | null = null
   let legacyPinsMigrated = false
   let sidebarPreferencesFailureNotified = false
@@ -646,16 +656,41 @@ export const useTerminalStore = defineStore('terminal', () => {
     return sidebarPreferencesFetchPromise
   }
 
+  function invalidateTabSnapshots(): number {
+    tabSnapshotGeneration += 1
+    return tabSnapshotGeneration
+  }
+
   function fetchTabs(options: { force?: boolean } = {}): Promise<void> {
     // Mutation callers (restore, switch-env, create agent, ...) rely on the
     // awaited refresh reflecting the change they just made, so they bypass
     // coalescing — a poll-started fetch could have raced the server.
     if (tabsFetchPromise && !options.force) return tabsFetchPromise
+    const generation = invalidateTabSnapshots()
     const run = async () => {
       try {
         const response = await fetch(`${API_BASE}/tabs`)
         if (!response.ok) throw new Error('Failed to fetch tabs')
-        tabs.value = await response.json()
+        const snapshot: unknown = await response.json()
+        if (!Array.isArray(snapshot)) throw new Error('Invalid full tab snapshot')
+        // A newer fetch or a successful local mutation owns the current list.
+        // Never let this older full snapshot erase a newly created/restored tab,
+        // its pane assignment, or a protected queued draft.
+        if (generation !== tabSnapshotGeneration) return
+        const nextTabs = snapshot as TerminalTab[]
+        const nextIds = new Set(nextTabs.map(tab => tab.id))
+        const removedIds = tabs.value
+          .map(tab => tab.id)
+          .filter(tabId => !nextIds.has(tabId))
+        tabs.value = nextTabs
+        if (removedIds.length > 0) {
+          const removed = new Set(removedIds)
+          for (const pane of panes.value) {
+            if (pane.tabId && removed.has(pane.tabId)) pane.tabId = null
+          }
+          for (const tabId of removedIds) discardQueuedChat(tabId)
+          if (activeTabId.value && removed.has(activeTabId.value)) activeTabId.value = null
+        }
         if (manualTabs.value.length && !activeTabId.value) {
           activeTabId.value = manualTabs.value[0].id
         }
@@ -676,13 +711,13 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
     }
     const promise = run()
-    if (!options.force) {
-      tabsFetchPromise = promise.finally(() => {
-        tabsFetchPromise = null
-      })
-      return tabsFetchPromise
-    }
-    return promise
+    const tracked = promise.finally(() => {
+      if (tabsFetchPromise === tracked) tabsFetchPromise = null
+    })
+    // A forced request supersedes an older coalesced request. Its identity
+    // check in finally prevents the older request from clearing this promise.
+    tabsFetchPromise = tracked
+    return tracked
   }
 
   async function fetchAgentStatuses() {
@@ -736,6 +771,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw await tabRequestError(response, 'Failed to create tab')
       const newTab = await response.json()
+      invalidateTabSnapshots()
       tabs.value.unshift(newTab)
       activeTabId.value = newTab.id
       // Auto-assign new tab to active pane
@@ -758,6 +794,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw await tabRequestError(response, 'Failed to duplicate tab')
       const newTab = await response.json()
+      invalidateTabSnapshots()
       tabs.value.unshift(newTab)
       activeTabId.value = newTab.id
       if (activePaneId.value) {
@@ -793,6 +830,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw await tabRequestError(response, 'Failed to fork tab')
       const newTab = await response.json()
+      invalidateTabSnapshots()
       tabs.value.unshift(newTab)
       // Is the user still looking at the source tab? The active pane's tab is
       // the ground truth for what is on screen right now. If yes → auto-switch
@@ -837,6 +875,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       })
       if (!response.ok) throw new Error('Failed to update tab')
       const updatedTab = await response.json()
+      invalidateTabSnapshots()
       const index = tabs.value.findIndex(tab => tab.id === tabId)
       if (index !== -1) {
         tabs.value[index] = updatedTab
@@ -856,6 +895,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         method: 'DELETE',
       })
       if (!response.ok) throw new Error('Failed to delete tab')
+      invalidateTabSnapshots()
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
       discardQueuedChat(tabId)
       // Remove tab from all panes
@@ -906,6 +946,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         method: 'POST',
       })
       if (!response.ok) throw new Error('Failed to archive tab')
+      invalidateTabSnapshots()
       tabs.value = tabs.value.filter(tab => tab.id !== tabId)
       discardQueuedChat(tabId)
       // Remove tab from all panes, remembering the first pane that lost it so
@@ -979,6 +1020,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         throw new Error(errText || `Failed to switch env (${response.status})`)
       }
       const updatedTab = await response.json()
+      invalidateTabSnapshots()
       const index = tabs.value.findIndex(t => t.id === tabId)
       if (index !== -1) {
         tabs.value[index] = updatedTab
@@ -1057,6 +1099,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const reorderedManualTabs = [...visibleTabs]
     const [removed] = reorderedManualTabs.splice(fromIndex, 1)
     reorderedManualTabs.splice(toIndex, 0, removed)
+    invalidateTabSnapshots()
     tabs.value = [...reorderedManualTabs, ...managedTabs.value]
     // Save the new order to backend
     saveTabOrder()
@@ -1068,6 +1111,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (!source || !target) return
     const next = moveTabById(tabs.value, sourceId, targetId, position)
     if (next === tabs.value) return
+    invalidateTabSnapshots()
     tabs.value = next
     void saveTabOrder()
   }
@@ -1090,6 +1134,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const reorderedManualTabs = manualTabs.value.map(
       tab => (pinned.has(tab.id) ? tab : movedTabs[movedIndex++]),
     )
+    invalidateTabSnapshots()
     tabs.value = [...reorderedManualTabs, ...managedTabs.value]
     void saveTabOrder()
   }

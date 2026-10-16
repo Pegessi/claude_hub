@@ -2,6 +2,7 @@
 
 import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
 
+from ...models.schemas import validate_workspace_session_surface
 from ..task_dependencies import require_task_dependencies, task_dependency_blockers
 from ._constants import *  # noqa: F401,F403
 
@@ -45,6 +46,10 @@ class _DispatchMixin:
                 await self.dispatch_workspace(workspace.id)
             return self.tasks[task_id]
 
+        # A compatibility start payload can override the provider even when an
+        # existing agent avoids the normal creation/admission path.
+        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
+
         logger.info(
             "Starting workspace task id=%s workspace_id=%s title=%r payload_target_session_id=%s "
             "payload_related_task_id=%s stored_related_task_id=%s current_session_id=%s status=%s",
@@ -58,8 +63,29 @@ class _DispatchMixin:
             task.status,
         )
         await self._refresh_session_statuses(workspace.id)
+        # Refresh can yield to a todo edit. Do not create an agent from the
+        # pre-refresh surface and only discover that it was invalid afterward.
+        task = self.tasks[task_id]
+        if task.status == WorkspaceTaskStatus.DONE:
+            raise RuntimeError("Done tasks cannot be started")
+        if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+            return task
+        require_task_dependencies(self.tasks, task)
+        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
+        selected_kind = task.session_kind
+        if payload.target_session_id:
+            selected = self.sessions.get(payload.target_session_id)
+            if selected is None or selected.workspace_id != workspace.id:
+                raise KeyError(payload.target_session_id)
+            if selected.role != WorkspaceSessionRole.ORCHESTRATOR:
+                raise RuntimeError("Tasks can only be assigned to workspace agents")
+            if selected.session_kind != task.session_kind:
+                raise ValueError("The selected agent does not match the Task execution surface")
 
-        if not self._workspace_agents(workspace.id, include_stopped=True):
+        if not payload.target_session_id and not any(
+            agent.session_kind == selected_kind
+            for agent in self._workspace_agents(workspace.id, include_stopped=True)
+        ):
             logger.info(
                 "No workspace agents found for workspace_id=%s; creating default agent for task id=%s",
                 workspace.id,
@@ -69,6 +95,7 @@ class _DispatchMixin:
                 workspace.id,
                 EnsureWorkspaceAgentRequest(
                     agent_type=payload.agent_type or task.agent_type,
+                    session_kind=selected_kind,
                     reuse_existing=False,
                 ),
             )
@@ -80,6 +107,7 @@ class _DispatchMixin:
             raise RuntimeError("Done tasks cannot be started")
         if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
             return task
+        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
         require_task_dependencies(self.tasks, task)
 
         base_update: dict[str, Any] = {
@@ -191,7 +219,11 @@ class _DispatchMixin:
         task: WorkspaceTask,
         payload: StartTaskRequest,
     ) -> Optional[tuple[ManagedSession, bool, str]]:
-        agents = self._workspace_agents(workspace.id, include_stopped=True)
+        agents = [
+            agent
+            for agent in self._workspace_agents(workspace.id, include_stopped=True)
+            if agent.session_kind == task.session_kind
+        ]
         # The "Clear context" checkbox is stored on the task at creation
         # (task.clear_context) but a start call may also override it inline
         # (payload.clear_context). Resolve the explicit request once so every
@@ -208,6 +240,8 @@ class _DispatchMixin:
                 raise KeyError(payload.target_session_id)
             if target.role != WorkspaceSessionRole.ORCHESTRATOR:
                 raise RuntimeError("Tasks can only be assigned to workspace agents")
+            if target.session_kind != task.session_kind:
+                raise ValueError("The selected agent does not match the Task execution surface")
             if not self._can_assign_or_queue_to(target):
                 if (
                     target.status == ManagedSessionStatus.STOPPED
@@ -229,7 +263,11 @@ class _DispatchMixin:
             target = None
             if related and related.session_id:
                 target = self.sessions.get(related.session_id)
-                if target and self._can_assign_or_queue_to(target):
+                if (
+                    target
+                    and target.session_kind == task.session_kind
+                    and self._can_assign_or_queue_to(target)
+                ):
                     logger.info(
                         "Dispatch target selected from related task: task_id=%s related_task_id=%s "
                         "target_session_id=%s related_status=%s",
@@ -255,7 +293,11 @@ class _DispatchMixin:
 
         if task.session_id:
             existing = self.sessions.get(task.session_id)
-            if existing and self._can_assign_or_queue_to(existing):
+            if (
+                existing
+                and existing.session_kind == task.session_kind
+                and self._can_assign_or_queue_to(existing)
+            ):
                 return (
                     existing,
                     bool(requested_clear),
@@ -304,7 +346,7 @@ class _DispatchMixin:
         return None
 
     def _can_assign_or_queue_to(self, session: ManagedSession) -> bool:
-        if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+        if session.role != WorkspaceSessionRole.ORCHESTRATOR or session.chat_paused:
             return False
         if session.status == ManagedSessionStatus.STOPPED:
             return False
@@ -345,6 +387,7 @@ class _DispatchMixin:
             workspace.id,
             EnsureWorkspaceAgentRequest(
                 agent_type=task.agent_type,
+                session_kind=task.session_kind,
                 role=WorkspaceSessionRole.DISPATCHER,
                 reuse_existing=True,
             ),
@@ -368,6 +411,8 @@ class _DispatchMixin:
             raise KeyError(payload.target_session_id)
         if target.role != WorkspaceSessionRole.ORCHESTRATOR:
             raise RuntimeError("Dispatch decisions must target a workspace agent")
+        if target.session_kind != task.session_kind:
+            raise ValueError("The selected agent does not match the Task execution surface")
 
         self.tasks[task.id] = task.model_copy(
             update={
@@ -455,6 +500,8 @@ class _DispatchMixin:
                     "next_action": self._autonomous_next_action(phase),
                 }
             )
+        await self._resume_chat_session(session.id)
+        session = self.sessions[session.id]
         # Opening a fresh work round: bump review_cycle so the worker's next
         # ready_for_review outranks the prior verdict (reviewed_cycle) and a
         # new reviewer is dispatched. Verdict timestamp fields are cleared too,
@@ -719,7 +766,7 @@ class _DispatchMixin:
             await self._dispatch_task_to_session(next_task, session)
 
     def _can_dispatch_to(self, session: ManagedSession) -> bool:
-        if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+        if session.role != WorkspaceSessionRole.ORCHESTRATOR or session.chat_paused:
             return False
         if session.status == ManagedSessionStatus.STOPPED:
             return False
@@ -769,8 +816,13 @@ class _DispatchMixin:
         free_session_id: str,
         workspace_id: str,
     ) -> Optional[WorkspaceTask]:
+        free_session = self.sessions.get(free_session_id)
+        if free_session is None:
+            return None
         candidates: list[WorkspaceTask] = []
         for task in self.tasks.values():
+            if task.session_kind != free_session.session_kind:
+                continue
             if not self._workspace_owns_task(task):
                 continue
             if task.workspace_id != workspace_id:
@@ -947,13 +999,21 @@ class _DispatchMixin:
 
         task = self.tasks[task.id]
         require_task_dependencies(self.tasks, task)
+        if task.session_kind != session.session_kind:
+            raise ValueError("The assigned agent does not match the Task execution surface")
         session = await self._rename_session_for_task(session, task)
         task = self.tasks[task.id]
         require_task_dependencies(self.tasks, task)
 
-        if task.clear_context:
-            await self.send_session_message(session.id, "/clear")
-            await asyncio.sleep(0.5)
+        await self._resume_chat_session(session.id)
+        session = self.sessions[session.id]
+        dispatch_call_id = f"dispatch:{task.id}:{task.dispatch_attempt}"
+        if task.clear_context and (
+            session.session_kind != SessionKind.CHAT
+            or dispatch_call_id not in session.call_payload_fingerprints
+        ):
+            await self._reset_session_context(session)
+            session = self.sessions[session.id]
 
         logger.info(
             "Dispatching workspace task id=%s title=%r to session_id=%s session_title=%r "

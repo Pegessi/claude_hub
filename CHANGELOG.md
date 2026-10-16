@@ -1,9 +1,317 @@
 # Changelog
 
 > Each entry corresponds to a merge or significant commit on `main`.
+> Reaching `main` is what releases a change, so every entry below is released;
+> add new ones at the top of **Released**.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
 
-## Unreleased
+## Released
+
+### feat(chat): refine tool cards and render details only when expanded
+
+- Mount tool input/output only while its native details card is open; preserve
+  expansion through streamed updates and historical process remounts.
+- Bound grouped-tool summaries to three names, use static readable status marks,
+  and keep hover/chevron transitions brief with reduced-motion support.
+- Make plain-text tool payloads keyboard-scrollable and keep nested cards within
+  narrow panes. No new timers, parsers, highlighting libraries, or dependencies.
+
+### feat(chat): compact reasoning status and animate active thinking cards
+
+- Combine adjacent reasoning-only updates into one compact indicator; keep
+  interruptions and tool, answer, error, turn and child-thread boundaries visible.
+- Show active thinking inside the plaintext card instead of a duplicate status
+  row, preserve expanded cards across snapshots, and respect reduced motion.
+- Preserve reasoning status metadata and cache unchanged child-thread projections
+  so sibling activity does not repeatedly rebuild their displayed thinking.
+- Stop hidden child-thinking CSS animations when a thread or its region is folded,
+  restoring the indicator only while its summary is visible.
+
+### ci: make reliability guidance executable for agents
+
+- Add a focused CI reliability contract with check selection, cost comparison,
+  failure diagnosis and compact handoff evidence, linked from agent/contributor guides.
+- Reject payload-sized pytest IDs with bounded, actionable diagnostics; preserve
+  test data, cover partial collections after early errors, and report slow
+  phases without adding a timing gate.
+- Make managed stream/control regressions independent of installed provider and
+  terminal binaries; wait for owned cleanup completion without busy-polling
+  under coverage.
+
+### feat(chat): continue active Goals after a planned restart
+
+- Include eligible running Goals in the existing opt-in restart recovery, keeping
+  the same Goal, provider conversation and checkpoint with one guarded resume.
+- Finish an interrupted ordinary turn before releasing an already-deferred Goal;
+  cancelled or failed ordinary turns leave that Goal paused instead.
+- Preserve user controls, waiting/uncertain states and claim-based no-replay
+  behavior. Revoke pending recovery on new Goal controls or archive, including
+  archive actions before the capture list is persisted.
+- Preserve interruption evidence through private proxy diagnostic redaction and
+  include effective deployment proxy defaults in restart configuration checks.
+- Finish failed deferred recovery before admitting queued objective edits.
+
+### fix(proxy): preserve login profiles and private diagnostic boundaries
+
+- Reassert configured provider proxies after login initialization while keeping
+  session HOME, SHELL and profile-based provider discovery intact.
+- Clear stale Claude launch settings when session overrides are removed, and
+  atomically create private launch files with restrictive permissions.
+- Mask proxy usernames and bypass hosts in error/status diagnostics; require
+  provider-specific network tests and private configuration during deployment.
+
+### feat(proxy): configure private deployment defaults per provider
+
+- Read separate Claude, Codex, Cursor and TraeX proxy/bypass defaults from
+  backend/.env, shared by native launches and Cursor catalog discovery.
+- Preserve session overrides and unconfigured deployments; keep private values
+  out of tab data, serialized settings and other providers' inherited variables.
+- Configure the Cursor catalog deadline per deployment and reject forced
+  additions of private root/backend .env files in commit-safety checks.
+
+### feat(chat): control queued messages and edit image-aware Goals
+
+- Expand queued messages, edit text, cancel inputs, and preview/remove images;
+  Cmd/Ctrl+Enter steers the first queued item when the composer is empty.
+- Keep automatic queue sends from overwriting composer drafts, retain queued
+  edits through bounded Chat eviction, and reconcile uncertain deliveries safely.
+- Edit Goal objectives for the next turn and attach original images at creation
+  or steering, with explicit recovery when image dispatch is interrupted.
+
+### fix(ci): keep large test payloads out of verbose test names
+
+- Give oversized image and deeply nested registry cases short, descriptive pytest
+  IDs, so verbose CI output does not include megabytes of fixture data.
+- Preserve the original payloads, assertions and CI execution settings.
+
+### fix(chat): bound formula parsing and preserve literal code
+
+- Avoid repeated suffix scans and token-array copies on long, incomplete math
+  delimiters; retain ordinary Markdown traversal and lazy-renderer detection.
+- Keep shell substitutions, quoted variables, prices beside negative formulas,
+  and raw HTML code/keyboard text literal. Preserve valid derivatives and norms.
+
+### feat(chat): render formulas and improve rich Markdown reading
+
+- Render inline and display LaTeX formulas, including matrices, with local,
+  on-demand KaTeX assets. Preserve literal code, prices and readable source
+  for partial or unsupported formulas; retain sanitized HTML and MathML.
+- Add language labels and exact-text copy controls to code blocks, keyboard
+  scrolling for wide tables/formulas, and improved narrow-pane containment.
+- Load syntax highlighting only for messages containing code blocks.
+
+### fix(proxy): preserve proxy bypass rules in agent subprocesses
+
+- Fill missing proxy environment case aliases for inherited Chat processes and
+  Cursor model discovery, including `no_proxy` / `NO_PROXY`.
+- Carry the current proxy environment through protected local terminal wrappers
+  even when tmux predates the backend, preserving explicit session overrides.
+- Keep inherited settings out of saved tabs, Claude settings and remote launches;
+  preserve explicit empty values and provider network route selection.
+
+### fix(chat): persist direct-tab cleanup obligations across failures and restart
+
+- Atomically retire a tab with a pending cleanup record, preserving retry after
+  partial file deletion, cancellation, or acknowledgment persistence failure.
+- Retry the same record on DELETE, startup and existing monitor ticks; reserve
+  pending identifiers and refuse cleanup of a replacement owner's artifacts.
+- Read legacy tab lists and save a versioned state envelope. Keep uncertain or
+  invalid state from losing cleanup evidence, and document the deployment backup
+  and old-binary downgrade boundary.
+
+### fix(chat): serialize question answers and finish cleanup before session reuse
+
+- Bind each managed question to one durable answer call so concurrent answers,
+  provider-handoff failures and retries cannot enqueue contradictory follow-ups.
+- Skip a paused previous reviewer when dispatching the next review, preserving
+  explicit Stop while selecting an available or newly created reviewer.
+- Stop direct Chat streams while their tab owner remains discoverable, and retain
+  failed runtime stops for retry across delete, retry, edit and archive paths.
+- Finish outstanding event-log I/O before cleanup or identifier reuse, including
+  cancellation, so old writes cannot enter a replacement session's history.
+
+### fix(chat): fence image cache ownership and retry proven-unsent restart input
+
+- Prevent deleted or cancelled Chat image reads from restoring retired cache
+  entries, including background writes and reused managed session IDs. Disable
+  browser caching of managed image responses.
+- Keep shutdown admission rejection retryable only when provider input was not
+  submitted, including lazy manager creation and rejection after a recorded start.
+  Preserve the same mailbox call ID and retain ambiguous delivery evidence.
+- Finalize test-owned terminal resources on failures and preserve planned-restart
+  continuation behavior when integrating managed Workspace Chat.
+
+### fix(workspace): preserve managed Chat ownership across controls and failures
+
+- Bind question answers to the active turn and exact provider request instead of
+  treating them as arbitrary steering or a new Task message.
+- Keep managed model changes, durable queued messages and retries on the actual
+  ManagedSession; distinguish stale Stop from an already completed turn.
+- Reject direct-tab lifecycle/history mutations for managed Chat, serve generated
+  images through its own stream, and reconcile panes after Agent deletion.
+- Fence failed initialization and deletion before releasing identities; retain
+  delivery evidence until durable removal prevents replay after a failed save.
+- Apply the same provider/surface rules to Task creation and start overrides, and
+  keep managed execution modes under Task control.
+- Keep ordinary Chat descriptors tied to persisted tab creation, and preserve
+  reviewer escalation when automatic recovery limits are reached.
+
+### feat(workspace): run managed agents and reviewers through Chat
+
+- Add an explicit Terminal/Chat execution choice for local Workspace agents,
+  including execution agents and independent reviewers. Existing configurations
+  retain Terminal behavior; MASO is available through local HTTP Chat only.
+- Keep managed Chat tabs as navigation records without starting ttyd, tmux or a
+  terminal shell. Reuse the managed-session stream for messages, tools, image
+  previews, approvals and persistent history.
+- Route Chat assignments and followups through the durable Workspace mailbox.
+  Separate provider handoff evidence from Task reports, preserve ambiguous
+  deliveries without automatic replay, and make Stop pause queued delivery until
+  an explicit continuation.
+- Reset native provider context for unrelated reviews while retaining display
+  history, inherit the execution agent's Chat configuration for auto-created
+  reviewers, and preserve existing review and human-acceptance requirements.
+
+### fix(chat): keep Claude background results from completing a user request
+
+- Correlate Claude result messages with the submitted input UUID, so a resumed
+  background-task notification cannot end the user's turn and discard its reply.
+- Preserve local-command completions, owned errors and older CLI results without
+  correlation metadata; retain the existing cancellation and stale-stream fences.
+
+### fix(chat): recheck restart continuation after provider preparation
+
+- Honor Stop, conversation/configuration changes and shutdown during asynchronous
+  provider preparation, before sending a continuation through stdin, RPC or HTTP.
+- Terminate an empty one-shot process if continuation is revoked while it starts,
+  and preserve manual follow-up after a rejected automatic attempt.
+- Skip a pending continuation if Retry replaces its original runtime.
+
+### feat(chat): continue working Chats after a planned service restart
+
+- Offer automatic continuation in the restart dialog, enabled by default. Send
+  `Please continue.` once in each eligible interrupted Chat's original provider
+  conversation, regardless of the task's language.
+- Preserve waiting Chats and managed recovery controls. Recheck conversation,
+  configuration, Stop and newer input before sending; uncertain attempts require
+  manual attention rather than automatic replay.
+- Reconnect Chat observation across a longer restart, preserving unsent drafts,
+  and report service recovery separately from Chat continuation results.
+
+### chore: remove unrelated presentation draft assets
+
+- Remove the unused root draft folder and its fifteen presentation assets.
+
+### fix(chat): retain streamed images and release inactive image viewers
+
+- Capture completed image references while assistant text streams, including
+  split links in long replies whose final summary is truncated.
+- Close an image viewer when its Chat becomes inactive and release its keyboard
+  focus trap without moving focus back into the hidden Chat.
+- Preserve fragment/query navigation, including HTML entities, when promoting
+  local image links; recapture expired source entries through normal cache eviction.
+
+### feat(chat): preview assistant images and retain original output in the shared LRU
+
+- Render local image links directly in Chat and open them in the image viewer,
+  with fit-to-window, actual-size and original-image controls.
+- Allow a tab's recorded image-view tools to display their exact temporary
+  screenshot, matching the frontend's existing Read/view_image recognition.
+- Save agent output as original bytes in the existing attachment cache and
+  shared quotas/LRU. Capture live image output before fanout, deduplicate
+  repeated reads, and keep retained images available after source cleanup.
+- Serialize updates to the same image and invalidate superseded versions so
+  concurrent reads or an uncacheable replacement cannot revive an older image.
+
+### feat(quota): color remaining balances by available share
+
+- Show remaining quota in green above 50%, amber at 50% or less, orange at
+  20% or less, and red at 10% or less. Match the percentage, progress bar and
+  row accent while preserving provider warnings and neutral missing readings.
+- Improve numeric alignment and remove insignificant decimal zeroes from
+  prepaid credit without rounding its value.
+
+### docs: hold the change log in one Released section
+
+- Merge three same-named `Unreleased` headings into one section, keeping all
+  408 entries and their order: a conflict resolved by keeping both sides'
+  headings had hidden 194 entries below a block readers never scrolled past.
+- Name the section `Released`, because reaching `main` is what releases a
+  change here, and point `CONTRIBUTING.md` and `docs/TASK_GRAPH.md` at it.
+- Fail `verify.sh docs` on a duplicate or renamed heading, so the next
+  conflict resolution cannot silently split the log again.
+
+### fix(chat): explain a MASO failure instead of printing its provider frame
+
+- Read MASO's `agent_error` as a provider failure frame: recover the description
+  it carries, and state plainly that there is none when it carries none, rather
+  than showing the frame itself as the error text.
+- Keep the frame verbatim as JSON evidence beside the message, surface
+  `stop_reason` when it says something the sentence does not, and stop leaking a
+  Python repr when the field is not a string.
+- Render the provider payload as a de-emphasized second line under the error
+  banner, so the readable statement is what the reader sees first.
+
+### feat(quota): report remaining Codex and MASO quota
+
+- Add `GET /api/quota`, a `claude-hub quota` command and a Hub menu panel that
+  report how much of each provider's allowance is still available, as a share
+  per limit window with its reset time.
+- Read Codex from the newest `token_count` record in its local rollout files,
+  ordered by modification time because resuming a session appends current
+  records to a file filed under its original date.
+- Withhold a Codex share once its rolling window has elapsed, rather than
+  presenting a reading that describes a window which no longer exists.
+- Ask MASO for its own per-model accounting over the discovered local endpoint
+  and present its states unchanged; report each provider separately so one
+  unavailable provider still leaves the other readable.
+- Separate a provider that is absent from the deployment from one that is
+  configured but unreachable, so a Hub without MASO states the fact quietly
+  instead of raising a permanent alert nobody can act on.
+- Carry the age of every reading, because Codex only refreshes its figures when
+  a turn completes and a stale reading is otherwise indistinguishable.
+- Say so when a manual refresh returns the same reading, and mark an ageing
+  reading as a last known value: an allowance can also be reset out of band,
+  which the reset time in an older reading cannot predict.
+
+### fix(feishu): build Feishu HTTP clients without HTTPX parsing NO_PROXY
+
+- Resolve the proxy for each Feishu endpoint before constructing the client, so
+  IPv6 CIDR entries such as `fe80::/10` no longer raise `httpx.InvalidURL` while
+  the Bot API, WebSocket discovery and OAuth sign-in clients are created.
+- Move the `NO_PROXY` decision into one shared rule set used by both the native
+  provider selector and Feishu, replacing a weaker duplicate that ignored `*`,
+  per-entry ports and bracketed IPv6 addresses.
+- Report the upstream Feishu code and support id when credential validation is
+  rejected, and name access-control policy 21001 in the Bot pool UI instead of
+  suggesting the operator retype a correct secret.
+
+### ci: initialize browser paths after runner assignment
+
+- Fix workflow rejection by setting browser installation and evidence paths
+  through `GITHUB_ENV` in each browser job's first step, using `RUNNER_TEMP`.
+- Preserve the existing runner-local paths, browser gates and artifact retention.
+
+### fix(chat): avoid blocking provider requests on inconclusive probe timeouts
+
+- In automatic network mode, preserve the existing subprocess environment when
+  the effective route's short HEAD probe times out, allowing the real provider
+  request to proceed without replaying the prompt.
+- Warn with redacted probe results and use the short failure-cache TTL so route
+  selection recovers promptly. Explicit routes and invalid configurations still
+  fail as before.
+- Preserve explicitly empty lowercase proxy settings when generating Claude
+  launch settings, so an inherited uppercase proxy cannot be restored by mistake.
+
+### feat(chat): accept image input in MASO conversations
+
+- Enable image attachments, including image-only turns and queued drafts, through
+  the existing Chat composer and durable preview history.
+- Send original PNG, JPEG, GIF and WebP bytes through MASO's session-scoped HTTP
+  chunk upload, then submit text and image references as one multimodal message.
+- Reject unsupported or oversized images before remote work; allow safe retry
+  after upload failure and fence transport cancellation before a delayed upload
+  can deliver a turn.
 
 ### feat(dot): add Dot, a persistent personal agent
 
@@ -1043,7 +1351,6 @@
   Vue reuse wrong vnodes (dropped rows). It now keys on the reducer's unique
   `sub.key`.
 
-
 ### feat(mobile): left-edge swipe session drawer with pinned sessions
 
 - On phones (≤768px) the chat session list is no longer `display:none`. The
@@ -1253,8 +1560,6 @@
   env); reusing an existing idle reviewer and remote placement
   (target/profile/cwd) are unchanged.
 
-## Unreleased
-
 ### fix: forked Chat tab seeds its truncated history into the new provider session
 
 - "Fork from here" copied the structured UI history up to the chosen turn but
@@ -1299,9 +1604,6 @@
   sub-agents in one turn each get an independent card and split surrounding
   ordinary tool groups. Pure frontend; the backend stream protocol is
   unchanged and internal sub-agent activity is not streamed (future work).
-
-## Unreleased
-
 
 ### fix: keep sidebar launcher enabled during background tab refresh
 

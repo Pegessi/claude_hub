@@ -12,6 +12,111 @@ from ._constants import *  # noqa: F401,F403
 
 
 class _SessionsMixin:
+    @staticmethod
+    async def _await_lifecycle_cleanup(task: "asyncio.Task[Any]") -> None:
+        """Finish committed cleanup even if its caller is cancelled."""
+
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+        task.result()
+        if cancellation is not None:
+            raise cancellation
+
+    def _quarantine_failed_session_deletion(self, session_id: str) -> None:
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        update: dict[str, Any] = {
+            "status": ManagedSessionStatus.NEEDS_INPUT,
+            "runtime_status": AgentRuntimeStatus.ATTENTION,
+            "updated_at": _wm._now(),
+        }
+        if session.session_kind == SessionKind.CHAT:
+            update["chat_paused"] = True
+        self.sessions[session_id] = session.model_copy(update=update)
+        try:
+            self._save_state()
+        except Exception:
+            logger.exception(
+                "Failed to persist retained session after deletion failure session_id=%s",
+                session_id,
+            )
+
+    @staticmethod
+    async def _retire_session_resources(session: ManagedSession) -> None:
+        """Release the discoverable tab before committing ownership removal."""
+
+        await ttyd_manager.delete_tab(session.tab_id)
+
+    async def _cleanup_deleted_session(
+        self, session: ManagedSession, *, provider_fenced: bool
+    ) -> None:
+        """Remove retained stream and delivery evidence after durable deletion."""
+
+        from ..agent_stream import discard_session_stream
+
+        discard_kwargs: dict[str, Any] = {"acknowledged_call_ids": set(session.delivered_call_ids)}
+        if provider_fenced:
+            discard_kwargs["provider_fenced"] = True
+        await discard_session_stream(
+            session.workspace_id,
+            session.id,
+            **discard_kwargs,
+        )
+
+    async def _delete_session_locked(self, session: ManagedSession) -> None:
+        """Delete one session while workspace and pump locks are held."""
+
+        from .. import managed_chat
+        from ..agent_stream import fence_session_stream
+
+        provider_fenced = await fence_session_stream(session.id)
+        if session.session_kind == SessionKind.CHAT:
+            managed_chat.validate_delivery_state_discard(
+                session.workspace_id,
+                session.id,
+                acknowledged_call_ids=set(session.delivered_call_ids),
+                provider_fenced=provider_fenced,
+            )
+
+        # Resource retirement is retryable while the durable session still
+        # exists. Evidence remains untouched until ownership removal commits.
+        await self._retire_session_resources(session)
+
+        snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
+        self.sessions.pop(session.id, None)
+        workspace = self.workspaces.get(session.workspace_id)
+        if workspace:
+            workspace_update: dict[str, Any] = {}
+            if workspace.dispatcher_session_id == session.id:
+                workspace_update["dispatcher_session_id"] = None
+            if workspace.resident_agent_session_id == session.id:
+                workspace_update.update(
+                    {
+                        "resident_agent_session_id": None,
+                        "resident_agent_last_run_at": None,
+                        "resident_agent_enabled": False,
+                    }
+                )
+            if workspace_update:
+                workspace_update["updated_at"] = _wm._now()
+                self.workspaces[workspace.id] = workspace.model_copy(update=workspace_update)
+        try:
+            self._save_state()
+        except BaseException:
+            self._restore_report_intake_workspace(session.workspace_id, snapshot)
+            raise
+
+        cleanup = asyncio.create_task(
+            self._cleanup_deleted_session(session, provider_fenced=provider_fenced),
+            name=f"workspace-session-delete-{session.id}",
+        )
+        await self._await_lifecycle_cleanup(cleanup)
+
     # Initialized in _StateMixin.__init__; annotation-only declaration (no value,
     # so no runtime attribute is created) lets mypy type the rebind below.
     reports: "dict[str, AgentReport]"
@@ -130,9 +235,6 @@ class _SessionsMixin:
         if payload.ephemeral and payload.reuse_existing:
             raise ValueError("Cannot combine ephemeral with reuse_existing")
 
-        if payload.agent_type == AgentType.MASO:
-            raise ValueError("MASO is an HTTP Chat provider; open it as a standalone Chat")
-
         if payload.agent_type == AgentType.TRAEX:
             # TraeX is supported as a top-level terminal/Chat tab but not as a
             # managed workspace worker this wave (goal-packet / autonomous
@@ -194,52 +296,51 @@ class _SessionsMixin:
         # distinct role counters/session ids and cannot overwrite each other.
         # Do not re-run the compatibility lookup inside this lock: doing so
         # would turn advisory reuse into hard concurrent de-duplication.
-        async with self.workspace_mutation_lock(workspace_id):
-            session = await self._create_managed_session(workspace, payload)
+        session: ManagedSession | None = None
         try:
+            async with self.workspace_mutation_lock(workspace_id):
+                session = await self._create_managed_session(workspace, payload)
             bootstrap_prompt = self._build_session_bootstrap_prompt(workspace, session)
             if bootstrap_prompt:
                 await self._wait_for_agent_prompt(session)
                 await self.send_session_message(session.id, bootstrap_prompt)
-        except Exception as exc:
-            # Creating the terminal and persisting the session precedes the
-            # bootstrap. Compensate that partial create so any initialization
-            # failure cannot leave an unusable session in the sidebar.
+        except BaseException as exc:
+            if session is None:
+                # Validation and tab-creation failures keep their established
+                # ValueError/KeyError/RuntimeError contracts. Persistence
+                # failures are wrapped inside _create_managed_session after
+                # its compensation decision is known.
+                raise
+            # A native bootstrap may already own a provider turn. Retire that
+            # owner through the same fenced deletion path before releasing the
+            # friendly session id; if retirement fails, keep the session
+            # paused and visible instead of cross-wiring a replacement to it.
+            cleanup_error: BaseException | None = None
+            cleanup = asyncio.create_task(
+                self.delete_session(session.id),
+                name=f"workspace-bootstrap-rollback-{session.id}",
+            )
             try:
-                async with self.workspace_mutation_lock(workspace_id):
-                    self.sessions.pop(session.id, None)
-                    current_workspace = self.workspaces.get(workspace_id)
-                    if current_workspace:
-                        workspace_update: dict[str, Any] = {}
-                        if current_workspace.dispatcher_session_id == session.id:
-                            workspace_update["dispatcher_session_id"] = None
-                        if current_workspace.resident_agent_session_id == session.id:
-                            workspace_update["resident_agent_session_id"] = None
-                            workspace_update["resident_agent_last_run_at"] = None
-                        if workspace_update:
-                            workspace_update["updated_at"] = _wm._now()
-                            self.workspaces[workspace_id] = current_workspace.model_copy(
-                                update=workspace_update
-                            )
-                    self._save_state()
-            except Exception:
+                await self._await_lifecycle_cleanup(cleanup)
+            except asyncio.CancelledError:
+                # Preserve the bootstrap cancellation after cleanup below.
+                if not isinstance(exc, asyncio.CancelledError):
+                    raise
+            except BaseException as rollback_exc:
+                cleanup_error = rollback_exc
                 logger.exception(
-                    "Failed to persist workspace agent rollback "
+                    "Failed to safely retire workspace agent after bootstrap failure "
                     "workspace_id=%s session_id=%s tab_id=%s",
                     workspace_id,
                     session.id,
                     session.tab_id,
                 )
-            try:
-                await ttyd_manager.delete_tab(session.tab_id)
-            except Exception:
-                logger.exception(
-                    "Failed to delete terminal tab during workspace agent rollback "
-                    "workspace_id=%s session_id=%s tab_id=%s",
-                    workspace_id,
-                    session.id,
-                    session.tab_id,
-                )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if cleanup_error is not None:
+                raise WorkspaceAgentInitializationError(
+                    "Failed to initialize workspace agent; its fenced cleanup is incomplete"
+                ) from exc
             raise WorkspaceAgentInitializationError(
                 "Failed to initialize workspace agent; the new session was rolled back"
             ) from exc
@@ -268,7 +369,18 @@ class _SessionsMixin:
             session_id = f"{workspace.session_prefix}-agent-{role_count + 1}"
             title = payload.title or f"{workspace.name} Agent {role_count + 1}"
 
-        if session_id in self.sessions:
+        from .. import managed_chat
+
+        tab_reserved_ids = {
+            tab.managed_session_id
+            for tab in [*ttyd_manager.list_tabs(), *ttyd_manager.list_archived_tabs()]
+            if tab.managed_session_id
+        }
+        while (
+            session_id in self.sessions
+            or session_id in tab_reserved_ids
+            or managed_chat.has_residual_state(workspace.id, session_id)
+        ):
             session_id = f"{session_id}-{uuid.uuid4().hex[:6]}"
 
         session_target = self._effective_agent_target(workspace, payload)
@@ -300,11 +412,15 @@ class _SessionsMixin:
         session_workspace_path = (
             (remote_cwd or local_cwd) if session_target == ExecutionTarget.REMOTE else local_cwd
         )
-        cursor_transport = "terminal"
+        cursor_transport = "native" if payload.session_kind == SessionKind.CHAT else "terminal"
         cursor_create_kwargs: dict[str, Any] = {}
         cursor_session_id: str | None = None
         launch_env = dict(payload.env)
-        if payload.agent_type == AgentType.CURSOR and session_target == ExecutionTarget.LOCAL:
+        if (
+            payload.agent_type == AgentType.CURSOR
+            and session_target == ExecutionTarget.LOCAL
+            and payload.session_kind == SessionKind.TERMINAL
+        ):
             from ..ttyd_manager import (
                 CURSOR_TRANSCRIPT_SCHEMA,
                 SUPPORTED_CURSOR_TRANSCRIPT_VERSIONS,
@@ -346,6 +462,7 @@ class _SessionsMixin:
                 cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
                 solo_mode=payload.solo_mode,
                 agent_type=payload.agent_type,
+                session_kind=payload.session_kind,
                 target=session_target,
                 remote_profile_id=remote_profile_id,
                 remote_cwd=remote_cwd,
@@ -354,6 +471,7 @@ class _SessionsMixin:
                 workspace_id=workspace.id,
                 workspace_name=workspace.name,
                 workspace_role=role,
+                managed_session_id=session_id,
                 env=launch_env,
                 **agent_session_kwargs,
                 **cursor_create_kwargs,
@@ -364,6 +482,7 @@ class _SessionsMixin:
                 cwd=local_cwd if session_target == ExecutionTarget.LOCAL else None,
                 solo_mode=payload.solo_mode,
                 agent_type=payload.agent_type,
+                session_kind=payload.session_kind,
                 target=session_target,
                 remote_profile_id=remote_profile_id,
                 remote_cwd=remote_cwd,
@@ -372,6 +491,7 @@ class _SessionsMixin:
                 workspace_id=workspace.id,
                 workspace_name=workspace.name,
                 workspace_role=role,
+                managed_session_id=session_id,
                 **agent_session_kwargs,
                 **cursor_create_kwargs,
             )
@@ -383,10 +503,8 @@ class _SessionsMixin:
             tab_id=tab.id,
             role=role,
             agent_type=payload.agent_type,
-            # Workspace worker/reviewer/orchestrator sessions always drive
-            # the raw TUI control plane.  Never inherit a mocked, stale, or
-            # migrated top-level tab's Chat surface.
-            session_kind=SessionKind.TERMINAL,
+            session_kind=payload.session_kind,
+            chat_paused=False,
             status=ManagedSessionStatus.SPAWNING,
             runtime_status=AgentRuntimeStatus.IDLE,
             current_task_id=None,
@@ -394,7 +512,9 @@ class _SessionsMixin:
             title=title,
             branch=None,
             workspace_path=session_workspace_path,
-            tmux_session=f"claude-hub-{tab.id[:8]}",
+            tmux_session=(
+                "" if payload.session_kind == SessionKind.CHAT else f"claude-hub-{tab.id[:8]}"
+            ),
             target=session_target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -414,12 +534,51 @@ class _SessionsMixin:
             created_at=now,
             updated_at=now,
         )
+        snapshot = self._snapshot_report_intake_workspace(workspace.id)
         self.sessions[session.id] = session
         if role == WorkspaceSessionRole.DISPATCHER:
             self.workspaces[workspace.id] = workspace.model_copy(
                 update={"dispatcher_session_id": session.id, "updated_at": now}
             )
-        self._save_state()
+        try:
+            self._save_state()
+        except BaseException as persist_exc:
+            self._restore_report_intake_workspace(workspace.id, snapshot)
+            compensated = False
+            try:
+                # _save_state spans index + workspace files. A reported failure
+                # can occur after this workspace was replaced, so first persist
+                # the restored owner set. If that compensation also fails, keep
+                # the backing tab as a durable identity reservation rather than
+                # delete the only evidence for a possibly committed session.
+                self._save_state()
+                compensated = True
+            except BaseException:
+                logger.exception(
+                    "Failed to compensate workspace state after agent create failure "
+                    "workspace_id=%s session_id=%s tab_id=%s",
+                    workspace.id,
+                    session.id,
+                    tab.id,
+                )
+            if compensated:
+                cleanup = asyncio.create_task(
+                    ttyd_manager.delete_tab(tab.id),
+                    name=f"workspace-create-rollback-{session.id}",
+                )
+                try:
+                    await self._await_lifecycle_cleanup(cleanup)
+                except BaseException:
+                    if isinstance(persist_exc, asyncio.CancelledError):
+                        raise persist_exc
+                    raise WorkspaceAgentInitializationError(
+                        "Failed to persist the workspace agent; its tab cleanup is incomplete"
+                    ) from persist_exc
+            if isinstance(persist_exc, asyncio.CancelledError):
+                raise
+            raise WorkspaceAgentInitializationError(
+                "Failed to create and persist the workspace agent; its identity remains reserved"
+            ) from persist_exc
         return session
 
     def _workspace_remote_cwd(self, workspace: Workspace) -> str:
@@ -463,45 +622,24 @@ class _SessionsMixin:
         if not session:
             raise KeyError(session_id)
 
-        blocking = self._non_terminal_tasks_referencing_session(session_id)
-        if blocking:
-            raise RuntimeError("Cannot delete an agent with queued, working, or review tasks")
+        async with self.workspace_mutation_lock(session.workspace_id):
+            session = self.sessions.get(session_id)
+            if session is None:
+                raise KeyError(session_id)
+            blocking = self._non_terminal_tasks_referencing_session(session_id)
+            if blocking:
+                raise RuntimeError("Cannot delete an agent with queued, working, or review tasks")
 
-        # A later create can reuse this human-readable session id. Remove the
-        # structured stream before exposing that id for a new conversation.
-        from ..agent_stream import discard_session_stream
-
-        await discard_session_stream(session.workspace_id, session_id)
-
-        self.sessions.pop(session_id, None)
-        workspace = self.workspaces.get(session.workspace_id)
-        if workspace:
-            ws_update: dict[str, Any] = {}
-            if workspace.dispatcher_session_id == session_id:
-                ws_update["dispatcher_session_id"] = None
-            # Resident teardown via Delete: if this session is the workspace's
-            # resident, clear the resident pointer and reset last_run_at. We ALSO
-            # set resident_agent_enabled=False so that Delete means "stop it", not
-            # "restart next tick" — otherwise the next resident tick would simply
-            # recreate the session the user just deleted (surprising). Pause is the
-            # way to keep the session disabled-for-auto but alive.
-            if workspace.resident_agent_session_id == session_id:
-                ws_update["resident_agent_session_id"] = None
-                ws_update["resident_agent_last_run_at"] = None
-                ws_update["resident_agent_enabled"] = False
-            if ws_update:
-                ws_update["updated_at"] = _wm._now()
-                self.workspaces[workspace.id] = workspace.model_copy(update=ws_update)
-        self._save_state()
-        try:
-            await ttyd_manager.delete_tab(session.tab_id)
-        except Exception:
-            logger.exception(
-                "Failed to delete terminal tab after removing workspace session "
-                "session_id=%s tab_id=%s",
-                session.id,
-                session.tab_id,
-            )
+            pump_lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+            async with pump_lock:
+                session = self.sessions.get(session_id)
+                if session is None:
+                    raise KeyError(session_id)
+                try:
+                    await self._delete_session_locked(session)
+                except BaseException:
+                    self._quarantine_failed_session_deletion(session_id)
+                    raise
 
     _CLEANUP_ALLOWED_SESSION_ROLES = frozenset(
         {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}

@@ -18,6 +18,7 @@ from claude_hub.main import app
 from claude_hub.models import (
     AgentType,
     ExecutionTarget,
+    SessionKind,
     TerminalTab,
     User,
     WorkspaceSessionRole,
@@ -87,6 +88,7 @@ def cold_review_env(
         cwd: str | None = None,
         solo_mode: bool = False,
         agent_type: AgentType = AgentType.CLAUDE,
+        session_kind: SessionKind = SessionKind.TERMINAL,
         target: ExecutionTarget = ExecutionTarget.LOCAL,
         remote_profile_id: str | None = None,
         remote_cwd: str | None = None,
@@ -95,6 +97,7 @@ def cold_review_env(
         workspace_id: str | None = None,
         workspace_name: str | None = None,
         workspace_role: WorkspaceSessionRole | None = None,
+        managed_session_id: str | None = None,
     ) -> TerminalTab:
         tab_id = f"tab-{len(sent_messages)}"
         return TerminalTab(
@@ -104,6 +107,7 @@ def cold_review_env(
             cwd=cwd,
             solo_mode=solo_mode,
             agent_type=agent_type,
+            session_kind=session_kind,
             target=target,
             remote_profile_id=remote_profile_id,
             remote_cwd=remote_cwd,
@@ -114,6 +118,7 @@ def cold_review_env(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_role=workspace_role,
+            managed_session_id=managed_session_id,
         )
 
     async def fake_send_tmux_message(tmux_session: str, message: str) -> None:

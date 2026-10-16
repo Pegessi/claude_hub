@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib
 import json
 import os
@@ -92,6 +93,65 @@ def _make_store(workspace_id: str = "ws1", session_id: str = "s1", **overrides):
     from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
 
     return AgentStreamAttachmentStore(workspace_id, session_id, **overrides)
+
+
+@pytest.mark.parametrize("keep_source", [False, True])
+async def test_uploads_and_agent_outputs_share_the_same_lru(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch, keep_source: bool
+) -> None:
+    from claude_hub.services.agent_stream import attachments
+
+    clock = [1000.0]
+    monkeypatch.setattr(attachments.time, "time", lambda: clock[0])
+    store = _make_store(max_session_count=2, max_global_count=2)
+    key = hashlib.sha256(b"output path").hexdigest()
+    upload = await store.save("image/png", _png())
+    clock[0] += 1
+    await store.save("image/png", _png(2, 2), source_key=key)
+    clock[0] += 4000
+    if keep_source:
+        assert (await store.read_source(key))[0] == _png(2, 2)
+    else:
+        await store.read(upload["id"])
+    clock[0] += 1
+    await store.save("image/png", _png(3, 3))
+    if keep_source:
+        with pytest.raises(KeyError):
+            await store.read(upload["id"])
+        assert (await store.read_source(key))[0] == _png(2, 2)
+    else:
+        with pytest.raises(KeyError):
+            await store.read_source(key)
+        assert (await store.read(upload["id"]))[0] == _png()
+
+
+async def test_agent_output_source_key_is_session_scoped(state_root: Path) -> None:
+    key = hashlib.sha256(b"same path").hexdigest()
+    one = _make_store(session_id="one")
+    two = _make_store(session_id="two")
+    await one.save("image/png", _png(), source_key=key)
+    with pytest.raises(KeyError):
+        await two.read_source(key)
+
+
+async def test_source_deduplication_recaptures_an_expired_image(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import attachments
+
+    clock = [100.0]
+    monkeypatch.setattr(attachments.time, "time", lambda: clock[0])
+    store = _make_store(max_age_seconds=10)
+    key = hashlib.sha256(b"same output path").hexdigest()
+    first = await store.save("image/png", _png(), source_key=key)
+    clock[0] = 1000.0
+    second = await store.save("image/png", _png(), source_key=key)
+    assert second["id"] != first["id"]
+    with pytest.raises(KeyError):
+        await store.read(first["id"])
+    assert (await store.read_source(key))[0] == _png()
+    entries = store._read_index()
+    assert len(entries) == 1 and entries[0]["created_at"] == 1000.0
 
 
 # ── config validation ───────────────────────────────────────────────────────
@@ -603,14 +663,22 @@ def test_read_rejects_path_traversal_ids(state_root: Path) -> None:
     store = _make_store(max_preview_bytes=10_000)
 
     async def run():
-        for bad in ["../etc/passwd", "..%2fetc%2fpasswd", "/etc/passwd", "a/b/c", "..\\..\\etc"]:
+        for bad in [
+            "../etc/passwd",
+            "..%2fetc%2fpasswd",
+            "/etc/passwd",
+            "a/b/c",
+            "..\\..\\etc",
+        ]:
             with pytest.raises((KeyError, ValueError)):
                 await store.read(bad)
 
     asyncio.run(run())
 
 
-def test_workspace_and_session_ids_with_path_characters_are_hashed(state_root: Path) -> None:
+def test_workspace_and_session_ids_with_path_characters_are_hashed(
+    state_root: Path,
+) -> None:
     """workspace_id / session_id containing '.', '..', or separators must not
     influence the on-disk path — only their SHA-256 digests are used."""
     from claude_hub.services.agent_stream.attachments import _hash_component
@@ -627,7 +695,9 @@ def test_workspace_and_session_ids_with_path_characters_are_hashed(state_root: P
         assert Path(store._session_dir) == expected
 
 
-def test_malicious_manifest_entry_cannot_touch_files_outside_preview_root(state_root: Path) -> None:
+def test_malicious_manifest_entry_cannot_touch_files_outside_preview_root(
+    state_root: Path,
+) -> None:
     """A corrupt index entry with malicious workspace/session ids must not
     cause gc/clear to delete or read files outside the dedicated preview root.
 
@@ -1236,7 +1306,10 @@ def test_gc_unlinks_symlinked_preview_root_without_touching_target(
 def test_gc_handles_dangling_preview_root_symlink(state_root: Path, tmp_path: Path) -> None:
     """A dangling symlink at the preview root must be unlinked; gc must not
     raise and must clear the manifest."""
-    from claude_hub.services.agent_stream.attachments import _attachments_root, _index_path
+    from claude_hub.services.agent_stream.attachments import (
+        _attachments_root,
+        _index_path,
+    )
 
     missing = tmp_path / "does-not-exist"
     root = _attachments_root()

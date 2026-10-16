@@ -55,6 +55,12 @@
       >
         {{ goal.status_message }}
       </p>
+      <p
+        v-if="goal.pending_image_count"
+        class="goal-status-message"
+      >
+        Image delivery was interrupted. Review Chat, reattach images in the composer, then select Recover Goal.
+      </p>
       <div
         v-if="goal.checkpoint"
         class="goal-checkpoint"
@@ -96,6 +102,22 @@
     </p>
     <div class="goal-status-actions">
       <button
+        v-if="error"
+        type="button"
+        :disabled="busy"
+        @click="emit('refresh')"
+      >
+        Reload Goal status
+      </button>
+      <button
+        v-if="!isGoalTerminal(goal.status)"
+        type="button"
+        :disabled="busy || needsReconciliation"
+        @click="emit('edit')"
+      >
+        Edit Goal
+      </button>
+      <button
         v-if="needsReconciliation"
         type="button"
         :disabled="busy"
@@ -114,7 +136,7 @@
       <button
         v-if="!needsReconciliation && (goal.status === 'paused' || goal.status === 'blocked')"
         type="button"
-        :disabled="busy"
+        :disabled="busy || Boolean(goal.pending_image_count)"
         @click="emit('resume')"
       >
         Resume
@@ -144,7 +166,7 @@ import type { ChatGoal } from '@/types'
 import { goalStatusLabel, isGoalTerminal } from '@/utils/chatGoalPolicy'
 
 const props = defineProps<{ goal: ChatGoal; busy?: boolean; error?: string | null }>()
-const emit = defineEmits<{ pause: []; resume: []; complete: []; clear: [] }>()
+const emit = defineEmits<{ pause: []; resume: []; complete: []; clear: []; edit: []; refresh: [] }>()
 const expanded = ref(false)
 const needsReconciliation = computed(() => props.goal.dispatch_state === 'uncertain')
 function retryStop() {

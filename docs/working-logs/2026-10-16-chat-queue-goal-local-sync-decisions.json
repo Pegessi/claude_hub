@@ -1,0 +1,175 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "4a12832ca0ed53ecc7b8fdd16fa20e5a526282a0",
+  "parents": [
+    "82c58ae213d17754ac1bf2e1fe217e9ec9da7ce9",
+    "afe2e9062d5ff5ed7d47bf6ac82ccb42d2156299"
+  ],
+  "base": "47bdae723ee1984c8d50577f1ab9b4f5fa8c2561",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "afb0b80d330a9d71b749296f11068d1bfdaa6255",
+  "reconstructed_tree": "4ff450cd521fe43a070a3ac597c133e97a381eb6",
+  "conflicts": [
+    "backend/claude_hub/api/goal_runs.py",
+    "docs/working-logs/2026-10-16-chat-queue-goal-controls.md",
+    "frontend/src/components/StructuredPane.vue",
+    "frontend/tests/chatFlowReliability.test.mjs",
+    "frontend/tests/chatGoalWiring.test.mjs"
+  ],
+  "decisions": [
+    {
+      "path": "backend/claude_hub/api/goal_runs.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d29d4612c9990d3eca60ca203b9e67f8bdc914d4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f7c27ab85cfc25270ae299ad59d96d341862b841"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4eb86d3489068708b79b32ce88c29e71018386f2"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "dd7c66d9e0839d29830d89083a631c6d501f22b9"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f7c27ab85cfc25270ae299ad59d96d341862b841"
+      },
+      "reason": "Retain parent1 local Managed Chat transport and guards/test harness. Both variants carry the queue/Goal feature; the remote native transplant intentionally omits this local-only integration. All application/test files remain byte-identical to independently validated local candidate 82c58ae.",
+      "disposition": "retain-parent",
+      "destinations": []
+    },
+    {
+      "path": "docs/working-logs/2026-10-16-chat-queue-goal-controls.md",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "440bb7b8510fec3fab5095726c13e33248f8821a"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "43b1d72a91512435e24918e64f5aa1e90becefd4"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "323a3f2befa0710b6d811baa98925d456cc9a112"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "43b1d72a91512435e24918e64f5aa1e90becefd4"
+      },
+      "reason": "Retain incoming parent2 working log: original feature evidence plus explicit native-only publication provenance and local-only boundary.",
+      "disposition": "retain-parent",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/components/StructuredPane.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8d89f63fe7ce12db26ba48b0869c821b0b9c590c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bb1dfa914331bbdeab06f0e4481f7b0194cfb99e"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "dc9c581b8c9d19e2f6bcc5d093cdbba6b71a3c8c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "55c20c629ffe302411266d2d04301e18674a6d81"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bb1dfa914331bbdeab06f0e4481f7b0194cfb99e"
+      },
+      "reason": "Retain parent1 local Managed Chat transport and guards/test harness. Both variants carry the queue/Goal feature; the remote native transplant intentionally omits this local-only integration. All application/test files remain byte-identical to independently validated local candidate 82c58ae.",
+      "disposition": "retain-parent",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/chatFlowReliability.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "78a6b1193732ced8aa98223143bb5dc0c5f295cc"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "020698a59f52198ac46ead74c994adcb50592b56"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "89e53b500f4d730d9ba7d97f5392e44d8b1de041"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "77e961b226b33272ea4d0bed9f086a71a3a495c3"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "020698a59f52198ac46ead74c994adcb50592b56"
+      },
+      "reason": "Retain parent1 local Managed Chat transport and guards/test harness. Both variants carry the queue/Goal feature; the remote native transplant intentionally omits this local-only integration. All application/test files remain byte-identical to independently validated local candidate 82c58ae.",
+      "disposition": "retain-parent",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/chatGoalWiring.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d310dd6288cc5500de889223b341a28c7bc699cc"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "986ffe08eecdae5350f5694e155da2aacd5b2b81"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "195d30ba19c785141dd6ee0eb287476093a8e8ef"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "212ba314d6789ff8e58dc85e666040cd82c1ac09"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "986ffe08eecdae5350f5694e155da2aacd5b2b81"
+      },
+      "reason": "Retain parent1 local Managed Chat transport and guards/test harness. Both variants carry the queue/Goal feature; the remote native transplant intentionally omits this local-only integration. All application/test files remain byte-identical to independently validated local candidate 82c58ae.",
+      "disposition": "retain-parent",
+      "destinations": []
+    }
+  ]
+}

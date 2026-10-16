@@ -55,6 +55,108 @@ function setup(t, initial = {}) {
   return { store, storage }
 }
 
+function deferred() {
+  let resolve
+  const promise = new Promise(res => { resolve = res })
+  return { promise, resolve }
+}
+
+test('stale tab snapshot cannot erase a locally created protected Chat', async t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const oldSnapshot = [...store.tabs]
+  const stale = deferred()
+  const created = { id: 'created-during-fetch', cwd: '/repo', session_kind: 'chat' }
+  let tabGets = 0
+  globalThis.fetch.mock.mockImplementation(async (url, request) => {
+    if (url === '/api/tabs' && !request) {
+      tabGets += 1
+      return stale.promise
+    }
+    if (url === '/api/tabs' && request?.method === 'POST') {
+      return { ok: true, json: async () => created }
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+
+  const loading = store.fetchTabs()
+  while (tabGets === 0) await Promise.resolve()
+  await store.createTab({ name: 'created', cwd: '/repo' })
+  const paneId = store.panes.find(pane => pane.tabId === created.id)?.id
+  assert.ok(paneId)
+  store.getQueuedChatState(paneId, created.id).drafts.push({
+    message: 'protected local draft',
+    attachments: [],
+  })
+  stale.resolve({ ok: true, json: async () => oldSnapshot })
+  await loading
+
+  assert.equal(store.tabs.some(tab => tab.id === created.id), true)
+  assert.equal(store.panes.some(pane => pane.tabId === created.id), true)
+  assert.equal(store.protectedQueuedChatIds(paneId).includes(created.id), true)
+})
+
+test('forced tab fetch supersedes stale fetch without stale finally clearing it', async t => {
+  const { store } = setup(t)
+  const stale = deferred()
+  const fresh = deferred()
+  const freshTabs = [{ id: 'fresh', cwd: '/fresh', session_kind: 'chat' }]
+  let tabGets = 0
+  globalThis.fetch.mock.mockImplementation(async url => {
+    if (url === '/api/tabs') {
+      tabGets += 1
+      return tabGets === 1 ? stale.promise : fresh.promise
+    }
+    if (url === '/api/tabs/sidebar-preferences/migrate-browser-pins') {
+      return { ok: true, json: async () => ({ pinned_tab_ids: [] }) }
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+
+  const requestA = store.fetchTabs()
+  while (tabGets < 1) await Promise.resolve()
+  const requestB = store.fetchTabs({ force: true })
+  while (tabGets < 2) await Promise.resolve()
+  stale.resolve({ ok: true, json: async () => [{ id: 'stale', session_kind: 'chat' }] })
+  await requestA
+  const coalescedWithB = store.fetchTabs()
+  await Promise.resolve()
+  assert.equal(tabGets, 2, 'stale A finally must not clear forced B ownership')
+
+  fresh.resolve({ ok: true, json: async () => freshTabs })
+  await Promise.all([requestB, coalescedWithB])
+  assert.deepEqual(store.tabs.map(tab => tab.id), ['fresh'])
+})
+
+test('full tab snapshots remove stale managed state from panes and queued activation', async t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.panes[0].id
+  store.assignTabToPane('a', paneId)
+  store.setActiveTab('a')
+  store.getQueuedChatState(paneId, 'a').drafts.push({ message: 'stale', attachments: [] })
+  store.requestQueuedChatActivation(paneId, 'a')
+  assert.equal(store.queuedChatActivationOwner?.tabId, 'a')
+  const nextTabs = store.tabs.filter(tab => tab.id !== 'a')
+
+  globalThis.fetch.mock.mockImplementation(async url => {
+    if (url === '/api/tabs') return { ok: true, json: async () => nextTabs }
+    if (url === '/api/tabs/sidebar-preferences/migrate-browser-pins') {
+      return { ok: true, json: async () => ({ pinned_tab_ids: [] }) }
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+
+  await store.fetchTabs()
+
+  assert.equal(store.tabs.some(tab => tab.id === 'a'), false)
+  assert.equal(store.panes.some(pane => pane.tabId === 'a'), false)
+  assert.notEqual(store.activeTabId, 'a')
+  assert.equal(store.queuedChatActivationOwner, null)
+  assert.equal(store.protectedQueuedChatIds(paneId).includes('a'), false)
+  assert.equal(store.observedQueuedChatIds(paneId).includes('a'), false)
+})
+
 test('pin and unpin use server preferences and ignore other session surfaces', async t => {
   const { store, storage } = setup(t)
   globalThis.fetch.mock.mockImplementation(async (url, request) => {
@@ -525,4 +627,21 @@ test('pinned group is still built for mobile-shaped chat data (presentation-agno
   assert.ok(
     groups.filter(group => !group.pinned).every(group => !group.tabs.some(tab => tab.id === 'a')),
   )
+})
+
+test('editing a hidden queue yields activation and cannot starve another ready Chat', t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  const paneId = store.panes[0].id
+  const a = store.getQueuedChatState(paneId, 'a')
+  a.drafts.push({ id: 'a-draft', message: 'Keep until saved', attachments: [] })
+  a.editing = true
+  assert.equal(store.observedQueuedChatIds(paneId).includes('a'), false)
+  store.requestQueuedChatActivation(paneId, 'a')
+  assert.equal(store.queuedChatActivationOwner, null)
+  store.requestQueuedChatActivation(paneId, 'b')
+  assert.equal(store.queuedChatActivationOwner?.tabId, 'b')
+  assert.equal(a.drafts[0].message, 'Keep until saved')
+  a.editing = false
+  assert.equal(store.observedQueuedChatIds(paneId).includes('a'), true)
 })

@@ -438,12 +438,14 @@ class _NormalizeMixin:
         normalized.setdefault("prompt_retry_task_id", None)
         normalized.setdefault("prompt_retry_attempted_at", None)
         normalized.setdefault("last_review_task_id", None)
-        # Every persisted Workspace session is an internal task runner that
-        # drives the raw TUI control plane.  Historical agent/chat values were
-        # briefly written during the top-level Chat migration; fail closed on
-        # load and normalize them back to Terminal/default.  Direct user Chat
-        # tabs live in TTYDManager state and never pass through this boundary.
-        normalized["session_kind"] = SessionKind.TERMINAL.value
+        # Missing historical fields retain Terminal behavior; an explicitly
+        # persisted Chat must not restart as a provider TUI.
+        if normalized.get("session_kind") not in {
+            SessionKind.TERMINAL.value,
+            SessionKind.CHAT.value,
+        }:
+            normalized["session_kind"] = SessionKind.TERMINAL.value
+        normalized.setdefault("chat_paused", False)
         normalized["chat_mode"] = "default"
         return normalized
 

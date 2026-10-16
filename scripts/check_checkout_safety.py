@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PATHS = ("start.sh", "frontend/pnpm-workspace.yaml")
+PROTECTED_FILES = frozenset({"start.sh", "frontend/pnpm-workspace.yaml"})
 HOST = "${CLAUDE_HUB_HOST:-0.0.0.0}"
 MODULE = "claude_hub.service_launcher"
 # These select a different snapshot than the requested checkout. Reject rather
@@ -76,20 +76,33 @@ def read_entries(root: Path, commit: str | None) -> tuple[str, dict[str, tuple[s
     entries: dict[str, tuple[str, str]] = {}
     if commit is None:
         label = "index"
-        output = git(root, "ls-files", "--stage", "-z", "--", *PATHS)
+        output = git(root, "ls-files", "--stage", "-z")
     else:
         label = (
-            git(root, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}")
+            git(
+                root,
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{commit}^{{commit}}",
+            )
             .decode("ascii")
             .strip()
         )
-        output = git(root, "ls-tree", "-r", "-z", label, "--", *PATHS)
+        # ls-tree does not expand the .env.* wildcards accepted by ls-files.
+        # Read repository metadata only and filter both snapshots identically.
+        output = git(root, "ls-tree", "-r", "-z", label)
     for record in output.split(b"\0"):
         if not record:
             continue
         metadata, raw_path = record.split(b"\t", 1)
         fields = metadata.decode("ascii").split()
         path = raw_path.decode("utf-8")
+        candidate = Path(path)
+        if path not in PROTECTED_FILES and not (
+            candidate.parent in {Path("."), Path("backend")} and candidate.name.startswith(".env")
+        ):
+            continue
         if commit is None:
             mode, object_id, stage = fields
             if stage != "0":
@@ -105,6 +118,9 @@ def read_entries(root: Path, commit: str | None) -> tuple[str, dict[str, tuple[s
 def check(root: Path, commit: str | None) -> tuple[str, list[str]]:
     label, entries = read_entries(root, commit)
     errors: list[str] = []
+    for path in entries:
+        if Path(path).name.startswith(".env") and Path(path).name != ".env.example":
+            errors.append(f"{path} is deployment-local and must not be committed")
     if "frontend/pnpm-workspace.yaml" in entries:
         errors.append("frontend/pnpm-workspace.yaml is local-only and must not be committed")
     if "start.sh" in entries:
@@ -130,14 +146,19 @@ def main() -> int:
         print(f"Checkout safety failed: {exc}", file=sys.stderr)
         return 1
     except (OSError, subprocess.SubprocessError):
-        print("Checkout safety failed: cannot read the selected Git index/commit", file=sys.stderr)
+        print(
+            "Checkout safety failed: cannot read the selected Git index/commit",
+            file=sys.stderr,
+        )
         return 1
     for error in errors:
         print(f"Checkout safety failed: {error}", file=sys.stderr)
     if errors:
         return 1
     print(f"Checkout safety PASS: {label}")
-    print("Scope: start.sh when present and frontend/pnpm-workspace.yaml; working tree not checked")
+    print(
+        "Scope: start.sh, frontend/pnpm-workspace.yaml and root/backend .env files; working tree not checked"
+    )
     return 0
 
 
