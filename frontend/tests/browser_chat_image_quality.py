@@ -34,6 +34,7 @@ CODE_TEXT = 'formula = r"\\[x\\]"\nprint("<tag> & $HOME")\n'
 RICH_SUFFIX = (
     "2}\\]\n\n"
     r"Inline $x_1^2$ and \(p=\frac{1}{2}\). Prices $5 and $10. Literal `$x$`."
+    '\n\nShell $HOME.${USER}; echo "$HOME" "$USER"; echo "$?".'
     "\n\n\\[\\Delta=\\mathrm{KL}(A|EVO)-\\mathrm{KL}(A|B)\\]\n\n"
     "$$\\begin{pmatrix}1 & 2 \\\\ 3 & 4\\end{pmatrix}$$\n\n"
     "\\[" + "+".join([r"\frac{a_i^2+b_i^2}{1+\sqrt{c_i}}"] * 20) + "\\]\n\n"
@@ -482,6 +483,9 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(rich.locator(".katex")).to_have_count(7)
             await page.evaluate("document.fonts.ready")
             await expect(rich).to_contain_text("Prices $5 and $10")
+            await expect(rich).to_contain_text(
+                'Shell $HOME.${USER}; echo "$HOME" "$USER"; echo "$?".'
+            )
             await expect(rich.locator("code").filter(has_text="$x$")).to_have_count(1)
             await expect(rich.locator(".math-source")).to_contain_text("notARealCommand")
             await expect(rich.locator('img[alt="Formula $x$"]')).to_have_count(1)
@@ -528,6 +532,54 @@ async def main(browser_run: BrowserRun) -> None:
             )
             report["screenshots"].append("rich-markdown-desktop.png")
             report["screenshots"].append("rich-markdown-preview.png")
+            report["adversarial_markdown"] = await page.evaluate(r"""async () => {
+                const { MarkdownBlockCache, joinBlocks } = await import('/src/utils/markdownBlocks.ts')
+                const input = '\\['.repeat(32768) + '\\\\]'
+                const cache = new MarkdownBlockCache()
+                const start = performance.now()
+                cache.render(input, { complete: true })
+                const elapsedMs = performance.now() - start
+                const dollarInput = '$a '.repeat(16000) + '$'
+                const dollarCache = new MarkdownBlockCache()
+                const dollarStart = performance.now()
+                dollarCache.render(dollarInput, { complete: true })
+                const dollarElapsedMs = performance.now() - dollarStart
+                const literalCache = new MarkdownBlockCache()
+                const literalHtml = joinBlocks(literalCache.render(
+                  'Literal <code>$x$</code> and <kbd>\\(y\\)</kbd>.', { complete: true }
+                ))
+                const literalTemplate = document.createElement('template')
+                literalTemplate.innerHTML = literalHtml
+                const hostile = '<a href="javascript:alert(1)" onclick="alert(1)">bad</a>\n\n'
+                  + '\\[\\href{javascript:alert(1)}{bad}\\]\n\n'
+                  + '<img src="javascript:alert(1)" onerror="alert(1)">'
+                const template = document.createElement('template')
+                template.innerHTML = joinBlocks(new MarkdownBlockCache().render(hostile, {
+                  complete: true, linkMarkdownPaths: true, quotedTabId: 'image-quality-tab',
+                }))
+                return { input_bytes: input.length, elapsed_ms: elapsedMs,
+                  incomplete_has_math: cache.hasMath,
+                  dollar_input_bytes: dollarInput.length, dollar_elapsed_ms: dollarElapsedMs,
+                  dollar_has_math: dollarCache.hasMath,
+                  raw_code_has_math: literalCache.hasMath,
+                  raw_code_text: literalTemplate.content.querySelector('code')?.textContent,
+                  raw_kbd_text: literalTemplate.content.querySelector('kbd')?.textContent,
+                  dangerous_nodes: template.content.querySelectorAll(
+                    'script,[onclick],[onerror],[href^="javascript:"],[src^="javascript:"]'
+                  ).length }
+                }""")
+            assert not report["adversarial_markdown"]["incomplete_has_math"]
+            assert not report["adversarial_markdown"]["dollar_has_math"]
+            assert not report["adversarial_markdown"]["raw_code_has_math"]
+            assert report["adversarial_markdown"]["raw_code_text"] == "$x$"
+            # Native Marked still applies ordinary punctuation escaping in
+            # inline HTML; the math extension must leave that behavior intact.
+            assert report["adversarial_markdown"]["raw_kbd_text"] == "(y)"
+            assert report["adversarial_markdown"]["dangerous_nodes"] == 0
+            # Broad freeze guard, not a device-level performance claim. The
+            # original extension blocks for >10s on this 64KiB fixture.
+            assert report["adversarial_markdown"]["elapsed_ms"] < 5000
+            assert report["adversarial_markdown"]["dollar_elapsed_ms"] < 5000
             for width in (390, 280):
                 await page.set_viewport_size({"width": width, "height": 844})
                 table = rich.get_by_role("region", name="Scrollable table")

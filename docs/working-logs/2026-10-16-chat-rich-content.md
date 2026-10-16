@@ -71,7 +71,7 @@ backend tests (3,534 passed / 7 skipped), and frontend lint/types/tests/build.
 Its formatter target detected the browser scenario's Python formatting; that
 file was formatted using `backend/pyproject.toml`, and `backend-format` passed
 on rerun. Latest frontend targets are rerun after the final source changes;
-the frontend suite has 852 passing cases, including 53 Markdown cases.
+the original frontend suite had 852 passing cases, including 53 Markdown cases.
 
 Independent review reproduced and closed currency/code pairing, table alignment
 and image-alt regressions. Both explicit Markdown images and ordinary local
@@ -97,3 +97,57 @@ bundle observations, not a claim of measured user-device speed improvement.
 Terminal HMR/replay and live-provider tests were not run for this Markdown-only
 change. The working tree's commit and retained evidence are the handoff point;
 no production service restart or main-branch merge is included.
+
+## Independent cross-validation follow-up
+
+Two fresh read-only reviewers checked grammar/caching/performance and nested
+Markdown/security boundaries separately. They reproduced dollar pairing that
+misread shell substitutions, quoted variables and prices preceding negative
+formulas, plus formula parsing inside raw HTML code/keyboard text. Conservative
+dollar boundaries and Marked's raw-block state now preserve those literals;
+numeric derivatives, norms and quoted TeX text remain valid formulas.
+Bare `$$` shell PID syntax can still overlap display-math delimiters in prose;
+shell examples in code spans/fences remain literal, and unsupported formulas
+fall back to readable source without changing the stored message.
+
+Malformed repeated delimiters also exposed synchronous quadratic work: custom
+suffix searches and Marked's return-value-collecting `walkTokens` both copied or
+rescanned increasingly long input. Math now bounds incomplete backslash scans
+at the next unescaped opener and extends the native inline text stopping rules
+without a suffix-wide pre-scan. A private effects-only token visitor retains
+table/list/image traversal while avoiding accumulation of unused return values.
+The private parser leaves shared Marked rules unchanged.
+
+Independent offline controls compare full rendered output with native Marked,
+not just elapsed time. Previously, malformed 32 KiB backslash input took about
+1–2.7 seconds and 64 KiB escaped-closer input about 11.8 seconds. The repaired
+32/64 KiB cases take tens to low hundreds of milliseconds on this host, close
+to native parsing. Repeated dollar text is also covered to prevent the same
+problem at inline boundaries. These are adversarial fixture measurements, not
+general browser/device performance claims.
+
+The browser scenario adds both 64 KiB backslash and 48 KiB dollar fixtures, a
+broad five-second freeze guard, literal raw HTML code/keyboard assertions, and
+hostile link/image/TeX inputs through actual DOMPurify and post-processing. The
+offline reviewers stub DOMPurify; only browser checks provide real DOM evidence.
+Cross-validation probes and before/after source hashes are retained under
+`chat-rich-content/cross-validation/`; the final candidate report supersedes
+the original `delivery.json` for this follow-up.
+
+Both independent reviewers passed the final math/cache source hashes. All ten
+mocked-API browser scenarios passed, including the real sanitizer, code copy,
+stream completion and 390px/280px keyboard scrolling. Adversarial browser render
+times were approximately 136 ms for the 64 KiB backslash fixture and 19 ms for
+the 48 KiB dollar fixture. Raw inline HTML retains native Marked punctuation
+escaping; the guard prevents formula interpretation rather than changing that
+existing escape behavior. The tested hostile final DOM contained no selected
+executable link/image/event-handler nodes. Owned browser resources closed, Vite
+exited normally and port 5307 refused connections after cleanup; broader
+process-tree exit was not independently verified by the lifecycle owner.
+
+The final strict `./scripts/verify.sh all` rerun exited 0: all standard targets
+passed, with 3,534 backend tests passed / 7 skipped and 857 frontend tests passed
+(58 Markdown cases). Docs, browser-scenario formatting and the staged-index
+safety check are checked again after the final evidence notes. The cross-review
+fix is committed separately from the original feature; integration and a
+production restart remain outside this handoff.
