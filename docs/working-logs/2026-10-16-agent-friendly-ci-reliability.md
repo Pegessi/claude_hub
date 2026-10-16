@@ -31,7 +31,11 @@ ordinary local/CI collection and documents the broader reliability contract.
 ## Validation
 
 The six initial collection-policy regressions pass through the canonical focused
-entry (1.08 seconds). Final format/type, complete suite, document, staged and
+entry (1.08 seconds). Independent review then demonstrated that collection-only
+reporters still printed rejected IDs after UsageError. Clear the pending items
+on rejection and add real `--collect-only -q`/`-vv` regressions with 8 MiB data;
+this preserves the failing exit rather than reporting an empty-suite success.
+Final format/type, complete suite, document, staged and
 independent-review results are recorded against the delivered SHA in the Task
 and delivery receipt. Live providers and production service behavior are outside
 this change's evidence.

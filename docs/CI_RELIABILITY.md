@@ -36,6 +36,9 @@ This applies to the ordinary local/CI pytest paths through `tests/conftest.py`,
 including collection-only runs. Failure exits with pytest usage-error status 4
 and a JSON diagnostic containing `code: CI_NODE_ID_TOO_LONG`, the limit, count,
 and at most five file/line/length examples. The diagnostic omits the actual IDs.
+On rejection it clears the pending items before aborting, so collection-finish
+reporters cannot echo the rejected names. This remains a failed collection,
+never an empty-suite success.
 
 512 is this repository's readability budget, not a GitHub platform limit or a
 test-data size limit. At adoption, the default collection had 3569 cases and a
