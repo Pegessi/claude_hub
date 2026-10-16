@@ -245,9 +245,13 @@ def test_schedules_are_created_once_and_follow_the_tab(
     service.ensure_schedules(TAB_ID)
     assert len(schedules) == 2 and updates == [], "repeat setup reuses the schedules"
     service.ensure_schedules("tab-new")
-    # The Hub turned them off when the old Chat was deleted; the new tab turns them on.
+    # The Hub turned them off when the old Chat was deleted; the new tab turns them on,
+    # and their time is sent again so the next run is not a missed old one.
     moved = {"tab_id": "tab-new", "enabled": True}
-    assert sorted(updates) == [("s-1", moved), ("s-2", moved)]
+    assert sorted(updates) == [
+        ("s-1", {**moved, "interval_seconds": service_module.WAKE_INTERVAL_SECONDS}),
+        ("s-2", {**moved, "cron": service_module.TIDY_CRON}),
+    ]
 
     # A home from before this change woke Dot every morning; setup moves it off that.
     # A tidy time the user picked is kept.

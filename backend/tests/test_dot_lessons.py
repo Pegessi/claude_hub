@@ -829,3 +829,42 @@ def test_cards_round_trip_odd_line_breaks_and_quick_edits(service: DotService) -
                          body=body))  # fmt: skip
     os.utime(path, ns=(stamp, stamp))
     assert [hit.id for hit in index.search("divider")] == [card.id]
+
+
+def test_broken_journal_index_and_folders_heal(service: DotService) -> None:
+    import shutil
+
+    from claude_hub.services.dot.store import Card
+
+    store = service.store
+    store.append_journal("you", "remember the flash attention notes")
+    # A write cut off in the middle of a character.
+    with store.journal_path(store.journal_days()[-1]).open("ab") as stream:
+        stream.write("## 23:59 · dot\n\nhalf é".encode()[:-1])
+    assert "flash attention" in " ".join(store.recent_journal())
+
+    # The index is rebuilt from the cards when its file is garbage.
+    card = store.save_card(Card(id="", kind="knowledge", title="Flash attention notes"))
+    assert [hit.id for hit in service.index.search("flash")] == [card.id]
+    store.index_path.write_bytes(b"not a database at all" * 100)
+    assert [hit.id for hit in service.index.search("flash")] == [card.id]
+
+    # Folders removed by hand while the server runs come back on the next write.
+    shutil.rmtree(store.journal_dir)
+    shutil.rmtree(store.files_dir, ignore_errors=True)
+    store.append_journal("dot", "still here")
+    assert store.recent_journal()[-1].endswith("still here")
+    assert store.store_file(b"data", "a.txt").startswith("files/")
+
+
+def test_common_words_and_wake_ups_recall_nothing(service: DotService) -> None:
+    from claude_hub.services.dot.store import Card
+
+    store = service.store
+    store.save_card(Card(id="", kind="knowledge", title="Plans", body="what the team will do"))
+    assert service.index.search("what is the") == []
+    assert service.index.search("what is the team plan")
+    plan = service.prepare_turn("what is the team plan", "conv-1")
+    assert "Memory that may help" in plan.turn_pack
+    wake = service.prepare_turn(service_module.WAKE_MESSAGE, "conv-1")
+    assert "Memory that may help" not in wake.turn_pack

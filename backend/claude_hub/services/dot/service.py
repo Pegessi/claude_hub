@@ -276,8 +276,15 @@ class DotService:
             if existing is not None:
                 update: dict[str, Any] = {}
                 if existing.tab_id != tab_id:
-                    # The Hub turns off a schedule whose Chat was deleted.
+                    # The Hub turns off a schedule whose Chat was deleted. Its time is
+                    # sent again so the next run is worked out anew, not a missed one.
                     update.update(tab_id=tab_id, enabled=True)
+                    update.update(
+                        {
+                            field: getattr(existing, field, None) or value
+                            for field, value in timing.items()
+                        }
+                    )
                 # Older homes woke Dot every morning; move them to events only. A
                 # time the user picked in the right form is kept.
                 if any(getattr(existing, field, None) is None for field in timing):
@@ -341,7 +348,8 @@ class DotService:
             "" if tidy else text,
             first_turn=new_session,
             session_turn=turns,
-            recall=not tidy,
+            # A Hub wake-up's fixed words would recall the same cards every time.
+            recall=not stripped.startswith("[Dot "),
             # A tidy turn is not the user's: events wait for a turn that can act on them.
             inbox=not tidy,
         )

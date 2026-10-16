@@ -28,7 +28,7 @@ MAX_DONE_WHEN = 7
 _CJK = r"\u3400-\u9fff\uf900-\ufaff"
 _CJK_RUN_RE = re.compile(f"[{_CJK}]+")
 _WORD_RE = re.compile(r"[a-z0-9]+")
-_STOP_WORDS = frozenset(
+STOP_WORDS = frozenset(
     "the and for with that this are not when must should from into each all any "
     "you your what where how its has have was were will can".split()
 )
@@ -111,7 +111,7 @@ def session_rules(lessons: Iterable[dict[str, Any]], now: datetime) -> list[dict
 def tokens(text: str) -> set[str]:
     """Words of 3+ letters and CJK character pairs, to compare two rules."""
     lowered = text.lower()
-    found = {word for word in _WORD_RE.findall(lowered) if len(word) >= 3} - _STOP_WORDS
+    found = {word for word in _WORD_RE.findall(lowered) if len(word) >= 3} - STOP_WORDS
     for run in _CJK_RUN_RE.findall(lowered):
         found.update(run[index : index + 2] for index in range(len(run) - 1))
     return found

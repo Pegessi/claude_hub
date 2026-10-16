@@ -309,6 +309,26 @@ that fails on the old code:
 
 Not changed: other tabs see only no-op hooks; reviewers found no regression.
 
+### Review of round 9
+
+One reviewer attacked the round-8 commit (with 800 randomized turn
+simulations: no invariant broke), one the least-reviewed parts (review,
+stats, packs, index, health). Fixed, each with a test that fails on the old
+code:
+
+- A schedule turned back on kept its old next-run time, so a new Dot tab
+  could get a nightly tidy at once. Its time is now sent again.
+- `dot identity` with a file that is not a picture still renamed Dot. The
+  picture now goes first.
+- A journal file cut off mid-character stopped every new session from
+  getting its context; it is read with the bad bytes replaced.
+- A garbled `index.sqlite` broke every turn pack until deleted by hand; it
+  is now dropped and rebuilt.
+- `journal/` or `files/` removed while the server ran stopped the journal
+  until a restart; writes make the folder again.
+- Common words ("what", "the") recalled nearly every card, and every wake-up
+  recalled cards for its fixed text. Both are gone.
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

@@ -528,6 +528,7 @@ class DotStore:
         path = self.files_dir / f"{digest}{suffix}"
         if not path.exists():
             with self._lock:
+                self.files_dir.mkdir(parents=True, exist_ok=True)
                 fd, raw = tempfile.mkstemp(prefix=".file.", suffix=".tmp", dir=self.files_dir)
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(data)
@@ -874,6 +875,8 @@ class DotStore:
         moment = (at or utc_now()).astimezone()
         path = self.journal_path(moment.strftime("%Y-%m-%d"))
         entry = f"## {moment.strftime('%H:%M')} · {who}\n\n{text.strip()}\n\n"
+        # The folder may have been removed by hand since ``ensure`` ran.
+        path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, path.open("a", encoding="utf-8") as stream:
             stream.write(entry)
 
@@ -886,7 +889,8 @@ class DotStore:
         entries: list[str] = []
         for day in reversed(self.journal_days()[-3:]):
             try:
-                text = self.journal_path(day).read_text(encoding="utf-8")
+                # A cut-off write must not hide the rest of the recent talk.
+                text = self.journal_path(day).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             parts = _JOURNAL_HEADER_RE.split(text)
