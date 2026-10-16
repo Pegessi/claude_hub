@@ -48,9 +48,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, watchEffect } from 'vue'
 import { MarkdownBlockCache } from '@/utils/markdownBlocks'
 import { ensureHighlighter, highlightReady } from '@/utils/codeHighlight'
+import { ensureMathRenderer, mathVersion } from '@/utils/mathRendering'
+import { writeClipboard } from '@/utils/clipboard'
 
 const props = withDefaults(defineProps<{
   text?: string | null
@@ -78,22 +80,11 @@ const emit = defineEmits<{
 // tail (the still-growing last block) is re-rendered on each delta.
 const blockCache = new MarkdownBlockCache()
 
-// Kick off lazy loading of the syntax highlighter.  When the chunk
-// finishes loading, ``highlightReady`` flips and the ``blocks`` computed
-// re-evaluates (it depends on ``highlightReady``), causing the cache to
-// invalidate and code blocks to re-render with real highlighting.
-onMounted(() => {
-  // Degrade gracefully on chunk-load failure: the block renders as plain
-  // text and ``ensureHighlighter`` resets its state so the next mount
-  // retries the dynamic import.  The ``.catch`` prevents an unhandled
-  // rejection from bubbling out of the mount hook.
-  ensureHighlighter().catch(() => {})
-})
-
 const blocks = computed(() => {
   // Depend on highlightReady so the computed re-evaluates when the
   // lazy-loaded highlighter finishes loading.
   void highlightReady.value
+  void mathVersion.value
 
   const source = props.text?.trim() || ''
   if (!source) {
@@ -106,6 +97,14 @@ const blocks = computed(() => {
     linkMarkdownPaths: props.linkMarkdownPaths,
     quotedTabId: props.tabId,
   })
+})
+
+// Prose-only messages need neither renderer. Completed block caches are
+// invalidated once when a requested chunk arrives; failed loads keep source.
+watchEffect(() => {
+  void blocks.value
+  if (blockCache.hasCode) ensureHighlighter().catch(() => {})
+  if (blockCache.hasMath) ensureMathRenderer().catch(() => {})
 })
 
 // A proxied image that fails to load (404 / expired temporary file) is
@@ -123,7 +122,22 @@ function handleError(event: Event) {
   ;(button || target).replaceWith(placeholder)
 }
 
-function handleClick(event: MouseEvent) {
+async function handleClick(event: MouseEvent) {
+  const copyButton = event.target instanceof Element
+    ? event.target.closest<HTMLButtonElement>('button[data-copy-code]')
+    : null
+  if (copyButton) {
+    event.preventDefault()
+    const code = copyButton.closest('.markdown-code-block')?.querySelector('pre code')
+    if (!code) return
+    try {
+      await writeClipboard(code.textContent || '')
+      copyButton.textContent = 'Copied'
+    } catch {
+      copyButton.textContent = 'Copy failed'
+    }
+    return
+  }
   const imageButton = event.target instanceof Element
     ? event.target.closest<HTMLButtonElement>('button[data-image-preview]')
     : null
@@ -378,14 +392,139 @@ function handleClick(event: MouseEvent) {
 }
 
 .markdown-block :deep(table) {
-  display: block;
-  overflow-x: auto;
+  display: table;
+  width: 100%;
   border-collapse: collapse;
+}
+
+.markdown-block :deep(.markdown-table-scroll) {
+  max-width: 100%;
+  overflow-x: auto;
+  margin-top: 8px;
+  border-radius: var(--ch-radius-sm);
+}
+
+.markdown-block :deep(.markdown-table-scroll table) {
+  margin: 0;
 }
 
 .markdown-block :deep(th),
 .markdown-block :deep(td) {
   border: 1px solid var(--ch-color-border-strong);
   padding: 6px 8px;
+  min-width: 88px;
+  vertical-align: top;
+}
+
+.markdown-block :deep(th:not([align])),
+.markdown-block :deep(td:not([align])) {
+  text-align: left;
+}
+
+.markdown-block :deep(th[align="right"]),
+.markdown-block :deep(td[align="right"]) {
+  text-align: right;
+}
+
+.markdown-block :deep(th[align="center"]),
+.markdown-block :deep(td[align="center"]) {
+  text-align: center;
+}
+
+.markdown-block :deep(th[align="left"]),
+.markdown-block :deep(td[align="left"]) {
+  text-align: left;
+}
+
+.markdown-block :deep(th) {
+  background: var(--ch-color-canvas);
+  font-weight: 600;
+}
+
+.markdown-block :deep(.markdown-code-block) {
+  overflow: hidden;
+  margin-top: 8px;
+  border: 1px solid var(--ch-color-surface-control-active);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-canvas);
+}
+
+.markdown-block :deep(.markdown-code-header) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--ch-color-border);
+  color: var(--ch-color-text-muted);
+  font-family: var(--ch-font-mono);
+  font-size: 11px;
+}
+
+.markdown-block :deep(.markdown-code-header button) {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.markdown-block :deep(.markdown-code-block pre) {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.markdown-block :deep(.markdown-table-scroll:focus-visible),
+.markdown-block :deep(.markdown-math-display:focus-visible),
+.markdown-block :deep(.markdown-code-header button:focus-visible) {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: -2px;
+}
+
+.markdown-block :deep(.markdown-math) {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.markdown-block :deep(.markdown-math-display) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 10px 2px;
+}
+
+.markdown-block :deep(.markdown-math:not(.markdown-math-display)) {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: middle;
+}
+
+/* KaTeX sizes inner boxes itself. A global max-width would squash fractions. */
+.markdown-block :deep(.katex *) {
+  max-width: none;
+}
+
+.markdown-block :deep(.katex) {
+  font-size: 1.12em;
+}
+
+.markdown-block :deep(.katex-display) {
+  margin: 0;
+}
+
+.markdown-block :deep(.katex-display > .katex) {
+  text-align: left;
+}
+
+.markdown-block :deep(.math-source) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--ch-font-mono);
+  font-size: 0.92em;
 }
 </style>

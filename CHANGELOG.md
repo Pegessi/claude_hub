@@ -7,6 +7,15 @@
 
 ## Released
 
+### feat(chat): render formulas and improve rich Markdown reading
+
+- Render inline and display LaTeX formulas, including matrices, with local,
+  on-demand KaTeX assets. Preserve literal code, prices and readable source
+  for partial or unsupported formulas; retain sanitized HTML and MathML.
+- Add language labels and exact-text copy controls to code blocks, keyboard
+  scrolling for wide tables/formulas, and improved narrow-pane containment.
+- Load syntax highlighting only for messages containing code blocks.
+
 ### fix(chat): keep Claude background results from completing a user request
 
 - Correlate Claude result messages with the submitted input UUID, so a resumed

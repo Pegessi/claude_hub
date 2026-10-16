@@ -4,7 +4,8 @@ import { readFile } from 'node:fs/promises'
 import { hrtime } from 'node:process'
 import test from 'node:test'
 import ts from 'typescript'
-import { marked } from 'marked'
+import { marked, Marked } from 'marked'
+import * as katex from 'katex'
 
 // ── DOMPurify mock ──────────────────────────────────────────────────────
 // DOMPurify requires a DOM; in Node tests we stub it to return the input
@@ -56,6 +57,16 @@ globalThis.__quotedImage = await import(
   `data:text/javascript;base64,${Buffer.from(quotedOutputText).toString('base64')}`
 )
 
+const mathSource = await readFile(new URL('../src/utils/mathRendering.ts', import.meta.url), 'utf8')
+const mathOutput = ts.transpileModule(mathSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText
+globalThis.__katex = katex
+globalThis.__mathRendering = await import(`data:text/javascript;base64,${Buffer.from(mathOutput
+  .replace(/import \{ ref \} from ['"]vue['"];?/, 'const ref = globalThis.__vueRef;')
+  .replace(/import\(['"]\.\/katexRenderer['"]\)/g, 'Promise.resolve(globalThis.__katex)'),
+).toString('base64')}`)
+
 // ── Load markdownBlocks.ts with mocked dompurify ────────────────────────
 const source = await readFile(
   new URL('../src/utils/markdownBlocks.ts', import.meta.url),
@@ -73,8 +84,8 @@ const { outputText } = ts.transpileModule(source, {
 // the real marked and our DOMPurify mock.
 const mocked = outputText
   .replace(
-    /import \{ marked \} from ['"]marked['"];?/,
-    'const marked = globalThis.__marked;',
+    /import \{ marked, Marked \} from ['"]marked['"];?/,
+    'const marked = globalThis.__marked; const Marked = globalThis.__Marked;',
   )
   .replace(
     /import DOMPurify from ['"]dompurify['"];?/,
@@ -88,8 +99,13 @@ const mocked = outputText
     /import \{ resolveLocalImageUrl, rewriteQuotedImageSrcs \} from ['"]@\/utils\/quotedImage['"];?/,
     'const { resolveLocalImageUrl, rewriteQuotedImageSrcs } = globalThis.__quotedImage;',
   )
+  .replace(
+    /import \{ mathExtension, mathVersion \} from ['"]@\/utils\/mathRendering['"];?/,
+    'const { mathExtension, mathVersion } = globalThis.__mathRendering;',
+  )
 
 globalThis.__marked = marked
+globalThis.__Marked = Marked
 globalThis.__mockDOMPurify = mockDOMPurify
 
 const mod = await import(
@@ -99,8 +115,8 @@ const { splitBlockTokens, MarkdownBlockCache, joinBlocks } = mod
 
 // Spy on marked.parser to count parse calls.
 let parserCalls = 0
-const originalParser = marked.parser.bind(marked)
-marked.parser = (tokens, opt) => {
+const originalParser = mod.markdownParser.parser.bind(mod.markdownParser)
+mod.markdownParser.parser = (tokens, opt) => {
   parserCalls++
   return originalParser(tokens, opt)
 }
@@ -886,4 +902,114 @@ test('percent-encoded navigation characters remain valid local image filenames',
   assert.equal((html.match(/<img/g) || []).length, 2)
   assert.match(html, /agent-image\?path=%23diagram.png/)
   assert.match(html, /agent-image\?path=%3Fdiagram.png/)
+})
+
+test('math loads on demand and invalidates an already completed source fallback', async () => {
+  const cache = new MarkdownBlockCache()
+  const source = String.raw`\[\Delta=\mathrm{KL}(A|EVO)-\mathrm{KL}(A|B)\]`
+  const before = renderString(cache, source, { complete: true })
+  assert.equal(cache.hasMath, true)
+  assert.match(before, /math-source/)
+  assert.doesNotMatch(before, /class="katex"/)
+  await globalThis.__mathRendering.ensureMathRenderer()
+  const after = renderString(cache, source, { complete: true })
+  assert.match(after, /class="katex"/)
+  assert.match(after, /<math/)
+  assert.doesNotMatch(after, /math-source/)
+})
+
+test('all four math delimiters preserve TeX through Markdown parsing', () => {
+  for (const source of [String.raw`\[\frac{a_1}{b^2}\]`, String.raw`$$\frac{a_1}{b^2}$$`,
+    String.raw`Value \(\frac{a_1}{b^2}\).`, String.raw`Value $\frac{a_1}{b^2}$.`]) {
+    const html = renderString(new MarkdownBlockCache(), source)
+    assert.match(html, /class="katex"/)
+    assert.match(html, /annotation encoding="application\/x-tex">\\frac\{a_1\}\{b\^2\}/)
+  }
+})
+
+test('multiline matrices, lists, blockquotes and tables support math', () => {
+  const cache = new MarkdownBlockCache()
+  const html = renderString(cache, String.raw`\[
+\begin{aligned}a &= b + c \\ d &= \frac{1}{2}\end{aligned}
+\]
+
+- Value $x_1$.
+
+> Value \(y^2\).
+
+| Formula | Meaning |
+| --- | --- |
+| $z^3$ | cube |`)
+  assert.equal((html.match(/class="katex"/g) || []).length, 4)
+  assert.equal(cache.hasMath, true)
+})
+
+test('code examples, escaped dollars and ordinary prices stay literal', () => {
+  const cache = new MarkdownBlockCache()
+  const html = renderString(cache, 'Price $5 and $10; use $HOME. Escaped \\$x\\$.\n\n`$x$` and `\\[x\\]`\n\n```tex\n\\[x\\]\n```')
+  assert.doesNotMatch(html, /class="katex"|markdown-math/)
+  assert.match(html, /Price \$5 and \$10/)
+  assert.match(html, /<code>\$x\$<\/code>/)
+  assert.equal(cache.hasMath, false)
+  assert.equal(cache.hasCode, true)
+})
+
+test('partial and invalid formulas remain readable and later deltas complete them', () => {
+  const cache = new MarkdownBlockCache()
+  const partial = renderString(cache, String.raw`Before \[\frac{a}{`)
+  assert.match(partial, /Before/)
+  assert.match(partial, /frac/)
+  const complete = renderString(cache, String.raw`Before \[\frac{a}{b}\] after`)
+  assert.match(complete, /class="katex"/)
+  assert.match(complete, /after/)
+  const invalid = renderString(cache, String.raw`\[\notARealCommand{<img src=x onerror=alert(1)>}\]`)
+  assert.match(invalid, /math-source/)
+  assert.doesNotMatch(invalid, /<img/)
+  assert.match(invalid, /&lt;img/)
+})
+
+test('prices beside code or later math do not steal a subsequent opening dollar', () => {
+  const source = 'Price $5 and $10. Literal `$x$`.'
+  const cache = new MarkdownBlockCache()
+  assert.doesNotMatch(renderString(cache, source), /class="katex"/)
+  assert.equal(cache.hasMath, false)
+  assert.equal((renderString(cache, 'Price $5 and $10, then $x$.').match(/class="katex"/g) || []).length, 1)
+  assert.equal((renderString(cache, 'Math $1 + x$ and $2x$ and $2 x$.').match(/class="katex"/g) || []).length, 3)
+  assert.doesNotMatch(renderString(cache, 'Use $HOME/$USER and $5; (`$x$`) remains code.'), /class="katex"/)
+  for (const source of [String.raw`Cost $5.50 ($\frac{x}{y}$).`, String.raw`Cost $5-$\alpha$.`,
+    'Cost $5 ($-x$).', 'Cost $5+$-3$.']) {
+    const html = renderString(cache, source)
+    assert.equal((html.match(/class="katex"/g) || []).length, 1, source)
+    assert.match(html, /Cost \$5/)
+  }
+})
+
+test('formula text in image alternatives remains literal and does not load math', () => {
+  for (const prefix of ['!', '']) {
+    const cache = new MarkdownBlockCache()
+    const html = renderString(cache, `${prefix}[Formula $x$ and **$y$**](/result.png)`, { quotedTabId: 'math-image' })
+    assert.match(html, /alt="Formula \$x\$ and \$y\$"/)
+    assert.doesNotMatch(html, /katex|markdown-math|&lt;span/)
+    assert.equal(cache.hasMath, false)
+  }
+})
+
+test('untrusted commands cannot introduce links or images and macros are message-local', () => {
+  const cache = new MarkdownBlockCache()
+  const html = renderString(cache, String.raw`\[\href{javascript:alert(1)}{click}\]`)
+  assert.doesNotMatch(html, /<a\b|<img\b/)
+  renderString(cache, String.raw`\[\gdef\localmacro{42}\localmacro\]`)
+  const unrelated = renderString(cache, String.raw`\[\localmacro\]`)
+  assert.match(unrelated, /math-source/)
+  const recursive = renderString(cache, String.raw`\[\def\loop{\loop}\loop\]`)
+  assert.match(recursive, /math-source/)
+})
+
+test('the shared Marked instance keeps ordinary callers free of math extensions', () => {
+  assert.doesNotMatch(marked.parse('$x$'), /katex|markdown-math/)
+  const cache = new MarkdownBlockCache()
+  cache.render('$x$')
+  cache.clear()
+  assert.equal(cache.hasMath, false)
+  assert.equal(cache.hasCode, false)
 })
