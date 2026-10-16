@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(proxy): preserve proxy bypass rules in agent subprocesses
+
+- Fill missing proxy environment case aliases for inherited Chat processes and
+  Cursor model discovery, including `no_proxy` / `NO_PROXY`.
+- Carry the current proxy environment through protected local terminal wrappers
+  even when tmux predates the backend, preserving explicit session overrides.
+- Keep inherited settings out of saved tabs, Claude settings and remote launches;
+  preserve explicit empty values and provider network route selection.
+
 ### fix(chat): keep Claude background results from completing a user request
 
 - Correlate Claude result messages with the submitted input UUID, so a resumed
