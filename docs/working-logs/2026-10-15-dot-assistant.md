@@ -255,6 +255,35 @@ Fixed, each with a test that fails on the old code:
 - A NUL byte or an over-long name in a file path was a 500; it is a 404 (or
   400 on a card). A blank focus title is 400, and an edit cannot blank it.
 
+### Review of round 7
+
+One reviewer attacked the round-6 commit, one the less-reviewed parts (turn
+flow, index, store, API, panel). Fixed, each with a test that fails on the
+old code:
+
+- The stuck-review reaper's report (any copied state, even `needs_input`)
+  was taken as a new round and as a worker question. All Hub-written review
+  requests are now recognised. A worker return followed by a Hub request in
+  the same poll was lost; the newest non-Hub report now decides.
+- If a write failed after the inbox event was written, the next tick wrote
+  the event again. Events are now written last.
+- A JSON file that could not be read (a directory, no permission) read as
+  empty, and the next write could replace it. Readers still get the default;
+  writers now fail.
+- Events of a turn that failed after the provider took it were lost. They
+  are unread again, and a failed first turn re-opens a fresh session.
+- Two card saves within the mtime resolution left the search index stale.
+- U+2028, U+0085, form feed and similar characters split a card's lines and
+  changed it on the next save; only `\n` ends a line now.
+- Re-activating a closed focus item could make 8 active items.
+- A card id or link too long for the filesystem was a 500.
+- Panel: an older search answer could replace a newer one, overlapping
+  actions cleared the loading state early, and the card count stayed stale
+  after archive.
+
+Not changed: the journal sync counts stream lines on each completed turn
+(same pattern as the rest of the stream store; sessions rotate).
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

@@ -38,10 +38,14 @@ _QUESTION_REPORT_STATES = {"needs_input", "blocked"}
 _ATTENTION_REPORT_STATES = _QUESTION_REPORT_STATES | {"review_needs_input"}
 # Report states that hand the work back (a new round after a verdict).
 _RETURN_REPORT_STATES = {"ready_for_review", "completed", "failed"}
-# review_reason of the report the Hub writes when a task is moved to review by hand.
+# review_reason of the report the Hub writes when a task is moved to review by hand,
 _MANUAL_REVIEW_REASON = "Manual status transition to REVIEW."
+# ... and the end of the review_reason of the Hub's stuck-review reaper.
+_REAPER_REASON_SUFFIX = "recovered by background dispatcher."
 # Per report field on a result card; a huge report must not make the card unsavable.
 RESULT_TEXT_LIMIT = 20_000
+# Prepared turns waiting for their end; more than this and the oldest never ended.
+_SENT_TURNS_KEPT = 10
 _JOURNAL_TEXT_LIMIT = 20_000
 # skip: Dot cannot judge this one (say why in the note). Not counted anywhere.
 REVIEW_VERDICTS = ("ok", "redo", "skip")
@@ -100,20 +104,28 @@ def _report_state(report: Any) -> str:
     return str(getattr(getattr(report, "state", None), "value", "") or "")
 
 
-def _hub_review_request(report: Any) -> bool:
-    """The Hub's own "please review" report (manual move to review, review re-request).
+def _sent_turns(state: dict[str, Any]) -> list[dict[str, Any]]:
+    turns = state.get("sent_turns")
+    return [turn for turn in turns if isinstance(turn, dict)] if isinstance(turns, list) else []
 
-    It carries no work, so it is neither a new round nor a result to show.
+
+def _hub_report(report: Any) -> bool:
+    """A report the Hub wrote to ask for a review: a manual move to review, a review
+    asked again, or the stuck-review reaper. It carries no work and no question, so
+    it is neither a new round, a result to show, nor news for Dot.
     """
     decision = getattr(getattr(report, "review_decision", None), "value", None)
-    reason = getattr(report, "review_reason", None)
+    reason = str(getattr(report, "review_reason", None) or "")
     return (
-        _report_state(report) == "ready_for_review"
-        and decision == "request"
+        decision == "request"
         and not getattr(report, "changed_files", None)
         and not getattr(report, "validation", None)
         and not getattr(report, "risks", None)
-        and reason in (getattr(report, "message", None), _MANUAL_REVIEW_REASON)
+        and (
+            reason == getattr(report, "message", None)
+            or reason == _MANUAL_REVIEW_REASON
+            or reason.endswith(_REAPER_REASON_SUFFIX)
+        )
     )
 
 
@@ -329,12 +341,16 @@ class DotService:
             # A tidy turn is not the user's: events wait for a turn that can act on them.
             inbox=not tidy,
         )
+        # Remembered until the turn ends: a failed turn gives its events and its
+        # first-turn context back (see ``_turn_ended``).
+        sent = {"at": utc_now().isoformat(), "ids": pack.delivered_event_ids, "first": new_session}
         updates: dict[str, Any] = {
             "session_conversation_id": conversation_id,
             "session_turns": turns,
             "session_pack": system_pack,
             # A tidy runs in its own session; the next real turn starts clean.
             "rotate_requested": True if tidy else None,
+            "sent_turns": [*_sent_turns(state), sent][-_SENT_TURNS_KEPT:],
         }
         if new_session:
             updates["session_started_at"] = now_iso()
@@ -348,6 +364,30 @@ class DotService:
             turn_pack=pack.text,
             delivered_event_ids=pack.delivered_event_ids,
         )
+
+    def _turn_ended(self, ended_at: Any, failed: bool) -> None:
+        """Match a finished turn to the turn Dot prepared for it.
+
+        A failed turn never reached Dot: its events are unread again, and when it
+        opened a session the next turn opens a fresh one (with the recent talk).
+        """
+        ended = _parse_time(ended_at)
+        if ended is None:
+            return
+        with self.store.lock:
+            sent = _sent_turns(self.store.read_state())
+            before = [turn for turn in sent if (_parse_time(turn.get("at")) or ended) <= ended]
+            if not before:
+                return
+            turn = before[-1]
+            rest = [one for one in sent if one not in before]
+            changes: dict[str, Any] = {"sent_turns": rest or None}
+            if failed and turn.get("first"):
+                changes["rotate_requested"] = True
+            self.store.update_state(**changes)
+        ids = [str(one) for one in turn.get("ids") or []]
+        if failed and ids:
+            self.store.mark_inbox_unread(ids)
 
     def mark_delivered(self, event_ids: list[str]) -> None:
         """The provider accepted a turn: its shown inbox events are now read."""
@@ -405,6 +445,7 @@ class DotService:
                         asked, asked_at = starts.pop(event.turn_id or "", ("", None))
                         answer = str(payload.get("assistant_text") or "")
                         last_completed = event.stream_sequence
+                        self._turn_ended(event.created_at, payload.get("status") == "failed")
                         from_hub = asked.lstrip().startswith("[Dot ")
                         if from_hub and answer.strip() == QUIET_REPLY:
                             # Nothing needed the user; keep it out of the recent talk.
@@ -890,69 +931,48 @@ class DotService:
         previous = item.get("status")
         reports = self._reports(str(item.get("workspace_id") or ""), task_id)
         report = reports[-1] if reports else None
-        # What the worker said last; the Hub's own review requests carry no result.
-        result = next((old for old in reversed(reports) if not _hub_review_request(old)), report)
         report_id = getattr(report, "id", None)
         seen_ids = [getattr(old, "id", None) for old in reports]
         last_seen = item.get("last_report_id")
         new_reports = reports[seen_ids.index(last_seen) + 1 :] if last_seen in seen_ids else reports
-        events = 0
+        # The Hub's own review requests carry no result, question or round.
+        result = next((old for old in reversed(reports) if not _hub_report(old)), report)
+        fresh = [new for new in new_reports if not _hub_report(new)]
+        latest = fresh[-1] if fresh else None
         changes: dict[str, Any] = {}
+        notices: list[tuple[str, str, Optional[str]]] = []
         if status != previous:
             changes["status"] = status
         # Any question since the last check, even one answered before this poll, counts
         # against first pass (only until the first verdict).
         if not item.get("first_verdict") and any(
-            _report_state(new) in _QUESTION_REPORT_STATES for new in new_reports
+            _report_state(new) in _QUESTION_REPORT_STATES for new in fresh
         ):
             changes["asked"] = True
         # Dot judges what it delegated; a watched task's brief was not Dot's.
         review_due = None if item.get("watched") else True
         # A new final report in review/failed is a new round, even when the poll never
         # saw the task working again; before a verdict it refreshes the result card.
-        again = (
-            status == previous
-            and report_id is not None
-            and report_id != last_seen
-            and _report_state(report) in _RETURN_REPORT_STATES
-            and not _hub_review_request(report)
-        )
+        again = status == previous and _report_state(latest) in _RETURN_REPORT_STATES
+        title = item.get("title") or task_id
         if status in ("review", "failed") and (status != previous or again or rerun):
             card = self._result_card(item, status, result)
             changes["result_card"] = card.id
             changes["review_due"] = review_due
-            kind = "task_ready" if status == "review" else "task_failed"
             summary = _first_line(str(getattr(result, "message", "") or ""), 300)
-            self.store.add_inbox(
-                kind,
-                f"{item.get('title') or task_id} — {summary or status}",
-                task_id=task_id,
-                card_id=card.id,
-            )
-            events += 1
+            kind = "task_ready" if status == "review" else "task_failed"
+            notices.append((kind, f"{title} — {summary or status}", card.id))
         elif status == "done" and (previous not in ("review", "done") or rerun):
             card = self._result_card(item, status, result)
             changes["result_card"] = card.id
             changes["review_due"] = review_due
-            self.store.add_inbox(
-                "task_done",
-                f"{item.get('title') or task_id} — done",
-                task_id=task_id,
-                card_id=card.id,
-            )
-            events += 1
+            notices.append(("task_done", f"{title} — done", card.id))
         elif (
-            report is not None
-            and report_id != last_seen
-            and _report_state(report) in _ATTENTION_REPORT_STATES
+            _report_state(latest) in _ATTENTION_REPORT_STATES
             and status not in _TERMINAL_TASK_STATES
         ):
-            self.store.add_inbox(
-                "task_needs_input",
-                f"{item.get('title') or task_id} — {_first_line(str(report.message), 300)}",
-                task_id=task_id,
-            )
-            events += 1
+            question = _first_line(str(getattr(latest, "message", "") or ""), 300)
+            notices.append(("task_needs_input", f"{title} — {question}", None))
         elif status in _STALL_TASK_STATES and (activity := self._last_activity(item, task, report)):
             idle = utc_now() - activity
             limit = float(item.get("stall_hours") or DEFAULT_STALL_HOURS)
@@ -960,14 +980,15 @@ class DotService:
             if idle > timedelta(hours=limit) and item.get("stall_alarm_for") != (
                 marker := activity.isoformat()
             ):
-                self.store.add_inbox(
-                    "task_stalled",
-                    f"{item.get('title') or task_id} — no progress for "
-                    f"{idle.total_seconds() / 3600:.1f}h (status {status})",
-                    task_id=task_id,
+                notices.append(
+                    (
+                        "task_stalled",
+                        f"{title} — no progress for "
+                        f"{idle.total_seconds() / 3600:.1f}h (status {status})",
+                        None,
+                    )
                 )
                 changes["stall_alarm_for"] = marker
-                events += 1
         if report_id and report_id != last_seen:
             changes["last_report_id"] = report_id
         if status in _TERMINAL_TASK_STATES:
@@ -978,7 +999,12 @@ class DotService:
             changes["closed"] = False
         if changes:
             self.store.upsert_work(task_id, **changes)
-        return events
+        # Events go last: if anything above fails, the next tick tries again instead
+        # of repeating an event it already wrote. A lost event still leaves the review due.
+        for kind, text, card_id in notices:
+            extra = {"card_id": card_id} if card_id else {}
+            self.store.add_inbox(kind, text, task_id=task_id, **extra)
+        return len(notices)
 
     # ── name and avatar ─────────────────────────────────────────────────
 

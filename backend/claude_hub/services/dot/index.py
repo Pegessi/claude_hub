@@ -1,6 +1,6 @@
 """Derived SQLite FTS5 search index over Dot memory cards.
 
-The index is disposable: it is rebuilt from card file mtimes on demand, so
+The index is disposable: it is rebuilt from card file stamps on demand, so
 hand edits to card files are picked up on the next search.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from typing import Optional
@@ -18,7 +19,7 @@ from .store import Card, DotStore
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
     path TEXT PRIMARY KEY,
-    mtime REAL NOT NULL,
+    mtime NOT NULL,
     id TEXT NOT NULL,
     kind TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -34,6 +35,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 _MAX_TERMS = 24
+_SETTLE_NS = 2_000_000_000
 
 
 @dataclass
@@ -89,16 +91,20 @@ class DotIndex:
                 key = str(path.relative_to(self.store.home))
                 seen.add(key)
                 try:
-                    mtime = path.stat().st_mtime
+                    stat = path.stat()
                 except OSError:
                     continue
-                if known.get(key) == mtime:
+                stamp = f"{stat.st_mtime_ns}:{stat.st_size}"
+                if known.get(key) == stamp:
                     continue
                 card = self.store.read_card_path(path)
                 conn.execute("DELETE FROM cards WHERE path = ?", (key,))
                 conn.execute("DELETE FROM cards_fts WHERE path = ?", (key,))
                 if card is not None:
-                    self._insert(conn, key, mtime, card)
+                    # A file written within the clock's resolution can change again
+                    # with the same stamp; such a file is read again next time.
+                    settled = time.time_ns() - stat.st_mtime_ns > _SETTLE_NS
+                    self._insert(conn, key, stamp if settled else "", card)
                 changes += 1
             for key in set(known) - seen:
                 conn.execute("DELETE FROM cards WHERE path = ?", (key,))
@@ -107,12 +113,12 @@ class DotIndex:
             return changes
 
     @staticmethod
-    def _insert(conn: sqlite3.Connection, key: str, mtime: float, card: Card) -> None:
+    def _insert(conn: sqlite3.Connection, key: str, stamp: str, card: Card) -> None:
         conn.execute(
             "INSERT INTO cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 key,
-                mtime,
+                stamp,
                 card.id,
                 card.kind,
                 card.title,

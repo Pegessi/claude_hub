@@ -42,7 +42,9 @@ index.sqlite        derived FTS5 search index (not in git)
 ```
 
 Markdown cards are the source of truth. The index is rebuilt lazily from
-file mtimes, so Dot may also edit card files directly.
+file mtime and size, so Dot may also edit card files directly. A file changed
+in the last two seconds is read again on the next search, since a second
+quick edit can keep the same mtime.
 
 ### Compression levels
 
@@ -92,7 +94,10 @@ Values are JSON; a plain unquoted value is read as a string.
      Reviews come before events so a busy inbox cannot push them out; a
      section that does not fit is skipped, not the ones after it.
 3. After the turn completes, a post-persist observer appends the exchange to
-   the journal and commits the Dot home.
+   the journal and commits the Dot home. Inbox events in the pack are marked
+   read when the provider takes the turn; if the turn then fails, they are
+   unread again, and a failed first turn makes the next turn open a fresh
+   session (so the recent talk is shown again).
 
 ## Delegation and wake-up
 
@@ -108,8 +113,9 @@ worker or the Hub reviewer asks), or looks stuck it:
 - writes an inbox event,
 - writes a result card from the worker's latest report (each part cut at
   20,000 characters). The Hub's own "please review" reports (a task moved to
-  review by hand, a review asked again) carry no result, so they neither
-  fill the card nor start a new round,
+  review by hand, a review asked again, the stuck-review reaper) carry no
+  result, so they neither fill the card, start a new round, nor count as a
+  question,
 - runs the standing "Dot wake-up" Chat schedule now (queued behind any
   active turn; repeated wakes coalesce). The schedule has a ten-year interval
   so it never fires on its own; events are the only way it runs.

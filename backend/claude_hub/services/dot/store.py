@@ -179,7 +179,9 @@ def _parse_json(raw: bytes) -> Any:
 
 def parse_card(text: str, path: Optional[Path] = None) -> Optional[Card]:
     """Parse a card file; tolerate hand edits. Returns None without a header."""
-    lines = text.splitlines()
+    # Only "\n" ends a line: str.splitlines() would also split on U+2028 or \x0c
+    # inside a title or the body and change the card on its next save.
+    lines = text.split("\n")
     if not lines or lines[0].strip() != _FRONTMATTER:
         return None
     meta: dict[str, Any] = {}
@@ -289,16 +291,23 @@ class DotStore:
 
     # ── json files ──────────────────────────────────────────────────────
 
-    def _read_json(self, name: str, default: Any) -> Any:
+    def _read_json(self, name: str, default: Any, *, update: bool = False) -> Any:
         """Read a JSON file; lists keep only their objects.
 
         A missing file is ``default``. A file that is not the expected JSON (a bad
-        hand edit) is moved aside first, so the next write cannot erase it.
+        hand edit) is moved aside first, so the next write cannot erase it. A file
+        that cannot be read is ``default`` for a reader, but an error for an
+        ``update``: writing the default back would erase it.
         """
         path = self.home / name
         try:
             raw = path.read_bytes()
         except FileNotFoundError:
+            return default
+        except OSError:
+            if update:
+                raise
+            logger.warning("dot: cannot read %s", path.name, exc_info=True)
             return default
         value = _parse_json(raw)
         if not isinstance(value, type(default)):
@@ -342,7 +351,7 @@ class DotStore:
     def update_state(self, **changes: Any) -> dict[str, Any]:
         self.ensure()
         with self._lock:
-            state = self._read_json("state.json", {})
+            state = self._read_json("state.json", {}, update=True)
             for key, value in changes.items():
                 if value is None:
                     state.pop(key, None)
@@ -448,8 +457,12 @@ class DotStore:
             return None
         for kind in CARD_KINDS:
             candidate = self.memory_dir / kind / f"{card_id}.md"
-            if candidate.exists():
-                return candidate
+            try:
+                if candidate.exists():
+                    return candidate
+            except OSError:
+                # A name too long for the filesystem is no card.
+                return None
         for path in self.iter_card_paths():
             card = self.read_card_path(path)
             if card is not None and card.id == card_id:
@@ -556,7 +569,7 @@ class DotStore:
         if not title:
             raise ValueError("title is required")
         with self._lock:
-            items = self._read_json("focus.json", [])
+            items = self._read_json("focus.json", [], update=True)
             active = [item for item in items if item.get("status", "active") == "active"]
             if len(active) >= FOCUS_LIMIT:
                 raise ValueError(f"focus is full ({FOCUS_LIMIT} active); close or drop one first")
@@ -575,7 +588,7 @@ class DotStore:
 
     def update_focus(self, focus_id: str, **changes: Any) -> Optional[dict[str, Any]]:
         with self._lock:
-            items = self._read_json("focus.json", [])
+            items = self._read_json("focus.json", [], update=True)
             for item in items:
                 if item.get("id") != focus_id:
                     continue
@@ -591,6 +604,12 @@ class DotStore:
                         value = max(1, min(5, int(value)))
                     if key == "status" and value not in ("active", "done", "dropped"):
                         raise ValueError("status must be active, done or dropped")
+                    if key == "status" and value == "active" != item.get("status", "active"):
+                        active = [one for one in items if one.get("status", "active") == "active"]
+                        if len(active) >= FOCUS_LIMIT:
+                            raise ValueError(
+                                f"focus is full ({FOCUS_LIMIT} active); close or drop one first"
+                            )
                     item[key] = value
                 item["updated"] = now_iso()
                 self._write_json("focus.json", items)
@@ -608,7 +627,7 @@ class DotStore:
 
     def upsert_work(self, task_id: str, **fields: Any) -> dict[str, Any]:
         with self._lock:
-            items = self._read_json("work.json", [])
+            items = self._read_json("work.json", [], update=True)
             for item in items:
                 if item.get("task_id") == task_id:
                     item.update({key: value for key, value in fields.items() if value is not None})
@@ -662,7 +681,7 @@ class DotStore:
         clean = self._clean_rule(rule)
         self.ensure()
         with self._lock:
-            items = self._read_json("lessons.json", [])
+            items = self._read_json("lessons.json", [], update=True)
             stamp = now_iso()
             item = {
                 "id": f"l-{uuid.uuid4().hex[:6]}",
@@ -679,7 +698,7 @@ class DotStore:
     def _change_lesson(self, lesson_id: str, change: Any) -> Optional[dict[str, Any]]:
         self.ensure()
         with self._lock:
-            items = self._read_json("lessons.json", [])
+            items = self._read_json("lessons.json", [], update=True)
             for item in items:
                 if isinstance(item, dict) and item.get("id") == lesson_id:
                     change(item)
@@ -699,7 +718,11 @@ class DotStore:
         """
         self.ensure()
         with self._lock:
-            items = [item for item in self._read_json("lessons.json", []) if isinstance(item, dict)]
+            items = [
+                item
+                for item in self._read_json("lessons.json", [], update=True)
+                if isinstance(item, dict)
+            ]
             by_id = {item.get("id"): item for item in items}
             item = by_id.get(lesson_id)
             hops = 0
@@ -743,7 +766,11 @@ class DotStore:
         others = [other for other in dict.fromkeys(other_ids) if other != keep_id]
         self.ensure()
         with self._lock:
-            items = [item for item in self._read_json("lessons.json", []) if isinstance(item, dict)]
+            items = [
+                item
+                for item in self._read_json("lessons.json", [], update=True)
+                if isinstance(item, dict)
+            ]
             by_id = {item.get("id"): item for item in items}
             keep = by_id.get(keep_id)
             missing = [other for other in others if other not in by_id]
@@ -786,7 +813,7 @@ class DotStore:
 
     def add_inbox(self, kind: str, text: str, **extra: Any) -> dict[str, Any]:
         with self._lock:
-            items = self._read_json("inbox.json", [])
+            items = self._read_json("inbox.json", [], update=True)
             item = {
                 "id": f"e-{uuid.uuid4().hex[:8]}",
                 "at": now_iso(),
@@ -807,13 +834,26 @@ class DotStore:
     def mark_inbox_read(self, ids: Optional[Iterable[str]] = None) -> int:
         wanted = set(ids) if ids is not None else None
         with self._lock:
-            items = self._read_json("inbox.json", [])
+            items = self._read_json("inbox.json", [], update=True)
             count = 0
             for item in items:
                 if item.get("read"):
                     continue
                 if wanted is None or item.get("id") in wanted:
                     item["read"] = True
+                    count += 1
+            if count:
+                self._write_json("inbox.json", items)
+            return count
+
+    def mark_inbox_unread(self, ids: Iterable[str]) -> int:
+        wanted = set(ids)
+        with self._lock:
+            items = self._read_json("inbox.json", [], update=True)
+            count = 0
+            for item in items:
+                if item.get("read") and item.get("id") in wanted:
+                    item["read"] = False
                     count += 1
             if count:
                 self._write_json("inbox.json", items)

@@ -695,3 +695,112 @@ def test_a_broken_hand_edit_is_kept_aside_not_erased(service: DotService) -> Non
     (cards / "latin1.md").write_bytes(b'---\nid: "x"\ntitle: "caf\xe9"\n---\n')
     assert store.get_card("k") is not None and store.get_card("latin1") is None
     assert [card.id for card in store.list_cards()] == ["k"]
+
+
+@pytest.mark.asyncio
+async def test_the_stuck_review_reaper_and_late_hub_requests(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    reports: dict[str, list[Any]] = {}
+    review = SimpleNamespace(status=SimpleNamespace(value="review"), title="t")
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-1": review, "task-2": review})
+    monkeypatch.setattr(
+        workspace_manager, "reports_for_task", lambda _ws, tid: reports.get(tid, [])
+    )
+    for task_id in ("task-1", "task-2"):
+        store.upsert_work(task_id, workspace_id="ws", title=task_id, status="working")
+        reports[task_id] = [_report(f"{task_id}-w1", "ready_for_review", "1. ✓ first try")]
+    await service.check_work()
+    store.mark_inbox_read()
+
+    # task-1: the reaper re-sends the stuck review, copying a question state.
+    reaper = _hub_request(
+        "h1",
+        "Re-dispatching stuck review task (fallback reaper); prior reviewer dispatch did not "
+        "complete.",
+        "Stuck review recovered by background dispatcher.",
+    )
+    reaper.state = SimpleNamespace(value="needs_input")
+    reports["task-1"].append(reaper)
+    # task-2: a second worker return and then a Hub request land in the same poll.
+    reports["task-2"] += [
+        _report("task-2-w2", "ready_for_review", "1. ✓ second try"),
+        _hub_request("h2", "Human requested reviewer checks."),
+    ]
+    await service.check_work()
+    events = store.list_inbox()
+    assert [(event["kind"], event["task_id"]) for event in events] == [("task_ready", "task-2")]
+    assert "second try" in events[0]["text"]
+    assert not store.get_work("task-1").get("asked")  # type: ignore[union-attr]
+    card = store.get_card(store.get_work("task-1")["result_card"])  # type: ignore[index]
+    assert card is not None and "first try" in card.body and "reaper" not in card.body
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_does_not_repeat_the_event(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    review = SimpleNamespace(status=SimpleNamespace(value="review"), title="t")
+    monkeypatch.setattr(workspace_manager, "tasks", {"task-1": review})
+    monkeypatch.setattr(
+        workspace_manager,
+        "reports_for_task",
+        lambda _ws, _tid: [_report("r1", "ready_for_review", "ok")],
+    )
+    store.upsert_work("task-1", workspace_id="ws", title="t", status="working")
+    upsert = store.upsert_work
+    failures = [OSError("disk full")]
+
+    def flaky(task_id: str, **fields: Any) -> dict[str, Any]:
+        if failures and "result_card" in fields:
+            raise failures.pop()
+        return upsert(task_id, **fields)
+
+    monkeypatch.setattr(store, "upsert_work", flaky)
+    assert await service.check_work() == 0 and store.list_inbox() == []
+    assert await service.check_work() == 1
+    assert await service.check_work() == 0
+    assert len(store.list_inbox()) == 1
+
+
+def test_unreadable_files_are_empty_for_readers_and_errors_for_writers(
+    service: DotService,
+) -> None:
+    store = service.store
+    (store.home / "identity.json").mkdir()
+    assert store.read_identity()["name"] == "Dot"
+    (store.home / "work.json").unlink(missing_ok=True)
+    (store.home / "work.json").mkdir()
+    assert store.list_work() == []
+    with pytest.raises(OSError):
+        store.upsert_work("task-1", status="working")
+    assert (store.home / "work.json").is_dir()
+
+
+def test_cards_round_trip_odd_line_breaks_and_quick_edits(service: DotService) -> None:
+    import os
+    import time
+
+    from claude_hub.services.dot.index import DotIndex
+    from claude_hub.services.dot.store import Card
+
+    store = service.store
+    title = "Line\u2028separator \x85 and\u2029end"
+    body = "page\x0cbreak and \x1c group\nnext line"
+    card = store.save_card(Card(id="", kind="knowledge", title=title, body=body))
+    again = store.get_card(card.id)
+    assert again is not None and (again.title, again.body) == (title, body)
+
+    # Two saves within the clock's resolution: the index must see the second one.
+    index = DotIndex(store)
+    path = store.find_card_path(card.id)
+    assert path is not None
+    stamp = time.time_ns()
+    os.utime(path, ns=(stamp, stamp))
+    assert [hit.id for hit in index.search("separator")] == [card.id]
+    store.save_card(Card(id=card.id, kind="knowledge", title=title.replace("separator", "divider"),
+                         body=body))  # fmt: skip
+    os.utime(path, ns=(stamp, stamp))
+    assert [hit.id for hit in index.search("divider")] == [card.id]

@@ -518,3 +518,20 @@ def test_odd_paths_and_titles_are_client_errors(api: tuple[TestClient, DotServic
     item = client.post("/api/dot/focus", json={"title": "Real"}).json()
     assert client.patch(f"/api/dot/focus/{item['id']}", json={"title": "  "}).status_code == 400
     assert client.get("/api/dot/focus").json()[0]["title"] == "Real"
+
+
+def test_long_ids_and_a_full_focus_are_client_errors(
+    api: tuple[TestClient, DotService],
+) -> None:
+    client, _ = api
+    assert client.get("/api/dot/cards/" + "a" * 300).status_code == 404
+    bad_link = client.post("/api/dot/cards", json={"title": "x", "links": ["a" * 300]})
+    assert bad_link.status_code == 400, bad_link.text
+    ids = [
+        client.post("/api/dot/focus", json={"title": f"Goal {i}"}).json()["id"] for i in range(7)
+    ]
+    client.patch(f"/api/dot/focus/{ids[0]}", json={"status": "dropped"})
+    assert client.post("/api/dot/focus", json={"title": "Goal 7"}).status_code == 200
+    back = client.patch(f"/api/dot/focus/{ids[0]}", json={"status": "active"})
+    assert back.status_code == 400 and "full" in back.text
+    assert len(client.get("/api/dot/focus").json()) == 7
