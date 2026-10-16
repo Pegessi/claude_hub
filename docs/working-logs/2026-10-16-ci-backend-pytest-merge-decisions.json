@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "2c355f540617f966915a7c6d2e1265886f11960d",
+  "parents": [
+    "67375799d7e41420de24e80aaa8a3681e3cf97d2",
+    "39ca52eb6f6f4dfb6aa69d9c46eb22e79d002e3b"
+  ],
+  "base": "8f38b01eac83f736de563690b36cf92ab1d1cfd4",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "1f2d63e0006b3c20c652013c02f1c0f1e3b34f93",
+  "reconstructed_tree": "f9935d56e53096b95f265e6b95feba3ed0307602",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3911580d1a94ffe6e0ccb8709d0169576f254023"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c678209f1e42e8e7db09a395c1eb9091b1952c48"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a2cf26e6c77fbc1d4df6aaa41c83990a82b4e46f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c77c6ca1218f7625a382938c2a1bac5674a7efb5"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "59783e188d7218135da5db555c6c334ba038f3c2"
+      },
+      "reason": "Preserve the CI parameter-ID fix entry together with both rich Markdown release entries from current main, retaining the single Released heading.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
