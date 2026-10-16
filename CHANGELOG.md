@@ -7,6 +7,22 @@
 
 ## Released
 
+### fix(chat): bound formula parsing and preserve literal code
+
+- Avoid repeated suffix scans and token-array copies on long, incomplete math
+  delimiters; retain ordinary Markdown traversal and lazy-renderer detection.
+- Keep shell substitutions, quoted variables, prices beside negative formulas,
+  and raw HTML code/keyboard text literal. Preserve valid derivatives and norms.
+
+### feat(chat): render formulas and improve rich Markdown reading
+
+- Render inline and display LaTeX formulas, including matrices, with local,
+  on-demand KaTeX assets. Preserve literal code, prices and readable source
+  for partial or unsupported formulas; retain sanitized HTML and MathML.
+- Add language labels and exact-text copy controls to code blocks, keyboard
+  scrolling for wide tables/formulas, and improved narrow-pane containment.
+- Load syntax highlighting only for messages containing code blocks.
+
 ### fix(proxy): preserve proxy bypass rules in agent subprocesses
 
 - Fill missing proxy environment case aliases for inherited Chat processes and
