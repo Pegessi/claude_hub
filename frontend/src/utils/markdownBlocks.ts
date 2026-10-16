@@ -1,7 +1,8 @@
-import { marked, type Token, type Tokens } from 'marked'
+import { Marked, type Token, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
 import { highlightVersion, renderCodeBlockHtml } from '@/utils/codeHighlight'
 import { resolveLocalImageUrl, rewriteQuotedImageSrcs } from '@/utils/quotedImage'
+import { mathExtension, mathVersion } from '@/utils/mathRendering'
 
 /**
  * Marked render options.
@@ -12,6 +13,7 @@ import { resolveLocalImageUrl, rewriteQuotedImageSrcs } from '@/utils/quotedImag
  * so existing single-newline fixtures keep their line breaks.
  */
 const MARKED_OPTIONS = { gfm: true, breaks: true }
+export const markdownParser = new Marked(MARKED_OPTIONS, mathExtension)
 
 /**
  * A rendered markdown block that is a single HTML element (paragraph,
@@ -50,11 +52,30 @@ export type RenderedBlock = RenderedHtmlBlock | RenderedListBlock
  * because they render to empty HTML.
  */
 export function splitBlockTokens(source: string): Token[] {
-  return marked.lexer(source, MARKED_OPTIONS).filter((t) => t.type !== 'space')
+  return markdownParser.lexer(source).filter((t) => t.type !== 'space')
+}
+
+/** Effects-only traversal. Marked.walkTokens collects callback return values
+ * with concat; thousands of escape tokens otherwise create quadratic copies. */
+function visitTokens(tokens: Token[], visit: (token: Token) => void): void {
+  for (const token of tokens) {
+    visit(token)
+    if (token.type === 'table') {
+      const table = token as Tokens.Table
+      for (const cell of table.header) visitTokens(cell.tokens, visit)
+      for (const row of table.rows) {
+        for (const cell of row) visitTokens(cell.tokens, visit)
+      }
+    } else if (token.type === 'list') {
+      visitTokens((token as Tokens.List).items, visit)
+    } else if ('tokens' in token && token.tokens) {
+      visitTokens(token.tokens, visit)
+    }
+  }
 }
 
 function promoteLocalImageLinks(tokens: Token[], tabId: string): void {
-  marked.walkTokens(tokens, (token) => {
+  visitTokens(tokens, (token) => {
     if (token.type !== 'link' || !resolveLocalImageUrl(tabId, token.href)) return
     // Work with parsed tokens: code examples and external links keep their
     // meaning, including nested lists and escaped/space-containing filenames.
@@ -81,6 +102,43 @@ function wrapImagePreviews(html: string): string {
   return template.innerHTML
 }
 
+/** Add keyboard-accessible chrome after sanitization, without changing source. */
+function decorateRichBlocks(html: string): string {
+  if (typeof document === 'undefined' || !/<(?:pre|table)[\s>]/i.test(html)) return html
+  const template = document.createElement('template')
+  template.innerHTML = html
+  template.content.querySelectorAll('pre').forEach((pre) => {
+    const code = pre.querySelector('code')
+    if (!code || pre.closest('.markdown-code-block')) return
+    const container = document.createElement('div')
+    container.className = 'markdown-code-block'
+    const header = document.createElement('div')
+    header.className = 'markdown-code-header'
+    const language = document.createElement('span')
+    language.textContent = code.className.match(/\blanguage-([\w#+.-]+)/)?.[1] || 'Code'
+    const copy = document.createElement('button')
+    copy.type = 'button'
+    copy.dataset.copyCode = '1'
+    copy.textContent = 'Copy'
+    copy.setAttribute('aria-label', 'Copy code')
+    copy.setAttribute('aria-live', 'polite')
+    header.append(language, copy)
+    pre.replaceWith(container)
+    container.append(header, pre)
+  })
+  template.content.querySelectorAll('table').forEach((table) => {
+    if (table.closest('.markdown-table-scroll')) return
+    const container = document.createElement('div')
+    container.className = 'markdown-table-scroll'
+    container.tabIndex = 0
+    container.setAttribute('role', 'region')
+    container.setAttribute('aria-label', 'Scrollable table')
+    table.replaceWith(container)
+    container.append(table)
+  })
+  return template.innerHTML
+}
+
 /**
  * Render a single block token to sanitized HTML.
  *
@@ -94,7 +152,7 @@ export function renderBlockToken(token: Token): string {
     const codeToken = token as Tokens.Code
     return DOMPurify.sanitize(renderCodeBlockHtml(codeToken.text, codeToken.lang || ''))
   }
-  return DOMPurify.sanitize(marked.parser([token], MARKED_OPTIONS))
+  return DOMPurify.sanitize(markdownParser.parser([token]))
 }
 
 /**
@@ -115,7 +173,7 @@ function renderListItemInnerHtml(item: Tokens.ListItem, listToken: Tokens.List):
     loose: listToken.loose,
     items: [item],
   }
-  const html = DOMPurify.sanitize(marked.parser([syntheticList], MARKED_OPTIONS))
+  const html = DOMPurify.sanitize(markdownParser.parser([syntheticList]))
   if (typeof document === 'undefined') {
     const match = html.match(/<li[^>]*>([\s\S]*)<\/li>/)
     return match ? match[1] : html
@@ -132,7 +190,7 @@ const MARKDOWN_PATH_PATTERN =
 function hasLinkExcludedParent(node: Node): boolean {
   let parent = node.parentElement
   while (parent) {
-    if (['A', 'CODE', 'PRE', 'KBD', 'SAMP'].includes(parent.tagName)) return true
+    if (['A', 'CODE', 'PRE', 'KBD', 'SAMP'].includes(parent.tagName) || parent.classList.contains('markdown-math')) return true
     parent = parent.parentElement
   }
   return false
@@ -217,6 +275,8 @@ export function linkPathMentions(html: string): string {
  * mode does not serve stale (un)linked HTML.
  */
 export class MarkdownBlockCache {
+  hasMath = false
+  hasCode = false
   private cache = new Map<string, string>()
   /** The linkMarkdownPaths mode the cache was populated for. If the mode
    *  changes, the cache is invalidated. */
@@ -228,6 +288,7 @@ export class MarkdownBlockCache {
    *  when the lazy-loaded highlighter finishes loading; the cache is
    *  invalidated so code blocks are re-rendered with real highlighting. */
   private hlVersion: number | null = null
+  private mathRenderVersion: number | null = null
 
   private cacheKey(
     raw: string,
@@ -287,9 +348,28 @@ export class MarkdownBlockCache {
       this.cache.clear()
     }
     this.hlVersion = highlightVersion.value
+    if (this.mathRenderVersion !== null && this.mathRenderVersion !== mathVersion.value) {
+      this.cache.clear()
+    }
+    this.mathRenderVersion = mathVersion.value
 
     const tokens = splitBlockTokens(source)
     if (quotedTabId) promoteLocalImageLinks(tokens, quotedTabId)
+    this.hasMath = false
+    this.hasCode = false
+    visitTokens(tokens, (token) => {
+      // Marked invokes extension renderers even when flattening image alt text.
+      // Keep TeX literal there instead of placing rendered HTML in an attribute.
+      if (token.type === 'image' && token.tokens) {
+        visitTokens(token.tokens, (alt) => {
+          if (alt.type === 'mathBlock' || alt.type === 'mathInline') {
+            Object.assign(alt, { type: 'text', text: alt.raw, escaped: false })
+          }
+        })
+      }
+      if (token.type === 'mathBlock' || token.type === 'mathInline') this.hasMath = true
+      if (token.type === 'code') this.hasCode = true
+    })
     if (tokens.length === 0) return []
 
     const blocks: RenderedBlock[] = []
@@ -331,6 +411,7 @@ export class MarkdownBlockCache {
       result = rewriteQuotedImageSrcs(result, quotedTabId)
       result = wrapImagePreviews(result)
     }
+    result = decorateRichBlocks(result)
     return result
   }
 
@@ -442,6 +523,9 @@ export class MarkdownBlockCache {
     this.linkMode = null
     this.quotedTabId = null
     this.hlVersion = null
+    this.mathRenderVersion = null
+    this.hasMath = false
+    this.hasCode = false
   }
 
   /** Check whether a block's raw text is cached. */
