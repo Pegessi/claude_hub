@@ -650,15 +650,20 @@ const cardTotal = computed(() =>
   Object.values(status.value?.cards ?? {}).reduce((sum, count) => sum + (count ?? 0), 0),
 )
 
+// Actions can overlap (a search while a section loads): loading ends with the last one.
+let running = 0
+
 async function run(action: () => Promise<void>) {
   errorText.value = ''
+  running += 1
   loading.value = true
   try {
     await action()
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : String(error)
   } finally {
-    loading.value = false
+    running -= 1
+    loading.value = running > 0
   }
 }
 
@@ -674,10 +679,15 @@ async function loadSection() {
   })
 }
 
+// A slow answer for an older search must not replace the newer one.
+let cardsRequest = 0
+
 async function loadCards() {
+  const request = ++cardsRequest
   const kind = kindFilter.value || undefined
   const text = searchText.value.trim()
-  cards.value = text ? await recallDot(text, kind) : await loadDotCards(kind)
+  const found = text ? await recallDot(text, kind) : await loadDotCards(kind)
+  if (request === cardsRequest) cards.value = found
 }
 
 function addFocus() {
@@ -808,6 +818,7 @@ function archiveCard(cardId: string) {
     await archiveDotCard(cardId)
     selectedCard.value = null
     await loadCards()
+    status.value = await loadDotStatus()
   })
 }
 

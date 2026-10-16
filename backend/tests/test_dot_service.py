@@ -576,3 +576,36 @@ async def test_rename_renames_tab_and_rotates(
             await service.update_identity(name=bad)
     with pytest.raises(ValueError):
         await service.update_identity(avatar_image="DOT.md")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_gives_its_events_back(
+    service: DotService, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+    store = service.store
+    stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{TAB_ID}")
+    event = store.add_inbox("task_done", "Paper — done", task_id="task-1")
+
+    # The first turn of a session carries the event, then fails at the provider.
+    plan = service.prepare_turn("[Dot wake] events", None)
+    assert plan.rotate and plan.delivered_event_ids == [event["id"]]
+    service.mark_delivered(plan.delivered_event_ids)
+    assert store.list_inbox() == []
+    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t1", summary="[Dot wake]"))
+    await stream.append(
+        _event(AgentStreamEventType.TURN_COMPLETED, "t1", status="failed", assistant_text="401")
+    )
+    await service.sync_journal()
+    assert [item["id"] for item in store.list_inbox()] == [event["id"]]
+    assert store.read_state().get("rotate_requested"), "the next turn opens a fresh session"
+
+    # The retry works: the event is read for good.
+    plan = service.prepare_turn("[Dot wake] events", plan.conversation_id)
+    assert plan.rotate and plan.delivered_event_ids == [event["id"]]
+    service.mark_delivered(plan.delivered_event_ids)
+    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t2", summary="[Dot wake]"))
+    await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, "t2", assistant_text="Done."))
+    await service.sync_journal()
+    assert store.list_inbox() == [] and not store.read_state().get("sent_turns")
