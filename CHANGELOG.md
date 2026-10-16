@@ -14,8 +14,9 @@
 - Reject payload-sized pytest IDs with bounded, actionable diagnostics; preserve
   test data, cover partial collections after early errors, and report slow
   phases without adding a timing gate.
-- Make the managed SSE regression independent of installed provider binaries,
-  and wait for owned cleanup completion without busy-polling under coverage.
+- Make managed stream/control regressions independent of installed provider and
+  terminal binaries; wait for owned cleanup completion without busy-polling
+  under coverage.
 
 ### feat(chat): continue active Goals after a planned restart
 

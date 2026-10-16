@@ -826,12 +826,17 @@ async def isolated_tab_manager(
     monkeypatch.setattr(ttyd_module, "STATE_FILE", tmp_path / "guard-tabs.json")
     monkeypatch.setattr(ttyd_module, "ORDER_FILE", tmp_path / "guard-order.json")
     monkeypatch.setattr(ttyd_module, "LAUNCH_ENV_DIR", tmp_path / "guard-launch")
+    # These cases prove API ownership guards, not terminal process startup.
+    monkeypatch.setattr(
+        ttyd_module.TTYDProcess, "ensure_tmux_session", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(ttyd_module.TTYDProcess, "start", AsyncMock())
+    monkeypatch.setattr(ttyd_module.TTYDProcess, "stop", AsyncMock())
     tabs = TTYDManager()
     try:
         yield tabs
     finally:
-        # Direct Chat still owns a ttyd process even when it only carries
-        # Workspace display metadata. Reap every test-owned tab on failures too.
+        # Exercise real record retirement even though process I/O is doubled.
         results = await asyncio.gather(
             *(tabs.delete_tab(tab_id) for tab_id in tuple(tabs.processes)),
             return_exceptions=True,

@@ -77,3 +77,14 @@ review and verify the new exact candidate rather than relabeling old results.
 An isolated missing-Claude control reproduces the old SSE failure and passes
 with the explicit capability double. Both owning modules plus the collection
 guard pass together with default coverage (46 cases); format/types/docs pass.
+
+The next remote run passed the SSE boundary and exposed another unmocked
+dependency in the same module: the metadata/ownership guard test started ttyd
+for its direct-tab control case. Double `TTYDProcess.ensure_tmux_session`,
+`start` and `stop` in that fixture, retaining actual manager creation, API
+rejection and record retirement.
+The ordinary backend CI job need not install terminal executables for this
+unit-level guard; the existing terminal/browser integration gates stay intact.
+A full-module control with provider/ttyd/tmux binaries unavailable reproduces
+the old guard-test failure (30 pass, one fail) and passes all 31 cases with the
+fixture repair, using the repository pytest configuration and coverage.
