@@ -7,6 +7,12 @@
 
 ## Released
 
+### fix(ci): keep large test payloads out of verbose test names
+
+- Give oversized image and deeply nested registry cases short, descriptive pytest
+  IDs, so verbose CI output does not include megabytes of fixture data.
+- Preserve the original payloads, assertions and CI execution settings.
+
 ### fix(proxy): preserve proxy bypass rules in agent subprocesses
 
 - Fill missing proxy environment case aliases for inherited Chat processes and

@@ -71,19 +71,8 @@ check_tool_version() {
 
 backend_python() (
   unset PYTHONPATH PYTHONHOME PYTHONUSERBASE UV_ENV_FILE
-  local -a python_command=(python -I)
-  if [[ "${1:-}" == -m && "${2:-}" == pytest &&
-    -n "${CLAUDE_HUB_PYTEST_TIMEOUT_SECONDS:-}" ]]; then
-    [[ "$CLAUDE_HUB_PYTEST_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail \
-      "CLAUDE_HUB_PYTEST_TIMEOUT_SECONDS must be a positive integer"
-    require_command timeout
-    # Keep the pipeline's tee outside the timeout process group so Python's
-    # fatal-signal traceback and the final exit status remain observable.
-    python_command=(timeout --signal=ABRT --kill-after=15s
-      "$CLAUDE_HUB_PYTEST_TIMEOUT_SECONDS" python -I)
-  fi
   uv run --offline --no-sync --no-config --no-env-file --project "$ROOT/backend" \
-    "${python_command[@]}" "$@"
+    python -I "$@"
 )
 
 backend_tool_command() (
