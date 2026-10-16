@@ -92,7 +92,7 @@ Values are JSON; a plain unquoted value is read as a string.
      passed via `--append-system-prompt`, stable for the whole session;
    - build the **turn pack** (time, focus, open work, tasks waiting for
      review, new inbox events, cards recalled by the user's words (not on
-     Hub wake-ups; common words like "the" do not count), and on the first
+     Hub wake-ups; common words like "the" and a bare "hi" do not count), and on the first
      turn the recent talk) — prepended in the hidden
      `<claude_hub_instructions>` block.
      Reviews come before events so a busy inbox cannot push them out; a
@@ -118,8 +118,8 @@ be read does not stop the others. When one finishes, fails, needs input (the
 worker or the Hub reviewer asks), or looks stuck it:
 
 - writes an inbox event,
-- writes a result card from the worker's latest report (each part cut at
-  20,000 characters). The Hub's own "please review" reports (a task moved to
+- writes a result card from the worker's latest report (not the Hub
+  reviewer's; each part cut at 20,000 characters). The Hub's own "please review" reports (a task moved to
   review by hand, a review asked again, the stuck-review reaper) carry no
   result, so they neither fill the card, start a new round, nor count as a
   question,

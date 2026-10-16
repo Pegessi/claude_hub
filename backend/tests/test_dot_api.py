@@ -60,9 +60,11 @@ def test_card_lifecycle(api: tuple[TestClient, DotService]) -> None:
     assert client.delete(f"/api/dot/cards/{other}", params={"hard": True}).status_code == 200
     edited = client.post(
         "/api/dot/cards",
-        json={"id": linker["id"], "title": "Linker", "links": [other], "summary": "new"},
+        json={"id": f" {linker['id']} ", "title": "Linker", "links": [other], "summary": "new"},
     )
     assert edited.status_code == 200, edited.text
+    # Spaces around the id still update the same card.
+    assert client.get(f"/api/dot/cards/{linker['id']}").json()["summary"] == "new"
     assert client.delete(f"/api/dot/cards/{linker['id']}", params={"hard": True}).status_code == 200
 
     assert client.delete(f"/api/dot/cards/{card_id}").json()["archived"]
@@ -451,6 +453,11 @@ def test_journal_route_and_cli_show(
     service.store.append_journal("user", "hello Dot")
     journal = client.get("/api/dot/journal").json()
     assert journal["days"] == [journal["day"]] and "hello Dot" in journal["text"]
+    # A write cut off mid-character must not break the day.
+    with service.store.journal_path(journal["day"]).open("ab") as stream:
+        stream.write("half é".encode()[:-1])
+    cut = client.get("/api/dot/journal")
+    assert cut.status_code == 200 and "hello Dot" in cut.json()["text"]
     assert client.get("/api/dot/journal", params={"day": "bad"}).status_code == 422
 
     card = client.post(

@@ -451,6 +451,19 @@ async def test_watcher_catches_quick_questions_redo_rounds_and_restarts(
     assert store.get_work("task-b")["review_due"]  # type: ignore[index]
     assert [event["kind"] for event in store.list_inbox()] == ["task_failed"]
 
+    # task-a again: the worker's report and the Hub reviewer's start land in one poll.
+    await service.review("task-a", verdict="redo", cause="worker", note="still skips check 2")
+    reports["task-a"] += [
+        _report("a4", "ready_for_review", "fixed check 2 too"),
+        _report("a5", "review_started", "Reviewer is checking"),
+    ]
+    await service.check_work()
+    item_a = store.get_work("task-a")
+    assert item_a is not None and item_a["review_due"], "a new round, not the reviewer's"
+    card = store.get_card(item_a["result_card"])
+    assert card is not None and "fixed check 2 too" in card.body
+    assert "Reviewer is checking" not in card.body
+
     # task-c comes back a second time before any verdict: the card shows the new report.
     reports["task-c"].append(_report("c2", "ready_for_review", "second try, all checks pass"))
     await service.check_work()
@@ -866,6 +879,15 @@ def test_broken_journal_index_and_folders_heal(service: DotService) -> None:
     assert store.recent_journal()[-1].endswith("still here")
     assert store.store_file(b"data", "a.txt").startswith("files/")
 
+    # A card file an editor saved with a byte order mark is still a card.
+    path = store.memory_dir / "knowledge" / f"{card.id}.md"
+    path.write_text("\ufeff" + path.read_text(encoding="utf-8"), encoding="utf-8")
+    assert store.get_card(card.id) is not None
+
+    # A state.json nested too deep is no Dot tab, not a crash in every Chat turn.
+    (store.home / "state.json").write_text("[" * 200_000, encoding="utf-8")
+    assert service.is_dot_tab("tab-1") is False
+
 
 def test_common_words_and_wake_ups_recall_nothing(service: DotService) -> None:
     from claude_hub.services.dot.store import Card
@@ -878,3 +900,7 @@ def test_common_words_and_wake_ups_recall_nothing(service: DotService) -> None:
     assert "Memory that may help" in plan.turn_pack
     wake = service.prepare_turn(service_module.WAKE_MESSAGE, "conv-1")
     assert "Memory that may help" not in wake.turn_pack
+    # "hi" would match "this" as a substring; a short CJK word still recalls.
+    store.save_card(Card(id="", kind="knowledge", title="this week", summary="論文 notes"))
+    assert "Memory that may help" not in service.prepare_turn("hi", "conv-1").turn_pack
+    assert "論文 notes" in service.prepare_turn("論文", "conv-1").turn_pack

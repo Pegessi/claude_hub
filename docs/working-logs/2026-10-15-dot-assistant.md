@@ -366,6 +366,23 @@ setup (which then makes a new tab); the `[quiet]` filter would also hide a
 non-Dot turn whose user text starts with `[Dot ` and whose reply is exactly
 `[quiet]`.
 
+### Review of round 12
+
+One reviewer attacked the round-11 commit and the store; one checked the
+service against DOT.md claim by claim, with randomized tests for lesson
+scores, first-pass stats, pack caps and stall alarms (all held). Fixed, each
+with a test that fails on the old code:
+
+- When the Hub reviewer reported in the same poll as the worker, the result
+  card showed the reviewer's message, and after a redo the new round was
+  missed. Only worker reports count as a result or a return now.
+- The Journal view gave a 500 on a day file cut off mid-character.
+- A card id sent with spaces around it moved the card to a file no lookup
+  could find. The id is trimmed, and a bad id is refused.
+- A card file with a byte order mark (some editors add one) vanished.
+- A `state.json` nested very deep raised in every Chat turn's Dot check.
+- "hi" or "ok" recalled cards that only matched as substrings ("this").
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

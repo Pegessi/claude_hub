@@ -181,7 +181,8 @@ def parse_card(text: str, path: Optional[Path] = None) -> Optional[Card]:
     """Parse a card file; tolerate hand edits. Returns None without a header."""
     # Only "\n" ends a line: str.splitlines() would also split on U+2028 or \x0c
     # inside a title or the body and change the card on its next save.
-    lines = text.split("\n")
+    # An editor may add a byte order mark.
+    lines = text.removeprefix("\ufeff").split("\n")
     if not lines or lines[0].strip() != _FRONTMATTER:
         return None
     meta: dict[str, Any] = {}
@@ -486,6 +487,12 @@ class DotStore:
             raise ValueError("title is required")
         if len(card.body) > MAX_BODY_CHARS:
             raise ValueError(f"body is longer than {MAX_BODY_CHARS} characters")
+        if card.id and (
+            card.id != card.id.strip()
+            or card.id.startswith(".")
+            or any(char in card.id for char in "/\\\0")
+        ):
+            raise ValueError(f"bad card id: {card.id!r}")
         with self._lock:
             stamp = now_iso()
             if not card.id:
