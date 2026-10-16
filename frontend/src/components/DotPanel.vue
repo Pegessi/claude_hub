@@ -26,7 +26,7 @@
                 class="dot-panel__meta"
               >
                 {{ cardTotal }} cards · session turn {{ status.session.turns }}/{{ status.session.max_turns }}
-                · tidy {{ status.last_tidy_at ? `${relativeTime(status.last_tidy_at)} ago` : 'never' }}
+                · tidy {{ status.last_tidy_at ? ago(status.last_tidy_at) : 'never' }}
               </p>
             </div>
             <button
@@ -265,7 +265,7 @@
                   </span>
                   <div class="dot-item__info">
                     <span class="dot-item__title">{{ event.text }}</span>
-                    <span class="dot-item__sub">{{ relativeTime(event.at) }} ago</span>
+                    <span class="dot-item__sub">{{ ago(event.at) }}</span>
                   </div>
                   <div
                     v-if="event.card_id"
@@ -294,7 +294,7 @@
                     <template v-if="item.review_due">· <strong>waiting for review</strong></template>
                     <template v-else-if="item.review">· reviewed {{ item.review.verdict }}</template>
                     · stuck alarm {{ item.stall_hours ?? DEFAULT_STALL_HOURS }}h
-                    · {{ relativeTime(item.created) }} ago
+                    · {{ ago(item.created) }}
                   </span>
                 </div>
                 <div class="dot-item__actions">
@@ -302,7 +302,7 @@
                     type="button"
                     class="ch-btn ch-btn--ghost ch-btn--sm"
                     title="Stop watching this task"
-                    @click="unwatchTask(item.task_id)"
+                    @click="unwatchTask(item)"
                   >
                     Stop
                   </button>
@@ -332,7 +332,7 @@
                   </h3>
                   <p class="dot-item__sub">
                     {{ selectedCard.kind }} · importance {{ selectedCard.importance }}
-                    · updated {{ relativeTime(selectedCard.updated) }} ago
+                    · updated {{ ago(selectedCard.updated) }}
                   </p>
                   <p
                     v-if="selectedCard.summary"
@@ -381,6 +381,7 @@
                     v-model="searchText"
                     class="ch-input"
                     type="search"
+                    maxlength="2000"
                     placeholder="Search memory"
                     aria-label="Search memory"
                   >
@@ -501,7 +502,7 @@
                   <div class="dot-item__info">
                     <span class="dot-item__title">{{ lesson.rule }}</span>
                     <span class="dot-item__sub">
-                      {{ lesson.reach }} · score {{ lesson.score }} · seen {{ relativeTime(lesson.seen) }} ago
+                      {{ lesson.reach }} · score {{ lesson.score }} · seen {{ ago(lesson.seen) }}
                     </span>
                   </div>
                   <div class="dot-item__actions">
@@ -650,6 +651,12 @@ const cardTotal = computed(() =>
   Object.values(status.value?.cards ?? {}).reduce((sum, count) => sum + (count ?? 0), 0),
 )
 
+// "just now", not "just now ago".
+function ago(iso: string | null | undefined): string {
+  const age = relativeTime(iso)
+  return age && age !== 'just now' ? `${age} ago` : age
+}
+
 // Actions can overlap (a search while a section loads): loading ends with the last one.
 let running = 0
 
@@ -693,9 +700,15 @@ async function loadCards() {
 function addFocus() {
   const title = newFocus.value.trim()
   if (!title) return
+  // Cleared before the request, so a double Enter cannot add it twice.
+  newFocus.value = ''
   void run(async () => {
-    await addDotFocus({ title, priority: newPriority.value })
-    newFocus.value = ''
+    try {
+      await addDotFocus({ title, priority: newPriority.value })
+    } catch (error) {
+      newFocus.value ||= title
+      throw error
+    }
     focus.value = await loadDotFocus()
   })
 }
@@ -716,9 +729,14 @@ async function loadLessons() {
 function addLesson() {
   const rule = newLesson.value.trim()
   if (!rule) return
+  newLesson.value = ''
   void run(async () => {
-    await addDotLesson(rule)
-    newLesson.value = ''
+    try {
+      await addDotLesson(rule)
+    } catch (error) {
+      newLesson.value ||= rule
+      throw error
+    }
     await loadLessons()
   })
 }
@@ -791,9 +809,10 @@ function watchTask() {
   })
 }
 
-function unwatchTask(taskId: string) {
+function unwatchTask(item: DotWorkItem) {
+  if (item.review_due && !window.confirm(`Stop tracking "${item.title || item.task_id}"? Its review is dropped.`)) return
   void run(async () => {
-    await unwatchDotTask(taskId)
+    await unwatchDotTask(item.task_id)
     work.value = await loadDotWork()
   })
 }

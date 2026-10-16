@@ -55,6 +55,12 @@ test('Dot API errors surface the server detail', async t => {
   await assert.rejects(api.addDotFocus({ title: 'x' }), err => err.status === 409 && err.message === 'focus is full (7 active)')
 })
 
+test('Dot API validation errors show their messages', async t => {
+  const body = { detail: [{ loc: ['query', 'q'], msg: 'String should have at most 2000 characters' }] }
+  t.mock.method(globalThis, 'fetch', async () => response(body, 422))
+  await assert.rejects(api.recallDot('x'), err => err.status === 422 && err.message === 'String should have at most 2000 characters')
+})
+
 test('Dot launcher sits in the app bar and opens the Dot Chat tab', () => {
   const app = read('../src/App.vue')
   const launcher = read('../src/components/DotLauncher.vue')
@@ -93,6 +99,11 @@ test('Dot panel covers focus, work, lessons, memory and health', () => {
     assert.ok(panel.includes(call), call)
   }
   assert.ok(panel.includes("event.key === 'Escape'"))
+  // No "just now ago"; a double Enter cannot add twice (the draft is cleared first).
+  assert.ok(!/\}\} ago|\)\} ago/.test(panel))
+  assert.match(panel, /newFocus\.value = ''\n {2}void run\(/)
+  assert.match(panel, /newLesson\.value = ''\n {2}void run\(/)
+  assert.ok(panel.includes('maxlength="2000"'))
 })
 
 test('Dot name and avatar are shared and editable', () => {
@@ -113,7 +124,9 @@ test('Dot name and avatar are shared and editable', () => {
 test('Dot panel can watch and stop watching tasks', () => {
   const panel = read('../src/components/DotPanel.vue')
   assert.ok(panel.includes('watchDotTask(taskId, watchStallHours.value)'))
-  assert.ok(panel.includes('unwatchDotTask(taskId)'))
+  assert.ok(panel.includes('unwatchDotTask(item.task_id)'))
+  // Stopping a task that waits for review drops the review: ask first.
+  assert.match(panel, /item\.review_due && !window\.confirm\(/)
   assert.ok(panel.includes("'task_stalled'"))
 })
 

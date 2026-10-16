@@ -848,6 +848,16 @@ def test_broken_journal_index_and_folders_heal(service: DotService) -> None:
     assert [hit.id for hit in service.index.search("flash")] == [card.id]
     store.index_path.write_bytes(b"not a database at all" * 100)
     assert [hit.id for hit in service.index.search("flash")] == [card.id]
+    # A good header with damaged pages inside opens fine and fails on the first read.
+    for number in range(40):
+        store.save_card(Card(id="", kind="knowledge", title=f"Filler {number}", body="x" * 3000))
+    assert service.index.count() == 41
+    data = bytearray(store.index_path.read_bytes())
+    for start in range(8192, len(data) - 4096, 4096):
+        data[start : start + 200] = b"\xff" * 200
+    store.index_path.write_bytes(bytes(data))
+    assert service.index.count() == 41
+    assert [hit.id for hit in service.index.search("flash")] == [card.id]
 
     # Folders removed by hand while the server runs come back on the next write.
     shutil.rmtree(store.journal_dir)

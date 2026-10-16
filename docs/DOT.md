@@ -42,8 +42,9 @@ index.sqlite        derived FTS5 search index (not in git)
 ```
 
 Markdown cards are the source of truth. The index is rebuilt lazily from
-file mtime and size, so Dot may also edit card files directly. An index file
-that is not a database is dropped and rebuilt. A file changed in the last two
+file mtime and size, so Dot may also edit card files directly. A broken index
+file (not a database, or a damaged page found on any read) is dropped and
+rebuilt. A file changed in the last two
 seconds is read again on the next search, since a second quick edit can keep
 the same mtime.
 
@@ -109,7 +110,8 @@ starts a Hub Task, and records it in `work.json` (before it starts, so a task
 that fails to start is still tracked; retry it with the same
 `--request-key`). `claude-hub dot watch <task_id>` (or the Work tab in the
 panel) adds a Hub Task you started yourself;
-`dot unwatch` stops tracking it. Watching a task Dot delegated keeps it a
+`dot unwatch` stops tracking it (the panel asks first when a review is
+waiting, since the review is dropped). Watching a task Dot delegated keeps it a
 delegated task (only `--stall-hours` changes), so its review is not lost. A
 background watcher checks tracked tasks every 60 seconds; one task that cannot
 be read does not stop the others. When one finishes, fails, needs input (the

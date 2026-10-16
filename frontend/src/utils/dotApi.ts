@@ -165,6 +165,8 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
     try {
       const body = await response.json() as { detail?: unknown }
       if (typeof body.detail === 'string') detail = body.detail
+      // FastAPI validation errors (422) carry a list of { msg }.
+      else if (Array.isArray(body.detail)) detail = body.detail.map(item => String((item as { msg?: unknown })?.msg ?? item)).join('; ')
     } catch { /* keep the generic message */ }
     throw new DotRequestError(response.status, detail)
   }
