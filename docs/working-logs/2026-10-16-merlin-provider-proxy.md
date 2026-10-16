@@ -47,3 +47,15 @@ This establishes that request only, not inference acceptance of all 108 IDs.
 One remote native Claude Chat was working during preflight. Deployment activation
 must account for that active turn; no Stop or user-message injection was issued.
 Final integration/configuration and post-activation evidence will be appended.
+
+## Target-shell correction
+
+The first Linux focused run exposed a real portability defect: dash ignores
+arguments passed to the dot builtin, so argument-based source-mode selection
+re-entered the launcher instead of applying the environment. The owned test
+processes were interrupted; no shared service or user turn was stopped.
+Source-mode selection now uses an internal shell variable set immediately
+before sourcing and unset before the provider command. Process tests have
+10-second deadlines and include sh/dash/bash/zsh when installed.
+Independent 12-case shell/profile counterprobes pass, and the updated local
+proxy scopes pass 77 tests. Linux acceptance is required before activation.
