@@ -32,7 +32,15 @@ STOP_WORDS = frozenset(
     "the and for with that this are not when must should from into each all any "
     "you your what where how its has have was were will can".split()
 )
-_NEGATION_RE = re.compile(r"\b(?:not|no|never|cannot|without|avoid)\b|n['’]t|[不別别勿沒没]")
+_NEGATION_RE = re.compile(
+    r"\b(?:not|no|never|cannot|without|avoid|disable|forbid|forbidden)\b|n['’]t"
+    r"|[不別别勿沒没禁]|[无無][需須须]"
+)
+# Words that hold a negation character or word but do not negate the rule.
+_NOT_NEGATION_RE = re.compile(
+    r"\bno (?:more|less|fewer|later|earlier) than\b"
+    r"|不[同仅僅但断斷久]|[特区區分差类類级級识識告个個性][别別]"
+)
 _VAGUE = frozenset(
     {
         "done",
@@ -119,7 +127,7 @@ def tokens(text: str) -> set[str]:
 
 
 def _negated(text: str) -> bool:
-    return bool(_NEGATION_RE.search(text.lower()))
+    return bool(_NEGATION_RE.search(_NOT_NEGATION_RE.sub(" ", text.lower())))
 
 
 def same_rule(lessons: Iterable[dict[str, Any]], rule: str) -> Optional[dict[str, Any]]:

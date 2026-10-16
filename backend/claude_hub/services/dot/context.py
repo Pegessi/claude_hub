@@ -30,6 +30,9 @@ SESSION_PACK_CHARS = 9000
 TURN_PACK_CHARS = 5000
 _PROFILE_CHARS = 2500
 _CONCEPT_CHARS = 1500
+# Focus and work come first; caps keep room for reviews and events behind them.
+_FOCUS_CHARS = 1600
+_WORK_CHARS = 1400
 _LINE_CHARS = 240
 
 
@@ -40,18 +43,20 @@ def _clip(text: str, limit: int = _LINE_CHARS) -> str:
 
 def _card_line(card: Card) -> str:
     summary = f" — {_clip(card.summary)}" if card.summary else ""
-    return f"- [{card.id}] {_clip(card.title, 120)}{summary}"
+    return f"- [{_clip(card.id, 120)}] {_clip(card.title, 120)}{summary}"
 
 
-def _take_lines(lines: Iterable[str], budget: int) -> list[str]:
+def _take_lines(lines: Iterable[str], budget: int, *, newest_last: bool = False) -> list[str]:
+    """Lines from the front that fit ``budget``; from the back when the newest are last."""
+    ordered = list(lines)
     taken: list[str] = []
     used = 0
-    for line in lines:
+    for line in reversed(ordered) if newest_last else ordered:
         if used + len(line) + 1 > budget:
             break
         taken.append(line)
         used += len(line) + 1
-    return taken
+    return taken[::-1] if newest_last else taken
 
 
 def _ranked(cards: list[Card]) -> list[Card]:
@@ -86,6 +91,19 @@ def build_session_pack(store: DotStore) -> str:
     return pack[:SESSION_PACK_CHARS]
 
 
+def session_pack_cuts(store: DotStore) -> list[str]:
+    """Session pack sections with cards that did not fit (for ``health``)."""
+    cuts = []
+    for name, kind, cap in (
+        ("profile", "user", _PROFILE_CHARS),
+        ("concepts", "concept", _CONCEPT_CHARS),
+    ):
+        lines = [_card_line(card) for card in store.list_cards(kind)]
+        if len(_take_lines(lines, cap)) < len(lines):
+            cuts.append(name)
+    return cuts
+
+
 @dataclass
 class TurnPack:
     text: str
@@ -117,6 +135,7 @@ def _work_lines(store: DotStore) -> list[str]:
 _EVENTS_PER_TURN = 12
 _EVENTS_TITLE = "## New events since your last turn"
 _REVIEWS_PER_TURN = 8
+_RECENT_TITLE = "## Recent talk (before this fresh session)"
 
 
 def _review_lines(store: DotStore) -> list[str]:
@@ -176,9 +195,12 @@ def build_turn_pack(
         f"Now: {moment.strftime('%Y-%m-%d %a %H:%M %Z')} · session turn {session_turn}"
     )
     events = store.list_inbox() if inbox else []
+    focus = _take_lines(_focus_lines(store), _FOCUS_CHARS)
+    # The newest work is last; a cut drops the oldest.
+    work = _take_lines(_work_lines(store), _WORK_CHARS, newest_last=True)
     sections: list[tuple[str, list[str]]] = [
-        ("## Focus (what matters now)", _focus_lines(store) or ["- (empty — ask what matters)"]),
-        ("## Delegated work", _work_lines(store) or ["- (none)"]),
+        ("## Focus (what matters now)", focus or ["- (empty — ask what matters)"]),
+        ("## Delegated work", work or ["- (none)"]),
     ]
     # Reviews go before events: a busy inbox must not push them out of the pack.
     reviews = _review_lines(store)
@@ -198,7 +220,7 @@ def build_turn_pack(
                 (
                     "## Memory that may help (use `claude-hub dot show <id>` for detail)",
                     [
-                        f"- [{hit.id}] ({hit.kind}) {_clip(hit.title, 120)}"
+                        f"- [{_clip(hit.id, 120)}] ({hit.kind}) {_clip(hit.title, 120)}"
                         + (f" — {_clip(hit.summary)}" if hit.summary else "")
                         for hit in hits
                     ],
@@ -207,15 +229,16 @@ def build_turn_pack(
     if first_turn:
         recent = store.recent_journal()
         if recent:
-            sections.append(
-                ("## Recent talk (before this fresh session)", [f"- {line}" for line in recent])
-            )
+            sections.append((_RECENT_TITLE, [f"- {line}" for line in recent]))
 
     budget = TURN_PACK_CHARS - len(header)
     blocks = [header]
     shown_events = 0
     for title, lines in sections:
-        kept = _take_lines(lines, max(budget - len(title) - 2, 0))
+        # The recent talk is oldest first: a cut keeps the latest exchanges.
+        kept = _take_lines(
+            lines, max(budget - len(title) - 2, 0), newest_last=title == _RECENT_TITLE
+        )
         if not kept:
             continue
         if title == _EVENTS_TITLE:

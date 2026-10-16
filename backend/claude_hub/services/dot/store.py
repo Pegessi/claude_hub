@@ -77,9 +77,19 @@ def _load_value(raw: str) -> Any:
     if not raw:
         return ""
     try:
-        return json.loads(raw)
+        return _whole_text(json.loads(raw))
     except ValueError:
         return raw
+
+
+def _whole_text(value: Any) -> Any:
+    """A JSON escape can give half an emoji (a lone surrogate), which no UTF-8 write,
+    index or prompt accepts: it becomes "?"."""
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(value, list):
+        return [_whole_text(one) for one in value]
+    return value
 
 
 @dataclass
@@ -199,7 +209,10 @@ def parse_card(text: str, path: Optional[Path] = None) -> Optional[Card]:
         return None
     body = "\n".join(lines[end + 1 :]).strip("\n")
     fallback_id = path.stem if path is not None else ""
-    kind = str(meta.get("kind") or (path.parent.name if path is not None else "knowledge"))
+    # The folder is the kind (lists, recall and the next save all agree), even when a
+    # card was moved by hand without editing its header.
+    folder = path.parent.name if path is not None else ""
+    kind = folder if folder in CARD_KINDS else str(meta.get("kind") or "knowledge")
     try:
         importance = int(meta.get("importance", 2))
     except (TypeError, ValueError, OverflowError):
@@ -366,7 +379,8 @@ class DotStore:
         self.ensure()
         try:
             return self.role_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, ValueError):
+            # Unreadable or not UTF-8 (saved by an editor in another encoding).
             return DEFAULT_ROLE
 
     # ── identity ────────────────────────────────────────────────────────
@@ -491,7 +505,8 @@ class DotStore:
         if card.id and (
             card.id != card.id.strip()
             or card.id.startswith(".")
-            or any(char in card.id for char in "/\\\0")
+            or any(char in card.id for char in "/\\")
+            or _CONTROL_RE.search(card.id)
         ):
             raise ValueError(f"bad card id: {card.id!r}")
         with self._lock:
@@ -884,7 +899,9 @@ class DotStore:
         moment = (at or utc_now()).astimezone()
         path = self.journal_path(moment.strftime("%Y-%m-%d"))
         # A line in the text that looks like an entry header would read as a turn of its own.
-        body = _JOURNAL_HEADER_RE.sub(lambda match: " " + match.group(0), text.strip())
+        # Reading turns "\r\n" and "\r" into "\n": escape what they will read as.
+        body = re.sub(r"\r\n?", "\n", text.strip())
+        body = _JOURNAL_HEADER_RE.sub(lambda match: " " + match.group(0), body)
         entry = f"## {moment.strftime('%H:%M')} · {who}\n\n{body}\n\n"
         # The folder may have been removed by hand since ``ensure`` ran.
         path.parent.mkdir(parents=True, exist_ok=True)

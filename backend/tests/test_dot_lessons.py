@@ -103,6 +103,17 @@ def test_same_rule_finds_a_near_copy_only() -> None:
     # The same words that say the opposite are not the same rule.
     assert same_rule(lessons, "When summarizing a paper, do not name the paper version") is None
     assert same_rule(lessons, "When summarizing a paper, don’t name the paper version") is None
+    # Words that only hold a negation character are not a negation, and the
+    # usual negations of rules ("disable", 禁止) are.
+    cjk = [
+        {"id": "c", "rule": "在环境中使用独立的配置文件"},
+        {"id": "d", "rule": "Enable the cache for test runs"},
+    ]
+    assert same_rule(cjk, "在不同环境中使用独立的配置文件")["id"] == "c"  # type: ignore[index]
+    assert same_rule(cjk, "在环境中禁止使用独立的配置文件") is None
+    assert same_rule(cjk, "Disable the cache for test runs") is None
+    limits = [{"id": "e", "rule": "When retrying downloads, use at most three retries"}]
+    assert same_rule(limits, "When retrying downloads, use no more than three retries")["id"] == "e"  # type: ignore[index]
 
 
 def test_store_lessons_vote_edit_drop_merge(service: DotService) -> None:
@@ -986,6 +997,89 @@ async def test_what_the_watcher_shows_after_send_backs_and_failures(
     await poll("e", "review", _report("e1", "completed", "done"))
     await poll("e", "failed")
     assert kinds()[-1] == "task_failed"
+
+
+@pytest.mark.asyncio
+async def test_continue_messages_and_late_watches(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    store = service.store
+    reports: dict[str, list[Any]] = {}
+    tasks: dict[str, Any] = {}
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(
+        workspace_manager, "reports_for_task", lambda _ws, tid: reports.setdefault(tid, [])
+    )
+
+    def put(task_id: str, status: str, *new: Any, **extra: Any) -> None:
+        tasks[task_id] = SimpleNamespace(
+            id=task_id,
+            workspace_id="ws",
+            status=SimpleNamespace(value=status),
+            title="t",
+            agent_type=SimpleNamespace(value="claude"),
+            **extra,
+        )
+        reports.setdefault(task_id, []).extend(new)
+
+    def card(task_id: str) -> str:
+        found = store.get_card(store.get_work(task_id)["result_card"])  # type: ignore[index]
+        assert found is not None
+        return found.body
+
+    def continued(report_id: str, message: str, at: Any) -> SimpleNamespace:
+        # What the Hub writes when a person continues the task: the run's start time.
+        report = _report(report_id, "working", message)
+        report.review_decision, report.created_at = None, at
+        return report
+
+    # Sent back with the person's words, then back in review by hand with no word
+    # from the worker: the person's message is not the worker's report.
+    store.upsert_work("f", workspace_id="ws", title="F", status="working")
+    put("f", "review", _report("f1", "completed", "RESULT A"))
+    await service.check_work()
+    start = utc_now()
+    put("f", "working", continued("f2", "PLEASE FIX X", start), started_at=start)
+    audit = _report("f3", "working", "Feedback lessons injected into worker prompt: l-1")
+    audit.risk_level = "system_audit"
+    reports["f"].append(audit)
+    await service.check_work()
+    put(
+        "f", "review", _hub_request("f4", "Task manually moved to review status."), started_at=start
+    )
+    await service.check_work()
+    assert "PLEASE FIX X" not in card("f") and "Feedback lessons" not in card("f")
+    assert "(no report)" in card("f")
+    # The session died after the send-back: the reason, not the person's words.
+    start = utc_now()
+    put("f", "working", continued("f5", "Task continued from review", start), started_at=start)
+    await service.check_work()
+    put("f", "failed", failed_at=utc_now(), failure_reason="session died", started_at=start)
+    await service.check_work()
+    events = store.list_inbox()
+    assert events[-1]["kind"] == "task_failed" and "session died" in events[-1]["text"]
+    assert "Task continued" not in card("f")
+
+    # Watched while working (only progress so far), then moved straight to done: news.
+    put("g", "working", _report("g1", "working", "halfway"))
+    await service.watch("g")
+    put("g", "done", completed_at=utc_now())
+    await service.check_work()
+    assert store.list_inbox()[-1]["kind"] == "task_done"
+    # Watched while the Hub reviewer looks at a result, then accepted: no news.
+    count = len(store.list_inbox())
+    put(
+        "h",
+        "working",
+        _report("h1", "ready_for_review", "done"),
+        _report("h2", "review_started", "checking"),
+    )
+    await service.watch("h")
+    put("h", "review", _report("h3", "review_passed", "fine"))
+    await service.check_work()
+    put("h", "done", completed_at=utc_now())
+    await service.check_work()
+    assert len(store.list_inbox()) == count
 
 
 @pytest.mark.asyncio

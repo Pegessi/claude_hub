@@ -80,7 +80,8 @@ archived: false
 Body text.
 ```
 
-Values are JSON; a plain unquoted value is read as a string.
+Values are JSON; a plain unquoted value is read as a string. The folder is
+the card's kind, even when a card was moved by hand without editing `kind`.
 
 ## Turn flow
 
@@ -96,8 +97,10 @@ Values are JSON; a plain unquoted value is read as a string.
      or broken index only loses the recall), and on the first
      turn the recent talk) — prepended in the hidden
      `<claude_hub_instructions>` block.
-     Reviews come before events so a busy inbox cannot push them out; a
-     section that does not fit is skipped, not the ones after it.
+     Focus and work have their own caps (the oldest work is cut) so reviews
+     and events still fit; reviews come before events so a busy inbox cannot
+     push them out; a section that does not fit is skipped, not the ones after
+     it. A cut recent talk keeps the latest exchanges.
 3. After the turn completes, a post-persist observer appends the exchange to
    the journal and commits the Dot home. Inbox events in the pack are marked
    read when the provider takes the turn; if the turn then fails, they are
@@ -126,11 +129,13 @@ worker or the Hub reviewer asks), or looks stuck it:
   result, so they neither fill the card, start a new round, nor count as a
   question. A new return (ready for review, completed, failed) is the result,
   even with progress posted after it; with no new return the card shows the
-  worker's newest report. A failed card also says why the Hub failed it
+  worker's newest report since the task was last continued (the person's
+  continue message and the Hub's audit lines are not the worker's). A failed card also says why the Hub failed it
   (session died, timeout). A result is announced once: the Hub reviewer
   taking the task back to working and returning it, or a person accepting
   (even again) a result that was not a failure, is not news; nor is the
-  result a task had when it was watched. A task a person sent back that
+  result a task had when it was watched (a task watched while working with
+  only progress is news when it is done). A task a person sent back that
   returns with no new return is asked for review again, and a re-run that
   fails again (or a move to failed by hand) is a new failure. A reviewer
   question is its own event, even in the poll that announces the result or
@@ -225,7 +230,7 @@ A second schedule runs the nightly `[Dot tidy]` turn in a fresh session:
 compress yesterday's journal into cards and concepts, merge duplicates,
 prune focus. It also replies `[quiet]` unless something needs the user.
 Its turn pack has no inbox events: they stay unread for a turn that can act
-on them. "Mark read" in the panel marks only the events on screen.
+on them. A tidy turn that fails does not count as a tidy in `dot health`. "Mark read" in the panel marks only the events on screen.
 
 The JSON files are hand-editable. One that is not valid JSON (or not the
 expected list or object) is renamed to `<name>.corrupt-<time>` before Dot

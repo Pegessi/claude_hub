@@ -454,6 +454,33 @@ the old code:
 Not changed: a home deleted by hand gets its git back only after a restart;
 a send-back followed by a Hub review in one poll counts as the same result.
 
+### Review of round 16
+
+One reviewer attacked the round-15 watcher, lessons and journal changes; one
+went over the context packs, the index, health and tidy (event delivery,
+marker escaping, index healing under races and identity routes held). Fixed,
+each with a test that fails on the old code:
+
+- A task watched while working (progress only) and then moved to done raised
+  no event.
+- The person's continue message (and the Hub's lesson-audit line) showed as
+  the worker's report on a card after a send-back.
+- Journal text with `\r\n` or `\r` line breaks could still forge a turn.
+- Lesson negation: 不同, 特别, 区别 and "no more than" counted as negations
+  (duplicates instead of votes); 禁止, 无需 and "disable" did not.
+- A cut recent talk dropped the newest exchanges; a cut work list dropped the
+  newest tasks; long focus and work could push out reviews and events.
+- Half an emoji (`\ud83d`) in a hand-written card broke the index, recall and
+  health; a non-UTF-8 `DOT.md` stripped Dot's context from every turn.
+- A card moved to another folder by hand had two kinds.
+- A failed tidy counted as done; a stray `.md` file in a card folder failed
+  the index check forever; profile truncation was never reported.
+- A card id could hold a line break.
+
+Not changed: a fresh home reports no focus and no tidy yet (true, and says
+what to do); the first index fill is quadratic in card count (2,000 cards in
+about 2 s).
+
 ## Risks
 
 - The built-in default Claude preset has no key. A user with no working Claude

@@ -114,13 +114,31 @@ def _sent_turns(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _worker_report(report: Any) -> bool:
-    """A report from the worker itself: not a Hub review request, not the Hub reviewer."""
-    return not _hub_report(report) and not _report_state(report).startswith("review_")
+    """A report from the worker itself: not a Hub review request, not the Hub reviewer,
+    not a Hub audit line (lessons put into a prompt)."""
+    return (
+        not _hub_report(report)
+        and not _report_state(report).startswith("review_")
+        and getattr(report, "risk_level", None) != "system_audit"
+    )
 
 
 def _worker_return(report: Any) -> bool:
     """A worker report that hands work back: a result (or failure) for a person."""
     return _worker_report(report) and _report_state(report) in _RETURN_REPORT_STATES
+
+
+def _continue_report(report: Any, task: Any) -> bool:
+    """The report the Hub writes when a person continues the task (their message, or
+    "Task continued ..."). It is written as the run starts, with the same time.
+    """
+    started = getattr(task, "started_at", None)
+    return (
+        _report_state(report) == "working"
+        and getattr(report, "review_decision", None) is None
+        and started is not None
+        and getattr(report, "created_at", None) == started
+    )
 
 
 def _hub_report(report: Any) -> bool:
@@ -375,7 +393,14 @@ class DotService:
         )
         # Remembered until the turn ends: a failed turn gives its events and its
         # first-turn context back (see ``_turn_ended``).
-        sent = {"at": utc_now().isoformat(), "ids": pack.delivered_event_ids, "first": new_session}
+        sent: dict[str, Any] = {
+            "at": utc_now().isoformat(),
+            "ids": pack.delivered_event_ids,
+            "first": new_session,
+        }
+        if tidy:
+            # A tidy that fails is no tidy: health must keep saying so.
+            sent["tidy_before"] = state.get("last_tidy_at")
         updates: dict[str, Any] = {
             "session_conversation_id": conversation_id,
             "session_turns": turns,
@@ -430,6 +455,8 @@ class DotService:
             changes: dict[str, Any] = {"sent_turns": rest or None}
             if failed and turn.get("first"):
                 changes["rotate_requested"] = True
+            if failed and "tidy_before" in turn:
+                changes["last_tidy_at"] = turn["tidy_before"]
             self.store.update_state(**changes)
         # Only a turn the provider took marked its events read; a later turn may have
         # shown and read them since a turn that was never taken.
@@ -1058,28 +1085,36 @@ class DotService:
         title = item.get("title") or task_id
         # A new round shows its return even when progress came after it; otherwise
         # the worker's newest word (a send-back that came back without a new result).
-        result = (
-            new_returns[-1]
-            if new_returns
-            else next((old for old in reversed(reports) if _worker_report(old)), None)
-        )
+        result = new_returns[-1] if new_returns else None
+        for old in [] if new_returns else reversed(reports):
+            # The person's continue message is not the worker's word, and before it
+            # is the round that was sent back.
+            if _continue_report(old, task):
+                break
+            if _worker_report(old):
+                result = old
+                break
         result_id = getattr(result, "id", None)
         # The Hub reviewer moves a task to working and back to review (or a person then
         # accepts it): that is the result already announced, not a new one.
         announced = item.get("announced_report_id")
-        since = reports[seen_ids.index(announced) + 1 :] if announced in seen_ids else None
+        at = seen_ids.index(announced) if announced in seen_ids else None
+        since = reports[at + 1 :] if at is not None else None
+        announced_return = at is not None and _worker_return(reports[at])
         same_result = (
             bool(announced)
             and since is not None
             and not any(_worker_return(old) for old in since)
             # Back in review without a reviewer step, someone sent the task back: ask
-            # again. Accepting (again) a result that was not a failure is not news;
+            # again. Accepting (again) a result that was not a failure is not news (a
+            # task watched while working only had a result if it had returned);
             # failing again with no new report (a re-run that crashed) is.
             and (
                 any(_report_state(new).startswith("review_") for new in fresh)
                 if status == "review"
                 else (
-                    item.get("announced_status") != "failed"
+                    item.get("announced_status") in ("review", "done")
+                    or (item.get("announced_status") != "failed" and announced_return)
                     if status == "done"
                     else ended is not None and ended == item.get("ended_at")
                 )
@@ -1272,15 +1307,24 @@ class DotService:
         duplicates = sorted(title for title, count in titles.items() if count > 1)
         check("duplicates", not duplicates, f"duplicate titles: {', '.join(duplicates) or 'none'}")
         indexed = self.index.count()
-        on_disk = len(list(self.store.iter_card_paths()))
-        check("index", indexed == on_disk, f"{indexed} indexed / {on_disk} card file(s)")
+        # A note dropped into a card folder (no card header) is not a card to index.
+        on_disk = len(self.store.list_cards(include_archived=True))
+        stray = len(list(self.store.iter_card_paths())) - on_disk
+        check(
+            "index",
+            indexed == on_disk,
+            f"{indexed} indexed / {on_disk} card file(s)"
+            + (f"; {stray} .md file(s) without a card header" if stray else ""),
+        )
         pack = build_session_pack(self.store)
-        from .context import SESSION_PACK_CHARS
+        from .context import SESSION_PACK_CHARS, session_pack_cuts
 
+        cuts = session_pack_cuts(self.store)
         check(
             "session_pack",
-            len(pack) < SESSION_PACK_CHARS,
-            f"{len(pack)} / {SESSION_PACK_CHARS} chars (full means profile is truncated)",
+            len(pack) < SESSION_PACK_CHARS and not cuts,
+            f"{len(pack)} / {SESSION_PACK_CHARS} chars"
+            + (f"; cut to fit: {', '.join(cuts)}" if cuts else ""),
         )
         last_tidy = _parse_time(state.get("last_tidy_at"))
         check(
