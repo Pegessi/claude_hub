@@ -136,6 +136,7 @@ runtime store or an enforced JSON schema:
 ```json
 {
   "head_sha": "<exact verified commit>",
+  "base_sha": null,
   "check": "backend-tests",
   "scope": "default|focused|integration",
   "command": ["./scripts/verify.sh", "backend-tests"],
@@ -146,6 +147,9 @@ runtime store or an enforced JSON schema:
   "unverified": []
 }
 ```
+
+Set `base_sha` to the compared commit for a cost comparison; leave it `null`
+when no comparable baseline was measured.
 
 The reviewer verifies the final SHA and required scope, preserved assertions and
 inputs, added cost, actual failure-path evidence, and any changed gate or retry
