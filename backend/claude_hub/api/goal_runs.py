@@ -15,6 +15,8 @@ from ..models import (
     SessionKind,
     User,
 )
+from ..models.chat_image import ChatImageAttachment
+from ..models.goal_run import GoalObjectiveUpdate
 from ..services import ttyd_manager
 from ..services.goal_run import (
     GoalPolicyError,
@@ -22,6 +24,7 @@ from ..services.goal_run import (
     get_goal_admission_lock,
     get_goal_manager,
 )
+from ..services.goal_run.images import goal_image_input, pending_goal_images
 
 router = APIRouter(tags=["goals"])
 
@@ -46,6 +49,7 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
         session,
         AgentStreamSendRequest(
             text=prompt,
+            attachments=pending_goal_images(goal),
             client_turn_id=turn_id,
             delivery="steer" if steered else "normal",
         ),
@@ -54,6 +58,24 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
         turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
     )
     return turn_id
+
+
+async def validate_goal_images(tab_id: str, images: list[ChatImageAttachment]) -> None:
+    """Reject invalid/unsupported images before changing or cancelling a Goal."""
+    if not images:
+        return
+    from .agent_stream import (
+        _capabilities_for,
+        _decode_attachments,
+        _get_tab_tailer_manager,
+        _terminal_tab_session_or_404,
+    )
+
+    _decode_attachments(images)
+    session = _terminal_tab_session_or_404(tab_id)
+    capabilities = await _capabilities_for(session, _get_tab_tailer_manager())
+    if not capabilities.supports_images:
+        raise HTTPException(status_code=400, detail="This Chat does not support image attachments")
 
 
 async def _cancel_goal_turn(goal: GoalRun) -> None:
@@ -125,7 +147,12 @@ async def create_goal(
             return replay
         try:
             await _ensure_goal_ready(tab_id)
-            return await manager.create_and_start(tab_id, body)
+            await validate_goal_images(tab_id, body.attachments)
+            with goal_image_input(tab_id, body.attachments):
+                result = await manager.create_and_start(tab_id, body)
+            if result.dispatch_state.value == "uncertain":
+                raise HTTPException(status_code=503, detail=result.status_message)
+            return result
         except (ValueError, GoalPolicyError) as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
 
@@ -135,12 +162,31 @@ async def current_goal(
     tab_id: str, current_user: User = Depends(get_current_user)
 ) -> GoalRun | None:
     _direct_chat_tab(tab_id)
-    return get_goal_manager().current(tab_id)
+    # A steer parks the Goal while cancelling/dispatching. Do not expose that
+    # intermediate snapshot as a completed recovery to a lost-response client.
+    async with get_goal_admission_lock(tab_id):
+        return get_goal_manager().current(tab_id)
 
 
 @router.get("/api/goals/{goal_id}", response_model=GoalRun)
 async def get_goal(goal_id: str, current_user: User = Depends(get_current_user)) -> GoalRun:
     return _call(get_goal_manager().get, goal_id)
+
+
+@router.patch("/api/goals/{goal_id}/objective", response_model=GoalRun)
+async def update_goal_objective(
+    goal_id: str, body: GoalObjectiveUpdate, current_user: User = Depends(get_current_user)
+) -> GoalRun:
+    try:
+        manager = get_goal_manager()
+        goal = manager.get(goal_id)
+        _direct_chat_tab(goal.tab_id)
+        async with get_goal_admission_lock(goal.tab_id):
+            return await manager.update_objective(goal_id, body.client_request_id, body.objective)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except (ValueError, GoalPolicyError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
 
 
 @router.post("/api/goals/{goal_id}/pause", response_model=GoalRun)

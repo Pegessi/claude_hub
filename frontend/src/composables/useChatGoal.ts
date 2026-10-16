@@ -77,6 +77,28 @@ export function useChatGoal(tabId: Ref<string>) {
     })
   }
 
+  let objectiveAttempt: { key: string; id: string } | null = null
+  async function updateObjective(objective: string): Promise<boolean> {
+    const current = goal.value
+    if (!current) return false
+    const key = `${current.id}\n${objective}`
+    if (objectiveAttempt?.key !== key) objectiveAttempt = { key, id: requestId() }
+    const clientRequestId = objectiveAttempt.id
+    const succeeded = await run(async signal => {
+      const response = await fetch(`/api/goals/${current.id}/objective`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        signal,
+        body: JSON.stringify({ objective, client_request_id: clientRequestId }),
+      })
+      if (!response.ok) throw new Error(await errorDetail(response))
+      return await response.json() as ChatGoal
+    })
+    if (succeeded && objectiveAttempt?.id === clientRequestId) objectiveAttempt = null
+    return succeeded
+  }
+
   async function mutate(operation: GoalMutation): Promise<boolean> {
     const current = goal.value
     if (!current) return false
@@ -155,6 +177,7 @@ export function useChatGoal(tabId: Ref<string>) {
     hasGoal: computed(() => goal.value !== null),
     hydrate,
     create,
+    updateObjective,
     pause: () => mutate('pause'),
     resume: () => mutate('resume'),
     complete: () => mutate('complete'),
