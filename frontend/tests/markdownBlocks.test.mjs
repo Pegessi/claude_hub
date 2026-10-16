@@ -84,8 +84,8 @@ const { outputText } = ts.transpileModule(source, {
 // the real marked and our DOMPurify mock.
 const mocked = outputText
   .replace(
-    /import \{ marked, Marked \} from ['"]marked['"];?/,
-    'const marked = globalThis.__marked; const Marked = globalThis.__Marked;',
+    /import \{ Marked \} from ['"]marked['"];?/,
+    'const Marked = globalThis.__Marked;',
   )
   .replace(
     /import DOMPurify from ['"]dompurify['"];?/,
@@ -1012,4 +1012,60 @@ test('the shared Marked instance keeps ordinary callers free of math extensions'
   cache.clear()
   assert.equal(cache.hasMath, false)
   assert.equal(cache.hasCode, false)
+})
+
+test('shell substitutions and quoted environment variables stay literal', () => {
+  for (const source of ['$HOME.${USER}', 'echo "$HOME" "$USER"; echo "$?"']) {
+    const cache = new MarkdownBlockCache()
+    assert.equal(renderString(cache, source), marked.parse(source, { gfm: true, breaks: true }))
+    assert.equal(cache.hasMath, false)
+  }
+})
+
+test('prices with Unicode separators leave the later negative formula intact', () => {
+  for (const separator of ['–', '—', '−', '->', '→', '≤']) {
+    const source = `Cost $5${separator}$-x$.`
+    const html = renderString(new MarkdownBlockCache(), source)
+    assert.equal((html.match(/class="katex"/g) || []).length, 1)
+    assert.match(html, /Cost \$5/)
+    assert.match(html, /annotation encoding="application\/x-tex">-x<\/annotation>/)
+  }
+})
+
+test('large incomplete delimiter runs preserve following Markdown and formulas', () => {
+  for (const opener of [String.raw`\[`, String.raw`\(`]) {
+    for (const suffix of ['', String.raw`\\]`, String.raw`\\)`]) {
+      const source = opener.repeat(2_048) + suffix + '\n\n**After** and $x$.'
+      const html = renderString(new MarkdownBlockCache(), source)
+      assert.match(html, /<strong>After<\/strong>/)
+      assert.equal((html.match(/class="katex"/g) || []).length, 1)
+    }
+  }
+  const valid = String.raw`\[\begin{matrix}a\\[4pt]b\end{matrix}\]`
+  assert.match(renderString(new MarkdownBlockCache(), valid), /class="katex"/)
+  for (const item of ['$1 ', '$a ']) {
+    const cache = new MarkdownBlockCache()
+    const source = item.repeat(4_096) + '$'
+    assert.equal(renderString(cache, source), marked.parse(source, { gfm: true, breaks: true }))
+    assert.equal(cache.hasMath, false)
+  }
+})
+
+test('single-dollar numeric formulas support derivatives, norms and quoted text', () => {
+  for (const source of ["Derivative $2x'$ is linear.", 'Norm $2|x|$ is nonnegative.',
+    String.raw`Answer $\text{"hello"}$.`]) {
+    assert.match(renderString(new MarkdownBlockCache(), source), /class="katex"/)
+  }
+})
+
+test('raw HTML code and keyboard text preserve literal formula delimiters', () => {
+  for (const source of ['Before <code>$x$</code> after.',
+    String.raw`Before <kbd>\(x\)</kbd> after.`]) {
+    const cache = new MarkdownBlockCache()
+    assert.equal(renderString(cache, source), marked.parse(source, { gfm: true, breaks: true }))
+    assert.equal(cache.hasMath, false)
+    const withFormula = renderString(new MarkdownBlockCache(), source + ' Then $y$.')
+    assert.equal((withFormula.match(/class="katex"/g) || []).length, 1)
+    assert.match(withFormula, /annotation encoding="application\/x-tex">y<\/annotation>/)
+  }
 })

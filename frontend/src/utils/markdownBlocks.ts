@@ -1,4 +1,4 @@
-import { marked, Marked, type Token, type Tokens } from 'marked'
+import { Marked, type Token, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
 import { highlightVersion, renderCodeBlockHtml } from '@/utils/codeHighlight'
 import { resolveLocalImageUrl, rewriteQuotedImageSrcs } from '@/utils/quotedImage'
@@ -55,8 +55,27 @@ export function splitBlockTokens(source: string): Token[] {
   return markdownParser.lexer(source).filter((t) => t.type !== 'space')
 }
 
+/** Effects-only traversal. Marked.walkTokens collects callback return values
+ * with concat; thousands of escape tokens otherwise create quadratic copies. */
+function visitTokens(tokens: Token[], visit: (token: Token) => void): void {
+  for (const token of tokens) {
+    visit(token)
+    if (token.type === 'table') {
+      const table = token as Tokens.Table
+      for (const cell of table.header) visitTokens(cell.tokens, visit)
+      for (const row of table.rows) {
+        for (const cell of row) visitTokens(cell.tokens, visit)
+      }
+    } else if (token.type === 'list') {
+      visitTokens((token as Tokens.List).items, visit)
+    } else if ('tokens' in token && token.tokens) {
+      visitTokens(token.tokens, visit)
+    }
+  }
+}
+
 function promoteLocalImageLinks(tokens: Token[], tabId: string): void {
-  marked.walkTokens(tokens, (token) => {
+  visitTokens(tokens, (token) => {
     if (token.type !== 'link' || !resolveLocalImageUrl(tabId, token.href)) return
     // Work with parsed tokens: code examples and external links keep their
     // meaning, including nested lists and escaped/space-containing filenames.
@@ -338,11 +357,11 @@ export class MarkdownBlockCache {
     if (quotedTabId) promoteLocalImageLinks(tokens, quotedTabId)
     this.hasMath = false
     this.hasCode = false
-    markdownParser.walkTokens(tokens, (token) => {
+    visitTokens(tokens, (token) => {
       // Marked invokes extension renderers even when flattening image alt text.
       // Keep TeX literal there instead of placing rendered HTML in an attribute.
       if (token.type === 'image' && token.tokens) {
-        markdownParser.walkTokens(token.tokens, (alt) => {
+        visitTokens(token.tokens, (alt) => {
           if (alt.type === 'mathBlock' || alt.type === 'mathInline') {
             Object.assign(alt, { type: 'text', text: alt.raw, escaped: false })
           }
