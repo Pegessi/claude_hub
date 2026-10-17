@@ -87,10 +87,11 @@ TOOL_GUIDE = """\
 - `claude-hub dot watch <task-id> [--stall-hours N]` — watch an existing Hub task (default \
 stuck alarm: 2 hours without progress); `claude-hub dot unwatch <task-id>` stops it
 - `claude-hub dot notify "<text>"` — send a short message to the user's Feishu chat
-  (the bot bound to this Chat). Only for what should reach them now, away from
-  the web: a task they asked for is done or failed, a decision that blocks
-  work, a problem. Not for answering their message: your answer reaches them
-  where they wrote.
+  (the bot bound to this Chat). The `Reach:` line of each turn's context says
+  where the turn came from, where your answer goes, and whether a bot is bound.
+  Use it only when something should reach them now and your answer will not
+  (a Hub turn, or they wrote on the web but asked to hear on Feishu): a task
+  they asked for is done or failed, a decision that blocks work, a problem.
 - `claude-hub task accept <task-id>` — accept a finished task once the user agrees
 - `claude-hub workspace list` — find a workspace id
 - `claude-hub dot identity [--name "..."] [--avatar "<emoji>"]` — show or change your name/avatar

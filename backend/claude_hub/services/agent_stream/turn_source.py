@@ -19,6 +19,12 @@ _FEISHU_OUTPUT_GUIDANCE_V2 = (
 )
 
 
+def is_feishu_provider_text(text: str) -> bool:
+    """The provider text of a verified Feishu message (any format version)."""
+
+    return text.startswith((_FEISHU_PROVIDER_INTRO_V1, _FEISHU_PROVIDER_INTRO_V2))
+
+
 def format_feishu_provider_text_v1(
     text: str,
     *,

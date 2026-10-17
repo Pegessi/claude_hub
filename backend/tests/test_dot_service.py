@@ -941,6 +941,34 @@ async def test_the_users_message_is_sent_when_giving_way_fails(
     assert calls == [("cancel", "scheduled-r-wake"), ("send", "hi")]
 
 
+def test_each_turn_says_where_it_came_from_and_where_the_answer_goes(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.api import feishu_bot as bot_api
+    from claude_hub.services.agent_stream.turn_source import format_feishu_provider_text_v2
+
+    bound = True
+    monkeypatch.setattr(bot_api, "feishu_bound_to_tab", lambda tab_id: bound and tab_id == TAB_ID)
+    feishu = format_feishu_provider_text_v2(
+        "hi", app_id="app-1", chat_id="oc-1", message_id="om-1", sender_open_id="ou-1"
+    )
+
+    def reach(text: str) -> str:
+        pack = service.prepare_turn(text, "conv-1").turn_pack
+        return next(line for line in pack.splitlines() if line.startswith("Reach: "))
+
+    assert "from Feishu; your answer goes back" in reach(feishu)
+    assert "notify" not in reach(feishu)
+    assert "web Chat; your answer shows there" in reach("hi")
+    assert "they are here now" in reach("hi")
+    woke = reach(WAKE_MESSAGE)
+    assert "web Chat only" in woke and "also send it with `claude-hub dot notify`" in woke
+    assert "Hub tidy" in reach(TIDY_MESSAGE)
+    bound = False
+    assert "No Feishu bot is bound" in reach(WAKE_MESSAGE)
+    assert "bound" not in reach("hi")
+
+
 @pytest.mark.asyncio
 async def test_dot_decides_what_reaches_feishu(
     service: DotService, monkeypatch: MonkeyPatch

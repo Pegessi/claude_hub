@@ -183,6 +183,32 @@ def _event_lines(events: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def reach_note(source: str, feishu_bound: bool) -> str:
+    """Where this turn came from, where Dot's answer goes, and whether
+    ``claude-hub dot notify`` can reach the user on Feishu.
+
+    ``source`` is ``feishu``, ``web``, ``wake`` or ``tidy``.
+    """
+    if source == "feishu":
+        return "Reach: the user wrote from Feishu; your answer goes back to their Feishu chat."
+    if source == "web":
+        line = "Reach: the user wrote in the web Chat; your answer shows there."
+        if feishu_bound:
+            return line + " A Feishu bot is bound to this Chat, but they are here now."
+        return line
+    line = (
+        f"Reach: a Hub {'tidy' if source == 'tidy' else 'wake-up'}, not the user; your answer "
+        "shows in the web Chat only."
+    )
+    if feishu_bound:
+        return line + (
+            " A Feishu bot is bound to this Chat: when something should reach the user now (a "
+            "task they asked for is done or failed, a decision that blocks work, a problem), "
+            "also send it with `claude-hub dot notify`."
+        )
+    return line + " No Feishu bot is bound, so `claude-hub dot notify` cannot reach them."
+
+
 def build_turn_pack(
     store: DotStore,
     index: Optional[DotIndex],
@@ -194,17 +220,20 @@ def build_turn_pack(
     recall: bool = True,
     inbox: bool = True,
     wake: bool = True,
+    reach: str = "",
 ) -> TurnPack:
     """Assemble the per-turn context; a section that does not fit is cut or skipped.
 
     ``wake`` is false on the user's turn: reviews and events are shown, but left
-    for the next wake-up.
+    for the next wake-up. ``reach`` is the ``reach_note`` line.
     """
     moment = (now or datetime.now()).astimezone()
     header = (
         f"{DOT_CONTEXT_HEADER}\n"
         f"Now: {moment.strftime('%Y-%m-%d %a %H:%M %Z')} · session turn {session_turn}"
     )
+    if reach:
+        header += "\n" + reach
     events = store.list_inbox() if inbox else []
     focus = _take_lines(_focus_lines(store), _FOCUS_CHARS)
     # The newest work is last; a cut drops the oldest.
