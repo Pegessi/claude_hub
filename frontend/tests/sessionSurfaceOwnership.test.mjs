@@ -7,26 +7,32 @@ const readSource = relativePath => readFileSync(
   'utf8',
 )
 
-const tabBar = readSource('../src/components/TabBar.vue')
-const workspaceView = readSource('../src/components/AgentWorkspaceView.vue')
+const sessionCreator = readSource('../src/features/terminal/components/SessionCreator.vue')
+const workspaceAgentDialog = readSource('../src/features/workspace/components/WorkspaceAgentDialog.vue')
+const workspaceAgentManager = readSource('../src/features/workspace/composables/useWorkspaceAgentManager.ts')
+const workspaceRuntime = readSource('../src/features/workspace/composables/useWorkspaceRuntime.ts')
 const terminalPane = readSource('../src/components/TerminalPane.vue')
-const structuredPane = readSource('../src/components/StructuredPane.vue')
+const structuredPane = readSource('../src/features/chat/StructuredPane.vue')
+const chatComposer = readSource('../src/features/chat/components/ChatComposer.vue')
+const chatComposerController = readSource('../src/features/chat/controllers/useChatComposer.ts')
+const chatDelivery = readSource('../src/features/chat/controllers/useChatDelivery.ts')
+const chatImages = readSource('../src/features/chat/controllers/useChatImages.ts')
 const taskDialog = readSource('../src/components/TaskCreateDialog.vue')
 
 test('top-level and Workspace launchers both expose an explicit execution surface', () => {
-  assert.match(tabBar, /@click="setSessionKind\('chat'\)"/)
-  assert.match(tabBar, /@click="setSessionKind\('terminal'\)"/)
-  assert.match(tabBar, /session_kind:\s*form\.session_kind/)
+  assert.match(sessionCreator, /@click="setSessionKind\('chat'\)"/)
+  assert.match(sessionCreator, /@click="setSessionKind\('terminal'\)"/)
+  assert.match(sessionCreator, /session_kind:\s*form\.session_kind/)
 
-  assert.match(workspaceView, /<label>Execution surface<\/label>/)
-  assert.match(workspaceView, /handleAgentSurfaceChange\('chat'\)/)
-  assert.match(workspaceView, /session_kind:\s*agentOptionsForm\.session_kind/)
+  assert.match(workspaceAgentDialog, /<label>Execution surface<\/label>/)
+  assert.match(workspaceAgentDialog, /handleAgentSurfaceChange\('chat'\)/)
+  assert.match(workspaceAgentManager, /session_kind:\s*agentOptionsForm\.session_kind/)
   assert.match(taskDialog, /form\.session_kind === 'chat'/)
   assert.match(taskDialog, /workspaceAgents\.filter\(agent => agent\.session_kind === form\.session_kind\)/)
 })
 
 test('Agent Workspace opens the existing managed tab without creating a second transport', () => {
-  const openSession = workspaceView.match(
+  const openSession = workspaceRuntime.match(
     /async function openSession\(session: ManagedSession\)\s*\{[\s\S]*?\n\}/,
   )
   assert.ok(openSession, 'AgentWorkspaceView must expose the managed-session open action')
@@ -42,18 +48,18 @@ test('managed Chat mounts StructuredPane with managed session identity', () => {
   assert.match(terminalPane, /v-if="pane\.tabId && !isChatSession"[\s\S]*?<TerminalView/)
   assert.match(terminalPane, /v-if="pane\.tabId && isChatSession"[\s\S]*?<StructuredPane/)
   assert.match(structuredPane, /workspaces\/sessions\/\$\{encodeURIComponent\(streamSourceId\.value\)\}\/stream/)
-  assert.match(structuredPane, /`\$\{streamBasePath\.value\}\/send`/)
-  assert.match(structuredPane, /`\$\{streamBasePath\.value\}\/cancel`/)
-  assert.match(structuredPane, /`\$\{streamBasePath\.value\}\/attachments\/\$\{encId\}`/)
+  assert.match(chatDelivery, /const base = `\$\{deps\.streamBasePath\.value\}\/send`/)
+  assert.match(chatDelivery, /`\$\{deps\.streamBasePath\.value\}\/cancel`/)
+  assert.match(chatImages, /`\$\{deps\.streamBasePath\.value\}\/attachments\/\$\{encId\}`/)
   assert.match(structuredPane, /Managed Chat identity is not available yet\. Refresh Workspace sessions and try again\./)
-  assert.match(structuredPane, /v-else-if="isManagedChat"[\s\S]*Enter \/ ⌘\/Ctrl\+Enter send[\s\S]*Busy turn follow-ups are durable[\s\S]*Shift\+Enter newline/)
-  assert.match(structuredPane, /if \(isManagedChat\.value\) \{[\s\S]*submit\('normal'\)[\s\S]*return[\s\S]*\}[\s\S]*if \(action === 'queue'\)/)
-  assert.match(structuredPane, /submit\(action === 'steer' \? 'steer' : 'normal'\)/)
+  assert.match(chatComposer, /v-else-if="isManagedChat"[\s\S]*Enter \/ ⌘\/Ctrl\+Enter send[\s\S]*Busy turn follow-ups are durable[\s\S]*Shift\+Enter newline/)
+  assert.match(chatComposerController, /if \(deps\.isManagedChat\.value\) \{[\s\S]*deps\.submit\('normal'\)[\s\S]*return[\s\S]*\}[\s\S]*if \(action === 'queue'\)/)
+  assert.match(chatComposerController, /deps\.submit\(action === 'steer' \? 'steer' : 'normal'\)/)
 })
 
 test('Workspace launcher exposes MASO only for local Chat', () => {
-  assert.match(workspaceView, /:allow-maso="agentOptionsForm\.session_kind === 'chat'"/)
-  assert.match(workspaceView, /:allow-terminal="agentOptionsForm\.session_kind === 'terminal'"/)
-  assert.match(workspaceView, /:disabled="agentOptionsForm\.target === 'remote'"/)
-  assert.match(workspaceView, /if \(target === 'remote'\) handleAgentSurfaceChange\('terminal'\)/)
+  assert.match(workspaceAgentDialog, /:allow-maso="agentOptionsForm\.session_kind === 'chat'"/)
+  assert.match(workspaceAgentDialog, /:allow-terminal="agentOptionsForm\.session_kind === 'terminal'"/)
+  assert.match(workspaceAgentDialog, /:disabled="agentOptionsForm\.target === 'remote'"/)
+  assert.match(workspaceAgentManager, /if \(target === 'remote'\) handleAgentSurfaceChange\('terminal'\)/)
 })

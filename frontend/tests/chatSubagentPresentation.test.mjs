@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { loadChatUtility } from './chatPresentationTestHarness.mjs'
+import { loadChatFeature } from './chatPresentationTestHarness.mjs'
 
 const {
   subagentChip, subagentName, subagentHeadline, subagentPrompt,
@@ -8,7 +8,7 @@ const {
   subagentRegionHeadline, subagentRegionStatusLabel, subagentRegionStatusClass,
   subthreadStatusClass, subthreadStatusLabel, subthreadTerminal,
   subthreadHeadline, subthreadInstructionText,
-} = await loadChatUtility('chatSubagentPresentation')
+} = await loadChatFeature('presentation/chatSubagentPresentation')
 
 const tool = (view = {}, extra = {}) => ({
   key: 'tool', status: 'completed', argsText: 'raw arguments',

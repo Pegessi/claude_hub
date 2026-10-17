@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 from typing import Literal
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ..task_dependencies import require_task_dependencies, validate_task_dependencies
 from ..task_graph import reparent_task
 from ._attachments import _PreparedWorkspaceAttachment
@@ -251,7 +249,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             task = self.tasks.get(task_id)
             if task is None:
                 raise KeyError(task_id)
-            now = _wm._now()
+            now = self._runtime_now()
             plan = self._prepare_task_edit(task, payload, now)
             before = self._read_task_edit_state(task.workspace_id)
             snapshot = self._snapshot_report_intake_workspace(task.workspace_id)
@@ -387,7 +385,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             self._cleanup_removed_task_attachments(plan.removed_attachments)
 
     def _write_task_record(self, task: WorkspaceTask) -> None:
-        completed_at = task.completed_at or _wm._now()
+        completed_at = task.completed_at or self._runtime_now()
         record_dir = self._workspace_task_records_dir(task.workspace_id)
         record_dir.mkdir(parents=True, exist_ok=True)
         timestamp = completed_at.isoformat(timespec="seconds").replace(":", "-")
@@ -404,7 +402,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             public_task.pop("agent_tag", None)
         payload = {
             "schema_version": 1,
-            "archived_at": _wm._now().isoformat(),
+            "archived_at": self._runtime_now().isoformat(),
             "workspace_id": task.workspace_id,
             "task": public_task,
             "session": session.model_dump(mode="json") if session else None,

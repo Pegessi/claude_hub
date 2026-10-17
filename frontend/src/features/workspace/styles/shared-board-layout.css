@@ -1,0 +1,21 @@
+.board {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(220px, 1fr));
+  gap: 12px;
+  overflow: auto;
+  padding: 14px;
+  background: var(--ch-color-surface-sunken);
+}
+
+.board-skeleton-fade-enter-active,
+.board-skeleton-fade-leave-active {
+  transition: opacity var(--ch-motion-standard);
+}
+
+.board-skeleton-fade-enter-from,
+.board-skeleton-fade-leave-to {
+  opacity: 0;
+}

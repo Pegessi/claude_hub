@@ -12,76 +12,18 @@ import ast
 import fnmatch
 import sys
 import tomllib
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Sequence
 
 ENTRY_DOC_MAX_LINES = 150
-DEFAULT_BACKEND_MAX_LINES = 1500
-DEFAULT_FRONTEND_MAX_LINES = 2500
+DEFAULT_BACKEND_MAX_LINES = 800
+DEFAULT_FRONTEND_MAX_LINES = 800
 
-# Ratchet ceiling for pre-existing large files.
-# New files must stay within DEFAULT_BACKEND_MAX_LINES / DEFAULT_FRONTEND_MAX_LINES.
-# Existing files listed here may shrink or be split, but a shrink must lower the
-# recorded ceiling in the same change (and remove the entry once below the default).
-LEGACY_LINE_BUDGETS: dict[str, int] = {
-    # Backend modules (> 1500 lines)
-    "backend/claude_hub/api/agent_stream.py": 2522,
-    "backend/claude_hub/api/feishu_bot.py": 1740,
-    "backend/claude_hub/cli/commands/tasks.py": 2100,
-    "backend/claude_hub/models/schemas.py": 2271,
-    "backend/claude_hub/services/agent_stream/attachments.py": 1646,
-    "backend/claude_hub/services/agent_stream/native.py": 3450,
-    "backend/claude_hub/services/agent_stream/tailer.py": 4089,
-    "backend/claude_hub/services/feedback_lessons.py": 1567,
-    "backend/claude_hub/services/ttyd_manager.py": 5856,
-    "backend/claude_hub/services/workspace_manager/_messaging.py": 1809,
-    "backend/claude_hub/services/workspace_manager/_prompts.py": 1521,
-    "backend/claude_hub/services/workspace_manager/_reports.py": 2050,
-    "backend/claude_hub/services/workspace_manager/_scheduling.py": 1803,
-    # Frontend components (> 2500 lines)
-    "frontend/src/components/AgentWorkspaceView.vue": 9151,
-    "frontend/src/components/StructuredPane.vue": 5818,
-}
-
-LEGACY_IMPORT_CYCLES: tuple[frozenset[str], ...] = (
-    frozenset(
-        {
-            "claude_hub.services",
-            "claude_hub.services.agent_stream.claude_jsonl",
-            "claude_hub.services.agent_stream.codex_jsonl",
-            "claude_hub.services.agent_stream.cursor_cli_transcript",
-            "claude_hub.services.agent_stream.registry",
-            "claude_hub.services.agent_stream.tailer",
-            "claude_hub.services.managed_chat",
-            "claude_hub.services.session_seat",
-            "claude_hub.services.task_mailbox",
-            "claude_hub.services.ttyd_manager",
-            "claude_hub.services.workspace_manager",
-            "claude_hub.services.workspace_manager._artifacts",
-            "claude_hub.services.workspace_manager._attachments",
-            "claude_hub.services.workspace_manager._chat",
-            "claude_hub.services.workspace_manager._chat_controls",
-            "claude_hub.services.workspace_manager._constants",
-            "claude_hub.services.workspace_manager._dispatch",
-            "claude_hub.services.workspace_manager._feedback",
-            "claude_hub.services.workspace_manager._messaging",
-            "claude_hub.services.workspace_manager._monitor",
-            "claude_hub.services.workspace_manager._normalize",
-            "claude_hub.services.workspace_manager._persistence",
-            "claude_hub.services.workspace_manager._prompts",
-            "claude_hub.services.workspace_manager._reports",
-            "claude_hub.services.workspace_manager._review",
-            "claude_hub.services.workspace_manager._scheduling",
-            "claude_hub.services.workspace_manager._sessions",
-            "claude_hub.services.workspace_manager._state",
-            "claude_hub.services.workspace_manager._task_execution",
-            "claude_hub.services.workspace_manager._task_updates",
-            "claude_hub.services.workspace_manager._tasks",
-            "claude_hub.services.workspace_manager._tmux_queries",
-            "claude_hub.services.workspace_manager._workspaces",
-        }
-    ),
-)
+# Legacy source and import-cycle debt has been eliminated. Keep the empty
+# baselines explicit so regression tests reject reintroducing exemptions.
+LEGACY_LINE_BUDGETS: dict[str, int] = {}
+LEGACY_IMPORT_CYCLES: tuple[frozenset[str], ...] = ()
 
 REQUIRED_WARNING_NOISE_FILTERS: tuple[str, ...] = (
     "ignore:websockets.InvalidStatusCode is deprecated:DeprecationWarning:lark_oapi.ws.client",
@@ -175,13 +117,44 @@ def check_file_size_ratchet(root: Path) -> list[str]:
     frontend_src = root / "frontend" / "src"
     if frontend_src.is_dir():
         for fe_file in sorted(frontend_src.rglob("*")):
-            if not fe_file.is_file() or fe_file.suffix not in {".vue", ".ts"}:
+            if not fe_file.is_file() or fe_file.suffix not in {
+                ".vue",
+                ".ts",
+                ".js",
+                ".css",
+                ".html",
+            }:
                 continue
             rel = fe_file.relative_to(root).as_posix()
             lines = _line_count(fe_file)
             budget = LEGACY_LINE_BUDGETS.get(rel, DEFAULT_FRONTEND_MAX_LINES)
             if lines > budget:
                 errors.append(f"{rel} has {lines} lines, exceeding ceiling of {budget} lines")
+    return errors
+
+
+class _VueTemplateSourceDetector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.has_external_template = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "template" and any(name == "src" for name, _ in attrs):
+            self.has_external_template = True
+
+
+def check_vue_template_type_coverage(root: Path) -> list[str]:
+    """Reject external SFC templates that the current vue-tsc silently skips."""
+    errors: list[str] = []
+    for vue_file in sorted((root / "frontend" / "src").rglob("*.vue")):
+        parser = _VueTemplateSourceDetector()
+        parser.feed(vue_file.read_text(encoding="utf-8"))
+        parser.close()
+        if parser.has_external_template:
+            errors.append(
+                f"{vue_file.relative_to(root).as_posix()} uses <template src>, which bypasses "
+                "vue-tsc template checks; keep templates inline and split typed components/composables"
+            )
     return errors
 
 
@@ -391,6 +364,45 @@ def check_import_cycle_ratchet(root: Path) -> list[str]:
     return errors
 
 
+def _writes_binding(node: ast.AST, name: str) -> bool:
+    """Conservatively detect writes without interpreting arbitrary Python."""
+    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        return node.name == name
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return any(
+            alias.name == "*" or (alias.asname or alias.name.split(".")[0]) == name
+            for alias in node.names
+        )
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.Delete)):
+        targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
+        return any(
+            isinstance(part, ast.Name) and part.id == name
+            for target in targets
+            for part in ast.walk(target)
+        )
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if any(
+            isinstance(part, ast.Name) and part.id == name for part in ast.walk(node.func.value)
+        ):
+            return True
+    return any(_writes_binding(child, name) for child in ast.iter_child_nodes(node))
+
+
+def _reads_binding(node: ast.AST, name: str) -> bool:
+    evaluated: list[ast.AST]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        evaluated = [*node.decorator_list, node.args]
+        if node.returns is not None:
+            evaluated.append(node.returns)
+        return any(_reads_binding(part, name) for part in evaluated)
+    if isinstance(node, ast.ClassDef):
+        evaluated = [*node.decorator_list, *node.bases, *node.keywords]
+        return any(_reads_binding(part, name) for part in evaluated)
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == name:
+        return True
+    return any(_reads_binding(child, name) for child in ast.iter_child_nodes(node))
+
+
 def _has_extra_forbid(
     node: ast.ClassDef,
     classes: dict[str, ast.ClassDef],
@@ -400,29 +412,153 @@ def _has_extra_forbid(
     if node.name in visited:
         return False
     visited.add(node.name)
-    for stmt in node.body:
-        if not isinstance(stmt, ast.Assign):
+    val: ast.expr | None
+    for stmt in reversed(node.body):
+        if isinstance(stmt, ast.Assign):
+            targets = stmt.targets
+            val = stmt.value
+        elif isinstance(stmt, ast.AnnAssign):
+            targets = [stmt.target]
+            val = stmt.value
+        else:
+            if _writes_binding(stmt, "model_config") or _reads_binding(stmt, "model_config"):
+                return False
             continue
-        if not any(isinstance(t, ast.Name) and t.id == "model_config" for t in stmt.targets):
+        if not any(
+            isinstance(target, ast.Name) and target.id == "model_config" for target in targets
+        ):
+            if _writes_binding(stmt, "model_config") or _reads_binding(stmt, "model_config"):
+                return False
             continue
-        val = stmt.value
         if isinstance(val, ast.Dict):
-            for key, value in zip(val.keys, val.values):
+            if any(key is None for key in val.keys):
+                return False
+            for key, value in reversed(list(zip(val.keys, val.values))):
                 if isinstance(key, ast.Constant) and key.value == "extra":
                     return isinstance(value, ast.Constant) and value.value == "forbid"
         elif isinstance(val, ast.Call):
+            if not isinstance(val.func, ast.Name) or val.func.id != "ConfigDict":
+                return False
+            if any(keyword.arg is None for keyword in val.keywords):
+                return False
             for keyword in val.keywords:
                 if keyword.arg == "extra":
                     return (
                         isinstance(keyword.value, ast.Constant) and keyword.value.value == "forbid"
                     )
-        else:
-            return False
-    parents = [
-        classes[base.id] for base in node.bases if isinstance(base, ast.Name) and base.id in classes
-    ]
+        return False
+    if any(not isinstance(base, ast.Name) or base.id not in classes for base in node.bases):
+        return False
+    parents = [classes[base.id] for base in node.bases if isinstance(base, ast.Name)]
     return bool(parents) and all(
         _has_extra_forbid(parent, classes, visited.copy()) for parent in parents
+    )
+
+
+def _resolve_schema_class(
+    root: Path,
+    module: Path,
+    name: str,
+    cache: dict[Path, ast.Module],
+    seen: frozenset[tuple[Path, str]] = frozenset(),
+    *,
+    before_line: int | None = None,
+) -> tuple[Path, ast.ClassDef] | None:
+    """Follow explicit model reexports without importing application code."""
+    key = (module, name)
+    models_root = root / "backend" / "claude_hub" / "models"
+    if key in seen or not module.is_relative_to(models_root) or not module.is_file():
+        return None
+    if module not in cache:
+        cache[module] = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+    for node in reversed(cache[module].body):
+        if before_line is not None and node.lineno >= before_line:
+            continue
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return module, node
+        if not isinstance(node, ast.ImportFrom):
+            if _writes_binding(node, name):
+                return None
+            continue
+        if any(alias.name == "*" for alias in node.names):
+            return None
+        for alias in node.names:
+            if (alias.asname or alias.name) != name:
+                continue
+            if node.level:
+                target = module.parent
+                for _ in range(node.level - 1):
+                    target = target.parent
+                if node.module:
+                    target = target.joinpath(*node.module.split("."))
+            else:
+                target = (root / "backend").joinpath(*(node.module or "").split("."))
+            target = (
+                target / "__init__.py"
+                if (target / "__init__.py").is_file()
+                else target.with_suffix(".py")
+            )
+            return _resolve_schema_class(root, target, alias.name, cache, seen | {key})
+    return None
+
+
+def _trusted_config_constructor(module: ast.Module, cls: ast.ClassDef) -> bool:
+    """Trust ConfigDict calls only when the constructor is imported from Pydantic."""
+    value: ast.expr | None
+    for statement in cls.body:
+        if isinstance(statement, ast.Assign):
+            targets, value = statement.targets, statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            targets, value = [statement.target], statement.value
+        else:
+            continue
+        if not isinstance(value, ast.Call) or not any(
+            isinstance(target, ast.Name) and target.id == "model_config" for target in targets
+        ):
+            continue
+        if not isinstance(value.func, ast.Name) or value.func.id != "ConfigDict":
+            return False
+        if any(_writes_binding(local, "ConfigDict") for local in cls.body):
+            return False
+        for binding in reversed(module.body):
+            if binding.lineno >= cls.lineno:
+                continue
+            if (
+                isinstance(binding, ast.ImportFrom)
+                and binding.module == "pydantic"
+                and not binding.level
+            ):
+                for alias in binding.names:
+                    if (alias.asname or alias.name) == "ConfigDict":
+                        return alias.name == "ConfigDict"
+            if _writes_binding(binding, "ConfigDict"):
+                return False
+        return False
+    return True
+
+
+def _schema_has_extra_forbid(
+    root: Path,
+    resolved: tuple[Path, ast.ClassDef],
+    cache: dict[Path, ast.Module],
+    seen: frozenset[tuple[Path, str]] = frozenset(),
+) -> bool:
+    module, node = resolved
+    key = (module, node.name)
+    if key in seen:
+        return False
+    if any(_writes_binding(statement, "model_config") for statement in node.body):
+        return _trusted_config_constructor(cache[module], node) and _has_extra_forbid(node, {})
+    parents: list[tuple[Path, ast.ClassDef]] = []
+    for base in node.bases:
+        if not isinstance(base, ast.Name):
+            return False
+        parent = _resolve_schema_class(root, module, base.id, cache, before_line=node.lineno)
+        if parent is None:
+            return False
+        parents.append(parent)
+    return bool(parents) and all(
+        _schema_has_extra_forbid(root, parent, cache, seen | {key}) for parent in parents
     )
 
 
@@ -432,14 +568,13 @@ def check_strict_schemas(root: Path) -> list[str]:
     if not schemas_path.is_file():
         return errors
 
-    tree = ast.parse(schemas_path.read_text(encoding="utf-8"), filename=str(schemas_path))
-    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    cache: dict[Path, ast.Module] = {}
     for cls_name in STRICT_TASK_STATE_SCHEMAS:
-        cls_node = classes.get(cls_name)
-        if cls_node is None:
+        resolved = _resolve_schema_class(root, schemas_path, cls_name, cache)
+        if resolved is None:
             errors.append(f"Strict schema class {cls_name} is missing from models/schemas.py")
             continue
-        if not _has_extra_forbid(cls_node, classes):
+        if not _schema_has_extra_forbid(root, resolved, cache):
             errors.append(f"Schema {cls_name} in models/schemas.py must declare extra='forbid'")
     return errors
 
@@ -541,6 +676,7 @@ def run_all_checks(root: Path) -> list[str]:
     return [
         *check_entry_docs(root),
         *check_file_size_ratchet(root),
+        *check_vue_template_type_coverage(root),
         *check_layering_boundaries(root),
         *check_import_cycle_ratchet(root),
         *check_strict_schemas(root),

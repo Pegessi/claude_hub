@@ -4,7 +4,7 @@ import test from 'node:test'
 import { bot, flush, harness, mountSettings, pool, response } from './feishuBotUiTestHarness.mjs'
 
 const dialog = readFileSync(
-  new URL('../src/components/FeishuBotSettingsDialog.vue', import.meta.url),
+  new URL('../src/features/feishu-bot/FeishuBotSettingsDialog.vue', import.meta.url),
   'utf8',
 )
 

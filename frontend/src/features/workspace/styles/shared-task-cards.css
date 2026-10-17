@@ -1,0 +1,34 @@
+.task-actions button,
+.agent-row button {
+  height: 26px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control-active);
+  color: var(--ch-color-text);
+  padding: 0 10px;
+  transition: all var(--ch-motion-fast);
+  -webkit-tap-highlight-color: var(--ch-color-accent-halo);
+}
+
+.task-actions button:focus-visible,
+.agent-row button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+.task-actions button:active,
+.agent-row button:active,
+.tool-button:active,
+.primary-button:active,
+.abort-button:active,
+.danger-button:active {
+  transform: translateY(1px);
+  background: var(--ch-color-surface-pressed);
+}
+
+.task-actions .danger-button,
+.agent-row .danger-button {
+  background: var(--ch-color-danger-bg);
+  border-color: var(--ch-color-danger-border);
+}

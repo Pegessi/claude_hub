@@ -1,7 +1,5 @@
 """Reviewer selection and review-report handling."""
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
@@ -331,7 +329,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
             )
             return
 
-        now = _wm._now()
+        now = self._runtime_now()
         # ------------------------------------------------------------------
         # Idempotency guard (cycle-based): terminal review flags are written
         # synchronously in create_report() before the first save, which also
@@ -440,7 +438,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
                     f"错误：{exc}"
                 ),
                 report_state=AgentReportState.NEEDS_INPUT,
-                sampled_at=_wm._now(),
+                sampled_at=self._runtime_now(),
             )
 
     async def _handle_goal_packet_review_report(
@@ -449,7 +447,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
         reviewer: ManagedSession,
         report: AgentReport,
     ) -> None:
-        now = _wm._now()
+        now = self._runtime_now()
         # ------------------------------------------------------------------
         # Idempotency guard: the create_report() fast-path already writes
         # review_completed_at and transitions the Goal Packet to
@@ -601,5 +599,5 @@ class _ReviewMixin(_WorkspaceManagerBase):
                     f"worker 回到空闲后自动恢复将重试。错误：{exc}"
                 ),
                 report_state=AgentReportState.NEEDS_INPUT,
-                sampled_at=_wm._now(),
+                sampled_at=self._runtime_now(),
             )

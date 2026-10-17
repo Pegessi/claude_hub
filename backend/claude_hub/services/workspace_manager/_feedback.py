@@ -3,8 +3,6 @@
 import re
 from typing import Callable
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ...models import FeedbackSummaryMode
 from ..feedback_automation import FeedbackAutomationSettings, FeedbackAutomationStore
 from ._constants import *  # noqa: F401,F403
@@ -59,7 +57,7 @@ class _FeedbackMixin(_WorkspaceManagerBase):
             raise KeyError(workspace_id)
         return (
             FeedbackAutomationStore(self._feedback_store().state_root)
-            .state(workspace_id, getattr(self, "_feedback_started_at", _wm._now()))
+            .state(workspace_id, getattr(self, "_feedback_started_at", self._runtime_now()))
             .model_dump(mode="json")
         )
 
@@ -69,7 +67,9 @@ class _FeedbackMixin(_WorkspaceManagerBase):
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
         store = FeedbackAutomationStore(self._feedback_store().state_root)
-        state = store.state(workspace_id, getattr(self, "_feedback_started_at", _wm._now()))
+        state = store.state(
+            workspace_id, getattr(self, "_feedback_started_at", self._runtime_now())
+        )
         state.settings = settings
         store.save(workspace_id, state)
         return state.model_dump(mode="json")
@@ -86,7 +86,7 @@ class _FeedbackMixin(_WorkspaceManagerBase):
         if self._feedback_automation_lock.locked():
             return
         async with self._feedback_automation_lock:
-            now = _wm._now()
+            now = self._runtime_now()
             # Existing manual reapers retain ownership too. Do not multiply
             # background model sessions across many quiet workspaces.
             active_reapers = [

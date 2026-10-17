@@ -526,6 +526,8 @@ def test_every_browser_entrypoint_uses_the_lifecycle_owner(
     setattr(fake, "BrowserRun", object)
     setattr(fake, "run_browser_main", calls.append)
     monkeypatch.setitem(launcher.sys.modules, "browser_lifecycle", fake)
+    # A real script invocation includes its directory for shared fixture imports.
+    monkeypatch.syspath_prepend(str(launcher.FRONTEND / "tests"))
     for script, _suffix in launcher.RUNNERS:
         runpy.run_path(str(launcher.FRONTEND / "tests" / script), run_name="__main__")
         assert len(calls) == 1

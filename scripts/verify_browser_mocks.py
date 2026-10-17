@@ -26,6 +26,7 @@ REFUSAL_PORT = 59999
 RUNNERS = (
     ("browser_task_execution_panel.py", "/tests/task_execution_panel_harness.html"),
     ("browser_agent_workspace_task_create.py", "/tests/agent_workspace_task_create_harness.html"),
+    ("browser_workspace_detail.py", "/tests/agent_workspace_task_create_harness.html"),
     ("browser_chat_subagent_region.py", ""),
     ("browser_chat_composer.py", ""),
     ("browser_managed_chat_question.py", ""),

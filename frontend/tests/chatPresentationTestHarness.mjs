@@ -28,3 +28,7 @@ async function moduleUrl(file) {
 export async function loadChatUtility(name) {
   return import(await moduleUrl(new URL(`../src/utils/${name}.ts`, import.meta.url)))
 }
+
+export async function loadChatFeature(path) {
+  return import(await moduleUrl(new URL(`../src/features/chat/${path}.ts`, import.meta.url)))
+}

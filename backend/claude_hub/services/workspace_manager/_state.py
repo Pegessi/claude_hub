@@ -6,8 +6,6 @@ from contextvars import ContextVar
 
 from pydantic import ValidationError
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ..legacy_state_migration import (
     LEGACY_TASK_KEYS,
     index_has_legacy_keys,
@@ -30,7 +28,7 @@ class _StateMixin(_WorkspaceManagerBase):
     _scheduled_chat_recovery_pending: bool
 
     def __init__(self) -> None:
-        self._feedback_started_at = _wm._now()
+        self._feedback_started_at = self._runtime_now()
         self.workspaces: dict[str, Workspace] = {}
         self.tasks: dict[str, WorkspaceTask] = {}
         self._task_activity_cursors: dict[str, tuple[int, int]] = {}
@@ -105,7 +103,7 @@ class _StateMixin(_WorkspaceManagerBase):
         self._load_state()
 
     def _workspace_dir(self, workspace_id: str) -> Path:
-        return _wm.STATE_ROOT / workspace_id
+        return self._runtime_state_root / workspace_id
 
     def _workspace_state_file(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "state.json"
@@ -145,7 +143,7 @@ class _StateMixin(_WorkspaceManagerBase):
         return self._workspace_dir(workspace_id) / "attachments"
 
     def _feedback_store(self) -> FeedbackLessonStore:
-        return FeedbackLessonStore(_wm.STATE_ROOT)
+        return FeedbackLessonStore(self._runtime_state_root)
 
     def snapshot_path(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "snapshot.md"

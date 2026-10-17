@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-const files=['../src/utils/feishuBotConfig.ts','../src/stores/feishuBotPoolStore.ts','../src/components/FeishuBotSettingsDialog.vue','../src/composables/useFeishuBinding.ts','../src/components/FeishuBindingPanel.vue'].map(path=>readFileSync(new URL(path,import.meta.url),'utf8'))
+const files=['../src/utils/feishuBotConfig.ts','../src/stores/feishuBotPoolStore.ts','../src/features/feishu-bot/FeishuBotSettingsDialog.vue','../src/composables/useFeishuBinding.ts','../src/components/FeishuBindingPanel.vue'].map(path=>readFileSync(new URL(path,import.meta.url),'utf8'))
 const source=files.join('\n')
 test('new UI contains no removed routes',()=>{
   assert.doesNotMatch(source,/\/api\/feishu\/bot\/(?:config|bind\/start|binding|pairings)(?:[/'"`]|$)/)

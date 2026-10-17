@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
 from ...models import AgentReportState, AgentType
+from .contracts.runtime import _RuntimeHostContract
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
     from ._task_updates import _TaskEditPlan
 
 
-class _WorkspaceManagerBase(ABC):
+class _WorkspaceManagerBase(_RuntimeHostContract):
     _dispatch_locks: dict[str, asyncio.Lock]
     _feedback_automation_task: asyncio.Task[None] | None
     _feedback_chat_busy: Callable[[], bool] | None
@@ -65,6 +66,26 @@ class _WorkspaceManagerBase(ABC):
     task_mailbox: TaskMailbox
     tasks: dict[str, WorkspaceTask]
     workspaces: dict[str, Workspace]
+
+    @abstractmethod
+    def _runtime_now(self) -> datetime:
+        """Read the clock supplied by the public manager entrypoint."""
+        ...
+
+    @property
+    @abstractmethod
+    def _runtime_state_root(self) -> Path:
+        """Resolve the caller-owned state root without importing the entrypoint."""
+        ...
+
+    @property
+    @abstractmethod
+    def _runtime_scheduled_tasks_file(self) -> Path: ...
+
+    @abstractmethod
+    def _runtime_resident_prompt(
+        self, workspace: Workspace, base_url: str, session_id: str
+    ) -> str: ...
 
     @staticmethod
     @abstractmethod

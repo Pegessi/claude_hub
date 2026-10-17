@@ -15,7 +15,7 @@ from unittest.mock import Mock
 import pytest
 
 from claude_hub import services
-from claude_hub.services import _terminal_session_catalog as catalog
+from claude_hub.services.terminal_runtime import catalog, records
 from claude_hub.services.ttyd_manager import ScanEntry, TabStateError, TTYDManager, TTYDProcess
 
 TM = importlib.import_module("claude_hub.services.ttyd_manager")
@@ -76,8 +76,11 @@ def test_terminal_owner_classes_and_singleton_keep_historical_identity() -> None
     assert services.TTYDProcess is TM.TTYDProcess is TTYDProcess
     assert services.ttyd_manager is TM.ttyd_manager
     assert type(TM.ttyd_manager) is TTYDManager
-    for cls in (TTYDManager, TTYDProcess, ScanEntry, TabStateError, TM._PendingTabCleanup):
+    for cls in (TTYDManager, TTYDProcess):
         assert cls.__module__ == TM.__name__
+    assert ScanEntry is records.ScanEntry
+    assert TabStateError is records.TabStateError
+    assert TM._PendingTabCleanup is records._PendingTabCleanup
     assert TM._codex_id_in_index is TM._codex_id_exists
     assert type(_entry("one")) is ScanEntry
 

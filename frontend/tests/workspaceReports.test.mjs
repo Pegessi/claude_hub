@@ -8,7 +8,7 @@ const {
   profileResultsFor, reviewProfileLabel, taskReviewProfiles, profileResultSummary,
   primaryExpandedReportId, isMarkdownArtifact, markdownArtifactRefs, artifactPreviewKey,
   markdownDocumentPreviewKey, markdownDocumentSourceLabel, taskMarkdownDocuments,
-} = await loadWorkspaceProjection('workspaceReports')
+} = await loadWorkspaceProjection('reports')
 
 function report(id, overrides = {}) {
   return { id, state: 'working', message: 'legacy text', ...overrides }

@@ -3,6 +3,8 @@
 import asyncio
 from typing import Optional
 
+import claude_hub.services.managed_chat as managed_chat
+
 from ...models import (
     AgentRuntimeStatus,
     ManagedSession,
@@ -11,7 +13,6 @@ from ...models import (
     WorkspaceAttachmentCreate,
     WorkspaceTaskStatus,
 )
-from .. import managed_chat
 from ._base import _WorkspaceManagerBase
 from ._constants import _now
 

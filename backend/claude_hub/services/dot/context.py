@@ -22,7 +22,8 @@ from typing import Any, Iterable, Optional
 from .index import DotIndex, recallable
 from .lessons import session_rules
 from .prompts import DOT_CONTEXT_HEADER, TOOL_GUIDE
-from .store import DEFAULT_NAME, Card, DotStore, utc_now
+from .storage.store import DotStore
+from .store import DEFAULT_NAME, Card, utc_now
 
 logger = logging.getLogger(__name__)
 

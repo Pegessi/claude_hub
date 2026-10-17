@@ -1,89 +1,73 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
-import { readFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import test from 'node:test'
-import ts from 'typescript'
-import { workspaceProjectionModuleUrl } from './workspaceProjectionTestHarness.mjs'
+import { loadWorkspaceFeature, mountWorkspaceConsumer, vue } from './workspaceFeatureTestHarness.mjs'
 
-const require = createRequire(import.meta.url)
-const { parse } = require('vue/compiler-sfc')
-const source = await readFile(new URL('../src/components/AgentWorkspaceView.vue', import.meta.url), 'utf8')
-const { descriptor } = parse(source)
-const script = ts.createSourceFile('AgentWorkspaceView.ts', descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-const bindings = new Set([
-  'activeWorkspace', 'selectedTask', 'selectedReports', 'selectedMarkdownDocuments',
-  'feedbackLessonMatchSummary', 'latestSelectedReportAgeLabel', 'selectedProgressTimeline',
-  'reportMessagePreview', 'primaryExpandedReportId', 'isLatestSelectedReport',
-  'taskTotalElapsedLabel', 'taskWorkingElapsedLabel', 'reportElapsedLabel', 'reportElapsedTitle',
-  'REPORT_LANG_STORAGE_KEY', 'reportLang', 'reportMessageForLang', 'hasBilingualReport',
-  'enabledPeriodicTaskCount', 'residentLastRunLabel', 'residentRunPending', 'residentNextRunLabel', 'latestResidentReport',
-  'buildResidentPayload',
-])
-const selectedNames = new Set()
-const statements = []
-for (const statement of script.statements) {
-  if (ts.isImportDeclaration(statement) && statement.moduleSpecifier.text.startsWith('@/utils/workspace')) {
-    const name = statement.moduleSpecifier.text.split('/').at(-1)
-    statements.push(statement.getText(script).replace(statement.moduleSpecifier.text, await workspaceProjectionModuleUrl(name)))
-    continue
-  }
-  const name = ts.isFunctionDeclaration(statement)
-    ? statement.name.text
-    : ts.isVariableStatement(statement) ? statement.declarationList.declarations[0].name.getText(script) : null
-  if (bindings.has(name)) {
-    selectedNames.add(name)
-    statements.push(statement.getText(script))
-  }
-}
-assert.deepEqual([...selectedNames].sort(), [...bindings].sort(), 'exercise every intended SFC projection binding')
-
-// Load the real env parser without starting the preset composable's storage or fetch lifecycle.
-const envSource = await readFile(new URL('../src/composables/useLaunchEnvPresets.ts', import.meta.url), 'utf8')
-const envScript = ts.createSourceFile('useLaunchEnvPresets.ts', envSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-const envHelpers = envScript.statements.filter(statement =>
-  ts.isFunctionDeclaration(statement) && ['stripShellQuotes', 'parseLaunchEnv'].includes(statement.name.text)
-)
-assert.equal(envHelpers.length, 2)
-
-// Execute the actual SFC projection declarations with Vue refs. Stores and the
-// component clock remain external inputs; fetching and lifecycle stay out of this seam.
-const runtime = `
-import { computed, reactive, ref } from '${import.meta.resolve('vue')}'
-const localStorage = undefined
-const tasks = ref([]), selectedTaskId = ref(null), board = ref(null), activeFeedbackLessons = ref([])
-const workspaces = ref([]), activeWorkspaceId = ref(null), elapsedClockMs = ref(0)
-const workspaceForm = reactive({
-  resident_agent_enabled: true, resident_agent_paused: false, resident_agent_master_mode: false,
-  resident_agent_interval_minutes: 60, resident_agent_directive: '', resident_agent_periodic_tasks: [],
-  resident_agent_type: 'claude', resident_agent_solo_mode: true, resident_agent_title: '',
-  resident_agent_target: 'local', resident_agent_remote_profile_id: '', resident_agent_cwd: '',
-  resident_agent_remote_reconnect: true, resident_env_text: '',
-})
-const workspaceStore = reactive({
-  reports: [],
-  reportsForTaskId(id) { return this.reports.filter(report => report.task_id === id) },
-})
-${envHelpers.map(statement => statement.getText(envScript)).join('\n')}
-${statements.join('\n')}
-export const inputs = { tasks, selectedTaskId, board, activeFeedbackLessons, workspaces, activeWorkspaceId, elapsedClockMs, workspaceForm, workspaceStore }
-export { ${[...bindings].filter(name => name !== 'REPORT_LANG_STORAGE_KEY').join(', ')} }
-`
-const { outputText } = ts.transpileModule(runtime, {
-  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
-})
-const url = `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
+const { useWorkspaceTaskPresentation } = await loadWorkspaceFeature('composables/useWorkspaceTaskPresentation.ts')
+const { useWorkspaceEditor } = await loadWorkspaceFeature('composables/useWorkspaceEditor.ts')
+const { useWorkspaceLessons } = await loadWorkspaceFeature('composables/useWorkspaceLessons.ts')
+const contexts = await loadWorkspaceFeature('context.ts')
+const { default: WorkspaceSummary } = await loadWorkspaceFeature('components/WorkspaceSummary.vue')
 const epoch = Date.parse('2026-10-17T10:00:00Z')
 const at = seconds => new Date(epoch + seconds * 1000).toISOString()
 
-async function harness(name) {
-  const api = await import(`${url}#${name}`)
-  api.inputs.elapsedClockMs.value = epoch + 120_000
-  return api
+function harness(t) {
+  const scope = vue.effectScope()
+  t.after(() => scope.stop())
+  const tasks = vue.ref([]), selectedTaskId = vue.ref(null), board = vue.ref(null), activeFeedbackLessons = vue.ref([])
+  const workspaces = vue.ref([]), activeWorkspaceId = vue.ref(null), elapsedClockMs = vue.ref(epoch + 120_000)
+  const selectedTask = vue.computed(() => tasks.value.find(task => task.id === selectedTaskId.value) || null)
+  const activeWorkspace = vue.computed(() => workspaces.value.find(workspace => workspace.id === activeWorkspaceId.value) || null)
+  const workspaceStore = vue.reactive({
+    reports: [],
+    reportsForTaskId(id) { return this.reports.filter(report => report.task_id === id) },
+    reportsForTask(task) { return this.reportsForTaskId(task.id) },
+    sessionForTask() { return null },
+    latestReportForTask(task) { return this.reportsForTaskId(task.id).at(-1) || null },
+    fetchFeedbackLessons: async () => undefined,
+  })
+  const inputs = {
+    tasks, selectedTaskId, board, activeFeedbackLessons, workspaces, activeWorkspaceId, elapsedClockMs, workspaceStore,
+    selectedTask, activeWorkspace, selectedWorkspaceId: vue.ref(''),
+    runPending: (_key, callback) => callback(), taskActionKey: (action, id) => `task:${id}:${action}`,
+    reviewerTitle: id => id || 'none', defaultPresetTextForAgent: () => '',
+  }
+  const presentation = scope.run(() => useWorkspaceTaskPresentation(inputs))
+  const editor = scope.run(() => useWorkspaceEditor(inputs))
+  const lessons = scope.run(() => useWorkspaceLessons(inputs))
+  inputs.workspaceForm = editor.workspaceForm
+  return { inputs, selectedTask, ...presentation, ...editor, ...lessons }
 }
 
-test('SFC report projections follow task selection, report updates, language, and clock', async () => {
-  const api = await harness('reports')
+test('Workspace summary consumes reactive domain contexts and invokes the owning lesson action', async (t) => {
+  const api = harness(t)
+  let fetches = 0
+  api.inputs.workspaceStore.fetchFeedbackLessons = async () => { fetches += 1 }
+  const workspaceAgents = vue.ref([{ runtime_status: 'working' }])
+  api.inputs.activeWorkspaceId.value = 'workspace'
+  const mounted = mountWorkspaceConsumer(t, WorkspaceSummary, () => {
+    contexts.provideWorkspaceRuntimeContext({
+      error: vue.ref(null), dismissWorkspaceErrors: () => undefined,
+      activeWorkspaceId: api.inputs.activeWorkspaceId, workspaceAgents,
+      reviewerAgents: vue.ref([]), temporaryReviewers: vue.ref([]),
+      tasksByStatus: status => api.inputs.tasks.value.filter(task => task.status === status),
+      activeFeedbackLessons: api.inputs.activeFeedbackLessons, columns: [], taskCountByStatus: () => 0,
+    })
+    contexts.provideWorkspaceLessonsContext({ openLessonsModal: api.openLessonsModal })
+  })
+  const button = mounted.find(node => node.props?.class === 'summary-chip-button')
+  assert.ok(button, 'the real consumer renders its lesson action')
+  button.props.onClick()
+  assert.equal(api.showLessonsModal.value, true)
+  assert.equal(fetches, 1)
+  api.inputs.activeFeedbackLessons.value = [{ id: 'lesson' }]
+  workspaceAgents.value.push({ runtime_status: 'working' })
+  await vue.nextTick()
+  assert.equal(button.text.trim(), '1 lessons')
+  assert.equal(mounted.find(node => node.tag === 'strong').text, '2 working')
+})
+
+test('Workspace report projections follow task selection, report updates, language, and clock', async (t) => {
+  const api = await harness(t)
   const { inputs } = api
   inputs.tasks.value = [
     { id: 'first', title: 'first', status: 'working', created_at: at(0), started_at: at(30) },
@@ -95,7 +79,7 @@ test('SFC report projections follow task selection, report updates, language, an
     { id: 'two', task_id: 'second', state: 'working', message: 'second', created_at: at(90) },
   ]
   assert.equal(api.latestSelectedReportAgeLabel.value, '1m ago')
-  assert.equal(api.primaryExpandedReportId(), 'one')
+  assert.equal(api.isLatestSelectedReport(api.selectedReports.value[0]), true)
   assert.equal(api.hasBilingualReport.value, true)
   assert.equal(api.reportMessageForLang(api.selectedReports.value[0]), 'English')
   api.reportLang.value = 'zh'
@@ -106,19 +90,19 @@ test('SFC report projections follow task selection, report updates, language, an
   assert.equal(api.latestSelectedReportAgeLabel.value, '2m ago')
   assert.equal(api.selectedProgressTimeline.value.at(-1).timestampMs, epoch + 180_000)
   inputs.selectedTaskId.value = 'second'
-  assert.equal(api.primaryExpandedReportId(), 'two')
+  assert.equal(api.isLatestSelectedReport(api.selectedReports.value[0]), true)
   assert.equal(api.hasBilingualReport.value, false)
   assert.equal(api.reportElapsedLabel(api.selectedReports.value[0], 0), 'creation +30s')
   inputs.workspaceStore.reports.push({ id: 'three', task_id: 'second', state: 'working', message: 'new', created_at: at(150) })
-  assert.equal(api.primaryExpandedReportId(), 'three')
+  assert.equal(api.isLatestSelectedReport(api.selectedReports.value[1]), true)
   assert.equal(api.reportElapsedTitle(api.selectedReports.value[1], 1), 'Elapsed since previous report: 1m')
   inputs.selectedTaskId.value = null
   assert.deepEqual(api.selectedProgressTimeline.value, [])
   assert.equal(api.latestSelectedReportAgeLabel.value, 'none')
 })
 
-test('SFC feedback and Markdown projections react to current store arrays', async () => {
-  const api = await harness('feedback-markdown')
+test('Workspace feedback and Markdown projections react to current store arrays', async (t) => {
+  const api = await harness(t)
   const { inputs } = api
   inputs.tasks.value = [{ id: 'task', title: 'Alpha', prompt: '' }]
   inputs.selectedTaskId.value = 'task'
@@ -136,34 +120,42 @@ test('SFC feedback and Markdown projections react to current store arrays', asyn
   assert.deepEqual(api.selectedMarkdownDocuments.value.map(doc => doc.id), ['direct', 'report-doc'])
 })
 
-test('SFC resident payload wrapper parses the current draft env and forwards overrides', async () => {
-  const api = await harness('resident-payload')
-  const { workspaceForm } = api.inputs
+test('Workspace resident save actions parse the current draft env and forward lifecycle overrides', async (t) => {
+  const api = harness(t)
+  const { workspaceForm, workspaceStore } = api.inputs
+  api.inputs.workspaces.value = [{
+    id: 'workspace', name: 'Test', path: '/workspace', default_branch: 'main', session_prefix: 'test',
+    target: 'local', remote_reconnect: true, resident_agent_enabled: false,
+  }]
+  api.inputs.activeWorkspaceId.value = 'workspace'
+  api.openEditWorkspaceModal()
+  let payload
+  workspaceStore.updateWorkspace = async (_id, next) => { payload = next; return { id: 'workspace' } }
   workspaceForm.resident_env_text = '# ignored\nexport MODEL="model=one"\nLABEL=\'resident worker\''
   workspaceForm.resident_agent_title = '  draft title  '
   workspaceForm.resident_agent_periodic_tasks.push({ id: 'one', text: ' check ', enabled: true })
-  const payload = api.buildResidentPayload()
+  await api.handleSubmitWorkspace()
   assert.deepEqual(payload.resident_agent_env, { MODEL: 'model=one', LABEL: 'resident worker' })
   assert.equal(payload.resident_agent_title, 'draft title')
   assert.deepEqual(payload.resident_agent_periodic_tasks, [{ id: 'one', text: 'check', enabled: true }])
   assert.equal(workspaceForm.resident_agent_periodic_tasks[0].text, ' check ')
 
   workspaceForm.resident_env_text = 'MODEL=model-two'
-  assert.deepEqual(api.buildResidentPayload().resident_agent_env, { MODEL: 'model-two' })
+  await api.handleSubmitWorkspace()
+  assert.deepEqual(payload.resident_agent_env, { MODEL: 'model-two' })
   workspaceForm.resident_env_text = '# no custom env\ninvalid line'
-  assert.deepEqual(api.buildResidentPayload().resident_agent_env, {})
+  await api.handleSubmitWorkspace()
+  assert.deepEqual(payload.resident_agent_env, {})
 
-  const overrides = { resident_agent_enabled: false, resident_agent_title: 'override', resident_agent_env: { EXTRA: 'yes' } }
-  const overridden = api.buildResidentPayload(overrides)
-  assert.equal(overridden.resident_agent_enabled, false)
-  assert.equal(overridden.resident_agent_title, 'override')
-  assert.equal(overridden.resident_agent_env, overrides.resident_agent_env)
+  assert.equal(workspaceForm.resident_agent_enabled, false)
+  await api.handleCreateResident()
+  assert.equal(payload.resident_agent_enabled, true)
   assert.equal(workspaceForm.resident_agent_enabled, true)
   assert.equal(workspaceForm.resident_agent_title, '  draft title  ')
 })
 
-test('SFC resident projections react to workspace switches, draft edits, and clock ticks', async () => {
-  const api = await harness('resident')
+test('Workspace resident projections react to workspace switches, draft edits, and clock ticks', async (t) => {
+  const api = await harness(t)
   const { inputs } = api
   inputs.workspaces.value = [{
     id: 'workspace', resident_agent_enabled: true, resident_agent_session_id: 'resident',

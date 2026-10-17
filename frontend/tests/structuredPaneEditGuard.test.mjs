@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { computed, ref } from 'vue'
+import { loadChatFeature } from './chatPresentationTestHarness.mjs'
 
 const structuredPane = readFileSync(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
+  new URL('../src/features/chat/components/ChatTurn.vue', import.meta.url),
   'utf8',
 )
+const userMessage = readFileSync(
+  new URL('../src/features/chat/components/ChatUserMessage.vue', import.meta.url),
+  'utf8',
+)
+const { useChatActions } = await loadChatFeature('controllers/useChatActions')
 
 // ---------------------------------------------------------------------------
 // Edit-resend guard: while a turn is running (turnInFlight), the hover edit
@@ -89,11 +96,11 @@ test('inline editing does not balloon the bubble', () => {
   // The form forced ``min-width: 320px`` and drew a bordered dark box inside
   // the blue bubble, so a two-character message opened a wide empty-looking
   // form. The textarea now reads as the message itself.
-  const form = structuredPane.match(/\.edit-resend-form \{[\s\S]*?\n\}/)
+  const form = userMessage.match(/\.edit-resend-form \{[\s\S]*?\n\}/)
   assert.ok(form, 'the edit form rule must exist')
   assert.doesNotMatch(form[0], /min-width: min\(320px/, 'the form must not force a wide bubble')
 
-  const textarea = structuredPane.match(/\.edit-resend-textarea \{[\s\S]*?\n\}/)
+  const textarea = userMessage.match(/\.edit-resend-textarea \{[\s\S]*?\n\}/)
   assert.ok(textarea, 'the textarea rule must exist')
   assert.match(textarea[0], /border: none/, 'the textarea must not draw a box inside the bubble')
   assert.match(textarea[0], /background: none/, 'the textarea must not draw its own fill')
@@ -110,15 +117,31 @@ test('a disabled edit button looks disabled', () => {
 })
 
 test('startEdit refuses to open the editor while a turn is running', () => {
-  // Even if the disabled button is bypassed (e.g. via a11y tooling), startEdit
-  // must bail when turnInFlight is true.
-  const fnMatch = structuredPane.match(/function startEdit\(turn: TimelineTurn\) \{[\s\S]*?\n\}/)
-  assert.ok(fnMatch, 'startEdit function must exist')
-  const body = fnMatch[0]
+  const controller = useChatActions({
+    composerError: ref(null),
+    currentModeId: ref('default'),
+    feishuBotPoolStore: { bots: [], activeBotForTab: () => null },
+    goalComposerLocked: ref(false),
+    goalComposerReason: ref(null),
+    goalEditReason: ref(null),
+    isManagedChat: ref(false),
+    modeChangeError: ref(null),
+    props: { tabId: 'tab-a', paneId: 'pane-a' },
+    resetStream() {},
+    async setMode() {},
+    async start() {},
+    streamBasePath: ref('/api/workspaces/tabs/tab-a/stream'),
+    streamSource: computed(() => 'terminal-tab'),
+    streamSourceId: ref('tab-a'),
+    async submit() { return true },
+    terminalStore: { async forkTab() {} },
+    turnInFlight: ref(true),
+    turns: computed(() => []),
+  })
+  const turn = { key: 'turn-a', userText: 'original' }
 
-  assert.match(
-    body,
-    /if \(turnInFlight\.value\) return/,
-    'startEdit must return early when a turn is in flight',
-  )
+  controller.startEdit(turn)
+
+  assert.equal(controller.editingTurnKey.value, null)
+  assert.equal(controller.editDraft.value, '')
 })

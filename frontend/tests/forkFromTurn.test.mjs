@@ -1,66 +1,7 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-
-import ts from 'typescript'
 import { createPinia, setActivePinia } from 'pinia'
-
-// ── Load the real terminalStore in Node ─────────────────────────────────────
-// Rather than mount the whole Vue app, transpile terminalStore.ts to ESM,
-// rewrite its bare `pinia`/`vue` imports to absolute file URLs (so they
-// resolve from a data: URL, which has no base of its own), and import it.
-// Type-only imports (@/types) are erased by the transpiler.
-const storeSource = await readFile(
-  new URL('../src/stores/terminalStore.ts', import.meta.url),
-  'utf8',
-)
-const { outputText } = ts.transpileModule(storeSource, {
-  compilerOptions: {
-    module: ts.ModuleKind.ES2022,
-    target: ts.ScriptTarget.ES2020,
-  },
-})
-const piniaUrl = await import.meta.resolve('pinia')
-const vueUrl = await import.meta.resolve('vue')
-// chatGroups is a value import (not type-only), so it survives transpilation.
-// It is self-contained — its own @/types import is type-only and erased — so
-// transpile it and embed it as a data URL the store can import from.
-const chatGroupsSource = await readFile(
-  new URL('../src/utils/chatGroups.ts', import.meta.url),
-  'utf8',
-)
-const { outputText: chatGroupsJs } = ts.transpileModule(chatGroupsSource, {
-  compilerOptions: {
-    module: ts.ModuleKind.ES2022,
-    target: ts.ScriptTarget.ES2020,
-  },
-})
-const chatGroupsUrl = `data:text/javascript;base64,${Buffer.from(chatGroupsJs).toString('base64')}`
-// terminalReconnect is a value import too; it pulls `reactive` from vue, so
-// rewrite that specifier to the resolved runtime before embedding.
-const reconnectSource = await readFile(
-  new URL('../src/utils/terminalReconnect.ts', import.meta.url),
-  'utf8',
-)
-const { outputText: reconnectJs } = ts.transpileModule(reconnectSource, {
-  compilerOptions: {
-    module: ts.ModuleKind.ES2022,
-    target: ts.ScriptTarget.ES2020,
-  },
-})
-const reconnectUrl = `data:text/javascript;base64,${Buffer.from(
-  reconnectJs.replace(/from\s+['"]vue['"]/g, `from ${JSON.stringify(vueUrl)}`),
-).toString('base64')}`
-const rewritten = outputText
-  .replace(/from\s+['"]pinia['"]/g, `from ${JSON.stringify(piniaUrl)}`)
-  .replace(/from\s+['"]vue['"]/g, `from ${JSON.stringify(vueUrl)}`)
-  .replace(/from\s+['"]@\/utils\/chatGroups['"]/g, `from ${JSON.stringify(chatGroupsUrl)}`)
-  .replace(/from\s+['"]@\/utils\/terminalReconnect['"]/g, `from ${JSON.stringify(reconnectUrl)}`)
-const storeModule = await import(
-  `data:text/javascript;base64,${Buffer.from(rewritten).toString('base64')}`
-)
-const useTerminalStore = storeModule.useTerminalStore
+import { useTerminalStore } from './terminalStoreTestHarness.mjs'
 
 // ── Browser globals the store touches ───────────────────────────────────────
 // Use Reflect.apply wrappers that read globalThis at call time so that

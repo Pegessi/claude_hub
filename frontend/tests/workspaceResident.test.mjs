@@ -5,7 +5,7 @@ import { loadWorkspaceProjection } from './workspaceProjectionTestHarness.mjs'
 const {
   sanitizePeriodicTasks, enabledPeriodicTaskCount, residentUpdatePayload,
   residentLastRunLabel, residentNextRunLabel, latestResidentReport,
-} = await loadWorkspaceProjection('workspaceResident')
+} = await loadWorkspaceProjection('resident')
 
 const now = Date.parse('2026-10-17T12:00:00Z')
 const at = seconds => new Date(now + seconds * 1000).toISOString()

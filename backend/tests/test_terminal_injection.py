@@ -1,5 +1,6 @@
 """Focused contracts for proxied terminal HTML injection."""
 
+import hashlib
 import json
 
 from claude_hub.api._terminal_injection import inject_terminal_html, render_terminal_injection
@@ -22,6 +23,19 @@ def test_terminal_injection_json_encodes_dynamic_values() -> None:
     assert "function setupHistoryResync(term)" in rendered
     assert rendered.count("<style>") == 1
     assert rendered.count("<script>") == 1
+
+
+def test_terminal_injection_remains_byte_identical_after_fragment_split() -> None:
+    rendered = render_terminal_injection(
+        tab_id='tab"</script>',
+        agent_type_value="claude",
+        execution_target_value="remote",
+    )
+
+    assert len(rendered) == 104455
+    assert hashlib.sha256(rendered.encode("utf-8")).hexdigest() == (
+        "48f286cf570e082e4261af6858fc66eac6c8f760c2e57423136c01c3937c6bb1"
+    )
 
 
 def test_terminal_injection_preserves_pages_without_lowercase_head_close() -> None:
