@@ -57,6 +57,7 @@ async def main(browser_run: BrowserRun) -> None:
         "is_active": True,
         "created_at": NOW,
     }
+    agent_status = "working"
     work: list[dict] = []
     inbox = [
         {
@@ -158,7 +159,19 @@ async def main(browser_run: BrowserRun) -> None:
                     body = {"auth_required": False, "user": None}
                 elif path == "/api/tabs":
                     body = [tab]
-                elif path in {"/api/tabs/status", "/api/tabs/archived"}:
+                elif path == "/api/tabs/status":
+                    body = [
+                        {
+                            "tab_id": TAB,
+                            "tab_name": tab["name"],
+                            "agent_type": "claude",
+                            "status": agent_status,
+                            "status_text": agent_status.title(),
+                            "tmux_session": "fixture-dot-session",
+                            "sampled_at": NOW,
+                        }
+                    ]
+                elif path == "/api/tabs/archived":
                     body = []
                 elif path.startswith("/api/tabs/sidebar-preferences"):
                     body = {"pinned_tab_ids": []}
@@ -197,6 +210,8 @@ async def main(browser_run: BrowserRun) -> None:
                 elif "network" in path:
                     body = {"hostname": "fixture", "addresses": []}
                 elif path == "/api/dot/status":
+                    body = status()
+                elif method == "POST" and path == "/api/dot/setup":
                     body = status()
                 elif path == "/api/dot/identity" and method == "GET":
                     body = identity
@@ -289,8 +304,48 @@ async def main(browser_run: BrowserRun) -> None:
             launcher = launchers.first
             await expect(launcher).to_be_visible()
             assert "dot-launcher--compact" in (await launcher.get_attribute("class") or "")
-            box = await launcher.locator(".dot-launcher__memory").bounding_box()
-            assert box is not None and box["height"] >= 36, box
+            # The compact launcher shares a row with the other toolbar controls.
+            # Check physical boxes across phone widths and the mobile breakpoint.
+            report["toolbar_geometry"] = []
+            for width in (360, 390, 768):
+                await page.set_viewport_size({"width": width, "height": 844})
+                await expect(launcher).to_be_visible()
+                await expect(page.locator(".tab-bar .tab-indicator")).to_be_visible()
+                launcher_box = await launcher.bounding_box()
+                add_box = await page.locator(".add-tab").bounding_box()
+                menu_box = await page.locator(".mobile-app-menu-trigger").bounding_box()
+                assert launcher_box is not None and add_box is not None and menu_box is not None
+                report["toolbar_geometry"].append(
+                    {"width": width, "dot": launcher_box, "add": add_box, "menu": menu_box}
+                )
+                for neighbor in (add_box, menu_box):
+                    assert abs(launcher_box["height"] - neighbor["height"]) <= 1, report[
+                        "toolbar_geometry"
+                    ][-1]
+                    assert abs(launcher_box["y"] - neighbor["y"]) <= 1, report["toolbar_geometry"][
+                        -1
+                    ]
+                for button in (".dot-launcher__open", ".dot-launcher__memory"):
+                    box = await launcher.locator(button).bounding_box()
+                    assert box is not None and box["height"] >= 24 and box["width"] >= 36, box
+                    assert 0 <= box["x"] and box["x"] + box["width"] <= width, box
+                await expect(page.locator(".tab-bar .agent-status")).to_have_count(0)
+                await shot(f"dot-mobile-toolbar-{width}.png")
+            await page.set_viewport_size({"width": 390, "height": 844})
+            # Hiding summaries must not stop the shared status polling lifecycle.
+            indicator = page.locator(".tab-bar .tab-indicator")
+            await expect(indicator).to_have_attribute("data-status", "working")
+            status_reads = report["api_requests"].count(["GET", "/api/tabs/status"])
+            assert status_reads > 0
+            agent_status = "attention"
+            await expect(indicator).to_have_attribute("data-status", "attention", timeout=12000)
+            assert report["api_requests"].count(["GET", "/api/tabs/status"]) > status_reads
+            await expect(page.locator(".tab-bar .agent-status")).to_have_count(0)
+            await launcher.get_by_role("button", name="Talk to Dot", exact=True).click()
+            await expect(
+                launcher.get_by_role("button", name="Talk to Dot", exact=True)
+            ).to_be_enabled()
+            assert len(wrote("POST", "/api/dot/setup")) == 1
             await shot("dot-mobile-home.png")
 
             await launcher.get_by_role("button", name="Open Dot memory").click()
@@ -374,11 +429,16 @@ async def main(browser_run: BrowserRun) -> None:
             await panel.get_by_role("button", name="Close Jarvis memory").click()
             await expect(panel).to_be_hidden()
 
-            # Desktop: the full launcher moves to the app bar and shows the name.
-            await page.set_viewport_size({"width": 1280, "height": 900})
-            await expect(launchers).to_have_count(1)
-            await expect(page.locator(".app-mode-tools [data-testid=dot-launcher]")).to_be_visible()
-            await expect(page.locator(".dot-launcher__name")).to_have_text("Jarvis")
+            # The desktop status entry returns immediately past the breakpoint.
+            for width in (769, 1280):
+                await page.set_viewport_size({"width": width, "height": 900})
+                await expect(launchers).to_have_count(1)
+                await expect(
+                    page.locator(".app-mode-tools [data-testid=dot-launcher]")
+                ).to_be_visible()
+                await expect(page.locator(".tab-bar .dot-launcher")).to_have_count(0)
+                await expect(page.locator(".tab-bar .status-trigger")).to_be_visible()
+                await expect(page.locator(".dot-launcher__name")).to_have_text("Jarvis")
             await shot("dot-desktop-home.png")
 
             assert not report["unknown_requests"], report["unknown_requests"]

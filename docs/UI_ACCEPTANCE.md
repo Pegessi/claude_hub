@@ -57,6 +57,7 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 | Queued chat activation | A hidden queued Chat activates before sending; editing yields activation and survives bounded Chat eviction |
 | Goal steering | Queue details/edit/cancel, original-image preview, empty-composer steering without Stop, objective editing, image-aware creation, and explicit interrupted-image recovery on an insecure-context API surface |
 | Chat images and rich Markdown | An original image is sent once, sized from the real preview; assistant images open at actual size; streamed formulas render with MathML, code and prices remain literal, code copies exactly, and wide tables/formulas scroll by keyboard on mobile and narrow panes |
+| Dot launcher and panel | Aligned mobile toolbar controls at 360/390/768px, hidden mobile status summaries with continued polling and per-tab status transitions, normal Dot Chat/memory clicks, identity editing, task watching and lessons; desktop launcher and status summaries at 769/1280px |
 | Service restart | Default automatic Chat continuation and explicit opt-out; desktop/mobile restart controls; a lost POST response retains request identity; pending continuation remains observable; stream recovery preserves the unsent draft without another send or provider replacement |
 
 These are real Vue/Pinia DOM checks served by a dedicated Vite process. Page
