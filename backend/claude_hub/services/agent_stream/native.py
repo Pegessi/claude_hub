@@ -59,6 +59,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
 from uuid import uuid4
 
+import claude_hub.services.agent_stream.provider_guidance as provider_guidance
+import claude_hub.services.agent_stream.provider_model_options as provider_model_options
+
 from ...config import settings
 from ...models import (
     AgentType,
@@ -69,7 +72,7 @@ from ...models import (
     StreamModeOption,
     StreamReasoningEffortOption,
 )
-from ..agent_execution_policy import EXECUTION_POLICY
+from ..agent_execution_policy import EXECUTION_POLICY as EXECUTION_POLICY
 from ..provider_proxy import provider_subprocess_env, redact_provider_proxy_diagnostic
 from .fork_seed import wrap_fork_seed_history
 from .provider_network import (
@@ -81,6 +84,10 @@ from .provider_network import (
     resolve_provider_endpoint,
     select_provider_subprocess_env,
 )
+
+# Preserve the legacy import and monkeypatch targets used by adapters/sessions.
+from .provider_questions import codex_normalize_questions as codex_normalize_questions
+from .provider_questions import parse_ask_question_response as parse_ask_question_response
 
 logger = logging.getLogger(__name__)
 
@@ -112,319 +119,72 @@ _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 # is the legacy alias used by older builds.
 _CODEX_QUESTION_METHODS = ("item/tool/requestUserInput", "tool/requestUserInput")
 
-# Interactive question protocol guidance (chat "no timeout").
-#
-# Claude and Cursor run each chat turn as a one-shot ``--print`` subprocess.
-# In non-interactive mode the CLI cannot render an interactive prompt, so when
-# the agent calls AskUserQuestion/AskQuestion the CLI immediately auto-declines
-# it with a placeholder tool_result ("Answer questions?" for Claude; a
-# "skipped" notice for Cursor). The agent reads that placeholder as "the user
-# declined" and ends the turn — the perceived "timeout". This guidance teaches
-# the agent to interpret the placeholder as "still pending in the UI — wait",
-# so the card stays live and the agent continues when the user's follow-up
-# answer arrives.
-#
-# Claude receives it via ``--append-system-prompt`` (clean, not part of the
-# user message). Cursor's CLI has no system-prompt flag, so the guidance is
-# prepended to the prompt wrapped in sentinel markers; the adapter strips the
-# sentinel block when normalizing user messages so it never reaches the
-# persisted transcript or the UI.
-QUESTION_PROTOCOL_GUIDANCE = (
-    "INTERACTIVE QUESTION PROTOCOL (Hub UI): When you call an interactive "
-    "question tool (AskUserQuestion or AskQuestion), the question is rendered "
-    "as an interactive card in the user's Hub interface and the user will "
-    "answer by clicking it. In this non-interactive transport the tool may "
-    "return a placeholder result (such as 'Answer questions?' or a 'skipped' "
-    "notice) instead of the real answer. This placeholder means the question "
-    "is STILL PENDING in the UI — it does NOT mean the user declined, "
-    "dismissed, or skipped it. When you see this placeholder: (1) do NOT say "
-    "the user declined, dismissed, ignored, or skipped the question; (2) do "
-    "NOT re-ask, choose a default, or proceed without the answer; (3) end "
-    "your turn with one short neutral line such as 'I've made my selection "
-    "above — waiting for your choice.' and stop. The user's real answer will "
-    "arrive as a follow-up message; continue from it then."
-)
-
-_HUB_QUESTION_PROTOCOL_START = "<<<HUB_QUESTION_PROTOCOL_V1>>>"
-_HUB_QUESTION_PROTOCOL_END = "<<<END_HUB_QUESTION_PROTOCOL_V1>>>"
+# Keep native's call-time lookup surface for transport and adapter patches.
+# Helpers receive these values explicitly instead of importing native back.
+QUESTION_PROTOCOL_GUIDANCE = provider_guidance.QUESTION_PROTOCOL_GUIDANCE
+_HUB_QUESTION_PROTOCOL_START = provider_guidance._HUB_QUESTION_PROTOCOL_START
+_HUB_QUESTION_PROTOCOL_END = provider_guidance._HUB_QUESTION_PROTOCOL_END
+_HUB_IMAGE_ATTACHMENT_START = provider_guidance._HUB_IMAGE_ATTACHMENT_START
+_HUB_IMAGE_ATTACHMENT_END = provider_guidance._HUB_IMAGE_ATTACHMENT_END
+_IMAGE_ATTACHMENT_GUIDANCE = provider_guidance._IMAGE_ATTACHMENT_GUIDANCE
+HUB_RUNTIME_GUIDANCE = provider_guidance.HUB_RUNTIME_GUIDANCE
+_HUB_RUNTIME_START = provider_guidance._HUB_RUNTIME_START
+_HUB_RUNTIME_END = provider_guidance._HUB_RUNTIME_END
+_HUB_RUNTIME_MARKERS = provider_guidance._HUB_RUNTIME_MARKERS
 
 
 def wrap_question_protocol_guidance(text: str) -> str:
-    """Prepend the sentinel-wrapped guidance to a Cursor prompt.
-
-    Cursor's CLI has no system-prompt flag, so the guidance is delivered as a
-    prefix on the prompt text. The adapter strips it on transcript read (see
-    :func:`strip_question_protocol_guidance`) so it never reaches the
-    persisted timeline or the UI.
-    """
-    return (
-        f"{_HUB_QUESTION_PROTOCOL_START}\n{QUESTION_PROTOCOL_GUIDANCE}\n"
-        f"{_HUB_QUESTION_PROTOCOL_END}\n\n{text}"
+    """Prefix Cursor question guidance, stripped on transcript read."""
+    return provider_guidance.wrap_guidance_block(
+        text,
+        body=QUESTION_PROTOCOL_GUIDANCE,
+        opening=_HUB_QUESTION_PROTOCOL_START,
+        closing=_HUB_QUESTION_PROTOCOL_END,
     )
 
 
 def strip_question_protocol_guidance(text: str) -> str:
-    """Remove the sentinel-wrapped guidance block from a user message.
-
-    Applied when normalizing Cursor user messages (transcript/snapshot read)
-    so the injected guidance never reaches the persisted timeline or the UI.
-    No-op when the block is absent or malformed (an open block without a
-    close marker is left untouched rather than risk truncating a legitimate
-    message).
-    """
-    if not text:
-        return text
-    start = text.find(_HUB_QUESTION_PROTOCOL_START)
-    if start == -1:
-        return text
-    end = text.find(_HUB_QUESTION_PROTOCOL_END, start + len(_HUB_QUESTION_PROTOCOL_START))
-    if end == -1:
-        return text  # malformed (open block); leave untouched
-    end += len(_HUB_QUESTION_PROTOCOL_END)
-    # Drop the block and the separator newlines that wrap() placed after it,
-    # preserving any legitimate text that preceded the block (normally none).
-    return text[:start] + text[end:].lstrip("\n")
-
-
-_HUB_IMAGE_ATTACHMENT_START = "<<<HUB_IMAGE_ATTACHMENT_V1>>>"
-_HUB_IMAGE_ATTACHMENT_END = "<<<END_HUB_IMAGE_ATTACHMENT_V1>>>"
-
-_IMAGE_ATTACHMENT_GUIDANCE = (
-    "The user attached the image(s) listed below. Use your Read tool to read "
-    "each image file before answering the user's message that follows. The "
-    "image contents are part of the user's request; do not ask the user to "
-    "re-attach them."
-)
+    """Strip the first question block without truncating malformed user text."""
+    return provider_guidance.strip_guidance_block(
+        text, markers=((_HUB_QUESTION_PROTOCOL_START, _HUB_QUESTION_PROTOCOL_END),)
+    )
 
 
 def wrap_image_attachment_guidance(text: str, image_paths: List[Path]) -> str:
-    """Prepend a sentinel-wrapped image-reference block to a Cursor prompt.
-
-    Cursor's CLI has no structured image-input flag (no ``--image`` /
-    ``--attach``), so attached images are staged to temp files and referenced
-    by absolute path in the prompt; the model reads them with its multimodal
-    Read tool. The block is wrapped in sentinels and stripped on transcript
-    read (see :func:`strip_image_attachment_guidance`) so the injected paths
-    never reach the persisted timeline or the UI.
-    """
-    if not image_paths:
-        return text
-    paths = "\n".join(f"- {p}" for p in image_paths)
-    return (
-        f"{_HUB_IMAGE_ATTACHMENT_START}\n{_IMAGE_ATTACHMENT_GUIDANCE}\n"
-        f"{paths}\n{_HUB_IMAGE_ATTACHMENT_END}\n\n{text}"
+    """Prefix staged Cursor image paths, stripped on transcript read."""
+    return provider_guidance.wrap_image_attachment_guidance(
+        text,
+        image_paths,
+        guidance=_IMAGE_ATTACHMENT_GUIDANCE,
+        opening=_HUB_IMAGE_ATTACHMENT_START,
+        closing=_HUB_IMAGE_ATTACHMENT_END,
     )
 
 
 def strip_image_attachment_guidance(text: str) -> str:
-    """Remove the sentinel-wrapped image-reference block from a user message.
-
-    Applied when normalizing Cursor user messages (transcript/snapshot read)
-    so the injected image paths never reach the persisted timeline or the UI.
-    No-op when the block is absent or malformed (an open block without a
-    close marker is left untouched rather than risk truncating a legitimate
-    message).
-    """
-    if not text:
-        return text
-    start = text.find(_HUB_IMAGE_ATTACHMENT_START)
-    if start == -1:
-        return text
-    end = text.find(_HUB_IMAGE_ATTACHMENT_END, start + len(_HUB_IMAGE_ATTACHMENT_START))
-    if end == -1:
-        return text  # malformed (open block); leave untouched
-    end += len(_HUB_IMAGE_ATTACHMENT_END)
-    return text[:start] + text[end:].lstrip("\n")
-
-
-# Hub Chat runtime / execution guidance.
-#
-# A native Chat agent runs with ``CLAUDE_HUB_TAB_ID`` in its provider
-# subprocess env (overlaid in :meth:`ProviderSession._build_env`) and the
-# ``claude-hub`` CLI on PATH, and ``schedule create --kind chat_turn`` can
-# enqueue a turn for the current conversation. Linked work can instead run in
-# its own context. Keep this capability map short and load command help only
-# for the selected path; it must not force a delegation on every user turn.
-#
-# Injected once, on the first user turn of a transport session (see
-# :meth:`ProviderSession.send_message`), as a sentinel-wrapped prompt prefix.
-# The ``$CLAUDE_HUB_TAB_ID`` reference is deliberately literal: the model
-# expands it from its own process env; the backend never substitutes the id.
-# Every transcript normalizer strips the block (see
-# :func:`strip_hub_runtime_guidance`) so it reaches neither the persisted
-# timeline nor the Chat UI; the authoritative Hub echo persists the clean
-# user text before the transport ever wraps it.
-HUB_RUNTIME_GUIDANCE = (
-    "You are running inside Claude Hub. The `claude-hub` CLI is available on PATH. "
-    "Read this Chat's ID from $CLAUDE_HUB_TAB_ID; never hardcode it.\n"
-    + EXECUTION_POLICY
-    + "Task tools: use `claude-hub task context` to inspect current context; consult only the selected "
-    "command's help. `task register` creates an initiator-controlled record without dispatch; "
-    "`task progress` records initiator progress; `task handoff` preserves the Task ID and changes control "
-    "without starting work; `task dispatch` starts Workspace execution. Check context before replacing work.\n"
-    "A reporter key permits progress, whole-Task completion, and release, not other Task management. "
-    "A tracking role does not narrow that permission. Keep keys in protected files, never chat, logs, "
-    "reports, or command output; authorize subagent access explicitly. Omit key-file options so "
-    "register/handoff store the per-Task default file that `task progress` finds by Task ID and "
-    "`task context` reports. Do not assume inherited context "
-    "or permissions, or fall back to manual progress if a key is lost. A child's completed substep "
-    "does not complete the whole Task.\n"
-    "Lessons: for unfamiliar or repeated problems, use `claude-hub feedback context <workspace-id> "
-    "--query <topic>`, then `claude-hub lessons get` for relevant details, not on every turn. For an "
-    "explicit reusable user correction, get message IDs with `claude-hub feedback sources` and follow "
-    "`feedback capture --help` to cite the exact quote. Do not invent corrections. Automatic controls: "
-    "`claude-hub feedback status` / `feedback configure`.\n"
-    "Schedules: create one only when the user requests a scheduled follow-up or recurring check. "
-    "Use `schedule create --kind hub_task --help` for independent Workspace work. To continue this Chat:\n"
-    '  claude-hub schedule create --name "<name>" --kind chat_turn '
-    '--tab-id "$CLAUDE_HUB_TAB_ID" --interval <seconds> --message "<follow-up>"\n'
-    "Use `claude-hub schedule list` / `schedule delete <id>` to inspect/remove schedules. Due Chat "
-    "turns queue behind active turns or Goals; they do not interrupt them. `--kind tab_message` is "
-    "for plain Terminal sessions, not this Chat."
-)
-
-
-_HUB_RUNTIME_START = "<claude_hub_instructions>"
-_HUB_RUNTIME_END = "</claude_hub_instructions>"
-# Provider transcripts can outlive the version that injected their first turn.
-_HUB_RUNTIME_MARKERS = (
-    (_HUB_RUNTIME_START, _HUB_RUNTIME_END),
-    ("<<<HUB_RUNTIME_V1>>>", "<<<END_HUB_RUNTIME_V1>>>"),
-)
+    """Strip the first image block without truncating malformed user text."""
+    return provider_guidance.strip_guidance_block(
+        text, markers=((_HUB_IMAGE_ATTACHMENT_START, _HUB_IMAGE_ATTACHMENT_END),)
+    )
 
 
 def wrap_hub_runtime_guidance(
     text: str, *, guidance: Optional[str] = HUB_RUNTIME_GUIDANCE, context: str = ""
 ) -> str:
-    """Prepend the sentinel-wrapped Hub runtime guidance to a Chat prompt.
-
-    Applied once to the first user turn of every native Chat transport so the
-    agent knows the lightweight execution policy and where to discover Hub
-    work, scheduling and feedback commands when they are relevant.
-    ``context`` carries an optional per-turn block (Dot's context pack) inside
-    the same hidden block, so one strip removes both. The adapter strips the
-    block on transcript read (see :func:`strip_hub_runtime_guidance`) so it
-    never reaches the persisted timeline or the UI.
-    """
-    # ``context`` can quote untrusted text (task reports, memory cards). A
-    # closing marker in it would end the hidden block early and leak the rest
-    # into the visible message, so break any marker it contains.
-    for _opening, closing in _HUB_RUNTIME_MARKERS:
-        context = context.replace(closing, closing[:2] + " " + closing[2:])
-    body = "\n\n".join(part for part in (guidance, context) if part)
-    return f"{_HUB_RUNTIME_START}\n{body}\n{_HUB_RUNTIME_END}\n\n{text}"
+    """Prefix hidden runtime advice and optional per-turn context."""
+    return provider_guidance.wrap_hub_runtime_guidance(
+        text,
+        guidance=guidance,
+        context=context,
+        opening=_HUB_RUNTIME_START,
+        closing=_HUB_RUNTIME_END,
+        markers=_HUB_RUNTIME_MARKERS,
+    )
 
 
 def strip_hub_runtime_guidance(text: str) -> str:
-    """Remove the first current or legacy Hub guidance block from a user message.
-
-    Applied when normalizing provider user messages (transcript/snapshot read)
-    and when matching an edited turn to a provider user message, so the
-    injected guidance never reaches the persisted timeline, the UI, or the
-    edit-resend content match. No-op when the block is absent or malformed (an
-    open block without a close marker is left untouched rather than risk
-    truncating a legitimate message).
-    """
-    if not text:
-        return text
-    start = len(text)
-    markers: Optional[Tuple[str, str]] = None
-    for opening, closing in _HUB_RUNTIME_MARKERS:
-        candidate = text.find(opening)
-        if 0 <= candidate < start:
-            start = candidate
-            markers = (opening, closing)
-    if markers is None:
-        return text
-    opening, closing = markers
-    end = text.find(closing, start + len(opening))
-    if end == -1:
-        return text  # malformed (open block); leave untouched
-    end += len(closing)
-    return text[:start] + text[end:].lstrip("\n")
-
-
-def parse_ask_question_response(text: str) -> Optional[List[Dict[str, Any]]]:
-    """Parse a structured ``ask_question_response`` composer payload.
-
-    The approval card submits answers as a JSON string of the form
-    ``{"type": "ask_question_response", "answers": [{"questionId",
-    "selected": [...]}]}``. Returns the answers list when ``text`` is such a
-    payload, else ``None`` so the caller can fall through to normal delivery.
-    """
-    if not text or not text.lstrip().startswith("{"):
-        return None
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(parsed, dict) or parsed.get("type") != "ask_question_response":
-        return None
-    answers = parsed.get("answers")
-    if not isinstance(answers, list):
-        return None
-    return answers
-
-
-def codex_normalize_questions(raw: Any) -> List[Dict[str, Any]]:
-    """Map Codex ``requestUserInput`` questions to the shared card shape.
-
-    Codex sends ``{id, header, question, options: [{label, ...}],
-    multiSelect}``; the approval card expects ``{id, prompt,
-    options: [{id, label}], allow_multiple}``. Option ids are the labels
-    themselves, so a selected label is also the answer value.
-
-    Lives in the transport module (not the adapter) so
-    ``CodexNativeSession._handle_server_request`` can reuse the exact same
-    skip rules to detect a request that yields zero actionable questions and
-    auto-dismiss it — keeping the "what makes a question card-worthy" logic in
-    one place. The adapter imports and reuses this for card emission.
-    """
-    if not isinstance(raw, list):
-        return []
-    questions: List[Dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        question_id = item.get("id")
-        if not isinstance(question_id, str) or not question_id:
-            continue
-        prompt = item.get("question")
-        if not isinstance(prompt, str) or not prompt:
-            prompt = item.get("header")
-        if not isinstance(prompt, str) or not prompt:
-            continue
-        raw_options = item.get("options")
-        options: List[Dict[str, str]] = []
-        if isinstance(raw_options, list):
-            for opt in raw_options:
-                if not isinstance(opt, dict):
-                    continue
-                label = opt.get("label")
-                if not isinstance(label, str) or not label:
-                    continue
-                option = {"id": label, "label": label}
-                description = opt.get("description")
-                if isinstance(description, str) and description:
-                    option["description"] = description
-                options.append(option)
-        # Modern app-server schemas explicitly allow null options for a
-        # free-text question. Only reject malformed supplied options; a
-        # missing, null, or empty list still produces an actionable card.
-        if raw_options is not None and (
-            not isinstance(raw_options, list) or (raw_options and not options)
-        ):
-            continue
-        question: Dict[str, Any] = {
-            "id": question_id,
-            "prompt": prompt,
-            "options": options,
-            "allow_multiple": item.get("multiSelect") is True,
-        }
-        if item.get("isSecret") is True:
-            question["is_secret"] = True
-        questions.append(question)
-    return questions
+    """Strip the first current or legacy runtime block, preserving malformed text."""
+    return provider_guidance.strip_guidance_block(text, markers=_HUB_RUNTIME_MARKERS)
 
 
 _DEFAULT_MODE = StreamModeOption(
@@ -564,153 +324,23 @@ _CLAUDE_MODEL_ENV_KEYS = (
 
 
 def _static_options(agent_type: str) -> List[StreamModelOption]:
-    """Build model options from the curated static list for an agent type."""
-    return [
-        StreamModelOption(id=model_id, label=model_id, description="")
-        for model_id in _STATIC_MODELS.get(agent_type, [])
-    ]
+    return provider_model_options.model_options_from_ids(_STATIC_MODELS.get(agent_type, []))
 
 
 def _claude_env_options(env: Dict[str, str]) -> List[StreamModelOption]:
-    """Build the Claude catalog advertised by one tab's launch env."""
-    model_ids: List[str] = []
-    seen: set[str] = set()
-    for key in _CLAUDE_MODEL_ENV_KEYS:
-        model_id = env.get(key, "").strip()
-        if not model_id or model_id in seen:
-            continue
-        seen.add(model_id)
-        model_ids.append(model_id)
-    return [
-        StreamModelOption(id=model_id, label=model_id, description="") for model_id in model_ids
-    ]
+    return provider_model_options.claude_env_options(env, model_env_keys=_CLAUDE_MODEL_ENV_KEYS)
 
 
 def _parse_list_models(raw: str) -> List[StreamModelOption]:
-    """Parse ``agent --list-models`` output into model options.
-
-    Each non-empty line is ``<id>  - <label>`` with optional ANSI colors and
-    trailing ``(default)``/``(current)`` markers. Malformed lines are skipped;
-    ids are deduped. An empty result signals the caller to fall back.
-    """
-    options: List[StreamModelOption] = []
-    seen: set[str] = set()
-    for line in raw.splitlines():
-        line = _OSC_RE.sub("", line)
-        line = _ANSI_RE.sub("", line).strip()
-        if not line or " - " not in line:
-            continue
-        model_id, label = line.split(" - ", 1)
-        model_id = model_id.strip()
-        label = _MARKER_RE.sub("", label.strip()).strip()
-        if not model_id or model_id in seen:
-            continue
-        seen.add(model_id)
-        options.append(StreamModelOption(id=model_id, label=label or model_id, description=""))
-    return options
+    return provider_model_options.parse_list_models(
+        raw, osc_re=_OSC_RE, ansi_re=_ANSI_RE, marker_re=_MARKER_RE
+    )
 
 
 def _group_cursor_model_options(options: List[StreamModelOption]) -> List[StreamModelOption]:
-    """Collapse Cursor's parameterized model ids into model + effort groups.
-
-    Cursor exposes effort as part of the provider model id (for example
-    ``gpt-5.6-sol-high``), unlike Codex-family app servers which accept model
-    and effort separately.  Capabilities normalize both representations while
-    retaining the exact Cursor id on each effort option.
-    """
-
-    grouped: Dict[Tuple[str, bool], StreamModelOption] = {}
-    ordered: List[StreamModelOption] = []
-    effort_suffixes = sorted(_REASONING_EFFORTS, key=len, reverse=True)
-    candidates: List[Tuple[StreamModelOption, str, bool, Optional[str]]] = []
-    evidence: Dict[Tuple[str, bool], set[str]] = {}
-    provider_ids = {option.id for option in options}
-    for option in options:
-        provider_id = option.id
-        fast = provider_id.endswith("-fast")
-        stem = provider_id[:-5] if fast else provider_id
-        effort: Optional[str] = None
-        # Older Cursor catalogs spell xhigh as ``extra-high`` in some ids.
-        if stem.endswith("-extra-high"):
-            effort = "xhigh"
-            stem = stem[:-11]
-        else:
-            for candidate in effort_suffixes:
-                if stem.endswith(f"-{candidate}"):
-                    effort = candidate
-                    stem = stem[: -(len(candidate) + 1)]
-                    break
-        candidates.append((option, stem, fast, effort))
-        if effort is not None:
-            evidence.setdefault((stem, fast), set()).add(effort)
-
-    for option, stem, fast, effort in candidates:
-        provider_id = option.id
-        base_id = f"{stem}-fast" if fast else stem
-        variants = evidence.get((stem, fast), set())
-        # A suffix such as ``-medium`` may be part of a real model name. Only
-        # collapse it when the catalog proves this is an effort family.
-        is_family = len(variants) >= 2 or base_id in provider_ids
-        if effort is None or not is_family:
-            standalone = option.model_copy(update={"provider_model_id": provider_id})
-            ordered.append(standalone)
-            continue
-
-        group_id = base_id
-        key = (stem, fast)
-        group = grouped.get(key)
-        if group is None:
-            effort_labels = "|".join(
-                re.escape(label)
-                for label in ("Extra High", "Minimal", "Medium", "High", "None", "Low", "Max")
-            )
-            label = re.sub(
-                rf"\s+(?:{effort_labels})(?=\s+Thinking$|$)",
-                "",
-                option.label,
-                flags=re.IGNORECASE,
-            )
-            if fast and not label.lower().endswith(" fast"):
-                label = f"{label} Fast"
-            group = StreamModelOption(
-                id=group_id,
-                label=label,
-                description=option.description,
-                provider_model_id=provider_id,
-                default_reasoning_effort=effort,
-                supported_reasoning_efforts=[],
-            )
-            grouped[key] = group
-            ordered.append(group)
-        group.supported_reasoning_efforts.append(
-            StreamReasoningEffortOption(
-                id=effort,
-                label=_REASONING_LABELS[effort],
-                provider_model_id=provider_id,
-            )
-        )
-        # Prefer medium, then high, as the representative id used by Default.
-        if effort == "medium" or (effort == "high" and group.default_reasoning_effort != "medium"):
-            group.default_reasoning_effort = effort
-            group.provider_model_id = provider_id
-    grouped_ids = {item.id for item in grouped.values()}
-    standalone_by_id = {item.id: item for item in ordered if not item.supported_reasoning_efforts}
-    for group in grouped.values():
-        default_option = standalone_by_id.get(group.id)
-        if default_option is not None:
-            group.provider_model_id = default_option.provider_model_id
-            group.default_reasoning_effort = "medium"
-            if not any(item.id == "medium" for item in group.supported_reasoning_efforts):
-                group.supported_reasoning_efforts.append(
-                    StreamReasoningEffortOption(
-                        id="medium",
-                        label=_REASONING_LABELS["medium"],
-                        provider_model_id=default_option.provider_model_id,
-                    )
-                )
-    return [
-        item for item in ordered if item.supported_reasoning_efforts or item.id not in grouped_ids
-    ]
+    return provider_model_options.group_cursor_model_options(
+        options, reasoning_efforts=_REASONING_EFFORTS, reasoning_labels=_REASONING_LABELS
+    )
 
 
 def _safe_kill(proc: Any) -> None:

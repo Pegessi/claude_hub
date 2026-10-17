@@ -41,8 +41,24 @@ from ..models import (
     WorkspaceSessionRole,
 )
 from ..models.schemas import CHAT_REMOTE_UNSUPPORTED
-from . import pty_exec
+from . import _terminal_session_catalog, _terminal_snapshot, pty_exec
 from ._cursor_verify import _cursor_id_exists
+from ._terminal_session_catalog import _CODEX_SESSION_LINE_RE as _CODEX_SESSION_LINE_RE
+from ._terminal_session_catalog import _CODEX_SKIP_TITLE_PREFIXES as _CODEX_SKIP_TITLE_PREFIXES
+from ._terminal_session_catalog import _CODEX_TASK_INLINE_RE as _CODEX_TASK_INLINE_RE
+from ._terminal_session_catalog import _CODEX_TASK_TITLE_RE as _CODEX_TASK_TITLE_RE
+from ._terminal_session_catalog import _CODEX_TITLE_MAX_LEN as _CODEX_TITLE_MAX_LEN
+from ._terminal_session_catalog import _CODEX_TITLE_SCAN_MAX_LINES as _CODEX_TITLE_SCAN_MAX_LINES
+from ._terminal_session_catalog import (
+    _CODEX_WORKSPACE_BOOTSTRAP_PREFIXES as _CODEX_WORKSPACE_BOOTSTRAP_PREFIXES,
+)
+from ._terminal_session_catalog import _CODEX_WORKSPACE_LINE_RE as _CODEX_WORKSPACE_LINE_RE
+from ._terminal_session_catalog import (
+    _CODEX_WORKSPACE_RECOVERY_PREFIXES as _CODEX_WORKSPACE_RECOVERY_PREFIXES,
+)
+from ._terminal_session_catalog import (
+    _CODEX_WORKSPACE_TASK_PREFIXES as _CODEX_WORKSPACE_TASK_PREFIXES,
+)
 from .agent_status_markers import codex_output_is_working
 from .provider_proxy import has_provider_proxy_settings, provider_subprocess_env
 from .proxy_rules import PROXY_ENV_KEYS, with_proxy_env_aliases
@@ -801,45 +817,7 @@ def _codex_home_dir() -> Path:
 def _parse_session_meta(
     first_line: str,
 ) -> Tuple[Optional[str], Optional[float], Optional[str], str]:
-    """Parse a codex rollout first line into (sid, ts_epoch, cwd, thread_source).
-
-    Returns ``(None, None, None, "")`` for unparseable lines. Canonical sid is
-    ``payload.id`` (V0 verified: matches the filename uuid and is what codex
-    resume keys off when the exact uuid is passed); ``payload.session_id`` is
-    the stable parent thread id and differs on forks, so we treat it as a
-    secondary alias only for back-compat with older legacy-flat rollouts.
-    Defensive against legacy format (no ``payload`` wrapper) which stores
-    ``session_id``/``id``/``cwd``/``timestamp`` at the top level.
-
-    ``thread_source`` is one of ``"user"``, ``"subagent"``, ``"automation"``,
-    or ``""`` for legacy rollouts that don't carry the field.
-    """
-    try:
-        record = json.loads(first_line)
-    except (json.JSONDecodeError, TypeError):
-        return None, None, None, ""
-    if not isinstance(record, dict):
-        return None, None, None, ""
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        payload = record  # legacy flat format
-    sid = payload.get("id") or payload.get("session_id")
-    if not isinstance(sid, str) or not sid:
-        return None, None, None, ""
-    ts_raw = payload.get("timestamp") or record.get("timestamp")
-    ts_epoch: Optional[float] = None
-    if isinstance(ts_raw, str):
-        try:
-            ts_epoch = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            ts_epoch = None
-    cwd = payload.get("cwd")
-    if not isinstance(cwd, str):
-        cwd = None
-    thread_source = payload.get("thread_source")
-    if not isinstance(thread_source, str):
-        thread_source = ""
-    return sid, ts_epoch, cwd, thread_source
+    return _terminal_session_catalog.parse_session_meta(first_line, datetime_type=datetime)
 
 
 def _codex_roots() -> List[Tuple[Path, bool]]:
@@ -922,32 +900,7 @@ def _codex_scan_sessions(
 
 
 def _diff_scans(pre: Dict[str, ScanEntry], post: Dict[str, ScanEntry]) -> Dict[str, str]:
-    """Compute per-sid change between a pre and post snapshot.
-
-    Returns a dict sid -> change_type, where change_type is one of:
-    * ``'new'``       — sid not in pre; a fresh rollout file was created.
-    * ``'appended'``  — file existed pre and both size AND mtime grew.
-    * ``'attr_changed'`` — existed pre but mtime changed without size growth
-                        (e.g. fs touch, codex metadata rewrite); NOT treated
-                        as session activity for attribution purposes.
-    Sids present in pre but absent in post (archival / deletion) are omitted.
-    """
-    out: Dict[str, str] = {}
-    for sid, post_entry in post.items():
-        pre_entry = pre.get(sid)
-        if pre_entry is None:
-            out[sid] = "new"
-            continue
-        if post_entry.path != pre_entry.path:
-            # sid relocated (e.g. moved to archived_sessions) — treat as attr
-            out[sid] = "attr_changed"
-            continue
-        if post_entry.size > pre_entry.size and post_entry.mtime_ns > pre_entry.mtime_ns:
-            out[sid] = "appended"
-            continue
-        if post_entry.mtime_ns != pre_entry.mtime_ns:
-            out[sid] = "attr_changed"
-    return out
+    return _terminal_session_catalog.diff_scans(pre, post)
 
 
 def _codex_id_exists(sid: str, cwd: Optional[str] = None) -> bool:
@@ -1008,217 +961,38 @@ def _codex_candidates_for_cwd(
     return out
 
 
-# Prefixes that mark a user message as boilerplate context (env / permissions /
-# AGENTS.md / recommended plugins) rather than the user's actual first prompt.
-# These are injected by codex (or the AGENTS.md preamble) at the start of every
-# session and should not be used as the session title. A message counts as
-# boilerplate if ANY of its content items starts with one of these prefixes.
-_CODEX_SKIP_TITLE_PREFIXES = (
-    "<environment_context>",
-    "<permissions instructions>",
-    "<system-reminder>",
-    "<recommended_plugins>",
-    "# AGENTS.md instructions",
-    "<codex_internal_context",
-)
-
-# Prefixes for workspace-manager-injected bootstrap/role prompts. These are
-# idle-session preamble (waiting instructions, reviewer guidelines, dispatcher
-# setup, resident-agent directives) and do not contain a task title. They are
-# skipped in the same way as codex's own boilerplate so that later real
-# messages (task assignment, review, or human input) can surface as the title.
-_CODEX_WORKSPACE_BOOTSTRAP_PREFIXES = (
-    "You are a resident",
-    "You are the dispatcher agent for this workspace.",
-    "You are an independent reviewer agent for this workspace.",
-    "You are this workspace's RESIDENT",
-)
-
-# Prefixes for workspace-manager task-delivery prompts. These ARE meaningful
-# first messages but start with a system line rather than a human-authored
-# title. For these we extract the "Task title:" field (or inline variant) and
-# use it as the session title.
-_CODEX_WORKSPACE_TASK_PREFIXES = (
-    "New workspace task assigned.",
-    "Review workspace task.",
-    "Continue workspace task from review.",
-    "Dispatch decision needed.",
-)
-
-# Prefixes for workspace-manager hard-recovery prompts. These start with a
-# warning emoji paragraph but contain a "Task title:" line further down.
-_CODEX_WORKSPACE_RECOVERY_PREFIXES = (
-    "⚠️  Your previous context was automatically cleared",
-    "⚠️  Context refreshed after error.",
-)
-
-# Regex to extract "Task title: <title>" from a task-delivery prompt body.
-_CODEX_TASK_TITLE_RE = re.compile(r"^\s*Task title:\s*(.+?)\s*$", re.MULTILINE)
-
-# Regex to extract the inline "Task: <id> (<title>)" variant used in the
-# revision-resume prompt.
-_CODEX_TASK_INLINE_RE = re.compile(
-    r"^\s*Task:\s*[0-9a-fA-F-]+\s+\((.+?)\)\s*(?:mode=|complexity=|iteration=|$)",
-    re.MULTILINE,
-)
-
-# Regex to extract "Workspace: <name>" and "Session: <id>" from bootstrap
-# prompts so we can fall back to a role label like "Reviewer (my-ws)".
-_CODEX_WORKSPACE_LINE_RE = re.compile(r"^\s*Workspace:\s*(.+?)\s*$", re.MULTILINE)
-_CODEX_SESSION_LINE_RE = re.compile(r"^\s*Session:\s*(.+?)\s*$", re.MULTILINE)
-
-# Maximum length of the extracted session title (truncated with ellipsis).
-_CODEX_TITLE_MAX_LEN = 80
-# The first meaningful user message (and any task-delivery prompt) always
-# appears near the top of the rollout — within the first few dozen lines.
-# Scanning the whole file (which can be 10+ MB) for sessions that never
-# contain a task-title prompt is wasteful, so cap the scan.
-_CODEX_TITLE_SCAN_MAX_LINES = 100
-
-
+# Resolve dependencies here on every call so patches to the historical module
+# path also affect the extracted pure parsing code.
 def _extract_task_title_from_text(text: str) -> str | None:
-    """Try to pull a task title from a workspace task/recovery prompt body.
-
-    Checks for both ``Task title: <x>`` and the inline ``Task: <id> (<x>)``
-    variants. Returns the first match stripped, or None if neither is found.
-    """
-    m = _CODEX_TASK_TITLE_RE.search(text)
-    if m:
-        return m.group(1).strip()
-    m = _CODEX_TASK_INLINE_RE.search(text)
-    if m:
-        return m.group(1).strip()
-    return None
+    return _terminal_session_catalog.extract_task_title_from_text(
+        text, task_title_re=_CODEX_TASK_TITLE_RE, task_inline_re=_CODEX_TASK_INLINE_RE
+    )
 
 
 def _bootstrap_role_label(text: str) -> str | None:
-    """Derive a short role label from a workspace bootstrap/idle prompt.
-
-    Uses the role-identifying first line plus workspace name when available,
-    e.g. "Reviewer (my-workspace)". Returns None if the text does not look like
-    a bootstrap prompt.
-    """
-    first_line = text.strip().split("\n", 1)[0]
-    role_map = {
-        "You are a resident": "Agent",
-        "You are the dispatcher agent for this workspace.": "Dispatcher",
-        "You are an independent reviewer agent for this workspace.": "Reviewer",
-        "You are this workspace's RESIDENT": "Resident",
-    }
-    role = None
-    for prefix, label in role_map.items():
-        if first_line.startswith(prefix):
-            role = label
-            break
-    if role is None:
-        return None
-    ws_match = _CODEX_WORKSPACE_LINE_RE.search(text)
-    if ws_match:
-        return f"{role} ({ws_match.group(1).strip()})"
-    return role
+    return _terminal_session_catalog.bootstrap_role_label(
+        text, workspace_line_re=_CODEX_WORKSPACE_LINE_RE
+    )
 
 
 def _codex_classify_and_extract(text: str) -> tuple[str, str | None]:
-    """Classify a user message and return (action, extracted_title).
-
-    Returns one of:
-      - ("skip", None)   — boilerplate / bootstrap preamble, keep scanning
-      - ("title", t)     — use ``t`` as the session title
-      - ("fallback", t)  — use ``t`` (truncated first-line / collapsed text)
-                           when no task title or role label applied
-    """
-    stripped = text.strip()
-    if not stripped:
-        return ("skip", None)
-
-    # Workspace bootstrap/idle prompts: these come FIRST in a managed session
-    # (before any task is assigned), so we do NOT return the role label
-    # immediately — we remember it as a fallback and keep scanning for a later
-    # task message. If the session is truly idle the caller will pick up the
-    # remembered fallback at end-of-rollout.
-    if any(stripped.startswith(p) for p in _CODEX_WORKSPACE_BOOTSTRAP_PREFIXES):
-        label = _bootstrap_role_label(stripped)
-        if label:
-            return ("fallback", label)
-        return ("skip", None)
-
-    # Task-delivery prompts (assignment / review / continue / dispatch):
-    # extract the embedded Task title.
-    if any(stripped.startswith(p) for p in _CODEX_WORKSPACE_TASK_PREFIXES):
-        t = _extract_task_title_from_text(stripped)
-        if t:
-            return ("title", t)
-        return ("fallback", stripped)
-
-    # Hard-recovery / revision-resume prompts: same extraction, just prefixed
-    # with the warning emoji.
-    if any(stripped.startswith(p) for p in _CODEX_WORKSPACE_RECOVERY_PREFIXES):
-        t = _extract_task_title_from_text(stripped)
-        if t:
-            return ("title", t)
-        return ("fallback", stripped)
-
-    return ("fallback", stripped)
+    return _terminal_session_catalog.classify_and_extract(
+        text,
+        bootstrap_prefixes=_CODEX_WORKSPACE_BOOTSTRAP_PREFIXES,
+        task_prefixes=_CODEX_WORKSPACE_TASK_PREFIXES,
+        recovery_prefixes=_CODEX_WORKSPACE_RECOVERY_PREFIXES,
+        role_label=_bootstrap_role_label,
+        task_title=_extract_task_title_from_text,
+    )
 
 
 def _codex_title_from_lines(lines: Iterable[str]) -> str:
-    """Extract a session title from an iterable of rollout JSONL lines.
-
-    See :func:`_codex_session_title` for the extraction rules. This variant
-    operates on already-read lines so callers can combine session_meta parsing
-    and title extraction in a single file open.
-    """
-    fallback_title = ""
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if record.get("type") != "response_item":
-            continue
-        payload = record.get("payload") or {}
-        if payload.get("role") != "user":
-            continue
-        content = payload.get("content")
-        if not isinstance(content, list):
-            continue
-        texts: List[str] = []
-        is_preamble = False
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") != "input_text":
-                continue
-            text = str(item.get("text", "")).strip()
-            if not text:
-                continue
-            if any(text.startswith(p) for p in _CODEX_SKIP_TITLE_PREFIXES):
-                is_preamble = True
-                break
-            texts.append(text)
-        if is_preamble:
-            continue
-        if not texts:
-            continue
-
-        joined = "\n\n".join(texts)
-        action, extracted = _codex_classify_and_extract(joined)
-        if action == "skip":
-            continue
-        if action == "title" and extracted:
-            title = " ".join(extracted.split())
-            if len(title) > _CODEX_TITLE_MAX_LEN:
-                title = title[: _CODEX_TITLE_MAX_LEN - 1] + "…"
-            return title
-        if action == "fallback" and extracted:
-            collapsed = " ".join(extracted.split())
-            if len(collapsed) > _CODEX_TITLE_MAX_LEN:
-                collapsed = collapsed[: _CODEX_TITLE_MAX_LEN - 1] + "…"
-            fallback_title = collapsed
-    return fallback_title
+    return _terminal_session_catalog.title_from_lines(
+        lines,
+        skip_prefixes=_CODEX_SKIP_TITLE_PREFIXES,
+        max_length=_CODEX_TITLE_MAX_LEN,
+        classify=_codex_classify_and_extract,
+    )
 
 
 def _codex_session_title(path: str) -> str:
@@ -1250,24 +1024,11 @@ def _codex_load_session_index() -> Dict[str, str]:
     Returns an empty dict if the file is missing or unreadable.
     """
     index_path = _codex_home_dir() / "session_index.jsonl"
-    out: Dict[str, str] = {}
     try:
         with open(index_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                sid = record.get("id")
-                name = record.get("thread_name")
-                if isinstance(sid, str) and sid and isinstance(name, str) and name:
-                    out[sid] = name
+            return _terminal_session_catalog.parse_session_index(f)
     except OSError:
         return {}
-    return out
 
 
 # Cache for list_codex_sessions(): (cache_key, result). The cache key is a
@@ -1376,49 +1137,8 @@ def list_codex_sessions() -> List[Dict[str, Any]]:
     # Single-pass scan: read session_meta for every session, but only read the
     # rollout body (for title extraction) for sessions NOT in the index.
     # Sessions in the index use thread_name directly.
-    raw: Dict[str, Dict[str, Any]] = {}
-    for sid, entry in _codex_scan_sessions(
-        with_title=True, skip_title_sids=set(thread_names.keys())
-    ).items():
-        # Filter out subagent and automation sessions. Only user-initiated
-        # sessions (thread_source == "user") and legacy rollouts (empty
-        # thread_source) are shown in the picker.
-        if entry.thread_source in ("subagent", "automation"):
-            continue
-        start_epoch = entry.ts or 0.0
-        existing = raw.get(sid)
-        if existing and existing["start_epoch"] >= start_epoch:
-            continue
-        title = thread_names.get(sid) or entry.title
-        raw[sid] = {
-            "session_id": sid,
-            "cwd": entry.cwd or "",
-            "start_epoch": start_epoch,
-            "start_time": datetime.fromtimestamp(start_epoch).isoformat() if start_epoch else "",
-            "title": title,
-        }
-
-    # Group by cwd.
-    by_cwd: Dict[str, List[Dict[str, Any]]] = {}
-    for sess in raw.values():
-        by_cwd.setdefault(sess["cwd"], []).append(sess)
-
-    # Sort within each group (most recent first) and order groups by latest.
-    result: List[Dict[str, Any]] = []
-    for cwd, sessions in sorted(
-        by_cwd.items(),
-        key=lambda kv: max(s["start_epoch"] for s in kv[1]),
-        reverse=True,
-    ):
-        sessions.sort(key=lambda s: s["start_epoch"], reverse=True)
-        for s in sessions:
-            s.pop("start_epoch", None)  # internal-only, not for the API
-        result.append(
-            {
-                "cwd": cwd,
-                "sessions": sessions,
-            }
-        )
+    scan = _codex_scan_sessions(with_title=True, skip_title_sids=set(thread_names.keys()))
+    result = _terminal_session_catalog.group_sessions(scan, thread_names, datetime_type=datetime)
 
     _CODEX_SESSIONS_CACHE = (cache_key, result)
     return result
@@ -3358,54 +3078,15 @@ class _PendingTabCleanup:
 
 
 def _parse_tabs_snapshot(value: Any) -> Tuple[List[Dict[str, Any]], Dict[str, _PendingTabCleanup]]:
-    """Validate the whole snapshot before publishing any runtime owner."""
-    if isinstance(value, list):
-        tabs, pending = value, []
-    elif (
-        isinstance(value, dict)
-        and set(value) == {"version", "tabs", "pending_stream_cleanup"}
-        and type(value["version"]) is int
-        and value["version"] == _TABS_STATE_VERSION
-    ):
-        tabs, pending = value["tabs"], value["pending_stream_cleanup"]
-    else:
-        raise TabStateError("unsupported or invalid tabs snapshot")
-    if not isinstance(tabs, list) or not isinstance(pending, list):
-        raise TabStateError("invalid tab or cleanup list")
-    live_ids: set[str] = set()
-    for tab in tabs:
-        if (
-            not isinstance(tab, dict)
-            or not isinstance(tab.get("id"), str)
-            or not _TAB_ID_RE.fullmatch(tab["id"])
-            or tab["id"] in live_ids
-            or not isinstance(tab.get("name"), str)
-            or type(tab.get("port")) is not int
-            or not isinstance(tab.get("created_at"), str)
-        ):
-            raise TabStateError("invalid or duplicate tab record")
-        datetime.fromisoformat(tab["created_at"])
-        live_ids.add(tab["id"])
-    records: Dict[str, _PendingTabCleanup] = {}
-    tokens: set[str] = set()
-    for raw in pending:
-        if (
-            not isinstance(raw, dict)
-            or set(raw) != {"tab_id", "created_at", "token", "authorization"}
-            or any(not isinstance(item, str) for item in raw.values())
-            or not _TAB_ID_RE.fullmatch(raw["tab_id"])
-            or not re.fullmatch(r"[0-9a-f]{32}", raw["token"])
-            or raw["authorization"] != _TAB_CLEANUP_AUTHORIZATION
-            or raw["tab_id"] in records
-            or raw["tab_id"] in live_ids
-            or raw["token"] in tokens
-        ):
-            raise TabStateError("invalid, duplicate, or live-colliding cleanup obligation")
-        datetime.fromisoformat(raw["created_at"])
-        record = _PendingTabCleanup(**raw)
-        records[record.tab_id] = record
-        tokens.add(record.token)
-    return tabs, records
+    return _terminal_snapshot.parse_tabs_snapshot(
+        value,
+        state_version=_TABS_STATE_VERSION,
+        cleanup_authorization=_TAB_CLEANUP_AUTHORIZATION,
+        tab_id_re=_TAB_ID_RE,
+        state_error=TabStateError,
+        pending_cleanup_type=_PendingTabCleanup,
+        datetime_type=datetime,
+    )
 
 
 def _write_tabs_snapshot(payload: Dict[str, Any]) -> None:

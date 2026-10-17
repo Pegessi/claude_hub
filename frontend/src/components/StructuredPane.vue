@@ -1521,10 +1521,9 @@ import { useAgentStream, validateImageAttachment, fileToDataUrl, generatePreview
 import { attachmentRequestBytes, toStreamSendAttachment } from '@/utils/agentStreamAttachments'
 import { useChatGoal } from '@/composables/useChatGoal'
 import { useQuestionAnswers, approvalStateSignature } from '@/composables/useQuestionAnswers'
-import { subagentRegionErrorCount, IncrementalTimelineReducer, foldTurnParts, getCompletedPlanText, messageClockLabel, messageSourceAvatarUrl, messageSourceLabel, splitTurnProcess, turnClockLabel, turnProcessLabel, type TimelineApproval, type TimelineAttachment, type TimelinePart, type TimelineTool, type TimelineTurn } from '@/utils/agentStreamTimeline'
+import { IncrementalTimelineReducer, getCompletedPlanText, messageClockLabel, messageSourceAvatarUrl, messageSourceLabel, turnClockLabel, type TimelineApproval, type TimelineAttachment, type TimelineTurn } from '@/utils/agentStreamTimeline'
 import { isQuietDotTurn } from '@/utils/dotApi'
 import { trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
-import { subagentProviderLabel } from '@/utils/subagentTool'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
@@ -1559,7 +1558,38 @@ import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
 import ThinkingIndicator from '@/components/ThinkingIndicator.vue'
-import { createSubthreadThinkingPresenter, presentThinkingParts, type ThinkingDisplayPart, type ThinkingState } from '@/utils/thinkingPresentation'
+import { createSubthreadThinkingPresenter } from '@/utils/thinkingPresentation'
+import {
+  LEGACY_TRAEX_REASONING_EFFORT_ENV,
+  defaultModelReasoningEffortLabel,
+  effortLabel,
+  filterChatModels,
+  isChatModelActive,
+  isChatModelEffortActive,
+  presentChatModel,
+} from '@/utils/chatModelPresentation'
+import {
+  subagentChip,
+  subagentName,
+  subagentHeadline,
+  subagentPrompt,
+  subagentCallStatusLabel,
+  subagentDispatchLabel,
+  subagentRegionHeadline,
+  subagentRegionStatusLabel,
+  subagentRegionStatusClass,
+  subthreadStatusClass,
+  subthreadStatusLabel,
+  subthreadTerminal,
+  subthreadHeadline,
+  subthreadInstructionText,
+} from '@/utils/chatSubagentPresentation'
+import {
+  isTurnProcessExpanded,
+  presentTurnParts,
+  toolGroupStatus,
+  turnProcessFoldSignature,
+} from '@/utils/chatTurnPresentation'
 import ChatDraftQueue from '@/components/ChatDraftQueue.vue'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
@@ -1907,21 +1937,6 @@ const currentModeLabel = computed(() => currentModeOption.value?.label ?? 'Mode'
 // to the provider (Claude/Codex read it from the environment; Cursor receives
 // it as a ``--model`` flag because the agent CLI does not read ``CURSOR_MODEL``).
 
-const MODEL_ENV_VAR: Record<string, string> = {
-  claude: 'ANTHROPIC_MODEL',
-  codex: 'CODEX_MODEL',
-  // TraeX reuses the Codex app-server; the backend injects the chosen slug via
-  // the collaborationMode.settings.model channel keyed off CODEX_MODEL.
-  traex: 'CODEX_MODEL',
-  cursor: 'CURSOR_MODEL',
-  maso: 'MASO_MODEL',
-}
-const REASONING_EFFORT_ENV: Record<string, string> = {
-  codex: 'CODEX_REASONING_EFFORT',
-  traex: 'CODEX_REASONING_EFFORT',
-}
-const LEGACY_TRAEX_REASONING_EFFORT_ENV = 'TRAEX_REASONING_EFFORT'
-
 // Models are surfaced on the session capabilities. Cursor is discovered via
 // ``agent --list-models``; Claude reflects the selected tab's Anthropic model
 // env (with a curated fallback); Codex uses its provider/static catalog. The
@@ -1929,116 +1944,31 @@ const LEGACY_TRAEX_REASONING_EFFORT_ENV = 'TRAEX_REASONING_EFFORT'
 const currentTab = computed(() =>
   terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
 )
-const modelEnvVar = computed(() => {
-  const at = currentTab.value?.agent_type
-  return at ? MODEL_ENV_VAR[at] ?? null : null
-})
+const modelPresentation = computed(() => presentChatModel(currentTab.value, capabilities.value))
+const modelEnvVar = computed(() => modelPresentation.value.modelEnvVar)
 // Edit-resend truncates the provider's on-disk transcript, which is only wired
 // for providers whose rollout Hub can locate. TraeX transcripts live under
 // ~/.trae and are not wired this wave, so the control is hidden (it would 409).
 const supportsEditResend = computed(() =>
   !isManagedChat.value && ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? '')
 )
-const currentModel = computed(() => {
-  const env = currentTab.value?.env ?? {}
-  const key = modelEnvVar.value
-  return key ? env[key] ?? '' : ''
-})
-const modelOptions = computed<StreamModelOption[]>(
-  () => capabilities.value?.available_models ?? [],
-)
-const effectiveCurrentModel = computed(() => {
-  if (currentModel.value && currentModel.value !== 'auto') return currentModel.value
-  return capabilities.value?.current_model ?? ''
-})
-const currentModelOption = computed(() =>
-  modelOptions.value.find(model =>
-    model.id === effectiveCurrentModel.value
-    || model.provider_model_id === effectiveCurrentModel.value
-    || model.supported_reasoning_efforts.some(effort => effort.provider_model_id === effectiveCurrentModel.value),
-  ) ?? null,
-)
-const currentModelLabel = computed(() => {
-  const id = currentModel.value
-  if (!id) {
-    // Codex-family providers report their effective thread model. Cursor
-    // exposes an explicit Auto row instead.
-    return currentModelOption.value?.label
-      ?? (modelOptions.value.some(m => m.id === 'auto') ? 'Auto' : 'default')
-  }
-  return currentModelOption.value?.label ?? id
-})
-const reasoningEffortEnvVar = computed(() => {
-  const at = currentTab.value?.agent_type
-  return at ? REASONING_EFFORT_ENV[at] ?? null : null
-})
-const currentReasoningEffort = computed(() => {
-  if (currentTab.value?.agent_type === 'maso') {
-    return currentModelOption.value?.supported_reasoning_efforts.find(
-      effort => effort.provider_model_id === effectiveCurrentModel.value,
-    )?.id ?? ''
-  }
-  if (currentTab.value?.agent_type === 'cursor') {
-    if (currentModel.value === currentModelOption.value?.provider_model_id) return ''
-    return currentModelOption.value?.supported_reasoning_efforts.find(
-      effort => effort.provider_model_id === currentModel.value,
-    )?.id ?? ''
-  }
-  const key = reasoningEffortEnvVar.value
-  if (!key) return ''
-  const selected = currentTab.value?.env?.[key]
-    ?? (currentTab.value?.agent_type === 'traex'
-      ? currentTab.value?.env?.[LEGACY_TRAEX_REASONING_EFFORT_ENV]
-      : '')
-    ?? ''
-  if (
-    selected
-    && currentModelOption.value
-    && !currentModelOption.value.supported_reasoning_efforts.some(effort => effort.id === selected)
-  ) return ''
-  return selected
-})
-const currentReasoningEffortLabel = computed(() =>
-  effortLabel(
-    currentReasoningEffort.value
-    || capabilities.value?.current_reasoning_effort
-    || currentModelOption.value?.default_reasoning_effort,
-  ),
-)
-const combinedModelLabel = computed(() => {
-  if (!currentModelOption.value?.supported_reasoning_efforts.length) return currentModelLabel.value
-  return `${currentModelLabel.value} · ${currentReasoningEffortLabel.value}`
-})
-// Whether a model row is the active selection. The empty-env state (no
-// explicit model) matches the provider's ``auto`` row.
+const currentModel = computed(() => modelPresentation.value.currentModel)
+const modelOptions = computed(() => modelPresentation.value.modelOptions)
+const currentModelOption = computed(() => modelPresentation.value.currentModelOption)
+const reasoningEffortEnvVar = computed(() => modelPresentation.value.reasoningEffortEnvVar)
+const combinedModelLabel = computed(() => modelPresentation.value.combinedModelLabel)
 function isModelActive(model: StreamModelOption) {
-  if (model.id === 'auto') {
-    return currentModel.value === '' || currentModel.value === 'auto'
-  }
-  return currentModelOption.value?.id === model.id
+  return isChatModelActive(model, modelPresentation.value)
 }
 function isModelEffortActive(model: StreamModelOption, effort: string) {
-  return isModelActive(model) && currentReasoningEffort.value === effort
-}
-function effortLabel(effort?: string | null) {
-  if (!effort) return 'Default'
-  return ({ xhigh: 'Extra High' } as Record<string, string>)[effort]
-    ?? effort.replace(/(^|[-_])\w/g, part => part.replace(/[-_]/, ' ').toUpperCase())
+  return isChatModelEffortActive(model, effort, modelPresentation.value)
 }
 function defaultReasoningEffortLabel(model: StreamModelOption) {
-  return effortLabel(
-    capabilities.value?.current_reasoning_effort ?? model.default_reasoning_effort,
-  )
+  return defaultModelReasoningEffortLabel(model, capabilities.value?.current_reasoning_effort)
 }
 // Search filter for the picker. Matches id or label, case-insensitive.
 const modelSearch = ref('')
-const filteredModelOptions = computed(() => {
-  const q = modelSearch.value.trim().toLowerCase()
-  if (!q) return modelOptions.value
-  return modelOptions.value.filter(
-    m => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q),
-  )
-})
+const filteredModelOptions = computed(() => filterChatModels(modelOptions.value, modelSearch.value))
 const isModelPickerAvailable = computed(() => modelEnvVar.value !== null)
 // Reset picker state if it unmounts while open (e.g. the agent type changes),
 // so a remount does not reopen with a stale menu/query.
@@ -3137,47 +3067,21 @@ const latestTurnKey = computed(() => {
   return list.length > 0 ? list[list.length - 1].key : null
 })
 
-function isProcessExpanded(turn: TimelineTurn): boolean {
-  const override = processExpandedOverrides.value.get(turn.key)
-  if (override !== undefined) return override
-  return turn.key === latestTurnKey.value
-}
-
-/** True when this turn has a working region worth folding.
- *
- * The newest turn is excluded so it keeps rendering exactly as it did before
- * folding existed, and ``splitTurnProcess`` rejects the rest of the unsafe
- * cases (still running, no delivered answer, work continuing past the last
- * text). An approval card is not one of them — it folds with the record, and
- * the header counts it so the card is not hidden without a trace. */
-function isTurnFoldable(turn: TimelineTurn): boolean {
-  return turn.key !== latestTurnKey.value && splitTurnProcess(turn) !== null
-}
-
 function toggleTurnProcess(turn: TimelineTurn): void {
   const next = new Map(processExpandedOverrides.value)
-  next.set(turn.key, !isProcessExpanded(turn))
+  next.set(turn.key, !isTurnProcessExpanded(turn, latestTurnKey.value, processExpandedOverrides.value))
   processExpandedOverrides.value = next
 }
 
 /** Parts to render for a turn, with its process folded away once it is history. */
-function turnPartsFor(turn: TimelineTurn): ThinkingDisplayPart<TimelinePart>[] {
-  const parts = isTurnFoldable(turn) ? foldTurnParts(turn, isProcessExpanded(turn)) : turn.parts
-  const terminal: Exclude<ThinkingState, 'active'> | null =
-    turn.errors.length > 0 || ['failed', 'cancelled', 'interrupted'].includes(turn.completionStatus ?? '')
-      ? 'interrupted' : turn.completed ? 'done' : null
-  return presentThinkingParts(parts, terminal)
+function turnPartsFor(turn: TimelineTurn) {
+  return presentTurnParts(turn, latestTurnKey.value, processExpandedOverrides.value)
 }
 
 const subthreadPartsFor = createSubthreadThinkingPresenter()
 
 function turnFoldSignature(turn: TimelineTurn): string {
-  // Turns with nothing foldable — including the active one — never depend on
-  // this state; keep them on the cheap memoized path.
-  if (!isTurnFoldable(turn)) return ''
-  const split = splitTurnProcess(turn)
-  const label = split ? turnProcessLabel(turn, split.before) : ''
-  return `${isProcessExpanded(turn) ? 'open' : 'folded'}|${label}`
+  return turnProcessFoldSignature(turn, latestTurnKey.value, processExpandedOverrides.value)
 }
 
 // visibleTurns creates a display copy on each stream update. Key folds by the
@@ -3207,159 +3111,6 @@ function collapseDetails(event: MouseEvent): void {
   }
 }
 
-
-/** Aggregate status for a tool group: 'running' if any tool is still running,
- *  'failed' if any tool failed (and none running), 'cancelled' if every tool
- *  was cancelled (e.g. a dismissed AskUserQuestion), else 'completed'. */
-function toolGroupStatus(
-  tools: TimelineTool[],
-): 'running' | 'completed' | 'failed' | 'cancelled' {
-  if (tools.some(t => t.status === 'running')) return 'running'
-  if (tools.some(t => t.status === 'failed')) return 'failed'
-  if (tools.length > 0 && tools.every(t => t.status === 'cancelled')) return 'cancelled'
-  return 'completed'
-}
-
-// --- Sub-agent card projection ---------------------------------------------
-// The timeline already classified the call as a sub-agent; these keep the
-// template null-safe (``tool.subagent`` is optional on TimelineTool) and hold
-// all fallback copy in one place.
-
-function subagentChip(tool: TimelineTool): string {
-  return tool.subagent ? subagentProviderLabel(tool.subagent.provider) : 'Sub-agent'
-}
-
-/** Sub-agent identity: its type when present, else a provider-local target
- *  (TraeX addresses children by thread id), else a neutral label. */
-function subagentName(tool: TimelineTool): string {
-  const view = tool.subagent
-  if (!view) return 'Sub-agent'
-  if (view.agentType) return view.agentType
-  if (view.provider === 'traex') {
-    const thread = view.threadIds[0]
-    return thread ? `Thread ${thread.slice(0, 8)}` : 'TraeX sub-agent'
-  }
-  return 'Sub-agent'
-}
-
-/** One-line description of what the child is doing. Providers without a
- *  ``description`` field (TraeX) fall back to the prompt's first line. */
-function subagentHeadline(tool: TimelineTool): string {
-  const view = tool.subagent
-  if (!view) return ''
-  const description = view.description.trim()
-  if (description) return description
-  const firstLine = view.prompt
-    .split('\n')
-    .map(line => line.trim())
-    .find(line => line.length > 0)
-  if (firstLine) return firstLine.length > 140 ? `${firstLine.slice(0, 140)}…` : firstLine
-  return 'Sub-agent task dispatched'
-}
-
-function subagentPrompt(tool: TimelineTool): string {
-  return tool.subagent?.prompt ?? ''
-}
-
-function subagentCallStatusLabel(status: TimelineTool['status']): string {
-  return {
-    running: 'Running',
-    completed: 'Returned',
-    failed: 'Failed',
-    cancelled: 'Cancelled',
-  }[status]
-}
-
-function subagentDispatchLabel(status: TimelineTool['status']): string {
-  return {
-    running: 'Dispatching',
-    completed: 'Dispatched',
-    failed: 'Dispatch failed',
-    cancelled: 'Dispatch cancelled',
-  }[status]
-}
-
-// --- Native sub-agent region projection -----------------------------------
-// Each row is keyed by its complete provider thread id. Lifecycle status comes
-// only from child-scoped provider evidence, never from tools or the parent.
-
-type SubagentRegionPart = Extract<TimelinePart, { kind: 'subagents' }>
-type SubthreadPart = SubagentRegionPart['threads'][number]
-
-function subagentRegionHeadline(part: SubagentRegionPart): string {
-  const count = part.threads.length
-  return `${count} sub-agent${count === 1 ? '' : 's'}`
-}
-
-function subagentRegionStatusLabel(part: SubagentRegionPart): string {
-  const counts = new Map<string, number>()
-  for (const thread of part.threads) {
-    counts.set(thread.lifecycleStatus, (counts.get(thread.lifecycleStatus) ?? 0) + 1)
-  }
-  const labels: string[] = []
-  const errors = subagentRegionErrorCount(part)
-  if (errors > 0) labels.push(`${errors} ${errors === 1 ? 'error' : 'errors'}`)
-  const append = (status: string, label: string) => {
-    const count = counts.get(status) ?? 0
-    if (count > 0) labels.push(`${count} ${label}`)
-  }
-  append('failed', 'failed')
-  append('cancelled', 'cancelled')
-  append('active', 'active')
-  append('unknown', 'unknown')
-  append('completed', 'completed')
-  return labels.join(' · ')
-}
-
-function subagentRegionStatusClass(part: SubagentRegionPart): string {
-  if (subagentRegionErrorCount(part) > 0) return 'failed'
-  if (part.threads.some(thread => thread.lifecycleStatus === 'failed')) return 'failed'
-  if (part.threads.some(thread => thread.lifecycleStatus === 'active')) return 'running'
-  if (part.threads.some(thread => thread.lifecycleStatus === 'cancelled')) return 'cancelled'
-  if (part.threads.some(thread => thread.lifecycleStatus === 'unknown')) return 'unknown'
-  return 'completed'
-}
-
-function subthreadStatusClass(part: SubthreadPart): string {
-  return part.lifecycleStatus === 'active' ? 'running' : part.lifecycleStatus
-}
-
-function subthreadStatusLabel(part: SubthreadPart): string {
-  return {
-    unknown: 'Unknown',
-    active: 'Active',
-    completed: 'Completed',
-    failed: 'Failed',
-    cancelled: 'Cancelled',
-  }[part.lifecycleStatus]
-}
-
-function subthreadTerminal(part: SubthreadPart): boolean {
-  return part.lifecycleStatus === 'completed' || part.lifecycleStatus === 'failed' ||
-    part.lifecycleStatus === 'cancelled'
-}
-
-/** Collapsed-row headline: the child's latest report or instruction, then the
- *  original delegated prompt, without using either as lifecycle evidence. */
-function subthreadHeadline(part: SubthreadPart): string {
-  for (let index = part.parts.length - 1; index >= 0; index -= 1) {
-    const child = part.parts[index]
-    const text = child.kind === 'text'
-      ? child.text
-      : child.kind === 'instruction' ? (child.tool.subagent?.prompt ?? '') : ''
-    const first = text.split(String.fromCharCode(10)).map(line => line.trim()).find(Boolean)
-    if (first) return first.length > 140 ? `${first.slice(0, 140)}…` : first
-  }
-  const prompt = part.launchTool?.subagent?.prompt ?? ''
-  const first = prompt.split(String.fromCharCode(10)).map(line => line.trim()).find(Boolean)
-  if (first) return first.length > 140 ? `${first.slice(0, 140)}…` : first
-  return 'Waiting for sub-agent activity'
-}
-
-/** Prompt carried by a spawn/sendInput directive tool. */
-function subthreadInstructionText(tool: TimelineTool): string {
-  return tool.subagent?.prompt ?? tool.argsText
-}
 
 async function submitQuestionResponse(turn: TimelineTurn, approval: TimelineApproval) {
   if (!canSubmitQuestion(approval)) {

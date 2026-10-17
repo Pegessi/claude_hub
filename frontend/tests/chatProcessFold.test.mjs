@@ -5,6 +5,9 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 import ts from 'typescript'
+import { loadChatUtility } from './chatPresentationTestHarness.mjs'
+
+const { isTurnFoldable, turnProcessFoldSignature } = await loadChatUtility('chatTurnPresentation')
 
 // ---------------------------------------------------------------------------
 // The fold helpers are pure functions over a finished turn, so they are tested
@@ -494,26 +497,31 @@ test('the part loop renders the folded view, not the raw parts', () => {
   assert.match(structuredPane, /v-for="part in turnPartsFor\(turn\)"/)
 })
 
-test('toggleTurnProcess returns an empty signature for unfolded turns', () => {
-  const fnMatch = structuredPane.match(
-    /function turnFoldSignature\(turn: TimelineTurn\): string \{[\s\S]*?\n\}/,
-  )
-  assert.ok(fnMatch, 'turnFoldSignature function must exist')
-  // Turns with nothing foldable — including the active one — stay memoized.
-  assert.match(fnMatch[0], /if \(!isTurnFoldable\(turn\)\) return ''/)
+test('fold signature is empty for the newest turn and turns without a safe process', () => {
+  const turn = completedTurn()
+  const overrides = new Map([[turn.key, false]])
+  assert.equal(turnProcessFoldSignature(turn, turn.key, overrides), '')
+  for (const unsafe of [
+    { ...turn, completed: false },
+    { ...turn, parts: [] },
+  ]) {
+    assert.equal(turnProcessFoldSignature(unsafe, 'newest', overrides), '')
+  }
 })
 
-test('the newest turn is excluded from folding', () => {
-  const fnMatch = structuredPane.match(
-    /function isTurnFoldable\(turn: TimelineTurn\): boolean \{[\s\S]*?\n\}/,
-  )
-  assert.ok(fnMatch, 'isTurnFoldable function must exist')
-  assert.match(
-    fnMatch[0],
-    /turn\.key !== latestTurnKey\.value/,
-    'the turn being read must stay open until a newer turn starts',
-  )
-  assert.match(fnMatch[0], /splitTurnProcess\(turn\) !== null/)
+test('the newest turn is excluded from folding even with a closed viewer override', () => {
+  const turn = completedTurn()
+  assert.ok(splitTurnProcess(turn), 'fixture must have a foldable process')
+  assert.equal(isTurnFoldable(turn, turn.key), false)
+  assert.equal(isTurnFoldable(turn, 'newest'), true)
+  assert.equal(isTurnFoldable({ ...turn, completed: false }, 'newest'), false)
+})
+
+test('pane passes current timeline and viewer state to the pure turn projection', () => {
+  assert.match(structuredPane, /presentTurnParts\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
+  assert.match(structuredPane, /turnProcessFoldSignature\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
+  assert.match(structuredPane, /isTurnProcessExpanded\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
+  assert.match(structuredPane, /const latestTurnKey = computed\(\(\) => \{[\s\S]*?const list = turns\.value/)
 })
 
 test('fold state is per-turn and replaced on toggle so the memo sees it', () => {

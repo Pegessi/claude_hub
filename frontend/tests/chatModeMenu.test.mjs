@@ -76,19 +76,19 @@ test('model picker presents model and thinking effort as a unified two-level men
   assert.match(structuredPane, /v-for="model in filteredModelOptions"/)
   assert.match(structuredPane, /v-for="effort in selectedMenuModel\.supported_reasoning_efforts"/)
   assert.match(structuredPane, /@click="selectModelAndEffort\(selectedMenuModel, effort\.id\)"/)
-  assert.match(structuredPane, /codex: 'CODEX_REASONING_EFFORT'/)
-  assert.match(structuredPane, /traex: 'CODEX_REASONING_EFFORT'/)
-  assert.match(structuredPane, /effort\.provider_model_id === currentModel\.value/)
+  // Provider mappings and effort selection are exercised through the utility
+  // in chatModelPresentation.test.mjs; guard the pane's reactive input wiring.
+  assert.match(structuredPane, /computed\(\(\) => presentChatModel\(currentTab\.value, capabilities\.value\)\)/)
+  assert.match(structuredPane, /return isChatModelEffortActive\(model, effort, modelPresentation\.value\)/)
+  assert.match(structuredPane, /modelPresentation\.value\.modelEnvVar/)
+  assert.match(structuredPane, /modelPresentation\.value\.reasoningEffortEnvVar/)
   assert.match(
     structuredPane,
     /filteredModelOptions\.value\.find\(model => model\.id === selectedMenuModelId\.value\)/,
   )
   assert.match(structuredPane, /capabilities\.value\?\.current_reasoning_effort/)
   assert.match(structuredPane, /defaultReasoningEffortLabel\(selectedMenuModel\)/)
-  assert.match(
-    structuredPane,
-    /!currentModelOption\.value\.supported_reasoning_efforts\.some\(effort => effort\.id === selected\)/,
-  )
+  assert.match(structuredPane, /defaultModelReasoningEffortLabel\(model, capabilities\.value\?\.current_reasoning_effort\)/)
   assert.match(
     structuredPane,
     /:disabled="modeInteractionLocked \|\| isUpdatingModel \|\| isUpdatingReasoningEffort"/,

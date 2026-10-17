@@ -7,6 +7,17 @@
 
 ## Released
 
+### refactor(core): extract pure helpers from large runtime and UI owners
+
+- Separate terminal catalog/snapshot parsing, provider protocol/model formatting
+  and Goal stream sanitization from their process and session lifecycle owners.
+- Give stream API callers explicit read-only readiness observations while keeping
+  transport, send locks and tailer registries under their existing owners.
+- Move Workspace and Chat display projections into focused, behavior-tested
+  utilities without changing templates, scoped styles or component lifetimes.
+- Preserve historical Python helper imports and dependency lookup behavior;
+  reduce exact file-size ceilings without expanding the existing import cycle.
+
 ### refactor(repo): enforce AI-native maintenance boundaries
 
 - Add an executable AI-maintainability gate for entry-document size, source-file
