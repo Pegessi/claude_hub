@@ -33,7 +33,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import stat
 import time
 import uuid
@@ -44,6 +43,8 @@ from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+
+import claude_hub.services.agent_stream.goal_protocol as _goal_protocol
 
 from ...models import (
     AgentRuntimeStatus,
@@ -63,6 +64,13 @@ from .base import (
 )
 from .coalescer import AgentStreamCoalescer
 from .fork_seed import discard_seed_sidecar, read_seed_sidecar
+
+# Keep the legacy imports, including the sanitizer factory patched by callers.
+from .goal_protocol import _CHECKPOINT_OPENER as _CHECKPOINT_OPENER
+from .goal_protocol import _GOAL_STATUS_TERMINAL_RE as _GOAL_STATUS_TERMINAL_RE
+from .goal_protocol import _GOAL_TAIL_SCAN_CHARS as _GOAL_TAIL_SCAN_CHARS
+from .goal_protocol import _MAX_STATUS_BODY_CHARS as _MAX_STATUS_BODY_CHARS
+from .goal_protocol import _STRICT_STATUS_OPENER_RE as _STRICT_STATUS_OPENER_RE
 from .local_images import ImageReferenceBuffer, cache_image_paths
 from .native import (
     ProviderSession,
@@ -233,175 +241,29 @@ _RETIRING_TAILER_IDS: Set[int] = set()
 _TAILER_MANAGERS: Any = weakref.WeakSet()
 PostPersistObserver = Callable[[AgentStreamEvent], Awaitable[None]]
 
-# Mirrors the Goal controller's terminal signal: a turn whose raw assistant
-# text ends with a complete ``goal-status`` block has produced the model-side
-# end of turn even if the provider never follows with a completion record.
-# Keep this aligned with the controller's trailing-signal contract: the same
-# raw text is handed to the Goal observer on a normal completion, so synthesis
-# must not accept an envelope the controller would itself reject.
-_GOAL_STATUS_TERMINAL_RE = re.compile(
-    r'<goal-status\s+state=["\'](?:continue|complete|blocked|needs_input)["\']\s*>'
-    r".*?</goal-status>\s*$",
-    re.IGNORECASE | re.DOTALL,
-)
-# Only scan the bounded tail of accumulated assistant text; the terminal signal
-# is required to be the trailing block of the turn. This must stay equal to the
-# Goal controller's own protocol window
-# (``_MAX_CHECKPOINT_JSON_CHARS + 4096`` in goal_run/controller.py), so the
-# tailer never recognizes an envelope that the controller cannot later see.
-_GOAL_TAIL_SCAN_CHARS = 64 * 1024 + 4096
-
-
-_STRICT_STATUS_OPENER_RE = re.compile(r'<goal-status\s+state=["\'][a-z_]+["\']\s*>', re.IGNORECASE)
-_CHECKPOINT_OPENER = "<goal-checkpoint>"
-# A trailing status block is a one-line signal; an unclosed opener with more
-# text than this is prose that mentions the tag.
-_MAX_STATUS_BODY_CHARS = 4096
-
 
 def _trailing_envelope_state(text: str) -> str:
-    """Classify ``text`` (starting at a protocol opener) as a trailing envelope.
-
-    Returns ``"complete"`` when it is an optional checkpoint followed by a
-    status block and only whitespace, ``"partial"`` while more text could still
-    make it one, and ``"no"`` otherwise.  The shape matches the frontend's
-    ``stripTrailingGoalProtocol`` and the controller's trailing signal.
-    """
-    if len(text) > _GOAL_TAIL_SCAN_CHARS:
-        return "no"
-    rest = text
-    lowered = rest.lower()
-    if lowered.startswith("<goal-checkpoint"):
-        if len(rest) < len(_CHECKPOINT_OPENER):
-            return "partial" if _CHECKPOINT_OPENER.startswith(lowered) else "no"
-        if not lowered.startswith(_CHECKPOINT_OPENER):
-            return "no"
-        body = lowered[len(_CHECKPOINT_OPENER) :]
-        if body.lstrip() and not body.lstrip().startswith("{"):
-            return "no"
-        end = body.find("</goal-checkpoint>")
-        if "<goal-checkpoint" in (body if end < 0 else body[:end]):
-            return "no"
-        if end < 0:
-            return "partial"
-        rest = rest[len(_CHECKPOINT_OPENER) + end + len("</goal-checkpoint>") :].lstrip()
-        lowered = rest.lower()
-        if not lowered.startswith("<goal-status"):
-            return "partial" if "<goal-status".startswith(lowered) else "no"
-    opener = _STRICT_STATUS_OPENER_RE.match(rest)
-    if opener is None:
-        return "partial" if ">" not in rest and len(rest) <= 64 else "no"
-    body = lowered[opener.end() :]
-    end = body.find("</goal-status>")
-    if "<goal-status" in (body if end < 0 else body[:end]):
-        return "no"
-    if end < 0:
-        return "partial" if len(body) <= _MAX_STATUS_BODY_CHARS else "no"
-    return "complete" if not body[end + len("</goal-status>") :].strip() else "no"
+    """Resolve legacy module overrides at call time, including for active streams."""
+    return _goal_protocol._trailing_envelope_state(
+        text,
+        tail_scan_chars=_GOAL_TAIL_SCAN_CHARS,
+        checkpoint_opener=_CHECKPOINT_OPENER,
+        status_opener_re=_STRICT_STATUS_OPENER_RE,
+        max_status_body_chars=_MAX_STATUS_BODY_CHARS,
+    )
 
 
-class _GoalProtocolSanitizer:
-    """Incrementally remove Goal control blocks from visible assistant text.
-
-    Provider deltas may split either tag at any byte boundary.  The sanitizer
-    therefore retains only a short possible opener/closer suffix between
-    calls, while the tailer separately retains the complete raw assistant text
-    for the in-process Goal observer.
-
-    Goal turns drop every control block.  With ``trailing_only`` (ordinary
-    turns in a Chat that has run a Goal), text from an opener is held until it
-    is known to be the reply's trailing envelope, which is dropped; anything
-    else is released unchanged.
-    """
-
-    _OPENERS = ("<goal-checkpoint", "<goal-status")
-    _OPENING_TAG = re.compile(r"<goal-(checkpoint|status)(?=[\s>])", re.IGNORECASE)
-    _CLOSERS = {"checkpoint": "</goal-checkpoint>", "status": "</goal-status>"}
-
-    def __init__(self, *, trailing_only: bool = False) -> None:
-        self._pending = ""
-        self._inside: Optional[str] = None
-        self._trailing_only = trailing_only
+class _GoalProtocolSanitizer(_goal_protocol._GoalProtocolSanitizer):
+    """Keep legacy lookup paths while the helper owns the parsing implementation."""
 
     @staticmethod
-    def _possible_opener_suffix(text: str) -> int:
-        lowered = text.lower()
-        best = 0
-        for opener in _GoalProtocolSanitizer._OPENERS:
-            for length in range(1, min(len(lowered), len(opener)) + 1):
-                if lowered.endswith(opener[:length]):
-                    best = max(best, length)
-        return best
+    def _possible_opener_suffix(text: str, *, openers: Optional[Tuple[str, ...]] = None) -> int:
+        return _goal_protocol._GoalProtocolSanitizer._possible_opener_suffix(
+            text, openers=_GoalProtocolSanitizer._OPENERS if openers is None else openers
+        )
 
-    def _feed_trailing(self, final: bool) -> str:
-        visible: List[str] = []
-        while self._pending:
-            opener = self._OPENING_TAG.search(self._pending)
-            if opener is None:
-                keep = 0 if final else self._possible_opener_suffix(self._pending)
-                emit_end = len(self._pending) - keep
-                visible.append(self._pending[:emit_end])
-                self._pending = self._pending[emit_end:]
-                break
-            visible.append(self._pending[: opener.start()])
-            self._pending = self._pending[opener.start() :]
-            state = _trailing_envelope_state(self._pending)
-            if state == "complete" and final:
-                self._pending = ""
-                break
-            if state == "no" or final:
-                visible.append(self._pending[: opener.end()])
-                self._pending = self._pending[opener.end() :]
-                continue
-            break
-        return "".join(visible)
-
-    def feed(self, text: str, *, final: bool = False) -> str:
-        self._pending += text
-        if self._trailing_only:
-            return self._feed_trailing(final)
-        visible: List[str] = []
-        while self._pending:
-            lowered = self._pending.lower()
-            if self._inside is not None:
-                closer = self._CLOSERS[self._inside]
-                close_at = lowered.find(closer)
-                if close_at < 0:
-                    # Raw text is retained by ``_assistant_text``; only keep a
-                    # possible split closing tag here so malformed/large blocks
-                    # cannot grow this display-only buffer without bound.
-                    keep = min(len(self._pending), len(closer) - 1)
-                    self._pending = self._pending[-keep:] if keep else ""
-                    break
-                self._pending = self._pending[close_at + len(closer) :]
-                self._inside = None
-                continue
-
-            opener = self._OPENING_TAG.search(self._pending)
-            if opener:
-                visible.append(self._pending[: opener.start()])
-                self._pending = self._pending[opener.end() :]
-                # The delimiter establishes a control block. Its opening
-                # attributes need not accumulate while awaiting a closing tag.
-                self._inside = opener.group(1).lower()
-                continue
-
-            if final:
-                # Do not reveal a truncated control opener at EOF. Ordinary
-                # prose before that prefix remains visible.
-                keep = self._possible_opener_suffix(self._pending)
-                visible.append(
-                    self._pending[: len(self._pending) - keep] if keep else self._pending
-                )
-                self._pending = ""
-                break
-            keep = self._possible_opener_suffix(self._pending)
-            emit_end = len(self._pending) - keep
-            visible.append(self._pending[:emit_end])
-            self._pending = self._pending[emit_end:]
-            break
-
-        return "".join(visible)
+    def _envelope_state(self, text: str) -> str:
+        return _trailing_envelope_state(text)
 
 
 @dataclass(frozen=True)
@@ -708,6 +570,35 @@ class SessionTailer:
         dual-session split-brain).
         """
         return self._native_transport
+
+    @property
+    def native_started(self) -> bool:
+        """Whether the native consumer has started its current transport."""
+        transport = self._native_transport
+        return transport is not None and bool(getattr(transport, "_started", False))
+
+    @property
+    def native_ready(self) -> bool:
+        """Whether transport startup and any required handshake have completed.
+
+        This is a read-only startup probe, not send admission: callers still
+        check runtime failure and the send path retains its own turn guard.
+        One-shot providers do not require a handshake before their first send.
+        """
+        transport = self._native_transport
+        return (
+            transport is not None
+            and self.native_started
+            and (
+                not transport.eof_is_fatal or bool(getattr(transport, "_handshake_complete", False))
+            )
+        )
+
+    @property
+    def input_busy(self) -> bool:
+        """Whether a send or provider turn is active, without waking the runtime."""
+        transport = self._native_transport
+        return self._send_lock.locked() or (transport is not None and transport.turn_in_flight)
 
     @property
     def native_error(self) -> Optional[str]:

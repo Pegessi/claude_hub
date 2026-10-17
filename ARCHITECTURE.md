@@ -79,6 +79,26 @@ Boundary regressions live in `test_task_mailbox.py`,
 switches, credential storage and mobile layout with mocked APIs; it does not
 prove live provider or Bot behavior.
 
+## Large-owner helper boundaries
+
+The runtime owners keep their existing class and module identities. Extracted
+helpers do not start providers, own transport registries or acquire global locks.
+
+| Owner | Extracted responsibility | Retained responsibility |
+| --- | --- | --- |
+| `services/ttyd_manager.py` | `_terminal_session_catalog.py`: Codex metadata/title/index parsing and catalog grouping; `_terminal_snapshot.py`: snapshot validation | Process classes, singleton, filesystem I/O, caches, locks and terminal lifecycle; old helper wrappers resolve caller-owned dependencies |
+| `services/agent_stream/native.py` | `provider_guidance.py`, `provider_questions.py`, `provider_model_options.py`: protocol text, answer normalization and model presentation | Provider class hierarchy/factory, subprocess and image cleanup, model discovery/cache/lock; compatibility wrappers pass current module constants |
+| `services/agent_stream/tailer.py` | `goal_protocol.py`: Goal envelope classification and per-stream display sanitizer | Tailer and registry ownership, turn fences, send guard, persistence and fanout ordering; `native_started`, `native_ready`, `input_busy` expose read-only observations |
+| `AgentWorkspaceView.vue` | `workspaceFeedback.ts`, `workspaceReports.ts`, `workspaceProgress.ts`, `workspaceResident.ts`: explicit-input projections and periodic-task payload normalization | Store reads, refs/computed state, form assignment, timers, async guards, template and scoped styles |
+| `StructuredPane.vue` | `chatModelPresentation.ts`, `chatSubagentPresentation.ts`, `chatTurnPresentation.ts`: model/effort labels, child lifecycle display and turn presentation | Provider calls, draft/send/queue state, KeepAlive, selection, projection caches, viewport/scroll observers, template and scoped styles |
+
+Backend paths are relative to `backend/claude_hub/`; frontend helpers live under
+`frontend/src/utils/`. Readiness properties do not reserve a send slot or override
+runtime failure. The Goal sanitizer is instantiated by its existing owner for
+each stream; moving its definition does not introduce a second shared registry.
+See the [extraction record](docs/working-logs/2026-10-17-large-owner-extraction.md)
+for acceptance evidence and the lifecycle boundaries deferred to later work.
+
 ## System Overview
 
 ```

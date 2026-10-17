@@ -25,22 +25,22 @@ DEFAULT_FRONTEND_MAX_LINES = 2500
 # recorded ceiling in the same change (and remove the entry once below the default).
 LEGACY_LINE_BUDGETS: dict[str, int] = {
     # Backend modules (> 1500 lines)
-    "backend/claude_hub/api/agent_stream.py": 2530,
+    "backend/claude_hub/api/agent_stream.py": 2522,
     "backend/claude_hub/api/feishu_bot.py": 1740,
     "backend/claude_hub/cli/commands/tasks.py": 2100,
     "backend/claude_hub/models/schemas.py": 2271,
     "backend/claude_hub/services/agent_stream/attachments.py": 1646,
-    "backend/claude_hub/services/agent_stream/native.py": 3820,
-    "backend/claude_hub/services/agent_stream/tailer.py": 4198,
+    "backend/claude_hub/services/agent_stream/native.py": 3450,
+    "backend/claude_hub/services/agent_stream/tailer.py": 4089,
     "backend/claude_hub/services/feedback_lessons.py": 1567,
-    "backend/claude_hub/services/ttyd_manager.py": 6175,
+    "backend/claude_hub/services/ttyd_manager.py": 5856,
     "backend/claude_hub/services/workspace_manager/_messaging.py": 1809,
     "backend/claude_hub/services/workspace_manager/_prompts.py": 1521,
     "backend/claude_hub/services/workspace_manager/_reports.py": 2050,
     "backend/claude_hub/services/workspace_manager/_scheduling.py": 1803,
     # Frontend components (> 2500 lines)
-    "frontend/src/components/AgentWorkspaceView.vue": 9596,
-    "frontend/src/components/StructuredPane.vue": 6067,
+    "frontend/src/components/AgentWorkspaceView.vue": 9151,
+    "frontend/src/components/StructuredPane.vue": 5818,
 }
 
 LEGACY_IMPORT_CYCLES: tuple[frozenset[str], ...] = (

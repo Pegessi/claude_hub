@@ -2826,7 +2826,30 @@ import { usePendingActions } from '@/composables/usePendingActions'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
-import { formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
+import {
+  feedbackLessonMatchSummary as projectFeedbackLessonMatchSummary,
+  feedbackSummaryDescription, feedbackSummaryTitle, feedbackSummaryTone,
+  lessonDescription, lessonTags, lessonTitle,
+} from '@/utils/workspaceFeedback'
+import {
+  acceptanceChecksFor, artifactPreviewKey, goalPacketGateLabel, goalPacketSections, goalPacketStatusLabel,
+  hasBilingualReport as projectHasBilingualReport, isMarkdownArtifact,
+  markdownArtifactRefs, markdownDocumentPreviewKey, markdownDocumentSourceLabel,
+  primaryExpandedReportId as projectPrimaryExpandedReportId, profileResultsFor, profileResultSummary,
+  reportMessageForLang as projectReportMessageForLang, reportMessagePreview as projectReportMessagePreview,
+  reportSummaryLabel, reviewProfileLabel, taskMarkdownDocuments, taskReviewProfiles, type ReportLang,
+} from '@/utils/workspaceReports'
+import {
+  latestReportAgeLabel, progressTimeline,
+  reportElapsedLabel as projectReportElapsedLabel, reportElapsedTitle as projectReportElapsedTitle,
+  taskTotalElapsedLabel as projectTaskTotalElapsedLabel, taskWorkingElapsedLabel as projectTaskWorkingElapsedLabel,
+} from '@/utils/workspaceProgress'
+import {
+  enabledPeriodicTaskCount as projectEnabledPeriodicTaskCount,
+  latestResidentReport as projectLatestResidentReport,
+  residentLastRunLabel as projectResidentLastRunLabel, residentNextRunLabel as projectResidentNextRunLabel,
+  residentUpdatePayload, sanitizePeriodicTasks,
+} from '@/utils/workspaceResident'
 import { providerSupportsManagedSurface } from '@/utils/managedChatSurface'
 import { remoteInteractive, remoteProfileBadge } from '@/utils/remoteProfiles'
 import { DEFAULT_ABORT_REASON, resolveAbortReason } from '@/utils/taskAbort'
@@ -2840,19 +2863,12 @@ import type {
   AgentType,
   WorkspaceArtifactPreview,
   WorkspaceMarkdownDocument,
-  WorkspaceMarkdownDocumentSource,
-  AcceptanceCheck,
-  AcceptanceCheckStatus,
-  AgentReportState,
   ExecutionTarget,
   FeedbackLesson,
   FeedbackSummaryRun,
-  GoalPacket,
   ManagedSession,
   RemoteProfile,
   ResidentPeriodicTask,
-  ReviewProfile,
-  ReviewProfileResult,
   SessionKind,
   TerminalAgentStatus,
   WorkspaceAttachment,
@@ -3109,101 +3125,13 @@ const selectedTask = computed(() =>
   tasks.value.find(task => task.id === selectedTaskId.value) || null
 )
 
-function feedbackTokens(value: string): Set<string> {
-  const text = value.toLowerCase()
-  const tokens = new Set(text.match(/[a-z0-9_.-]{2,}/g) || [])
-  const cjkChunks = text.match(/\p{Script=Han}+/gu) || []
-  cjkChunks.forEach((chunk) => {
-    for (const size of [2, 3]) {
-      if (chunk.length < size) continue
-      for (let index = 0; index <= chunk.length - size; index += 1) {
-        tokens.add(chunk.slice(index, index + size))
-      }
-    }
-  })
-  return tokens
-}
-
-function feedbackLessonText(lesson: FeedbackLesson): string {
-  return [
-    lesson.id,
-    lesson.summary,
-    lesson.do || '',
-    lesson.avoid || '',
-    ...(lesson.applies_when || []),
-    ...(lesson.tags || []),
-  ].join(' ')
-}
-
-function feedbackLessonScore(lesson: FeedbackLesson, task: WorkspaceTask): number {
-  const queryTokens = feedbackTokens(`${task.title} ${task.prompt}`)
-  if (queryTokens.size === 0) return 0
-  const lessonTokens = feedbackTokens(feedbackLessonText(lesson))
-  let score = 0
-  queryTokens.forEach((token) => {
-    if (lessonTokens.has(token)) score += 1
-  })
-  return score
-}
-
-function matchingFeedbackLessons(task: WorkspaceTask | null): FeedbackLesson[] {
-  if (!task) return []
-  return activeFeedbackLessons.value
-    .map(lesson => ({ lesson, score: feedbackLessonScore(lesson, task) }))
-    .filter(item => item.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map(item => item.lesson)
-    .slice(0, 6)
-}
-
-function lessonTitle(lesson: FeedbackLesson): string {
-  return lesson.title?.trim() || lesson.summary.split(/[。.!?]/)[0]?.trim() || lesson.id
-}
-
-function lessonDescription(lesson: FeedbackLesson): string {
-  return lesson.summary || lesson.do || lesson.avoid || lesson.id
-}
-
-function lessonTags(lesson: FeedbackLesson): string[] {
-  return (lesson.tags || []).slice(0, 4)
-}
-
 function shortId(value: string): string {
   return value.slice(0, 8)
 }
 
-function feedbackSummaryTone(run: FeedbackSummaryRun): 'queued' | 'skipped' | 'done' {
-  if (run.task_id) return 'queued'
-  if (run.cache_hit || run.skipped_reason) return 'skipped'
-  return 'done'
-}
-
-function feedbackSummaryTitle(run: FeedbackSummaryRun): string {
-  if (run.task_id) return 'Internal AI summary queued'
-  if (run.skipped_reason === 'no_new_task_records') return 'No new task records'
-  if (run.skipped_reason) return 'Summary skipped'
-  return 'Summary recorded'
-}
-
-function feedbackSummaryDescription(run: FeedbackSummaryRun): string {
-  if (run.task_id) {
-    return 'A hidden Feedback Reaper task was started. It will update lessons and write audit evidence when it finishes.'
-  }
-  if (run.skipped_reason === 'no_new_task_records') {
-    return 'No completed task records are available or changed, so no internal AI task was started. Force AI run can reprocess cached records once this workspace has records.'
-  }
-  if (run.skipped_reason) {
-    return `No internal AI task was started: ${run.skipped_reason}.`
-  }
-  return 'The feedback summary run was recorded.'
-}
-
-const feedbackLessonMatchSummary = computed(() => {
-  const matchedTaskCount = tasks.value.filter(task => matchingFeedbackLessons(task).length > 0).length
-  if (activeFeedbackLessons.value.length === 0) return 'No active lessons indexed'
-  if (matchedTaskCount === 0) return 'No current task matches'
-  return `${matchedTaskCount} current tasks match active lessons`
-})
+const feedbackLessonMatchSummary = computed(() =>
+  projectFeedbackLessonMatchSummary(tasks.value, activeFeedbackLessons.value)
+)
 
 const selectedSession = computed(() =>
   selectedTask.value ? workspaceStore.sessionForTask(selectedTask.value) : null
@@ -3217,239 +3145,20 @@ const selectedReports = computed<AgentReport[]>(() =>
   selectedTask.value ? workspaceStore.reportsForTaskId(selectedTask.value.id) : []
 )
 
-const selectedMarkdownDocuments = computed<WorkspaceMarkdownDocument[]>(() => {
-  const task = selectedTask.value
-  if (!task) return []
-  const documents = board.value?.markdown_documents || []
-  const selectedReportIds = new Set(selectedReports.value.map(report => report.id))
-  return documents.filter(document =>
-    !isWorkspaceMaintenanceMarkdown(document.path) && (
-      document.task_id === task.id ||
-      (document.report_id ? selectedReportIds.has(document.report_id) : false)
-    )
-  )
-})
+const selectedMarkdownDocuments = computed<WorkspaceMarkdownDocument[]>(() =>
+  taskMarkdownDocuments(selectedTask.value, selectedReports.value, board.value?.markdown_documents || [])
+)
 
-interface ProgressTimelineItem {
-  id: string
-  label: string
-  timestampMs: number
-  elapsedLabel: string
-  deltaLabel: string
-  tone: 'task' | 'report' | 'terminal' | 'live'
-}
+const latestSelectedReportAgeLabel = computed(() =>
+  latestReportAgeLabel(selectedReports.value, elapsedClockMs.value)
+)
 
-const latestSelectedReportAgeLabel = computed(() => {
-  const latestReport = selectedReports.value[selectedReports.value.length - 1]
-  if (!latestReport) return 'none'
-  const latestMs = parseTimestampMs(latestReport.created_at)
-  if (latestMs === null) return 'unknown'
-  return `${formatElapsedDuration(elapsedClockMs.value - latestMs)} ago`
-})
-
-const selectedProgressTimeline = computed<ProgressTimelineItem[]>(() => {
-  const task = selectedTask.value
-  if (!task) return []
-
-  const rawItems: Array<Omit<ProgressTimelineItem, 'elapsedLabel' | 'deltaLabel'>> = []
-  addTimelineItem(rawItems, 'task-created', 'Created', task.created_at, 'task')
-  addTimelineItem(rawItems, 'task-queued', 'Queued', task.queued_at, 'task')
-  addTimelineItem(rawItems, 'task-started', 'Started', task.started_at, 'task')
-  selectedReports.value.forEach((report) => {
-    addTimelineItem(
-      rawItems,
-      `report-${report.id}`,
-      report.state.replace(/_/g, ' '),
-      report.created_at,
-      'report',
-    )
-  })
-  addTimelineItem(rawItems, 'task-reviewed', 'Review', task.reviewed_at, 'task')
-  addTimelineItem(rawItems, 'task-failed', 'Failed', task.failed_at, 'terminal')
-  addTimelineItem(rawItems, 'task-done', 'Done', task.completed_at, 'terminal')
-  addTimelineItem(rawItems, 'task-aborted', 'Aborted', task.manual_aborted_at, 'terminal')
-
-  if (
-    task.status === 'queued' ||
-    task.status === 'working' ||
-    task.status === 'review' ||
-    task.status === 'failed'
-  ) {
-    rawItems.push({
-      id: 'task-now',
-      label: 'Now',
-      timestampMs: elapsedClockMs.value,
-      tone: 'live',
-    })
-  }
-
-  return rawItems
-    .sort((a, b) => a.timestampMs - b.timestampMs)
-    .map((item, index, items) => {
-      const previous = items[index - 1]
-      return {
-        ...item,
-        elapsedLabel: formatElapsedDuration(item.timestampMs - items[0].timestampMs),
-        deltaLabel: previous ? formatElapsedDuration(item.timestampMs - previous.timestampMs) : '',
-      }
-    })
-})
-
-function goalPacketSections(goalPacket: GoalPacket) {
-  return [
-    {
-      key: 'acceptance_criteria',
-      label: 'Acceptance Criteria',
-      items: goalPacketItems(goalPacket.acceptance_criteria),
-    },
-    {
-      key: 'validation_plan',
-      label: 'Validation Plan',
-      items: goalPacketItems(goalPacket.validation_plan),
-    },
-    {
-      key: 'assumptions',
-      label: 'Assumptions',
-      items: goalPacketItems(goalPacket.assumptions),
-    },
-    {
-      key: 'out_of_scope',
-      label: 'Out of Scope',
-      items: goalPacketItems(goalPacket.out_of_scope),
-    },
-    {
-      key: 'handoff_requirements',
-      label: 'Handoff Requirements',
-      items: goalPacketItems(goalPacket.handoff_requirements),
-    },
-  ]
-}
-
-function goalPacketItems(items: string[] | undefined): string[] {
-  return Array.isArray(items) ? items : []
-}
-
-function acceptanceChecksFor(report: AgentReport): AcceptanceCheck[] {
-  return Array.isArray(report.acceptance_check) ? report.acceptance_check : []
-}
-
-const FINAL_REPORT_STATES = new Set<AgentReportState>([
-  'completed',
-  'ready_for_review',
-  'review_passed',
-  'review_failed',
-])
-
-function isFinalReport(report: AgentReport): boolean {
-  return FINAL_REPORT_STATES.has(report.state)
-}
-
-function acceptanceSummary(report: AgentReport): string | null {
-  const checks = acceptanceChecksFor(report)
-  if (checks.length === 0) return null
-  const counts: Record<string, number> = {}
-  for (const check of checks) {
-    counts[check.status] = (counts[check.status] || 0) + 1
-  }
-  const order: AcceptanceCheckStatus[] = ['passed', 'partial', 'failed', 'not_checked']
-  const parts: string[] = []
-  for (const status of order) {
-    if (counts[status]) parts.push(`${counts[status]} ${status}`)
-  }
-  return parts.join(' · ')
-}
-
-function isSubstantiveReport(report: AgentReport): boolean {
-  return Boolean(
-    (report.changed_files && report.changed_files.length > 0) ||
-    report.validation ||
-    (report.acceptance_check && report.acceptance_check.length > 0) ||
-    (report.profile_results && report.profile_results.length > 0) ||
-    (report.artifact_refs && report.artifact_refs.length > 0) ||
-    report.risks ||
-    report.evaluation_report
-  )
-}
-
-function reportSummaryLabel(report: AgentReport): string {
-  const parts: string[] = []
-  const acceptance = acceptanceSummary(report)
-  if (acceptance) parts.push(acceptance)
-  if (report.changed_files?.length) {
-    parts.push(`${report.changed_files.length} file${report.changed_files.length === 1 ? '' : 's'}`)
-  }
-  if (report.validation) parts.push('validated')
-  if (report.risks) parts.push('risks noted')
-  if (report.profile_results?.length) parts.push(`${report.profile_results.length} review profile${report.profile_results.length === 1 ? '' : 's'}`)
-  if (report.artifact_refs?.length) parts.push(`${report.artifact_refs.length} artifact${report.artifact_refs.length === 1 ? '' : 's'}`)
-  return parts.join(' · ')
-}
+const selectedProgressTimeline = computed(() =>
+  progressTimeline(selectedTask.value, selectedReports.value, elapsedClockMs.value)
+)
 
 function reportMessagePreview(report: AgentReport): string {
-  const text = reportMessageForLang(report).trim()
-  if (text.length <= 120) return text
-  return text.slice(0, 117) + '…'
-}
-
-function profileResultsFor(report: AgentReport): ReviewProfileResult[] {
-  return Array.isArray(report.profile_results) ? report.profile_results : []
-}
-
-function reviewProfileLabel(profile: ReviewProfile): string {
-  const labels: Record<ReviewProfile, string> = {
-    general: 'General',
-    code: 'Code',
-    ui: 'UI',
-    artifact: 'Artifact',
-    delivery: 'Delivery',
-    boundary: 'Boundary',
-  }
-  return labels[profile] || profile
-}
-
-function taskReviewProfiles(task: WorkspaceTask): string {
-  const profiles = Array.isArray(task.review_profiles) ? task.review_profiles : []
-  if (profiles.length > 0) return profiles.map(reviewProfileLabel).join(', ')
-  const policyProfiles = task.autonomy_policy?.review_profiles || []
-  if (policyProfiles.length > 0) return policyProfiles.map(reviewProfileLabel).join(', ')
-  return task.autonomy_policy?.require_artifact_review ? 'Inferred + Artifact' : 'Inferred'
-}
-
-function profileResultSummary(results: ReviewProfileResult[]): string {
-  return results
-    .map(result => `${reviewProfileLabel(result.profile)} ${result.status}`)
-    .join(' · ')
-}
-
-function isMarkdownArtifact(artifact: string): boolean {
-  const value = artifact.trim().split(/[?#]/)[0] || ''
-  return /\.(md|markdown|mdown|mkd)(?::\d+)?$/i.test(value)
-}
-
-function isWorkspaceMaintenanceMarkdown(path: string): boolean {
-  return path.trim().split(/[?#]/)[0].split('/').pop()?.toLowerCase() === 'changelog.md'
-}
-
-function markdownArtifactRefs(report: AgentReport): string[] {
-  return (report.artifact_refs || []).filter(isMarkdownArtifact)
-}
-
-function artifactPreviewKey(report: AgentReport, artifact: string): string {
-  return `${report.id}:${artifact}`
-}
-
-function markdownDocumentPreviewKey(document: WorkspaceMarkdownDocument): string {
-  return `doc:${document.id}`
-}
-
-function markdownDocumentSourceLabel(source: WorkspaceMarkdownDocumentSource): string {
-  const labels: Record<WorkspaceMarkdownDocumentSource, string> = {
-    artifact: 'Official artifact',
-    changed_file: 'Changed Markdown',
-    snapshot: 'Workspace snapshot',
-    discovered: 'Discovered',
-  }
-  return labels[source]
+  return projectReportMessagePreview(report, reportLang.value)
 }
 
 function isMarkdownDocumentPreviewLoading(document: WorkspaceMarkdownDocument): boolean {
@@ -3744,30 +3453,6 @@ function executionComplexityLabel(complexity: WorkspaceTaskExecutionComplexity) 
   return 'Auto'
 }
 
-function goalPacketStatusLabel(status: GoalPacket['status']) {
-  if (status === 'pending_review') return 'Pending review'
-  if (status === 'approved') return 'Approved'
-  if (status === 'rejected') return 'Rejected'
-  if (status === 'frozen') return 'Frozen'
-  if (status === 'superseded') return 'Superseded'
-  return 'Draft'
-}
-
-function goalPacketGateLabel(task: WorkspaceTask) {
-  const status = task.goal_packet?.status
-  if (!status) return 'Not recorded'
-  if (status === 'pending_review') {
-    if (task.review_requested_at && !task.review_completed_at) {
-      return 'Awaiting Goal Packet approval'
-    }
-    if (task.review_completed_at) return 'Review needs input'
-    return 'Pending approval'
-  }
-  if (status === 'approved') return 'Approved for implementation'
-  if (status === 'rejected') return 'Changes requested before implementation'
-  return goalPacketStatusLabel(status)
-}
-
 function autonomousRunPhaseLabel(phase: string) {
   return phase
     .split('_')
@@ -3922,15 +3607,7 @@ function canEditTask(task: WorkspaceTask) {
 }
 
 function primaryExpandedReportId(): string | null {
-  const reports = selectedReports.value
-  if (reports.length === 0) return null
-  const finalSubstantive = [...reports].reverse().find(
-    (r) => isFinalReport(r) && isSubstantiveReport(r)
-  )
-  if (finalSubstantive) return finalSubstantive.id
-  const substantive = [...reports].reverse().find(isSubstantiveReport)
-  if (substantive) return substantive.id
-  return reports[reports.length - 1].id
+  return projectPrimaryExpandedReportId(selectedReports.value)
 }
 
 function isLatestSelectedReport(report: AgentReport) {
@@ -4067,92 +3744,23 @@ function formatTime(value: string) {
   }).format(new Date(value))
 }
 
-function addTimelineItem(
-  items: Array<Omit<ProgressTimelineItem, 'elapsedLabel' | 'deltaLabel'>>,
-  id: string,
-  label: string,
-  value: string | null | undefined,
-  tone: ProgressTimelineItem['tone'],
-) {
-  const timestampMs = parseTimestampMs(value)
-  if (timestampMs === null) return
-  items.push({ id, label, timestampMs, tone })
-}
-
-function taskTimingEndMs(task: WorkspaceTask): number {
-  return (
-    parseTimestampMs(task.completed_at) ??
-    parseTimestampMs(task.manual_aborted_at) ??
-    (
-      task.status === 'queued' ||
-      task.status === 'working' ||
-      task.status === 'review' ||
-      task.status === 'failed'
-        ? elapsedClockMs.value
-        : parseTimestampMs(task.updated_at) ?? elapsedClockMs.value
-    )
-  )
-}
-
 function taskTotalElapsedLabel(task: WorkspaceTask) {
-  const startedMs = parseTimestampMs(task.created_at)
-  if (startedMs === null) return 'unknown'
-  return formatElapsedDuration(taskTimingEndMs(task) - startedMs)
-}
-
-function taskWorkingStartedMs(task: WorkspaceTask): number | null {
-  return (
-    parseTimestampMs(task.started_at) ??
-    parseTimestampMs(task.autonomous_run?.iterations?.[0]?.started_at) ??
-    parseTimestampMs(selectedReports.value[0]?.created_at)
-  )
+  return projectTaskTotalElapsedLabel(task, elapsedClockMs.value)
 }
 
 function taskWorkingElapsedLabel(task: WorkspaceTask) {
-  const startedMs = taskWorkingStartedMs(task)
-  if (startedMs === null) return 'not started'
-  return formatElapsedDuration(taskTimingEndMs(task) - startedMs)
-}
-
-function reportReferenceForIndex(index: number): { label: string; timestampMs: number } | null {
-  const previousReportMs = parseTimestampMs(selectedReports.value[index - 1]?.created_at)
-  if (previousReportMs !== null) return { label: 'previous report', timestampMs: previousReportMs }
-
-  const task = selectedTask.value
-  const reportMs = parseTimestampMs(selectedReports.value[index]?.created_at)
-  if (!task || reportMs === null) return null
-
-  const startedMs = parseTimestampMs(task.started_at)
-  if (startedMs !== null && startedMs <= reportMs) return { label: 'start', timestampMs: startedMs }
-
-  const queuedMs = parseTimestampMs(task.queued_at)
-  if (queuedMs !== null && queuedMs <= reportMs) return { label: 'queue', timestampMs: queuedMs }
-
-  const createdMs = parseTimestampMs(task.created_at)
-  if (createdMs !== null) return { label: 'creation', timestampMs: createdMs }
-
-  return null
+  return projectTaskWorkingElapsedLabel(task, selectedReports.value, elapsedClockMs.value)
 }
 
 function reportElapsedLabel(report: AgentReport, index: number) {
-  const reportMs = parseTimestampMs(report.created_at)
-  const reference = reportReferenceForIndex(index)
-  if (reportMs === null || !reference) return ''
-
-  const elapsed = formatElapsedDuration(reportMs - reference.timestampMs)
-  return index === 0 ? `${reference.label} +${elapsed}` : `+${elapsed}`
+  return projectReportElapsedLabel(report, index, selectedTask.value, selectedReports.value)
 }
 
 function reportElapsedTitle(report: AgentReport, index: number) {
-  const reportMs = parseTimestampMs(report.created_at)
-  const reference = reportReferenceForIndex(index)
-  if (reportMs === null || !reference) return 'Elapsed time unavailable'
-
-  return `Elapsed since ${reference.label}: ${formatElapsedDuration(reportMs - reference.timestampMs)}`
+  return projectReportElapsedTitle(report, index, selectedTask.value, selectedReports.value)
 }
 
 const REPORT_LANG_STORAGE_KEY = 'claude-hub:report-lang'
-type ReportLang = 'en' | 'zh'
 
 const reportLang = ref<ReportLang>(
   (typeof localStorage !== 'undefined' && (localStorage.getItem(REPORT_LANG_STORAGE_KEY) as ReportLang | null)) || 'en'
@@ -4168,14 +3776,10 @@ function setReportLang(lang: ReportLang) {
 }
 
 function reportMessageForLang(report: AgentReport): string {
-  const preferred = reportLang.value === 'zh' ? report.message_zh : report.message_en
-  const fallback = reportLang.value === 'zh' ? report.message_en : report.message_zh
-  return preferred || fallback || report.message
+  return projectReportMessageForLang(report, reportLang.value)
 }
 
-const hasBilingualReport = computed(() =>
-  selectedReports.value.some((r) => (r.message_en && r.message_en.trim()) || (r.message_zh && r.message_zh.trim()))
-)
+const hasBilingualReport = computed(() => projectHasBilingualReport(selectedReports.value))
 
 async function fetchRemoteProfiles() {
   remoteProfilesLoading.value = true
@@ -4257,28 +3861,7 @@ async function handleCreateWorkspace() {
 // lifecycle buttons (handleCreateResident) so the payload shape stays in one
 // place. Field shape matches the values WorkspaceUpdate accepts.
 function buildResidentPayload(overrides: Partial<WorkspaceUpdate> = {}): WorkspaceUpdate {
-  return {
-    resident_agent_enabled: workspaceForm.resident_agent_enabled,
-    resident_agent_paused: workspaceForm.resident_agent_paused,
-    resident_agent_master_mode: workspaceForm.resident_agent_master_mode,
-    resident_agent_interval_minutes: workspaceForm.resident_agent_interval_minutes,
-    resident_agent_directive: workspaceForm.resident_agent_directive.trim() || undefined,
-    resident_agent_periodic_tasks: sanitizePeriodicTasks(
-      workspaceForm.resident_agent_periodic_tasks,
-    ),
-    resident_agent_type: workspaceForm.resident_agent_type,
-    resident_agent_env: parseLaunchEnv(workspaceForm.resident_env_text) ?? {},
-    resident_agent_solo_mode: workspaceForm.resident_agent_solo_mode,
-    resident_agent_title: workspaceForm.resident_agent_title.trim() || null,
-    resident_agent_target: workspaceForm.resident_agent_target,
-    resident_agent_remote_profile_id:
-      workspaceForm.resident_agent_target === 'remote'
-        ? workspaceForm.resident_agent_remote_profile_id || null
-        : null,
-    resident_agent_cwd: workspaceForm.resident_agent_cwd.trim() || null,
-    resident_agent_remote_reconnect: workspaceForm.resident_agent_remote_reconnect,
-    ...overrides,
-  }
+  return residentUpdatePayload(workspaceForm, parseLaunchEnv(workspaceForm.resident_env_text) ?? {}, overrides)
 }
 
 // --- Resident periodic-task editor helpers -----------------------------------
@@ -4294,13 +3877,6 @@ function newPeriodicTaskId() {
     return globalThis.crypto.randomUUID()
   }
   return `ptask-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-}
-
-// Drop blank rows and trim text; keep ids/order so a save round-trips stable.
-function sanitizePeriodicTasks(tasks: ResidentPeriodicTask[]): ResidentPeriodicTask[] {
-  return tasks
-    .map((task) => ({ ...task, text: (task.text ?? '').trim() }))
-    .filter((task) => task.text.length > 0)
 }
 
 function addPeriodicTask() {
@@ -4319,11 +3895,8 @@ function removePeriodicTask(taskId: string) {
 
 // Count of non-blank tasks currently enabled — drives the modal summary hint so
 // the user can see how many recurring items the resident will actually run.
-const enabledPeriodicTaskCount = computed(
-  () =>
-    workspaceForm.resident_agent_periodic_tasks.filter(
-      (task) => task.enabled && (task.text ?? '').trim().length > 0,
-    ).length,
+const enabledPeriodicTaskCount = computed(() =>
+  projectEnabledPeriodicTaskCount(workspaceForm.resident_agent_periodic_tasks)
 )
 
 async function handleSaveWorkspace() {
@@ -5206,11 +4779,9 @@ const isResidentMaster = computed(() => activeWorkspace.value?.resident_agent_ma
 
 // Relative "last run" label for the resident card, mirroring the timeline's
 // "{duration} ago" style (see latestSelectedReportAgeLabel).
-const residentLastRunLabel = computed(() => {
-  const lastRunMs = parseTimestampMs(activeWorkspace.value?.resident_agent_last_run_at)
-  if (lastRunMs === null) return 'never'
-  return `${formatElapsedDuration(elapsedClockMs.value - lastRunMs)} ago`
-})
+const residentLastRunLabel = computed(() =>
+  projectResidentLastRunLabel(activeWorkspace.value, elapsedClockMs.value)
+)
 
 // True while a run-now request is stamped but not yet consumed by a wake-up.
 // Drives the card's "queued" hint and disables the Run-now button so a user
@@ -5225,31 +4796,15 @@ const residentRunPending = computed(
 //   - disabled / no schedule -> "" (caller hides the line)
 //   - future timestamp       -> "in {duration}" countdown
 //   - past-due timestamp     -> "due now" (overdue backstop will pick it up)
-const residentNextRunLabel = computed(() => {
-  const workspace = activeWorkspace.value
-  if (!workspace || !workspace.resident_agent_enabled) return ''
-  if (residentRunPending.value) return 'queued'
-  if (workspace.resident_agent_paused) return 'paused'
-  const nextRunMs = parseTimestampMs(workspace.resident_agent_next_run_at)
-  if (nextRunMs === null) return ''
-  const remaining = nextRunMs - elapsedClockMs.value
-  if (remaining <= 0) return 'due now'
-  return `in ${formatElapsedDuration(remaining)}`
-})
+const residentNextRunLabel = computed(() =>
+  projectResidentNextRunLabel(activeWorkspace.value, elapsedClockMs.value)
+)
 
 // Newest report posted by the resident session, used to surface its latest
 // heartbeat on the resident card. Returns null when none exist.
-const latestResidentReport = computed<AgentReport | null>(() => {
-  const sessionId = activeWorkspace.value?.resident_agent_session_id
-  if (!sessionId) return null
-  const residentReports = workspaceStore.reports.filter(
-    report => report.session_id === sessionId
-  )
-  if (residentReports.length === 0) return null
-  return [...residentReports].sort(
-    (a, b) => (parseTimestampMs(b.created_at) ?? 0) - (parseTimestampMs(a.created_at) ?? 0)
-  )[0]
-})
+const latestResidentReport = computed<AgentReport | null>(() =>
+  projectLatestResidentReport(activeWorkspace.value?.resident_agent_session_id, workspaceStore.reports)
+)
 
 function isResidentAgent(agent: ManagedSession) {
   return agent.role === 'resident'

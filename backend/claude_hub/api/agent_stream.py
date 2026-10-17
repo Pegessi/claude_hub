@@ -292,7 +292,7 @@ async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> _ChatLiven
     tailer = _get_tab_tailer_manager().get_tailer(session.id)
     if tailer is None:
         return "unknown"
-    transport = tailer._native_transport
+    transport = tailer.native_transport
     if transport is not None and transport.turn_in_flight:
         # The human composer bypasses the scheduler and can own the guard with
         # a newer turn while a scheduled run is stale. That is not evidence the
@@ -355,18 +355,11 @@ async def _ensure_scheduled_chat_runtime(tab_id: str) -> bool:
     transport = tailer.native_transport
     if transport is None or tailer.native_error is not None or manager.hard_failed(session.id):
         return False
-    # Let the freshly started consumer's first tick run provider ``start()``
-    # (one-shot providers flip ``_started`` synchronously there; a persistent
-    # Codex app-server stays False until its handshake finishes).
-    if not getattr(transport, "_started", False):
+    # Let the freshly started consumer's first tick run provider start().
+    # Persistent app-servers also require a completed protocol handshake.
+    if not tailer.native_started:
         await asyncio.sleep(0)
-    if not getattr(transport, "_started", False):
-        return False
-    # Persistent app-servers are not ready until the JSON-RPC handshake plus
-    # thread create/resume has completed. One-shot providers do not handshake.
-    if transport.eof_is_fatal and not getattr(transport, "_handshake_complete", False):
-        return False
-    return True
+    return tailer.native_ready
 
 
 def _feedback_chat_busy() -> bool:
@@ -378,8 +371,7 @@ def _feedback_chat_busy() -> bool:
     if _tab_tailer_manager is None:
         return False
     for tailer in _tab_tailer_manager.tailers():
-        transport = tailer.native_transport
-        if tailer._send_lock.locked() or (transport is not None and transport.turn_in_flight):
+        if tailer.input_busy:
             return True
     return False
 
