@@ -84,6 +84,11 @@ Second review (of the notify and watch-loop change):
   (`feishu_bot.feishu_bound_to_tab`). A Hub turn with a bound bot is asked to
   send what needs the user with `dot notify`.
 
+Third review (all low): a repeat now answers `sent: false` with a reason
+instead of `sent: true`; events that come while a wake-up runs go right after
+it (not after the retry pause); a bot without a valid config does not count as
+bound.
+
 ## Not covered
 
 - A Feishu message during the user's own web turn on the Dot tab still gets

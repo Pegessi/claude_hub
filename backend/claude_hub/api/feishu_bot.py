@@ -1163,7 +1163,10 @@ def _bot_bound_to_tab(tab_id: str) -> BotEntry | None:
         (
             bot
             for bot in _pool.snapshot().bots
-            if bot.enabled and bot.binding is not None and bot.binding.tab_id == tab_id
+            if bot.enabled
+            and bot.configured
+            and bot.binding is not None
+            and bot.binding.tab_id == tab_id
         ),
         None,
     )

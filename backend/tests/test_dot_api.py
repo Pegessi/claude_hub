@@ -221,9 +221,9 @@ def test_notify_reports_whether_feishu_got_it(
     _route_to_app(client, monkeypatch)
     sent: list[str] = []
 
-    async def fake_notify(text: str) -> bool:
+    async def fake_notify(text: str) -> str:
         sent.append(text)
-        return text != "unbound"
+        return {"unbound": "failed", "again": "repeat"}.get(text, "sent")
 
     monkeypatch.setattr(service, "notify", fake_notify)
     result = CliRunner().invoke(cli, ["--json", "dot", "notify", "Paper task is done"])
@@ -231,9 +231,11 @@ def test_notify_reports_whether_feishu_got_it(
     assert json.loads(result.output) == {"sent": True}
     missed = client.post("/api/dot/notify", json={"text": "unbound"}).json()
     assert missed["sent"] is False and "Feishu" in missed["reason"]
+    again = client.post("/api/dot/notify", json={"text": "again"}).json()
+    assert again["sent"] is False and "30 minutes" in again["reason"]
     assert client.post("/api/dot/notify", json={"text": "  "}).status_code == 422
     assert client.post("/api/dot/notify", json={"text": "x" * 2001}).status_code == 422
-    assert sent == ["Paper task is done", "unbound"]
+    assert sent == ["Paper task is done", "unbound", "again"]
 
 
 def test_cli_remember_recall_and_merge(
