@@ -260,17 +260,24 @@ def _get_tab_tailer_manager() -> TailerManager:
 
 async def _dispatch_scheduled_chat_turn(run: ScheduledTaskRun, task: ScheduledTask) -> None:
     """Deliver one durable automation run through the native Chat path."""
+    from ..services.dot import get_dot_service
+
     session = _terminal_tab_session_or_404(run.tab_id)
+    metadata: Dict[str, Any] = {
+        "origin": "scheduled_task",
+        "scheduled_task_id": task.id,
+        "scheduled_task_run_id": run.id,
+        "scheduled_task_name": task.name,
+    }
+    if get_dot_service().is_system_schedule(task.id):
+        # The user's next message stops this turn (see ``_yield_dot_turn``), so the
+        # composer sends right away instead of queueing behind it.
+        metadata["yields_to_user"] = True
     await _send_to_native(
         session,
         AgentStreamSendRequest(text=run.message, client_turn_id=run.client_turn_id),
         _get_tab_tailer_manager(),
-        turn_metadata={
-            "origin": "scheduled_task",
-            "scheduled_task_id": task.id,
-            "scheduled_task_run_id": run.id,
-            "scheduled_task_name": task.name,
-        },
+        turn_metadata=metadata,
     )
 
 
@@ -1688,6 +1695,25 @@ async def send_stream_input(
     return {"ok": True}
 
 
+async def _yield_dot_turn(tab_id: str, session: ManagedSession, manager: TailerManager) -> None:
+    """The user comes first: their message stops Dot's own wake-up or tidy turn.
+
+    The stopped wake-up gives its events back and runs again later.
+    """
+    from ..services.dot import get_dot_service
+
+    service = get_dot_service()
+    if not service.is_dot_tab(tab_id):
+        return
+    active = await manager.active_turn_id(session)
+    if not active or not service.is_system_turn(active):
+        return
+    # Before the stop: its end drains the scheduler, which must find nothing to send.
+    service.drop_queued_system_runs()
+    if await manager.cancel_turn(session, expected_turn_id=active):
+        await asyncio.to_thread(service.yield_turn)
+
+
 async def _dispatch_tab_stream_input(
     tab_id: str,
     payload: AgentStreamSendRequest,
@@ -1799,6 +1825,7 @@ async def _dispatch_tab_stream_input(
         # model turn. HTTP request models never carry this callable.
         guard = admission_guard() if admission_guard is not None else nullcontext()
         async with guard:
+            await _yield_dot_turn(tab_id, session, manager)
             await _send_to_native(
                 session,
                 payload,

@@ -13,6 +13,7 @@ const { outputText } = ts.transpileModule(lifecycleSource, {
 })
 const {
   isChatModeLocked,
+  isComposerHeldByTurn,
   hasChatStatusRefreshBoundary,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
@@ -31,6 +32,16 @@ test('mode lock spans optimistic submission and the authoritative active turn', 
 test('turn completion or error terminalizes the authoritative mode lock', () => {
   assert.equal(isChatModeLocked(false, [activeTurn, completedTurn]), false)
   assert.equal(isChatModeLocked(false, [activeTurn, failedTurn]), false)
+})
+
+test('a turn that yields to the user locks the mode but does not hold the composer', () => {
+  const yielding = { ...activeTurn, yieldsToUser: true }
+  assert.equal(isChatModeLocked(false, [completedTurn, yielding]), true)
+  assert.equal(isComposerHeldByTurn(false, [completedTurn, yielding]), false)
+  assert.equal(isComposerHeldByTurn(false, [completedTurn, activeTurn]), true)
+  assert.equal(isComposerHeldByTurn(false, [completedTurn]), false)
+  // The user's own message is on its way: later ones queue behind it.
+  assert.equal(isComposerHeldByTurn(true, [completedTurn, yielding]), true)
 })
 
 function event(stream_sequence, type, extra = {}) {

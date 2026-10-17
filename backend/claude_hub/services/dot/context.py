@@ -21,7 +21,7 @@ from typing import Any, Iterable, Optional
 
 from .index import DotIndex, recallable
 from .lessons import session_rules
-from .prompts import DOT_CONTEXT_HEADER, TOOL_GUIDE
+from .prompts import DOT_CONTEXT_HEADER, TOOL_GUIDE, TURN_RULES
 from .store import DEFAULT_NAME, Card, DotStore, utc_now
 
 logger = logging.getLogger(__name__)
@@ -65,11 +65,12 @@ def _ranked(cards: list[Card]) -> list[Card]:
 
 
 def build_session_pack(store: DotStore) -> str:
-    """Role + name + tools + rules + user profile + concepts, capped at ``SESSION_PACK_CHARS``."""
+    """Role + name + turn rules + tools + lessons + user profile + concepts, capped at ``SESSION_PACK_CHARS``."""
     parts = [store.read_role().strip()]
     name = store.read_identity()["name"]
     if name != DEFAULT_NAME:
         parts.append(f'## Your name\nThe user named you "{name}". Use this name instead of Dot.')
+    parts.append(TURN_RULES.strip())
     parts.append(TOOL_GUIDE.strip())
     rules = session_rules(store.list_lessons(), utc_now())
     if rules:
@@ -134,11 +135,13 @@ def _work_lines(store: DotStore) -> list[str]:
 
 _EVENTS_PER_TURN = 12
 _EVENTS_TITLE = "## New events since your last turn"
+# The user's turn shows waiting events too, but a wake-up handles them.
+_WAITING_EVENTS_TITLE = "## Events waiting for your next wake-up"
 _REVIEWS_PER_TURN = 8
 _RECENT_TITLE = "## Recent talk (before this fresh session)"
 
 
-def _review_lines(store: DotStore) -> list[str]:
+def _review_lines(store: DotStore, wake: bool) -> list[str]:
     """Returned tasks stay listed every turn until Dot records a verdict."""
     pending = store.pending_reviews()
     if not pending:
@@ -155,6 +158,9 @@ def _review_lines(store: DotStore) -> list[str]:
         )
     if len(pending) > _REVIEWS_PER_TURN:
         lines.append(f"- ({len(pending) - _REVIEWS_PER_TURN} more)")
+    if not wake:
+        lines.append("- Your next wake-up judges these; answer the user first.")
+        return lines
     lines.append(
         "- Judge each result against its done-when list, then "
         "`claude-hub dot review <task-id> --verdict ok|redo|skip [--cause brief|env|worker|change] "
@@ -187,8 +193,13 @@ def build_turn_pack(
     now: Optional[datetime] = None,
     recall: bool = True,
     inbox: bool = True,
+    wake: bool = True,
 ) -> TurnPack:
-    """Assemble the per-turn context; a section that does not fit is cut or skipped."""
+    """Assemble the per-turn context; a section that does not fit is cut or skipped.
+
+    ``wake`` is false on the user's turn: reviews and events are shown, but left
+    for the next wake-up.
+    """
     moment = (now or datetime.now()).astimezone()
     header = (
         f"{DOT_CONTEXT_HEADER}\n"
@@ -203,11 +214,12 @@ def build_turn_pack(
         ("## Delegated work", work or ["- (none)"]),
     ]
     # Reviews go before events: a busy inbox must not push them out of the pack.
-    reviews = _review_lines(store)
+    reviews = _review_lines(store, wake)
     if reviews:
         sections.append(("## Waiting for your review", reviews))
+    events_title = _EVENTS_TITLE if wake else _WAITING_EVENTS_TITLE
     if events:
-        sections.append((_EVENTS_TITLE, _event_lines(events)))
+        sections.append((events_title, _event_lines(events)))
     if recall and recallable(text) and index is not None:
         try:
             hits = index.search(text, limit=6)
@@ -241,7 +253,7 @@ def build_turn_pack(
         )
         if not kept:
             continue
-        if title == _EVENTS_TITLE:
+        if title == events_title:
             shown_events = len(kept) - (len(events) > _EVENTS_PER_TURN)
         block = title + "\n" + "\n".join(kept)
         blocks.append(block)

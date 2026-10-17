@@ -21,6 +21,7 @@ from claude_hub.models import (
     ExecutionTarget,
     ManagedSession,
     ManagedSessionStatus,
+    ScheduledTaskRunStatus,
     WorkspaceSessionRole,
 )
 from claude_hub.services import ttyd_manager, workspace_manager
@@ -28,7 +29,7 @@ from claude_hub.services.agent_stream.native import ClaudeNativeSession
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.dot import Card, DotService, DotStore, reset_dot_service
 from claude_hub.services.dot import service as service_module
-from claude_hub.services.dot.prompts import TIDY_MESSAGE
+from claude_hub.services.dot.prompts import TIDY_MESSAGE, WAKE_MESSAGE
 
 TAB_ID = "tab-1"
 
@@ -219,6 +220,7 @@ def test_schedules_are_created_once_and_follow_the_tab(
             tab_id=payload.tab_id,
             cron=payload.cron,
             interval_seconds=payload.interval_seconds,
+            message=payload.message,
             payload=payload,
         )
         schedules[item.id] = item
@@ -266,6 +268,14 @@ def test_schedules_are_created_once_and_follow_the_tab(
             {"interval_seconds": service_module.WAKE_INTERVAL_SECONDS},
         )
     ]
+
+    # A wake-up still holding the earlier Hub words gets the current ones; words the
+    # user wrote are kept.
+    updates.clear()
+    wake.message = service_module.RETIRED_WAKE_MESSAGES[0]
+    tidy.message = "my own tidy words"
+    service.ensure_schedules("tab-new")
+    assert updates == [(wake.id, {"message": service_module.WAKE_MESSAGE})]
 
     # One schedule made, the next one failed: a retry makes only the missing one.
     del schedules[wake.id], schedules[tidy.id]
@@ -499,15 +509,19 @@ async def test_claude_hook_acks_events_after_send_and_hides_the_pack(
     transport = ClaudeNativeSession(_session(TAB_ID))
     with patch.object(transport, "_spawn_oneshot", AsyncMock(side_effect=RuntimeError("down"))):
         with pytest.raises(RuntimeError):
-            await transport.send_message("hi", [])
+            await transport.send_message(WAKE_MESSAGE, [])
     assert len(service.store.list_inbox()) == 1, "a failed send must not ack events"
 
     mock_spawn = AsyncMock()
     with patch.object(transport, "_spawn_oneshot", mock_spawn):
         await transport.send_message("hi", [])
-    assert service.store.list_inbox() == []
+    assert len(service.store.list_inbox()) == 1, "the user's turn leaves events to a wake-up"
     _, text = _sent(mock_spawn, 0)
     assert strip_hub_runtime_guidance(text) == "hi", "the pack must not leak into the message"
+    waking = ClaudeNativeSession(_session(TAB_ID))
+    with patch.object(waking, "_spawn_oneshot", AsyncMock()):
+        await waking.send_message(WAKE_MESSAGE, [])
+    assert service.store.list_inbox() == []
 
 
 @pytest.mark.asyncio
@@ -729,14 +743,14 @@ async def test_a_turn_the_provider_never_took(
 
     # The Hub stamps the start, Dot prepares the turn, then delivery fails: the
     # failed end carries the start time, which is before the turn was prepared.
-    started = _event(AgentStreamEventType.TURN_STARTED, "t1", summary="hello")
-    first = service.prepare_turn("hello", None)
+    started = _event(AgentStreamEventType.TURN_STARTED, "t1", summary="[Dot wake] hello")
+    first = service.prepare_turn("[Dot wake] hello", None)
     assert first.rotate and first.delivered_event_ids == [event["id"]]
     failed = _event(AgentStreamEventType.TURN_COMPLETED, "t1", status="failed")
     failed = failed.model_copy(update={"created_at": started.created_at})
-    # The user sends again before the journal catches up; that turn is taken.
-    again = _event(AgentStreamEventType.TURN_STARTED, "t2", summary="hello?")
-    second = service.prepare_turn("hello?", first.conversation_id)
+    # The Hub wakes Dot again before the journal catches up; that turn is taken.
+    again = _event(AgentStreamEventType.TURN_STARTED, "t2", summary="[Dot wake] hello?")
+    second = service.prepare_turn("[Dot wake] hello?", first.conversation_id)
     assert not second.rotate and second.delivered_event_ids == [event["id"]]
     service.mark_delivered(second.delivered_event_ids)
     for one in (started, failed, again):
@@ -747,3 +761,241 @@ async def test_a_turn_the_provider_never_took(
     assert state.get("rotate_requested"), "the first turn never opened the session"
     assert len(state["sent_turns"]) == 1, "the second turn waits for its own end"
     assert store.list_inbox() == [], "the second turn read the event"
+
+
+# ── the user comes first ───────────────────────────────────────────────
+
+
+def _install_tab_dispatch(monkeypatch: MonkeyPatch, manager: Any, calls: list[Any]) -> Any:
+    from claude_hub.api import agent_stream as stream_api
+    from claude_hub.services import goal_run
+
+    session = SimpleNamespace(id="native-session")
+
+    async def send(session_arg: Any, payload: Any, manager_arg: Any, **kwargs: Any) -> None:
+        calls.append(("send", payload.text))
+
+    monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda tab_id: session)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
+    monkeypatch.setattr(stream_api, "_send_to_native", send)
+    monkeypatch.setattr(goal_run, "get_goal_admission_lock", lambda tab_id: asyncio.Lock())
+    monkeypatch.setattr(
+        goal_run,
+        "get_goal_manager",
+        lambda: SimpleNamespace(current=lambda tab_id: None, has_goal_history=lambda tab_id: False),
+    )
+
+    async def user(tab_id: str, text: str) -> None:
+        await stream_api._dispatch_tab_stream_input(
+            tab_id,
+            stream_api.AgentStreamSendRequest(text=text, client_turn_id=f"web-{text}"),
+            turn_metadata={"origin": "web"},
+        )
+
+    return user
+
+
+class _Turns:
+    """The live turn of the Dot Chat, as the tailer manager reports it."""
+
+    def __init__(self, calls: list[Any], active: Optional[str]) -> None:
+        self.calls = calls
+        self.active = active
+
+    async def active_turn_id(self, session: Any) -> Optional[str]:
+        return self.active
+
+    async def cancel_turn(self, session: Any, expected_turn_id: Optional[str] = None) -> bool:
+        self.calls.append(("cancel", expected_turn_id))
+        stopped = expected_turn_id == self.active
+        self.active = None if stopped else self.active
+        return stopped
+
+
+def _system_runs(service: DotService, monkeypatch: MonkeyPatch) -> dict[str, Any]:
+    service.store.update_state(wake_schedule_id="sched-wake", tidy_schedule_id="sched-tidy")
+    running, queued = ScheduledTaskRunStatus.RUNNING, ScheduledTaskRunStatus.QUEUED
+    runs = {
+        run_id: SimpleNamespace(
+            client_turn_id=f"scheduled-{run_id}", scheduled_task_id=task_id, status=status
+        )
+        for run_id, task_id, status in (
+            ("r-wake", "sched-wake", running),
+            ("r-tidy", "sched-tidy", running),
+            ("r-other", "sched-other", running),
+            ("r-tidy-next", "sched-tidy", queued),
+            ("r-other-next", "sched-other", queued),
+        )
+    }
+    monkeypatch.setattr(workspace_manager, "scheduled_task_runs", runs)
+    monkeypatch.setattr(workspace_manager, "_save_scheduled_tasks", lambda: None)
+    return runs
+
+
+@pytest.mark.asyncio
+async def test_a_user_message_stops_a_wake_up_and_gives_its_events_back(
+    service: DotService, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+    _system_runs(service, monkeypatch)
+    store = service.store
+    stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{TAB_ID}")
+    event = store.add_inbox("task_done", "Paper — done", task_id="task-1")
+    started = _event(AgentStreamEventType.TURN_STARTED, "scheduled-r-wake", summary=WAKE_MESSAGE)
+    plan = service.prepare_turn(WAKE_MESSAGE, "conv-1")
+    service.mark_delivered(plan.delivered_event_ids)
+    assert store.list_inbox() == []
+
+    calls: list[Any] = []
+    user = _install_tab_dispatch(monkeypatch, _Turns(calls, "scheduled-r-wake"), calls)
+    await user(TAB_ID, "hi")
+    assert calls == [("cancel", "scheduled-r-wake"), ("send", "hi")], "stopped, then sent"
+    assert [one["id"] for one in store.list_inbox()] == [event["id"]]
+    assert service._wake_pending, "the wake-up runs again later"
+
+    # The next wake-up reads the events before the stopped turn's end is synced:
+    # that end must not give them back a second time.
+    stopped = _event(
+        AgentStreamEventType.TURN_COMPLETED,
+        "scheduled-r-wake",
+        status="cancelled",
+        assistant_text="Checking the paper",
+    )
+    again = _event(AgentStreamEventType.TURN_STARTED, "scheduled-r-wake2", summary=WAKE_MESSAGE)
+    second = service.prepare_turn(WAKE_MESSAGE, "conv-1")
+    service.mark_delivered(second.delivered_event_ids)
+    for one in (started, stopped, again):
+        await stream.append(one)
+    assert await service.sync_journal() == 0, "a wake-up that gave way is not in the talk"
+    assert store.list_inbox() == []
+    assert not any("Checking the paper" in line for line in store.recent_journal())
+
+
+@pytest.mark.asyncio
+async def test_only_dot_system_turns_give_way(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    _system_runs(service, monkeypatch)
+    calls: list[Any] = []
+    turns = _Turns(calls, None)
+    user = _install_tab_dispatch(monkeypatch, turns, calls)
+    for active in (None, "web-earlier", "scheduled-r-other"):
+        turns.active = active
+        await user(TAB_ID, "hi")
+    assert calls == [("send", "hi")] * 3, "the user's own turns and other automations stay"
+    assert not service._wake_pending
+
+    turns.active = "scheduled-r-wake"
+    await user("tab-other", "hi")
+    assert calls[-1] == ("send", "hi") and turns.active == "scheduled-r-wake"
+
+    calls.clear()
+    turns.active = "scheduled-r-tidy"
+    await user(TAB_ID, "hi")
+    assert calls == [("cancel", "scheduled-r-tidy"), ("send", "hi")]
+
+
+@pytest.mark.asyncio
+async def test_a_queued_dot_run_does_not_take_the_chat_from_the_user(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    runs = _system_runs(service, monkeypatch)
+    calls: list[Any] = []
+    user = _install_tab_dispatch(monkeypatch, _Turns(calls, None), calls)
+    await user(TAB_ID, "hi")
+    assert runs["r-tidy-next"].status == ScheduledTaskRunStatus.QUEUED, "no Dot turn to stop"
+
+    # The stopped turn's end drains the scheduler: Dot's queued runs must be gone
+    # by then, or one takes the Chat before the user's message.
+    user = _install_tab_dispatch(monkeypatch, _Turns(calls, "scheduled-r-wake"), calls)
+    await user(TAB_ID, "hi")
+    assert runs["r-tidy-next"].status == ScheduledTaskRunStatus.CANCELLED
+    assert runs["r-other-next"].status == ScheduledTaskRunStatus.QUEUED, "not Dot's"
+    assert service._wake_pending
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_tidy_is_no_tidy(
+    service: DotService, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+    stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{TAB_ID}")
+    await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t1", summary=TIDY_MESSAGE))
+    service.prepare_turn(TIDY_MESSAGE, "conv-1")
+    service.yield_turn()
+    await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, "t1", status="cancelled"))
+    await service.sync_journal()
+    state = service.store.read_state()
+    assert not state.get("last_tidy_at") and not state.get("sent_turns")
+
+
+@pytest.mark.asyncio
+async def test_a_wake_up_that_gave_way_runs_again_after_a_pause(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    woken: list[str] = []
+
+    async def run(schedule_id: str) -> None:
+        woken.append(schedule_id)
+
+    monkeypatch.setattr(workspace_manager, "scheduled_tasks", {"sched-1": object()})
+    monkeypatch.setattr(workspace_manager, "run_scheduled_task", run)
+    monkeypatch.setattr(service_module, "WATCH_INTERVAL_SECONDS", 0)
+    service.store.update_state(wake_schedule_id="sched-1")
+    checked = AsyncMock(return_value=0)
+    monkeypatch.setattr(service, "check_work", checked)
+    monkeypatch.setattr(service, "is_set_up", lambda: True)
+    monkeypatch.setattr(service, "ensure_schedules", lambda tab_id: None)
+
+    async def ticks(count: int) -> None:
+        start = checked.await_count
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if checked.await_count >= start + count:
+                return
+
+    # A tidy gave way: nothing waits, so nothing runs again.
+    service.yield_turn()
+    monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 0)
+    service.start()
+    await ticks(2)
+    assert woken == [] and not service._wake_pending
+
+    # A wake-up gave way: it waits while the user may still be talking.
+    service.store.add_inbox("task_ready", "done")
+    monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 3600)
+    service.yield_turn()
+    await ticks(3)
+    assert woken == [] and service._wake_pending
+    monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 0)
+    await ticks(2)
+    await service.stop()
+    assert woken == ["sched-1"] and not service._wake_pending
+
+
+@pytest.mark.asyncio
+async def test_dot_schedules_mark_their_turns_as_giving_way(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.api import agent_stream as stream_api
+
+    service.store.update_state(wake_schedule_id="sched-wake")
+    sent: list[dict[str, Any]] = []
+
+    async def send(session: Any, payload: Any, manager: Any, **kwargs: Any) -> None:
+        sent.append(kwargs["turn_metadata"])
+
+    monkeypatch.setattr(
+        stream_api, "_terminal_tab_session_or_404", lambda tab_id: SimpleNamespace(id="s")
+    )
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: None)
+    monkeypatch.setattr(stream_api, "_send_to_native", send)
+    for task_id in ("sched-wake", "sched-other"):
+        run = SimpleNamespace(
+            id=f"run-{task_id}", tab_id=TAB_ID, message="m", client_turn_id=f"turn-{task_id}"
+        )
+        task = SimpleNamespace(id=task_id, name=task_id)
+        await stream_api._dispatch_scheduled_chat_turn(run, task)  # type: ignore[arg-type]
+    assert sent[0]["yields_to_user"] is True and "yields_to_user" not in sent[1]

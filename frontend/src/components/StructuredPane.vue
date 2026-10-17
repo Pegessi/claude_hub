@@ -1381,7 +1381,7 @@
             :title="goalSteerOnly ? 'Send now as the next Goal turn' : goalComposerReason || undefined"
             @click="() => submit(isManagedChat ? 'normal' : (goalSteerOnly ? 'steer' : 'normal'))"
           >
-            {{ isSending ? 'Sending…' : (goalImageRecovery ? 'Recover Goal' : goalSteerOnly ? 'Steer' : (turnInFlight ? 'Queue' : 'Send')) }}
+            {{ isSending ? 'Sending…' : (goalImageRecovery ? 'Recover Goal' : goalSteerOnly ? 'Steer' : (composerTurnInFlight ? 'Queue' : 'Send')) }}
           </button>
         </div>
         <div
@@ -1402,7 +1402,7 @@
             <span>Shift+Enter newline</span>
           </template>
           <template v-else>
-            <span>Enter {{ turnInFlight ? 'queue' : 'send' }}</span>
+            <span>Enter {{ composerTurnInFlight ? 'queue' : 'send' }}</span>
             <span>⌘/Ctrl+Enter steer</span>
             <span>Shift+Enter newline</span>
           </template>
@@ -1535,7 +1535,11 @@ import {
   isGoalTerminal,
   stripTrailingGoalProtocol,
 } from '@/utils/chatGoalPolicy'
-import { hasChatStatusRefreshBoundary, isChatModeLocked } from '@/utils/chatTurnLifecycle'
+import {
+  hasChatStatusRefreshBoundary,
+  isChatModeLocked,
+  isComposerHeldByTurn,
+} from '@/utils/chatTurnLifecycle'
 import {
   autoresizeComposerTextarea,
   createComposerDraftId,
@@ -2189,6 +2193,12 @@ const isWaitingForQueuedChatActivation = computed(() =>
 )
 const isPreparingAttachments = ref(false)
 const turnInFlight = computed(() => isChatModeLocked(
+  pendingDirectTurns.value.length > 0,
+  authoritativeTurns.value,
+))
+// Dot's own wake-up or tidy gives way: a new message goes out at once (the
+// backend stops that turn) instead of queueing behind it.
+const composerTurnInFlight = computed(() => isComposerHeldByTurn(
   pendingDirectTurns.value.length > 0,
   authoritativeTurns.value,
 ))
@@ -2865,7 +2875,7 @@ function handleComposerEnter(event: KeyboardEvent) {
     metaKey: event.metaKey,
     ctrlKey: event.ctrlKey,
     altKey: event.altKey,
-    turnInFlight: turnInFlight.value || goalSteerOnly.value,
+    turnInFlight: composerTurnInFlight.value || goalSteerOnly.value,
     hasDraft: draftMessage.value.trim().length > 0 || attachments.value.length > 0,
     hasQueuedDraft: draftQueue.value.length > 0,
     isMobile: isMobileViewport.value,
@@ -2988,7 +2998,7 @@ async function sendQueuedDraft(id: string) {
   }
   isQueueSendInProgress.value = true
   try {
-    const sent = await submit(turnInFlight.value || goalSteerOnly.value ? 'steer' : 'normal', undefined, 'queue', null, draft)
+    const sent = await submit(composerTurnInFlight.value || goalSteerOnly.value ? 'steer' : 'normal', undefined, 'queue', null, draft)
     if (sent) {
       draftQueue.value = draftQueue.value.filter(item => item.id !== id)
       isDraftQueuePaused.value = draftQueue.value.some(item => Boolean(item.error))
@@ -3005,7 +3015,7 @@ async function flushDraftQueue() {
     draftQueue.value.length > 0
     && isSubmissionReady.value
     && !isDraftQueuePaused.value
-    && !turnInFlight.value
+    && !composerTurnInFlight.value
     && !isSending.value
     && !isQueueSendInProgress.value
     && !isEditingQueuedDraft.value
@@ -3055,7 +3065,7 @@ function requestDraftQueueFlush() {
     && !isWaitingForQueuedChatActivation.value
     && !isEditingQueuedDraft.value
     && !isDraftQueuePaused.value
-    && !turnInFlight.value
+    && !composerTurnInFlight.value
     && draftQueue.value.length > 0
     && !isSending.value
     && !goalComposerLocked.value
@@ -3067,7 +3077,7 @@ function requestDraftQueueFlush() {
 
 watch(
   [
-    turnInFlight,
+    composerTurnInFlight,
     () => draftQueue.value.length,
     isSending,
     goalComposerLocked,
@@ -3612,7 +3622,7 @@ async function submit(
   if (
     !isManagedChat.value &&
     delivery === 'normal' &&
-    (turnInFlight.value || goalSteerOnly.value) &&
+    (composerTurnInFlight.value || goalSteerOnly.value) &&
     !messageOverride
   ) {
     enqueueDraft()

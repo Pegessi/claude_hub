@@ -16,7 +16,7 @@ from claude_hub.services.dot.context import (
     build_turn_pack,
 )
 from claude_hub.services.dot.index import DotIndex, query_terms
-from claude_hub.services.dot.prompts import DEFAULT_ROLE
+from claude_hub.services.dot.prompts import DEFAULT_ROLE, WAKE_MESSAGE
 from claude_hub.services.dot.service import MAX_SESSION_AGE, MAX_SESSION_TURNS
 from claude_hub.services.dot.store import FOCUS_LIMIT, parse_card, utc_now
 
@@ -322,14 +322,29 @@ def test_prepare_turn_delivers_events_once(store: DotStore) -> None:
     service = DotService(store)
     store.update_state(tab_id="tab-dot")
     store.add_inbox("task_failed", "Build broke")
-    first = service.prepare_turn("hi", None)
+    first = service.prepare_turn(WAKE_MESSAGE, None)
     assert "Build broke" in first.turn_pack
     # Not sent yet (e.g. the provider failed): the event is shown again.
-    retry = service.prepare_turn("hi", first.conversation_id)
+    retry = service.prepare_turn(WAKE_MESSAGE, first.conversation_id)
     assert "Build broke" in retry.turn_pack
     service.mark_delivered(retry.delivered_event_ids)
-    second = service.prepare_turn("hi again", first.conversation_id)
+    second = service.prepare_turn(WAKE_MESSAGE, first.conversation_id)
     assert "Build broke" not in second.turn_pack
+
+
+def test_the_users_turn_shows_events_but_leaves_them_to_the_wake_up(store: DotStore) -> None:
+    service = DotService(store)
+    store.update_state(tab_id="tab-dot")
+    store.add_inbox("task_failed", "Build broke")
+    store.upsert_work("task-1", title="Port", status="review", review_due=True)
+    plan = service.prepare_turn("hi", None)
+    assert "Build broke" in plan.turn_pack and plan.delivered_event_ids == []
+    assert "Events waiting for your next wake-up" in plan.turn_pack
+    assert "answer the user first" in plan.turn_pack
+    assert len(store.list_inbox()) == 1
+    wake = service.prepare_turn(WAKE_MESSAGE, plan.conversation_id)
+    assert "New events since your last turn" in wake.turn_pack and wake.delivered_event_ids
+    assert "Judge each result" in wake.turn_pack
 
 
 def test_events_cut_from_the_pack_stay_unread(store: DotStore) -> None:
@@ -337,7 +352,7 @@ def test_events_cut_from_the_pack_stay_unread(store: DotStore) -> None:
     store.update_state(tab_id="tab-dot")
     for number in range(15):
         store.add_inbox("task_ready", f"event {number:02d} " + "x" * 380)
-    plan = service.prepare_turn("hi", None)
+    plan = service.prepare_turn(WAKE_MESSAGE, None)
     shown = [number for number in range(15) if f"event {number:02d}" in plan.turn_pack]
     # Oldest three wait for a later turn; the budget cuts more of the twelve.
     assert shown and shown[0] == 3 and len(shown) < 12

@@ -471,6 +471,22 @@ class _SchedulingMixin:
                 await self._drain_scheduled_chat_runs(tab_id)
         return count
 
+    def drop_pending_scheduled_task_runs(self, task_id: str, reason: str) -> int:
+        """Cancel queued/waiting occurrences without draining the tab.
+
+        For a caller about to send its own turn on that tab: a drain here could
+        dispatch the next run first.
+        """
+        count = self._cancel_scheduled_task_runs(
+            task_id,
+            statuses={ScheduledTaskRunStatus.QUEUED, ScheduledTaskRunStatus.WAITING},
+            reason=reason,
+            now=_wm._now(),
+        )
+        if count:
+            self._save_scheduled_tasks()
+        return count
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------

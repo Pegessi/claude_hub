@@ -161,6 +161,8 @@ export interface TimelineTurn {
   feishu: TimelineFeishuProvenance | null
   /** Mode when this turn began, not the composer's current selection. */
   mode: 'default' | 'plan' | null
+  /** The backend stops this turn when the user sends (Dot's own wake-up or tidy). */
+  yieldsToUser: boolean
   /** Durable attachment descriptors surfaced by ``turn_started``.
    *  Each entry carries the opaque attachment id, mime type, byte size,
    *  and optional pixel dimensions — never raw bytes or local paths. The
@@ -261,6 +263,7 @@ function createTurn(key: string, turnId: string | null): TimelineTurn {
     origin: 'unknown',
     feishu: null,
     mode: null,
+    yieldsToUser: false,
     attachments: [],
     parts: [],
     assistantText: '',
@@ -756,6 +759,10 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           turn.feishu = provenance.feishu
           mutated = true
         }
+      }
+      if (!turn.yieldsToUser && payloadRecord(event, 'metadata').yields_to_user === true) {
+        turn.yieldsToUser = true
+        mutated = true
       }
       const mode = event.payload.mode
       if ((mode === 'plan' || mode === 'default') && turn.mode !== mode) {
