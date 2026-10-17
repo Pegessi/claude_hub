@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from .context import TurnPack, build_session_pack, build_turn_pack
+from .context import TurnPack, build_session_pack, build_turn_pack, reach_note
 from .index import DotIndex
 from .lessons import lesson_score, lint_brief, same_rule, session_rules
 from .prompts import (
@@ -425,10 +425,25 @@ class DotService:
             self.index.sync()
         except Exception:
             logger.warning("dot: index sync failed", exc_info=True)
+        feishu_bound = self._feishu_bound()
         with self.store.lock:
-            return self._prepare_turn(text, conversation_id)
+            return self._prepare_turn(text, conversation_id, feishu_bound)
 
-    def _prepare_turn(self, text: str, conversation_id: Optional[str]) -> TurnPlan:
+    def _feishu_bound(self) -> bool:
+        from ...api.feishu_bot import feishu_bound_to_tab
+
+        tab_id = self.tab_id()
+        try:
+            return bool(tab_id) and feishu_bound_to_tab(str(tab_id))
+        except Exception:
+            logger.warning("dot: reading the Feishu binding failed", exc_info=True)
+            return False
+
+    def _prepare_turn(
+        self, text: str, conversation_id: Optional[str], feishu_bound: bool = False
+    ) -> TurnPlan:
+        from ..agent_stream.turn_source import is_feishu_provider_text
+
         state = self.store.read_state()
         now = utc_now()
         stripped = text.lstrip()
@@ -466,6 +481,14 @@ class DotService:
             # A tidy turn has other work: events wait for a wake-up.
             inbox=not tidy,
             wake=hub,
+            reach=reach_note(
+                (
+                    ("tidy" if tidy else "wake")
+                    if hub
+                    else "feishu" if is_feishu_provider_text(stripped) else "web"
+                ),
+                feishu_bound,
+            ),
         )
         # Only a wake-up handles events. The user's turn shows them, but the user
         # comes first: they stay unread for the wake-up that follows.

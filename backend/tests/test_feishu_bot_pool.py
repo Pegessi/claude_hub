@@ -981,7 +981,9 @@ def test_a_push_goes_only_to_the_chat_bound_to_the_tab(api) -> None:
 
     bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
     assert not asyncio.run(bot_api.push_to_tab("tab-1", "Task done")), "not bound yet"
+    assert not bot_api.feishu_bound_to_tab("tab-1")
     _pair(api.pool, bot_id, owner=LOCAL, tab_id="tab-1", chat_id="oc-1", environ={})
+    assert bot_api.feishu_bound_to_tab("tab-1") and not bot_api.feishu_bound_to_tab("tab-2")
 
     assert asyncio.run(bot_api.push_to_tab("tab-1", "Task done"))
     assert not asyncio.run(bot_api.push_to_tab("tab-2", "Task done"))
@@ -992,6 +994,7 @@ def test_a_push_goes_only_to_the_chat_bound_to_the_tab(api) -> None:
     entry = api.pool.snapshot({}).get(bot_id)
     api.pool.release_binding(bot_id, expected_revision=entry.revision, environ={})
     assert not asyncio.run(bot_api.push_to_tab("tab-1", "Task done")), "unbound"
+    assert not bot_api.feishu_bound_to_tab("tab-1")
     assert len(api.wire.pushes) == 1
 
 

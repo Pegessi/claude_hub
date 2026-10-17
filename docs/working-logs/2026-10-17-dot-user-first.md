@@ -77,8 +77,12 @@ Second review (of the notify and watch-loop change):
   `dot notify` hint): those words are retired too.
 - A wake-up that kept failing at once (e.g. a disabled schedule) was retried
   every minute: it now waits the pause unless new events came.
-- The tool guide no longer assumes Dot knows a turn came from Feishu: "not
-  for answering their message".
+- The user wants Dot to know the source, and to be told to use Feishu when a
+  bot is bound. Each turn pack now has a `Reach:` line (`reach_note`): Feishu
+  (the provider text's verified-source intro), web, or a Hub wake-up/tidy;
+  where the answer goes; and whether a bot is bound
+  (`feishu_bot.feishu_bound_to_tab`). A Hub turn with a bound bot is asked to
+  send what needs the user with `dot notify`.
 
 ## Not covered
 

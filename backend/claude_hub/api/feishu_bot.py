@@ -1158,19 +1158,32 @@ async def _reply_if_current(
         return False
 
 
+def _bot_bound_to_tab(tab_id: str) -> BotEntry | None:
+    return next(
+        (
+            bot
+            for bot in _pool.snapshot().bots
+            if bot.enabled and bot.binding is not None and bot.binding.tab_id == tab_id
+        ),
+        None,
+    )
+
+
+def feishu_bound_to_tab(tab_id: str) -> bool:
+    """An enabled Feishu bot is bound to ``tab_id``: ``push_to_tab`` can reach it."""
+
+    try:
+        return _bot_bound_to_tab(tab_id) is not None
+    except FeishuBotPoolError:
+        return False
+
+
 async def push_to_tab(tab_id: str, text: str) -> bool:
     """Send a message no Feishu message asked for (Dot's wake-up report) to the
     Feishu chat bound to ``tab_id``. False when no current binding routes there."""
 
     try:
-        entry = next(
-            (
-                bot
-                for bot in _pool.snapshot().bots
-                if bot.enabled and bot.binding is not None and bot.binding.tab_id == tab_id
-            ),
-            None,
-        )
+        entry = _bot_bound_to_tab(tab_id)
         if entry is None or entry.binding is None:
             return False
         binding = entry.binding
