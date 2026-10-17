@@ -252,8 +252,14 @@ async def dot_notify(
 ) -> dict[str, Any]:
     if not payload.text.strip():
         raise HTTPException(status_code=422, detail="text is empty")
-    if await _service().notify(payload.text):
+    result = await _service().notify(payload.text)
+    if result == "sent":
         return {"sent": True}
+    if result == "repeat":
+        return {
+            "sent": False,
+            "reason": "The same text was sent in the last 30 minutes; add what differs.",
+        }
     return {
         "sent": False,
         "reason": "No Feishu bot is bound to the Dot Chat, or Feishu refused the message.",

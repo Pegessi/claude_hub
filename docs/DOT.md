@@ -164,7 +164,8 @@ decision, a problem) with `claude-hub dot notify "<text>"`: the
 Hub sends it to the Feishu chat bound to the Dot tab (`POST /api/dot/notify`;
 `sent: false` when no bot is bound). Known secret patterns are masked first.
 The same text sent in the last 30 minutes is not sent again (a wake-up that
-was stopped or failed runs again and may repeat its notice).
+was stopped or failed runs again and may repeat its notice); Dot gets
+`sent: false` with a reason, and can add what differs.
 
 ### The user comes first
 

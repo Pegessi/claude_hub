@@ -593,27 +593,28 @@ class DotService:
     def request_rotation(self) -> None:
         self.store.update_state(rotate_requested=True)
 
-    async def notify(self, text: str) -> bool:
+    async def notify(self, text: str) -> str:
         """Dot chose to reach the user now: send ``text`` to the Feishu chat bound
-        to the Dot tab. False when no bot is bound there or the send failed. The
-        same text sent a short while ago is not sent again (it reached them)."""
+        to the Dot tab. ``sent``; ``repeat`` when the same text was sent a short
+        while ago (not sent again); ``failed`` when no bot is bound there or the
+        send failed."""
         from ...api.feishu_bot import push_to_tab
         from ..agent_stream.redaction import mask_secrets
 
         tab_id = self.tab_id()
         if not tab_id:
-            return False
+            return "failed"
         text = mask_secrets(text.strip())
         now = time.monotonic()
         self._notified = {
             one: at for one, at in self._notified.items() if now - at < NOTIFY_REPEAT_SECONDS
         }
         if text in self._notified:
-            return True
+            return "repeat"
         if not await push_to_tab(tab_id, text):
-            return False
+            return "failed"
         self._notified[text] = now
-        return True
+        return "sent"
 
     # ── journal ─────────────────────────────────────────────────────────
 
@@ -1075,8 +1076,9 @@ class DotService:
         """Wake while events are unread: new ones, or ones a stopped, failed or
         skipped wake-up gave back (a tidy that gave way waits for the next night).
         """
-        new_events = bool(await self.check_work())
-        if new_events:
+        # Pending: new events, or a wake-up gave way. They go as soon as the pause
+        # and any running wake-up allow.
+        if await self.check_work():
             self._wake_pending = True
         # The user may still be talking, or the provider is failing: wait a while.
         if time.monotonic() - self._yielded_at < YIELD_PAUSE_SECONDS:
@@ -1087,12 +1089,13 @@ class DotService:
             # Nothing unread (e.g. a tidy gave way): no wake-up, and none pending.
             self._wake_pending = False
             return
-        # Nothing new since the last try (it failed, was skipped or stopped by hand):
-        # try again, but not every minute.
-        if not new_events and time.monotonic() - self._woke_at < YIELD_PAUSE_SECONDS:
+        # Nothing pending since the last try (it failed, was skipped or stopped by
+        # hand): try again, but not every minute.
+        if not self._wake_pending and time.monotonic() - self._woke_at < YIELD_PAUSE_SECONDS:
             return
         self._woke_at = time.monotonic()
-        self._wake_pending = not await self.wake()
+        self._wake_pending = False
+        await self.wake()
 
     def _wake_in_flight(self) -> bool:
         """A wake-up run is queued or running: it reads the unread events."""

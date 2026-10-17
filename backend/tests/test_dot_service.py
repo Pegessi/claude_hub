@@ -580,7 +580,7 @@ async def test_a_failing_wake_up_is_not_retried_every_minute(
     monkeypatch.setattr(service, "check_work", AsyncMock(side_effect=[1, 0, 0, 1]))
     for _ in range(3):
         await service._wake_if_due()
-    assert len(tries) == 1 and service._wake_pending
+    assert len(tries) == 1 and not service._wake_pending
     await service._wake_if_due()
     assert len(tries) == 2, "new events try at once"
 
@@ -995,12 +995,12 @@ async def test_dot_decides_what_reaches_feishu(
     assert pushed == [], "a wake-up reply is not pushed by itself"
 
     key = "sk-" + "a" * 24
-    assert await service.notify(f"  Paper task is done. Key {key}  ")
+    assert await service.notify(f"  Paper task is done. Key {key}  ") == "sent"
     assert pushed == [(TAB_ID, "Paper task is done. Key [REDACTED]")]
-    assert await service.notify("Paper task is done. Key " + key)
+    assert await service.notify("Paper task is done. Key " + key) == "repeat"
     assert len(pushed) == 1, "a wake-up that ran again does not send it twice"
     bound = False
-    assert not await service.notify("No bot bound")
+    assert await service.notify("No bot bound") == "failed"
 
 
 @pytest.mark.asyncio
@@ -1093,12 +1093,18 @@ async def test_a_wake_up_that_gave_way_runs_again_after_a_pause(
     assert woken == ["sched-1"]
     checked.side_effect = None
 
-    # A wake-up already queued or running reads the unread events: no second one.
+    # A wake-up already queued or running reads the unread events: no second one
+    # while it runs, but events that came meanwhile go right after it.
     monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 0)
     run = SimpleNamespace(scheduled_task_id="sched-1", status=ScheduledTaskRunStatus.RUNNING)
     monkeypatch.setattr(workspace_manager, "scheduled_task_runs", {"r-1": run})
     await ticks(3)
     assert woken == ["sched-1"]
+    service.store.add_inbox("task_ready", "while it ran")
+    checked.side_effect = [1]
+    await ticks(2)
+    checked.side_effect = None
+    assert woken == ["sched-1"] and service._wake_pending
     run.status = ScheduledTaskRunStatus.COMPLETED
     await ticks(2)
     await service.stop()
