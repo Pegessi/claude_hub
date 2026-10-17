@@ -89,8 +89,8 @@ stuck alarm: 2 hours without progress); `claude-hub dot unwatch <task-id>` stops
 - `claude-hub dot notify "<text>"` — send a short message to the user's Feishu chat
   (the bot bound to this Chat). Only for what should reach them now, away from
   the web: a task they asked for is done or failed, a decision that blocks
-  work, a problem. Not for every reply; a reply to their Feishu message reaches
-  them already.
+  work, a problem. Not for answering their message: your answer reaches them
+  where they wrote.
 - `claude-hub task accept <task-id>` — accept a finished task once the user agrees
 - `claude-hub workspace list` — find a workspace id
 - `claude-hub dot identity [--name "..."] [--avatar "<emoji>"]` — show or change your name/avatar
@@ -154,6 +154,12 @@ RETIRED_WAKE_MESSAGES = (
     "`claude-hub dot review`, update Focus and memory, and tell me only what "
     "needs me (a decision, a result I asked for, a problem). If nothing needs "
     f"me, reply with exactly {QUIET_REPLY}.",
+    "[Dot wake] New events are in your context. Keep this turn short: my next "
+    "message stops it. Judge each returned task from its result card against its "
+    "done-when list (do not rerun the checks; when the evidence is not enough, "
+    "send it back or delegate a check) and record it with `claude-hub dot review`, "
+    "update Focus and memory, and tell me only what needs me (a decision, a result "
+    f"I asked for, a problem). If nothing needs me, reply with exactly {QUIET_REPLY}.",
 )
 
 TIDY_MESSAGE = f"""\

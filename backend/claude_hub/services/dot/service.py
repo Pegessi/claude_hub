@@ -38,6 +38,8 @@ TIDY_CRON = "17 3 * * *"
 WATCH_INTERVAL_SECONDS = 60.0
 # A wake-up that gave way to the user (or failed) waits this long before it runs again.
 YIELD_PAUSE_SECONDS = 180.0
+# A wake-up that ran again (stopped, failed) may send the same notice twice: skip it.
+NOTIFY_REPEAT_SECONDS = 1800.0
 DEFAULT_STALL_HOURS = 2.0
 _TERMINAL_TASK_STATES = {"done", "failed"}
 # Only running tasks can look stuck; review waits on a person, todo was never started.
@@ -193,6 +195,7 @@ class DotService:
         self._wake_pending = False
         self._yielded_at = float("-inf")
         self._woke_at = float("-inf")
+        self._notified: dict[str, float] = {}
         self._watch_task: Optional[asyncio.Task[None]] = None
         self._state_cache: tuple[tuple[int, int, int], dict[str, Any]] = ((-1, -1, -1), {})
 
@@ -569,14 +572,25 @@ class DotService:
 
     async def notify(self, text: str) -> bool:
         """Dot chose to reach the user now: send ``text`` to the Feishu chat bound
-        to the Dot tab. False when no bot is bound there or the send failed."""
+        to the Dot tab. False when no bot is bound there or the send failed. The
+        same text sent a short while ago is not sent again (it reached them)."""
         from ...api.feishu_bot import push_to_tab
         from ..agent_stream.redaction import mask_secrets
 
         tab_id = self.tab_id()
         if not tab_id:
             return False
-        return await push_to_tab(tab_id, mask_secrets(text.strip()))
+        text = mask_secrets(text.strip())
+        now = time.monotonic()
+        self._notified = {
+            one: at for one, at in self._notified.items() if now - at < NOTIFY_REPEAT_SECONDS
+        }
+        if text in self._notified:
+            return True
+        if not await push_to_tab(tab_id, text):
+            return False
+        self._notified[text] = now
+        return True
 
     # ── journal ─────────────────────────────────────────────────────────
 
@@ -1038,7 +1052,8 @@ class DotService:
         """Wake while events are unread: new ones, or ones a stopped, failed or
         skipped wake-up gave back (a tidy that gave way waits for the next night).
         """
-        if await self.check_work():
+        new_events = bool(await self.check_work())
+        if new_events:
             self._wake_pending = True
         # The user may still be talking, or the provider is failing: wait a while.
         if time.monotonic() - self._yielded_at < YIELD_PAUSE_SECONDS:
@@ -1049,9 +1064,9 @@ class DotService:
             # Nothing unread (e.g. a tidy gave way): no wake-up, and none pending.
             self._wake_pending = False
             return
-        # Unread with nothing new: an earlier wake-up was skipped or stopped by hand.
-        # Try again, but not every minute.
-        if not self._wake_pending and time.monotonic() - self._woke_at < YIELD_PAUSE_SECONDS:
+        # Nothing new since the last try (it failed, was skipped or stopped by hand):
+        # try again, but not every minute.
+        if not new_events and time.monotonic() - self._woke_at < YIELD_PAUSE_SECONDS:
             return
         self._woke_at = time.monotonic()
         self._wake_pending = not await self.wake()
