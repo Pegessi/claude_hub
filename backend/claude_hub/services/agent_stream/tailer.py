@@ -1377,15 +1377,19 @@ class SessionTailer:
 
         The signal lives in the raw (sanitizer-hidden) assistant text. Only
         one-shot providers can finish their model output but never send a
-        result record because a lingering child holds stdout open; persistent
-        app-servers (Codex/TraeX) emit their own terminal completion, so they
-        must never synthesize one.
+        result record because a lingering child holds stdout open. Persistent
+        app-servers (Codex/TraeX) and multi-stage service transports (MASO)
+        emit their own authoritative completion and must never synthesize one.
 
         Re-evaluated on every delta: if the model emits an envelope and then
         keeps writing (a protocol violation), the latch clears until the
         signal is trailing again.
         """
-        if not self._goal_protocol_turn or transport.eof_is_fatal:
+        if (
+            not self._goal_protocol_turn
+            or transport.eof_is_fatal
+            or transport.goal_completion_requires_provider_event
+        ):
             return
         tail = self._assistant_text[-_GOAL_TAIL_SCAN_CHARS:]
         if "goal-status" not in tail:
@@ -1416,11 +1420,17 @@ class SessionTailer:
         block / complete), then terminate the stale provider process. The
         tailer loop stays alive; the next turn spawns a fresh one-shot.
 
-        Persistent transports (Codex/TraeX) never reach this: their app-server
-        emits its own terminal completion and is not safe to retire early.
+        Persistent app-servers and multi-stage service transports never reach
+        this: they emit their own terminal completion and are not safe to retire
+        early.
         """
         turn_id = self._active_turn_id
-        if turn_id is None or self._goal_terminal_at is None or transport.eof_is_fatal:
+        if (
+            turn_id is None
+            or self._goal_terminal_at is None
+            or transport.eof_is_fatal
+            or transport.goal_completion_requires_provider_event
+        ):
             return
         session = self._session_getter()
         if session is None:

@@ -7,6 +7,17 @@
 
 ## Released
 
+### feat(chat): enable Hub-managed Goals for MASO
+
+- Advertise direct MASO Chats as Hub-managed Goal capable without enabling or
+  calling MASO Auto.
+- Send Goal continuations through the existing MASO HTTP session and preserve
+  the shared checkpoint, pause, steer, cancellation and restart contracts.
+- Wait for the root MASO `agent_end` before completing a Goal step, so model-call
+  endings, child agents and provider finalizers cannot release the next turn.
+- Retain fail-closed handling for uncertain message acceptance and interrupted
+  SSE streams without automatically repeating a Goal step.
+
 ### feat(chat): refine tool cards and render details only when expanded
 
 - Mount tool input/output only while its native details card is open; preserve
