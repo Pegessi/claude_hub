@@ -50,6 +50,11 @@ def _mask_string(value: str) -> str:
     return masked
 
 
+def mask_secrets(text: str) -> str:
+    """Mask known secret patterns in text that leaves the Hub (e.g. a Feishu message)."""
+    return _mask_string(text)
+
+
 def _redact_value(key: str, value: Any) -> Any:
     if isinstance(value, dict):
         if key in _ENV_VALUE_KEYS:

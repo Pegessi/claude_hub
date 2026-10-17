@@ -86,6 +86,11 @@ TOOL_GUIDE = """\
 - `claude-hub dot lessons` — your brief lessons; `lessons edit|drop|merge` keep them tidy
 - `claude-hub dot watch <task-id> [--stall-hours N]` — watch an existing Hub task (default \
 stuck alarm: 2 hours without progress); `claude-hub dot unwatch <task-id>` stops it
+- `claude-hub dot notify "<text>"` — send a short message to the user's Feishu chat
+  (the bot bound to this Chat). Only for what should reach them now, away from
+  the web: a task they asked for is done or failed, a decision that blocks
+  work, a problem. Not for every reply; a reply to their Feishu message reaches
+  them already.
 - `claude-hub task accept <task-id>` — accept a finished task once the user agrees
 - `claude-hub workspace list` — find a workspace id
 - `claude-hub dot identity [--name "..."] [--avatar "<emoji>"]` — show or change your name/avatar
@@ -136,8 +141,10 @@ WAKE_MESSAGE = (
     "message stops it. Judge each returned task from its result card against its "
     "done-when list (do not rerun the checks; when the evidence is not enough, "
     "send it back or delegate a check) and record it with `claude-hub dot review`, "
-    "update Focus and memory, and tell me only what needs me (a decision, a result "
-    f"I asked for, a problem). If nothing needs me, reply with exactly {QUIET_REPLY}."
+    "update Focus and memory, and tell me in two or three short lines only what "
+    "needs me (a task I asked for is done or failed, a decision, a problem). When "
+    "it should reach me now, also send it with `claude-hub dot notify`. If nothing "
+    f"needs me, reply with exactly {QUIET_REPLY}."
 )
 
 # Earlier wake-up words; a schedule still holding one gets the current words.

@@ -534,6 +534,7 @@ async def test_failed_wake_retries_while_events_are_unread(
         result = next(results)
         if result is not None:
             raise result
+        service.store.mark_inbox_read([one["id"] for one in service.store.list_inbox()])
 
     monkeypatch.setattr(workspace_manager, "scheduled_tasks", {"sched-1": object()})
     monkeypatch.setattr(workspace_manager, "run_scheduled_task", run)
@@ -798,15 +799,18 @@ def _install_tab_dispatch(monkeypatch: MonkeyPatch, manager: Any, calls: list[An
 class _Turns:
     """The live turn of the Dot Chat, as the tailer manager reports it."""
 
-    def __init__(self, calls: list[Any], active: Optional[str]) -> None:
+    def __init__(self, calls: list[Any], active: Optional[str], on_cancel: Any = None) -> None:
         self.calls = calls
         self.active = active
+        self.on_cancel = on_cancel
 
     async def active_turn_id(self, session: Any) -> Optional[str]:
         return self.active
 
     async def cancel_turn(self, session: Any, expected_turn_id: Optional[str] = None) -> bool:
         self.calls.append(("cancel", expected_turn_id))
+        if self.on_cancel is not None:
+            self.on_cancel()
         stopped = expected_turn_id == self.active
         self.active = None if stopped else self.active
         return stopped
@@ -897,6 +901,53 @@ async def test_only_dot_system_turns_give_way(
 
 
 @pytest.mark.asyncio
+async def test_the_users_message_is_sent_when_giving_way_fails(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    _system_runs(service, monkeypatch)
+    calls: list[Any] = []
+
+    def broken() -> None:
+        raise RuntimeError("cancelled edge not persisted")
+
+    user = _install_tab_dispatch(monkeypatch, _Turns(calls, "scheduled-r-wake", broken), calls)
+    await user(TAB_ID, "hi")
+    assert calls == [("cancel", "scheduled-r-wake"), ("send", "hi")]
+
+
+@pytest.mark.asyncio
+async def test_dot_decides_what_reaches_feishu(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.api import feishu_bot as bot_api
+
+    _system_runs(service, monkeypatch)
+    monkeypatch.setattr(service, "sync_journal", AsyncMock(return_value=0))
+    pushed: list[tuple[str, str]] = []
+    bound = True
+
+    async def push(tab_id: str, text: str) -> bool:
+        pushed.append((tab_id, text))
+        return bound
+
+    monkeypatch.setattr(bot_api, "push_to_tab", push)
+    done = _event(
+        AgentStreamEventType.TURN_COMPLETED,
+        "scheduled-r-wake",
+        status="completed",
+        assistant_text="Paper task is done: ok.",
+    )
+    await service.on_stream_event(done)
+    assert pushed == [], "a wake-up reply is not pushed by itself"
+
+    key = "sk-" + "a" * 24
+    assert await service.notify(f"  Paper task is done. Key {key}  ")
+    assert pushed == [(TAB_ID, "Paper task is done. Key [REDACTED]")]
+    bound = False
+    assert not await service.notify("No bot bound")
+
+
+@pytest.mark.asyncio
 async def test_a_queued_dot_run_does_not_take_the_chat_from_the_user(
     service: DotService, monkeypatch: MonkeyPatch
 ) -> None:
@@ -908,8 +959,11 @@ async def test_a_queued_dot_run_does_not_take_the_chat_from_the_user(
 
     # The stopped turn's end drains the scheduler: Dot's queued runs must be gone
     # by then, or one takes the Chat before the user's message.
-    user = _install_tab_dispatch(monkeypatch, _Turns(calls, "scheduled-r-wake"), calls)
+    at_stop: list[Any] = []
+    turns = _Turns(calls, "scheduled-r-wake", lambda: at_stop.append(runs["r-tidy-next"].status))
+    user = _install_tab_dispatch(monkeypatch, turns, calls)
     await user(TAB_ID, "hi")
+    assert at_stop == [ScheduledTaskRunStatus.CANCELLED], "gone before the stop"
     assert runs["r-tidy-next"].status == ScheduledTaskRunStatus.CANCELLED
     assert runs["r-other-next"].status == ScheduledTaskRunStatus.QUEUED, "not Dot's"
     assert service._wake_pending
@@ -939,6 +993,7 @@ async def test_a_wake_up_that_gave_way_runs_again_after_a_pause(
 
     async def run(schedule_id: str) -> None:
         woken.append(schedule_id)
+        service.store.mark_inbox_read([one["id"] for one in service.store.list_inbox()])
 
     monkeypatch.setattr(workspace_manager, "scheduled_tasks", {"sched-1": object()})
     monkeypatch.setattr(workspace_manager, "run_scheduled_task", run)
@@ -971,8 +1026,67 @@ async def test_a_wake_up_that_gave_way_runs_again_after_a_pause(
     assert woken == [] and service._wake_pending
     monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 0)
     await ticks(2)
-    await service.stop()
     assert woken == ["sched-1"] and not service._wake_pending
+
+    # New events while it waits do not cut the pause short.
+    service.yield_turn()
+    monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 3600)
+    service.store.add_inbox("task_ready", "more")
+    checked.side_effect = [1]
+    await ticks(3)
+    assert woken == ["sched-1"]
+    checked.side_effect = None
+
+    # A wake-up already queued or running reads the unread events: no second one.
+    monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 0)
+    run = SimpleNamespace(scheduled_task_id="sched-1", status=ScheduledTaskRunStatus.RUNNING)
+    monkeypatch.setattr(workspace_manager, "scheduled_task_runs", {"r-1": run})
+    await ticks(3)
+    assert woken == ["sched-1"]
+    run.status = ScheduledTaskRunStatus.COMPLETED
+    await ticks(2)
+    await service.stop()
+    assert woken == ["sched-1", "sched-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_up_stopped_by_hand_or_failed_runs_again(
+    service: DotService, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """No user message took its place, yet its events are unread: wake again, after a pause."""
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+    woken: list[str] = []
+
+    async def run(schedule_id: str) -> None:
+        woken.append(schedule_id)
+
+    monkeypatch.setattr(workspace_manager, "scheduled_tasks", {"sched-1": object()})
+    monkeypatch.setattr(workspace_manager, "scheduled_task_runs", {})
+    monkeypatch.setattr(workspace_manager, "run_scheduled_task", run)
+    monkeypatch.setattr(service, "check_work", AsyncMock(return_value=0))
+    service.store.update_state(wake_schedule_id="sched-1")
+    stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{TAB_ID}")
+    for status in ("cancelled", "failed"):
+        service.store.add_inbox("task_done", "Paper — done", task_id="task-1")
+        turn_id = f"wake-{status}"
+        await stream.append(
+            _event(AgentStreamEventType.TURN_STARTED, turn_id, summary=WAKE_MESSAGE)
+        )
+        plan = service.prepare_turn(WAKE_MESSAGE, "conv-1")
+        service.mark_delivered(plan.delivered_event_ids)
+        await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, turn_id, status=status))
+        await service.sync_journal()
+        assert service.store.list_inbox(), f"a {status} wake-up gives its events back"
+
+        await service._wake_if_due()
+        assert not woken, "it waits a while first"
+        monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 0)
+        await service._wake_if_due()
+        assert woken == ["sched-1"]
+        woken.clear()
+        monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 3600)
+        service.store.mark_inbox_read([one["id"] for one in service.store.list_inbox()])
 
 
 @pytest.mark.asyncio

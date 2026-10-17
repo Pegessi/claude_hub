@@ -214,6 +214,28 @@ def test_cli_setup_sends_the_env_preset(
     assert seen == [{"ALL_PROXY": "socks5://127.0.0.1:1080", "NO_PROXY": "localhost,127.0.0.1,::1"}]
 
 
+def test_notify_reports_whether_feishu_got_it(
+    api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, service = api
+    _route_to_app(client, monkeypatch)
+    sent: list[str] = []
+
+    async def fake_notify(text: str) -> bool:
+        sent.append(text)
+        return text != "unbound"
+
+    monkeypatch.setattr(service, "notify", fake_notify)
+    result = CliRunner().invoke(cli, ["--json", "dot", "notify", "Paper task is done"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"sent": True}
+    missed = client.post("/api/dot/notify", json={"text": "unbound"}).json()
+    assert missed["sent"] is False and "Feishu" in missed["reason"]
+    assert client.post("/api/dot/notify", json={"text": "  "}).status_code == 422
+    assert client.post("/api/dot/notify", json={"text": "x" * 2001}).status_code == 422
+    assert sent == ["Paper task is done", "unbound"]
+
+
 def test_cli_remember_recall_and_merge(
     api: tuple[TestClient, DotService], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
