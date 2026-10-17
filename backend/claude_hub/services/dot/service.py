@@ -36,7 +36,7 @@ WAKE_INTERVAL_SECONDS = 10 * 365 * 24 * 3600
 TIDY_CRON = "17 3 * * *"
 # Task state changes are rare; one cheap in-memory pass a minute is enough.
 WATCH_INTERVAL_SECONDS = 60.0
-# A wake-up that gave way to the user waits this long before it runs again.
+# A wake-up that gave way to the user (or failed) waits this long before it runs again.
 YIELD_PAUSE_SECONDS = 180.0
 DEFAULT_STALL_HOURS = 2.0
 _TERMINAL_TASK_STATES = {"done", "failed"}
@@ -192,6 +192,7 @@ class DotService:
         self._setup_lock: Optional[asyncio.Lock] = None
         self._wake_pending = False
         self._yielded_at = float("-inf")
+        self._woke_at = float("-inf")
         self._watch_task: Optional[asyncio.Task[None]] = None
         self._state_cache: tuple[tuple[int, int, int], dict[str, Any]] = ((-1, -1, -1), {})
 
@@ -546,6 +547,9 @@ class DotService:
         ids = [str(one) for one in turn.get("ids") or []] if turn.get("acked") else []
         if not finished and ids:
             self.store.mark_inbox_unread(ids)
+            # The watcher wakes Dot again for them, after a pause: a failing
+            # provider must not be retried every minute.
+            self._yielded_at = time.monotonic()
 
     def mark_delivered(self, event_ids: list[str]) -> None:
         """The provider accepted a turn: its shown inbox events are now read."""
@@ -562,6 +566,17 @@ class DotService:
 
     def request_rotation(self) -> None:
         self.store.update_state(rotate_requested=True)
+
+    async def notify(self, text: str) -> bool:
+        """Dot chose to reach the user now: send ``text`` to the Feishu chat bound
+        to the Dot tab. False when no bot is bound there or the send failed."""
+        from ...api.feishu_bot import push_to_tab
+        from ..agent_stream.redaction import mask_secrets
+
+        tab_id = self.tab_id()
+        if not tab_id:
+            return False
+        return await push_to_tab(tab_id, mask_secrets(text.strip()))
 
     # ── journal ─────────────────────────────────────────────────────────
 
@@ -1011,19 +1026,47 @@ class DotService:
     async def _watch_loop(self) -> None:
         while True:
             try:
-                # The user may still be talking: a wake-up that gave way waits a while.
-                paused = time.monotonic() - self._yielded_at < YIELD_PAUSE_SECONDS
-                retry = self._wake_pending and not paused
-                if self.is_set_up() and (await self.check_work() or retry):
-                    # A failed or skipped wake, or one that gave way to the user,
-                    # retries while events are unread (a tidy that gave way waits
-                    # for the next night).
-                    self._wake_pending = bool(self.store.list_inbox()) and not await self.wake()
+                if self.is_set_up():
+                    await self._wake_if_due()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("dot work watcher failed")
             await asyncio.sleep(WATCH_INTERVAL_SECONDS)
+
+    async def _wake_if_due(self) -> None:
+        """Wake while events are unread: new ones, or ones a stopped, failed or
+        skipped wake-up gave back (a tidy that gave way waits for the next night).
+        """
+        if await self.check_work():
+            self._wake_pending = True
+        # The user may still be talking, or the provider is failing: wait a while.
+        if time.monotonic() - self._yielded_at < YIELD_PAUSE_SECONDS:
+            return
+        if self._wake_in_flight():
+            return
+        if not self.store.list_inbox():
+            # Nothing unread (e.g. a tidy gave way): no wake-up, and none pending.
+            self._wake_pending = False
+            return
+        # Unread with nothing new: an earlier wake-up was skipped or stopped by hand.
+        # Try again, but not every minute.
+        if not self._wake_pending and time.monotonic() - self._woke_at < YIELD_PAUSE_SECONDS:
+            return
+        self._woke_at = time.monotonic()
+        self._wake_pending = not await self.wake()
+
+    def _wake_in_flight(self) -> bool:
+        """A wake-up run is queued or running: it reads the unread events."""
+        from .. import workspace_manager
+
+        schedule_id = self._peek_state().get("wake_schedule_id")
+        active = {"queued", "waiting", "dispatching", "running"}
+        return bool(schedule_id) and any(
+            run.scheduled_task_id == schedule_id
+            and str(getattr(run.status, "value", run.status)) in active
+            for run in list(workspace_manager.scheduled_task_runs.values())
+        )
 
     def _reports(self, workspace_id: str, task_id: str) -> list[Any]:
         from .. import workspace_manager

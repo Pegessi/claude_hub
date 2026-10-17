@@ -155,6 +155,12 @@ So Dot wakes often when many tasks move and rarely when few do. On a wake it
 tells the user only what needs them. When nothing does, it replies exactly
 `[quiet]`; that turn is hidden from the chat and kept out of the journal.
 
+A wake-up reply shows in the web Chat only. When something should reach the
+user now (a task they asked for is done or failed, a blocking decision, a
+problem), Dot decides to send it with `claude-hub dot notify "<text>"`: the
+Hub sends it to the Feishu chat bound to the Dot tab (`POST /api/dot/notify`;
+`sent: false` when no bot is bound). Known secret patterns are masked first.
+
 ### The user comes first
 
 The Dot Chat is also where the user talks to Dot (web, or a bound Feishu bot),

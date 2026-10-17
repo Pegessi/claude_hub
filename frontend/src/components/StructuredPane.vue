@@ -1398,7 +1398,7 @@
           </template>
           <template v-else-if="isManagedChat">
             <span>Enter / ⌘/Ctrl+Enter send</span>
-            <span v-if="turnInFlight">Busy turn follow-ups are durable</span>
+            <span v-if="composerTurnInFlight">Busy turn follow-ups are durable</span>
             <span>Shift+Enter newline</span>
           </template>
           <template v-else>

@@ -849,6 +849,7 @@ class _Wire:
     def __init__(self) -> None:
         self.replies: list[dict[str, Any]] = []
         self.reply_message_ids: list[str] = []
+        self.pushes: list[tuple[str, dict[str, Any]]] = []
         self.reaction_creates: list[str] = []
         self.reaction_types: list[tuple[str, str]] = []
         self.reaction_deletes: list[tuple[str, str]] = []
@@ -875,6 +876,11 @@ class _Wire:
                     },
                 },
             )
+        if request.method == "POST" and request.url.path == "/open-apis/im/v1/messages":
+            body = json.loads(request.content)
+            assert request.url.params["receive_id_type"] == "chat_id"
+            self.pushes.append((body["receive_id"], body))
+            return httpx.Response(200, json={"code": 0})
         if request.url.path.endswith("/reply"):
             self.replies.append(json.loads(request.content))
             self.reply_message_ids.append(request.url.path.split("/")[-2])
@@ -968,6 +974,25 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: Clock, wire: _Wi
         yield SimpleNamespace(client=client, pool=store, wire=wire)
     finally:
         client.close()
+
+
+def test_a_push_goes_only_to_the_chat_bound_to_the_tab(api) -> None:
+    """Dot's wake-up report is pushed to the bound chat; nothing else receives it."""
+
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    assert not asyncio.run(bot_api.push_to_tab("tab-1", "Task done")), "not bound yet"
+    _pair(api.pool, bot_id, owner=LOCAL, tab_id="tab-1", chat_id="oc-1", environ={})
+
+    assert asyncio.run(bot_api.push_to_tab("tab-1", "Task done"))
+    assert not asyncio.run(bot_api.push_to_tab("tab-2", "Task done"))
+    assert [chat for chat, _body in api.wire.pushes] == ["oc-1"]
+    assert "Task done" in api.wire.pushes[0][1]["content"]
+    assert api.wire.replies == []
+
+    entry = api.pool.snapshot({}).get(bot_id)
+    api.pool.release_binding(bot_id, expected_revision=entry.revision, environ={})
+    assert not asyncio.run(bot_api.push_to_tab("tab-1", "Task done")), "unbound"
+    assert len(api.wire.pushes) == 1
 
 
 def test_pairing_code_reply_carries_the_confirmation_word(api, clock: Clock) -> None:

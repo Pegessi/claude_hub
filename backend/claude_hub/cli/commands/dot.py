@@ -125,6 +125,14 @@ def dot_rotate(ctx: click.Context) -> None:
     emit(_call(ctx, "POST", "/rotate"), cli_main.as_json(ctx))
 
 
+@dot.command("notify")
+@click.argument("text")
+@click.pass_context
+def dot_notify(ctx: click.Context, text: str) -> None:
+    """Send a short message to the user's Feishu chat (the bot bound to the Dot Chat)."""
+    emit(_call(ctx, "POST", "/notify", json={"text": text}), cli_main.as_json(ctx))
+
+
 # ── memory ──────────────────────────────────────────────────────────────
 
 

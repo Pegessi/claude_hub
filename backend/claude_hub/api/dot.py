@@ -127,6 +127,12 @@ class WatchRequest(BaseModel):
     stall_hours: Optional[float] = Field(default=None, gt=0, le=720)
 
 
+class NotifyRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    text: str = Field(min_length=1, max_length=2000)
+
+
 class IdentityUpdate(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -238,6 +244,20 @@ async def dot_clear_avatar(current_user: User = Depends(get_current_user)) -> di
 async def dot_rotate(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
     _service().request_rotation()
     return {"rotate_requested": True}
+
+
+@router.post("/notify")
+async def dot_notify(
+    payload: NotifyRequest, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    if not payload.text.strip():
+        raise HTTPException(status_code=422, detail="text is empty")
+    if await _service().notify(payload.text):
+        return {"sent": True}
+    return {
+        "sent": False,
+        "reason": "No Feishu bot is bound to the Dot Chat, or Feishu refused the message.",
+    }
 
 
 @router.get("/health")

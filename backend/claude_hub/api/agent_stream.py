@@ -1705,13 +1705,17 @@ async def _yield_dot_turn(tab_id: str, session: ManagedSession, manager: TailerM
     service = get_dot_service()
     if not service.is_dot_tab(tab_id):
         return
-    active = await manager.active_turn_id(session)
-    if not active or not service.is_system_turn(active):
-        return
-    # Before the stop: its end drains the scheduler, which must find nothing to send.
-    service.drop_queued_system_runs()
-    if await manager.cancel_turn(session, expected_turn_id=active):
-        await asyncio.to_thread(service.yield_turn)
+    try:
+        active = await manager.active_turn_id(session)
+        if not active or not service.is_system_turn(active):
+            return
+        # Before the stop: its end drains the scheduler, which must find nothing to send.
+        service.drop_queued_system_runs()
+        if await manager.cancel_turn(session, expected_turn_id=active):
+            await asyncio.to_thread(service.yield_turn)
+    except Exception:
+        # Best effort: the user's message is still sent (or gets the usual busy reply).
+        logger.exception("Dot turn did not give way on tab %s", tab_id)
 
 
 async def _dispatch_tab_stream_input(

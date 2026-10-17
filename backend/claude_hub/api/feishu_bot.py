@@ -1158,6 +1158,43 @@ async def _reply_if_current(
         return False
 
 
+async def push_to_tab(tab_id: str, text: str) -> bool:
+    """Send a message no Feishu message asked for (Dot's wake-up report) to the
+    Feishu chat bound to ``tab_id``. False when no current binding routes there."""
+
+    try:
+        entry = next(
+            (
+                bot
+                for bot in _pool.snapshot().bots
+                if bot.enabled and bot.binding is not None and bot.binding.tab_id == tab_id
+            ),
+            None,
+        )
+        if entry is None or entry.binding is None:
+            return False
+        binding = entry.binding
+        effective = _pool.effective(entry.bot_id)
+    except FeishuBotPoolError:
+        return False
+    client = FeishuBotClient(effective.config)
+    payload = build_feishu_message_payload(text)
+    try:
+        # Token acquisition can block on Feishu and must stay outside the gate.
+        await client.get_tenant_token()
+        async with _gate(effective.bot_id):
+            if not _pool.is_current(effective) or not _binding_still_routes(effective, binding):
+                return False
+            await asyncio.wait_for(
+                client.send_message(binding.chat_id, payload.msg_type, payload.content),
+                timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
+            )
+            return True
+    except Exception as exc:
+        logger.warning("Feishu Bot push failed: %s", type(exc).__name__)
+        return False
+
+
 async def _add_processing_reaction(
     client: FeishuBotClient, event: FeishuMessageEvent, emoji_type: str = "Typing"
 ) -> str | None:
