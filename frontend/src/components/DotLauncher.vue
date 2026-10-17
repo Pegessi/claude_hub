@@ -46,7 +46,7 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { setupDot } from '@/utils/dotApi'
 
-// Compact: avatar only, with larger touch targets (mobile header).
+// Compact keeps separate avatar-only controls for the mobile header.
 defineProps<{ compact?: boolean }>()
 
 const appStore = useAppStore()
@@ -143,8 +143,6 @@ async function openDot() {
 }
 
 .dot-launcher--compact {
-  /* Inner buttons are 36px tall (the 1px border sits outside them). */
-  height: 38px;
   flex: 0 0 auto;
 }
 

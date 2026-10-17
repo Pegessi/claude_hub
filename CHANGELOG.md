@@ -7,6 +7,16 @@
 
 ## Released
 
+### fix(ui): align the mobile Dot toolbar and omit status summaries
+
+- Keep the compact Dot launcher on the same 30px row as the adjacent controls,
+  with consistent vertical centering across the mobile toolbar.
+- Omit Status/Agents summary markup on phones while preserving shared status
+  polling, per-tab status, both Dot actions and the desktop summaries. No new
+  listeners or timers.
+- Cover phone widths, the desktop breakpoint and ordinary Dot clicks in the
+  existing isolated browser gate.
+
 ### feat(chat): enable Hub-managed Goals for MASO
 
 - Advertise direct MASO Chats as Hub-managed Goal capable without enabling or

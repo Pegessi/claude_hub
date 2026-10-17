@@ -79,6 +79,15 @@ test('Dot launcher sits in the app bar and opens the Dot Chat tab', () => {
   assert.match(launcher, /<DotPanel[\s\S]*:open="panelOpen"/)
 })
 
+test('phone tab bars hide status summary markup while retaining its polling owners', () => {
+  const tabBar = read('../src/components/TabBar.vue')
+  const statusPanel = read('../src/components/AgentStatusFloatingPanel.vue')
+  assert.match(tabBar, /v-if="manualTabs\.length > 0"\s+:hide-summary="isMobile"\s+source="manual"/)
+  assert.match(tabBar, /v-if="managedTabs\.length > 0"\s+:hide-summary="isMobile"\s+source="managed"/)
+  assert.match(statusPanel, /v-if="!hideSummary && availableRows\.length > 0"/)
+  assert.match(tabBar, /v-if="tab\.session_kind === 'chat' \|\| tab\.is_active"\s+class="tab-indicator"/)
+})
+
 test('first-pass rate and review coverage read plainly', () => {
   assert.equal(api.formatFirstPass({ reviewed: 0, first_pass: 0, rate: null }), 'No reviews yet')
   assert.equal(api.formatFirstPass({ reviewed: 4, first_pass: 3, rate: 0.75 }), 'First pass 3/4 (75%)')

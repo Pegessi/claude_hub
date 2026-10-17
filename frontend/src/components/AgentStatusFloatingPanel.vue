@@ -1,6 +1,6 @@
 <template>
   <div
-    v-if="availableRows.length > 0"
+    v-if="!hideSummary && availableRows.length > 0"
     class="agent-status"
     :data-expanded="expanded"
   >
@@ -170,10 +170,13 @@ const props = withDefaults(defineProps<{
   source?: 'manual' | 'managed'
   label?: string
   panelTitle?: string
+  // Keep the shared status-polling owner alive even when its UI is omitted.
+  hideSummary?: boolean
 }>(), {
   source: 'managed',
   label: 'Agents',
   panelTitle: 'Workspace Agents',
+  hideSummary: false,
 })
 
 const store = useTerminalStore()

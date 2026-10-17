@@ -141,12 +141,14 @@
     </div>
     <AgentStatusFloatingPanel
       v-if="manualTabs.length > 0"
+      :hide-summary="isMobile"
       source="manual"
       label="Status"
       panel-title="Terminal Status"
     />
     <AgentStatusFloatingPanel
       v-if="managedTabs.length > 0"
+      :hide-summary="isMobile"
       source="managed"
       label="Agents"
       panel-title="Workspace Agents"
@@ -2149,6 +2151,10 @@ async function handleCreateTab() {
 }
 
 @media (max-width: 768px) {
+  .tab-bar {
+    align-items: center;
+  }
+
   .mobile-app-menu {
     display: flex;
     flex: 0 0 auto;
