@@ -1,35 +1,9 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import ts from 'typescript'
+import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-// Mirrors agentStreamTimeline.test.mjs: the timeline's ``@/utils/*`` imports
-// are stripped by regex and their transpiled sources concatenated ahead of it
-// (a data-URL module has no resolver). The new agentImage sibling travels too.
-const read = (p) => readFile(new URL(p, import.meta.url), 'utf8')
-const source = await read('../src/utils/agentStreamTimeline.ts')
-const questionSource = await read('../src/utils/chatQuestionResponse.ts')
-const durationSource = await read('../src/utils/duration.ts')
-const subagentSource = await read('../src/utils/subagentTool.ts')
-const agentImageSource = await read('../src/utils/agentImage.ts')
-
-const transpileOptions = {
-  compilerOptions: { module: ts.ModuleKind.ES2020, target: ts.ScriptTarget.ES2020 },
-}
-const j = (s) => ts.transpileModule(s, transpileOptions).outputText
-const timelineJs = j(source.replace(/^import .* from '@\/utils\/.*$/gm, ''))
-const bundled = [
-  j(durationSource),
-  j(questionSource),
-  j(subagentSource),
-  j(agentImageSource),
-  timelineJs,
-].join('\n')
-const mod = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
-)
+const mod = await loadChatUtility('agentStreamTimeline')
 const { groupEventsIntoTurns, countProcessSteps } = mod
 
 function makeEvent(seq, type, payload = {}, overrides = {}) {

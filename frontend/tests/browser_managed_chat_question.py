@@ -116,9 +116,13 @@ async def main(browser_run: BrowserRun) -> None:
     busy_sends: list[dict] = []
 
     async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
-        component_response = await context.request.get(f"{base}/src/components/StructuredPane.vue")
+        # Resolve dependency URLs from the implementations; the harness below
+        # deliberately mounts through the legacy public reexport paths.
+        component_response = await context.request.get(
+            f"{base}/src/features/chat/StructuredPane.vue"
+        )
         component = await component_response.text()
-        store_response = await context.request.get(f"{base}/src/stores/terminalStore.ts")
+        store_response = await context.request.get(f"{base}/src/stores/terminal/index.ts")
         store_source = await store_response.text()
         vue_match = re.search(r'from "([^"]*/vue.js[^"]*)"', component)
         pinia_match = re.search(r'from "([^"]*/pinia.js[^"]*)"', store_source)

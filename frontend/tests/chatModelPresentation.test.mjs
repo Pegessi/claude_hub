@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { computed, ref } from 'vue'
-import { loadChatUtility } from './chatPresentationTestHarness.mjs'
+import { loadChatFeature } from './chatPresentationTestHarness.mjs'
 
 const {
   presentChatModel,
@@ -10,7 +10,7 @@ const {
   defaultModelReasoningEffortLabel,
   filterChatModels,
   effortLabel,
-} = await loadChatUtility('chatModelPresentation')
+} = await loadChatFeature('presentation/chatModelPresentation')
 
 const model = {
   id: 'model', label: 'Model Label', provider_model_id: 'model-base', default_reasoning_effort: 'low',

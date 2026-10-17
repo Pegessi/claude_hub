@@ -22,10 +22,10 @@ from claude_hub.models import (
 from claude_hub.services.agent_stream import (
     codex_jsonl,
     native,
-    provider_guidance,
-    provider_model_options,
-    provider_questions,
 )
+from claude_hub.services.agent_stream.providers import guidance as provider_guidance
+from claude_hub.services.agent_stream.providers import model_options as provider_model_options
+from claude_hub.services.agent_stream.providers import questions as provider_questions
 
 
 @pytest.fixture

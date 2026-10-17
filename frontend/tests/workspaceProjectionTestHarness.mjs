@@ -6,7 +6,8 @@ const moduleUrls = new Map()
 
 export async function workspaceProjectionModuleUrl(name) {
   if (moduleUrls.has(name)) return moduleUrls.get(name)
-  const source = await readFile(new URL(`../src/utils/${name}.ts`, import.meta.url), 'utf8')
+  const sourcePath = name === 'duration' ? '../src/utils/duration.ts' : `../src/features/workspace/presentation/${name}.ts`
+  const source = await readFile(new URL(sourcePath, import.meta.url), 'utf8')
   let { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
   })

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { loadChatUtility } from './chatPresentationTestHarness.mjs'
+import { loadChatUtility, loadChatFeature } from './chatPresentationTestHarness.mjs'
 
 const { isTurnProcessExpanded, presentTurnParts, toolGroupStatus, turnProcessFoldSignature } =
-  await loadChatUtility('chatTurnPresentation')
+  await loadChatFeature('presentation/chatTurnPresentation')
 const { groupEventsIntoTurns } = await loadChatUtility('agentStreamTimeline')
 const event = (sequence, type, payload = {}, extra = {}) => ({
   stream_sequence: sequence, type, payload, session_id: 's', tab_id: 't',

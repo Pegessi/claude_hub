@@ -18,9 +18,19 @@ from pathlib import Path
 import pytest
 
 _API_DIR = Path(__file__).resolve().parent.parent / "claude_hub" / "api"
+_INJECTION_DIR = _API_DIR / "terminal_injection"
 TERMINAL_SOURCE = "\n".join(
-    (_API_DIR / name).read_text(encoding="utf-8")
-    for name in ("_terminal_injection_bootstrap.py", "_terminal_injection_runtime.py")
+    (_INJECTION_DIR / name).read_text(encoding="utf-8")
+    for name in (
+        "bootstrap.py",
+        "buffered_capture.py",
+        "history_replay.py",
+        "terminal_setup.py",
+        "history_resync.py",
+        "history_actions.py",
+        "input_controls.py",
+        "terminal_hook.py",
+    )
 )
 
 # Reads that force a synchronous layout reflow when done on the per-frame path.

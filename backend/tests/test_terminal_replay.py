@@ -1179,10 +1179,21 @@ def test_history_refresh_done_carries_request_id(terminal_tab: dict, page: Page)
 def _read_terminal_injection_source() -> str:
     from pathlib import Path
 
-    api_dir = Path(__file__).resolve().parents[1] / "claude_hub" / "api"
+    injection_dir = (
+        Path(__file__).resolve().parents[1] / "claude_hub" / "api" / "terminal_injection"
+    )
     return "\n".join(
-        (api_dir / name).read_text(encoding="utf-8")
-        for name in ("_terminal_injection_bootstrap.py", "_terminal_injection_runtime.py")
+        (injection_dir / name).read_text(encoding="utf-8")
+        for name in (
+            "bootstrap.py",
+            "buffered_capture.py",
+            "history_replay.py",
+            "terminal_setup.py",
+            "history_resync.py",
+            "history_actions.py",
+            "input_controls.py",
+            "terminal_hook.py",
+        )
     )
 
 

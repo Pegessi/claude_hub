@@ -3,7 +3,7 @@ import { Buffer } from 'node:buffer'
 import { getEventListeners } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { computed, createRenderer, nextTick, ref, watch } from 'vue'
+import { computed, createRenderer, nextTick, reactive, ref, watch } from 'vue'
 import ts from 'typescript'
 
 const transpileOptions = {
@@ -174,48 +174,98 @@ test('long-poll removes the parent abort listener after every normal request', a
   )
 })
 
-function extractFunction(source, name) {
-  const asyncStart = source.indexOf(`async function ${name}(`)
-  const syncStart = source.indexOf(`function ${name}(`)
-  const start = asyncStart >= 0 ? asyncStart : syncStart
-  assert.ok(start >= 0, `${name} must exist`)
-  const brace = source.indexOf('{', start)
-  let depth = 0
-  for (let index = brace; index < source.length; index += 1) {
-    if (source[index] === '{') depth += 1
-    else if (source[index] === '}') {
-      depth -= 1
-      if (depth === 0) return source.slice(start, index + 1)
+async function loadComposerEntries() {
+  const { useChatDelivery } = await import(
+    await moduleUrl('features/chat/controllers/useChatDelivery')
+  )
+  const { useChatQueue } = await import(
+    await moduleUrl('features/chat/controllers/useChatQueue')
+  )
+
+  return (deps) => {
+    let queue
+    const delivery = useChatDelivery({
+      attachments: deps.attachments,
+      authoritativeTurns: deps.authoritativeTurns,
+      connectionState: deps.connectionState,
+      get draftQueue() { return queue?.draftQueue ?? deps.draftQueue },
+      enqueueDraft() { queue?.enqueueDraft() },
+      events: ref([]),
+      goal: deps.goal,
+      goalComposerReason: deps.goalComposerReason,
+      goalError: deps.goalError,
+      goalImageRecovery: deps.goalImageRecovery,
+      goalInputBlocked: deps.goalInputBlocked,
+      goalSteerOnly: deps.goalSteerOnly,
+      hydrateGoal: deps.hydrateGoal,
+      get isDraftQueuePaused() { return queue?.isDraftQueuePaused ?? deps.isDraftQueuePaused },
+      isGoalHydrating: ref(false),
+      isGoalMutating: ref(false),
+      isManagedChat: deps.isManagedChat,
+      isPreparingAttachments: deps.isPreparingAttachments,
+      isUpdatingMode: deps.isUpdatingMode,
+      isUpdatingModel: deps.isUpdatingModel,
+      isUpdatingReasoningEffort: deps.isUpdatingReasoningEffort,
+      nudge() {},
+      requestLatestAnchor: deps.requestLatestAnchor,
+      streamBasePath: deps.streamBasePath,
+      syncComposerTextareaHeight: deps.syncComposerTextareaHeight,
+      terminalStore: deps.terminalStore,
+    })
+    delivery.draftMessage.value = deps.draftMessage.value
+    Object.assign(deps, {
+      canSend: delivery.canSend,
+      composerError: delivery.composerError,
+      draftMessage: delivery.draftMessage,
+      isSending: delivery.isSending,
+      isSubmissionReady: delivery.isSubmissionReady,
+      optimisticCancelledTurnId: delivery.optimisticCancelledTurnId,
+      pendingDirectTurns: delivery.pendingDirectTurns,
+      retrySendAttempt: delivery.retrySendAttempt,
+      turnInFlight: delivery.turnInFlight,
+    })
+    deps.queuedChatState.drafts = deps.draftQueue.value
+    deps.queuedChatState.paused = deps.isDraftQueuePaused.value
+    deps.queuedChatState.editing = deps.isEditingQueuedDraft.value
+    deps.queuedChatState.sendInProgress = deps.isQueueSendInProgress.value
+    deps.queuedChatState.autoActivationBlock = deps.queueAutoActivationBlock.value
+    queue = useChatQueue({
+      attachments: deps.attachments,
+      authoritativeTurns: deps.authoritativeTurns,
+      canSend: delivery.canSend,
+      composerError: delivery.composerError,
+      composerTextareaEl: ref(null),
+      connectionState: deps.connectionState,
+      draftMessage: delivery.draftMessage,
+      goalComposerLocked: deps.goalComposerLocked,
+      goalComposerReason: deps.goalComposerReason,
+      goalInputBlocked: deps.goalInputBlocked,
+      goalSteerOnly: deps.goalSteerOnly,
+      isPaneActivated: deps.isPaneActivated,
+      isPreparingAttachments: deps.isPreparingAttachments,
+      isSending: delivery.isSending,
+      isSubmissionReady: delivery.isSubmissionReady,
+      props: deps.props,
+      retrySendAttempt: delivery.retrySendAttempt,
+      submit: delivery.submit,
+      syncComposerTextareaHeight: deps.syncComposerTextareaHeight,
+      terminalStore: deps.terminalStore,
+      turnInFlight: delivery.turnInFlight,
+    })
+    Object.assign(deps, {
+      draftQueue: queue.draftQueue,
+      isDraftQueuePaused: queue.isDraftQueuePaused,
+      isEditingQueuedDraft: queue.isEditingQueuedDraft,
+      isQueueSendInProgress: queue.isQueueSendInProgress,
+      isWaitingForQueuedChatActivation: queue.isWaitingForQueuedChatActivation,
+      queueAutoActivationBlock: queue.queueAutoActivationBlock,
+    })
+    return {
+      ...delivery,
+      ...queue,
+      suspendStreamForDeactivation: () => deps.stop(),
     }
   }
-  throw new Error(`could not extract ${name}`)
-}
-
-async function loadComposerEntries() {
-  const source = await readFile(
-    new URL('../src/components/StructuredPane.vue', import.meta.url),
-    'utf8',
-  )
-  const snippet = [
-    extractFunction(source, 'sameRetryAttachment'),
-    extractFunction(source, 'reusableSendId'),
-    extractFunction(source, 'sendToStream'),
-    extractFunction(source, 'submit'),
-    extractFunction(source, 'reconcileQueuedDeliveries'),
-    extractFunction(source, 'reconcileGoalRecovery'),
-    extractFunction(source, 'sendQueuedDraft'),
-    extractFunction(source, 'suspendStreamForDeactivation'),
-    extractFunction(source, 'flushDraftQueue'),
-    extractFunction(source, 'requestDraftQueueFlush'),
-  ].join('\n')
-  const { outputText } = ts.transpileModule(snippet, transpileOptions)
-  const { toStreamSendAttachment } = await import(await moduleUrl('utils/agentStreamAttachments'))
-  const factory = new Function(
-    'deps',
-    'toStreamSendAttachment',
-    `const { isSending, goalComposerLocked, goalInputBlocked, goalSteerOnly, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, retrySendAttempt, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, isEditingQueuedDraft, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props, streamBasePath, isManagedChat, goal, goalImageRecovery, goalError, authoritativeTurns, queuedChatState } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush, reconcileQueuedDeliveries, reconcileGoalRecovery, sendQueuedDraft };`,
-  )
-  return (deps) => factory(deps, toStreamSendAttachment)
 }
 
 function composerDeps(options = {}) {
@@ -251,6 +301,17 @@ function composerDeps(options = {}) {
   const canSend = computed(() => isSubmissionReady.value
     && !goalComposerLocked.value
     && (draftMessage.value.trim().length > 0 || attachments.value.length > 0))
+  const queuedChatState = reactive({
+    paneId: 'pane-a',
+    tabId: 'tab-a',
+    drafts: [],
+    paused: false,
+    editing: false,
+    editingDraftId: null,
+    editingMessage: '',
+    sendInProgress: false,
+    autoActivationBlock: null,
+  })
 
   return {
     isSending,
@@ -270,6 +331,7 @@ function composerDeps(options = {}) {
     async hydrateGoal() {},
     terminalStore: {
       async fetchAgentStatuses() {},
+      getQueuedChatState() { return queuedChatState },
       requestQueuedChatActivation(paneId, tabId) {
         activationPending = true
         activationOwner = true
@@ -314,7 +376,7 @@ function composerDeps(options = {}) {
     goal: ref(null),
     goalImageRecovery: ref(false),
     goalError: ref(null),
-    queuedChatState: { editingDraftId: null },
+    queuedChatState,
   }
 }
 
@@ -696,9 +758,11 @@ test('a lost Goal recovery response retains identity until authoritative reconci
   assert.equal(deps.retrySendAttempt.value.goalRecovery, true)
   // The actual UI blocks sends while Goal hydration has failed. Even a
   // repeated imperative call must keep its Goal-controller idempotency key.
+  const retainedId = deps.retrySendAttempt.value.clientTurnId
   assert.equal(await entries.submit('steer'), false)
-  assert.equal(bodies[0].client_turn_id, bodies[1].client_turn_id)
-  deps.goal.value = { current_turn_id: bodies[0].client_turn_id, dispatch_state: 'dispatched' }
+  assert.equal(bodies.length, 1, 'failed Goal hydration blocks duplicate provider delivery')
+  assert.equal(deps.retrySendAttempt.value.clientTurnId, retainedId)
+  deps.goal.value = { current_turn_id: retainedId, dispatch_state: 'dispatched' }
   entries.reconcileGoalRecovery()
   assert.equal(deps.draftMessage.value, '')
   assert.equal(deps.attachments.value.length, 0)

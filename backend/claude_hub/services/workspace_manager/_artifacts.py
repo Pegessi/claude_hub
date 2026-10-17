@@ -2,8 +2,6 @@
 
 import subprocess
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 

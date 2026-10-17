@@ -3,7 +3,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from claude_hub.services.agent_stream import goal_protocol, tailer
+from claude_hub.services.agent_stream import tailer
+from claude_hub.services.agent_stream.runtime import goal_protocol
 from claude_hub.services.agent_stream.tailer import _GoalProtocolSanitizer
 
 _ENVELOPE = (

@@ -1,19 +1,9 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import ts from 'typescript'
+import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-const modules = await Promise.all([
-  'duration', 'chatQuestionResponse', 'subagentTool', 'agentImage',
-  'agentStreamTimeline', 'thinkingPresentation',
-].map(async name => ts.transpileModule(
-  (await readFile(new URL(`../src/utils/${name}.ts`, import.meta.url), 'utf8'))
-    .replace(/^import .* from '@\/utils\/.*$/gm, ''),
-  { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 } },
-).outputText))
-const { presentThinkingParts, createSubthreadThinkingPresenter, groupEventsIntoTurns, IncrementalTimelineReducer, foldTurnParts } =
-  await import(`data:text/javascript;base64,${Buffer.from(modules.join('\n')).toString('base64')}`)
+const { presentThinkingParts, createSubthreadThinkingPresenter } = await loadChatUtility('thinkingPresentation')
+const { groupEventsIntoTurns, IncrementalTimelineReducer, foldTurnParts } = await loadChatUtility('agentStreamTimeline')
 
 const status = (key, text = 'Done thinking', extra = {}) => ({
   kind: 'status', key, text, providerStatus: 'reasoning', messageId: `reasoning:${key}`, ...extra,

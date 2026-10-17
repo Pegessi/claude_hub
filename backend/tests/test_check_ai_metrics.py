@@ -73,6 +73,55 @@ def test_file_size_ratchet_allows_fixture_without_source_tree(tmp_path: Path) ->
     assert checker.check_file_size_ratchet(tmp_path) == []
 
 
+@pytest.mark.parametrize(
+    "template",
+    [
+        '<template src="./panel.html"></template>',
+        "<template\nlang='html' data-note='>'\nsrc=./panel.html></template>",
+        '<template src="./panel.html" />',
+        "<template SRC='./panel.html'></template>",
+    ],
+)
+def test_full_gate_rejects_external_vue_templates(tmp_path: Path, template: str) -> None:
+    checker = _load_checker()
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        (tmp_path / name).write_text("Guide\n", encoding="utf-8")
+    vue_file = tmp_path / "frontend/src/features/example/Panel.vue"
+    vue_file.parent.mkdir(parents=True)
+    vue_file.write_text(template, encoding="utf-8")
+
+    errors = checker.run_all_checks(tmp_path)
+
+    assert len(errors) == 1
+    assert "features/example/Panel.vue uses <template src>" in errors[0]
+    assert "vue-tsc" in errors[0]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '<template><img src="./image.png" /></template>',
+        '<!-- <template src="./example.html"> --><template><div /></template>',
+        '<template data-src="documentation"><div /></template>',
+        '<template><div /></template><script setup lang="ts">'
+        "const example = '<template src=\"./example.html\">';</script>",
+    ],
+)
+def test_template_coverage_allows_inline_content_and_documentation(
+    tmp_path: Path, source: str
+) -> None:
+    checker = _load_checker()
+    vue_file = tmp_path / "frontend/src/Panel.vue"
+    vue_file.parent.mkdir(parents=True)
+    vue_file.write_text(source, encoding="utf-8")
+
+    assert checker.check_vue_template_type_coverage(tmp_path) == []
+
+
+def test_template_coverage_allows_fixture_without_frontend(tmp_path: Path) -> None:
+    assert _load_checker().check_vue_template_type_coverage(tmp_path) == []
+
+
 def test_file_size_ratchet_requires_baseline_update_after_shrink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -248,6 +297,226 @@ def test_strict_schema_guard_accepts_inherited_config() -> None:
     assert checker._has_extra_forbid(classes["WorkspaceTask"], classes)
     assert not checker._has_extra_forbid(classes["PermissiveTask"], classes)
     assert checker._has_extra_forbid(classes["StrictDiamond"], classes)
+
+
+@pytest.mark.parametrize("permissive", [False, True])
+def test_strict_schema_guard_follows_reexports_and_imported_bases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, permissive: bool
+) -> None:
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "STRICT_TASK_STATE_SCHEMAS", ("WorkspaceTask",))
+    models = tmp_path / "backend" / "claude_hub" / "models"
+    domains = models / "domains"
+    domains.mkdir(parents=True)
+    (models / "schemas.py").write_text(
+        "from .domains.tasks import ActualTask as WorkspaceTask\n", encoding="utf-8"
+    )
+    (domains / "base.py").write_text(
+        "from pydantic import ConfigDict\n"
+        "class StrictBase:\n    model_config = ConfigDict(extra='forbid')\n",
+        encoding="utf-8",
+    )
+    body = (
+        "    model_config: ConfigDict = ConfigDict(extra='allow')\n" if permissive else "    pass\n"
+    )
+    (domains / "tasks.py").write_text(
+        "from claude_hub.models.domains.base import StrictBase as Base\n"
+        "class ActualTask(Base):\n" + body,
+        encoding="utf-8",
+    )
+
+    errors = checker.check_strict_schemas(tmp_path)
+
+    assert bool(errors) is permissive
+    if permissive:
+        assert "must declare extra='forbid'" in errors[0]
+
+
+@pytest.mark.parametrize("failure", ["cycle", "missing", "shadow", "annotated_shadow"])
+def test_strict_schema_reexport_failures_do_not_accept_stale_classes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "STRICT_TASK_STATE_SCHEMAS", ("WorkspaceTask",))
+    models = tmp_path / "backend" / "claude_hub" / "models"
+    models.mkdir(parents=True)
+    source = "from .tasks import WorkspaceTask\n"
+    if failure == "shadow":
+        source += "WorkspaceTask = object\n"
+    elif failure == "annotated_shadow":
+        source += "WorkspaceTask: type = object\n"
+    (models / "schemas.py").write_text(source, encoding="utf-8")
+    if failure != "missing":
+        (models / "tasks.py").write_text(
+            (
+                "from .schemas import WorkspaceTask\n"
+                if failure == "cycle"
+                else "class WorkspaceTask:\n    model_config = ConfigDict(extra='forbid')\n"
+            ),
+            encoding="utf-8",
+        )
+
+    assert checker.check_strict_schemas(tmp_path) == [
+        "Strict schema class WorkspaceTask is missing from models/schemas.py"
+    ]
+
+
+def test_final_source_policy_has_no_legacy_exemptions() -> None:
+    checker = _load_checker()
+    assert checker.DEFAULT_BACKEND_MAX_LINES == 800
+    assert checker.DEFAULT_FRONTEND_MAX_LINES == 800
+    assert checker.LEGACY_LINE_BUDGETS == {}
+    assert checker.LEGACY_IMPORT_CYCLES == ()
+
+
+@pytest.mark.parametrize("suffix", [".vue", ".ts", ".js", ".css", ".html"])
+def test_feature_sources_cannot_bypass_limit_by_file_extension(tmp_path: Path, suffix: str) -> None:
+    checker = _load_checker()
+    source = tmp_path / "frontend" / "src" / "features" / "chat" / f"oversized{suffix}"
+    source.parent.mkdir(parents=True)
+    source.write_text("line\n" * 801, encoding="utf-8")
+    assert checker.check_file_size_ratchet(tmp_path) == [
+        f"frontend/src/features/chat/oversized{suffix} has 801 lines, exceeding ceiling of 800 lines"
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "model_config = ConfigDict(extra='allow')",
+        "del model_config",
+        "model_config['extra'] = 'allow'",
+        "model_config.update(extra='allow')",
+        "model_config = make_permissive(extra='forbid')",
+        "model_config = {'extra': 'forbid', 'extra': 'allow'}",
+        "model_config = {'extra': 'forbid', **other}",
+        "cfg = model_config\n    cfg['extra'] = 'allow'",
+        "mutate(model_config)",
+        "@mutate(model_config)\n    def method(self):\n        pass",
+        "def method(self, value=mutate(model_config)):\n        pass",
+        "class Nested(mutate(model_config)):\n        pass",
+        "if enabled:\n        model_config = ConfigDict(extra='allow')",
+    ],
+)
+def test_strict_schema_rejects_later_config_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "STRICT_TASK_STATE_SCHEMAS", ("WorkspaceTask",))
+    source = tmp_path / "backend" / "claude_hub" / "models" / "schemas.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from pydantic import ConfigDict\n"
+        "class WorkspaceTask:\n    model_config = ConfigDict(extra='forbid')\n    "
+        + mutation
+        + "\n",
+        encoding="utf-8",
+    )
+    assert checker.check_strict_schemas(tmp_path)
+
+
+@pytest.mark.parametrize("base", ["ExternalPermissive", "external.Permissive", "Generic[T]"])
+def test_strict_schema_rejects_unknown_additional_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: str
+) -> None:
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "STRICT_TASK_STATE_SCHEMAS", ("WorkspaceTask",))
+    source = tmp_path / "backend" / "claude_hub" / "models" / "schemas.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "class StrictLocal:\n    model_config = ConfigDict(extra='forbid')\n"
+        f"class WorkspaceTask(StrictLocal, {base}):\n    pass\n",
+        encoding="utf-8",
+    )
+    assert checker.check_strict_schemas(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        "import arbitrary as WorkspaceTask",
+        "del WorkspaceTask",
+        "if enabled:\n    WorkspaceTask = object",
+        "try:\n    WorkspaceTask = object\nexcept Exception:\n    pass",
+    ],
+)
+def test_strict_schema_rejects_ambiguous_export_shadow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shadow: str
+) -> None:
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "STRICT_TASK_STATE_SCHEMAS", ("WorkspaceTask",))
+    source = tmp_path / "backend" / "claude_hub" / "models" / "schemas.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "class WorkspaceTask:\n    model_config = ConfigDict(extra='forbid')\n" + shadow + "\n",
+        encoding="utf-8",
+    )
+    assert checker.check_strict_schemas(tmp_path)
+
+
+def test_strict_schema_resolver_prefers_package_over_same_named_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "STRICT_TASK_STATE_SCHEMAS", ("WorkspaceTask",))
+    models = tmp_path / "backend" / "claude_hub" / "models"
+    (models / "tasks").mkdir(parents=True)
+    (models / "schemas.py").write_text("from .tasks import WorkspaceTask\n", encoding="utf-8")
+    (models / "tasks.py").write_text(
+        "class WorkspaceTask:\n    model_config = ConfigDict(extra='forbid')\n", encoding="utf-8"
+    )
+    (models / "tasks" / "__init__.py").write_text(
+        "class WorkspaceTask:\n    model_config = ConfigDict(extra='allow')\n", encoding="utf-8"
+    )
+    assert checker.check_strict_schemas(tmp_path)
+
+
+@pytest.mark.parametrize("initial_extra", ["allow", "forbid"])
+def test_strict_schema_inherits_base_at_class_definition_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, initial_extra: str
+) -> None:
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "STRICT_TASK_STATE_SCHEMAS", ("WorkspaceTask",))
+    models = tmp_path / "backend" / "claude_hub" / "models"
+    models.mkdir(parents=True)
+    opposite = "forbid" if initial_extra == "allow" else "allow"
+    (models / "initial.py").write_text(
+        f"class Base:\n    model_config = {{'extra': '{initial_extra}'}}\n", encoding="utf-8"
+    )
+    (models / "replacement.py").write_text(
+        f"class Base:\n    model_config = {{'extra': '{opposite}'}}\n", encoding="utf-8"
+    )
+    (models / "schemas.py").write_text(
+        "from .initial import Base\n"
+        "class WorkspaceTask(Base):\n    pass\n"
+        "from .replacement import Base\n",
+        encoding="utf-8",
+    )
+    assert bool(checker.check_strict_schemas(tmp_path)) is (initial_extra == "allow")
+
+
+@pytest.mark.parametrize(
+    ("prelude", "accepted"),
+    [
+        ("from pydantic import ConfigDict\n", True),
+        ("", False),
+        ("def ConfigDict(**kwargs):\n    return {'extra': 'allow'}\n", False),
+        ("from pydantic import ConfigDict\nConfigDict = other_factory\n", False),
+        ("from pydantic import ConfigDict\nif enabled:\n    ConfigDict = other_factory\n", False),
+    ],
+)
+def test_strict_schema_proves_config_constructor_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prelude: str, accepted: bool
+) -> None:
+    checker = _load_checker()
+    monkeypatch.setattr(checker, "STRICT_TASK_STATE_SCHEMAS", ("WorkspaceTask",))
+    source = tmp_path / "backend" / "claude_hub" / "models" / "schemas.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        prelude + "class WorkspaceTask:\n    model_config = ConfigDict(extra='forbid')\n",
+        encoding="utf-8",
+    )
+    assert (checker.check_strict_schemas(tmp_path) == []) is accepted
 
 
 def test_warning_policy_requires_cleaned_warning_families(tmp_path: Path) -> None:

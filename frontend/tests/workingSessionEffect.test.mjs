@@ -15,6 +15,21 @@ const effect = readFileSync(
   new URL('../src/components/ChatSidebarWorkingEffect.vue', import.meta.url),
   'utf8',
 )
+const sidebarRow = readFileSync(
+  new URL('../src/features/chat/sidebar/ChatSidebarRow.vue', import.meta.url),
+  'utf8',
+)
+const sidebarShell = readFileSync(
+  new URL('../src/features/chat/sidebar/ChatSidebar.vue', import.meta.url),
+  'utf8',
+)
+
+test('sidebar row owns the effect while the shell pauses hidden mobile animations', () => {
+  assert.match(sidebarRow, /<ChatSidebarWorkingEffect/)
+  assert.match(sidebarRow, /v-if="status === 'working'"/)
+  assert.match(sidebarShell, /\.chat-sidebar\.mobile-drawer:not\(\.mobile-drawer--open\) :deep\(\.working-effect \*\)/)
+  assert.match(sidebarShell, /\.chat-sidebar\.mobile-drawer\.mobile-drawer--dragging :deep\(\.working-effect \*\)/)
+})
 
 test('the beam crosses the top edge left to right and the bottom edge right to left', () => {
   const top = [0, 0.25, 0.5, 0.75, 1].map(x => beamPassFraction(x, 'top'))

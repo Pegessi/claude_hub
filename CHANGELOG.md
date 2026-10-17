@@ -7,6 +7,20 @@
 
 ## Released
 
+### refactor(architecture): bound legacy sources and organize feature ownership
+
+- Apply the 800-line production-source limit to existing and new code, including
+  extracted frontend templates/styles; remove all legacy size and import-cycle exemptions.
+- Organize terminal, provider, stream, Workspace, API, model/CLI and UI behavior
+  into named feature directories instead of growing general helper directories.
+- Replace WorkspaceManager package back-references with explicit typed runtime
+  dependencies and remove module-initialization import cycles without new lazy-loading workarounds.
+- Preserve single state/lock/cache owners, public compatibility entrypoints,
+  protocol and command behavior; add static schema-reexport checks and real
+  component/KeepAlive/Workspace-detail browser coverage.
+- Keep Vue templates inline and type-checked, with feature-local setup composables;
+  reject external SFC templates that silently bypass the installed `vue-tsc`.
+
 ### refactor(core): extract pure helpers from large runtime and UI owners
 
 - Separate terminal catalog/snapshot parsing, provider protocol/model formatting

@@ -377,7 +377,7 @@ test('applyBoardPayloadState appends load-more done page for active workspace', 
 })
 
 const viewSource = await readFile(
-  new URL('../src/components/AgentWorkspaceView.vue', import.meta.url),
+  new URL('../src/features/workspace/components/WorkspaceBoard.vue', import.meta.url),
   'utf8',
 )
 
@@ -387,13 +387,22 @@ test('AgentWorkspaceView exposes load-more control for older done tasks', () => 
   assert.match(viewSource, /handleLoadOlderTasks/)
 })
 
+const workspaceRuntimeSource = await readFile(
+  new URL('../src/features/workspace/composables/useWorkspaceRuntime.ts', import.meta.url),
+  'utf8',
+)
+
 test('AgentWorkspaceView column counts prefer server status totals', () => {
   assert.match(viewSource, /taskCountByStatus/)
-  assert.match(viewSource, /status_counts/)
+  assert.match(workspaceRuntimeSource, /status_counts/)
 })
 
 const storeSource = await readFile(
-  new URL('../src/stores/workspaceStore.ts', import.meta.url),
+  new URL('../src/stores/workspace/index.ts', import.meta.url),
+  'utf8',
+)
+const workspaceActionsSource = await readFile(
+  new URL('../src/stores/workspace/actions.ts', import.meta.url),
   'utf8',
 )
 
@@ -414,7 +423,7 @@ test('workspaceStore delegates payload acceptance to boardPagination helpers', (
 })
 
 test('workspaceStore deleteTask refreshes board with reset', () => {
-  assert.match(storeSource, /async function deleteTask[\s\S]*fetchBoard\([^)]*\{\s*reset:\s*true\s*\}/)
+  assert.match(workspaceActionsSource, /async function deleteTask[\s\S]*fetchBoard\([^)]*\{\s*reset:\s*true\s*\}/)
 })
 
 test('workspaceStore load-more exposes error retry state', () => {

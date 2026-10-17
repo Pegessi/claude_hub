@@ -5,7 +5,7 @@ import { loadWorkspaceProjection } from './workspaceProjectionTestHarness.mjs'
 const {
   matchingFeedbackLessons, lessonTitle, lessonDescription, lessonTags,
   feedbackSummaryTone, feedbackSummaryTitle, feedbackSummaryDescription, feedbackLessonMatchSummary,
-} = await loadWorkspaceProjection('workspaceFeedback')
+} = await loadWorkspaceProjection('feedback')
 
 function lesson(id, overrides = {}) {
   return { id, summary: '', ...overrides }

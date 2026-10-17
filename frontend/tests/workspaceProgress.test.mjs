@@ -5,7 +5,7 @@ import { loadWorkspaceProjection } from './workspaceProjectionTestHarness.mjs'
 const {
   progressTimeline, latestReportAgeLabel, taskTotalElapsedLabel, taskWorkingElapsedLabel,
   reportElapsedLabel, reportElapsedTitle,
-} = await loadWorkspaceProjection('workspaceProgress')
+} = await loadWorkspaceProjection('progress')
 
 const epoch = Date.parse('2026-10-17T10:00:00Z')
 const at = seconds => new Date(epoch + seconds * 1000).toISOString()
