@@ -1,6 +1,23 @@
 # Complete source boundaries, feature directories and acyclic initialization
 
-## Scope and acceptance
+## Source-budget policy clarification
+
+After reviewing `976ab86`, the user confirmed restoring the previously agreed
+hard ceilings: backend Python may have up to 1500 lines; covered frontend sources
+may have up to 2500 lines. The 800-line target remains advisory, not a hard gate.
+Scoped structural tests use the same hard ceilings, with explicit boundary tests
+for 801/1500/1501 backend lines and 801/2500/2501 lines in every frontend format.
+The decomposition, empty legacy exemptions, import-cycle and template-type checks
+remain in place. The original target and verification results below describe the
+completed refactoring stage rather than the current hard-limit policy.
+
+The policy follow-up passed 101 focused backend tests, 8 focused frontend tests,
+and `verify.sh all` (4276 backend passed, 10 skipped; 1024 frontend passed;
+formatting, types, docs and build passed). It changes no runtime sources and does
+not address the three facade-override compatibility findings from the later
+cross-review.
+
+## Original scope and acceptance
 
 Continue from `cf16254`, whose first extraction preserved runtime behavior but
 left old large files exempt and feature-specific helpers in general directories.

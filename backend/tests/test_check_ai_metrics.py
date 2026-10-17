@@ -363,21 +363,51 @@ def test_strict_schema_reexport_failures_do_not_accept_stale_classes(
 
 def test_final_source_policy_has_no_legacy_exemptions() -> None:
     checker = _load_checker()
-    assert checker.DEFAULT_BACKEND_MAX_LINES == 800
-    assert checker.DEFAULT_FRONTEND_MAX_LINES == 800
+    assert checker.DEFAULT_BACKEND_MAX_LINES == 1500
+    assert checker.DEFAULT_FRONTEND_MAX_LINES == 2500
     assert checker.LEGACY_LINE_BUDGETS == {}
     assert checker.LEGACY_IMPORT_CYCLES == ()
 
 
-@pytest.mark.parametrize("suffix", [".vue", ".ts", ".js", ".css", ".html"])
-def test_feature_sources_cannot_bypass_limit_by_file_extension(tmp_path: Path, suffix: str) -> None:
+@pytest.mark.parametrize("line_count", [801, 1500, 1501])
+def test_backend_hard_limit_is_inclusive_and_800_is_advisory(
+    tmp_path: Path, line_count: int
+) -> None:
     checker = _load_checker()
-    source = tmp_path / "frontend" / "src" / "features" / "chat" / f"oversized{suffix}"
+    source = tmp_path / "backend" / "claude_hub" / "services" / "example.py"
     source.parent.mkdir(parents=True)
-    source.write_text("line\n" * 801, encoding="utf-8")
-    assert checker.check_file_size_ratchet(tmp_path) == [
-        f"frontend/src/features/chat/oversized{suffix} has 801 lines, exceeding ceiling of 800 lines"
-    ]
+    source.write_text("value = 1\n" * line_count, encoding="utf-8")
+
+    expected = (
+        [
+            f"backend/claude_hub/services/example.py has {line_count} lines, "
+            "exceeding ceiling of 1500 lines"
+        ]
+        if line_count > 1500
+        else []
+    )
+    assert checker.check_file_size_ratchet(tmp_path) == expected
+
+
+@pytest.mark.parametrize("suffix", [".vue", ".ts", ".js", ".css", ".html"])
+@pytest.mark.parametrize("line_count", [801, 2500, 2501])
+def test_feature_sources_cannot_bypass_limit_by_file_extension(
+    tmp_path: Path, suffix: str, line_count: int
+) -> None:
+    checker = _load_checker()
+    source = tmp_path / "frontend" / "src" / "features" / "chat" / f"example{suffix}"
+    source.parent.mkdir(parents=True)
+    source.write_text("line\n" * line_count, encoding="utf-8")
+
+    expected = (
+        [
+            f"frontend/src/features/chat/example{suffix} has {line_count} lines, "
+            "exceeding ceiling of 2500 lines"
+        ]
+        if line_count > 2500
+        else []
+    )
+    assert checker.check_file_size_ratchet(tmp_path) == expected
 
 
 @pytest.mark.parametrize(

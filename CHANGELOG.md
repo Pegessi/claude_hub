@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(governance): restore agreed source line ceilings
+
+- Restore hard limits to 1500 lines for backend Python and 2500 lines for all
+  covered frontend source formats; retain 800 lines as advisory refactoring guidance.
+- Align scoped structural tests with those ceilings and cover the inclusive
+  boundaries, including files above 800 that remain within the hard limit.
+- Retain the feature decomposition, empty legacy exemptions, acyclic import
+  requirement, strict schemas and Vue template type-coverage checks.
+
 ### refactor(architecture): bound legacy sources and organize feature ownership
 
 - Apply the 800-line production-source limit to existing and new code, including

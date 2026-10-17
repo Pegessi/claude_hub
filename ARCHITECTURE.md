@@ -118,9 +118,11 @@ there is no mutable default-dependency installation or module-global syncing.
 Historical function-local cleanup lookups retain their original public patch
 semantics; they were not added to conceal an initialization cycle.
 
-Every backend Python and frontend Vue/TypeScript/JavaScript/CSS/HTML production
-source is limited to 800 lines, with no legacy exemptions. The module-initialization
-import graph must be acyclic; type-only imports are excluded, runtime `else`
+Production source hard limits are 1500 lines for backend Python and 2500 lines
+for frontend Vue/TypeScript/JavaScript/CSS/HTML, with no legacy exemptions.
+Keeping a file within 800 lines remains a recommended refactoring target, not a
+verification failure threshold. The module-initialization import graph must be
+acyclic; type-only imports are excluded, runtime `else`
 branches are included. Strict task schemas are checked through explicit static
 reexports without importing application code. See the
 [structural completion record](docs/working-logs/2026-10-17-feature-structure-and-cycles.md)

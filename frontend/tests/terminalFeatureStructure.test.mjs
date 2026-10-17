@@ -43,7 +43,7 @@ test('legacy terminal component entrypoints are pure default re-exports', () => 
 test('terminal feature files respect the production line budget', () => {
   for (const path of productionFiles) {
     const lineCount = read(path).split('\n').length - 1
-    assert.ok(lineCount <= 800, `${path} has ${lineCount} lines (limit 800)`)
+    assert.ok(lineCount <= 2500, `${path} has ${lineCount} lines (limit 2500)`)
   }
 })
 
