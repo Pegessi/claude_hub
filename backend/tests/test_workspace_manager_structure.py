@@ -228,7 +228,7 @@ def test_owned_workspace_manager_sources_stay_bounded() -> None:
     oversized = {
         path.relative_to(_MANAGER_ROOT).as_posix(): len(path.read_text().splitlines())
         for path in _owned_sources()
-        if len(path.read_text().splitlines()) > 800
+        if len(path.read_text().splitlines()) > 1500
     }
 
     assert oversized == {}

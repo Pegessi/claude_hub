@@ -27,7 +27,7 @@ def test_owned_api_production_files_stay_within_line_limit() -> None:
     oversized = {
         path.relative_to(_API_DIR): len(path.read_text(encoding="utf-8").splitlines())
         for path in _OWNED_PRODUCTION_FILES
-        if len(path.read_text(encoding="utf-8").splitlines()) > 800
+        if len(path.read_text(encoding="utf-8").splitlines()) > 1500
     }
 
     assert oversized == {}

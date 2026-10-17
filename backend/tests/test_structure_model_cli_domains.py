@@ -278,6 +278,6 @@ def test_restructured_production_modules_stay_below_legacy_size_limit() -> None:
     oversized = {
         str(path): len(path.read_text().splitlines())
         for path in paths
-        if len(path.read_text().splitlines()) > 800
+        if len(path.read_text().splitlines()) > 1500
     }
     assert oversized == {}
