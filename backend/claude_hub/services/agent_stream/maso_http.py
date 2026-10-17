@@ -190,8 +190,11 @@ class MasoHttpSession(ProviderSession):
     supports_images = True
     supports_tool_timeline = True
     supports_approval_ui = True
-    supports_goals = False
-    goal_execution_owner = None
+    supports_goals = True
+    goal_execution_owner = "hub_managed"
+    # MASO turn_end closes one model call. Only the root agent_end closes the
+    # provider run that Hub exposes as one Chat turn.
+    goal_completion_requires_provider_event = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -301,9 +304,12 @@ class MasoHttpSession(ProviderSession):
             structured=self._last_error is None and self._current_mode == "default",
             adapter_id=self.adapter_id,
             schema_version=self.schema_version,
-            supports_tool_timeline=True,
-            supports_approval_ui=True,
+            supports_tool_timeline=self.supports_tool_timeline,
+            supports_approval_ui=self.supports_approval_ui,
             supports_images=self.supports_images,
+            supports_goals=self.supports_goals,
+            goal_execution_owner=self.goal_execution_owner,
+            goal_usage_quality=self.goal_usage_quality,
             available_models=self._available_models,
             available_modes=self.available_modes(),
             current_mode=self._current_mode,

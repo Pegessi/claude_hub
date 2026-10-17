@@ -548,7 +548,10 @@ async def test_discovery_is_http_only_and_variants_use_provider_keys() -> None:
         await provider.start()
         await provider.prepare_capabilities()
         caps = provider.capabilities()
-        assert caps.structured and not caps.supports_goals
+        assert caps.structured and caps.supports_goals
+        assert caps.goal_execution_owner == "hub_managed"
+        assert caps.goal_usage_quality == "unavailable"
+        assert provider.goal_completion_requires_provider_event
         assert [m.id for m in caps.available_models] == ["seed"]
         assert (
             caps.available_models[0].supported_reasoning_efforts[1].provider_model_id == "seed-high"
@@ -559,6 +562,88 @@ async def test_discovery_is_http_only_and_variants_use_provider_keys() -> None:
         assert isinstance(get_adapter_for_session(session()), MasoEventAdapter)
     finally:
         await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_goal_waits_for_root_agent_end_and_hides_protocol(tmp_path, monkeypatch) -> None:
+    from claude_hub.services.agent_stream import tailer as tailer_module
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tailer_module, "GOAL_TERMINAL_GRACE_S", 0.0)
+    record = session()
+    server = MasoServer()
+    provider = transport(server, record)
+    observed = []
+
+    async def observer(event) -> None:
+        observed.append(event)
+
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+        post_persist_observers=[observer],
+    )
+    queue = await tailer.subscribe_completion()
+    response = (
+        "Visible progress.\n"
+        '<goal-checkpoint>{"verified_progress":[],"decisions":[],"remaining":["next"],'
+        '"blocker":null,"next_step":"continue"}</goal-checkpoint>\n'
+        '<goal-status state="continue">next</goal-status>'
+    )
+    try:
+        await tailer.send_message(
+            "Continue the active Goal.",
+            [],
+            "goal-turn",
+            visible_text="Continue active Goal",
+            turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
+        )
+        stream = server.streams[-1]
+        stream.emit("turn_end", {"agent_id": "main", "id": "answer", "content": response})
+        stream.emit("agent_start", {"agent_id": "child"})
+        stream.emit("agent_end", {"agent_id": "child", "stop_reason": "completed"})
+
+        for _ in range(100):
+            page = await tailer._store.read_since(-1, 100)
+            if any(event.type == AgentStreamEventType.TEXT_DELTA for event in page.events):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("MASO Goal response was not persisted")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(queue.get(), 0.1)
+        assert provider.turn_in_flight
+        assert tailer._goal_terminal_at is None
+        assert not any(
+            path.endswith("/control") or path.endswith("/exit") for _, path, _ in server.calls
+        )
+
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        completed = await asyncio.wait_for(queue.get(), 2)
+        await asyncio.sleep(0)
+        page = await tailer._store.read_since(-1, 100)
+        visible = "".join(
+            str(event.payload.get("text") or "")
+            for event in page.events
+            if event.type == AgentStreamEventType.TEXT_DELTA
+            and not event.payload.get("subagent_thread")
+        )
+
+        assert completed.type == AgentStreamEventType.TURN_COMPLETED
+        assert completed.payload["status"] == "completed"
+        assert visible.strip() == "Visible progress."
+        assert "goal-status" not in completed.payload["assistant_text"]
+        assert observed[-1].payload["_goal_protocol_text"] == response
+        assert not any("/auto" in path for _, path, _ in server.calls)
+    finally:
+        tailer.unsubscribe_completion(queue)
+        await tailer.stop()
 
 
 @pytest.mark.asyncio

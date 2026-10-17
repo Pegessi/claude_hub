@@ -2405,10 +2405,15 @@ class _FakeNativeTransport:
     def accepts_notification(self, record):
         return True
 
-    def __init__(self, eof_is_fatal: bool = False) -> None:
+    def __init__(
+        self,
+        eof_is_fatal: bool = False,
+        goal_completion_requires_provider_event: bool = False,
+    ) -> None:
         self._started = True
         self._records: asyncio.Queue = asyncio.Queue()
         self.eof_is_fatal = eof_is_fatal
+        self.goal_completion_requires_provider_event = goal_completion_requires_provider_event
         self.stop_called = False
         self.sent_messages: List[Tuple[str, List[bytes]]] = []
         self._turn_in_flight = False
@@ -4185,23 +4190,28 @@ async def test_goal_turn_provider_result_within_grace_wins(
 
 
 @pytest.mark.asyncio
-async def test_goal_turn_persistent_transport_is_not_synthesized(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("eof_is_fatal", "goal_completion_requires_provider_event"),
+    [(True, False), (False, True)],
+    ids=["persistent-app-server", "multi-stage-service"],
+)
+async def test_goal_turn_provider_owned_completion_is_not_synthesized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    eof_is_fatal: bool,
+    goal_completion_requires_provider_event: bool,
 ) -> None:
-    """Codex/TraeX app-servers keep their own terminal; never synthesize early.
-
-    Even with a complete goal-status envelope and a zero grace, a persistent
-    (``eof_is_fatal``) transport must keep the turn in flight and must not
-    publish a completion, since the app-server's own turn/completed is the
-    authority and releasing early would contaminate the next turn.
-    """
+    """Provider-owned terminal events remain authoritative past zero grace."""
     from claude_hub.services.agent_stream import tailer as tailer_module
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 
     _isolate_state_root(monkeypatch, tmp_path)
     monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.05)
     monkeypatch.setattr(tailer_module, "GOAL_TERMINAL_GRACE_S", 0.0)
-    transport = _FakeNativeTransport(eof_is_fatal=True)
+    transport = _FakeNativeTransport(
+        eof_is_fatal=eof_is_fatal,
+        goal_completion_requires_provider_event=goal_completion_requires_provider_event,
+    )
     session = _native_session()
     tailer = SessionTailer(
         workspace_id="ws-goal-persistent",

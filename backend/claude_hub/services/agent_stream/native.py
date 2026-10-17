@@ -993,6 +993,9 @@ class ProviderSession(ABC):
     supports_goals: bool = True
     goal_execution_owner: Optional[Literal["provider_native", "hub_managed"]] = "hub_managed"
     goal_usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
+    # One-shot CLIs can leave stdout open after their final Goal response. Other
+    # transports own a larger provider run and must emit its terminal event.
+    goal_completion_requires_provider_event: bool = False
 
     def __init__(
         self,

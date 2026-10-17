@@ -141,6 +141,27 @@ bounded event IDs can reset, so an interrupted connection fails the turn and
 attempts to stop it rather than claiming lossless replay. The next normal turn
 can continue on the same session after cleanup succeeds.
 
+## Hub-managed Goals
+
+Direct top-level MASO Chats advertise Hub-managed Goal mode. Hub persists the
+objective, checkpoint, dispatch identity and lifecycle, then sends each bounded
+continuation through the same ordinary MASO message endpoint used by Chat. It
+does not enable or call MASO Auto; only Hub schedules these Goal turns. Managed
+Workspace Chats retain their Task-owned controls and do not expose direct-Chat
+Goals.
+
+A trailing Goal control envelope is model output, not proof that the full MASO
+run ended. Hub keeps the control text out of the visible transcript and waits
+for the root `agent_end` before observing the Goal step as complete; `turn_end`
+and child `agent_end` events cannot release the next continuation. This keeps
+MASO tools, child agents and finalizers inside the turn that started them.
+
+Goal pause, clear and steering use the existing exact-turn cancellation path.
+Unknown HTTP acceptance or an interrupted SSE stream retains the same fail-closed
+behavior as ordinary MASO Chat: Hub does not automatically repeat the Goal step.
+Plan mode remains unavailable for MASO, so Goals always run in default Agent
+mode.
+
 ## Stop and request uncertainty
 
 Stop immediately retires the stream generation, removes this turn's pending
@@ -164,8 +185,8 @@ after a Hub restart. The error explains that the service may still execute the
 message: inspect and stop the session in MASO before starting a new Chat. An
 idle status immediately after a timeout is not proof of cancellation.
 
-This integration supports local Chat, text, images, reasoning, tool output and
-tool confirmations. Goals, Plan mode and editing earlier turns are not
+This integration supports local Chat, text, images, reasoning, tool output, tool
+confirmations and Hub-managed Goals. Plan mode and editing earlier turns are not
 advertised. Automatic long-context condensation remains MASO's responsibility;
 Hub adds no separate condenser.
 
