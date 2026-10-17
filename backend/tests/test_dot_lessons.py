@@ -692,11 +692,11 @@ async def test_a_reviewer_question_is_news_but_not_a_worker_question(
     assert not store.get_work("task-q").get("asked")  # type: ignore[union-attr]
 
 
-def test_a_tidy_turn_leaves_events_for_the_user(service: DotService) -> None:
+def test_a_tidy_turn_leaves_events_for_the_wake_up(service: DotService) -> None:
     event = service.store.add_inbox("task_done", "Paper — done", task_id="task-1")
     plan = service.prepare_turn("[Dot tidy] Nightly memory tidy.", "conv-1")
     assert plan.delivered_event_ids == [] and "Paper — done" not in plan.turn_pack
-    plan = service.prepare_turn("hi", None)
+    plan = service.prepare_turn(service_module.WAKE_MESSAGE, None)
     assert plan.delivered_event_ids == [event["id"]]
 
 
@@ -1158,6 +1158,8 @@ def test_turn_fills_a_cold_index_outside_the_store_lock(
     monkeypatch.setattr(service.index, "sync", locked)
     monkeypatch.setattr(service.index, "search", locked)
     plan = service.prepare_turn("what about the paper notes", "conv-1")
+    assert "Port — ported" in plan.turn_pack
+    plan = service.prepare_turn("[Dot wake] what about the paper notes", "conv-1")
     assert "Port — ported" in plan.turn_pack and plan.delivered_event_ids
 
 

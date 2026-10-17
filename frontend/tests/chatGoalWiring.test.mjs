@@ -79,10 +79,10 @@ test('active Goal accepts steers while queued drafts wait for the Goal to stop',
   )
   assert.ok(pane.includes('if (!messageOverride && goalInputBlocked.value)'))
   // Enter queues and ⌘/Ctrl+Enter steers while the Goal runs.
-  assert.ok(pane.includes('turnInFlight: turnInFlight.value || goalSteerOnly.value'))
+  assert.ok(pane.includes('turnInFlight: composerTurnInFlight.value || goalSteerOnly.value'))
   assert.match(
     pane,
-    /if \(\s*!isManagedChat\.value &&\s*delivery === 'normal' &&\s*\(turnInFlight\.value \|\| goalSteerOnly\.value\) &&\s*!messageOverride\s*\) \{\s*enqueueDraft\(\)/,
+    /if \(\s*!isManagedChat\.value &&\s*delivery === 'normal' &&\s*\(composerTurnInFlight\.value \|\| goalSteerOnly\.value\) &&\s*!messageOverride\s*\) \{\s*enqueueDraft\(\)/,
   )
   // Direct Goal turns keep steering; managed Task turns always use normal delivery.
   assert.ok(pane.includes("submit(isManagedChat ? 'normal' : (goalSteerOnly ? 'steer' : 'normal'))"))

@@ -213,7 +213,7 @@ async function loadComposerEntries() {
   const factory = new Function(
     'deps',
     'toStreamSendAttachment',
-    `const { isSending, goalComposerLocked, goalInputBlocked, goalSteerOnly, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, optimisticCancelledTurnId, pendingDirectTurns, retrySendAttempt, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, isEditingQueuedDraft, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props, streamBasePath, isManagedChat, goal, goalImageRecovery, goalError, authoritativeTurns, queuedChatState } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush, reconcileQueuedDeliveries, reconcileGoalRecovery, sendQueuedDraft };`,
+    `const { isSending, goalComposerLocked, goalInputBlocked, goalSteerOnly, composerError, goalComposerReason, draftMessage, attachments, turnInFlight, composerTurnInFlight, optimisticCancelledTurnId, pendingDirectTurns, retrySendAttempt, requestLatestAnchor, hydrateGoal, terminalStore, nextTick, syncComposerTextareaHeight, draftQueue, connectionState, isSubmissionReady, isDraftQueuePaused, isPaneActivated, isQueueSendInProgress, isEditingQueuedDraft, queueAutoActivationBlock, isWaitingForQueuedChatActivation, canSend, stop, props, streamBasePath, isManagedChat, goal, goalImageRecovery, goalError, authoritativeTurns, queuedChatState } = deps;\n${outputText}\nreturn { submit, suspendStreamForDeactivation, flushDraftQueue, requestDraftQueueFlush, reconcileQueuedDeliveries, reconcileGoalRecovery, sendQueuedDraft };`,
   )
   return (deps) => factory(deps, toStreamSendAttachment)
 }
@@ -262,6 +262,8 @@ function composerDeps(options = {}) {
     draftMessage,
     attachments,
     turnInFlight,
+    // No turn here yields to the user, so the composer is held whenever a turn runs.
+    composerTurnInFlight: turnInFlight,
     authoritativeTurnInFlight,
     optimisticCancelledTurnId: ref(null),
     pendingDirectTurns,

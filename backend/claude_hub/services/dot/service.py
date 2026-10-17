@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -13,7 +14,13 @@ from typing import Any, Optional
 from .context import TurnPack, build_session_pack, build_turn_pack
 from .index import DotIndex
 from .lessons import lesson_score, lint_brief, same_rule, session_rules
-from .prompts import BRIEF_TEMPLATE, QUIET_REPLY, TIDY_MESSAGE, WAKE_MESSAGE
+from .prompts import (
+    BRIEF_TEMPLATE,
+    QUIET_REPLY,
+    RETIRED_WAKE_MESSAGES,
+    TIDY_MESSAGE,
+    WAKE_MESSAGE,
+)
 from .store import FOCUS_LIMIT, Card, DotStore, now_iso, utc_now
 
 logger = logging.getLogger(__name__)
@@ -29,6 +36,8 @@ WAKE_INTERVAL_SECONDS = 10 * 365 * 24 * 3600
 TIDY_CRON = "17 3 * * *"
 # Task state changes are rare; one cheap in-memory pass a minute is enough.
 WATCH_INTERVAL_SECONDS = 60.0
+# A wake-up that gave way to the user waits this long before it runs again.
+YIELD_PAUSE_SECONDS = 180.0
 DEFAULT_STALL_HOURS = 2.0
 _TERMINAL_TASK_STATES = {"done", "failed"}
 # Only running tasks can look stuck; review waits on a person, todo was never started.
@@ -182,6 +191,7 @@ class DotService:
         self._journal_lock: Optional[asyncio.Lock] = None
         self._setup_lock: Optional[asyncio.Lock] = None
         self._wake_pending = False
+        self._yielded_at = float("-inf")
         self._watch_task: Optional[asyncio.Task[None]] = None
         self._state_cache: tuple[tuple[int, int, int], dict[str, Any]] = ((-1, -1, -1), {})
 
@@ -221,6 +231,64 @@ class DotService:
 
     def is_set_up(self) -> bool:
         return self.tab_id() is not None
+
+    def is_system_schedule(self, schedule_id: Optional[str]) -> bool:
+        """Dot's own wake-up or tidy schedule: its turns give way to the user."""
+        state = self._peek_state()
+        return bool(schedule_id) and schedule_id in (
+            state.get("wake_schedule_id"),
+            state.get("tidy_schedule_id"),
+        )
+
+    def is_system_turn(self, turn_id: Optional[str]) -> bool:
+        """The Chat turn is a run of Dot's wake-up or tidy schedule."""
+        from .. import workspace_manager
+
+        if not turn_id:
+            return False
+        return any(
+            run.client_turn_id == turn_id and self.is_system_schedule(run.scheduled_task_id)
+            for run in list(workspace_manager.scheduled_task_runs.values())
+        )
+
+    def drop_queued_system_runs(self) -> None:
+        """Queued wake-up or tidy runs would take the Chat when a stopped turn ends.
+
+        The user's message goes first; the wake-up is asked for again by ``yield_turn``.
+        """
+        from .. import workspace_manager
+
+        state = self._peek_state()
+        dropped = 0
+        for key in ("wake_schedule_id", "tidy_schedule_id"):
+            if state.get(key):
+                dropped += workspace_manager.drop_pending_scheduled_task_runs(
+                    state[key], "gave way to the user"
+                )
+        if dropped:
+            # Even when the running turn ends before the stop lands.
+            self._wake_pending = True
+            self._yielded_at = time.monotonic()
+
+    def yield_turn(self) -> None:
+        """A wake-up or tidy turn was stopped for the user: it did not happen.
+
+        Its events are unread again and wait for the next wake-up (asked for
+        here). Its end may not be synced yet; the turn's record forgets them, so
+        that end cannot give them back a second time after a later turn read them.
+        """
+        self._wake_pending = True
+        self._yielded_at = time.monotonic()
+        with self.store.lock:
+            sent = _sent_turns(self.store.read_state())
+            turn = sent[-1] if sent else {}
+            if not turn.get("hub"):
+                return
+            ids = [str(one) for one in turn.get("ids") or []] if turn.get("acked") else []
+            turn["ids"] = []
+            self.store.update_state(sent_turns=sent)
+        if ids:
+            self.store.mark_inbox_unread(ids)
 
     # ── setup ───────────────────────────────────────────────────────────
 
@@ -321,6 +389,8 @@ class DotService:
                 # time the user picked in the right form is kept.
                 if any(getattr(existing, field, None) is None for field in timing):
                     update.update(timing)
+                if existing.message in RETIRED_WAKE_MESSAGES:
+                    update["message"] = message
                 if update:
                     workspace_manager.update_scheduled_task(
                         existing.id, ScheduledTaskUpdate(**update)
@@ -358,6 +428,7 @@ class DotService:
         state = self.store.read_state()
         now = utc_now()
         stripped = text.lstrip()
+        hub = stripped.startswith("[Dot ")
         tidy = stripped.startswith("[Dot tidy]")
         started = _parse_time(state.get("session_started_at"))
         turns = int(state.get("session_turns") or 0)
@@ -387,17 +458,23 @@ class DotService:
             first_turn=new_session,
             session_turn=turns,
             # A Hub wake-up's fixed words would recall the same cards every time.
-            recall=not stripped.startswith("[Dot "),
-            # A tidy turn is not the user's: events wait for a turn that can act on them.
+            recall=not hub,
+            # A tidy turn has other work: events wait for a wake-up.
             inbox=not tidy,
+            wake=hub,
         )
+        # Only a wake-up handles events. The user's turn shows them, but the user
+        # comes first: they stay unread for the wake-up that follows.
+        delivered = pack.delivered_event_ids if hub else []
         # Remembered until the turn ends: a failed turn gives its events and its
         # first-turn context back (see ``_turn_ended``).
         sent: dict[str, Any] = {
             "at": utc_now().isoformat(),
-            "ids": pack.delivered_event_ids,
+            "ids": delivered,
             "first": new_session,
         }
+        if hub:
+            sent["hub"] = True
         if tidy:
             # Counted as a tidy only when the turn ends well (see ``_turn_ended``).
             sent["tidy"] = True
@@ -417,10 +494,12 @@ class DotService:
             conversation_id=conversation_id,
             system_pack=system_pack,
             turn_pack=pack.text,
-            delivered_event_ids=pack.delivered_event_ids,
+            delivered_event_ids=delivered,
         )
 
-    def _turn_ended(self, started_at: Any, until: Any, ended_at: Any, failed: bool) -> None:
+    def _turn_ended(
+        self, started_at: Any, until: Any, ended_at: Any, failed: bool, cancelled: bool = False
+    ) -> None:
         """Match a finished turn to the turn Dot prepared for it.
 
         A turn is prepared after it starts and before the next one starts
@@ -430,6 +509,8 @@ class DotService:
 
         A failed turn never reached Dot: its events are unread again, and when it
         opened a session the next turn opens a fresh one (with the recent talk).
+        A stopped turn may not have handled its events either: they are unread
+        again too, and a stopped tidy is no tidy.
         """
         started, bound, ended = _parse_time(started_at), _parse_time(until), _parse_time(ended_at)
         if ended is None:
@@ -456,13 +537,14 @@ class DotService:
                 changes["rotate_requested"] = True
             # A failed tidy is no tidy; two tidies may end out of order.
             tidied, last = _parse_time(turn.get("at")), _parse_time(state.get("last_tidy_at"))
-            if turn.get("tidy") and not failed and tidied and (last is None or tidied > last):
+            finished = not failed and not cancelled
+            if turn.get("tidy") and finished and tidied and (last is None or tidied > last):
                 changes["last_tidy_at"] = turn["at"]
             self.store.update_state(**changes)
         # Only a turn the provider took marked its events read; a later turn may have
         # shown and read them since a turn that was never taken.
         ids = [str(one) for one in turn.get("ids") or []] if turn.get("acked") else []
-        if failed and ids:
+        if not finished and ids:
             self.store.mark_inbox_unread(ids)
 
     def mark_delivered(self, event_ids: list[str]) -> None:
@@ -516,7 +598,7 @@ class DotService:
             starts: dict[str, tuple[str, Any]] = {}
             # Ended turns wait for the next start, the end of the window they were
             # prepared in; the last ones wait for the time of the last read.
-            ended: list[tuple[Any, Any, bool]] = []
+            ended: list[tuple[Any, Any, bool, bool]] = []
             added = 0
             last_completed = cursor
             while True:
@@ -530,18 +612,20 @@ class DotService:
                             event.created_at,
                         )
                         for turn in ended:
-                            self._turn_ended(turn[0], event.created_at, turn[1], turn[2])
+                            self._turn_ended(turn[0], event.created_at, *turn[1:])
                         ended.clear()
                     elif event.type == AgentStreamEventType.TURN_COMPLETED:
                         asked, asked_at = starts.pop(event.turn_id or "", ("", None))
                         answer = str(payload.get("assistant_text") or "")
                         last_completed = event.stream_sequence
+                        status = payload.get("status")
                         ended.append(
-                            (asked_at, event.created_at, payload.get("status") == "failed")
+                            (asked_at, event.created_at, status == "failed", status == "cancelled")
                         )
                         from_hub = asked.lstrip().startswith("[Dot ")
-                        if from_hub and answer.strip() == QUIET_REPLY:
-                            # Nothing needed the user; keep it out of the recent talk.
+                        if from_hub and (answer.strip() == QUIET_REPLY or status == "cancelled"):
+                            # Nothing needed the user, or the turn gave way to the user
+                            # and runs again later; keep it out of the recent talk.
                             continue
                         if asked.strip():
                             who = "hub" if from_hub else "you"
@@ -564,7 +648,7 @@ class DotService:
                 if not page.has_more:
                     break
             for turn in ended:
-                self._turn_ended(turn[0], read_at, turn[1], turn[2])
+                self._turn_ended(turn[0], read_at, *turn[1:])
             if last_completed != int(self.store.read_state().get("journal_seq", -1)):
                 self.store.update_state(journal_seq=last_completed)
             if added:
@@ -927,9 +1011,14 @@ class DotService:
     async def _watch_loop(self) -> None:
         while True:
             try:
-                if self.is_set_up() and (await self.check_work() or self._wake_pending):
-                    # A failed or skipped wake retries next tick while events are unread.
-                    self._wake_pending = not await self.wake() and bool(self.store.list_inbox())
+                # The user may still be talking: a wake-up that gave way waits a while.
+                paused = time.monotonic() - self._yielded_at < YIELD_PAUSE_SECONDS
+                retry = self._wake_pending and not paused
+                if self.is_set_up() and (await self.check_work() or retry):
+                    # A failed or skipped wake, or one that gave way to the user,
+                    # retries while events are unread (a tidy that gave way waits
+                    # for the next night).
+                    self._wake_pending = bool(self.store.list_inbox()) and not await self.wake()
             except asyncio.CancelledError:
                 raise
             except Exception:

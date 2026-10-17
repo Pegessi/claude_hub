@@ -2,6 +2,8 @@
 export interface ChatTurnLifecycle {
   completed: boolean
   errors: readonly unknown[]
+  /** The backend stops this turn when the user sends (Dot's own wake-up or tidy). */
+  yieldsToUser?: boolean
 }
 
 /** Minimal stream event projection used for one-shot runtime-status refreshes. */
@@ -31,6 +33,19 @@ export function isChatModeLocked(
   const latest = turns[turns.length - 1]
   if (!latest) return false
   return !latest.completed && latest.errors.length === 0
+}
+
+/**
+ * Whether a new message must queue behind the running turn. A turn that yields
+ * to the user is stopped by the backend when the user sends, so the composer
+ * sends at once instead; the mode stays locked until that turn ends.
+ */
+export function isComposerHeldByTurn(
+  hasPendingSubmission: boolean,
+  turns: readonly ChatTurnLifecycle[],
+): boolean {
+  if (!isChatModeLocked(hasPendingSubmission, turns)) return false
+  return hasPendingSubmission || !turns[turns.length - 1]?.yieldsToUser
 }
 
 function eventIdentity(event: ChatStreamLifecycleEvent): string {

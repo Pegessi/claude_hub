@@ -142,6 +142,24 @@ test('serialized turn history preserves explicit source without inferring from t
   assert.equal(messageSourceLabel(turns[2]), null)
 })
 
+test('a turn that yields to the user is marked from its server-authored start', () => {
+  const turns = groupEventsIntoTurns(JSON.parse(JSON.stringify([
+    makeEvent(1, 'turn_started', {
+      summary: '[Dot wake] New events',
+      metadata: { origin: 'scheduled_task', yields_to_user: true },
+    }, { turn_id: 'scheduled-wake' }),
+    // A provider echo without metadata keeps the mark.
+    makeEvent(2, 'turn_started', { summary: '[Dot wake] New events' }, { turn_id: 'scheduled-wake' }),
+    makeEvent(3, 'turn_started', {
+      summary: 'daily report',
+      metadata: { origin: 'scheduled_task', yields_to_user: 'yes' },
+    }, { turn_id: 'scheduled-other' }),
+  ])))
+  assert.equal(turns.length, 2)
+  assert.equal(turns[0].yieldsToUser, true)
+  assert.equal(turns[1].yieldsToUser, false)
+})
+
 test('Feishu source avatars reject non-HTTPS URLs', () => {
   const turns = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', {

@@ -7,7 +7,7 @@ import { computed, onUnmounted, watch } from 'vue'
 import { useAgentStream } from '@/composables/useAgentStream'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { IncrementalTimelineReducer } from '@/utils/agentStreamTimeline'
-import { isChatModeLocked } from '@/utils/chatTurnLifecycle'
+import { isComposerHeldByTurn } from '@/utils/chatTurnLifecycle'
 
 const props = defineProps<{
   paneId: string
@@ -20,7 +20,7 @@ const store = useTerminalStore()
 const queue = store.getQueuedChatState(props.paneId, props.tabId)
 const { events, connectionState, start, stop } = useAgentStream()
 const reducer = new IncrementalTimelineReducer()
-const turnInFlight = computed(() => isChatModeLocked(false, reducer.reduce(events.value)))
+const turnInFlight = computed(() => isComposerHeldByTurn(false, reducer.reduce(events.value)))
 
 function reconcileQueue() {
   if (queue.drafts.length === 0 || queue.paused || queue.editing || queue.sendInProgress) {

@@ -88,8 +88,9 @@ the card's kind, even when a card was moved by hand without editing `kind`.
 1. Hub sends a user turn to the Dot tab.
 2. `ClaudeNativeSession` asks the Dot service to prepare the turn:
    - decide rotation (turn count, age, explicit request, `[Dot tidy]`);
-   - build the **session pack** (role, user profile, concepts, delegation
-     rules from lessons, tool guide) —
+   - build the **session pack** (role, the Hub's "stay free for the user"
+     rules, user profile, concepts, delegation rules from lessons, tool
+     guide) —
      passed via `--append-system-prompt`, stable for the whole session;
    - build the **turn pack** (time, focus, open work, tasks waiting for
      review, new inbox events, cards recalled by the user's words (not on
@@ -102,10 +103,12 @@ the card's kind, even when a card was moved by hand without editing `kind`.
      push them out; a section that does not fit is skipped, not the ones after
      it. A cut recent talk keeps the latest exchanges.
 3. After the turn completes, a post-persist observer appends the exchange to
-   the journal and commits the Dot home. Inbox events in the pack are marked
-   read when the provider takes the turn; if the turn then fails, they are
-   unread again, and a failed first turn makes the next turn open a fresh
-   session (so the recent talk is shown again).
+   the journal and commits the Dot home. Only a wake-up handles events: its
+   inbox events are marked read when the provider takes the turn; if the turn
+   then fails or is stopped, they are unread again. A user's turn shows
+   waiting events and reviews too, but leaves them to the next wake-up. A
+   failed first turn makes the next turn open a fresh session (so the recent
+   talk is shown again).
 
 ## Delegation and wake-up
 
@@ -151,6 +154,27 @@ write is retried without a second copy of the event.
 So Dot wakes often when many tasks move and rarely when few do. On a wake it
 tells the user only what needs them. When nothing does, it replies exactly
 `[quiet]`; that turn is hidden from the chat and kept out of the journal.
+
+### The user comes first
+
+The Dot Chat is also where the user talks to Dot (web, or a bound Feishu bot),
+so Dot's own turns must not keep the user waiting:
+
+- A wake-up or nightly tidy turn **gives way**. When a user message arrives on
+  the Dot tab (web or Feishu) while one runs, the Hub stops it and sends the
+  user's message at once. The stopped wake-up gives its events back and runs
+  again about three minutes later (while events wait); a stopped tidy waits
+  for the next night. A stopped Hub turn stays out of the journal.
+- Its turns carry `yields_to_user` in their start metadata, so the web
+  composer sends (instead of queueing behind the turn) while one runs.
+- Turns stay short. The session pack tells Dot to keep every turn to a few
+  steps, hand long work to a Task, judge a returned task from its result card
+  instead of redoing the worker's checks, and answer the user first.
+- A wake-up schedule that still has the earlier Hub words gets the current
+  ones; words the user wrote stay.
+
+Not covered: a Feishu message that arrives during the user's own web turn on
+the Dot tab still gets the usual "busy" reply.
 
 ## Brief, review, lesson
 
