@@ -271,11 +271,13 @@ def test_schedules_are_created_once_and_follow_the_tab(
 
     # A wake-up still holding the earlier Hub words gets the current ones; words the
     # user wrote are kept.
-    updates.clear()
-    wake.message = service_module.RETIRED_WAKE_MESSAGES[0]
     tidy.message = "my own tidy words"
-    service.ensure_schedules("tab-new")
-    assert updates == [(wake.id, {"message": service_module.WAKE_MESSAGE})]
+    for retired in service_module.RETIRED_WAKE_MESSAGES:
+        updates.clear()
+        wake.message = retired
+        service.ensure_schedules("tab-new")
+        assert updates == [(wake.id, {"message": service_module.WAKE_MESSAGE})]
+    assert service_module.WAKE_MESSAGE not in service_module.RETIRED_WAKE_MESSAGES
 
     # One schedule made, the next one failed: a retry makes only the missing one.
     del schedules[wake.id], schedules[tidy.id]
@@ -539,6 +541,7 @@ async def test_failed_wake_retries_while_events_are_unread(
     monkeypatch.setattr(workspace_manager, "scheduled_tasks", {"sched-1": object()})
     monkeypatch.setattr(workspace_manager, "run_scheduled_task", run)
     monkeypatch.setattr(service_module, "WATCH_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(service_module, "YIELD_PAUSE_SECONDS", 0)
     service.store.update_state(wake_schedule_id="sched-1")
     service.store.add_inbox("task_ready", "done")
     checks = iter([1, 0])
@@ -557,6 +560,29 @@ async def test_failed_wake_retries_while_events_are_unread(
     await service.stop()
     assert next(results, "spent") == "spent", "the failed wake was retried"
     assert not service._wake_pending
+
+
+@pytest.mark.asyncio
+async def test_a_failing_wake_up_is_not_retried_every_minute(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    tries: list[str] = []
+
+    async def run(schedule_id: str) -> None:
+        tries.append(schedule_id)
+        raise ValueError("schedule is disabled")
+
+    monkeypatch.setattr(workspace_manager, "scheduled_tasks", {"sched-1": object()})
+    monkeypatch.setattr(workspace_manager, "scheduled_task_runs", {})
+    monkeypatch.setattr(workspace_manager, "run_scheduled_task", run)
+    service.store.update_state(wake_schedule_id="sched-1")
+    service.store.add_inbox("task_ready", "done")
+    monkeypatch.setattr(service, "check_work", AsyncMock(side_effect=[1, 0, 0, 1]))
+    for _ in range(3):
+        await service._wake_if_due()
+    assert len(tries) == 1 and service._wake_pending
+    await service._wake_if_due()
+    assert len(tries) == 2, "new events try at once"
 
 
 @pytest.mark.asyncio
@@ -943,6 +969,8 @@ async def test_dot_decides_what_reaches_feishu(
     key = "sk-" + "a" * 24
     assert await service.notify(f"  Paper task is done. Key {key}  ")
     assert pushed == [(TAB_ID, "Paper task is done. Key [REDACTED]")]
+    assert await service.notify("Paper task is done. Key " + key)
+    assert len(pushed) == 1, "a wake-up that ran again does not send it twice"
     bound = False
     assert not await service.notify("No bot bound")
 

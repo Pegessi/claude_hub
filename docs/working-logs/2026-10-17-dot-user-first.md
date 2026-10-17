@@ -69,6 +69,17 @@ reply), and the wake message points to it.
 - The web "Busy turn follow-ups are durable" hint follows the composer, so it
   is hidden while a Dot turn gives way.
 
+Second review (of the notify and watch-loop change):
+
+- A wake-up that ran again could send the same notice twice: `notify` skips
+  text it sent in the last 30 minutes.
+- Wake schedules written with the first short-turn words kept them (no
+  `dot notify` hint): those words are retired too.
+- A wake-up that kept failing at once (e.g. a disabled schedule) was retried
+  every minute: it now waits the pause unless new events came.
+- The tool guide no longer assumes Dot knows a turn came from Feishu: "not
+  for answering their message".
+
 ## Not covered
 
 - A Feishu message during the user's own web turn on the Dot tab still gets

@@ -160,6 +160,8 @@ user now (a task they asked for is done or failed, a blocking decision, a
 problem), Dot decides to send it with `claude-hub dot notify "<text>"`: the
 Hub sends it to the Feishu chat bound to the Dot tab (`POST /api/dot/notify`;
 `sent: false` when no bot is bound). Known secret patterns are masked first.
+The same text sent in the last 30 minutes is not sent again (a wake-up that
+was stopped or failed runs again and may repeat its notice).
 
 ### The user comes first
 
