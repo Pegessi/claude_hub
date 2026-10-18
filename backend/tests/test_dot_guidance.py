@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from claude_hub.services.dot import DotService, DotStore
-from claude_hub.services.dot.context import build_session_pack
+from claude_hub.services.dot.context import TURN_PACK_CHARS, build_session_pack, build_turn_pack
 from claude_hub.services.dot.prompts import (
     BRIEF_TEMPLATE,
     DEFAULT_ROLE,
@@ -28,6 +28,8 @@ def test_guidance_preserves_choices_and_explicit_tool_contracts() -> None:
     assert "Delegate long or many-step work" in DEFAULT_ROLE
     assert "Delegate long or many-step work to Hub Tasks" in TURN_RULES
     assert "when useful" not in TURN_RULES
+    assert "lengthy test runs" in TURN_RULES
+    assert "tracked tasks (delegated or watched)" in TOOL_GUIDE
     assert "not a watched task or human acceptance" in TOOL_GUIDE
     assert "A redo does not restart work" in TOOL_GUIDE
     assert "once the user agrees" in TOOL_GUIDE
@@ -78,3 +80,53 @@ def test_new_home_uses_guidance_and_existing_session_keeps_its_snapshot(tmp_path
     assert "Custom role second version" in fresh.system_pack
     assert "Custom role first version" not in fresh.system_pack
     assert store.role_path.read_text() == "Custom role second version.\n"
+
+
+@pytest.mark.parametrize("wake", [True, False], ids=["wake", "user"])
+def test_tracked_work_distinguishes_ownership_without_changing_review_state(
+    tmp_path: Path,
+    wake: bool,
+) -> None:
+    store = DotStore(tmp_path / "dot")
+    for task_id, watched in (("delegated", False), ("watched", True)):
+        store.upsert_work(
+            task_id,
+            title=task_id,
+            workspace_id="ws",
+            status="review",
+            watched=watched,
+            review_due=True,
+        )
+    # Older delegated entries omit the optional watched flag.
+    store.upsert_work("legacy", title="legacy", workspace_id="ws", status="working")
+    before = store.list_work()
+    pack = build_turn_pack(store, None, "", first_turn=False, session_turn=1, wake=wake)
+    assert "## Tracked work" in pack.text and "## Delegated work" not in pack.text
+    assert "[delegated] delegated — review (delegated; workspace ws)" in pack.text
+    assert "[watched] watched — review (watched; workspace ws)" in pack.text
+    assert "[legacy] legacy — working (delegated; workspace ws)" in pack.text
+    reviews = pack.text.split("## Waiting for your review", 1)[1]
+    assert "[delegated]" in reviews and "[watched]" not in reviews
+    assert store.list_work() == before
+    assert len(pack.text) <= TURN_PACK_CHARS
+
+
+@pytest.mark.parametrize("watched", [True, False], ids=["watched", "delegated"])
+def test_result_card_includes_tracking_without_taking_review_ownership(
+    tmp_path: Path,
+    watched: bool,
+) -> None:
+    store = DotStore(tmp_path / "dot")
+    item = store.upsert_work(
+        "task-1",
+        title="Result",
+        workspace_id="ws",
+        status="review",
+        watched=watched,
+    )
+    card = DotService(store)._result_card(item, "review", None)
+    tracking = "watched" if watched else "delegated"
+    assert f"Tracking: {tracking} by Dot" in card.body
+    if watched:
+        assert "task ownership is unchanged" in card.body
+    assert store.get_work("task-1") == item

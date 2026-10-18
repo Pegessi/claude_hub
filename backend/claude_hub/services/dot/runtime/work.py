@@ -515,6 +515,11 @@ class DotWorkService(DotSessionService, ABC):
     ) -> Card:
         message = _clip_text(str(getattr(report, "message", "") or "(no report)"))
         lines = [f"Task `{item['task_id']}` in workspace `{item.get('workspace_id')}`: {status}."]
+        lines.append(
+            "Tracking: watched by Dot; task ownership is unchanged."
+            if item.get("watched")
+            else "Tracking: delegated by Dot."
+        )
         if item.get("goal"):
             lines += ["", f"Goal: {item['goal']}"]
         if item.get("output"):

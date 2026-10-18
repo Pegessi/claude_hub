@@ -31,9 +31,11 @@ alone continues the existing snapshot. This change adds no forced rotation or
 prompt revision mechanism.
 
 Normal schedule setup/start refreshes only exact old defaults for the matching
-wake or tidy schedule. Custom wording (including whitespace edits), cross-kind
-text and existing user timing are preserved. No live setup, schedule mutation,
-message, rotation, service restart, merge or push was performed during this task.
+wake or tidy schedule. Custom wording (including whitespace edits) and cross-kind
+text are preserved. User timing is retained in the current form (wake interval,
+tidy cron); the existing migration converts cron-form wake schedules, including
+custom cron, to the event-only interval. No live setup, schedule mutation, message,
+rotation, service restart, merge or push was performed during this task.
 
 ## Verification
 
@@ -65,3 +67,25 @@ Dot focused tests: 138 passed. Strict `verify.sh all` exited 0 again: backend
 4337 passed / 10 skipped in 218.32s, frontend 1029 passed, and all other standard
 targets passed. Independent delta review passed. Evidence:
 `/tmp/ch-dot-guidance-checks/delegation-all.log`. No live state was changed.
+
+## Follow-up: independent review corrections
+
+The user accepted three review suggestions:
+
+- Clarify that the delegation example refers to lengthy test runs, keeping small
+  bounded checks distinct from long or many-step work.
+- Correct the timing-preservation documentation: the existing wake migration
+  converts cron-form schedules to the event-only interval, even for custom cron.
+  No scheduling behavior changed in this follow-up.
+- Rename the contextual list to `Tracked work` and identify each item as watched
+  or delegated. Newly generated result cards include the same distinction. The
+  work-list tool description now covers both. Existing cards are not rewritten,
+  and review/acceptance ownership, state, events and deduplication are unchanged.
+
+Focused Dot scope passed 142 tests. Tests cover mixed tracked work, legacy entries
+without a watched flag, both user and wake contexts, review-list isolation,
+ordinary result cards and the final-review notification path. Strict `verify.sh
+all` exited 0: backend 4341 passed / 10 skipped in 219.67s; frontend 1029 passed;
+all standard format/type/lint/build/docs checks passed. The clean-delivery test
+is rerun after commit. Independent review of all three fixes passed. Evidence:
+`/tmp/ch-dot-guidance-checks/review-fixes-all.log`. Live model behavior was not tested.

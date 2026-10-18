@@ -127,9 +127,10 @@ def _work_lines(store: DotStore) -> list[str]:
     for item in store.list_work():
         state = item.get("status") or "unknown"
         where = item.get("workspace_id") or "?"
+        tracking = "watched" if item.get("watched") else "delegated"
         lines.append(
             f"- [{item.get('task_id')}] {_clip(item.get('title', ''), 120)} — {state} "
-            f"(workspace {where})"
+            f"({tracking}; workspace {where})"
         )
     return lines[-15:]
 
@@ -247,7 +248,7 @@ def build_turn_pack(
     work = _take_lines(_work_lines(store), _WORK_CHARS, newest_last=True)
     sections: list[tuple[str, list[str]]] = [
         ("## Focus (what matters now)", focus or ["- (empty — ask what matters)"]),
-        ("## Delegated work", work or ["- (none)"]),
+        ("## Tracked work", work or ["- (none)"]),
     ]
     # Reviews go before events: a busy inbox must not push them out of the pack.
     reviews = _review_lines(store, wake)

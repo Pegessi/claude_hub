@@ -120,8 +120,10 @@ mid-conversation. Restarting the backend alone does not rebuild a cached pack.
 
 On normal schedule setup/start, exact known old wake and tidy defaults are updated
 to their corresponding current wording. Custom text (including a whitespace edit)
-and user-picked timings are preserved. This source change does not itself restart
-the service, rotate Dot, or edit its live memory home.
+is preserved. Timings are preserved when already in the current form: an interval
+for wake and cron for tidy. The existing timing migration converts a cron-form
+wake schedule to the event-only interval, including a custom cron. This source
+change does not itself restart the service, rotate Dot, or edit its live memory home.
 
 ## Delegation and wake-up
 
@@ -133,8 +135,11 @@ panel) adds a Hub Task you started yourself;
 `dot unwatch` stops tracking it (the panel asks first when a review is
 waiting, since the review is dropped). Watching a watched task again keeps its
 place (unseen reports still raise events). Watching a task Dot delegated keeps it a
-delegated task (only `--stall-hours` changes), so its review is not lost. A
-background watcher checks tracked tasks every 60 seconds; one task that cannot
+delegated task (only `--stall-hours` changes), so its review is not lost. The
+`Tracked work` context section labels each task as `delegated` or `watched`.
+Newly generated result cards carry the same distinction; stored older cards are
+not rewritten. These labels describe tracking, not permission to accept a task.
+A background watcher checks tracked tasks every 60 seconds; one task that cannot
 be read does not stop the others. When one finishes, fails, needs input (the
 worker or the Hub reviewer asks), or looks stuck it:
 
