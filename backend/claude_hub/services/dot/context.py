@@ -76,7 +76,7 @@ def build_session_pack(store: DotStore) -> str:
     rules = session_rules(store.list_lessons(), utc_now())
     if rules:
         parts.append(
-            "## Delegation rules (learned from your past briefs)\n"
+            "## Brief guidance (learned from past reviews)\n"
             + "\n".join(f"- {_clip(rule.get('rule', ''))} [{rule.get('id')}]" for rule in rules)
         )
     profile = _take_lines(
@@ -160,13 +160,12 @@ def _review_lines(store: DotStore, wake: bool) -> list[str]:
     if len(pending) > _REVIEWS_PER_TURN:
         lines.append(f"- ({len(pending) - _REVIEWS_PER_TURN} more)")
     if not wake:
-        lines.append("- Your next wake-up judges these; answer the user first.")
+        lines.append("- Prefer to answer the user first; unrelated reviews can wait for a wake-up.")
         return lines
     lines.append(
-        "- Judge each result against its done-when list, then "
-        "`claude-hub dot review <task-id> --verdict ok|redo|skip [--cause brief|env|worker|change] "
-        '[--note "..."]`; a brief miss needs `--lesson` or `--lesson-id`, any other redo or a '
-        "skip needs `--note`."
+        "- Consider the evidence against each done-when item. "
+        "`claude-hub dot review` records ok/redo/skip for delegated tasks; "
+        "see `claude-hub dot review --help` for causes and notes."
     )
     return lines
 
@@ -181,10 +180,8 @@ def _event_lines(events: list[dict[str, Any]]) -> list[str]:
     for event in events[-_EVENTS_PER_TURN:]:
         card = f" (card {event['card_id']})" if event.get("card_id") else ""
         action = (
-            " On wake, consider a brief update if this verdict or a pending acceptance decision "
-            "needs the user's attention; [quiet] is fine if there is nothing new worth reporting. "
-            "Consider `claude-hub dot notify` if Feishu is bound and the update should reach the "
-            "user now. Task acceptance still requires user authorization."
+            " Consider a brief update if useful; [quiet] is fine if there is nothing new "
+            "worth reporting. Task acceptance still requires user authorization."
             if event.get("kind") == "task_review_passed"
             else ""
         )
@@ -213,9 +210,8 @@ def reach_note(source: str, feishu_bound: bool) -> str:
     )
     if feishu_bound:
         return line + (
-            " A Feishu bot is bound to this Chat: when something should reach the user now (a "
-            "task they asked for is done or failed, a decision that blocks work, a problem), "
-            "also send it with `claude-hub dot notify`."
+            " A Feishu bot is bound. Consider `claude-hub dot notify` if an update "
+            "should reach the user now."
         )
     return line + " No Feishu bot is bound, so `claude-hub dot notify` cannot reach them."
 

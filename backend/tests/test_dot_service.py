@@ -29,7 +29,7 @@ from claude_hub.services.agent_stream.native import ClaudeNativeSession
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.dot import Card, DotService, DotStore, reset_dot_service
 from claude_hub.services.dot import service as service_module
-from claude_hub.services.dot.prompts import TIDY_MESSAGE, WAKE_MESSAGE
+from claude_hub.services.dot.prompts import RETIRED_TIDY_MESSAGES, TIDY_MESSAGE, WAKE_MESSAGE
 
 TAB_ID = "tab-1"
 
@@ -278,6 +278,27 @@ def test_schedules_are_created_once_and_follow_the_tab(
         service.ensure_schedules("tab-new")
         assert updates == [(wake.id, {"message": service_module.WAKE_MESSAGE})]
     assert service_module.WAKE_MESSAGE not in service_module.RETIRED_WAKE_MESSAGES
+    wake.message = "my own wake words"
+    for retired in RETIRED_TIDY_MESSAGES:
+        updates.clear()
+        tidy.message = retired
+        service.ensure_schedules("tab-new")
+        assert updates == [(tidy.id, {"message": TIDY_MESSAGE})]
+    assert TIDY_MESSAGE not in RETIRED_TIDY_MESSAGES
+
+    # Message matching is exact and scoped to its schedule, not prefix-based.
+    for wake_text, tidy_text in (
+        ("custom wake", "custom tidy"),
+        (service_module.RETIRED_WAKE_MESSAGES[0] + " ", RETIRED_TIDY_MESSAGES[0] + " "),
+        (RETIRED_TIDY_MESSAGES[0], service_module.RETIRED_WAKE_MESSAGES[0]),
+        (WAKE_MESSAGE, TIDY_MESSAGE),
+    ):
+        updates.clear()
+        wake.message, tidy.message = wake_text, tidy_text
+        service.ensure_schedules("tab-new")
+        assert updates == []
+        assert (wake.message, tidy.message) == (wake_text, tidy_text)
+        assert tidy.cron == "5 4 * * *"
 
     # One schedule made, the next one failed: a retry makes only the missing one.
     del schedules[wake.id], schedules[tidy.id]
@@ -962,7 +983,8 @@ def test_each_turn_says_where_it_came_from_and_where_the_answer_goes(
     assert "web Chat; your answer shows there" in reach("hi")
     assert "they are here now" in reach("hi")
     woke = reach(WAKE_MESSAGE)
-    assert "web Chat only" in woke and "also send it with `claude-hub dot notify`" in woke
+    assert "web Chat only" in woke and "Consider `claude-hub dot notify`" in woke
+    assert "should reach the user now" in woke
     assert "Hub tidy" in reach(TIDY_MESSAGE)
     bound = False
     assert "No Feishu bot is bound" in reach(WAKE_MESSAGE)
