@@ -51,12 +51,31 @@ def test_planned_restart_continues_once_across_backend_processes(
         ttyd_manager.start_all_tabs = AsyncMock()
         ttyd_manager.cleanup = AsyncMock()
         workspace_manager.start_background_monitor = lambda: None
-        workspace_manager.stop_background_monitor = AsyncMock()
+        workspace_manager.stop_background_monitor = AsyncMock(
+            side_effect=RuntimeError('fixture monitor stop failure')
+        )
         workspace_manager.sessions = {}
         workspace_manager.scheduled_task_runs = {}
         feishu_bot_websocket.prewarm_lark_sdk = lambda: None
         feishu_bot.start_feishu_websockets = AsyncMock()
-        feishu_bot.stop_feishu_websockets = AsyncMock()
+        feishu_bot.quiesce_feishu_websockets = AsyncMock()
+
+        async def stop_feishu_websockets(*, drain_timeout_seconds=None):
+            manager = api._tab_tailer_manager
+            active_tailers = manager.tailers() if manager is not None else []
+            turn_in_flight = any(
+                tailer.native_transport is not None and tailer.native_transport.turn_in_flight
+                for tailer in active_tailers
+            )
+            row = {
+                'drain_timeout_seconds': drain_timeout_seconds,
+                'turn_in_flight': turn_in_flight,
+                'ttyd_cleaned': ttyd_manager.cleanup.await_count > 0,
+            }
+            with (Path(os.environ['EVIDENCE']) / 'shutdowns.jsonl').open('a') as log:
+                log.write(json.dumps(row) + '\\n')
+
+        feishu_bot.stop_feishu_websockets = stop_feishu_websockets
 
         class MemoryProvider(ProviderSession):
             def _build_command(self): return []
@@ -113,6 +132,10 @@ def test_planned_restart_continues_once_across_backend_processes(
         path = tmp_path / "inputs.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def shutdowns() -> list[dict]:
+        path = tmp_path / "shutdowns.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
     try:
         launcher.start_backend()
         launcher.wait_healthy()
@@ -129,6 +152,13 @@ def test_planned_restart_continues_once_across_backend_processes(
         }
         post("/api/system/restart", request, restart=True)
         launcher.restart()
+        assert shutdowns() == [
+            {
+                "drain_timeout_seconds": 0,
+                "turn_in_flight": False,
+                "ttyd_cleaned": True,
+            }
+        ]
         deadline = time.monotonic() + 10
         while len(inputs()) < 3 and time.monotonic() < deadline:
             time.sleep(0.05)

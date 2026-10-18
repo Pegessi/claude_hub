@@ -294,9 +294,14 @@ class ServiceLauncher:
                     else "Restarting the service. Waiting for it to reconnect…"
                 ),
             )
+            prepared = time.monotonic()
             self.stop_backend()
             stopped = time.monotonic()
-            print(f"Restart: backend stopped in {stopped - started:.2f}s", flush=True)
+            print(
+                f"Restart: preparation completed in {prepared - started:.2f}s; "
+                f"backend stopped in {stopped - prepared:.2f}s",
+                flush=True,
+            )
             candidate = build_directory
             try:
                 self.promote_frontend(candidate)

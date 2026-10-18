@@ -276,7 +276,7 @@ async def test_transport_close_does_not_cancel_an_accepted_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_supervisor_final_stop_drains_accepted_routes(tmp_path) -> None:
+async def test_supervisor_quiesces_transport_before_draining_accepted_routes(tmp_path) -> None:
     pool = FeishuBotPoolStore(
         path=tmp_path / "pool.json",
         legacy_path=tmp_path / "legacy.json",
@@ -311,17 +311,45 @@ async def test_supervisor_final_stop_drains_accepted_routes(tmp_path) -> None:
     route_tasks.submit(connections[0].callback, SimpleNamespace(marker="accepted"))
     await started.wait()
 
-    stopping = asyncio.create_task(supervisor.stop())
-    for _ in range(10):
-        if connections[0].closed:
-            break
-        await asyncio.sleep(0)
+    await supervisor.quiesce()
 
     assert connections[0].closed is True
+    assert routed.is_set() is False
+    stopping = asyncio.create_task(supervisor.stop())
+    await asyncio.sleep(0)
     assert stopping.done() is False
     release.set()
     await stopping
     assert routed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_stop_accepts_a_short_final_drain_budget(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = FeishuBotPoolStore(
+        path=tmp_path / "pool.json",
+        legacy_path=tmp_path / "legacy.json",
+        now=lambda: 1_700_000_000.0,
+    )
+    route_tasks = _BoundedRouteTasks()
+    drain_timeouts: list[float] = []
+
+    async def drain(timeout_seconds: float) -> bool:
+        drain_timeouts.append(timeout_seconds)
+        return True
+
+    monkeypatch.setattr(route_tasks, "drain", drain)
+    supervisor = FeishuBotWebSocketSupervisor(
+        pool,
+        lambda _bot, _event: asyncio.sleep(0),
+        route_tasks=route_tasks,
+        shutdown_drain_seconds=30,
+    )
+
+    await supervisor.stop(drain_timeout_seconds=0)
+
+    assert drain_timeouts == [0]
 
 
 @pytest.mark.asyncio

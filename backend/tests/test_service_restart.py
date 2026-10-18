@@ -108,7 +108,7 @@ async def test_continuation_choice_is_idempotent_with_restart_request(
     assert retry.json()["operation"]["resume_running_chats"] is True
 
 
-def test_launcher_replaces_only_its_child_and_checks_new_identity(tmp_path):
+def test_launcher_replaces_only_its_child_and_checks_new_identity(tmp_path, capsys):
     from claude_hub.service_launcher import ServiceLauncher
     from claude_hub.services.service_restart import RestartStore
 
@@ -133,6 +133,9 @@ def test_launcher_replaces_only_its_child_and_checks_new_identity(tmp_path):
         with store.locked() as state:
             state["operation"] = {"id": "test", "instance_id": old_id, "status": "preparing"}
         launcher.restart()
+        output = capsys.readouterr().out
+        assert "Restart: preparation completed in " in output
+        assert "; backend stopped in " in output
         assert old_child.poll() is not None
         assert launcher.child.poll() is None
         assert launcher.instance_id != old_id
