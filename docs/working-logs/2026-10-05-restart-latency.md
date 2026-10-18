@@ -69,12 +69,14 @@ No production restart or live terminal cleanup was performed by this task.
 
 ## 2026-10-18 follow-up: Feishu route drain blocked restart cleanup
 
-A later live restart took 44.67 seconds. Launcher output split the observed run
-into about 9.5 seconds of dependency/frontend preparation, 29.7 seconds stopping
-the old backend, and 5.5 seconds starting the replacement. The old backend
-entered lifespan shutdown but did not persist `chat_recovery`, stop its stream
-owners, or release 18 ttyd listeners before the launcher used its 30-second kill
-fallback. The replacement then failed to bind all 18 saved ports.
+A later live restart took 44.67 seconds. Launcher output recorded 39.16 seconds
+through backend stop (including preparation) and 5.51 seconds to replacement
+readiness. Combining that with the lifecycle timestamps and stop deadline gives
+approximately 9-10 seconds of dependency/frontend preparation and 30 seconds
+stopping the old backend; the old log did not measure those phases separately.
+The old backend entered lifespan shutdown but did not persist `chat_recovery`,
+stop its stream owners, or release 18 ttyd listeners before the launcher's
+30-second kill fallback. The replacement then failed to bind all 18 saved ports.
 
 The blocking turn came through the Feishu WebSocket path. Lifespan shutdown
 waited first for the supervisor's 30-second accepted-route drain, while that
@@ -87,8 +89,9 @@ new Feishu intake and closes its connections without draining accepted routes.
 It then captures eligible restart continuations, stops stream owners, and releases
 ttyd listeners. Only after those cleanup-critical steps does it cancel any
 accepted Feishu routes that are still running; the app shutdown path gives them
-no additional 30-second wait, so cancellation starts before the launcher's outer
-deadline. Launcher output now reports preparation and backend shutdown separately
+no additional 30-second wait before cancellation. This removes the known drain
+wait but is not a hard bound on preceding cleanup or cancellation finalizers.
+Launcher output now reports preparation and backend shutdown separately
 instead of combining them under `backend stopped`.
 
 The interrupted Dot turn in this incident had `origin=feishu`. Planned restart
@@ -112,3 +115,69 @@ restart cross-validation passed 402 tests. Changed source modules passed scoped
 mypy and Ruff checks. The shared service was inspected only; this follow-up did
 not restart it, clean its orphan listeners, or run a live Feishu/provider
 continuation.
+
+## Latest-main integration and independent cross-validation
+
+The user authorized merging the latest main into this feature branch, with a
+separate decision still required before merging the feature back to main.
+Work remained in `~/claude_hub_worktree/restart-shutdown-fix` on
+`codex/restart-shutdown-fix`; the primary checkout stayed clean and its main ref
+was not advanced by this task.
+
+- Original fix commit: `066ced8193a27497ab315b3c3791dcf425675439`.
+- Latest local main: `3f935616eee4c41bf95395875a7d310d42cd8edc`. A fresh
+  `fetch origin main` returned `d728236c1c787fc0cc65a39cc0fa594134d16da6`;
+  local main already contained that ref and seven additional commits.
+- Fixed merge: `816e188d71c324de7f79ec6f5ca6e1496b425c6d`, with the fix as
+  first parent and latest local main as second parent. No textual conflicts or
+  manual merge resolutions; `verify.sh merge-decisions` passed with zero decision
+  paths. That structural check is not the independent semantic review.
+
+Main's module extraction moved substantial provider, tailer, terminal and Feishu
+behavior behind compatibility facades. Two independent reviewers traced the
+new consumers and verified that the restart hooks still share the original
+manager, queue and dedup owners. Runtime patch points used by the existing tests
+still resolve at call time. No concrete new P0-P3 defect remained after review.
+
+Validation on the fixed merge used worktree-local locked dependencies with
+strict declared versions: Python 3.11.16, uv 0.12.15, Node 24.21.0 and pnpm 9.15.9.
+
+| Check | Result |
+| --- | --- |
+| Focused Feishu/restart/Goal/facade selection | 410 passed, 37.52 seconds |
+| `CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 ./scripts/verify.sh all` | Passed |
+| Default backend scope with coverage | 4302 passed, 9 skipped, 227.32 seconds |
+| Frontend unit tests | 1029 passed, none skipped |
+| Black/isort, complete backend mypy, frontend lint/types/build | Passed |
+| Checkout safety, docs, fixed-merge decision coverage | Passed |
+
+Evidence is retained at `/tmp/ch-restart-main-merge.MF6W89/`, including
+`focused.log`, `all.log`, `all.exit`, and the verification-owned backend result
+directories. The Vite build emitted its existing large-chunk advisory; it did
+not fail. This task did not run browser-mocks, terminal-hmr or terminal-replay.
+
+Two additional bounded in-memory integration probes used real Feishu
+handler/dedup objects and route cancellation, with external transport replaced:
+
+1. An unstarted route cancelled during profile preparation releases its claim;
+   a synthetic same-ID replay dispatches once.
+2. A started turn terminalized by the real SessionTailer before route cancellation
+   retains its claim; a synthetic same-ID replay does not dispatch a second time.
+
+Both passed, including an independent owner rerun (`2 passed in 2.11s`). Probe
+source is `/tmp/restart_dedup_probe.py`; the rerun log is
+`/tmp/ch-restart-main-merge.MF6W89/probe-repeat/results.log`.
+
+A third probe initially assumed that any pre-submission rejection should release
+its message ID. It failed because a quiesced manager produces an ordinary failure
+reply and the dedup claim is retained. Review against the common ancestor and
+both parents confirmed unchanged at-most-once policy: a handled failure also
+consumes the message ID, while only explicit safe cancellation/retirement releases
+it. Claims are retained for seven days, not forever. The failure was an incorrect
+probe expectation, not a new merge defect; no delivery policy was changed.
+
+The final documentation-only follow-up records these results and the changelog;
+it does not alter the reviewed merge's executable code. Live Feishu/provider
+behavior, real ttyd listener release, and worst-case combined shutdown duration
+remain unverified. No remote push, main merge, shared-service restart, or orphan
+listener cleanup was performed.
