@@ -15,7 +15,6 @@ from claude_hub.services.feedback.common import (
     FeedbackRecord,
     Workspace,
     WorkspaceTask,
-    _now,
     _tokens,
     datetime,
     json,
@@ -43,7 +42,7 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
         reports: list[AgentReport],
         payload: FeedbackReaperRequest,
     ) -> FeedbackReaperRun:
-        now = _now()
+        now = self._feedback_now()
         record = self._create_feedback_record(workspace, task, reports, payload, now)
         drafts: list[FeedbackLessonDraft] = [
             self._create_lesson_draft(
@@ -86,7 +85,7 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
         now: datetime | None = None,
         enforce_iteration_signal: bool = True,
     ) -> FeedbackLesson:
-        now = now or _now()
+        now = now or self._feedback_now()
         summary = payload.summary.strip()
         if not summary:
             raise ValueError("Lesson summary is required")
@@ -206,7 +205,7 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
         *,
         now: datetime | None = None,
     ) -> FeedbackLesson:
-        now = now or _now()
+        now = now or self._feedback_now()
         lessons = self.list_lessons(workspace_id, include_inactive=True)
         for index, lesson in enumerate(lessons):
             if lesson.id != lesson_id:
@@ -347,7 +346,7 @@ class FeedbackLessonCatalogStore(FeedbackPersistenceStore, ABC):
     ) -> None:
         if not lesson_ids:
             return
-        now = now or _now()
+        now = now or self._feedback_now()
         lessons = self.list_lessons(workspace_id, include_inactive=True)
         id_set = {str(lid) for lid in lesson_ids if str(lid).strip()}
         if not id_set:

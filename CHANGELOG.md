@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(services): restore call-time legacy facade overrides
+
+- Restore `feedback_lessons._now`, `dot.service.WAKE_INTERVAL_SECONDS` and
+  `feishu_bot_pool.MAX_BOTS` overrides for both new and existing service instances.
+- Reuse typed facade methods without adding dependency registries, import cycles,
+  constructor snapshots, or additional state/lock owners.
+- Cover override restoration, feedback persistence and explicit timestamps, Dot
+  timing preservation, Bot capacity boundaries, and public consumer class identity.
+
 ### fix(governance): restore agreed source line ceilings
 
 - Restore hard limits to 1500 lines for backend Python and 2500 lines for all
