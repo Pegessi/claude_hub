@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "a3375ac1b442f671395a11662c148f1f4883157a",
+  "parents": [
+    "729d2eec7bfbc236702851611d0d4f2eb874cecf",
+    "3f5db8b7823136cac4f339805ddbbd10ecd07827"
+  ],
+  "base": "3ae9132df8c1d004395616537eb21a2e578545b0",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "d9019fe2efd4f35fb6661f393fccb785ad016c90",
+  "reconstructed_tree": "2dfa0ed3806b90e1665f322dbdace8e14708ab5b",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3872353411923f3d51eecb8142077ce3565c769a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5c47ed9b8aff0d14bd3746e7ccc820aca125f328"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8d9320f05002e7d8988c3eb7e85b4f14fe846017"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "016bf651d4d60cb5bad537444eada9fcf797341e"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2611bb7b5ca41806314cbe63474f480f5d01bcdf"
+      },
+      "reason": "Preserve the reviewed Markdown reader release entries, then the concurrently integrated Dot guidance and final-review entries, followed by the unchanged history-loading and older release notes. No product code required manual resolution; both parents remain intact.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

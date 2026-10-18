@@ -344,7 +344,7 @@ def test_the_users_turn_shows_events_but_leaves_them_to_the_wake_up(store: DotSt
     assert len(store.list_inbox()) == 1
     wake = service.prepare_turn(WAKE_MESSAGE, plan.conversation_id)
     assert "New events since your last turn" in wake.turn_pack and wake.delivered_event_ids
-    assert "Judge each result" in wake.turn_pack
+    assert "Consider the evidence against each done-when item" in wake.turn_pack
 
 
 def test_events_cut_from_the_pack_stay_unread(store: DotStore) -> None:

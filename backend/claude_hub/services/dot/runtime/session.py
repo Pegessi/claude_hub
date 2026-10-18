@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from claude_hub.services.dot.prompts import RETIRED_TIDY_MESSAGES
 from claude_hub.services.dot.runtime.common import (
     _JOURNAL_TEXT_LIMIT,
     _SENT_TURNS_KEPT,
@@ -233,16 +234,23 @@ class DotSessionService(object):
         from ... import workspace_manager
 
         state = self.store.read_state()
-        timings: tuple[tuple[str, str, dict[str, Any], str], ...] = (
+        timings: tuple[tuple[str, str, dict[str, Any], str, tuple[str, ...]], ...] = (
             (
                 "wake_schedule_id",
                 "Dot wake-up",
                 {"interval_seconds": self._wake_interval_seconds()},
                 WAKE_MESSAGE,
+                RETIRED_WAKE_MESSAGES,
             ),
-            ("tidy_schedule_id", "Dot nightly tidy", {"cron": TIDY_CRON}, TIDY_MESSAGE),
+            (
+                "tidy_schedule_id",
+                "Dot nightly tidy",
+                {"cron": TIDY_CRON},
+                TIDY_MESSAGE,
+                RETIRED_TIDY_MESSAGES,
+            ),
         )
-        for key, name, timing, message in timings:
+        for key, name, timing, message, retired_messages in timings:
             existing = workspace_manager.scheduled_tasks.get(state.get(key) or "")
             if existing is not None:
                 update: dict[str, Any] = {}
@@ -260,7 +268,7 @@ class DotSessionService(object):
                 # time the user picked in the right form is kept.
                 if any(getattr(existing, field, None) is None for field in timing):
                     update.update(timing)
-                if existing.message in RETIRED_WAKE_MESSAGES:
+                if existing.message in retired_messages:
                     update["message"] = message
                 if update:
                     workspace_manager.update_scheduled_task(
