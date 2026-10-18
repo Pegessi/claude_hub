@@ -62,12 +62,15 @@ const props = withDefaults(defineProps<{
   complete?: boolean
   /** Owning tab id; enables local/provider image src rewriting. */
   tabId?: string
+  /** Absolute source path used by the standalone document reader. */
+  documentPath?: string
 }>(), {
   text: '',
   compact: false,
   linkMarkdownPaths: false,
   complete: false,
   tabId: '',
+  documentPath: '',
 })
 
 const emit = defineEmits<{
@@ -96,6 +99,7 @@ const blocks = computed(() => {
     complete: props.complete,
     linkMarkdownPaths: props.linkMarkdownPaths,
     quotedTabId: props.tabId,
+    documentPath: props.documentPath,
   })
 })
 

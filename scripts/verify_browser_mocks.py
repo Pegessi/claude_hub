@@ -35,6 +35,7 @@ RUNNERS = (
     ("browser_chat_queue_activation.py", ""),
     ("browser_chat_goal_steer.py", ""),
     ("browser_chat_image_quality.py", ""),
+    ("browser_markdown_reader.py", ""),
     ("browser_dot_panel.py", ""),
     ("browser_service_restart.py", ""),
 )
