@@ -149,6 +149,7 @@
 </template>
 
 <script setup lang="ts">
+import '@/features/app-shell/styles/theme.css'
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import TabBar from '@/components/TabBar.vue'
@@ -480,6 +481,5 @@ onUnmounted(() => {
 })
 </script>
 
-<style src="@/features/app-shell/styles/theme.css"></style>
 <style src="@/features/app-shell/styles/controls.css"></style>
 <style src="@/features/app-shell/styles/shell.css"></style>

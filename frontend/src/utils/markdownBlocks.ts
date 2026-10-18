@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify'
 import { highlightVersion, renderCodeBlockHtml } from '@/utils/codeHighlight'
 import { resolveLocalImageUrl, rewriteQuotedImageSrcs } from '@/utils/quotedImage'
 import { mathExtension, mathVersion } from '@/utils/mathRendering'
+import { markdownPreviewUrl, rewriteMarkdownLinks } from '@/utils/markdownPreview'
 
 /**
  * Marked render options.
@@ -284,6 +285,7 @@ export class MarkdownBlockCache {
   /** The tab id bare quoted-image tokens were rewritten for. The endpoint
    *  URL embeds the tab id, so a different tab id invalidates the cache. */
   private quotedTabId: string | null = null
+  private documentPath = ''
   /** The highlight.js version the cache was populated for.  Bumped once
    *  when the lazy-loaded highlighter finishes loading; the cache is
    *  invalidated so code blocks are re-rendered with real highlighting. */
@@ -325,9 +327,12 @@ export class MarkdownBlockCache {
       complete?: boolean
       linkMarkdownPaths?: boolean
       quotedTabId?: string
+      documentPath?: string
     } = {},
   ): RenderedBlock[] {
-    const { complete = false, linkMarkdownPaths = false, quotedTabId = '' } = options
+    const { complete = false, linkMarkdownPaths = false, quotedTabId = '', documentPath = '' } = options
+    if (this.documentPath !== documentPath) this.cache.clear()
+    this.documentPath = documentPath
 
     // Invalidate the cache if the link mode changed since the last render.
     if (this.linkMode !== null && this.linkMode !== linkMarkdownPaths) {
@@ -354,7 +359,28 @@ export class MarkdownBlockCache {
     this.mathRenderVersion = mathVersion.value
 
     const tokens = splitBlockTokens(source)
-    if (quotedTabId) promoteLocalImageLinks(tokens, quotedTabId)
+    if (quotedTabId) {
+      visitTokens(tokens, (token) => {
+        if (token.type !== 'link' && token.type !== 'image') return
+        const localImage = documentPath ? resolveLocalImageUrl(quotedTabId, token.href) : null
+        if (localImage) {
+          const path = new URL(localImage, 'http://markdown.local').searchParams.get('path') || ''
+          if (path && !/^[/~]/.test(path)) {
+            const directory = documentPath.slice(0, documentPath.lastIndexOf('/') + 1)
+            const parts: string[] = []
+            for (const part of (directory + path).split('/')) {
+              if (part === '..') parts.pop()
+              else if (part && part !== '.') parts.push(part)
+            }
+            token.href = '/' + parts.map(encodeURIComponent).join('/')
+          }
+        }
+        if (token.type === 'link') {
+          token.href = markdownPreviewUrl(quotedTabId, token.href, documentPath) || token.href
+        }
+      })
+      promoteLocalImageLinks(tokens, quotedTabId)
+    }
     this.hasMath = false
     this.hasCode = false
     visitTokens(tokens, (token) => {
@@ -394,6 +420,25 @@ export class MarkdownBlockCache {
         }))
       }
     }
+    if (documentPath && typeof document !== 'undefined') {
+      // Keep anchors in rendered HTML, including after lazy math/highlighting
+      // invalidates cached blocks. DOM-only ids would disappear on rerender.
+      const counts = new Map<string, number>()
+      const fragments = blocks.flatMap(block => 'html' in block ? [block] : block.list.items)
+      for (const fragment of fragments) {
+        if (!/<h[1-6][\s>]/.test(fragment.html)) continue
+        const template = document.createElement('template')
+        template.innerHTML = fragment.html
+        template.content.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach((heading) => {
+          const slug = (heading.textContent || '').toLowerCase().trim()
+            .replace(/[^\p{L}\p{N}_\s-]/gu, '').replace(/\s/g, '-')
+          const count = counts.get(slug) || 0
+          counts.set(slug, count + 1)
+          heading.id = count ? `${slug}-${count}` : slug
+        })
+        fragment.html = template.innerHTML
+      }
+    }
     return blocks
   }
 
@@ -408,6 +453,7 @@ export class MarkdownBlockCache {
       result = linkPathMentions(result)
     }
     if (quotedTabId) {
+      result = rewriteMarkdownLinks(result, quotedTabId, this.documentPath)
       result = rewriteQuotedImageSrcs(result, quotedTabId)
       result = wrapImagePreviews(result)
     }

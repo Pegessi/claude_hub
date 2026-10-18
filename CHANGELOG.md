@@ -7,6 +7,27 @@
 
 ## Released
 
+### feat(chat): refine Markdown reading layout and loading
+
+- Give standalone documents a centered reading width, larger type and headings,
+  clearer action hierarchy, roomier error states and reader-sized images without
+  changing Chat or Workspace Markdown typography.
+- Load the reader independently of the full Hub UI and keep parsed document DOM
+  mounted when switching between rendered content and source.
+- Reject temporary-file grants from inert select content and safely rewrite SVG
+  anchors with attributes rather than readonly DOM properties.
+- Add dedicated dark/light, desktop/mobile, keyboard, overflow and retained-DOM
+  browser acceptance alongside the existing Chat-link coverage.
+
+### feat(chat): open local Markdown links in a standalone reader
+
+- Open Chat Markdown file links in a separate page with rendered content, source
+  view, refresh, heading anchors, document-relative links, and recoverable errors.
+- Preserve external web links and reuse the sanitized rich Markdown renderer.
+- Scope reads to the owning local Chat directory or an exact assistant-linked
+  temporary file; reject symlinks, remote-host paths and non-text files, and bound
+  previews to 512 KiB without caching document content in the browser.
+
 ### fix(chat): invalidate stale detail ranges and edited history caches
 
 - Tie detail reads to their exact history range so older responses cannot mark
