@@ -1,8 +1,8 @@
 # Dot — the persistent personal agent
 
 Dot is one long-lived Claude Chat tab with a stable role and a file-based
-memory. It handles small requests directly, uses memory when helpful, and can
-hand longer work to Hub Tasks while keeping track of the user's priorities.
+memory. It handles small requests directly, uses memory when helpful, and hands
+long or many-step work to Hub Tasks while keeping track of the user's priorities.
 
 Each turn receives a bounded context pack built from durable memory. The session
 pack stays fixed for a provider conversation; rotation limits accumulated history.
@@ -11,9 +11,9 @@ pack stays fixed for a provider conversation; rotation limits accumulated histor
 
 The defaults favor short, useful replies and event-driven task tracking. They
 allow targeted checks when the user asks, a task appears stuck, or evidence needs
-clarification. Reporting, delegation and memory updates use judgment rather than
-unconditional instructions. Permissions, secret handling and human acceptance
-remain explicit boundaries.
+clarification. Long or many-step work is delegated to Hub Tasks so Dot remains
+available. Reporting and memory updates use judgment; permissions, secret handling
+and human acceptance remain explicit boundaries.
 
 | Problem | Dot mechanism |
 | --- | --- |
@@ -196,7 +196,7 @@ so Dot's own turns must not keep the user waiting:
   for the next night. A stopped Hub turn stays out of the journal.
 - Its turns carry `yields_to_user` in their start metadata, so the web
   composer sends (instead of queueing behind the turn) while one runs.
-- Guidance favors short turns, useful delegation and evidence-based review.
+- Keep Dot turns short by delegating long or many-step work to Hub Tasks.
   Targeted verification is available when needed; routine rechecking is discouraged.
 - Wake and tidy schedules holding exact earlier defaults get the current wording;
   user-customized messages stay unchanged.

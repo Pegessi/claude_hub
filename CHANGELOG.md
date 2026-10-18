@@ -10,8 +10,9 @@
 ### refactor(dot): keep assistant guidance concise and advisory
 
 - Shorten default role, turn, tool, task-brief, wake, tidy and contextual guidance.
-  Prefer useful delegation and task events while allowing targeted checks and
-  quiet turns. Keep secret handling, tool contracts and human acceptance explicit.
+  Delegate long or many-step work to Hub Tasks; prefer task events while allowing
+  targeted checks and quiet turns. Keep secret handling, tool contracts and human
+  acceptance explicit.
 - Refresh only exact known old wake/tidy schedule defaults; preserve custom text,
   existing `DOT.md` files and the current provider-session prompt snapshot.
 
