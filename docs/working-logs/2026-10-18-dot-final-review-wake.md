@@ -58,8 +58,10 @@ write failure before and after event delivery. Existing Dot behavior tests remai
 - Final strict `verify.sh all` exited 0: backend 4332 passed / 10 skipped in
   219.46s; frontend 1029 passed / 0 skipped; Black/isort, full backend mypy
   (534 source files), frontend lint/types/build, docs and checkout safety passed.
-  One backend skip requires a clean committed delivery tree and will be rerun
-  after commit; the remaining skips are explicit browser/zsh prerequisites.
+  One backend skip requires a clean committed delivery tree; it passed separately
+  after implementation commit `44c26d7` (1 passed in 0.05s;
+  `/tmp/claude-hub-verify.gfsaef`). The remaining skips are explicit browser/zsh
+  prerequisites. Independent review approved the final code and documentation.
   Evidence: `/tmp/ch-dot-final-review-checks/final-all.log` and
   `/tmp/claude-hub-verify.ts1yhJ/pytest.log`.
 - Not run: live provider/Feishu/API integration, browser-mocks, terminal-hmr,
