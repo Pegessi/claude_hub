@@ -1,7 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import App from './App.vue'
-import MarkdownPreviewView from '@/views/MarkdownPreviewView.vue'
+import '@/features/app-shell/styles/theme.css'
 import type { ClaudeHubNamespace } from '@/types'
 
 // Create the single, application-wide namespace for any window-level globals
@@ -11,10 +10,14 @@ if (typeof window !== 'undefined') {
   ;(window as Window).__claudeHub = {} as ClaudeHubNamespace
 }
 
-// Use the existing SPA root so deep links also work after a production reload.
-const isMarkdownPreview = new URLSearchParams(window.location.search).has('markdown')
-const app = createApp(isMarkdownPreview ? MarkdownPreviewView : App)
-const pinia = createPinia()
+// Keep the standalone reader independent of the terminal/Workspace UI bundle.
+const rootComponent = new URLSearchParams(window.location.search).has('markdown')
+  ? import('@/views/MarkdownPreviewView.vue')
+  : import('./App.vue')
 
-app.use(pinia)
-app.mount('#app')
+void rootComponent.then(({ default: root }) => {
+  createApp(root).use(createPinia()).mount('#app')
+}).catch(() => {
+  const container = document.getElementById('app')
+  if (container) container.textContent = 'Unable to load the page. Please refresh to try again.'
+})

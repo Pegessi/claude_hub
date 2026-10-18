@@ -748,3 +748,22 @@ async def test_authentication_is_required_before_reading_document(
     assert response.status_code == 200
     assert response.json()["content"] == CONTENT
     assert reads == ["report.md"]
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        '<select><a href="{path}">Record</a></select>',
+        '<select><option><a href="{path}">Record</a></option></select>',
+        '<select/><a href="{path}">Record</a>',
+        "<select>\n\n[Record]({path})\n\n</select>",
+    ],
+    ids=["select", "select-option", "self-closing-select", "select-markdown"],
+)
+async def test_select_content_cannot_grant_temporary_markdown(
+    client: AsyncClient, markdown_scope: MarkdownScope, template: str
+) -> None:
+    private = markdown_scope.temporary / "private.md"
+    private.write_text(CONTENT, encoding="utf-8")
+    _write_reference(template.format(path=private))
+    _assert_unavailable(await _get_markdown(client, str(private)))
