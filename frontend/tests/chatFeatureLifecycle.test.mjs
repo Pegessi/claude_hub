@@ -114,10 +114,12 @@ const stubs = {
     import { ref } from 'vue'
     export function useAgentStream() {
       const events = ref([]), connectionState = ref('idle'), errorMessage = ref(null)
+      const historyDetails = ref({}), historyDetailRevision = ref(0), attributedToolIds = ref(new Set())
       const capabilities = ref({ available_models: [], current_model: null, current_reasoning_effort: null, available_modes: [], current_mode: null, supports_images: true, supports_goals: true })
       const start = async (id, source) => { globalThis.__chatLifecycleTest.calls.push(['start', id, source]); connectionState.value = 'live' }
       const stop = () => globalThis.__chatLifecycleTest.calls.push(['stop'])
-      const stream = { events, connectionState, errorMessage, capabilities, start, stop, retry: start, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
+      const loadHistoryDetail = async id => { globalThis.__chatLifecycleTest.calls.push(['loadHistoryDetail', id]) }
+      const stream = { events, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, retry: start, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
       globalThis.__chatLifecycleTest.streams.push(stream)
       return stream
     }

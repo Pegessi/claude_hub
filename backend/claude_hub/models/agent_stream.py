@@ -138,9 +138,20 @@ class AgentStreamEvent(BaseModel):
     redacted: bool = False
 
 
+class AgentStreamHistoryDetail(BaseModel):
+    """A turn's complete raw range available through the lazy history reader."""
+
+    turn_id: str
+    first_sequence: int
+    last_sequence: int
+    event_count: int
+
+
 class AgentStreamEventPage(BaseModel):
     """A page of events; ``since_sequence`` is exclusive on reads."""
 
     events: List[AgentStreamEvent]
     next_sequence: int
     has_more: bool
+    history_details: List[AgentStreamHistoryDetail] = Field(default_factory=list)
+    attributed_tool_ids: List[str] = Field(default_factory=list)

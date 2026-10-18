@@ -141,9 +141,9 @@ test('historical process expansion still uses compact reasoning and preserves de
     event(4, 'text_delta', { text: 'answer' }), event(5, 'turn_completed', { status: 'completed' })]
   const turn = groupEventsIntoTurns(events)[0]
   const expanded = presentThinkingParts(foldTurnParts(turn, true), 'done')
-  assert.deepEqual(expanded.map(p => p.kind), ['process', 'reasoning_status', 'text'])
+  assert.deepEqual(expanded.map(p => p.kind), ['reasoning_status', 'text'])
   const folded = presentThinkingParts(foldTurnParts(turn, false), 'done')
-  assert.deepEqual(folded.map(p => p.kind), ['process', 'text'])
+  assert.deepEqual(folded.map(p => p.kind), ['reasoning_status', 'text'])
 })
 
 test('trailing child activity does not complete its parent reasoning phase', () => {

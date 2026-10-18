@@ -469,6 +469,13 @@ Workspace-managed Task → workspace_manager dispatch/report/review lifecycle
 Initiator-managed Task → explicit progress/handoff; no implicit dispatch
 ```
 
+Structured Chat history and session-switch performance have a separate path from
+terminal replay: `useAgentStream` → stream events API → `AgentStreamStore` →
+Chat timeline. The default Chat view requests questions/replies and bounded
+execution-detail descriptors; complete per-turn details are fetched on expansion.
+Raw history remains available to existing clients, and detail reads never advance
+the live-stream cursor. See the [history contract and validation recipe](docs/working-logs/2026-10-18-chat-history-lazy-load.md).
+
 For MASO's HTTP session and condensation contract, read [MASO HTTP Chat](docs/MASO.md)
 and `services/agent_stream/maso_http.py` / `maso_events.py`.
 For Dot, the persistent personal agent built on a Claude Chat tab with

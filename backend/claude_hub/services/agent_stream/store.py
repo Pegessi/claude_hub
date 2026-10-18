@@ -16,10 +16,12 @@ import json
 import shutil
 from dataclasses import dataclass
 from enum import Enum
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 from ...models import AgentStreamEvent, AgentStreamEventPage, AgentStreamEventType
+from .history import ConversationHistoryIndex
 
 _READ_INDEX_STRIDE = 256
 _COMPACTABLE_HISTORY_TYPES = frozenset(
@@ -136,6 +138,7 @@ class AgentStreamStore:
         self._read_lock = asyncio.Lock()
         self._read_offsets: Dict[int, int] = {-1: 0}
         self._read_inode: Optional[int] = None
+        self._history = ConversationHistoryIndex()
 
     @property
     def path(self) -> Path:
@@ -244,6 +247,7 @@ class AgentStreamStore:
     def _reset_read_index(self) -> None:
         self._read_offsets = {-1: 0}
         self._read_inode = None
+        self._history.reset()
 
     def _prepare_read_index(self) -> None:
         """Invalidate cached offsets if the append-only file was replaced."""
@@ -331,6 +335,60 @@ class AgentStreamStore:
                 next_sequence=next_seq,
                 has_more=has_more,
             )
+
+    async def read_conversation(
+        self,
+        since_sequence: int = -1,
+        limit: int = 500,
+        *,
+        compact: bool = False,
+    ) -> AgentStreamEventPage:
+        """Read question/answer history without materializing process details."""
+        async with self._read_lock:
+            try:
+                page = await _complete_io(
+                    self._history.conversation_page, self._path, since_sequence, max(1, limit)
+                )
+            except BaseException:
+                self._history.reset()
+                raise
+            if compact:
+                # Omitted events remain compaction barriers. A tool between two
+                # text runs must not change snapshot/replay recognition.
+                events = []
+                for _, run in groupby(
+                    enumerate(page.events), lambda item: item[1].stream_sequence - item[0]
+                ):
+                    events.extend(compact_history_events([event for _, event in run]))
+                page = page.model_copy(update={"events": events})
+            return page
+
+    async def read_turn_since(
+        self,
+        turn_id: str,
+        since_sequence: int,
+        through_sequence: int,
+        limit: int = 500,
+        *,
+        compact: bool = False,
+    ) -> AgentStreamEventPage:
+        """Read one turn through a fixed raw cursor without scanning other turns."""
+        async with self._read_lock:
+            try:
+                page = await _complete_io(
+                    self._history.turn_page,
+                    self._path,
+                    turn_id,
+                    since_sequence,
+                    through_sequence,
+                    max(1, limit),
+                )
+            except BaseException:
+                self._history.reset()
+                raise
+            if compact:
+                page = page.model_copy(update={"events": compact_history_events(page.events)})
+            return page
 
     async def count(self) -> int:
         """Return the number of persisted events."""

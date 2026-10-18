@@ -17,10 +17,10 @@ const completedTurn = () => groupEventsIntoTurns([
   event(4, 'turn_completed', { status: 'completed' }),
 ])[0]
 
-test('viewer overrides take precedence over latest-turn defaults without being mutated', () => {
+test('viewer overrides take precedence over folded defaults without being mutated', () => {
   const turn = completedTurn()
   const overrides = new Map()
-  assert.equal(isTurnProcessExpanded(turn, turn.key, overrides), true)
+  assert.equal(isTurnProcessExpanded(turn, turn.key, overrides), false)
   assert.equal(isTurnProcessExpanded(turn, 'newest', overrides), false)
   overrides.set(turn.key, false)
   assert.equal(isTurnProcessExpanded(turn, turn.key, overrides), false)
@@ -29,11 +29,11 @@ test('viewer overrides take precedence over latest-turn defaults without being m
   assert.deepEqual([...overrides], [[turn.key, true]])
 })
 
-test('newest turn stays fully rendered while historical process folds and preserves the answer', () => {
+test('historical process folds by default and preserves the answer', () => {
   const turn = completedTurn()
   const before = structuredClone(turn)
   const overrides = new Map([[turn.key, false]])
-  assert.deepEqual(presentTurnParts(turn, turn.key, overrides).map(part => part.kind), ['thinking', 'text'])
+  assert.deepEqual(presentTurnParts(turn, turn.key, overrides).map(part => part.kind), ['process', 'text'])
   const folded = presentTurnParts(turn, 'newest', overrides)
   assert.deepEqual(folded.map(part => part.kind), ['process', 'text'])
   assert.equal(folded[0].expanded, false)
@@ -63,6 +63,38 @@ test('parent completion and errors determine reasoning state without mutating ti
     assert.equal(presentTurnParts(turn, turn.key, new Map())[0].state, expected)
     assert.deepEqual(turn, before)
   }
+})
+
+test('pending lazy detail projection hides unfinished process while preserving summary text', () => {
+  const turn = groupEventsIntoTurns([
+    event(1, 'turn_started', { summary: 'question' }),
+    event(2, 'thinking_delta', { text: 'hidden thought' }),
+    event(3, 'text_delta', { text: 'visible answer' }),
+    event(4, 'tool_call_started', { tool_call_id: 'shell', name: 'Bash', args: {} }),
+  ])[0]
+  const parts = presentTurnParts(turn, turn.key, new Map(), {
+    descriptor: { turn_id: 'turn', first_sequence: 1, last_sequence: 4, event_count: 4 },
+    status: 'idle',
+  })
+  assert.deepEqual(parts.map(part => part.kind), ['process', 'text'])
+  assert.equal(parts[1].text, 'visible answer')
+})
+
+test('pending lazy detail projection preserves approval, error, status and compact failed subagent summaries', () => {
+  const childId = 'child-thread'
+  const turn = groupEventsIntoTurns([
+    event(1, 'turn_started', { summary: 'question' }),
+    event(2, 'approval_required', { tool_call_id: 'q', kind: 'question', title: 'Approve?' }),
+    event(3, 'status', { text: 'child failed', provider_status: 'error', subagent_thread: childId }, { message_id: 'child-status' }),
+    event(4, 'error', { message: 'top-level warning' }),
+    event(5, 'text_delta', { text: 'visible answer' }),
+  ])[0]
+  const parts = presentTurnParts(turn, turn.key, new Map(), {
+    descriptor: { turn_id: 'turn', first_sequence: 1, last_sequence: 5, event_count: 5 },
+    status: 'idle',
+  })
+  assert.deepEqual(parts.map(part => part.kind), ['process', 'approval', 'subagents', 'error', 'text'])
+  assert.equal(parts[2].compact, true)
 })
 
 test('tool group status preserves running, failed and all-cancelled precedence', () => {

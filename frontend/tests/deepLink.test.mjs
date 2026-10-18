@@ -57,7 +57,7 @@ test('buildTabShareText hints at the paged stream events endpoint', () => {
   const text = buildTabShareText('abc-123')
   assert.match(
     text,
-    /http:\/\/localhost:8173\/api\/tabs\/abc-123\/stream\/events\?since_sequence=-1&limit=5000/,
+    /http:\/\/localhost:8173\/api\/workspaces\/tabs\/abc-123\/stream\/events\?since_sequence=-1&limit=5000/,
   )
   assert.match(text, /paged JSON/)
 })
@@ -67,5 +67,5 @@ test('buildTabShareText URL-encodes the tab id in the events URL', () => {
     location: { origin: 'https://hub.example.com', pathname: '/app/' },
   }
   const text = buildTabShareText('a b&c')
-  assert.match(text, /https:\/\/hub.example.com\/api\/tabs\/a%20b%26c\/stream\/events/)
+  assert.match(text, /https:\/\/hub.example.com\/api\/workspaces\/tabs\/a%20b%26c\/stream\/events/)
 })

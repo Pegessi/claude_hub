@@ -3,7 +3,7 @@
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -127,7 +127,16 @@ async def stream_events_for(
     bindings: AgentStreamRouteBindings,
     allow_pending_source: bool = False,
     compact: bool = False,
+    view: Literal["raw", "conversation"] = "raw",
+    turn_id: Optional[str] = None,
+    through_sequence: Optional[int] = None,
 ) -> AgentStreamEventPage:
+    if (turn_id is None) != (through_sequence is None):
+        raise HTTPException(
+            status_code=400, detail="turn_id and through_sequence must be provided together"
+        )
+    if view == "conversation" and turn_id is not None:
+        raise HTTPException(status_code=400, detail="conversation view cannot filter one turn")
     caps = await bindings.capabilities_for(session, manager)
     if not caps.structured and not allow_pending_source:
         return AgentStreamEventPage(events=[], next_sequence=since_sequence, has_more=False)
@@ -140,6 +149,12 @@ async def stream_events_for(
     if manager.hard_failed(session.id):
         bindings.raise_structured_unavailable(session.id, manager)
     store = manager.get_store(session.workspace_id, session.id)
+    if view == "conversation":
+        return await store.read_conversation(since_sequence, limit, compact=compact)
+    if turn_id is not None and through_sequence is not None:
+        return await store.read_turn_since(
+            turn_id, since_sequence, through_sequence, limit, compact=compact
+        )
     if compact:
         return await store.read_since(since_sequence, limit, compact=True)
     return await store.read_since(since_sequence, limit)
@@ -487,13 +502,23 @@ def register_observation_routes(
         since_sequence: int = Query(-1, ge=-1),
         limit: int = Query(200, ge=1, le=_MAX_HISTORY_PAGE_SIZE),
         compact: bool = Query(False),
+        view: Literal["raw", "conversation"] = Query("raw"),
+        turn_id: Optional[str] = Query(None, min_length=1),
+        through_sequence: Optional[int] = Query(None, ge=0),
         current_user: User = Depends(get_current_user),
     ) -> AgentStreamEventPage:
         session = bindings.session_or_404(managed_session_id)
         manager = bindings.get_tailer_manager()
         async with bindings.managed_stream_interaction(session) as live:
             page = await bindings.stream_events_for(
-                live, manager, since_sequence, limit, compact=compact
+                live,
+                manager,
+                since_sequence,
+                limit,
+                compact=compact,
+                view=view,
+                turn_id=turn_id,
+                through_sequence=through_sequence,
             )
         bindings.require_current_managed_session(session, manager)
         return page
@@ -507,6 +532,9 @@ def register_observation_routes(
         since_sequence: int = Query(-1, ge=-1),
         limit: int = Query(200, ge=1, le=_MAX_HISTORY_PAGE_SIZE),
         compact: bool = Query(False),
+        view: Literal["raw", "conversation"] = Query("raw"),
+        turn_id: Optional[str] = Query(None, min_length=1),
+        through_sequence: Optional[int] = Query(None, ge=0),
         current_user: User = Depends(get_current_user),
     ) -> AgentStreamEventPage:
         session = bindings.terminal_tab_session_or_404(tab_id)
@@ -517,6 +545,9 @@ def register_observation_routes(
             limit,
             allow_pending_source=True,
             compact=compact,
+            view=view,
+            turn_id=turn_id,
+            through_sequence=through_sequence,
         )
 
     @router.post(
