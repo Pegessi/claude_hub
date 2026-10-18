@@ -7,6 +7,16 @@
 
 ## Released
 
+### fix(restart): capture interrupted Chats before draining Feishu routes
+
+- Stop new Feishu intake before recording eligible Chat continuations, stopping
+  native streams, and releasing ttyd listeners. Cancel remaining Feishu routes
+  after those cleanup steps without an additional 30-second grace period.
+- Continue restart capture if the workspace monitor reports a shutdown error,
+  and report frontend/dependency preparation separately from backend stop time.
+- Preserve Feishu/Bot message ownership and at-most-once delivery: Feishu-origin
+  Dot turns remain outside general automatic Chat continuation.
+
 ### fix(services): restore call-time legacy facade overrides
 
 - Restore `feedback_lessons._now`, `dot.service.WAKE_INTERVAL_SECONDS` and
