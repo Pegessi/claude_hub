@@ -57,6 +57,12 @@ globalThis.__quotedImage = await import(
   `data:text/javascript;base64,${Buffer.from(quotedOutputText).toString('base64')}`
 )
 
+const previewSource = await readFile(new URL('../src/utils/markdownPreview.ts', import.meta.url), 'utf8')
+const previewOutput = ts.transpileModule(previewSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText
+globalThis.__markdownPreview = await import(`data:text/javascript;base64,${Buffer.from(previewOutput).toString('base64')}`)
+
 const mathSource = await readFile(new URL('../src/utils/mathRendering.ts', import.meta.url), 'utf8')
 const mathOutput = ts.transpileModule(mathSource, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
@@ -102,6 +108,10 @@ const mocked = outputText
   .replace(
     /import \{ mathExtension, mathVersion \} from ['"]@\/utils\/mathRendering['"];?/,
     'const { mathExtension, mathVersion } = globalThis.__mathRendering;',
+  )
+  .replace(
+    /import \{ markdownPreviewUrl, rewriteMarkdownLinks \} from ['"]@\/utils\/markdownPreview['"];?/,
+    'const { markdownPreviewUrl, rewriteMarkdownLinks } = globalThis.__markdownPreview;',
   )
 
 globalThis.__marked = marked
@@ -1068,4 +1078,27 @@ test('raw HTML code and keyboard text preserve literal formula delimiters', () =
     assert.equal((withFormula.match(/class="katex"/g) || []).length, 1)
     assert.match(withFormula, /annotation encoding="application\/x-tex">y<\/annotation>/)
   }
+})
+
+test('chat Markdown targets are scoped without rewriting code or external links', () => {
+  const cache = new MarkdownBlockCache()
+  const text = '[Report](docs/report.md)\n\n`[literal](docs/report.md)`\n\n[External](https://example.com/report.md)'
+  const html = renderString(cache, text, { complete: true, quotedTabId: 'tab-a' })
+  assert.match(html, /\/\?markdown=docs%2Freport.md&(?:amp;)?scope=tab-a/)
+  assert.ok(html.includes('<code>[literal](docs/report.md)</code>'))
+  assert.ok(html.includes('href="https://example.com/report.md"'))
+  const other = renderString(cache, text, { complete: true, quotedTabId: 'tab-b' })
+  assert.ok(other.includes('scope=tab-b'))
+  assert.ok(!other.includes('scope=tab-a'))
+})
+
+test('preview document path changes invalidate cached relative links and images', () => {
+  const cache = new MarkdownBlockCache()
+  const text = '[Next](next.md)\n\n![Plot](plot.png)'
+  const first = renderString(cache, text, { complete: true, quotedTabId: 'tab-a', documentPath: '/one/report.md' })
+  const second = renderString(cache, text, { complete: true, quotedTabId: 'tab-a', documentPath: '/two/report.md' })
+  assert.ok(first.includes('markdown=%2Fone%2Fnext.md'))
+  assert.ok(first.includes('path=%2Fone%2Fplot.png'))
+  assert.ok(second.includes('markdown=%2Ftwo%2Fnext.md'))
+  assert.ok(second.includes('path=%2Ftwo%2Fplot.png'))
 })

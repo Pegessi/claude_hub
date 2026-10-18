@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
+import MarkdownPreviewView from '@/views/MarkdownPreviewView.vue'
 import type { ClaudeHubNamespace } from '@/types'
 
 // Create the single, application-wide namespace for any window-level globals
@@ -10,7 +11,9 @@ if (typeof window !== 'undefined') {
   ;(window as Window).__claudeHub = {} as ClaudeHubNamespace
 }
 
-const app = createApp(App)
+// Use the existing SPA root so deep links also work after a production reload.
+const isMarkdownPreview = new URLSearchParams(window.location.search).has('markdown')
+const app = createApp(isMarkdownPreview ? MarkdownPreviewView : App)
 const pinia = createPinia()
 
 app.use(pinia)

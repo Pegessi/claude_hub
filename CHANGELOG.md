@@ -7,6 +7,15 @@
 
 ## Released
 
+### feat(chat): open local Markdown links in a standalone reader
+
+- Open Chat Markdown file links in a separate page with rendered content, source
+  view, refresh, heading anchors, document-relative links, and recoverable errors.
+- Preserve external web links and reuse the sanitized rich Markdown renderer.
+- Scope reads to the owning local Chat directory or an exact assistant-linked
+  temporary file; reject symlinks, remote-host paths and non-text files, and bound
+  previews to 512 KiB without caching document content in the browser.
+
 ### fix(restart): capture interrupted Chats before draining Feishu routes
 
 - Stop new Feishu intake before recording eligible Chat continuations, stopping

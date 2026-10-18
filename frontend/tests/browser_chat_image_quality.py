@@ -28,7 +28,26 @@ TURN = "cursor-turn"
 NOW = "2026-10-12T08:00:00Z"
 REPORT = "Run B regressed on 3 cases."
 OUTPUT_PATH = "/tmp/dotbm/dot-mobile-work.png"
-OUTPUT_TEXT = "[View screenshot](/tmp/result.png)\n\n![Missing screenshot](/tmp/missing.png)"
+OUTPUT_TEXT = (
+    "[View screenshot](/tmp/result.png)\n\n![Missing screenshot](/tmp/missing.png)"
+    "\n\n[排查记录](<reports/排查 记录.md>)"
+)
+MARKDOWN_PATH = "/fixture/project/reports/排查 记录.md"
+MARKDOWN_SOURCE = (
+    "# Investigation record\n\nThe **decoded output** is stable.\n\n"
+    "| Case | A | B | C | D | E | F | G |\n"
+    "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| Sample | alpha | beta | gamma | delta | epsilon | zeta | eta |\n\n"
+    '```python\nprint("preview")\n```\n\n'
+    "[Details](details.md#evidence)\n\n[Missing document](missing.md)\n\n"
+    "[Scoped preview](/?markdown=%2Ffixture%2Fproject%2Freports%2Fdetails.md&scope=other-tab#evidence)\n\n"
+    "![Parent plot](../plot.png)\n\n"
+    "[Restricted document](denied.md)\n\n"
+    "[External documentation](https://example.com/manual.md)\n\n"
+    "<script>window.__markdownUnsafe = true</script>\n\n"
+    '<a href="javascript:alert(1)" onclick="window.__markdownUnsafe = true">Unsafe link</a>\n\n'
+    '<img src="javascript:alert(1)" onerror="window.__markdownUnsafe = true">'
+)
 RICH_PREFIX = "Rich content preview\n\n\\[\\frac{1}{"
 CODE_TEXT = 'formula = r"\\[x\\]"\nprint("<tag> & $HOME")\n'
 RICH_SUFFIX = (
@@ -155,6 +174,186 @@ EVENTS = [
 ]
 
 
+async def check_markdown_preview(page, context, output: Path, report: dict) -> None:
+    """Exercise the ordinary Chat link and the independent document reader."""
+    link = page.get_by_role("link", name="排查记录", exact=True)
+    await expect(link).to_be_visible()
+    link_query = parse_qs(urlparse(await link.get_attribute("href")).query)
+    assert link_query == {"markdown": ["reports/排查 记录.md"], "scope": [TAB]}, link_query
+    async with context.expect_page() as opened:
+        await link.click()
+    reader = await opened.value
+    reader.on("pageerror", lambda error: report["page_errors"].append(str(error)))
+    try:
+        await reader.wait_for_load_state("domcontentloaded")
+        article = reader.get_by_role("article")
+        await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+        await expect(reader.locator(".markdown-reader-path")).to_have_text(MARKDOWN_PATH)
+        await expect(article.locator("strong")).to_have_text("decoded output")
+        await expect(article.locator("table")).to_have_count(1)
+        await expect(article.locator("pre code")).to_have_text('print("preview")')
+        await expect(reader.locator(".structured-pane")).to_have_count(0)
+        assert reader.url != page.url
+        assert await page.get_by_role("link", name="排查记录", exact=True).count() == 1
+        assert await reader.evaluate("window.opener === null")
+        external = article.get_by_role("link", name="External documentation", exact=True)
+        await expect(external).to_have_attribute("href", "https://example.com/manual.md")
+        scoped = article.get_by_role("link", name="Scoped preview", exact=True)
+        assert parse_qs(urlparse(await scoped.get_attribute("href")).query) == {
+            "markdown": ["/fixture/project/reports/details.md"],
+            "scope": [TAB],
+        }
+        parent_plot = article.get_by_role("img", name="Parent plot", exact=True)
+        image_url = urlparse(await parent_plot.get_attribute("src"))
+        assert image_url.path == f"/api/workspaces/tabs/{TAB}/stream/agent-image"
+        assert parse_qs(image_url.query) == {"path": ["/fixture/project/plot.png"]}
+        assert "/../" not in parse_qs(image_url.query)["path"][0]
+        await expect(parent_plot).to_have_js_property("naturalWidth", 1920)
+        assert (
+            await article.locator(
+                'script,[onclick],[onerror],[href^="javascript:"],[src^="javascript:"]'
+            ).count()
+            == 0
+        )
+        assert not await reader.evaluate("Boolean(window.__markdownUnsafe)")
+
+        await reader.get_by_role("button", name="Show source", exact=True).click()
+        source = reader.locator(".markdown-reader-source")
+        await expect(source).to_be_visible()
+        assert await source.text_content() == MARKDOWN_SOURCE
+        assert await source.locator("script, a, img").count() == 0
+        await reader.get_by_role("button", name="Show preview", exact=True).click()
+        await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+        preview_url = reader.url
+        await reader.reload(wait_until="domcontentloaded")
+        await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+        assert reader.url == preview_url
+        await reader.screenshot(path=str(output / "markdown-reader-desktop.png"), full_page=True)
+        report["screenshots"].append("markdown-reader-desktop.png")
+
+        await reader.set_viewport_size({"width": 390, "height": 844})
+        actions = reader.get_by_role("navigation", name="Document actions")
+        await expect(actions.get_by_role("link", name="Back to Hub")).to_be_in_viewport()
+        await expect(actions.get_by_role("button", name="Refresh", exact=True)).to_be_in_viewport()
+        await expect(actions.get_by_role("button", name="Show source")).to_be_in_viewport()
+        assert await reader.locator(".markdown-reader").evaluate(
+            "el => el.scrollWidth <= el.clientWidth"
+        )
+        table = article.get_by_role("region", name="Scrollable table")
+        assert await table.evaluate("el => el.scrollWidth > el.clientWidth")
+        await table.focus()
+        await reader.keyboard.press("ArrowRight")
+        await asyncio.sleep(0.1)
+        assert await table.evaluate("el => el.scrollLeft > 0")
+        await actions.get_by_role("button", name="Show source").click()
+        await expect(source).to_be_visible()
+        await reader.get_by_role("button", name="Show preview", exact=True).click()
+        await reader.screenshot(path=str(output / "markdown-reader-mobile.png"), full_page=True)
+        report["screenshots"].append("markdown-reader-mobile.png")
+
+        page_count = len(context.pages)
+        renderer_requested = asyncio.Event()
+        release_renderer = asyncio.Event()
+
+        async def delay_highlighter(route) -> None:
+            path = urlparse(route.request.url).path
+            if "highlight__js" in path or "highlight.js" in path:
+                renderer_requested.set()
+                await release_renderer.wait()
+            await route.fallback()
+
+        await reader.route("**/*", delay_highlighter)
+        try:
+            await article.get_by_role("link", name="Details", exact=True).click()
+            heading = article.locator("blockquote").get_by_role(
+                "heading", name="Evidence", exact=True
+            )
+            duplicate_heading = article.locator("li").get_by_role(
+                "heading", name="Evidence", exact=True
+            )
+            await expect(article.get_by_role("heading", name="Evidence", exact=True)).to_have_count(
+                2
+            )
+            await expect(heading).to_be_visible()
+            await asyncio.wait_for(renderer_requested.wait(), timeout=5)
+            await expect(heading).to_have_attribute("id", "evidence")
+            await expect(duplicate_heading).to_have_attribute("id", "evidence-1")
+            await expect(article.locator(".hljs-string")).to_have_count(0)
+            release_renderer.set()
+            await expect(article.locator(".hljs-string")).to_have_count(1)
+            await expect(heading).to_have_attribute("id", "evidence")
+            await expect(duplicate_heading).to_have_attribute("id", "evidence-1")
+        finally:
+            release_renderer.set()
+            await reader.unroute("**/*", delay_highlighter)
+        nested_query = parse_qs(urlparse(reader.url).query)
+        assert nested_query == {
+            "markdown": ["/fixture/project/reports/details.md"],
+            "scope": [TAB],
+        }, nested_query
+        assert urlparse(reader.url).fragment == "evidence"
+        await expect(
+            article.locator("blockquote").get_by_role("heading", name="Evidence", exact=True)
+        ).to_have_attribute("id", "evidence")
+        await expect(
+            article.locator("li").get_by_role("heading", name="Evidence", exact=True)
+        ).to_have_attribute("id", "evidence-1")
+        assert len(context.pages) == page_count
+        await reader.go_back(wait_until="domcontentloaded")
+        await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+        await article.get_by_role("link", name="Scoped preview", exact=True).click()
+        await expect(
+            article.locator("blockquote").get_by_role("heading", name="Evidence", exact=True)
+        ).to_be_visible()
+        assert parse_qs(urlparse(reader.url).query) == nested_query
+        assert len(context.pages) == page_count
+        await reader.go_back(wait_until="domcontentloaded")
+        await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+        await article.get_by_role("link", name="Missing document", exact=True).click()
+        error = reader.get_by_role("alert")
+        await expect(error).to_contain_text("Unable to preview this document")
+        await expect(error).to_contain_text("moved or deleted")
+        await expect(article).to_have_count(0)
+        failed_url = reader.url
+        await error.get_by_role("button", name="Retry", exact=True).click()
+        await expect(article.get_by_role("heading", name="Recovered document")).to_be_visible()
+        assert reader.url == failed_url
+        await expect(error).to_have_count(0)
+        await reader.go_back(wait_until="domcontentloaded")
+        await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+        await article.get_by_role("link", name="Restricted document", exact=True).click()
+        await expect(error).to_contain_text("moved or deleted")
+        await expect(article).to_have_count(0)
+        assert "secret" not in await error.inner_text()
+        await error.get_by_role("button", name="Retry", exact=True).click()
+        await expect(error).to_contain_text("moved or deleted")
+        await reader.screenshot(path=str(output / "markdown-reader-error.png"), full_page=True)
+        report["screenshots"].append("markdown-reader-error.png")
+        report["markdown_preview"] = {
+            "normal_chat_click_opens_independent_page": True,
+            "unicode_space_path": True,
+            "rendered_heading_table_code": True,
+            "source_preserved_as_text": True,
+            "reload_preserves_document": True,
+            "nested_relative_link_preserves_scope": True,
+            "source_preview_url_rebound_to_current_scope": True,
+            "parent_image_path_normalized": True,
+            "heading_anchor_survives_lazy_highlighter": True,
+            "nested_duplicate_heading_ids": ["evidence", "evidence-1"],
+            "fragment_preserved": True,
+            "external_link_unchanged": True,
+            "sanitized": True,
+            "mobile_width": 390,
+            "missing_retry_recovers_same_document": True,
+            "denied_error_does_not_leak_detail": True,
+        }
+    except BaseException:
+        await reader.screenshot(path=str(output / "markdown-reader-failure.png"), full_page=True)
+        raise
+    finally:
+        await reader.close()
+
+
 async def main(browser_run: BrowserRun) -> None:
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
@@ -188,6 +387,7 @@ async def main(browser_run: BrowserRun) -> None:
     ]
     tabs.append({**tabs[0], "id": OTHER_TAB, "name": "Other Image Chat"})
     send_payloads: list[dict] = []
+    markdown_attempts: dict[str, int] = {}
     report: dict = {
         "result": "FAIL",
         "api_requests": [],
@@ -267,6 +467,51 @@ async def main(browser_run: BrowserRun) -> None:
                         "events": rows,
                         "next_sequence": next_sequence,
                         "has_more": False,
+                    }
+                elif path == f"/api/workspaces/tabs/{TAB}/stream/markdown":
+                    document_path = parse_qs(parsed.query).get("path", [""])[0]
+                    markdown_attempts[document_path] = markdown_attempts.get(document_path, 0) + 1
+                    missing_path = "/fixture/project/reports/missing.md"
+                    if document_path == "/fixture/project/reports/denied.md":
+                        await route.fulfill(
+                            status=404,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "secret filesystem detail"}),
+                        )
+                        return
+                    if document_path == missing_path and markdown_attempts[document_path] == 1:
+                        await route.fulfill(
+                            status=404,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "document not available"}),
+                        )
+                        return
+                    if document_path in {"reports/排查 记录.md", MARKDOWN_PATH}:
+                        resolved_path = MARKDOWN_PATH
+                        content = MARKDOWN_SOURCE
+                    elif document_path == "/fixture/project/reports/details.md":
+                        resolved_path = document_path
+                        content = (
+                            "# Detail record\n\n> ## Evidence\n>\n> The nested report loaded.\n\n"
+                            "- ## Evidence\n  Duplicate heading inside a list.\n\n"
+                            '```python\nprint("evidence")\n```'
+                        )
+                    elif document_path == missing_path:
+                        resolved_path = document_path
+                        content = "# Recovered document\n\nThe retry kept the requested path."
+                    else:
+                        report["unknown_requests"].append([request.method, path, document_path])
+                        await route.fulfill(
+                            status=501,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "unmocked Markdown path"}),
+                        )
+                        return
+                    body = {
+                        "path": resolved_path,
+                        "content": content,
+                        "size_bytes": len(content.encode("utf-8")),
+                        "truncated": False,
                     }
                 elif path.endswith("/stream/agent-image"):
                     image_path = parse_qs(parsed.query).get("path", [""])[0]
@@ -615,6 +860,8 @@ async def main(browser_run: BrowserRun) -> None:
                 "lazy_renderers": True,
             }
             await page.set_viewport_size({"width": 1280, "height": 900})
+            await check_markdown_preview(page, context, output, report)
+            report["markdown_requests"] = markdown_attempts
 
             composer = page.locator(".composer-textarea").first
             file_input = page.locator(".composer-file-input").first
