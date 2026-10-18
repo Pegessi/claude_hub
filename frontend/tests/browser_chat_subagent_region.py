@@ -153,6 +153,8 @@ async def main(browser_run: BrowserRun) -> None:
     unexpected_external_requests = []
     detail_requests = []
     summary_requests = []
+    edit_requests = []
+    edited_events = None
     fail_first_detail = True
     delay_next_detail = False
     delayed_started = asyncio.Event()
@@ -179,7 +181,7 @@ async def main(browser_run: BrowserRun) -> None:
             await socket.close(code=1000, reason="mocked UI smoke")
 
         async def api(route):
-            nonlocal fail_first_detail, delay_next_detail
+            nonlocal fail_first_detail, delay_next_detail, edited_events
             request = route.request
             parsed = urlparse(request.url)
             if (parsed.scheme, parsed.hostname, parsed.port) != (
@@ -304,6 +306,15 @@ async def main(browser_run: BrowserRun) -> None:
                             "has_more": False,
                             "history_details": [],
                         }
+                    elif edited_events is not None:
+                        body = {
+                            "events": [
+                                row for row in edited_events if row["stream_sequence"] > since
+                            ],
+                            "next_sequence": max(since, 2),
+                            "has_more": False,
+                            "history_details": [],
+                        }
                     else:
                         # Failed child status remains visible without downloading
                         # the child prose, spawn arguments or results.
@@ -330,9 +341,32 @@ async def main(browser_run: BrowserRun) -> None:
                                 else []
                             ),
                         }
+            elif path.endswith("/edit-resend") and request.method == "POST":
+                payload = json.loads(request.post_data or "{}")
+                assert payload["turn_id"] == TURN
+                assert payload["text"] == "Edited question"
+                assert payload["client_turn_id"]
+                edit_requests.append(payload)
+                edited_events = [
+                    {**event(index, kind, body), "turn_id": payload["client_turn_id"]}
+                    for index, (kind, body) in enumerate(
+                        (
+                            ("turn_started", {"summary": "Edited question"}),
+                            ("text_delta", {"text": "Edited answer."}),
+                            ("turn_completed", {"status": "completed"}),
+                        )
+                    )
+                ]
+                body = {"ok": True}
             elif path.endswith("/wait"):
+                requested_cursor = json.loads(request.post_data or "{}")["since_sequence"]
                 expected_cursor = 2 if OTHER_TAB in path else 12
-                assert json.loads(request.post_data or "{}")["since_sequence"] == expected_cursor
+                if edited_events is None or OTHER_TAB in path:
+                    assert requested_cursor == expected_cursor
+                else:
+                    # An old wait may still arrive while edit commits. Preserve
+                    # that request's cursor; generation ownership must reject it.
+                    expected_cursor = requested_cursor
                 await asyncio.sleep(0.1)
                 body = {
                     "events": [],
@@ -494,6 +528,21 @@ async def main(browser_run: BrowserRun) -> None:
             await retry.click()
         await expect(process_fold).to_have_attribute("aria-expanded", "true")
         assert len(detail_requests) >= before_delayed + 3, detail_requests
+
+        # This pane has a warm history cache from the switches above. Editing
+        # the first message truncates/renumbers the mocked store, so the next
+        # hydration must start at -1 rather than restoring the cached cursor 12.
+        await old_turn.hover()
+        await old_turn.get_by_role("button", name="Edit message", exact=True).click()
+        await old_turn.get_by_placeholder("Edit your message...").fill("Edited question")
+        await old_turn.get_by_role("button", name="Resend", exact=True).click()
+        await expect(page.get_by_text("Edited question", exact=True)).to_be_visible()
+        await expect(page.get_by_text("Edited answer.", exact=True)).to_be_visible()
+        await expect(turns).to_have_count(1)
+        await expect(page.get_by_text("Next answer.", exact=True)).to_have_count(0)
+        await expect(page.get_by_text("Parent answer.", exact=True)).to_have_count(0)
+        assert len(edit_requests) == 1
+        assert summary_requests[-1]["since"] == -1, summary_requests
         assert not unknown_requests, unknown_requests
         assert not unexpected_external_requests, unexpected_external_requests
         assert not errors, errors
@@ -509,8 +558,10 @@ async def main(browser_run: BrowserRun) -> None:
             "summary-first history without eager detail requests",
             "detail failure retry and fixed-cursor pagination",
             "detail cache across folding and Chat switches",
+            "warm-cache edit reloads renumbered history without old future turns",
             "mobile overflow",
         ],
+        "edit_requests": len(edit_requests),
         "detail_requests": len(detail_requests),
         "summary_requests": summary_requests,
         "timings_ms": timings,

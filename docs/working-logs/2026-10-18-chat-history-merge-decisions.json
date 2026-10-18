@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "2eb43899cf29c7d6b170bb74987fbc7441554f07",
+  "parents": [
+    "5e3da89b1e7f76aa859021b1c74fb8d9da4408c9",
+    "7e1d0e3ef8469ab72b716347efdd1b4149bd292e"
+  ],
+  "base": "3f935616eee4c41bf95395875a7d310d42cd8edc",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "c430fafe8ce286606b1c5da9e290fbfe7886e1d6",
+  "reconstructed_tree": "29ac812e24f570885da2baf561dd1444da2ec493",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a66b6330db597c6af5d0c4ba9ddda2ce3006c6c6"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "704af458e819bc55303f3735d9fa7c7e0c5e0241"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "312ccf8c1e7c27b41b813ae477c40559402f7ccd"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f49678bf76d7b00c5c3def42d927f62c61c140cf"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8c56a1e35bfa0ae23ae12bc248aecfe607179738"
+      },
+      "reason": "双方都在 Released 顶部新增条目。保留懒加载功能的完整条目，并紧接保留主线服务关闭顺序修复的完整条目；不修改其余发布记录或任何运行时实现。",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

@@ -25,6 +25,7 @@ async function moduleUrl(path) {
   return url
 }
 const { useAgentStream } = await import(await moduleUrl('composables/useAgentStream'))
+const { agentStreamHistoryCache } = await import(await moduleUrl('utils/agentStreamHistoryCache'))
 const renderer = createRenderer({
   createComment: () => ({}), insert() {}, remove() {}, parentNode() {}, nextSibling() {},
 })
@@ -176,6 +177,151 @@ test('history detail loading replaces a turn range without advancing the live cu
     .filter(({ url }) => url.endsWith('/wait'))
     .map(({ options }) => JSON.parse(options.body))
   assert.ok(waitBodies.every(body => body.since_sequence === 10), 'detail fetches must not move the live wait cursor backwards')
+})
+
+test('stale history detail responses cannot mark a grown descriptor loaded', async t => {
+  const streamPath = '/api/workspaces/tabs/descriptor-race/stream'
+  const oldDescriptor = { turn_id: 'turn-1', first_sequence: 0, last_sequence: 2, event_count: 3 }
+  const newDescriptor = { turn_id: 'turn-1', first_sequence: 0, last_sequence: 4, event_count: 5 }
+  agentStreamHistoryCache.set(streamPath, {
+    capabilities: { structured: true },
+    events: [{ stream_sequence: 0, type: 'turn_started', turn_id: 'turn-1', payload: { summary: 'old' }, session_id: 's', tab_id: 't', agent_type: 'codex', created_at: 'now', redacted: false }],
+    cursor: 0,
+    historyDetails: { 'turn-1': { descriptor: oldDescriptor, status: 'idle' } },
+    detailRevision: 0,
+  })
+  t.after(() => agentStreamHistoryCache.clear())
+
+  let releaseCapabilities
+  let releaseDetail
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    if (url.endsWith('/capabilities')) {
+      return new Promise(resolve => { releaseCapabilities = () => resolve({ ok: true, json: async () => ({ structured: true }) }) })
+    }
+    if (url.includes('/events?')) {
+      const parsed = new URL(url, 'http://local')
+      if (parsed.searchParams.get('view') === 'conversation') {
+        return { ok: true, json: async () => ({ events: [], next_sequence: 4, has_more: false, history_details: [newDescriptor] }) }
+      }
+      return new Promise(resolve => {
+        releaseDetail = () => resolve({
+          ok: true,
+          json: async () => ({
+            events: [{ stream_sequence: 2, type: 'thinking_delta', turn_id: 'turn-1', payload: { text: 'old detail' }, session_id: 's', tab_id: 't', agent_type: 'codex', created_at: 'now', redacted: false }],
+            next_sequence: 2,
+            has_more: false,
+          }),
+        })
+        options.signal.addEventListener('abort', () => resolve({ ok: false, status: 499, json: async () => ({}) }))
+      })
+    }
+    return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))))
+  })
+
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+  const startPromise = stream.start('descriptor-race', 'terminal-tab')
+  await nextImmediate()
+  const detailPromise = stream.loadHistoryDetail('turn-1')
+  await nextImmediate()
+  releaseCapabilities()
+  await nextImmediate()
+  releaseDetail()
+  await Promise.all([startPromise, detailPromise])
+
+  assert.equal(stream.historyDetails.value['turn-1'].status, 'idle')
+  assert.deepEqual(stream.historyDetails.value['turn-1'].descriptor, newDescriptor)
+  assert.deepEqual(stream.events.value.map(event => event.payload.text).filter(Boolean), [])
+})
+
+test('explicit reset clears warm history cache before a renumbered edit reload', async t => {
+  const streamPath = '/api/workspaces/tabs/edit-reset/stream'
+  agentStreamHistoryCache.set(streamPath, {
+    capabilities: { structured: true },
+    events: [{ stream_sequence: 99, type: 'text_delta', turn_id: 'future', payload: { text: 'stale future' }, session_id: 's', tab_id: 't', agent_type: 'codex', created_at: 'old', redacted: false }],
+    cursor: 99,
+  })
+  t.after(() => agentStreamHistoryCache.clear())
+
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    if (url.endsWith('/capabilities')) return { ok: true, json: async () => ({ structured: true }) }
+    if (url.includes('/events?')) {
+      const since = new URL(url, 'http://local').searchParams.get('since_sequence')
+      return since === '99'
+        ? { ok: true, json: async () => ({ events: [], next_sequence: 99, has_more: false }) }
+        : {
+          ok: true,
+          json: async () => ({
+            events: [{ stream_sequence: 0, type: 'text_delta', turn_id: 'new', payload: { text: 'new answer' }, session_id: 's', tab_id: 't', agent_type: 'codex', created_at: 'new', redacted: false }],
+            next_sequence: 0,
+            has_more: false,
+          }),
+        }
+    }
+    return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))))
+  })
+
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+  await stream.start('edit-reset', 'terminal-tab')
+  assert.deepEqual(stream.events.value.map(event => event.payload.text), ['stale future'])
+
+  stream.reset()
+  await stream.start('edit-reset', 'terminal-tab')
+
+  assert.deepEqual(stream.events.value.map(event => event.payload.text), ['new answer'])
+  assert.equal(stream.events.value[0].stream_sequence, 0)
+})
+
+test('stop aborts in-flight history detail fetches and ignores late responses', async t => {
+  const descriptor = { turn_id: 'turn-1', first_sequence: 0, last_sequence: 2, event_count: 3 }
+  let detailSignal
+  let releaseDetail
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    if (url.endsWith('/capabilities')) return { ok: true, json: async () => ({ structured: true }) }
+    if (url.includes('/events?')) {
+      const parsed = new URL(url, 'http://local')
+      if (parsed.searchParams.get('view') === 'conversation') {
+        return {
+          ok: true,
+          json: async () => ({
+            events: [{ stream_sequence: 0, type: 'turn_started', turn_id: 'turn-1', payload: { summary: 'q' }, session_id: 's', tab_id: 't', agent_type: 'codex', created_at: 'now', redacted: false }],
+            next_sequence: 2,
+            has_more: false,
+            history_details: [descriptor],
+          }),
+        }
+      }
+      detailSignal = options.signal
+      return new Promise(resolve => {
+        releaseDetail = () => resolve({
+          ok: true,
+          json: async () => ({
+            events: [{ stream_sequence: 1, type: 'thinking_delta', turn_id: 'turn-1', payload: { text: 'late detail' }, session_id: 's', tab_id: 't', agent_type: 'codex', created_at: 'now', redacted: false }],
+            next_sequence: 1,
+            has_more: false,
+          }),
+        })
+      })
+    }
+    return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))))
+  })
+
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+  await stream.start('stop-detail', 'terminal-tab')
+  const detailPromise = stream.loadHistoryDetail('turn-1')
+  await nextImmediate()
+  assert.ok(detailSignal)
+  assert.equal(detailSignal.aborted, false)
+
+  stream.stop()
+  assert.equal(detailSignal.aborted, true)
+  releaseDetail()
+  await detailPromise
+
+  assert.notEqual(stream.historyDetails.value['turn-1']?.status, 'loaded')
+  assert.deepEqual(stream.events.value.map(event => event.payload.text).filter(Boolean), [])
 })
 
 test('SSE applies the same summary-attributed replay filter as long-poll and advances reconciliation cursor', async t => {
