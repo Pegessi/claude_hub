@@ -17,10 +17,10 @@ const completedTurn = () => groupEventsIntoTurns([
   event(4, 'turn_completed', { status: 'completed' }),
 ])[0]
 
-test('viewer overrides take precedence over latest-turn defaults without being mutated', () => {
+test('viewer overrides take precedence over folded defaults without being mutated', () => {
   const turn = completedTurn()
   const overrides = new Map()
-  assert.equal(isTurnProcessExpanded(turn, turn.key, overrides), true)
+  assert.equal(isTurnProcessExpanded(turn, turn.key, overrides), false)
   assert.equal(isTurnProcessExpanded(turn, 'newest', overrides), false)
   overrides.set(turn.key, false)
   assert.equal(isTurnProcessExpanded(turn, turn.key, overrides), false)
@@ -29,11 +29,11 @@ test('viewer overrides take precedence over latest-turn defaults without being m
   assert.deepEqual([...overrides], [[turn.key, true]])
 })
 
-test('newest turn stays fully rendered while historical process folds and preserves the answer', () => {
+test('historical process folds by default and preserves the answer', () => {
   const turn = completedTurn()
   const before = structuredClone(turn)
   const overrides = new Map([[turn.key, false]])
-  assert.deepEqual(presentTurnParts(turn, turn.key, overrides).map(part => part.kind), ['thinking', 'text'])
+  assert.deepEqual(presentTurnParts(turn, turn.key, overrides).map(part => part.kind), ['process', 'text'])
   const folded = presentTurnParts(turn, 'newest', overrides)
   assert.deepEqual(folded.map(part => part.kind), ['process', 'text'])
   assert.equal(folded[0].expanded, false)

@@ -138,10 +138,13 @@ const appStore = useAppStore()
 const feishuBotPoolStore = useFeishuBotPoolStore()
 const {
   events,
+  historyDetails,
+  historyDetailRevision,
   connectionState,
   errorMessage,
   capabilities,
   start,
+  loadHistoryDetail,
   retry: retryStream,
   refreshCapabilities,
   setMode,
@@ -267,6 +270,9 @@ const composer = useChatComposer({
 const timeline = useChatTimeline({
   get connectionState() { return connectionState },
   get events() { return events },
+  get historyDetails() { return historyDetails },
+  get historyDetailRevision() { return historyDetailRevision },
+  get loadHistoryDetail() { return loadHistoryDetail },
   get isApprovalResolved() { return composer.isApprovalResolved },
   get isEditingTurn() { return actions.isEditingTurn },
   get optimisticCancelledTurnId() { return delivery.optimisticCancelledTurnId },

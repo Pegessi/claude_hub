@@ -4,10 +4,13 @@ Run only with a dedicated Vite server, never 5173/8173:
   python tests/browser_chat_subagent_region.py http://127.0.0.1:5287 /tmp/subagent-region-ui [browser]
 """
 
+import asyncio
 import json
+import re
 import sys
+import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from browser_lifecycle import BrowserRun, run_browser_main
 from playwright.async_api import expect
@@ -16,6 +19,7 @@ F6 = "01a0e38b-0000-7031-b97e-aaaaaaaaaaaa"
 FEC = "01a0e38b-0000-7031-b97e-bbbbbbbbbbbb"
 TURN = "fixture-parent-turn"
 TAB = "fixture-subagent-tab"
+OTHER_TAB = "fixture-other-chat"
 NOW = "2026-10-06T10:00:00Z"
 
 
@@ -147,6 +151,27 @@ async def main(browser_run: BrowserRun) -> None:
     unknown_requests = []
     blocked_external_requests = []
     unexpected_external_requests = []
+    detail_requests = []
+    summary_requests = []
+    fail_first_detail = True
+    delay_next_detail = False
+    delayed_started = asyncio.Event()
+    delayed_finished = asyncio.Event()
+    timings = {}
+    other_events = [
+        {
+            **event(index, kind, payload),
+            "tab_id": OTHER_TAB,
+            "turn_id": "other-turn",
+        }
+        for index, (kind, payload) in enumerate(
+            (
+                ("turn_started", {"summary": "Other question"}),
+                ("text_delta", {"text": "Other answer."}),
+                ("turn_completed", {"status": "completed"}),
+            )
+        )
+    ]
 
     async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
 
@@ -154,6 +179,7 @@ async def main(browser_run: BrowserRun) -> None:
             await socket.close(code=1000, reason="mocked UI smoke")
 
         async def api(route):
+            nonlocal fail_first_detail, delay_next_detail
             request = route.request
             parsed = urlparse(request.url)
             if (parsed.scheme, parsed.hostname, parsed.port) != (
@@ -187,7 +213,17 @@ async def main(browser_run: BrowserRun) -> None:
                         "port": 0,
                         "is_active": True,
                         "created_at": NOW,
-                    }
+                    },
+                    {
+                        "id": OTHER_TAB,
+                        "name": "Other Chat",
+                        "cwd": "/fixture/project",
+                        "agent_type": "codex",
+                        "session_kind": "chat",
+                        "port": 0,
+                        "is_active": True,
+                        "created_at": NOW,
+                    },
                 ]
             elif (
                 path in {"/api/tabs/status", "/api/tabs/archived"}
@@ -219,15 +255,88 @@ async def main(browser_run: BrowserRun) -> None:
                     "supports_mode_switch": False,
                 }
             elif path.endswith("/events"):
-                body = {
-                    "events": EVENTS,
-                    "next_sequence": len(EVENTS),
-                    "has_more": False,
-                }
+                query = parse_qs(parsed.query)
+                since = int(query.get("since_sequence", ["-1"])[0])
+                if "turn_id" in query:
+                    assert path == f"/api/workspaces/tabs/{TAB}/stream/events"
+                    assert query["turn_id"] == [TURN]
+                    assert query.get("through_sequence") == ["9"]
+                    assert query.get("compact") == ["true"]
+                    assert "view" not in query
+                    detail_requests.append(query)
+                    if fail_first_detail:
+                        fail_first_detail = False
+                        await route.fulfill(
+                            status=503,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "Temporary detail read failure"}),
+                        )
+                        return
+                    # A fixed upper bound plus multiple pages must reconstruct
+                    # this turn without touching another turn or the live cursor.
+                    if delay_next_detail:
+                        delay_next_detail = False
+                        delayed_started.set()
+                        await asyncio.sleep(0.6)
+                        delayed_finished.set()
+                    else:
+                        await asyncio.sleep(0.05)
+                    matching = [
+                        row
+                        for row in EVENTS
+                        if row["turn_id"] == TURN and since < row["stream_sequence"] <= 9
+                    ]
+                    selected = matching[:5]
+                    body = {
+                        "events": selected,
+                        "next_sequence": selected[-1]["stream_sequence"] if selected else 9,
+                        "has_more": len(matching) > len(selected),
+                    }
+                else:
+                    assert query.get("view") == ["conversation"]
+                    summary_requests.append({"path": path, "since": since})
+                    if path == f"/api/workspaces/tabs/{OTHER_TAB}/stream/events":
+                        body = {
+                            "events": [
+                                row for row in other_events if row["stream_sequence"] > since
+                            ],
+                            "next_sequence": 2,
+                            "has_more": False,
+                            "history_details": [],
+                        }
+                    else:
+                        # Failed child status remains visible without downloading
+                        # the child prose, spawn arguments or results.
+                        visible = {0, 4, 8, 9, 10, 11, 12}
+                        body = {
+                            "events": [
+                                row
+                                for row in EVENTS
+                                if row["stream_sequence"] in visible
+                                and row["stream_sequence"] > since
+                            ],
+                            "next_sequence": 12,
+                            "has_more": False,
+                            "history_details": (
+                                [
+                                    {
+                                        "turn_id": TURN,
+                                        "first_sequence": 0,
+                                        "last_sequence": 9,
+                                        "event_count": 10,
+                                    }
+                                ]
+                                if since < 9
+                                else []
+                            ),
+                        }
             elif path.endswith("/wait"):
+                expected_cursor = 2 if OTHER_TAB in path else 12
+                assert json.loads(request.post_data or "{}")["since_sequence"] == expected_cursor
+                await asyncio.sleep(0.1)
                 body = {
                     "events": [],
-                    "next_sequence": len(EVENTS),
+                    "next_sequence": expected_cursor,
                     "has_more": False,
                 }
             elif path.endswith("/live"):
@@ -260,18 +369,39 @@ async def main(browser_run: BrowserRun) -> None:
         await context.route("**/*", api)
         page = await context.new_page()
         page.on("pageerror", lambda error: errors.append(str(error)))
+        started = time.perf_counter()
         await page.goto(base + f"/?tab={TAB}")
 
         turns = page.locator(".structured-turn")
         await expect(turns).to_have_count(2)
         old_turn = turns.nth(0)
         next_turn = turns.nth(1)
+        await expect(old_turn).to_contain_text("Run two checks")
+        await expect(old_turn).to_contain_text("Parent answer.")
         await expect(next_turn).to_contain_text("Next question")
         await expect(next_turn).to_contain_text("Next answer.")
+        timings["first_questions_and_answers_ms"] = (time.perf_counter() - started) * 1000
         await expect(next_turn.get_by_test_id("subagent-region")).to_have_count(0)
-        process_fold = old_turn.locator(".process-fold")
+        await expect(old_turn).not_to_contain_text("inspect parser")
+        await expect(old_turn).not_to_contain_text("first child report")
+        visible_failure = old_turn.get_by_text(re.compile("failed", re.IGNORECASE)).and_(
+            page.locator(":visible")
+        )
+        await expect(visible_failure.first).to_be_visible()
+        assert detail_requests == [], "Collapsed history must not fetch execution details"
+        process_fold = old_turn.get_by_test_id("history-details-toggle")
         await expect(process_fold).to_have_count(1)
         await expect(process_fold).to_have_attribute("aria-expanded", "false")
+        await page.screenshot(path=str(output / "collapsed-desktop.png"), full_page=True)
+        await process_fold.click()
+        retry = old_turn.get_by_test_id("history-details-retry")
+        await expect(retry).to_be_visible()
+        await expect(old_turn).to_contain_text("Parent answer.")
+        assert len(detail_requests) == 1
+        await retry.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "true")
+        assert len(detail_requests) == 3, detail_requests
+        assert [row["since_sequence"] for row in detail_requests] == [["-1"], ["-1"], ["4"]]
         region = old_turn.get_by_test_id("subagent-region")
         await expect(region).to_have_count(1)
         summary = region.locator(":scope > summary")
@@ -282,10 +412,6 @@ async def main(browser_run: BrowserRun) -> None:
             "1 failed · 1 active"
         )
         assert not await region.evaluate("element => element.open")
-        await page.screenshot(path=str(output / "collapsed-desktop.png"), full_page=True)
-        await process_fold.click()
-        await expect(process_fold).to_have_attribute("aria-expanded", "true")
-        await expect(region).to_have_count(1)
         await region.locator(":scope > summary").click()
         rows = region.locator(".subagent-thread-row")
         await expect(rows).to_have_count(2)
@@ -325,6 +451,49 @@ async def main(browser_run: BrowserRun) -> None:
             assert bounds["x"] + bounds["width"] <= 391
         await page.screenshot(path=str(output / "mobile.png"), full_page=True)
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await process_fold.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "false")
+        await expect(old_turn.get_by_text("first child report", exact=True)).to_be_hidden()
+        await expect(visible_failure.first).to_be_visible()
+        await page.locator(f'.chat-sidebar [data-tab-id="{OTHER_TAB}"]').click()
+        await expect(page.get_by_text("Other answer.", exact=True)).to_be_visible()
+        started = time.perf_counter()
+        await page.locator(f'.chat-sidebar [data-tab-id="{TAB}"]').click()
+        await expect(page.get_by_text("Parent answer.", exact=True)).to_be_visible()
+        timings["cached_switch_questions_and_answers_ms"] = (time.perf_counter() - started) * 1000
+        await expect(turns).to_have_count(2)
+        await expect(process_fold).to_have_attribute("aria-expanded", "false")
+        await process_fold.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "true")
+        assert len(detail_requests) == 3, "Cached details must survive folding and Chat switches"
+        await expect(page.get_by_text("Parent answer.", exact=True)).to_have_count(1)
+        assert any(item["since"] == 12 for item in summary_requests), summary_requests
+
+        # A new page has no in-memory detail cache. Switch away while its
+        # expansion read is pending, then allow that old response to finish.
+        await page.reload()
+        await expect(page.get_by_text("Parent answer.", exact=True)).to_be_visible()
+        delay_next_detail = True
+        before_delayed = len(detail_requests)
+        await process_fold.click()
+        await asyncio.wait_for(delayed_started.wait(), timeout=5)
+        await page.locator(f'.chat-sidebar [data-tab-id="{OTHER_TAB}"]').click()
+        await expect(page.get_by_text("Other answer.", exact=True)).to_be_visible()
+        await asyncio.wait_for(delayed_finished.wait(), timeout=5)
+        await expect(page.get_by_text("Parent answer.", exact=True)).to_have_count(0)
+        await expect(page.get_by_text("first child report", exact=True)).to_have_count(0)
+        await page.locator(f'.chat-sidebar [data-tab-id="{TAB}"]').click()
+        await expect(page.get_by_text("Parent answer.", exact=True)).to_be_visible()
+        await expect(process_fold).to_be_enabled()
+        if await process_fold.get_attribute("aria-expanded") == "false":
+            await process_fold.click()
+        retry = old_turn.get_by_test_id("history-details-retry")
+        if await retry.is_visible():
+            await retry.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "true")
+        assert len(detail_requests) >= before_delayed + 3, detail_requests
         assert not unknown_requests, unknown_requests
         assert not unexpected_external_requests, unexpected_external_requests
         assert not errors, errors
@@ -337,8 +506,14 @@ async def main(browser_run: BrowserRun) -> None:
             "spawn/child deduplication",
             "dispatch versus child lifecycle",
             "expanded child process",
+            "summary-first history without eager detail requests",
+            "detail failure retry and fixed-cursor pagination",
+            "detail cache across folding and Chat switches",
             "mobile overflow",
         ],
+        "detail_requests": len(detail_requests),
+        "summary_requests": summary_requests,
+        "timings_ms": timings,
         "api_requests": len(requests),
         "unknown_requests": unknown_requests,
         "blocked_external_requests": blocked_external_requests,

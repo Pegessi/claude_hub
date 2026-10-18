@@ -2,6 +2,7 @@ import { ref, shallowRef, onUnmounted, type Ref, type ShallowRef } from 'vue'
 import type {
   AgentStreamEvent,
   AgentStreamEventPage,
+  AgentStreamHistoryDetail,
   StreamCapabilities,
 } from '@/types'
 import { validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '@/utils/agentStreamAttachments'
@@ -10,6 +11,7 @@ import { AgentStreamBatcher } from '@/utils/agentStreamBatcher'
 import { StreamConnectionStateMachine } from '@/utils/streamConnectionStateMachine'
 import {
   agentStreamHistoryCache,
+  type AgentStreamHistoryDetailEntry,
   type AgentStreamHistorySnapshot,
 } from '@/utils/agentStreamHistoryCache'
 
@@ -60,10 +62,15 @@ class StreamWaitError extends Error {
 export interface UseAgentStreamApi {
   capabilities: ShallowRef<StreamCapabilities | null>
   events: ShallowRef<AgentStreamEvent[]>
+  historyDetails: ShallowRef<Record<string, AgentStreamHistoryDetailEntry>>
+  attributedToolIds: ShallowRef<ReadonlySet<string>>
+  historyDetailRevision: Ref<number>
   connectionState: Ref<StreamConnectionState>
   errorMessage: Ref<string | null>
   /** Start (or restart) a managed-session or direct Chat-tab stream. */
   start: (sourceId: string, source?: StreamSource) => Promise<void>
+  /** Fetch a folded historical turn's full process without advancing the live cursor. */
+  loadHistoryDetail: (turnId: string) => Promise<void>
   /** Replace a failed provider transport, then hydrate its resumed stream. */
   retry: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Refresh active-session capabilities without restarting timeline delivery. */
@@ -113,6 +120,9 @@ export function useAgentStream(): UseAgentStreamApi {
   // Batches replace the array; event payloads are immutable. Deep proxies
   // make replaying a long transcript substantially more expensive.
   const events = shallowRef<AgentStreamEvent[]>([])
+  const historyDetails = shallowRef<Record<string, AgentStreamHistoryDetailEntry>>({})
+  const attributedToolIds = shallowRef<ReadonlySet<string>>(new Set())
+  const historyDetailRevision = ref(0)
   const connectionState = ref<StreamConnectionState>('idle')
   const errorMessage = ref<string | null>(null)
 
@@ -134,6 +144,8 @@ export function useAgentStream(): UseAgentStreamApi {
   let hydrationAbort: AbortController | null = null
   /** Latest-wins owner for requests that replace active capabilities. */
   let capabilitiesUpdateAbort: AbortController | null = null
+  let nextHistoryDetailRequestId = 1
+  const historyDetailRequests = new Map<string, number>()
   // Stream sequences are zero-based and cursors are exclusive. SSE is only an
   // accelerator: future events stay buffered until long-poll fills every gap.
   const sequenceBuffer = createContiguousEventBuffer<AgentStreamEvent>()
@@ -149,6 +161,18 @@ export function useAgentStream(): UseAgentStreamApi {
     events.value = [...events.value, ...batch]
   })
 
+  function normalizeHistoryDetailsForCache(
+    details: Record<string, AgentStreamHistoryDetailEntry>,
+  ): Record<string, AgentStreamHistoryDetailEntry> {
+    const normalized: Record<string, AgentStreamHistoryDetailEntry> = {}
+    for (const [turnId, entry] of Object.entries(details)) {
+      normalized[turnId] = entry.status === 'loading'
+        ? { descriptor: entry.descriptor, status: 'idle' }
+        : entry
+    }
+    return normalized
+  }
+
   function enqueueEvents(committed: AgentStreamEvent[]) {
     batcher.enqueue(committed)
   }
@@ -158,6 +182,11 @@ export function useAgentStream(): UseAgentStreamApi {
     batcher.flushAndCancel()
     capabilities.value = snapshot?.capabilities ?? null
     events.value = snapshot?.events ?? []
+    historyDetails.value = snapshot?.historyDetails
+      ? normalizeHistoryDetailsForCache(snapshot.historyDetails)
+      : {}
+    attributedToolIds.value = snapshot?.attributedToolIds ? new Set(snapshot.attributedToolIds) : new Set()
+    historyDetailRevision.value = snapshot?.detailRevision ?? 0
     errorMessage.value = null
     sequenceBuffer.reset(snapshot?.cursor ?? -1)
   }
@@ -169,6 +198,9 @@ export function useAgentStream(): UseAgentStreamApi {
       capabilities: capabilities.value,
       events: events.value,
       cursor: sequenceBuffer.cursor,
+      historyDetails: normalizeHistoryDetailsForCache(historyDetails.value),
+      attributedToolIds: new Set(attributedToolIds.value),
+      detailRevision: historyDetailRevision.value,
     })
   }
 
@@ -211,17 +243,115 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
+  function replayIdentity(event: AgentStreamEvent): string | null {
+    if (![
+      'tool_call_started',
+      'tool_call_completed',
+      'approval_required',
+      'approval_resolved',
+    ].includes(event.type)) return null
+    const fromPayload = event.payload.tool_call_id
+    if (typeof fromPayload === 'string' && fromPayload) return fromPayload
+    return typeof event.call_id === 'string' && event.call_id ? event.call_id : null
+  }
+
+  function filterLiveCommittedEvents(committed: AgentStreamEvent[]): AgentStreamEvent[] {
+    const nextIds = new Set(attributedToolIds.value)
+    const accepted: AgentStreamEvent[] = []
+    let changedIds = false
+    for (const event of committed) {
+      const identity = replayIdentity(event)
+      if (!identity) {
+        accepted.push(event)
+        continue
+      }
+      if (!event.turn_id && nextIds.has(identity)) {
+        changedIds = true
+        continue
+      }
+      accepted.push(event)
+      if (event.turn_id && !nextIds.has(identity)) {
+        nextIds.add(identity)
+        changedIds = true
+      }
+    }
+    if (changedIds) attributedToolIds.value = nextIds
+    return accepted
+  }
+
   function applyPage(page: AgentStreamEventPage, generationId: number) {
     // A stale page (from a superseded generation) must not advance the shared
     // sequence cursor; otherwise the current generation's events would be
     // skipped because their stream_sequence is <= the stale cursor.
     if (!stateMachine.isCurrent(generationId)) return
     const committed = sequenceBuffer.push(page.events)
-    if (committed.length) enqueueEvents(committed)
+    if (committed.length) enqueueEvents(filterLiveCommittedEvents(committed))
+  }
+
+  function detailChanged(previous: AgentStreamHistoryDetail, next: AgentStreamHistoryDetail): boolean {
+    return previous.first_sequence !== next.first_sequence ||
+      previous.last_sequence !== next.last_sequence ||
+      previous.event_count !== next.event_count
+  }
+
+  function recordHistoryDetails(details: AgentStreamHistoryDetail[] | undefined) {
+    if (!details || details.length === 0) return
+    const next = { ...historyDetails.value }
+    let changed = false
+    for (const descriptor of details) {
+      const existing = next[descriptor.turn_id]
+      if (!existing) {
+        next[descriptor.turn_id] = { descriptor, status: 'idle' }
+        changed = true
+      } else if (detailChanged(existing.descriptor, descriptor)) {
+        // A newer summary covers a different raw range. Previously fetched
+        // detail is no longer complete for this descriptor; make the next
+        // expansion read the fixed, current range.
+        next[descriptor.turn_id] = { descriptor, status: 'idle' }
+        changed = true
+      }
+    }
+    if (changed) historyDetails.value = next
+  }
+
+  function markHistoryDetail(turnId: string, patch: Partial<AgentStreamHistoryDetailEntry>) {
+    const existing = historyDetails.value[turnId]
+    if (!existing) return
+    historyDetails.value = {
+      ...historyDetails.value,
+      [turnId]: { ...existing, ...patch },
+    }
+  }
+
+  function replaceHistoryDetailEvents(turnId: string, descriptor: AgentStreamHistoryDetail, detailEvents: AgentStreamEvent[]) {
+    const lower = descriptor.first_sequence
+    const upper = descriptor.last_sequence
+    const retained = events.value.filter(event => {
+      if (event.turn_id !== turnId) return true
+      return event.stream_sequence < lower || event.stream_sequence > upper
+    })
+    const orderedDetail = [...detailEvents].sort((a, b) => a.stream_sequence - b.stream_sequence)
+    events.value = [...retained, ...orderedDetail].sort((a, b) => a.stream_sequence - b.stream_sequence)
+    historyDetailRevision.value += 1
+  }
+
+  function recordAttributedToolIds(ids: string[] | undefined) {
+    if (!ids || ids.length === 0) return
+    const next = new Set(attributedToolIds.value)
+    let changed = false
+    for (const id of ids) {
+      if (!next.has(id)) {
+        next.add(id)
+        changed = true
+      }
+    }
+    if (changed) attributedToolIds.value = next
   }
 
   function applyCompactedHistoryPage(page: AgentStreamEventPage, generationId: number) {
     if (!stateMachine.isCurrent(generationId)) return
+    recordHistoryDetails(page.history_details)
+    recordAttributedToolIds(page.attributed_tool_ids)
     // Compacted history intentionally has sequence gaps: adjacent durable
     // deltas are represented by one event.  Commit those presentation events
     // directly, then advance the correctness cursor to the raw page cursor so
@@ -275,9 +405,18 @@ export function useAgentStream(): UseAgentStreamApi {
     streamPath: string,
     since: number,
     signal: AbortSignal,
+    options: { view?: 'conversation'; turnId?: string; throughSequence?: number } = {},
   ): Promise<AgentStreamEventPage> {
+    const params = new URLSearchParams({
+      since_sequence: String(since),
+      limit: String(HYDRATION_PAGE_LIMIT),
+      compact: 'true',
+    })
+    if (options.view) params.set('view', options.view)
+    if (options.turnId) params.set('turn_id', options.turnId)
+    if (options.throughSequence !== undefined) params.set('through_sequence', String(options.throughSequence))
     const res = await fetchWithTimeout(
-      `${streamPath}/events?since_sequence=${since}&limit=${HYDRATION_PAGE_LIMIT}&compact=true`,
+      `${streamPath}/events?${params.toString()}`,
       { signal },
       HYDRATION_FETCH_TIMEOUT_MS,
     )
@@ -388,7 +527,7 @@ export function useAgentStream(): UseAgentStreamApi {
       try {
         const evt = JSON.parse(ev.data) as AgentStreamEvent
         const committed = sequenceBuffer.push([evt])
-        if (committed.length) enqueueEvents(committed)
+        if (committed.length) enqueueEvents(filterLiveCommittedEvents(committed))
       } catch {
         // ignore malformed event
       }
@@ -453,7 +592,7 @@ export function useAgentStream(): UseAgentStreamApi {
 
       while (true) {
         if (stopped || !stateMachine.isCurrent(generationId)) return
-        const page = await fetchEvents(streamPath, since, signal)
+        const page = await fetchEvents(streamPath, since, signal, { view: 'conversation' })
         if (stopped || !stateMachine.isCurrent(generationId)) return
         applyCompactedHistoryPage(page, generationId)
         since = page.next_sequence
@@ -485,6 +624,65 @@ export function useAgentStream(): UseAgentStreamApi {
         errorMessage.value = message
         connectionState.value = 'failed'
       }
+    }
+  }
+
+  async function loadHistoryDetail(turnId: string) {
+    const sourceId = currentSessionId
+    const streamPath = currentStreamPath
+    const entry = historyDetails.value[turnId]
+    if (stopped || !sourceId || !streamPath || !entry || entry.status === 'loaded' || entry.status === 'loading') return
+
+    const requestId = nextHistoryDetailRequestId++
+    historyDetailRequests.set(turnId, requestId)
+    markHistoryDetail(turnId, { status: 'loading', errorMessage: undefined })
+
+    const descriptor = entry.descriptor
+    const detailGeneration = stateMachine.getGeneration()
+    const since = Math.max(-1, descriptor.first_sequence - 1)
+    const through = descriptor.last_sequence
+    const controller = new AbortController()
+    const detailEvents: AgentStreamEvent[] = []
+    try {
+      let cursor = since
+      while (true) {
+        if (
+          stopped ||
+          currentSessionId !== sourceId ||
+          currentStreamPath !== streamPath ||
+          !stateMachine.isCurrent(detailGeneration)
+        ) return
+        const page = await fetchEvents(streamPath, cursor, controller.signal, {
+          turnId,
+          throughSequence: through,
+        })
+        if (
+          stopped ||
+          currentSessionId !== sourceId ||
+          currentStreamPath !== streamPath ||
+          !stateMachine.isCurrent(detailGeneration) ||
+          historyDetailRequests.get(turnId) !== requestId
+        ) return
+        detailEvents.push(...page.events)
+        cursor = page.next_sequence
+        if (!page.has_more) break
+      }
+      replaceHistoryDetailEvents(turnId, descriptor, detailEvents)
+      markHistoryDetail(turnId, { status: 'loaded', errorMessage: undefined })
+    } catch (err) {
+      if (
+        stopped ||
+        currentSessionId !== sourceId ||
+        currentStreamPath !== streamPath ||
+        !stateMachine.isCurrent(detailGeneration)
+      ) return
+      if (historyDetailRequests.get(turnId) !== requestId) return
+      markHistoryDetail(turnId, {
+        status: 'error',
+        errorMessage: err instanceof Error ? err.message : 'Failed to load execution details',
+      })
+    } finally {
+      if (historyDetailRequests.get(turnId) === requestId) historyDetailRequests.delete(turnId)
     }
   }
 
@@ -626,9 +824,13 @@ export function useAgentStream(): UseAgentStreamApi {
   return {
     capabilities,
     events,
+    historyDetails,
+    attributedToolIds,
+    historyDetailRevision,
     connectionState,
     errorMessage,
     start,
+    loadHistoryDetail,
     retry,
     refreshCapabilities,
     setMode,
