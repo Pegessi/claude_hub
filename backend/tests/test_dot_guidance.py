@@ -25,7 +25,9 @@ def test_guidance_preserves_choices_and_explicit_tool_contracts() -> None:
     assert "Handle small, bounded requests directly" in DEFAULT_ROLE
     assert "A targeted check can help" in DEFAULT_ROLE
     assert "Do not store secrets or passwords" in DEFAULT_ROLE
-    assert "when useful" in TURN_RULES
+    assert "Delegate long or many-step work" in DEFAULT_ROLE
+    assert "Delegate long or many-step work to Hub Tasks" in TURN_RULES
+    assert "when useful" not in TURN_RULES
     assert "not a watched task or human acceptance" in TOOL_GUIDE
     assert "A redo does not restart work" in TOOL_GUIDE
     assert "once the user agrees" in TOOL_GUIDE

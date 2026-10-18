@@ -5,8 +5,8 @@
 The user requested short, clear Dot guidance with room for judgment. This changes
 repository defaults and generated context, not the live Dot home or its sessions.
 
-- Default role: small requests can be handled directly; longer work can be
-  delegated when useful. Prefer task events over routine polling, with targeted
+- Default role: small requests can be handled directly; long or many-step work
+  is delegated to Hub Tasks. Prefer task events over routine polling, with targeted
   checks allowed for user requests, stalled work or evidence gaps.
 - Turn, wake and tidy guidance: short steps and useful updates are preferences.
   An exact `[quiet]` reply remains the protocol for hiding a quiet Hub turn.
@@ -16,7 +16,8 @@ repository defaults and generated context, not the live Dot home or its sessions
 - Dynamic context: use brief suggestions rather than fixed reply lengths or
   unconditional review/notification instructions. Keep complete factual events.
 
-The six active prompt constants total 5,526 characters, down from 7,615 (27.4%).
+At the initial cleanup commit, the six active prompt constants totaled 5,526
+characters, down from 7,615 (27.4%).
 This compares role, turn, tool, brief, wake and tidy defaults, not tokens or a
 single transmitted prompt. Exact historical schedule text is retained only for
 migration matching and is not included in new prompts.
@@ -52,3 +53,15 @@ resources are test-owned; no model or Feishu service is involved.
   default matching, preserved customization, session caching and documentation.
 - Evidence: `/tmp/ch-dot-guidance-checks/all.log`; no live provider/Feishu or
   browser acceptance was run. These tests do not establish live model behavior.
+
+## Follow-up: restore long-task delegation
+
+The user retained the explicit rule that long or many-step work goes to Hub
+Tasks. It is restored in both the default role and Hub-kept turn guidance; small,
+bounded requests remain direct. Memory, wake/tidy, reporting, task ownership and
+human-acceptance guidance are unchanged.
+
+Dot focused tests: 138 passed. Strict `verify.sh all` exited 0 again: backend
+4337 passed / 10 skipped in 218.32s, frontend 1029 passed, and all other standard
+targets passed. Independent delta review passed. Evidence:
+`/tmp/ch-dot-guidance-checks/delegation-all.log`. No live state was changed.
