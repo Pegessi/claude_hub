@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "ae440ab9d0343a78a9f7adb4ef519053b1b46198",
+  "parents": [
+    "3ae9132df8c1d004395616537eb21a2e578545b0",
+    "02d374ca4f496903d5e5b6de6613dbec86932108"
+  ],
+  "base": "5e3da89b1e7f76aa859021b1c74fb8d9da4408c9",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "b0b516359f7e84b7921d934575471da3f7b7e464",
+  "reconstructed_tree": "26b65ea49280a0b1d3088a6675bc3fe7c247d8c2",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "704af458e819bc55303f3735d9fa7c7e0c5e0241"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3872353411923f3d51eecb8142077ce3565c769a"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "303742a986b67d332bfa9aa0626e4113feeff7b0"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9d454d973c23c7584a4b2db6029d7e94ca35467f"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d8becd9e11b9a6a86cabd149740cffc54df71fbc"
+      },
+      "reason": "双方都在 Released 顶部新增条目。保留飞书时间容差与批次准入修复的完整条目，紧接保留主线的历史详情失效修复及懒加载两条完整条目；正文内容和其余发布记录不变，未手工修改运行时代码。",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

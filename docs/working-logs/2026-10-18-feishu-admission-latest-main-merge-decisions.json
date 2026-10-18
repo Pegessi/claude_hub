@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "c721b69f8d71e3b54c1950b683d4f45b8f104635",
+  "parents": [
+    "ae440ab9d0343a78a9f7adb4ef519053b1b46198",
+    "d64efc7fff057a6d8a33f00569234923636851b1"
+  ],
+  "base": "3ae9132df8c1d004395616537eb21a2e578545b0",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "48cdfc1bca198f0aea6fd79806131e32209d9e93",
+  "reconstructed_tree": "8ad4839d7dd115052ce914fef05820b0169112b4",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3872353411923f3d51eecb8142077ce3565c769a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d8becd9e11b9a6a86cabd149740cffc54df71fbc"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2611bb7b5ca41806314cbe63474f480f5d01bcdf"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8b77d6a7b819cd8b4da36769644ac129de44837b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0ab54c3867bc5c0fc49a7d2e14aa2a3578a4410d"
+      },
+      "reason": "保留飞书准入修复完整条目，并完整保留并发主线新增的 Markdown 阅读器两条、Dot 指引及最终复审通知两条记录；不改写条目正文，不手工修改任何运行时代码。",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
