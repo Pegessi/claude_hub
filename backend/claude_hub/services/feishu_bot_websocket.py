@@ -620,7 +620,9 @@ class FeishuBotWebSocketSupervisor:
         if self._monitor is None or self._monitor.done():
             self._monitor = asyncio.create_task(self._monitor_loop())
 
-    async def stop(self) -> None:
+    async def quiesce(self) -> None:
+        """Stops new intake and connections without waiting for accepted routes."""
+
         self._stopping = True
         self._started = False
         self._route_tasks.stop_accepting()
@@ -632,7 +634,13 @@ class FeishuBotWebSocketSupervisor:
             for bot_id in list(self._connections):
                 await self._stop_one(bot_id)
             self._failures.clear()
-        await self._route_tasks.drain(self._shutdown_drain_seconds)
+
+    async def stop(self, *, drain_timeout_seconds: float | None = None) -> None:
+        await self.quiesce()
+        timeout_seconds = (
+            self._shutdown_drain_seconds if drain_timeout_seconds is None else drain_timeout_seconds
+        )
+        await self._route_tasks.drain(timeout_seconds)
 
     async def _monitor_loop(self) -> None:
         while True:

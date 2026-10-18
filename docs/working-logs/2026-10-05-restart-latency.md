@@ -66,3 +66,49 @@ one external-terminal restart of the launcher (the normal `./start.sh` entry).
 After activation, subsequent menu restarts use the bounded drain automatically.
 Merging this change alone does not change the already-running launcher.
 No production restart or live terminal cleanup was performed by this task.
+
+## 2026-10-18 follow-up: Feishu route drain blocked restart cleanup
+
+A later live restart took 44.67 seconds. Launcher output split the observed run
+into about 9.5 seconds of dependency/frontend preparation, 29.7 seconds stopping
+the old backend, and 5.5 seconds starting the replacement. The old backend
+entered lifespan shutdown but did not persist `chat_recovery`, stop its stream
+owners, or release 18 ttyd listeners before the launcher used its 30-second kill
+fallback. The replacement then failed to bind all 18 saved ports.
+
+The blocking turn came through the Feishu WebSocket path. Lifespan shutdown
+waited first for the supervisor's 30-second accepted-route drain, while that
+accepted route was itself waiting for the native Chat turn that later shutdown
+steps would stop. Cleanup therefore could not make progress before the launcher's
+outer deadline.
+
+The follow-up separates Feishu shutdown into two phases. Shutdown first stops
+new Feishu intake and closes its connections without draining accepted routes.
+It then captures eligible restart continuations, stops stream owners, and releases
+ttyd listeners. Only after those cleanup-critical steps does it cancel any
+accepted Feishu routes that are still running; the app shutdown path gives them
+no additional 30-second wait, so cancellation starts before the launcher's outer
+deadline. Launcher output now reports preparation and backend shutdown separately
+instead of combining them under `backend stopped`.
+
+The interrupted Dot turn in this incident had `origin=feishu`. Planned restart
+continuation intentionally accepts direct Web Chat turns and eligible Goal turns,
+not Feishu/Bot turns; this change does not alter that ownership boundary. It
+restores the capture path that the forced old-process kill skipped, and deployment
+documentation now states the Feishu/Dot limitation explicitly.
+
+Focused validation covers the two-phase supervisor behavior and the real
+launcher/app process restart order. The process regression requires the final
+Feishu stop call to observe no provider turn in flight, a completed return from
+the configured ttyd cleanup hook, and a zero-second pre-cancellation wait; it
+also retains the same-conversation, one-attempt continuation checks. Provider,
+Feishu transport, and ttyd cleanup are replaced in that process fixture, so it
+proves lifecycle ordering and persisted continuation, not real listener release
+or live Bot delivery. An isolated HEAD copy with the current process regression
+failed under the old shutdown order: final Feishu stop saw a live provider turn,
+the cleanup hook had not run, and no zero-second cancellation budget was supplied.
+The focused Feishu/restart/Goal selection passed 175 tests; a broader Feishu and
+restart cross-validation passed 402 tests. Changed source modules passed scoped
+mypy and Ruff checks. The shared service was inspected only; this follow-up did
+not restart it, clean its orphan listeners, or run a live Feishu/provider
+continuation.

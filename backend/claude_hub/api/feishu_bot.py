@@ -1754,11 +1754,16 @@ async def start_feishu_websockets() -> None:
     await _ws_supervisor.start()
 
 
-async def stop_feishu_websockets() -> None:
-    await _ws_supervisor.stop()
+async def quiesce_feishu_websockets() -> None:
+    await _ws_supervisor.quiesce()
+
+
+async def stop_feishu_websockets(*, drain_timeout_seconds: float | None = None) -> None:
+    await _ws_supervisor.stop(drain_timeout_seconds=drain_timeout_seconds)
 
 
 __all__ = [
+    "quiesce_feishu_websockets",
     "require_hub_user",
     "router",
     "start_feishu_websockets",

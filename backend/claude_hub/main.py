@@ -187,11 +187,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.gather(continuation_task, return_exceptions=True)
             try:
                 try:
-                    from .api.feishu_bot import stop_feishu_websockets
+                    from .api.feishu_bot import quiesce_feishu_websockets
 
-                    await stop_feishu_websockets()
+                    await quiesce_feishu_websockets()
                 except Exception:
-                    logger.exception("Failed to stop Feishu Bot WebSockets")
+                    logger.exception("Failed to quiesce Feishu Bot WebSockets")
                 try:
                     from .services.dot import get_dot_service
 
@@ -199,7 +199,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 except Exception:
                     logger.exception("Failed to stop the Dot work watcher")
                 # Stop new scheduled dispatch before draining its transports.
-                await workspace_manager.stop_background_monitor()
+                try:
+                    await workspace_manager.stop_background_monitor()
+                except Exception:
+                    logger.exception("Failed to stop the workspace background monitor")
                 try:
                     await capture_interrupted_chats()
                 except Exception:
@@ -212,7 +215,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 except Exception:
                     logger.exception("Failed to stop agent-stream tailers")
                 finally:
-                    await ttyd_manager.cleanup()
+                    try:
+                        await ttyd_manager.cleanup()
+                    finally:
+                        try:
+                            from .api.feishu_bot import stop_feishu_websockets
+
+                            await stop_feishu_websockets(drain_timeout_seconds=0)
+                        except Exception:
+                            logger.exception("Failed to stop Feishu Bot WebSockets")
 
 
 app = FastAPI(
