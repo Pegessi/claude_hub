@@ -52,6 +52,9 @@ class DotSessionService(object):
     def _watch_interval_seconds(self) -> float:
         return WATCH_INTERVAL_SECONDS
 
+    def _wake_interval_seconds(self) -> int:
+        return WAKE_INTERVAL_SECONDS
+
     # ── identity ────────────────────────────────────────────────────────
 
     def _peek_state(self) -> dict[str, Any]:
@@ -165,7 +168,7 @@ class DotSessionService(object):
             (
                 "wake_schedule_id",
                 "Dot wake-up",
-                {"interval_seconds": WAKE_INTERVAL_SECONDS},
+                {"interval_seconds": self._wake_interval_seconds()},
                 WAKE_MESSAGE,
             ),
             ("tidy_schedule_id", "Dot nightly tidy", {"cron": TIDY_CRON}, TIDY_MESSAGE),

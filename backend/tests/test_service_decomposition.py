@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from claude_hub.services import feedback_lessons, feishu_bot_pool
+from claude_hub.api import feishu_bot as bot_api
+from claude_hub.services import feedback_lessons, feishu_bot_pool, feishu_bot_websocket
 from claude_hub.services.bot_pool.store import FeishuBotPoolStore as BotPoolImplementation
 from claude_hub.services.dot import service as dot_service
 from claude_hub.services.dot import store as dot_store
@@ -64,7 +65,9 @@ def test_legacy_entries_are_small_and_export_the_feature_implementations() -> No
         assert len((_SERVICE_ROOT / relative).read_text(encoding="utf-8").splitlines()) <= 1500
 
     assert issubclass(feedback_lessons.FeedbackLessonStore, FeedbackImplementation)
-    assert feishu_bot_pool.FeishuBotPoolStore is BotPoolImplementation
+    assert issubclass(feishu_bot_pool.FeishuBotPoolStore, BotPoolImplementation)
+    assert bot_api.FeishuBotPoolStore is feishu_bot_pool.FeishuBotPoolStore
+    assert feishu_bot_websocket.FeishuBotPoolStore is feishu_bot_pool.FeishuBotPoolStore
     assert issubclass(dot_store.DotStore, DotStoreImplementation)
     assert issubclass(dot_service.DotService, DotRuntimeImplementation)
 

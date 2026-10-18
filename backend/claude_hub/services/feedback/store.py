@@ -13,7 +13,6 @@ from claude_hub.services.feedback.common import (
     Path,
     Workspace,
     WorkspaceTask,
-    _now,
     bisect_right,
     datetime,
     hashlib,
@@ -53,7 +52,7 @@ class FeedbackLessonStore(FeedbackLessonCatalogStore):
         made it into the final prompt (after the global budget drops excess
         digests), so budget-dropped records stay unprocessed and are retried on
         the next run."""
-        now = now or _now()
+        now = now or self._feedback_now()
         limit = min(max(limit, 1), self._REAPER_MAX_DIGESTS_PER_RUN)
         index = self._read_feedback_index(workspace_id)
         existing_entries = {
@@ -393,7 +392,7 @@ class FeedbackLessonStore(FeedbackLessonCatalogStore):
         *,
         now: datetime | None = None,
     ) -> FeedbackSummaryRun | None:
-        now = now or _now()
+        now = now or self._feedback_now()
         run_path, run = self._find_summary_run_by_task(workspace_id, task_id)
         if not run_path or not run:
             return None
@@ -429,7 +428,7 @@ class FeedbackLessonStore(FeedbackLessonCatalogStore):
     ) -> FeedbackSummaryRun | None:
         """Make an unfinished run terminal without consuming its staged input."""
 
-        now = now or _now()
+        now = now or self._feedback_now()
         run_path, run = self._find_summary_run_by_task(workspace_id, task_id)
         if not run_path or not run:
             return None

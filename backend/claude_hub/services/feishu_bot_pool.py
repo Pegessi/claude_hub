@@ -55,4 +55,11 @@ from claude_hub.services.bot_pool.common import (
     time,
     turn_id_for,
 )
-from claude_hub.services.bot_pool.store import FeishuBotPoolStore
+from claude_hub.services.bot_pool.store import FeishuBotPoolStore as _FeishuBotPoolStore
+
+
+class FeishuBotPoolStore(_FeishuBotPoolStore):
+    """Bot pool with call-time lookup of the legacy capacity setting."""
+
+    def _max_bots(self) -> int:
+        return MAX_BOTS

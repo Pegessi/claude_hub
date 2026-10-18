@@ -47,6 +47,9 @@ from claude_hub.services.bot_pool.state import FeishuBotPoolStateStore
 
 class FeishuBotPoolStore(FeishuBotPoolStateStore):
 
+    def _max_bots(self) -> int:
+        return MAX_BOTS
+
     # ------------------------------------------------------- bot lifecycle
 
     def create_bot(
@@ -64,7 +67,10 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             state = self._load()
             self._prune(state, now)
             self._sync_env_entry(state, environ, now)
-            if len([v for v in state["bots"].values() if not v.get("revoked_at")]) >= MAX_BOTS:
+            if (
+                len([v for v in state["bots"].values() if not v.get("revoked_at")])
+                >= self._max_bots()
+            ):
                 raise FeishuPoolFull("pool")
             self._require_app_id_free(state, config.app_id, exclude=None)
             bot_id = secrets.token_hex(8)

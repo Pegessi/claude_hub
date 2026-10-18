@@ -36,6 +36,9 @@ class FeedbackPersistenceStore(object):
     def __init__(self, state_root: Path) -> None:
         self.state_root = state_root
 
+    def _feedback_now(self) -> datetime:
+        return _now()
+
     def _feedback_runtime_settings(self) -> FeedbackRuntimeSettings:
         return feedback_runtime_settings()
 
@@ -155,7 +158,7 @@ class FeedbackPersistenceStore(object):
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema_version": 1,
-            "updated_at": _now().isoformat(),
+            "updated_at": self._feedback_now().isoformat(),
             "lessons": [lesson.model_dump(mode="json") for lesson in lessons],
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -189,7 +192,7 @@ class FeedbackPersistenceStore(object):
     def _write_feedback_index(self, workspace_id: str, payload: dict[str, Any]) -> None:
         path = self._feedback_index_path(workspace_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload["updated_at"] = _now().isoformat()
+        payload["updated_at"] = self._feedback_now().isoformat()
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _sync_lesson_fingerprints(

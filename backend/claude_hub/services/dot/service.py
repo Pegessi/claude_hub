@@ -70,6 +70,9 @@ class DotService(_RuntimeDotService):
     def _watch_interval_seconds(self) -> float:
         return WATCH_INTERVAL_SECONDS
 
+    def _wake_interval_seconds(self) -> int:
+        return WAKE_INTERVAL_SECONDS
+
 
 _service: Optional[DotService] = None
 

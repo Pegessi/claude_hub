@@ -1,5 +1,7 @@
 """Compatibility entrypoint for workspace feedback lessons."""
 
+from datetime import datetime
+
 from claude_hub.services.feedback.common import (
     _DIGEST_MAX_CHANGED_FILES,
     _DIGEST_MAX_FAILURE_EVIDENCE,
@@ -51,6 +53,9 @@ from claude_hub.services.feedback.store import FeedbackLessonStore as _FeedbackL
 
 class FeedbackLessonStore(_FeedbackLessonStore):
     """Feedback store with late-bound legacy facade settings."""
+
+    def _feedback_now(self) -> datetime:
+        return _now()
 
     def _feedback_runtime_settings(self) -> FeedbackRuntimeSettings:
         return FeedbackRuntimeSettings(
