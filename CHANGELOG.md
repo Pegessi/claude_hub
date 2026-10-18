@@ -7,6 +7,14 @@
 
 ## Released
 
+### refactor(dot): keep assistant guidance concise and advisory
+
+- Shorten default role, turn, tool, task-brief, wake, tidy and contextual guidance.
+  Prefer useful delegation and task events while allowing targeted checks and
+  quiet turns. Keep secret handling, tool contracts and human acceptance explicit.
+- Refresh only exact known old wake/tidy schedule defaults; preserve custom text,
+  existing `DOT.md` files and the current provider-session prompt snapshot.
+
 ### fix(dot): announce final review passes separately from worker progress
 
 - Wake Dot when a tracked task's current independent review passes and awaits
