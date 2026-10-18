@@ -92,10 +92,8 @@ test('mode updates are scoped to the active stream and replace capabilities only
 
 test('initial hydration uses bounded compacted pages instead of replaying every raw delta', () => {
   assert.match(composable, /const HYDRATION_PAGE_LIMIT = 5_000/)
-  assert.match(
-    composable,
-    /events\?since_sequence=\$\{since\}&limit=\$\{HYDRATION_PAGE_LIMIT\}&compact=true/,
-  )
+  assert.match(composable, /new URLSearchParams\(\{[\s\S]*?since_sequence: String\(since\)[\s\S]*?limit: String\(HYDRATION_PAGE_LIMIT\)[\s\S]*?compact: 'true'/)
+  assert.match(composable, /fetchEvents\(streamPath, since, signal, \{ view: 'conversation' \}\)/)
   assert.match(composable, /sequenceBuffer\.reset\(page\.next_sequence\)/)
 })
 

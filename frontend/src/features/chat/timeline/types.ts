@@ -130,7 +130,7 @@ export type TimelinePart =
   | { kind: 'subagent'; key: string; tool: TimelineTool }
   // One expandable native-subagent region per parent turn. Child identity is
   // always the complete provider thread id; each row retains its full process.
-  | { kind: 'subagents'; key: string; threads: TimelineSubthread[] }
+  | { kind: 'subagents'; key: string; threads: TimelineSubthread[]; compact?: boolean }
   // An agent-produced local image (view_image / image Read), split out of the
   // tool groups so the pane renders the actual picture (click → lightbox)
   // instead of a raw path string. ``tool`` carries the live status; ``path``
@@ -144,7 +144,15 @@ export type TimelinePart =
   // Synthetic part produced by ``foldTurnParts`` — never emitted by the
   // reducer. It is the folded working region's header: the toggle that both
   // reveals and hides the detail beneath it.
-  | { kind: 'process'; key: string; meta: string; expanded: boolean }
+  | {
+      kind: 'process'
+      key: string
+      meta: string
+      expanded: boolean
+      turnId?: string | null
+      detailStatus?: 'idle' | 'loading' | 'loaded' | 'error'
+      detailError?: string
+    }
 
 export interface TimelineTurn {
   key: string

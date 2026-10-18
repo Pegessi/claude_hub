@@ -7,6 +7,17 @@
 
 ## Released
 
+### feat(chat): load conversation history before execution details
+
+- Load historical questions, replies, attachments and essential state without
+  downloading thinking, tool payloads or complete sub-agent transcripts up front.
+- Fetch complete per-turn execution details on expansion, with fixed-cursor
+  pagination, visible retry, request cancellation and cache reuse across Chat switches.
+- Preserve raw event API defaults, live-stream cursor ownership, replay identity
+  filtering, approvals, errors, edit/fork history and the original durable log.
+- Add an incremental store-owned history index and focused storage/API/UI regression
+  coverage; document the loading path and correct the shared Chat history API hint.
+
 ### fix(services): restore call-time legacy facade overrides
 
 - Restore `feedback_lessons._now`, `dot.service.WAKE_INTERVAL_SECONDS` and

@@ -568,6 +568,9 @@ async def _stream_events_for(
     limit: int,
     allow_pending_source: bool = False,
     compact: bool = False,
+    view: Literal["raw", "conversation"] = "raw",
+    turn_id: Optional[str] = None,
+    through_sequence: Optional[int] = None,
 ) -> AgentStreamEventPage:
     return await observation.stream_events_for(
         session,
@@ -577,6 +580,9 @@ async def _stream_events_for(
         _agent_stream_bindings,
         allow_pending_source,
         compact,
+        view,
+        turn_id,
+        through_sequence,
     )
 
 
