@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(dot): announce final review passes separately from worker progress
+
+- Wake Dot when a tracked task's current independent review passes and awaits
+  human acceptance, even if its earlier worker-result event was already consumed.
+  Include the final verdict and reviewed worker evidence, not late progress echoes.
+- Deduplicate the notification per review cycle across polls and restarts, and
+  recover a failed work-marker write from an already-delivered inbox event.
+- Tell Dot to report the verdict and request human acceptance instead of replying
+  `[quiet]`; preserve watched-task ownership and do not automatically accept tasks
+  or send Feishu messages outside the existing `dot notify` flow.
+
 ### fix(restart): capture interrupted Chats before draining Feishu routes
 
 - Stop new Feishu intake before recording eligible Chat continuations, stopping
