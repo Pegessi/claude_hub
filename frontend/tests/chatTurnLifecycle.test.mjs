@@ -69,19 +69,31 @@ test('a replaced event source is re-evaluated instead of inheriting the old curs
   assert.equal(hasChatStatusRefreshBoundary(previous, replacement), true)
 })
 
-const structuredPane = readFileSync(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
+const modePicker = readFileSync(
+  new URL('../src/features/chat/components/ChatModePicker.vue', import.meta.url),
+  'utf8',
+)
+const settingsController = readFileSync(
+  new URL('../src/features/chat/controllers/useChatSettings.ts', import.meta.url),
+  'utf8',
+)
+const goalController = readFileSync(
+  new URL('../src/features/chat/controllers/useChatGoal.ts', import.meta.url),
+  'utf8',
+)
+const deliveryController = readFileSync(
+  new URL('../src/features/chat/controllers/useChatDelivery.ts', import.meta.url),
   'utf8',
 )
 
-test('StructuredPane wires the lifecycle lock into mode UI and refreshes status once per boundary', () => {
-  assert.match(structuredPane, /:disabled="modeInteractionLocked \|\| isUpdatingMode"/)
-  assert.match(structuredPane, /if \(modeInteractionLocked\.value \|\| isUpdatingMode\.value/)
-  assert.match(structuredPane, /hasChatStatusRefreshBoundary\(previous, latest\)/)
-  assert.match(structuredPane, /terminalStore\.fetchAgentStatuses\(\)/)
+test('Chat feature wires the lifecycle lock into mode UI and refreshes status once per boundary', () => {
+  assert.match(modePicker, /:disabled="modeInteractionLocked \|\| isUpdatingMode"/)
+  assert.match(settingsController, /if \(deps\.modeInteractionLocked\.value \|\| isUpdatingMode\.value/)
+  assert.match(goalController, /hasChatStatusRefreshBoundary\(previous, latest\)/)
+  assert.match(goalController, /deps\.terminalStore\.fetchAgentStatuses\(\)/)
   assert.match(
-    structuredPane,
+    deliveryController,
     /const pendingDirectTurns = ref<PendingTurn\[\]>\(\[\]\)/,
-    'each keyed KeepAlive instance starts with an empty optimistic turn list, so a source switch needs no manual wipe',
+    'each keyed KeepAlive instance owns an empty optimistic turn list',
   )
 })

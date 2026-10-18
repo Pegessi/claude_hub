@@ -1,0 +1,1 @@
+"""Dot persistence implementation."""

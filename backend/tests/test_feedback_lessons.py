@@ -18,10 +18,10 @@ from claude_hub.services.feedback_lessons import (
     FeedbackLessonStore,
     FeedbackLessonValidationError,
 )
-from claude_hub.services.workspace_manager._feedback import _FeedbackMixin
+from claude_hub.services.workspace_manager import WorkspaceManager
 
 
-class _FeedbackHarness(_FeedbackMixin):
+class _FeedbackHarness(WorkspaceManager):
     workspaces: dict[str, Workspace]
 
     def __init__(self, workspace: Workspace, store: FeedbackLessonStore) -> None:

@@ -1,31 +1,7 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
-import ts from 'typescript'
 import { createPinia, setActivePinia } from 'pinia'
-
-const require = createRequire(import.meta.url)
-const moduleUrl = source => {
-  const { outputText } = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
-  })
-  return `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
-}
-const groupsUrl = moduleUrl(readFileSync(new URL('../src/utils/chatGroups.ts', import.meta.url), 'utf8'))
-const vueRuntimeUrl = pathToFileURL(require.resolve('vue/dist/vue.runtime.esm-bundler.js')).href
-const reconnectUrl = moduleUrl(
-  readFileSync(new URL('../src/utils/terminalReconnect.ts', import.meta.url), 'utf8')
-    .replaceAll("from 'vue'", `from '${vueRuntimeUrl}'`),
-)
-const source = readFileSync(new URL('../src/stores/terminalStore.ts', import.meta.url), 'utf8')
-  .replaceAll("from 'pinia'", `from '${pathToFileURL(require.resolve('pinia/dist/pinia.mjs')).href}'`)
-  .replaceAll("from 'vue'", `from '${vueRuntimeUrl}'`)
-  .replaceAll("from '@/utils/chatGroups'", `from '${groupsUrl}'`)
-  .replaceAll("from '@/utils/terminalReconnect'", `from '${reconnectUrl}'`)
-const { useTerminalStore } = await import(moduleUrl(source))
+import { chatGroupsModuleUrl as groupsUrl, useTerminalStore } from './terminalStoreTestHarness.mjs'
 
 function setup(t, initial = {}) {
   const storage = new Map(Object.entries(initial))

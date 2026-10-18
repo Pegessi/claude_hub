@@ -9,7 +9,10 @@ const js = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 }).outputText
 const { toolGroupNames, toolStatusLabel } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
-const pane = await readFile(new URL('../src/components/StructuredPane.vue', import.meta.url), 'utf8')
+const toolGroup = await readFile(new URL('../src/features/chat/components/ChatToolGroup.vue', import.meta.url), 'utf8')
+const subthread = await readFile(new URL('../src/features/chat/components/ChatSubthread.vue', import.meta.url), 'utf8')
+const timeline = await readFile(new URL('../src/features/chat/components/ChatTimeline.vue', import.meta.url), 'utf8')
+const controller = await readFile(new URL('../src/features/chat/controllers/useChatTimeline.ts', import.meta.url), 'utf8')
 
 test('tool summaries keep a small group readable and count names omitted from large groups', () => {
   const tools = ['Read', 'Bash', 'Search', 'Write', 'Fetch'].map(name => ({ name }))
@@ -42,26 +45,25 @@ test('tool status labels remain explicit without relying on animation or color',
     ['Running', 'Completed', 'Failed', 'Cancelled'])
 })
 
-test('main and child tool bodies are gated by the native details state', () => {
-  for (const part of ['part', 'sub']) {
-    assert.ok(pane.includes(`:open="expandedToolGroups.get(turn.key)?.has(${part}.key)"`))
-    assert.ok(pane.includes(`@toggle="onToolGroupToggle(turn, ${part}.key, $event)"`))
-    assert.match(pane, new RegExp(`<template v-if="expandedToolGroups\\.get\\(turn\\.key\\)\\?\\.has\\(${part}\\.key\\)">\\s*<div\\s+v-for="tool in ${part}\\.tools"`))
-  }
-  const memo = pane.match(/v-memo="\[([^\]]*)\]"/)[1]
-  assert.ok(memo.includes('expandedToolGroups.get(turn.key)'), 'history folds must invalidate their own memo')
-  assert.match(pane, /shallowReactive\(new Map<string, ReadonlySet<string>>\(\)\)/)
-  assert.doesNotMatch(pane, /expandedToolGroups\.get\(turn\)/,
-    'visibleTurns copies turn objects on streaming updates; expansion must use a stable key')
+test('main and child tool bodies are gated by native details state', () => {
+  assert.match(toolGroup, /:open="expandedToolGroups\.get\(turn\.key\)\?\.has\(part\.key\)"/)
+  assert.match(toolGroup, /@toggle="onToolGroupToggle\(turn, part\.key, \$event\)"/)
+  assert.match(toolGroup, /<template v-if="expandedToolGroups\.get\(turn\.key\)\?\.has\(part\.key\)">/)
+  assert.match(subthread, /:open="expandedToolGroups\.get\(turn\.key\)\?\.has\(sub\.key\)"/)
+  assert.match(subthread, /@toggle="onToolGroupToggle\(turn, sub\.key, \$event\)"/)
+  assert.match(subthread, /<template v-if="expandedToolGroups\.get\(turn\.key\)\?\.has\(sub\.key\)">/)
+  const memo = timeline.match(/v-memo="\[([^\]]*)\]"/)[1]
+  assert.match(memo, /expandedToolGroups\.get\(turn\.key\)/)
+  assert.match(controller, /shallowReactive\(new Map<string, ReadonlySet<string>>\(\)\)/)
+  assert.doesNotMatch(controller, /expandedToolGroups\.get\(turn\)/)
 })
 
-test('tool data stays plain text and both scrollable inputs and results support keyboard focus', () => {
-  for (const field of ['argsText', 'resultText']) {
-    const label = field === 'argsText' ? 'Tool input' : 'Tool result'
-    const matches = pane.match(new RegExp(`<pre\\s+tabindex="0"\\s+aria-label="${label}"\\s*>\\{\\{ tool\\.${field} \\}\\}</pre>`, 'g'))
-    assert.equal(matches?.length, 2)
+test('tool data stays plain text and scrollable inputs/results support keyboard focus', () => {
+  for (const component of [toolGroup, subthread]) {
+    assert.match(component, /<pre\s+tabindex="0"\s+aria-label="Tool input"\s*>\{\{ tool\.argsText \}\}<\/pre>/)
+    assert.match(component, /<pre\s+tabindex="0"\s+aria-label="Tool result"\s*>\{\{ tool\.resultText \}\}<\/pre>/)
+    const styles = component.slice(component.indexOf('.tool-header {'), component.indexOf('.tool-name {', component.indexOf('.tool-header {')))
+    assert.doesNotMatch(styles, /animation\s*:/)
+    assert.match(component, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.tool-chevron,[\s\S]*\.tool-header\s*\{\s*transition: none/)
   }
-  const styles = pane.slice(pane.indexOf('.tool-header {'), pane.indexOf('.tool-name {', pane.indexOf('.tool-header {')))
-  assert.doesNotMatch(styles, /animation\s*:/, 'large tool histories must not keep status animations running')
-  assert.match(pane, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.tool-chevron,[\s\S]*\.tool-header\s*\{\s*transition: none/)
 })

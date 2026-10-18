@@ -7,19 +7,31 @@ bottom-follow scheduler) must NOT read DOM geometry per frame. Reading
 or ``needsBottomScroll`` forces a synchronous layout reflow on every output
 frame, which is exactly the regression that made typing feel laggy ("不跟手").
 
-These tests parse the injected JavaScript (a Python f-string in
-``claude_hub.api.terminal``) and assert the hot path stays geometry-free,
-relying instead on the event-driven ``domAtBottomCached`` cache. See
-``docs/working-logs/2026-06-14-terminal-input-latency-v3.md``.
+These tests parse the injected JavaScript templates in
+``claude_hub.api._terminal_injection_*`` and assert the hot path stays
+geometry-free, relying instead on the event-driven ``domAtBottomCached`` cache.
+See ``docs/working-logs/2026-06-14-terminal-input-latency-v3.md``.
 """
 
 from pathlib import Path
 
 import pytest
 
-TERMINAL_SOURCE = (
-    Path(__file__).resolve().parent.parent / "claude_hub" / "api" / "terminal.py"
-).read_text(encoding="utf-8")
+_API_DIR = Path(__file__).resolve().parent.parent / "claude_hub" / "api"
+_INJECTION_DIR = _API_DIR / "terminal_injection"
+TERMINAL_SOURCE = "\n".join(
+    (_INJECTION_DIR / name).read_text(encoding="utf-8")
+    for name in (
+        "bootstrap.py",
+        "buffered_capture.py",
+        "history_replay.py",
+        "terminal_setup.py",
+        "history_resync.py",
+        "history_actions.py",
+        "input_controls.py",
+        "terminal_hook.py",
+    )
+)
 
 # Reads that force a synchronous layout reflow when done on the per-frame path.
 FORBIDDEN_LAYOUT_READS = (
@@ -44,7 +56,7 @@ def _extract_js_function_body(source: str, name: str) -> str:
     """
     marker = f"function {name}("
     start = source.find(marker)
-    assert start != -1, f"hot-path function {name!r} not found in terminal.py"
+    assert start != -1, f"hot-path function {name!r} not found in injection templates"
 
     open_idx = source.find("{{", start)
     assert open_idx != -1, f"opening brace for {name!r} not found"

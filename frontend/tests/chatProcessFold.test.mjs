@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
 import { readFileSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import ts from 'typescript'
+import { loadChatUtility, loadChatFeature } from './chatPresentationTestHarness.mjs'
+
+const { isTurnFoldable, turnProcessFoldSignature } = await loadChatFeature('presentation/chatTurnPresentation')
 
 // ---------------------------------------------------------------------------
 // The fold helpers are pure functions over a finished turn, so they are tested
@@ -13,44 +13,7 @@ import ts from 'typescript'
 // structuredPaneApprovalMemo.test.mjs guards the approval card.
 // ---------------------------------------------------------------------------
 
-const source = await readFile(
-  new URL('../src/utils/agentStreamTimeline.ts', import.meta.url),
-  'utf8',
-)
-const questionSource = await readFile(
-  new URL('../src/utils/chatQuestionResponse.ts', import.meta.url),
-  'utf8',
-)
-const durationSource = await readFile(
-  new URL('../src/utils/duration.ts', import.meta.url),
-  'utf8',
-)
-const subagentSource = await readFile(
-  new URL('../src/utils/subagentTool.ts', import.meta.url),
-  'utf8',
-)
-const agentImageSource = await readFile(
-  new URL('../src/utils/agentImage.ts', import.meta.url),
-  'utf8',
-)
-const transpileOptions = {
-  compilerOptions: {
-    module: ts.ModuleKind.ES2022,
-    target: ts.ScriptTarget.ES2020,
-  },
-}
-const questionJs = ts.transpileModule(questionSource, transpileOptions).outputText
-const durationJs = ts.transpileModule(durationSource, transpileOptions).outputText
-const subagentJs = ts.transpileModule(subagentSource, transpileOptions).outputText
-const agentImageJs = ts.transpileModule(agentImageSource, transpileOptions).outputText
-const timelineJs = ts.transpileModule(
-  source.replace(/^import .* from '@\/utils\/.*$/gm, ''),
-  transpileOptions,
-).outputText
-const bundled = `${durationJs}\n${questionJs}\n${subagentJs}\n${agentImageJs}\n${timelineJs}`
-const mod = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
-)
+const mod = await loadChatUtility('agentStreamTimeline')
 const {
   countProcessSteps,
   foldTurnParts,
@@ -472,113 +435,81 @@ test('a finished turn folds as soon as a newer turn starts', () => {
   )
 })
 
-// ── StructuredPane wiring ───────────────────────────────────────────────
+// ── Feature wiring ─────────────────────────────────────────────────────
 
-const structuredPane = readFileSync(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
-  'utf8',
-)
+const readChat = path => readFileSync(new URL(`../src/features/chat/${path}`, import.meta.url), 'utf8')
+const timelineComponent = readChat('components/ChatTimeline.vue')
+const turnComponent = readChat('components/ChatTurn.vue')
+const turnPartsComponent = readChat('components/ChatTurnParts.vue')
+const thinkingComponent = readChat('components/ChatThinkingCard.vue')
+const toolComponent = readChat('components/ChatToolGroup.vue')
+const subagentComponent = readChat('components/ChatSubagentCard.vue')
+const timelineController = readChat('controllers/useChatTimeline.ts')
 
 test('turn v-memo deps include the fold signature', () => {
-  const memoMatch = structuredPane.match(/v-memo="\[([^\]]*)\]"/)
-  assert.ok(memoMatch, 'a v-memo directive must exist on the turn loop')
-  assert.match(
-    memoMatch[1],
-    /turnFoldSignature\(turn\)/,
-    'v-memo deps must include turnFoldSignature(turn) or toggling the process '
-      + 'updates the reactive state but v-memo skips re-rendering the turn',
-  )
+  const memoMatch = timelineComponent.match(/v-memo="\[([^\]]*)\]"/)
+  assert.ok(memoMatch)
+  assert.match(memoMatch[1], /turnFoldSignature\(turn\)/)
 })
 
-test('the part loop renders the folded view, not the raw parts', () => {
-  assert.match(structuredPane, /v-for="part in turnPartsFor\(turn\)"/)
+test('the part loop renders the folded view, not raw parts', () => {
+  assert.match(turnComponent, /<ChatTurnParts[\s\S]*?:turn="turn"/)
+  assert.match(turnComponent, /v-for="part in turnPartsFor\(turn\)"/)
 })
 
-test('toggleTurnProcess returns an empty signature for unfolded turns', () => {
-  const fnMatch = structuredPane.match(
-    /function turnFoldSignature\(turn: TimelineTurn\): string \{[\s\S]*?\n\}/,
-  )
-  assert.ok(fnMatch, 'turnFoldSignature function must exist')
-  // Turns with nothing foldable — including the active one — stay memoized.
-  assert.match(fnMatch[0], /if \(!isTurnFoldable\(turn\)\) return ''/)
+test('fold signature is empty for newest and unsafe turns', () => {
+  const turn = completedTurn()
+  const overrides = new Map([[turn.key, false]])
+  assert.equal(turnProcessFoldSignature(turn, turn.key, overrides), '')
+  assert.equal(turnProcessFoldSignature({ ...turn, completed: false }, 'newest', overrides), '')
+  assert.equal(turnProcessFoldSignature({ ...turn, parts: [] }, 'newest', overrides), '')
 })
 
-test('the newest turn is excluded from folding', () => {
-  const fnMatch = structuredPane.match(
-    /function isTurnFoldable\(turn: TimelineTurn\): boolean \{[\s\S]*?\n\}/,
-  )
-  assert.ok(fnMatch, 'isTurnFoldable function must exist')
-  assert.match(
-    fnMatch[0],
-    /turn\.key !== latestTurnKey\.value/,
-    'the turn being read must stay open until a newer turn starts',
-  )
-  assert.match(fnMatch[0], /splitTurnProcess\(turn\) !== null/)
+test('the newest turn is excluded from folding even with a closed override', () => {
+  const turn = completedTurn()
+  assert.ok(splitTurnProcess(turn))
+  assert.equal(isTurnFoldable(turn, turn.key), false)
+  assert.equal(isTurnFoldable(turn, 'newest'), true)
+  assert.equal(isTurnFoldable({ ...turn, completed: false }, 'newest'), false)
 })
 
-test('fold state is per-turn and replaced on toggle so the memo sees it', () => {
-  assert.match(structuredPane, /const processExpandedOverrides = ref\(new Map<string, boolean>\(\)\)/)
-  const fnMatch = structuredPane.match(
-    /function toggleTurnProcess\(turn: TimelineTurn\): void \{[\s\S]*?\n\}/,
-  )
-  assert.ok(fnMatch, 'toggleTurnProcess function must exist')
-  assert.match(fnMatch[0], /new Map\(processExpandedOverrides\.value\)/)
+test('timeline owner passes current timeline and viewer state to pure projection', () => {
+  assert.match(timelineController, /presentTurnParts\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
+  assert.match(timelineController, /turnProcessFoldSignature\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
+  assert.match(timelineController, /isTurnProcessExpanded\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
+  assert.match(timelineController, /const latestTurnKey = computed\(\(\) => \{[\s\S]*?const list = turns\.value/)
 })
 
-test('the process header is the single toggle for its own detail', () => {
-  assert.match(structuredPane, /v-else-if="part\.kind === 'process'"/)
-  assert.doesNotMatch(
-    structuredPane,
-    /process_end/,
-    'the collapse control must be the header itself, not a footer that scrolls '
-      + 'out of reach exactly when the detail is long',
-  )
-  const toggles = structuredPane.match(/@click="toggleTurnProcess\(turn\)"/g) ?? []
-  assert.equal(toggles.length, 1, 'one control, in the place the reader clicked')
-  assert.match(structuredPane, /:aria-expanded="part\.expanded"/)
-  assert.match(structuredPane, /part\.expanded \? '▾' : '▸'/)
+test('fold state is per-turn and replaced on toggle so memo sees it', () => {
+  assert.match(timelineController, /const processExpandedOverrides = ref\(new Map<string, boolean>\(\)\)/)
+  assert.match(timelineController, /function toggleTurnProcess\(turn: TimelineTurn\): void \{[\s\S]*?new Map\(processExpandedOverrides\.value\)/)
+})
+
+test('the process header is the single toggle for its detail', () => {
+  assert.match(turnPartsComponent, /v-else-if="part\.kind === 'process'"/)
+  assert.doesNotMatch(turnPartsComponent, /process_end/)
+  assert.equal((turnPartsComponent.match(/@click="toggleTurnProcess\(turn\)"/g) ?? []).length, 1)
+  assert.match(turnPartsComponent, /:aria-expanded="part\.expanded"/)
+  assert.match(turnPartsComponent, /part\.expanded \? '▾' : '▸'/)
 })
 
 test('an open process header stays reachable from any scroll depth', () => {
-  const openRule = structuredPane.match(/\.process-fold--open \{[\s\S]*?\n\}/)
-  assert.ok(openRule, 'the open-state rule must exist')
-  assert.match(
-    openRule[0],
-    /position: sticky/,
-    'a working region can be taller than the viewport, so the toggle must pin '
-      + 'to the top of the timeline like the thinking and tool summaries do',
-  )
+  const openRule = turnPartsComponent.match(/\.process-fold--open \{[\s\S]*?\n\}/)
+  assert.ok(openRule)
+  assert.match(openRule[0], /position: sticky/)
 })
 
-test('a long thinking, tool, or sub-agent card can be collapsed from its own footer', () => {
-  // Count footers in the top-level branches only. The nested sub-thread block
-  // reuses the same collapse control for its own child cards and legitimately
-  // adds more, so exclude that branch when asserting the three top-level cards.
-  const subthreadStart = structuredPane.indexOf(`v-else-if="part.kind === 'subagents'"`)
-  const subthreadEnd = structuredPane.indexOf(`v-else-if="part.kind === 'agent_image'"`)
-  assert.ok(subthreadStart > -1 && subthreadEnd > subthreadStart)
-  const topLevelPane =
-    structuredPane.slice(0, subthreadStart) + structuredPane.slice(subthreadEnd)
-  const collapses = topLevelPane.match(/class="details-collapse"/g) ?? []
-  assert.equal(
-    collapses.length,
-    3,
-    'thinking, tool, and sub-agent cards each need the footer',
-  )
-  assert.match(structuredPane, /@click="collapseDetails"/)
-  const fnMatch = structuredPane.match(
-    /function collapseDetails\(event: MouseEvent\): void \{[\s\S]*?\n\}/,
-  )
-  assert.ok(fnMatch, 'collapseDetails function must exist')
-  assert.match(fnMatch[0], /closest\('details'\)/)
+test('long thinking, tool, and sub-agent cards expose their own collapse footer', () => {
+  for (const component of [thinkingComponent, toolComponent, subagentComponent]) {
+    assert.match(component, /class="details-collapse"/)
+    assert.match(component, /@click="collapseDetails"/)
+  }
+  assert.match(timelineController, /function collapseDetails\(event: MouseEvent\): void \{[\s\S]*?closest\('details'\)/)
 })
 
-test('the sticky summary keeps its scrolling ancestor intact', () => {
-  // ``position: sticky`` is ignored inside an ancestor with ``overflow: hidden``
-  // because that ancestor becomes the scrollport. The tool card clips its
-  // children to the rounded corners, so it must clip without scrolling.
-  assert.match(structuredPane, /position: sticky/)
-  const toolCard = structuredPane.match(/\.tool-card \{[\s\S]*?\n\}/)
+test('sticky summary keeps its scrolling ancestor intact', () => {
+  assert.match(toolComponent, /position: sticky/)
+  const toolCard = toolComponent.match(/\.tool-card \{[\s\S]*?\n\}/)
   assert.ok(toolCard)
   assert.doesNotMatch(toolCard[0], /overflow: hidden/)
   assert.match(toolCard[0], /overflow: clip/)

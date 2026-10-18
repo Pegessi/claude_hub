@@ -3,6 +3,10 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 const app = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
+const appShellStyle = readFileSync(
+  new URL('../src/features/app-shell/styles/shell.css', import.meta.url),
+  'utf8',
+)
 const terminalPane = readFileSync(
   new URL('../src/components/TerminalPane.vue', import.meta.url),
   'utf8',
@@ -12,7 +16,15 @@ const useViewport = readFileSync(
   'utf8',
 )
 const chatSidebar = readFileSync(
-  new URL('../src/components/ChatSidebar.vue', import.meta.url),
+  new URL('../src/features/chat/sidebar/ChatSidebar.vue', import.meta.url),
+  'utf8',
+)
+const chatSidebarGroup = readFileSync(
+  new URL('../src/features/chat/sidebar/ChatSidebarGroup.vue', import.meta.url),
+  'utf8',
+)
+const chatSidebarRow = readFileSync(
+  new URL('../src/features/chat/sidebar/ChatSidebarRow.vue', import.meta.url),
   'utf8',
 )
 const useTabStatus = readFileSync(
@@ -20,15 +32,19 @@ const useTabStatus = readFileSync(
   'utf8',
 )
 const tabBar = readFileSync(
-  new URL('../src/components/TabBar.vue', import.meta.url),
+  new URL('../src/features/terminal/components/TabBar.vue', import.meta.url),
+  'utf8',
+)
+const sessionCreator = readFileSync(
+  new URL('../src/features/terminal/components/SessionCreator.vue', import.meta.url),
   'utf8',
 )
 const tabActionsMenu = readFileSync(
-  new URL('../src/components/TabActionsMenu.vue', import.meta.url),
+  new URL('../src/features/terminal/components/TabActionsMenu.vue', import.meta.url),
   'utf8',
 )
 const agentStatusPanel = readFileSync(
-  new URL('../src/components/AgentStatusFloatingPanel.vue', import.meta.url),
+  new URL('../src/features/agent-status/AgentStatusFloatingPanel.vue', import.meta.url),
   'utf8',
 )
 const useCwdHistory = readFileSync(
@@ -51,7 +67,7 @@ test('desktop TabBar is merged into the app-mode-bar, terminal-mode only', () =>
 })
 
 test('a status light in the sidebar shows working, idle, attention, and offline', () => {
-  assert.match(chatSidebar, /class="chat-sidebar__item-status"/)
+  assert.match(chatSidebarRow, /class="chat-sidebar__item-status"/)
   // the sidebar uses the shared useTabStatus composable (no duplicated logic)
   assert.match(chatSidebar, /const \{ getTabStatus, getTabStatusLabel \} = useTabStatus\(agentStatuses\)/)
   // the status logic lives in the composable
@@ -60,49 +76,50 @@ test('a status light in the sidebar shows working, idle, attention, and offline'
   assert.match(useTabStatus, /function getTabStatusLabel\(tab: TerminalTab\)/)
   // the per-state colors — aligned with the TabBar indicator (working is
   // warning yellow, attention is attention red, not the old blue accent)
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='working'\]\s*\{[^}]*--ch-color-warning/)
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]/)
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='attention'\]\s*\{[^}]*--ch-color-attention/)
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='offline'\]/)
+  assert.match(chatSidebarRow, /\.chat-sidebar__item-status\[data-status='working'\]\s*\{[^}]*--ch-color-warning/)
+  assert.match(chatSidebarRow, /\.chat-sidebar__item-status\[data-status='idle'\]/)
+  assert.match(chatSidebarRow, /\.chat-sidebar__item-status\[data-status='attention'\]\s*\{[^}]*--ch-color-attention/)
+  assert.match(chatSidebarRow, /\.chat-sidebar__item-status\[data-status='offline'\]/)
 })
 
 test('an unread completed turn shows a compact completion badge and tight unread pulse', () => {
   // the status light carries an unread flag
-  assert.match(chatSidebar, /:data-unread="tab\.is_unread \? 'true' : 'false'"/)
+  assert.match(chatSidebarRow, /:data-unread="tab\.is_unread \? 'true' : 'false'"/)
   // Completion is legible from a checkmark and persistent outline; animation
   // only reinforces that the result is still unread.
-  assert.match(chatSidebar, /:aria-label="getTabStatusAriaLabel\(tab\)"/)
+  assert.match(chatSidebarRow, /:aria-label="statusLabel"/)
+  assert.match(chatSidebar, /:status-label="getTabStatusAriaLabel\(tab\)"/)
   assert.match(chatSidebar, /function getTabStatusAriaLabel\(tab: TerminalTab\)/)
   assert.match(chatSidebar, /return 'Completed, unread'/)
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]\s*\{[^}]*width:\s*8px;[^}]*height:\s*8px;/s)
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::before/)
-  assert.match(chatSidebar, /content:\s*'✓'/)
-  assert.match(chatSidebar, /color:\s*var\(--ch-color-sidebar-bg\)/)
-  assert.match(chatSidebar, /font-size:\s*6px/)
-  assert.match(chatSidebar, /background:\s*var\(--ch-color-success-strong\)/)
-  assert.match(chatSidebar, /border:\s*1px solid var\(--ch-color-success\)/)
-  assert.match(chatSidebar, /0 0 8px color-mix\(in srgb, var\(--ch-color-success\) 42%, transparent\)/)
-  assert.match(chatSidebar, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::after/)
-  assert.match(chatSidebar, /@keyframes sidebar-complete-unread-pulse/)
-  assert.match(chatSidebar, /inset:\s*-3px/)
-  assert.doesNotMatch(chatSidebar, /@keyframes sidebar-unread-ping/)
-  assert.doesNotMatch(chatSidebar, /border:\s*1\.5px solid var\(--ch-color-accent\)/)
-  assert.doesNotMatch(chatSidebar, /0 0 10px var\(--ch-color-success-bg\)/)
-  assert.match(chatSidebar, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::after[\s\S]*?animation: none;[\s\S]*?opacity:\s*0\.55;/)
+  assert.match(chatSidebarRow, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]\s*\{[^}]*width:\s*8px;[^}]*height:\s*8px;/s)
+  assert.match(chatSidebarRow, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::before/)
+  assert.match(chatSidebarRow, /content:\s*'✓'/)
+  assert.match(chatSidebarRow, /color:\s*var\(--ch-color-sidebar-bg\)/)
+  assert.match(chatSidebarRow, /font-size:\s*6px/)
+  assert.match(chatSidebarRow, /background:\s*var\(--ch-color-success-strong\)/)
+  assert.match(chatSidebarRow, /border:\s*1px solid var\(--ch-color-success\)/)
+  assert.match(chatSidebarRow, /0 0 8px color-mix\(in srgb, var\(--ch-color-success\) 42%, transparent\)/)
+  assert.match(chatSidebarRow, /\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::after/)
+  assert.match(chatSidebarRow, /@keyframes sidebar-complete-unread-pulse/)
+  assert.match(chatSidebarRow, /inset:\s*-3px/)
+  assert.doesNotMatch(chatSidebarRow, /@keyframes sidebar-unread-ping/)
+  assert.doesNotMatch(chatSidebarRow, /border:\s*1\.5px solid var\(--ch-color-accent\)/)
+  assert.doesNotMatch(chatSidebarRow, /0 0 10px var\(--ch-color-success-bg\)/)
+  assert.match(chatSidebarRow, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.chat-sidebar__item-status\[data-status='idle'\]\[data-unread='true'\]::after[\s\S]*?animation: none;[\s\S]*?opacity:\s*0\.55;/)
 })
 
 test('Maso sidebar and main planes use distinct semantic background roles', () => {
   assert.match(chatSidebar, /\.chat-sidebar\s*\{[^}]*background: var\(--ch-color-sidebar-bg\);/s)
-  assert.match(app, /\.terminal-main-column\s*\{[^}]*background: var\(--ch-color-main-bg\);/s)
+  assert.match(appShellStyle, /\.terminal-main-column\s*\{[^}]*background: var\(--ch-color-main-bg\);/s)
   assert.match(terminalPane, /\.terminal-pane\s*\{[^}]*background-color: var\(--ch-color-main-bg\);/s)
 })
 
 test('Maso sidebar text puts workspaces first and dims unselected sessions', () => {
-  assert.match(chatSidebar, /\n\.chat-sidebar__group-header \{[^}]*color: var\(--ch-color-text\);/)
-  assert.match(chatSidebar, /\n\.chat-sidebar__item \{[^}]*color: var\(--ch-color-text-muted\);/)
-  assert.match(chatSidebar, /\n\.chat-sidebar__item:hover \{[^}]*color: var\(--ch-color-text\);/)
-  assert.match(chatSidebar, /\n\.chat-sidebar__item\.active \{[^}]*color: var\(--ch-color-text-selected\);/)
-  assert.match(chatSidebar, /\n\.chat-sidebar__item\.active \.chat-sidebar__item-name \{[^}]*font-weight: 600;/)
+  assert.match(chatSidebarGroup, /\n\.chat-sidebar__group-header \{[^}]*color: var\(--ch-color-text\);/)
+  assert.match(chatSidebarRow, /\n\.chat-sidebar__item \{[^}]*color: var\(--ch-color-text-muted\);/)
+  assert.match(chatSidebarRow, /\n\.chat-sidebar__item:hover \{[^}]*color: var\(--ch-color-text\);/)
+  assert.match(chatSidebarRow, /\n\.chat-sidebar__item\.active \{[^}]*color: var\(--ch-color-text-selected\);/)
+  assert.match(chatSidebarRow, /\n\.chat-sidebar__item\.active \.chat-sidebar__item-name \{[^}]*font-weight: 600;/)
 })
 
 test('Terminal Status follows the Chat workspace order before terminal-only groups', () => {
@@ -123,12 +140,13 @@ test('preview Pin API can be isolated without desynchronizing live Hub APIs', ()
 })
 
 test('a working session is marked only by its moving light, not a lit border', () => {
-  assert.match(chatSidebar, /:data-runtime-status="getTabStatus\(tab\)"/)
-  assert.doesNotMatch(chatSidebar, /\[data-runtime-status='working'\]:not\(\.active\)/)
-  assert.match(chatSidebar, /\.chat-sidebar__item\.active\[data-runtime-status='working'\] \{\s*border-color: color-mix\(in srgb, var\(--ch-color-border-selected\) 20%, transparent\);\s*box-shadow: none;/)
+  assert.match(chatSidebarRow, /:data-runtime-status="status"/)
+  assert.match(chatSidebar, /:status="getTabStatus\(tab\)"/)
+  assert.doesNotMatch(chatSidebarRow, /\[data-runtime-status='working'\]:not\(\.active\)/)
+  assert.match(chatSidebarRow, /\.chat-sidebar__item\.active\[data-runtime-status='working'\] \{\s*border-color: color-mix\(in srgb, var\(--ch-color-border-selected\) 20%, transparent\);\s*box-shadow: none;/)
   // Row content and the ⋯ menu stay above the decorative light layer.
-  assert.match(chatSidebar, /\[data-runtime-status='working'\] > \.chat-sidebar__item-main,[\s\S]*?z-index: 1;/)
-  assert.match(chatSidebar, /> :deep\(\.chat-sidebar__item-menu\) \{\s*position: absolute;[\s\S]*?z-index: 1;/)
+  assert.match(chatSidebarRow, /\[data-runtime-status='working'\] > \.chat-sidebar__item-main,[\s\S]*?z-index: 1;/)
+  assert.match(chatSidebarRow, /> :deep\(\.chat-sidebar__item-menu\) \{\s*position: absolute;[\s\S]*?z-index: 1;/)
 })
 
 test('a session-name pill sits in the top-right corner of each pane', () => {
@@ -156,9 +174,9 @@ test('session actions live in a shared TabActionsMenu used by both surfaces', ()
   assert.match(tabActionsMenu, /store\.deleteTab\(props\.tab\.id\)/)
   // both the TabBar and the sidebar mount it
   assert.match(tabBar, /<TabActionsMenu/)
-  assert.match(chatSidebar, /<TabActionsMenu/)
+  assert.match(chatSidebarRow, /<TabActionsMenu/)
   // the sidebar gets the sidebar variant for its row-embedded trigger
-  assert.match(chatSidebar, /variant="sidebar"/)
+  assert.match(chatSidebarRow, /variant="sidebar"/)
   // the fixed-position panel re-measures on every open and while scrolling,
   // so it cannot render at stale coordinates after the list scrolls
   assert.match(tabActionsMenu, /void open\.value/)
@@ -182,29 +200,29 @@ test('cwd history stays in sync across windows and falls back only when storage 
 test('sidebar rows keep a valid nested-control structure', () => {
   // the row is a plain container; the primary action is a real inner button,
   // so the ⋯ menu button is a sibling (no button-inside-role=button)
-  assert.match(chatSidebar, /class="chat-sidebar__item-main"/)
-  assert.doesNotMatch(chatSidebar, /role="button"/)
+  assert.match(chatSidebarRow, /class="chat-sidebar__item-main"/)
+  assert.doesNotMatch(chatSidebarRow, /role="button"/)
 })
 
 test('a failed session creation does not enter cwd history', () => {
   // createTab returns undefined on failure; only a truthy result records the
   // cwd and closes the dialog
-  assert.match(tabBar, /const created = await store\.createTab\(/)
-  assert.match(tabBar, /if \(!created\) return/)
-  assert.match(tabBar, /addCwd\(cwd\)/)
+  assert.match(sessionCreator, /const created = await store\.createTab\(/)
+  assert.match(sessionCreator, /if \(!created\) return/)
+  assert.match(sessionCreator, /addCwd\(cwd\)/)
 })
 
 test('the create-session dialog offers recent working directories and solo default-on', () => {
   // Recent and open directories share an explicit picker, so a prefilled
   // value cannot make the browser hide non-prefix matches.
-  assert.match(tabBar, /v-for="\(cwd, index\) in visibleCwdChoices"/)
-  assert.match(tabBar, /\.\.\.recentCwds\.value, \.\.\.openPaths/)
-  assert.doesNotMatch(tabBar, /<datalist/)
+  assert.match(sessionCreator, /v-for="\(cwd, index\) in visibleCwdChoices"/)
+  assert.match(sessionCreator, /\.\.\.recentCwds\.value, \.\.\.openPaths/)
+  assert.doesNotMatch(sessionCreator, /<datalist/)
   // history is persisted per launch scope (local / remote:<profile>)
   assert.match(useCwdHistory, /claude-hub:cwd-history:/)
   assert.match(useCwdHistory, /localStorage\.(getItem|setItem)/)
   // new sessions default to solo mode: form init plus both form-reset points
-  assert.match(tabBar, /solo_mode:\s*true/)
-  const soloResets = tabBar.match(/form\.solo_mode = true/g) || []
+  assert.match(sessionCreator, /solo_mode:\s*true/)
+  const soloResets = sessionCreator.match(/form\.solo_mode = true/g) || []
   assert.ok(soloResets.length >= 2, 'solo_mode reset to true after close and create')
 })

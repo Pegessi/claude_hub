@@ -1,43 +1,7 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-
-import ts from 'typescript'
-
-const storeSource = await readFile(
-  new URL('../src/stores/workspaceStore.ts', import.meta.url),
-  'utf8',
-)
-const paginationSource = await readFile(
-  new URL('../src/utils/boardPagination.ts', import.meta.url),
-  'utf8',
-)
-const vueUrl = await import.meta.resolve('vue')
-const piniaUrl = await import.meta.resolve('pinia')
-const { createPinia, getActivePinia, setActivePinia } = await import(piniaUrl)
-const transpileOptions = {
-  compilerOptions: {
-    module: ts.ModuleKind.ES2022,
-    target: ts.ScriptTarget.ES2020,
-  },
-}
-
-function dataModule(source) {
-  return `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
-}
-
-const paginationJs = ts.transpileModule(paginationSource, transpileOptions).outputText
-const paginationUrl = dataModule(paginationJs)
-const storeJs = ts.transpileModule(storeSource, transpileOptions).outputText
-const rewrittenStoreJs = storeJs
-  .replace(/from\s+['"]pinia['"]/g, `from ${JSON.stringify(piniaUrl)}`)
-  .replace(/from\s+['"]vue['"]/g, `from ${JSON.stringify(vueUrl)}`)
-  .replace(
-    /from\s+['"]@\/utils\/boardPagination['"]/g,
-    `from ${JSON.stringify(paginationUrl)}`,
-  )
-const { useWorkspaceStore } = await import(dataModule(rewrittenStoreJs))
+import { createPinia, getActivePinia, setActivePinia } from 'pinia'
+import { useWorkspaceStore } from './workspaceStoreTestHarness.mjs'
 
 const VALID_CAPABILITIES = {
   supported_execution_controls: ['workspace', 'initiator'],

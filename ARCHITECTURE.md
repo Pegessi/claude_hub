@@ -9,14 +9,16 @@ parallel orchestrator, store or approval mechanism.
 
 | Layer | Existing owners | Durable facts / derived views |
 | --- | --- | --- |
-| Intent | `models/schemas.py`, `workspace_manager/_tasks.py`, `_task_updates.py`, Task Graph API/CLI | Task/Goal Packet, dependency records, acceptance criteria |
-| Context | `workspace_manager/_prompts.py`, `_persistence.py`, feedback lesson retrieval | Prompts/snapshots are derived caches; verify against task/report records and Git |
-| Execution | `workspace_manager/_dispatch.py`, `_sessions.py`, `_messaging.py`, provider adapters | Session assignment, runtime seat, worktree/resource ownership, delivery receipts |
-| Verification | `workspace_manager/_review.py`, `_reports.py`, `workspace_state_policy.py` | Validation/evaluation reports, reproducible artifact evidence and acceptance decisions |
+| Intent | `models/schema_domains/`, `workspace_manager/tasking/`, Task Graph API/CLI | Task/Goal Packet, dependency records, acceptance criteria |
+| Context | `workspace_manager/prompts/`, `_persistence.py`, feedback lesson retrieval | Prompts/snapshots are derived caches; verify against task/report records and Git |
+| Execution | `workspace_manager/dispatching/`, `sessions/`, `messaging/`, provider adapters | Session assignment, runtime seat, worktree/resource ownership, delivery receipts |
+| Verification | `workspace_manager/_review.py`, `reports/`, `workspace_state_policy.py` | Validation/evaluation reports, reproducible artifact evidence and acceptance decisions |
 | Governance | `runtime_isolation.py`, `session_seat.py`, auth, feedback store and task lifecycle policy | Runtime/permission limits, lifecycle transitions and evidence-backed lessons |
 
-Paths above are relative to `backend/claude_hub/`. Read/write transitions go
-through the existing Task/report APIs. A snapshot is a navigation aid, not a
+Model paths above are relative to `backend/claude_hub/`; service paths are
+relative to `backend/claude_hub/services/`, with sibling paths abbreviated within
+`workspace_manager/`. Read/write transitions go through the existing Task/report
+APIs. A snapshot is a navigation aid, not a
 second database; no consumer may infer completed/accepted work from its prose.
 The independent Hub evaluator remains the autonomous gate even when a simple
 worker runs without native subagents. See [agent workflow](docs/AGENT_WORKFLOW.md)
@@ -52,7 +54,7 @@ The existing lock-reentrancy ContextVar remains independent of persistence.
 ### Task creation UI
 
 ```text
-AgentWorkspaceView (page lifetime)
+WorkspacePage (page lifetime; AgentWorkspaceView compatibility entry)
   ├─ useTaskCreateFlow (form, request identity, recovery and async guards)
   │    ├─ workspaceStore (API calls and capability state)
   │    └─ taskExecution utilities (saved attempt and reporter credential)
@@ -66,11 +68,12 @@ The parent calls the flow's workspace-change and disposal hooks. Workspace,
 generation and request identity checks keep late responses out of a newer form.
 Credential-storage retries do not create another Task.
 
-`utils/draftAttachments.ts` shares attachment conversion and preview cleanup with
-the remaining parent forms; callers own their draft lists. Task detail, editing,
-agent setup and the board remain in the parent and are not part of this extraction.
-When moving another form, identify its state lifetime and async owners before
-moving its template; include its scoped styles in browser acceptance.
+`utils/draftAttachments.ts` shares attachment conversion and preview cleanup;
+callers own their draft lists. Task detail, editing, agent setup and the board
+now have components and state owners under `features/workspace/`. `WorkspacePage`
+coordinates their lifetime. Template boundaries do not transfer ownership of
+request guards, draft state or cleanup. Include moved scoped styles in the
+corresponding browser acceptance.
 
 Boundary regressions live in `test_task_mailbox.py`,
 `test_task_execution_control.py`, `test_report_intake_atomicity.py` and
@@ -78,6 +81,52 @@ Boundary regressions live in `test_task_mailbox.py`,
 `browser_agent_workspace_task_create.py` checks request recovery, workspace
 switches, credential storage and mobile layout with mocked APIs; it does not
 prove live provider or Bot behavior.
+
+## Feature directories and runtime ownership
+
+Long-lived public entrypoints remain small compatibility surfaces. Read the
+feature implementation directory for behavior; do not add unrelated helpers to
+`services/` or `frontend/src/utils/` merely to avoid a file-size limit.
+
+| Public entrypoint | Implementation directory | Single runtime owner |
+| --- | --- | --- |
+| `services/ttyd_manager.py` | `services/terminal_runtime/`, with `process/` and `manager/` responsibility groups | Concrete process/manager instances; one exported manager, launch lock, session cache and tunnel registry |
+| `services/agent_stream/native.py`, `provider_network.py`, `codex_jsonl.py` | `agent_stream/providers/`, `agent_stream/transcripts/` | One provider session for queues/turn guards and temporary files; one default network selector |
+| `services/agent_stream/tailer.py`, `attachments.py` | `agent_stream/runtime/`, `agent_stream/media/` | One tailer state and manager registry; process-wide fences and attachment lock remain under their public entrypoints |
+| `services/workspace_manager/` | `tasking/`, `reports/`, `prompts/`, `scheduling/`, `messaging/`, `dispatching/`, `monitoring/`, `sessions/`, `workspaces/`, `tmux/` | One WorkspaceManager state; typed contracts describe shared methods, not replacement stores |
+| `models/schemas.py`, CLI task/card entrypoints | `models/schema_domains/`, `cli/task_commands/`, `cli/feishu_cards_impl/` | Static model reexports and one Click command group; its public registration order is assembled at the entrypoint |
+| Workspace, stream and Feishu API modules | `api/routes/workspaces/`, `agent_stream/`, `feishu_bot/` | Existing routers and caller-owned dependencies; named bindings preserve public patch points |
+| Terminal injection modules | `api/terminal_injection/` | Named fragments compose in their original order and one JavaScript lexical scope |
+| `services/feedback_lessons.py`, `feishu_bot_pool.py`, `dot/` | `services/feedback/`, `services/bot_pool/`, `dot/storage/`, `dot/runtime/` | Existing store/service instance and persistence/lock lifetimes |
+| `AgentWorkspaceView.vue` | `frontend/src/features/workspace/` | Named runtime, editor, task, artifact and agent owners; one lifecycle coordinator |
+| `StructuredPane.vue`, `ChatSidebar.vue` | `frontend/src/features/chat/` | One delivery/queue/attachment/timeline owner per mounted pane; sidebar gesture owners dispose their listeners |
+| Tab/terminal and settings panels | `frontend/src/features/terminal/`, `app-shell/`, `scheduled-tasks/`, `dot/`, `agent-status/`, `feishu-bot/` | Existing mounted component/controller lifetime and public Pinia store |
+| Terminal/workspace stores and shared types | `frontend/src/stores/terminal/`, `stores/workspace/`, `types/` | One `defineStore` symbol per store; public barrels do not instantiate another store |
+
+Backend paths are relative to `backend/claude_hub/`. Pure Vue reexports preserve
+the component object instead of mounting a wrapper instance. Frontend contexts
+are feature-specific typed refs/actions, not a second source of state. Vue
+templates remain inline so `vue-tsc` checks their expressions; the engineering
+gate rejects `<template src>`. Larger setup blocks belong in typed feature-local
+composables, with one invocation per mounted owner and the same cleanup lifetime.
+
+WorkspaceManager no longer imports its own package from implementation mixins.
+Its public class supplies explicit clock, state-root, resident-prompt and schedule
+path methods. These resolve the current public bindings at call time. Other
+runtime facades use finite, typed dependency contracts for the same purpose;
+there is no mutable default-dependency installation or module-global syncing.
+Historical function-local cleanup lookups retain their original public patch
+semantics; they were not added to conceal an initialization cycle.
+
+Production source hard limits are 1500 lines for backend Python and 2500 lines
+for frontend Vue/TypeScript/JavaScript/CSS/HTML, with no legacy exemptions.
+Keeping a file within 800 lines remains a recommended refactoring target, not a
+verification failure threshold. The module-initialization import graph must be
+acyclic; type-only imports are excluded, runtime `else`
+branches are included. Strict task schemas are checked through explicit static
+reexports without importing application code. See the
+[structural completion record](docs/working-logs/2026-10-17-feature-structure-and-cycles.md)
+for verification and intentionally changed private paths.
 
 ## System Overview
 

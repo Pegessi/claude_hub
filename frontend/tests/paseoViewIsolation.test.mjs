@@ -6,20 +6,60 @@ const terminalPane = readFileSync(
   new URL('../src/components/TerminalPane.vue', import.meta.url),
   'utf8',
 )
-const terminalView = readFileSync(
-  new URL('../src/components/TerminalView.vue', import.meta.url),
+const terminalInputRing = readFileSync(
+  new URL('../src/features/terminal/state/terminalInputRing.ts', import.meta.url),
   'utf8',
 )
 const structuredPane = readFileSync(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
+  new URL('../src/features/chat/StructuredPane.vue', import.meta.url),
+  'utf8',
+)
+const chatTimelineView = readFileSync(
+  new URL('../src/features/chat/components/ChatTimeline.vue', import.meta.url),
+  'utf8',
+)
+const chatTurn = readFileSync(
+  new URL('../src/features/chat/components/ChatTurn.vue', import.meta.url),
+  'utf8',
+)
+const chatPendingTurn = readFileSync(
+  new URL('../src/features/chat/components/ChatPendingTurn.vue', import.meta.url),
+  'utf8',
+)
+const chatComposer = readFileSync(
+  new URL('../src/features/chat/components/ChatComposer.vue', import.meta.url),
+  'utf8',
+)
+const chatModePicker = readFileSync(
+  new URL('../src/features/chat/components/ChatModePicker.vue', import.meta.url),
+  'utf8',
+)
+const chatAttachments = readFileSync(
+  new URL('../src/features/chat/controllers/useChatAttachments.ts', import.meta.url),
+  'utf8',
+)
+const chatDelivery = readFileSync(
+  new URL('../src/features/chat/controllers/useChatDelivery.ts', import.meta.url),
+  'utf8',
+)
+const chatSettings = readFileSync(
+  new URL('../src/features/chat/controllers/useChatSettings.ts', import.meta.url),
+  'utf8',
+)
+const chatTimeline = readFileSync(
+  new URL('../src/features/chat/controllers/useChatTimeline.ts', import.meta.url),
   'utf8',
 )
 const tabBar = readFileSync(
-  new URL('../src/components/TabBar.vue', import.meta.url),
+  new URL('../src/features/terminal/components/TabBar.vue', import.meta.url),
+  'utf8',
+)
+const sessionCreator = readFileSync(
+  new URL('../src/features/terminal/components/SessionCreator.vue', import.meta.url),
   'utf8',
 )
 const tabActionsMenu = readFileSync(
-  new URL('../src/components/TabActionsMenu.vue', import.meta.url),
+  new URL('../src/features/terminal/components/TabActionsMenu.vue', import.meta.url),
   'utf8',
 )
 const useTabStatus = readFileSync(
@@ -48,23 +88,23 @@ test('Chat and Terminal are fixed session surfaces, not a per-pane view toggle',
 })
 
 test('new-session launcher requires an explicit Chat or Terminal surface', () => {
-  assert.match(tabBar, /Create New Session/)
-  assert.match(tabBar, /Session Type/)
-  assert.match(tabBar, /form\.session_kind === 'chat'/)
-  assert.match(tabBar, /form\.session_kind === 'terminal'/)
-  assert.match(tabBar, /session_kind:\s*form\.session_kind/)
-  assert.match(tabBar, /:allow-terminal="form\.session_kind === 'terminal'"/)
-  assert.match(tabBar, />\s*Chat\s*<\/button>/)
-  assert.match(tabBar, /Chat Provider/)
-  assert.match(tabBar, /Chat session/)
-  assert.match(tabBar, /:disabled="form\.session_kind === 'chat'"/)
-  assert.match(tabBar, /Chat always runs on this Hub host/)
-  assert.match(tabBar, /Remote SSH is Terminal-only/)
-  assert.match(structuredPane, /aria-label="Chat conversation"/)
-  assert.match(structuredPane, /start this chat/)
-  assert.match(structuredPane, /Waiting for response…/)
-  assert.match(structuredPane, /Waiting for model activity…/)
-  assert.match(structuredPane, /This chat does not support image attachments/)
+  assert.match(sessionCreator, /Create New Session/)
+  assert.match(sessionCreator, /Session Type/)
+  assert.match(sessionCreator, /form\.session_kind === 'chat'/)
+  assert.match(sessionCreator, /form\.session_kind === 'terminal'/)
+  assert.match(sessionCreator, /session_kind:\s*form\.session_kind/)
+  assert.match(sessionCreator, /:allow-terminal="form\.session_kind === 'terminal'"/)
+  assert.match(sessionCreator, />\s*Chat\s*<\/button>/)
+  assert.match(sessionCreator, /Chat Provider/)
+  assert.match(sessionCreator, /Chat session/)
+  assert.match(sessionCreator, /:disabled="form\.session_kind === 'chat'"/)
+  assert.match(sessionCreator, /Chat always runs on this Hub host/)
+  assert.match(sessionCreator, /Remote SSH is Terminal-only/)
+  assert.match(chatTimelineView, /aria-label="Chat conversation"/)
+  assert.match(chatTimelineView, /start this chat/)
+  assert.match(chatTurn, /Waiting for response…/)
+  assert.match(chatPendingTurn, /Waiting for model activity…/)
+  assert.match(chatAttachments, /This chat does not support image attachments/)
   // Switch Env / restart UI is shared between the TabBar and sidebar via
   // TabActionsMenu, so it lives in that component now.
   assert.match(tabActionsMenu, /The chat provider will restart/)
@@ -89,35 +129,35 @@ test('active Terminal tabs retain their runtime status indicator and idle fallba
 })
 
 test('direct Chat mode menu renders backend capabilities while managed Task mode stays hidden', () => {
-  assert.match(structuredPane, /v-if="!isManagedChat && modeOptions\.length > 0"/)
-  assert.match(structuredPane, /v-for="option in modeOptions"/)
-  assert.match(structuredPane, /:disabled="modeInteractionLocked \|\| isUpdatingMode"/)
-  assert.match(structuredPane, /aria-haspopup="menu"/)
-  assert.match(structuredPane, /role="menuitemradio"/)
-  assert.match(structuredPane, /await setMode\(modeId\)/)
-  assert.match(structuredPane, /@media \(max-width: 640px\)[\s\S]*?\.composer-mode-trigger \{[\s\S]*?min-height: 44px/)
-  assert.doesNotMatch(structuredPane, /agentType.*(?:default|plan)/i)
+  assert.match(chatComposer, /v-if="!isManagedChat && modeOptions\.length > 0"/)
+  assert.match(chatModePicker, /v-for="option in modeOptions"/)
+  assert.match(chatModePicker, /:disabled="modeInteractionLocked \|\| isUpdatingMode"/)
+  assert.match(chatModePicker, /aria-haspopup="menu"/)
+  assert.match(chatModePicker, /role="menuitemradio"/)
+  assert.match(chatSettings, /await deps\.setMode\(modeId\)/)
+  assert.match(chatModePicker, /@media \(max-width: 640px\)[\s\S]*?\.composer-mode-trigger \{[\s\S]*?min-height: 44px/)
+  assert.doesNotMatch(chatSettings, /agentType.*(?:default|plan)/i)
 })
 
 test('SAB terminal input decodes a non-shared copy before draining the record', () => {
-  assert.match(terminalView, /var decodedBytes = new Uint8Array\(bytes\.length\);/)
-  assert.match(terminalView, /decodedBytes\.set\(bytes\);/)
-  assert.match(terminalView, /return decoder\.decode\(decodedBytes\);/)
+  assert.match(terminalInputRing, /var decodedBytes = new Uint8Array\(bytes\.length\);/)
+  assert.match(terminalInputRing, /decodedBytes\.set\(bytes\);/)
+  assert.match(terminalInputRing, /return decoder\.decode\(decodedBytes\);/)
 })
 
 test('direct Paseo sends atomically with a stable client turn id', () => {
-  assert.match(structuredPane, /const pendingDirectTurns = ref<PendingTurn\[\]>\(\[\]\)/)
-  assert.match(structuredPane, /client_turn_id: clientTurnId/)
-  assert.match(structuredPane, /crypto\.randomUUID/)
-  assert.match(structuredPane, /turn\.turnId !== clientTurnId/)
-  assert.doesNotMatch(structuredPane, /Sent to terminal/)
-  assert.doesNotMatch(structuredPane, /sendTerminalText/)
+  assert.match(chatDelivery, /const pendingDirectTurns = ref<PendingTurn\[\]>\(\[\]\)/)
+  assert.match(chatDelivery, /client_turn_id: clientTurnId/)
+  assert.match(chatDelivery, /crypto\.randomUUID/)
+  assert.match(chatDelivery, /turn\.turnId !== clientTurnId/)
+  assert.doesNotMatch(chatDelivery, /Sent to terminal/)
+  assert.doesNotMatch(chatDelivery, /sendTerminalText/)
 })
 
 test('an acknowledged turn shows a waiting state until provider activity arrives', () => {
-  assert.match(structuredPane, /awaitingAgentActivity: !turn\.completed/)
-  assert.match(structuredPane, /Waiting for response…/)
-  assert.match(structuredPane, /agent-waiting-pulse/)
+  assert.match(chatTimeline, /awaitingAgentActivity: !turn\.completed/)
+  assert.match(chatTurn, /Waiting for response…/)
+  assert.match(chatTurn, /agent-waiting-pulse/)
 })
 
 test('structured Retry asks the backend to replace a failed provider transport', () => {
@@ -127,9 +167,9 @@ test('structured Retry asks the backend to replace a failed provider transport',
 })
 
 test('Paseo follows dynamic timeline height but preserves deliberate history reading', () => {
-  assert.match(structuredPane, /new ResizeObserver/)
-  assert.match(structuredPane, /isTimelineNearBottom\(el\)/)
-  assert.match(structuredPane, /detachFromTail\(\)/)
-  assert.match(structuredPane, /requestLatestAnchor\(true\)/)
+  assert.match(chatTimeline, /new ResizeObserver/)
+  assert.match(chatTimeline, /isTimelineNearBottom\(el\)/)
+  assert.match(chatTimeline, /detachFromTail\(\)/)
+  assert.match(chatTimeline, /requestLatestAnchor\(true\)/)
   assert.match(structuredPane, /structured-jump-latest/)
 })

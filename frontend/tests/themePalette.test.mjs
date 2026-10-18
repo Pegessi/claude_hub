@@ -2,7 +2,10 @@ import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import test from 'node:test'
 
-const app = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
+const appTheme = await readFile(new URL('../src/features/app-shell/styles/theme.css', import.meta.url), 'utf8')
+const appControls = await readFile(new URL('../src/features/app-shell/styles/controls.css', import.meta.url), 'utf8')
+const appShell = await readFile(new URL('../src/features/app-shell/styles/shell.css', import.meta.url), 'utf8')
+const workspaceHeaderStyle = await readFile(new URL('../src/features/workspace/styles/shared-controls.css', import.meta.url), 'utf8')
 const sourceRoot = new URL('../src/', import.meta.url)
 
 async function loadVueSources() {
@@ -15,11 +18,11 @@ async function loadVueSources() {
 }
 
 function themeBlock(selector) {
-  const start = app.indexOf(selector)
+  const start = appTheme.indexOf(selector)
   assert.notEqual(start, -1, `${selector} block exists`)
-  const open = app.indexOf('{', start)
-  const close = app.indexOf('}', open)
-  return app.slice(open + 1, close)
+  const open = appTheme.indexOf('{', start)
+  const close = appTheme.indexOf('}', open)
+  return appTheme.slice(open + 1, close)
 }
 
 function styleBlock(source, selector) {
@@ -161,7 +164,7 @@ test('text roles stay readable and ordered on the primary planes of both themes'
 
 test('Chat messages use the reading size while compact Markdown stays dense', async () => {
   const [structured, markdown] = await Promise.all([
-    readFile(new URL('../src/components/StructuredPane.vue', import.meta.url), 'utf8'),
+    readFile(new URL('../src/features/chat/components/ChatTurnParts.vue', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/MarkdownContent.vue', import.meta.url), 'utf8'),
   ])
   const chatMarkdown = styleBlock(structured, '.conversation-bubble :deep(.markdown-content.compact)')
@@ -173,25 +176,27 @@ test('Chat messages use the reading size while compact Markdown stays dense', as
 })
 
 test('selected, focus, and primary-action roles remain separate in key controls', async () => {
-  const [layout, pane, structured] = await Promise.all([
+  const [layout, pane, chatTurn, chatUserMessage, chatAgentImage] = await Promise.all([
     readFile(new URL('../src/components/LayoutSelector.vue', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/TerminalPane.vue', import.meta.url), 'utf8'),
-    readFile(new URL('../src/components/StructuredPane.vue', import.meta.url), 'utf8'),
+    readFile(new URL('../src/features/chat/components/ChatTurn.vue', import.meta.url), 'utf8'),
+    readFile(new URL('../src/features/chat/components/ChatUserMessage.vue', import.meta.url), 'utf8'),
+    readFile(new URL('../src/features/chat/components/ChatAgentImage.vue', import.meta.url), 'utf8'),
   ])
-  const userBubble = styleBlock(structured, '.conversation-bubble--user')
-  const messageSource = styleBlock(structured, '.conversation-message-source')
-  const attachmentPlaceholder = styleBlock(structured, '.turn-attachment-placeholder')
-  const userAttachmentPlaceholder = styleBlock(structured, '.conversation-bubble--user .turn-attachment-placeholder')
-  const agentImageMissing = styleBlock(structured, '.agent-image-missing')
-  const editFocus = styleBlock(structured, '.edit-resend-textarea:focus-visible')
-  const editPlaceholder = styleBlock(structured, '.edit-resend-textarea::placeholder')
-  const editError = styleBlock(structured, '.edit-resend-error')
+  const userBubble = styleBlock(chatUserMessage, '.conversation-bubble--user')
+  const messageSource = styleBlock(chatUserMessage, '.conversation-message-source')
+  const attachmentPlaceholder = styleBlock(chatUserMessage, '.turn-attachment-placeholder')
+  const userAttachmentPlaceholder = styleBlock(chatUserMessage, '.conversation-bubble--user .turn-attachment-placeholder')
+  const agentImageMissing = styleBlock(chatAgentImage, '.agent-image-missing')
+  const editFocus = styleBlock(chatUserMessage, '.edit-resend-textarea:focus-visible')
+  const editPlaceholder = styleBlock(chatUserMessage, '.edit-resend-textarea::placeholder')
+  const editError = styleBlock(chatUserMessage, '.edit-resend-error')
 
-  assert.match(app, /\.mode-button\.active[\s\S]*?background: var\(--ch-color-surface-selected\);[\s\S]*?border-color: var\(--ch-color-border-selected\);/)
-  assert.match(app, /\.mode-button:focus-visible[\s\S]*?box-shadow: 0 0 0 3px var\(--ch-color-accent-ring\);/)
+  assert.match(appShell, /\.mode-button\.active[\s\S]*?background: var\(--ch-color-surface-selected\);[\s\S]*?border-color: var\(--ch-color-border-selected\);/)
+  assert.match(appShell, /\.mode-button:focus-visible[\s\S]*?box-shadow: 0 0 0 3px var\(--ch-color-accent-ring\);/)
   assert.match(layout, /\.layout-btn\.active[\s\S]*?border-color: var\(--ch-color-border-selected\);[\s\S]*?background-color: var\(--ch-color-surface-selected\);/)
   assert.match(pane, /\.terminal-pane\.active[\s\S]*?border-color: var\(--ch-color-border-selected\);/)
-  assert.match(structured, /\.conversation-avatar \{[\s\S]*?background: var\(--ch-color-surface-selected\);[\s\S]*?color: var\(--ch-color-text-selected\);/)
+  assert.match(chatTurn, /\.conversation-avatar \{[\s\S]*?background: var\(--ch-color-surface-selected\);[\s\S]*?color: var\(--ch-color-text-selected\);/)
   assert.match(userBubble, /background: var\(--ch-color-message-user-bg\);/)
   assert.match(userBubble, /color: var\(--ch-color-text-inverse\);/)
   assert.match(messageSource, /color: var\(--ch-color-message-user-muted\);/)
@@ -203,7 +208,7 @@ test('selected, focus, and primary-action roles remain separate in key controls'
   assert.match(editFocus, /outline: 2px solid var\(--ch-color-message-user-focus\);/)
   assert.match(editPlaceholder, /color: var\(--ch-color-message-user-muted\);/)
   assert.match(editError, /color: var\(--ch-color-message-user-error\);/)
-  assert.match(app, /\.ch-btn--primary \{[\s\S]*?background: var\(--ch-color-accent-strong\);/)
+  assert.match(appControls, /\.ch-btn--primary \{[\s\S]*?background: var\(--ch-color-accent-strong\);/)
 })
 
 test('keyboard focus uses the solid ring rather than a translucent selected-state token', async () => {
@@ -224,16 +229,20 @@ test('keyboard focus uses the solid ring rather than a translucent selected-stat
 
 test('filled accent controls use contrast-safe fill roles', async () => {
   const componentUrls = [
-    '../src/components/AgentWorkspaceView.vue',
+    '../src/features/workspace/components/TaskReports.vue',
     '../src/components/GoalSetupDialog.vue',
     '../src/components/LayoutSelector.vue',
-    '../src/components/StructuredPane.vue',
-    '../src/components/TabBar.vue',
+    '../src/features/chat/components/ChatComposer.vue',
+    '../src/features/terminal/styles/tab-bar.css',
   ]
   const components = await Promise.all(componentUrls.map(url => (
     readFile(new URL(url, import.meta.url), 'utf8')
   )))
 
+  const chatApproval = await readFile(
+    new URL('../src/features/chat/components/ChatApprovalCard.vue', import.meta.url),
+    'utf8',
+  )
   const vueSources = await loadVueSources()
 
   for (const { path, source } of vueSources) {
@@ -258,9 +267,9 @@ test('filled accent controls use contrast-safe fill roles', async () => {
   assert.match(components[1], /button\.primary \{[^}]*background: var\(--ch-color-accent-strong\);/)
   assert.match(components[2], /\.user-avatar-fallback[\s\S]*?background-color: var\(--ch-color-accent-strong\);/)
   assert.match(components[3], /\.composer-send-btn[\s\S]*?background-color: var\(--ch-color-accent-strong\);/)
-  assert.match(components[3], /\.approval-submit-btn[\s\S]*?background: var\(--ch-color-accent-strong\);/)
+  assert.match(chatApproval, /\.approval-submit-btn[\s\S]*?background: var\(--ch-color-accent-strong\);/)
   assert.match(components[4], /\.pane-indicator[\s\S]*?background-color: var\(--ch-color-accent-strong\);/)
-  assert.match(app, /\.ch-btn--primary:hover:not\(:disabled\)[\s\S]*?background: var\(--ch-color-accent-fill-hover\);/)
-  assert.match(components[0], /\.primary-button:hover[\s\S]*?background: var\(--ch-color-accent-fill-hover\);/)
+  assert.match(appControls, /\.ch-btn--primary:hover:not\(:disabled\)[\s\S]*?background: var\(--ch-color-accent-fill-hover\);/)
+  assert.match(workspaceHeaderStyle, /\.primary-button:hover[\s\S]*?background: var\(--ch-color-accent-fill-hover\);/)
   assert.match(components[3], /\.composer-send-btn:hover:not\(:disabled\)[\s\S]*?background-color: var\(--ch-color-accent-fill-hover\);/)
 })

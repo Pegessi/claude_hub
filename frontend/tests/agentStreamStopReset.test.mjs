@@ -26,8 +26,9 @@ import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { createRenderer, nextTick } from 'vue'
+import { computed, createRenderer, nextTick, ref } from 'vue'
 import ts from 'typescript'
+import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
 const transpileOptions = {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
@@ -59,31 +60,11 @@ async function moduleUrl(path) {
   return url
 }
 
-// Bundle the timeline reducer with its @/utils deps inlined, mirroring the
-// established queue-wedge test harness.
 async function loadTimeline() {
-  const read = name => readFile(new URL(`../src/utils/${name}`, import.meta.url), 'utf8')
-  const [durationSrc, questionSrc, subagentSrc, agentImageSrc, timelineSrc, lifeSrc] =
-    await Promise.all([
-      read('duration.ts'),
-      read('chatQuestionResponse.ts'),
-      read('subagentTool.ts'),
-      read('agentImage.ts'),
-      read('agentStreamTimeline.ts'),
-      read('chatTurnLifecycle.ts'),
-    ])
-  const strip = src => src.replace(/^import .* from '@\/utils\/.*$/gm, '')
-  const bundle = [durationSrc, questionSrc, subagentSrc, agentImageSrc, timelineSrc]
-    .map(strip)
-    .map(src => ts.transpileModule(src, transpileOptions).outputText)
-    .join('\n')
-  const timeline = await import(
-    `data:text/javascript;base64,${Buffer.from(bundle).toString('base64')}`
-  )
-  const life = await import(
-    `data:text/javascript;base64,${Buffer.from(ts.transpileModule(lifeSrc, transpileOptions).outputText).toString('base64')}`
-  )
-  return { ...timeline, ...life }
+  return {
+    ...await loadChatUtility('agentStreamTimeline'),
+    ...await loadChatUtility('chatTurnLifecycle'),
+  }
 }
 
 function makeEvent(seq, type, payload = {}, overrides = {}) {
@@ -230,26 +211,51 @@ test('natural completion winning the Stop race converges to status=completed', (
 
 // ── component guard: the {cancelled:false} wedge must never gate the reset ──
 
-test('StructuredPane Stop resets on a 200 regardless of the cancelled boolean', async () => {
-  const pane = await readFile(
-    new URL('../src/components/StructuredPane.vue', import.meta.url),
-    'utf8',
-  )
-  // The old gating predicate that caused the wedge must be gone.
-  assert.doesNotMatch(
-    pane,
-    /cancelled\s*!==?\s*false/,
-    'Stop must not gate its local reset on the backend cancelled boolean',
-  )
-  // A successful response must still arm the optimistic terminal edge and the
-  // one-RTT wait nudge.
-  assert.match(pane, /optimisticCancelledTurnId\.value\s*=\s*cancelledTurnId/)
-  assert.match(pane, /\bnudge\(\)/)
+test('Chat delivery Stop resets on a 200 regardless of the cancelled boolean', async t => {
+  const { useChatDelivery } = await loadTs('features/chat/controllers/useChatDelivery')
+  const nudgeCalls = []
+  t.mock.method(globalThis, 'fetch', async () => ({
+    ok: true,
+    json: async () => ({ cancelled: false }),
+  }))
+  const controller = useChatDelivery({
+    attachments: ref([]),
+    authoritativeTurns: computed(() => [{ turnId: 'turn-1', completed: false, errors: [] }]),
+    connectionState: ref('reconciling'),
+    draftQueue: ref([]),
+    enqueueDraft() {},
+    events: ref([]),
+    goal: ref(null),
+    goalComposerReason: ref(null),
+    goalError: ref(null),
+    goalImageRecovery: ref(false),
+    goalInputBlocked: ref(false),
+    goalSteerOnly: ref(false),
+    async hydrateGoal() {},
+    isDraftQueuePaused: ref(false),
+    isGoalHydrating: ref(false),
+    isGoalMutating: ref(false),
+    isManagedChat: ref(false),
+    isPreparingAttachments: ref(false),
+    isUpdatingMode: ref(false),
+    isUpdatingModel: ref(false),
+    isUpdatingReasoningEffort: ref(false),
+    nudge() { nudgeCalls.push(true) },
+    requestLatestAnchor() {},
+    streamBasePath: ref('/api/workspaces/tabs/tab-a/stream'),
+    syncComposerTextareaHeight() {},
+    terminalStore: { async fetchAgentStatuses() {} },
+  })
+
+  await controller.cancelActiveTurn()
+
+  assert.equal(controller.optimisticCancelledTurnId.value, 'turn-1')
+  assert.equal(nudgeCalls.length, 1)
 })
 
 test('Stop is mounted in BOTH the reconnecting and FAILED banners (5/5 retry case)', async () => {
   const pane = await readFile(
-    new URL('../src/components/StructuredPane.vue', import.meta.url),
+    new URL('../src/features/chat/StructuredPane.vue', import.meta.url),
     'utf8',
   )
   // The reconnecting/loading banner Stop.
@@ -266,8 +272,13 @@ test('Stop is mounted in BOTH the reconnecting and FAILED banners (5/5 retry cas
   assert.ok(failedBanner, 'failed banner template must exist')
   assert.match(failedBanner[0], /cancelActiveTurn/, 'failed banner must offer Stop')
   assert.match(failedBanner[0], /banner-retry/, 'failed banner must still offer Retry')
-  // Both banner Stops share the same unconditional gate as the composer Stop.
+  // Both banner Stops and the leaf composer Stop share the same gate.
+  const composer = await readFile(
+    new URL('../src/features/chat/components/ChatComposer.vue', import.meta.url),
+    'utf8',
+  )
   const stopGateCount = (pane.match(/v-if="stopArmed"/g) || []).length
+    + (composer.match(/v-if="stopArmed"/g) || []).length
   assert.ok(stopGateCount >= 3, `stopArmed should gate composer + 2 banners, got ${stopGateCount}`)
 })
 

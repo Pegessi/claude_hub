@@ -1,56 +1,90 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { ref } from 'vue'
+import { loadChatFeature } from './chatPresentationTestHarness.mjs'
 
-const structuredPane = readFileSync(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
+const timeline = readFileSync(
+  new URL('../src/features/chat/components/ChatTimeline.vue', import.meta.url),
   'utf8',
 )
+const approvalCard = readFileSync(
+  new URL('../src/features/chat/components/ChatApprovalCard.vue', import.meta.url),
+  'utf8',
+)
+const { useChatComposer } = await loadChatFeature('controllers/useChatComposer')
 
-// ---------------------------------------------------------------------------
-// AskUserQuestion approval cards render inside a v-memo'd turn. The memo deps
-// MUST include a signature of the per-approval selection/resolved state, or a
-// click that toggles an option updates the reactive refs but v-memo sees
-// unchanged deps and skips re-rendering the turn — the chip shows no selected
-// state and the submit button stays disabled. This is the regression guard for
-// that exact bug.
-// ---------------------------------------------------------------------------
+function makeComposer() {
+  const isSending = ref(false)
+  const controller = useChatComposer({
+    attachments: ref([]),
+    closeImageLightbox() {},
+    closeModeMenu() {},
+    closeModelMenu() {},
+    composerError: ref(null),
+    draftMessage: ref(''),
+    draftQueue: ref([]),
+    enqueueDraft() {},
+    goalComposerReason: ref(null),
+    goalInputBlocked: ref(false),
+    goalSteerOnly: ref(false),
+    imageLightboxUrl: ref(null),
+    isManagedChat: ref(false),
+    isModeMenuOpen: ref(false),
+    isModelMenuOpen: ref(false),
+    isPaneActivated: ref(true),
+    isSending,
+    lightboxEl: ref(null),
+    async sendQueuedDraft() {},
+    async submit() { return true },
+    turnInFlight: ref(false),
+    composerTurnInFlight: ref(false),
+  })
+  return { controller, isSending }
+}
+
+const approval = {
+  key: 'approval-a',
+  callId: 'call-a',
+  kind: 'ask_question',
+  title: 'Pick one',
+  questions: [{
+    id: 'q1',
+    prompt: 'Pick one',
+    allowMultiple: false,
+    options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+  }],
+}
 
 test('turn v-memo deps include the approval interaction signature', () => {
-  const memoMatch = structuredPane.match(/v-memo="\[([^\]]*)\]"/)
+  const memoMatch = timeline.match(/v-memo="\[([^\]]*)\]"/)
   assert.ok(memoMatch, 'a v-memo directive must exist on the turn loop')
-  const deps = memoMatch[1]
-  assert.match(
-    deps,
-    /turnApprovalSignature\(turn\)/,
-    'v-memo deps must include turnApprovalSignature(turn) so a selection toggle re-renders the turn',
-  )
+  assert.match(memoMatch[1], /turnApprovalSignature\(turn\)/)
 })
 
-test('turnApprovalSignature folds in answers, resolved keys, and isSending', () => {
-  const fnMatch = structuredPane.match(
-    /function turnApprovalSignature\(turn: TimelineTurn\): string \{[\s\S]*?\n\}/,
-  )
-  assert.ok(fnMatch, 'turnApprovalSignature function must exist')
-  const body = fnMatch[0]
-  // Non-approval turns short-circuit so they stay cheaply memoized.
-  assert.match(body, /turn\.approvals\.length === 0/)
-  // Each approval's state is folded in via the pure signature helper.
-  assert.match(body, /approvalStateSignature\(/)
-  // isSending gates the disabled state inside the card, so it must invalidate
-  // the memo for approval-bearing turns too.
-  assert.match(body, /isSending\.value/)
+test('turnApprovalSignature tracks answers, resolved state, and sending', () => {
+  const { controller, isSending } = makeComposer()
+  const turn = { approvals: [approval] }
+  const initial = controller.turnApprovalSignature(turn)
+
+  controller.toggleQuestionOption('approval-a', 'q1', 'a', false)
+  const selected = controller.turnApprovalSignature(turn)
+  controller.markResolved('approval-a')
+  const resolved = controller.turnApprovalSignature(turn)
+  isSending.value = true
+  const sending = controller.turnApprovalSignature(turn)
+
+  assert.notEqual(selected, initial)
+  assert.notEqual(resolved, selected)
+  assert.match(sending, /\|sending$/)
+  assert.equal(controller.turnApprovalSignature({ approvals: [] }), '')
 })
 
 test('approval card options are wired to the composable selection helpers', () => {
-  // The option chip must reflect selected state and toggle on click. These
-  // bindings are formatted across multiple lines in the template, so the
-  // regexes tolerate whitespace/newlines between arguments.
-  assert.match(structuredPane, /isQuestionOptionSelected\(\s*part\.approval\.key/)
+  assert.match(approvalCard, /isQuestionOptionSelected\(\s*part\.approval\.key/)
   assert.match(
-    structuredPane,
+    approvalCard,
     /toggleQuestionOption\(\s*part\.approval\.key,\s*question\.id,\s*option\.id,\s*question\.allowMultiple,?\s*\)/,
   )
-  // The submit button must be gated by canSubmitQuestion.
-  assert.match(structuredPane, /canSubmitQuestion\(part\.approval\)/)
+  assert.match(approvalCard, /canSubmitQuestion\(part\.approval\)/)
 })

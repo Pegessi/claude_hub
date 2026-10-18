@@ -4,11 +4,12 @@ import test from 'node:test'
 
 // Regression test for the status-color desaturation regression. The semantic
 // status colors (success/warning/attention/danger) must be saturated enough to
-// be readable in both themes. We parse App.vue's CSS custom properties and
-// assert each main status color clears a minimum HSL saturation floor.
+// be readable in both themes. We parse the app-shell theme stylesheet's CSS
+// custom properties and assert each main status color clears a minimum HSL
+// saturation floor.
 
-const appVue = await readFile(
-  new URL('../src/App.vue', import.meta.url),
+const themeCss = await readFile(
+  new URL('../src/features/app-shell/styles/theme.css', import.meta.url),
   'utf8',
 )
 
@@ -65,7 +66,7 @@ const mainColors = ['success', 'warning', 'attention', 'danger']
 const byName = new Map(mainColors.map((n) => [n, []]))
 
 let match
-while ((match = colorDeclRe.exec(appVue)) !== null) {
+while ((match = colorDeclRe.exec(themeCss)) !== null) {
   const [, name, value] = match
   // Only track the bare color (not -strong/-hover/-bg etc.) for saturation.
   if (!mainColors.includes(name)) continue

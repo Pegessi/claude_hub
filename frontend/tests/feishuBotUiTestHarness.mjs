@@ -42,7 +42,7 @@ const clipboardUrl = moduleUrl(`
 export const clipboard = await import(clipboardUrl)
 imports['@/utils/clipboard'] = clipboardUrl
 const filename = 'FeishuBotSettingsDialog.vue'
-const { descriptor } = parse(source(`components/${filename}`), { filename })
+const { descriptor } = parse(source(`features/feishu-bot/${filename}`), { filename })
 const script = compileScript(descriptor, { id: 'bot-settings-behavior', genDefaultAs: '__component' })
 const Settings = (await import(moduleUrl(rewrite(`${script.content}\nexport default __component`)))).default
 
