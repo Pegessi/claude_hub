@@ -34,11 +34,13 @@ notification, task acceptance, service restart, merge, or push was performed.
   again. This uses the existing bounded inbox history (200 read events); repeated
   storage failure followed by eviction of that history is not a transactional
   exactly-once guarantee. Normal successful markers survive inbox compaction.
-- The fresh turn context explicitly asks Dot to report the final verdict, request
-  human acceptance, avoid `[quiet]`, and use the existing `dot notify` path if a
-  Feishu bot is bound. No automatic acceptance or deterministic outbound message
-  delivery was added. Actual model compliance and live Feishu delivery remain
-  separate end-to-end validation.
+- The fresh turn context gives Dot the final review information and suggests a
+  brief update when the verdict or pending acceptance decision needs the user's
+  attention. `[quiet]` remains appropriate when there is nothing new worth
+  reporting. The existing `dot notify` path is suggested only if Feishu is bound
+  and the update should reach the user now. Acceptance still requires user
+  authorization. No deterministic outbound message delivery was added; model
+  judgment and live Feishu delivery remain separate end-to-end validation.
 
 ## Validation
 
@@ -67,3 +69,17 @@ write failure before and after event delivery. Existing Dot behavior tests remai
 - Not run: live provider/Feishu/API integration, browser-mocks, terminal-hmr,
   terminal-replay. No frontend source changed. A provider can still fail or ignore
   instructions; unit tests do not prove real notification delivery.
+
+## Follow-up: advisory reporting guidance
+
+The user clarified that Dot should report when useful, with guidance rather than
+an unconditional reporting requirement. The event text now allows `[quiet]` when
+there is nothing new worth reporting and makes Feishu notification conditional on
+whether the update should reach the user now. Event production, scheduling,
+review authority, deduplication and human-acceptance authorization are unchanged.
+
+Independent delta review passed. Focused Dot tests: 133 passed. Strict `verify.sh
+all` passed again: backend 4332 passed / 10 skipped in 219.19s, frontend 1029 passed,
+and all format/type/lint/build/docs checks passed. Evidence:
+`/tmp/ch-dot-final-review-checks/advisory-all.log`. The clean-delivery check is
+rerun after this follow-up commit; live provider/Feishu behavior remains untested.

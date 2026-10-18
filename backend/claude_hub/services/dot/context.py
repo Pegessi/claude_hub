@@ -181,8 +181,10 @@ def _event_lines(events: list[dict[str, Any]]) -> list[str]:
     for event in events[-_EVENTS_PER_TURN:]:
         card = f" (card {event['card_id']})" if event.get("card_id") else ""
         action = (
-            " On wake, report this final verdict and ask for human acceptance; do not reply "
-            "[quiet] or accept automatically. Use `claude-hub dot notify` if Feishu is bound."
+            " On wake, consider a brief update if this verdict or a pending acceptance decision "
+            "needs the user's attention; [quiet] is fine if there is nothing new worth reporting. "
+            "Consider `claude-hub dot notify` if Feishu is bound and the update should reach the "
+            "user now. Task acceptance still requires user authorization."
             if event.get("kind") == "task_review_passed"
             else ""
         )

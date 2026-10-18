@@ -14,9 +14,10 @@
   Include the final verdict and reviewed worker evidence, not late progress echoes.
 - Deduplicate the notification per review cycle across polls and restarts, and
   recover a failed work-marker write from an already-delivered inbox event.
-- Tell Dot to report the verdict and request human acceptance instead of replying
-  `[quiet]`; preserve watched-task ownership and do not automatically accept tasks
-  or send Feishu messages outside the existing `dot notify` flow.
+- Guide Dot to report the verdict or pending acceptance decision when useful,
+  allowing `[quiet]` when there is nothing new worth reporting. Preserve watched-task
+  ownership and human authorization for acceptance; suggest `dot notify` only when
+  an update should reach the user now and Feishu is bound.
 
 ### fix(restart): capture interrupted Chats before draining Feishu routes
 
