@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -46,7 +47,9 @@ from claude_hub.services.feishu_bot import (
     FeishuBotRemoteError,
     FeishuMessageDedupStore,
     FeishuMessageEvent,
+    FeishuMessageTimeStatus,
     feishu_message_time_is_valid,
+    feishu_message_time_notice,
 )
 from claude_hub.services.feishu_bot_pool import (
     MAX_BOTS,
@@ -319,6 +322,9 @@ class _FeishuPoolBindings:
     def now(self) -> float:
         return _now()
 
+    def feishu_message_future_skew_seconds(self) -> float:
+        return settings.feishu_message_future_skew_seconds
+
     def gate(self, bot_id: str) -> Any:
         return _gate(bot_id)
 
@@ -448,6 +454,7 @@ _image_mime = _message_dispatcher._image_mime
 _event_attachments = _message_dispatcher._event_attachments
 _refresh_missing_profile = _message_dispatcher._refresh_missing_profile
 _binding_still_routes = _message_dispatcher._binding_still_routes
+_message_time_status = _message_dispatcher._message_time_status
 _message_matches_binding_time = _message_dispatcher._message_matches_binding_time
 _admit_binding_dispatch = _message_dispatcher._admit_binding_dispatch
 _admit_batch_dispatch = _message_dispatcher._admit_batch_dispatch
@@ -523,6 +530,61 @@ _PAIRING_FAILURE_TEXT = {
 }
 
 
+def _event_retry_fingerprint(event: FeishuMessageEvent) -> str:
+    value = {
+        "app_id": event.app_id,
+        "chat_id": event.chat_id,
+        "chat_type": event.chat_type,
+        "image_keys": list(event.image_keys),
+        "message_created_at_ms": event.message_created_at_ms,
+        "message_id": event.message_id,
+        "sender_open_id": event.sender_open_id,
+        "text": event.text,
+        "thread_id": event.thread_id,
+    }
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _dedup_retry_context(
+    bot_id: str, event: FeishuMessageEvent, binding: BotBinding | None
+) -> dict[str, str] | None:
+    if binding is None:
+        return None
+    return {
+        "bot_id": bot_id,
+        "pairing_id": binding.pairing_id,
+        "tab_id": binding.tab_id,
+        "workspace_id": binding.workspace_id or "-",
+        "chat_id": event.chat_id,
+        "sender_open_id": event.sender_open_id,
+        "message_id": event.message_id,
+        "event_fingerprint": _event_retry_fingerprint(event),
+    }
+
+
+_CLAIM_CONTEXT_NOT_PROVIDED = object()
+
+
+def _current_dedup_retry_context(bot_id: str, event: FeishuMessageEvent) -> dict[str, str] | None:
+    try:
+        binding = (
+            _pool.routed_binding(bot_id, sender_open_id=event.sender_open_id, chat_id=event.chat_id)
+            if event.chat_type == "p2p"
+            else _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
+        )
+    except FeishuBotPoolError:
+        return None
+    return _dedup_retry_context(bot_id, event, binding)
+
+
+def _claim_context_matches(claimed_context: object, current_context: dict[str, str] | None) -> bool:
+    if claimed_context is _CLAIM_CONTEXT_NOT_PROVIDED:
+        return True
+    return claimed_context == current_context
+
+
 async def _handle_pairing_code(
     bot_id: str,
     event: FeishuMessageEvent,
@@ -563,10 +625,16 @@ async def _handle_pairing_code(
 
 
 async def _handle_message_event(
-    bot_id: str, event: FeishuMessageEvent, effective: EffectiveBot
+    bot_id: str,
+    event: FeishuMessageEvent,
+    effective: EffectiveBot,
+    claimed_retry_context: object = _CLAIM_CONTEXT_NOT_PROVIDED,
 ) -> None:
     client = FeishuBotClient(effective.config)
     status_value = "failed"
+    status_stage = "intake"
+    status_reason: str | None = None
+    retry_context: dict[str, str] | None = None
     binding: BotBinding | None = None
     item: _TabDispatchItem | None = None
     try:
@@ -585,17 +653,57 @@ async def _handle_message_event(
         )
         if binding is None:
             if event.chat_type == "group":
+                status_value = "pre_dispatch_rejected"
+                status_stage = "pre_dispatch"
+                status_reason = "binding_missing"
                 return
-            await _reply_if_current(
+            if await _reply_if_current(
                 client,
                 event,
                 effective,
                 "本会话尚未连接 Claude Hub。请在 Hub 网页选择一个 Bot 和 Chat 生成配对码。",
-            )
+            ):
+                status_value = "pre_dispatch_rejected"
+                status_stage = "pre_dispatch"
+                status_reason = "binding_missing"
+            else:
+                status_value = "reply_failed"
+                status_stage = "pre_dispatch"
+                status_reason = "binding_missing"
             return
-        if not _message_matches_binding_time(event, binding):
+        retry_context = _dedup_retry_context(bot_id, event, binding)
+        if not _claim_context_matches(claimed_retry_context, retry_context):
+            status_value = "pre_dispatch_rejected"
+            status_stage = "pre_dispatch"
+            status_reason = "retry_context_changed"
+            return
+        time_status = _message_time_status(event, binding)
+        if time_status != FeishuMessageTimeStatus.VALID:
+            notice = feishu_message_time_notice(time_status)
+            if notice is None:
+                status_value = "pre_dispatch_rejected"
+                status_stage = "pre_dispatch"
+                status_reason = time_status.value
+                return
+            if await _reply_if_current(
+                client,
+                event,
+                effective,
+                notice,
+                still_valid=lambda: _binding_still_routes(effective, binding),
+            ):
+                status_value = "pre_dispatch_rejected"
+                status_stage = "pre_dispatch"
+                status_reason = time_status.value
+            else:
+                status_value = "reply_failed"
+                status_stage = "pre_dispatch"
+                status_reason = time_status.value
             return
         if not _owner_is_authorized(binding.owner):
+            status_value = "pre_dispatch_rejected"
+            status_stage = "pre_dispatch"
+            status_reason = "owner_unauthorized"
             async with _gate(bot_id):
                 if not _owner_is_authorized(binding.owner):
                     _pool.drop_binding(bot_id, binding.pairing_id)
@@ -612,19 +720,26 @@ async def _handle_message_event(
             )
         except _TabDispatchQueueFull:
             reaction_id = await _add_processing_reaction(client, event, "OneSecond")
-            await _reply_if_current(
+            if await _reply_if_current(
                 client,
                 event,
                 effective,
                 "Claude Hub 消息队列已满，本条消息未执行，请稍后重试。",
                 still_valid=lambda: binding is not None
                 and _binding_still_routes(effective, binding),
-            )
+            ):
+                status_value = "pre_dispatch_rejected"
+            else:
+                status_value = "reply_failed"
+            status_stage = "pre_dispatch"
+            status_reason = "queue_full"
             await _delete_processing_reaction(client, event, reaction_id)
             return
         item.reaction_task = asyncio.create_task(_maintain_processing_reaction(item))
         await item.start
         queue = _tab_dispatch_queues.get(binding.tab_id)
+        if item.native_bridge_started:
+            status_stage = "native_dispatch"
         if queue is None:
             # The batch leader may complete and retire the queue before a
             # coalesced follower resumes from ``item.start``. Its per-item
@@ -634,6 +749,11 @@ async def _handle_message_event(
             status_value = await _dispatch_tab_batch(binding.tab_id, queue, item)
         else:
             status_value = await asyncio.shield(item.outcome)
+        if item.native_bridge_started:
+            status_stage = "native_dispatch"
+        if status_value == "reply_failed":
+            status_stage = "reply"
+            status_reason = "reply_failed"
         if status_value == "retired":
             raise ExternalDispatchRetired(turn_id_for(bot_id, event.message_id))
     except asyncio.CancelledError:
@@ -664,7 +784,7 @@ async def _handle_message_event(
         raise
     except Exception:
         logger.exception("Feishu Bot message dispatch failed")
-        await _reply_if_current(
+        if await _reply_if_current(
             client,
             event,
             effective,
@@ -674,7 +794,11 @@ async def _handle_message_event(
                 if binding is not None
                 else None
             ),
-        )
+        ):
+            status_reason = "handler_exception"
+        else:
+            status_value = "reply_failed"
+            status_reason = "handler_exception"
     finally:
         if binding is not None and item is not None:
             _cancel_tab_dispatch(binding.tab_id, item)
@@ -682,7 +806,20 @@ async def _handle_message_event(
             if item is not None:
                 await _finish_processing_reaction(item)
         finally:
-            _dedup.finish(dedup_key(bot_id, event.message_id), status_value)
+            if item is not None and item.admission_time_rejection is not None:
+                status_stage = "pre_dispatch"
+                status_reason = item.admission_time_rejection.value
+            elif item is not None and item.native_bridge_started and status_stage == "intake":
+                status_stage = "native_dispatch"
+            if status_value == "reply_failed":
+                status_stage = "reply"
+            _dedup.finish(
+                dedup_key(bot_id, event.message_id),
+                status_value,
+                stage=status_stage,
+                reason=status_reason,
+                retry_context=retry_context,
+            )
 
 
 async def _handle_sdk_event(bot_id: str, data: Any) -> None:
@@ -703,11 +840,15 @@ async def _handle_sdk_event(bot_id: str, data: Any) -> None:
     except ValueError as exc:
         logger.info("Ignored unsupported Feishu WebSocket event for Bot %s: %s", bot_id, exc)
         return
-    if not _dedup.claim(dedup_key(bot_id, event.message_id)):
+    claimed_retry_context = _current_dedup_retry_context(bot_id, event)
+    if not _dedup.claim(
+        dedup_key(bot_id, event.message_id),
+        retry_context=claimed_retry_context,
+    ):
         return
     key = dedup_key(bot_id, event.message_id)
     try:
-        await _handle_message_event(bot_id, event, effective)
+        await _handle_message_event(bot_id, event, effective, claimed_retry_context)
     except ExternalDispatchRetired:
         # Final shutdown cancels only after its bounded drain. The Chat bridge
         # proved the matching turn was stopped or never started, so releasing

@@ -68,6 +68,13 @@ class Settings(BaseSettings):
             raise ValueError("cursor_models_probe_timeout_seconds must be positive and finite")
         return value
 
+    @field_validator("feishu_message_future_skew_seconds")
+    @classmethod
+    def _feishu_message_future_skew(cls, value: float) -> float:
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("feishu_message_future_skew_seconds must be finite and non-negative")
+        return value
+
     # Keep the long-lived backend log bounded. RotatingFileHandler retains the
     # active file plus ``backend_log_backup_count`` numbered backups.
     backend_log_max_bytes: int = 10 * 1024 * 1024
@@ -85,6 +92,13 @@ class Settings(BaseSettings):
     feishu_app_id: Optional[str] = None
     feishu_app_secret: Optional[str] = None
     feishu_redirect_uri: Optional[str] = None
+
+    # Feishu Bot message timestamps can arrive a few milliseconds ahead of the
+    # Hub host clock. Keep activation lower bounds exact; this only tolerates
+    # small future skew on the upper bound.
+    feishu_message_future_skew_seconds: float = Field(
+        default=5.0, validation_alias="CLAUDE_HUB_FEISHU_MESSAGE_FUTURE_SKEW_SECONDS"
+    )
 
     # Session settings
     session_secret_key: str = "change-this-in-production"

@@ -28,7 +28,9 @@ from claude_hub.services.agent_stream.turn_source import (
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuMessageEvent,
-    feishu_message_time_is_valid,
+    FeishuMessageTimeStatus,
+    feishu_message_time_notice,
+    feishu_message_time_status,
 )
 from claude_hub.services.feishu_bot_pool import (
     BotBinding,
@@ -42,6 +44,21 @@ from claude_hub.services.feishu_message_format import build_feishu_message_paylo
 
 logger = logging.getLogger(__name__)
 _BIND_CODE_RE = re.compile(r"^(?:bind\s+)?(CH-[A-Z0-9]{10})$", re.IGNORECASE)
+
+
+class FeishuMessageTimeRejected(HTTPException):
+    """Only the local admission guard can prove this turn was never submitted."""
+
+    def __init__(self, reason: FeishuMessageTimeStatus) -> None:
+        super().__init__(
+            status_code=409,
+            detail="message_outside_binding_period",
+            headers={
+                CHAT_ERROR_REASON_HEADER: "message_outside_binding_period",
+                "X-Claude-Hub-Feishu-Reject-Reason": reason.value,
+            },
+        )
+        self.reason = reason
 
 
 class FeishuMessageDispatcher:
@@ -254,42 +271,77 @@ class FeishuMessageDispatcher:
             return False
         return self.bindings.owner_is_authorized(current.owner)
 
-    def _message_matches_binding_time(self, event: FeishuMessageEvent, binding: BotBinding) -> bool:
-        return feishu_message_time_is_valid(
-            event.message_created_at_ms, activated_at=binding.created_at, now=self.bindings.now()
+    def _message_time_status(
+        self, event: FeishuMessageEvent, binding: BotBinding
+    ) -> FeishuMessageTimeStatus:
+        now = self.bindings.now()
+        skew = self.bindings.feishu_message_future_skew_seconds()
+        result = feishu_message_time_status(
+            event.message_created_at_ms,
+            activated_at=binding.created_at,
+            now=now,
+            future_skew_seconds=skew,
         )
+        if result != FeishuMessageTimeStatus.VALID:
+            offset_ms = (
+                None
+                if result == FeishuMessageTimeStatus.INVALID_TIMESTAMP
+                else event.message_created_at_ms - now * 1000
+            )
+            logger.info(
+                "Feishu message time rejected: message=%s pairing=%s reason=%s "
+                "offset_ms=%s allowed_future_seconds=%s",
+                event.message_id,
+                binding.pairing_id,
+                result.value,
+                offset_ms,
+                skew,
+            )
+        return result
+
+    def _message_matches_binding_time(self, event: FeishuMessageEvent, binding: BotBinding) -> bool:
+        return self._message_time_status(event, binding) == FeishuMessageTimeStatus.VALID
+
+    def _validate_binding_dispatch(
+        self, effective: EffectiveBot, binding: BotBinding, event: FeishuMessageEvent
+    ) -> None:
+        """Validate a message while the caller holds its bot's admission gate."""
+        if not self.bindings.pool().is_current(effective) or not self._binding_still_routes(
+            effective, binding
+        ):
+            raise HTTPException(status_code=409, detail="bot_binding_revoked")
+        time_status = self._message_time_status(event, binding)
+        if time_status != FeishuMessageTimeStatus.VALID:
+            raise FeishuMessageTimeRejected(time_status)
+        self.bindings.validate_saved_target(binding)
 
     @asynccontextmanager
     async def _admit_binding_dispatch(
         self, effective: EffectiveBot, binding: BotBinding, event: FeishuMessageEvent
     ) -> AsyncIterator[None]:
         async with self.bindings.gate(effective.bot_id):
-            if not self.bindings.pool().is_current(effective) or not self._binding_still_routes(
-                effective, binding
-            ):
-                raise HTTPException(status_code=409, detail="bot_binding_revoked")
-            if not self._message_matches_binding_time(event, binding):
-                raise HTTPException(
-                    status_code=409,
-                    detail="message_outside_binding_period",
-                    headers={CHAT_ERROR_REASON_HEADER: "message_outside_binding_period"},
-                )
-            self.bindings.validate_saved_target(binding)
+            self._validate_binding_dispatch(effective, binding, event)
             yield
 
     @asynccontextmanager
     async def _admit_batch_dispatch(
-        self,
-        queue: _TabDispatchQueue,
-        effective: EffectiveBot,
-        binding: BotBinding,
-        event: FeishuMessageEvent,
+        self, queue: _TabDispatchQueue, batch: list[_TabDispatchItem]
     ) -> AsyncIterator[None]:
-        """Mark follow-up history only after native delivery is accepted."""
-
-        async with self._admit_binding_dispatch(effective, binding, event):
+        """Validate the claimed batch and mark history only after native handoff."""
+        leader = batch[0]
+        # Coalesced items share a bot and pairing, but their timestamps differ.
+        # Keep one gate through every check and the handoff; nested single-message
+        # guards would reacquire the same non-reentrant lock.
+        async with self.bindings.gate(leader.effective.bot_id):
+            for item in batch:
+                self._validate_binding_dispatch(item.effective, item.binding, item.event)
             yield
-        context = (effective.bot_id, binding.pairing_id, event.chat_id, event.thread_id)
+        context = (
+            leader.effective.bot_id,
+            leader.binding.pairing_id,
+            leader.event.chat_id,
+            leader.event.thread_id,
+        )
         queue.dispatched_contexts[context] = None
         queue.dispatched_contexts.move_to_end(context)
         while len(queue.dispatched_contexts) > self.bindings.max_tab_dispatch_contexts():
@@ -611,9 +663,7 @@ class FeishuMessageDispatcher:
                         "feishu_followup": followup,
                     },
                     attachments=attachments,
-                    admission_guard=lambda: self._admit_batch_dispatch(
-                        queue, leader.effective, leader.binding, leader.event
-                    ),
+                    admission_guard=lambda: self._admit_batch_dispatch(queue, batch),
                 )
                 status = (
                     "completed"
@@ -627,10 +677,31 @@ class FeishuMessageDispatcher:
                         ),
                         formatted=True,
                     )
-                    else "failed"
+                    else "reply_failed"
                 )
             except ExternalDispatchRetired:
                 status = "retired"
+            except FeishuMessageTimeRejected as exc:
+                for item in batch:
+                    item.admission_time_rejection = exc.reason
+                notice = feishu_message_time_notice(exc.reason)
+                if notice is None:
+                    status = "pre_dispatch_rejected"
+                else:
+                    # Cancellation during this post must not make an uncertain
+                    # notification eligible for another send or native dispatch.
+                    status = "reply_failed"
+                    target = batch[-1] if batch else leader
+                    if await self.bindings.reply_if_current(
+                        target.client,
+                        target.event,
+                        target.effective,
+                        notice,
+                        still_valid=lambda: self._binding_still_routes(
+                            target.effective, target.binding
+                        ),
+                    ):
+                        status = "pre_dispatch_rejected"
             except ExternalInteractionRequired:
                 target = batch[-1] if batch else leader
                 await self.bindings.reply_if_current(
