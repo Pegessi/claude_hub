@@ -9,6 +9,8 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
+from enum import Enum
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -429,6 +431,75 @@ class FeishuBotClient:
 
 
 _MAX_FEISHU_MESSAGE_TIME_MS = 4_102_444_800_000
+_MAX_DEDUP_RETRY_ATTEMPTS = 2
+_PRE_DISPATCH_RETRY_WINDOW_SECONDS = 10 * 60
+_DEDUP_RETRYABLE_REASONS = frozenset({"message_future_over_skew"})
+
+
+class FeishuMessageTimeStatus(str, Enum):
+    VALID = "valid"
+    INVALID_TIMESTAMP = "invalid_timestamp"
+    CLOCK_INVERTED = "clock_inverted"
+    MESSAGE_BEFORE_BINDING = "message_before_binding"
+    MESSAGE_FUTURE_OVER_SKEW = "message_future_over_skew"
+
+
+def feishu_message_time_notice(status: FeishuMessageTimeStatus) -> str | None:
+    """Explain host-clock failures without replying to stale or malformed input."""
+    if status == FeishuMessageTimeStatus.MESSAGE_FUTURE_OVER_SKEW:
+        return (
+            "Claude Hub 尚未执行这条消息：飞书消息时间晚于服务器时间且超出允许偏差。"
+            "如稍后仍未收到回复，请重新发送。"
+        )
+    if status == FeishuMessageTimeStatus.CLOCK_INVERTED:
+        return "Claude Hub 尚未执行这条消息：服务器时间校验异常。请稍后重新发送。"
+    return None
+
+
+def feishu_message_time_status(
+    created_at_ms: int,
+    *,
+    activated_at: float,
+    now: float,
+    future_skew_seconds: float = 0.0,
+) -> FeishuMessageTimeStatus:
+    """Classify an inbound Feishu message timestamp against binding time."""
+    if (
+        isinstance(created_at_ms, bool)
+        or not isinstance(created_at_ms, int)
+        or not 0 <= created_at_ms <= _MAX_FEISHU_MESSAGE_TIME_MS
+    ):
+        return FeishuMessageTimeStatus.INVALID_TIMESTAMP
+    ratios: list[tuple[int, int]] = []
+    for value in (activated_at, now):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return FeishuMessageTimeStatus.INVALID_TIMESTAMP
+        try:
+            seconds = float(value)
+        except OverflowError:
+            return FeishuMessageTimeStatus.INVALID_TIMESTAMP
+        if not math.isfinite(seconds) or not 0 <= seconds <= _MAX_FEISHU_MESSAGE_TIME_MS / 1000:
+            return FeishuMessageTimeStatus.INVALID_TIMESTAMP
+        ratios.append(seconds.as_integer_ratio())
+    if isinstance(future_skew_seconds, bool) or not isinstance(future_skew_seconds, (int, float)):
+        return FeishuMessageTimeStatus.INVALID_TIMESTAMP
+    try:
+        skew = float(future_skew_seconds)
+    except OverflowError:
+        return FeishuMessageTimeStatus.INVALID_TIMESTAMP
+    if not math.isfinite(skew) or skew < 0:
+        return FeishuMessageTimeStatus.INVALID_TIMESTAMP
+    (lower_n, lower_d), (upper_n, upper_d) = ratios
+    if lower_n * upper_d > upper_n * lower_d:
+        return FeishuMessageTimeStatus.CLOCK_INVERTED
+    if created_at_ms * lower_d < lower_n * 1000:
+        return FeishuMessageTimeStatus.MESSAGE_BEFORE_BINDING
+    # Keep the host clock's exact bound. The configured allowance uses its
+    # decimal value, so 0.152 means 152 ms without an arbitrary epsilon.
+    upper_ms = 1000 * (Fraction(upper_n, upper_d) + Fraction(str(skew)))
+    if created_at_ms > upper_ms:
+        return FeishuMessageTimeStatus.MESSAGE_FUTURE_OVER_SKEW
+    return FeishuMessageTimeStatus.VALID
 
 
 def feishu_message_time_is_valid(created_at_ms: int, *, activated_at: float, now: float) -> bool:
@@ -437,25 +508,10 @@ def feishu_message_time_is_valid(created_at_ms: int, *, activated_at: float, now
     Host and Feishu clocks must be normally synchronized. This rejects
     observable future/inverted times, not every unobserved wall-clock jump.
     """
-    if (
-        isinstance(created_at_ms, bool)
-        or not isinstance(created_at_ms, int)
-        or not 0 <= created_at_ms <= _MAX_FEISHU_MESSAGE_TIME_MS
-    ):
-        return False
-    ratios: list[tuple[int, int]] = []
-    for value in (activated_at, now):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return False
-        try:
-            seconds = float(value)
-        except OverflowError:
-            return False
-        if not math.isfinite(seconds) or not 0 <= seconds <= _MAX_FEISHU_MESSAGE_TIME_MS / 1000:
-            return False
-        ratios.append(seconds.as_integer_ratio())
-    (lower_n, lower_d), (upper_n, upper_d) = ratios
-    return created_at_ms * lower_d >= lower_n * 1000 and created_at_ms * upper_d <= upper_n * 1000
+    return (
+        feishu_message_time_status(created_at_ms, activated_at=activated_at, now=now)
+        == FeishuMessageTimeStatus.VALID
+    )
 
 
 _MAX_DEDUP_TIMESTAMP = 4_102_444_800.0
@@ -482,6 +538,60 @@ def _dedup_message_id(key: str) -> str:
     return message_id
 
 
+_RETRY_CONTEXT_KEYS = frozenset(
+    {
+        "bot_id",
+        "pairing_id",
+        "tab_id",
+        "workspace_id",
+        "chat_id",
+        "sender_open_id",
+        "message_id",
+        "event_fingerprint",
+    }
+)
+
+
+def _validate_retry_context(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or not _RETRY_CONTEXT_KEYS.issubset(value):
+        raise FeishuBotError("Invalid Feishu message retry context")
+    for key, item in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise FeishuBotError("Invalid Feishu message retry context")
+        if not isinstance(item, str) or not item.strip():
+            raise FeishuBotError("Invalid Feishu message retry context")
+    return value
+
+
+def _same_retry_context(left: Mapping[str, str] | None, right: Mapping[str, str] | None) -> bool:
+    return bool(left is not None and right is not None and dict(left) == dict(right))
+
+
+def _pre_dispatch_retry_allowed(
+    record: Mapping[str, Any], *, now: float, retry_context: Mapping[str, str] | None
+) -> bool:
+    if record.get("status") != "pre_dispatch_rejected":
+        return False
+    if record.get("stage") != "pre_dispatch":
+        return False
+    if record.get("reason") not in _DEDUP_RETRYABLE_REASONS:
+        return False
+    attempts = record.get("attempts", 1)
+    if isinstance(attempts, bool) or not isinstance(attempts, int):
+        return False
+    if attempts >= _MAX_DEDUP_RETRY_ATTEMPTS:
+        return False
+    finished_at = record.get("finished_at")
+    if not isinstance(finished_at, (int, float)) or isinstance(finished_at, bool):
+        return False
+    if not 0 <= now - float(finished_at) <= _PRE_DISPATCH_RETRY_WINDOW_SECONDS:
+        return False
+    stored_context = record.get("retry_context")
+    if stored_context is not None:
+        _validate_retry_context(stored_context)
+    return _same_retry_context(stored_context, retry_context)
+
+
 def _validate_dedup_events(value: Any, *, namespaced: bool) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise FeishuBotError("Invalid Feishu message claims")
@@ -496,6 +606,15 @@ def _validate_dedup_events(value: Any, *, namespaced: bool) -> dict[str, Any]:
             raise FeishuBotError("Invalid Feishu message claim status")
         if "finished_at" in record:
             _dedup_timestamp(record["finished_at"])
+        attempts = record.get("attempts", 1)
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+            raise FeishuBotError("Invalid Feishu message claim attempts")
+        for field in ("stage", "reason"):
+            raw = record.get(field)
+            if raw is not None and (not isinstance(raw, str) or not raw.strip()):
+                raise FeishuBotError("Invalid Feishu message claim metadata")
+        if "retry_context" in record:
+            _validate_retry_context(record["retry_context"])
     return value
 
 
@@ -553,9 +672,11 @@ class FeishuMessageDedupStore:
             except FileNotFoundError:
                 pass
 
-    def claim(self, key: str) -> bool:
+    def claim(self, key: str, *, retry_context: Mapping[str, str] | None = None) -> bool:
         message_id = _dedup_message_id(key)
         now = _dedup_timestamp(self._now())
+        if retry_context is not None:
+            _validate_retry_context(dict(retry_context))
         with self._lock:
             state = self._load()
             cutoff = now - _EVENT_RETENTION_SECONDS
@@ -571,22 +692,58 @@ class FeishuMessageDedupStore:
                 for item, record in state["legacy_events"].items()
                 if record["claimed_at"] >= legacy_cutoff
             }
-            if key in events or message_id in state["legacy_events"]:
+            if message_id in state["legacy_events"]:
+                self._save(state)
+                return False
+            existing = events.get(key)
+            if existing is not None:
+                if _pre_dispatch_retry_allowed(existing, now=now, retry_context=retry_context):
+                    existing.update(
+                        claimed_at=now,
+                        status="processing",
+                        stage="intake",
+                        reason="retry_after_pre_dispatch_reject",
+                        attempts=int(existing.get("attempts", 1)) + 1,
+                    )
+                    existing.pop("finished_at", None)
+                    self._save(state)
+                    return True
                 self._save(state)
                 return False
             events[key] = {"claimed_at": now, "status": "processing"}
             self._save(state)
             return True
 
-    def finish(self, key: str, status: str) -> None:
+    def finish(
+        self,
+        key: str,
+        status: str,
+        *,
+        stage: str | None = None,
+        reason: str | None = None,
+        retry_context: Mapping[str, str] | None = None,
+    ) -> None:
         _dedup_message_id(key)
         if not isinstance(status, str) or not status.strip():
             raise FeishuBotError("Invalid Feishu message claim status")
+        for value in (stage, reason):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise FeishuBotError("Invalid Feishu message claim metadata")
+        if retry_context is not None:
+            retry_context = _validate_retry_context(dict(retry_context))
         with self._lock:
             state = self._load()
             value = state["events"].get(key)
             if value is not None:
                 value["status"] = status
+                if stage is not None:
+                    value["stage"] = stage
+                if reason is not None:
+                    value["reason"] = reason
+                else:
+                    value.pop("reason", None)
+                if retry_context is not None:
+                    value["retry_context"] = dict(retry_context)
                 value["finished_at"] = _dedup_timestamp(self._now())
                 self._save(state)
 
@@ -609,5 +766,8 @@ __all__ = [
     "FeishuBotProfile",
     "FeishuBotError",
     "FeishuMessageEvent",
+    "FeishuMessageTimeStatus",
     "feishu_message_time_is_valid",
+    "feishu_message_time_notice",
+    "feishu_message_time_status",
 ]

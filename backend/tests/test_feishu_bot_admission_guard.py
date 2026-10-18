@@ -24,7 +24,11 @@ from claude_hub.models import (
     User,
 )
 from claude_hub.services import goal_run, ttyd_manager, workspace_manager
-from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuMessageEvent
+from claude_hub.services.feishu_bot import (
+    FeishuBotConfig,
+    FeishuMessageEvent,
+    FeishuMessageTimeStatus,
+)
 from claude_hub.services.feishu_bot_pool import (
     BOT_ENV_KEYS,
     OWNER_KIND_OAUTH,
@@ -96,6 +100,124 @@ def env(monkeypatch, tmp_path):
         authorized=authorized,
         replies=replies,
     )
+
+
+@pytest.mark.parametrize("offset_ms", [91, 143, 152])
+def test_small_future_feishu_timestamp_skew_is_accepted(env, offset_ms):
+    binding = activate(env)
+    candidate = replace(message(), message_created_at_ms=1_800_000_000_000 + offset_ms)
+
+    assert bot_api._message_time_status(candidate, binding) == FeishuMessageTimeStatus.VALID
+    assert bot_api._message_matches_binding_time(candidate, binding) is True
+
+
+def test_future_timestamp_tolerance_boundary_and_overrun(env, monkeypatch):
+    binding = activate(env)
+    monkeypatch.setattr(bot_api.settings, "feishu_message_future_skew_seconds", 0.152)
+
+    assert (
+        bot_api._message_time_status(
+            replace(message(), message_created_at_ms=1_800_000_000_152), binding
+        )
+        == FeishuMessageTimeStatus.VALID
+    )
+    assert (
+        bot_api._message_time_status(
+            replace(message(), message_created_at_ms=1_800_000_000_153), binding
+        )
+        == FeishuMessageTimeStatus.MESSAGE_FUTURE_OVER_SKEW
+    )
+
+
+def test_binding_lower_bound_remains_exact_and_inverted_clock_is_rejected(env):
+    binding = activate(env)
+    before_binding = replace(message(), message_created_at_ms=1_799_999_999_999)
+
+    assert bot_api._message_time_status(before_binding, binding) == (
+        FeishuMessageTimeStatus.MESSAGE_BEFORE_BINDING
+    )
+    env.clock[0] = binding.created_at - 0.001
+    assert (
+        bot_api._message_time_status(message(), binding) == FeishuMessageTimeStatus.CLOCK_INVERTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_future_timestamp_rejection_is_visible_without_model_execution(env, monkeypatch):
+    binding = activate(env)
+    effective = env.pool.effective(env.bot_id)
+    submitted = []
+    monkeypatch.setattr(bot_api.settings, "feishu_message_future_skew_seconds", 0.05)
+
+    async def send(payload, queue):
+        submitted.append(payload.client_turn_id)
+        complete(queue, payload.client_turn_id)
+
+    install_stream(monkeypatch, send)
+    await bot_api._handle_message_event(
+        env.bot_id,
+        replace(message(), message_created_at_ms=1_800_000_000_051),
+        effective,
+    )
+
+    assert submitted == []
+    assert len(env.replies) == 1
+    assert env.replies[0][0] == "om-1"
+    assert "尚未执行" in env.replies[0][1]
+    assert env.pool.snapshot().get(env.bot_id).binding == binding
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_binding_rejection_drops_binding_without_reply(env, monkeypatch):
+    activate(env)
+    effective = env.pool.effective(env.bot_id)
+    submitted = []
+
+    async def send(payload, queue):
+        submitted.append(payload.client_turn_id)
+        complete(queue, payload.client_turn_id)
+
+    install_stream(monkeypatch, send)
+    env.authorized[0] = False
+
+    await bot_api._handle_message_event(env.bot_id, message(), effective)
+
+    assert submitted == []
+    assert env.replies == []
+    assert env.pool.snapshot().get(env.bot_id).binding is None
+
+
+@pytest.mark.asyncio
+async def test_retry_claim_context_is_rechecked_after_profile_refresh_rebind(env, monkeypatch):
+    old_binding = activate(env)
+    effective = env.pool.effective(env.bot_id)
+    inbound = replace(message(), message_created_at_ms=1_800_000_000_100)
+    claimed_context = bot_api._dedup_retry_context(env.bot_id, inbound, old_binding)
+    submitted = []
+    refreshed = asyncio.Event()
+
+    async def refresh(candidate, client, *, require_open_id=False):
+        env.pool.release_binding(env.bot_id, expected_revision=revision(env))
+        env.clock[0] += 0.05
+        new_binding = activate(env)
+        assert new_binding.pairing_id != old_binding.pairing_id
+        assert bot_api._message_matches_binding_time(inbound, new_binding) is True
+        refreshed.set()
+        return env.pool.effective(env.bot_id)
+
+    async def send(payload, queue):
+        submitted.append(payload.client_turn_id)
+        complete(queue, payload.client_turn_id)
+
+    monkeypatch.setattr(bot_api, "_refresh_missing_profile", refresh)
+    install_stream(monkeypatch, send)
+
+    await bot_api._handle_message_event(env.bot_id, inbound, effective, claimed_context)
+
+    assert refreshed.is_set()
+    assert submitted == []
+    assert env.replies == []
+    assert env.pool.snapshot().get(env.bot_id).binding is not None
 
 
 def revision(env):
@@ -405,7 +527,9 @@ async def test_clock_rollback_during_subscribe_is_rechecked_at_submission(env, m
         release.set()
         await asyncio.wait_for(job, 2)
         assert submitted == []
-        assert env.replies == []
+        assert len(env.replies) == 1
+        assert "尚未执行" in env.replies[0][1]
+        assert "服务器时间校验异常" in env.replies[0][1]
         assert len(stream.unsubscribed) == 1
     finally:
         release.set()

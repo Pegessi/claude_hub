@@ -4,7 +4,11 @@ import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from claude_hub.services.feishu_bot import FeishuBotClient, FeishuMessageEvent
+from claude_hub.services.feishu_bot import (
+    FeishuBotClient,
+    FeishuMessageEvent,
+    FeishuMessageTimeStatus,
+)
 from claude_hub.services.feishu_bot_pool import BotBinding, EffectiveBot
 
 
@@ -29,6 +33,7 @@ class TabDispatchItem:
     processing_reaction_id: str | None = None
     dispatch_started: bool = False
     native_bridge_started: bool = False
+    admission_time_rejection: FeishuMessageTimeStatus | None = None
     cancelled: bool = False
 
 

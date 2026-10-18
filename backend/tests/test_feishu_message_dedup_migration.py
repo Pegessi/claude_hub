@@ -11,6 +11,7 @@ migrated ids, strictly per-Bot for everything new.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -353,3 +354,224 @@ def test_release_preserves_unrelated_and_legacy_authority(tmp_path: Path) -> Non
 
     assert not store.claim("bot-a:om-live")
     assert not store.claim("bot-a:om-legacy")
+
+
+def _retry_context(pairing_id: str = "pair-1", fingerprint: str = "fp-1") -> dict[str, str]:
+    return {
+        "bot_id": "bot-a",
+        "pairing_id": pairing_id,
+        "tab_id": "tab-1",
+        "workspace_id": "ws-1",
+        "chat_id": "oc-1",
+        "sender_open_id": "ou-1",
+        "message_id": "om-retry",
+        "event_fingerprint": fingerprint,
+    }
+
+
+def test_same_id_finished_claim_is_not_reexecuted(tmp_path: Path) -> None:
+    path = tmp_path / "feishu_bot_events.json"
+    store = _ClockedDedupStore(path, _T0)
+
+    assert store.claim("bot-a:om-done") is True
+    store.finish("bot-a:om-done", "completed", stage="native_dispatch")
+
+    assert store.claim("bot-a:om-done") is False
+
+
+def test_pre_dispatch_future_reject_allows_one_context_matched_redelivery(tmp_path: Path) -> None:
+    path = tmp_path / "feishu_bot_events.json"
+    store = _ClockedDedupStore(path, _T0)
+    context = _retry_context()
+
+    assert store.claim("bot-a:om-retry", retry_context=context) is True
+    store.finish(
+        "bot-a:om-retry",
+        "pre_dispatch_rejected",
+        stage="pre_dispatch",
+        reason="message_future_over_skew",
+        retry_context=context,
+    )
+    store.clock = _T0 + 2
+
+    assert store.claim("bot-a:om-retry", retry_context=context) is True
+    store.finish("bot-a:om-retry", "completed", stage="native_dispatch")
+    assert store.claim("bot-a:om-retry", retry_context=context) is False
+
+
+def test_future_skew_retry_does_not_cross_rebinding_after_time_becomes_valid(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "feishu_bot_events.json"
+    store = _ClockedDedupStore(path, _T0)
+    context = _retry_context()
+
+    assert store.claim("bot-a:om-retry", retry_context=context) is True
+    store.finish(
+        "bot-a:om-retry",
+        "pre_dispatch_rejected",
+        stage="pre_dispatch",
+        reason="message_future_over_skew",
+        retry_context=context,
+    )
+    store.clock = _T0 + 2
+
+    assert store.claim("bot-a:om-retry", retry_context=_retry_context(pairing_id="pair-2")) is False
+    assert store.claim("bot-a:om-retry", retry_context=_retry_context(fingerprint="fp-2")) is False
+
+
+def test_future_skew_retry_expires_and_non_transient_rejects_stay_claimed(tmp_path: Path) -> None:
+    path = tmp_path / "feishu_bot_events.json"
+    context = _retry_context()
+    store = _ClockedDedupStore(path, _T0)
+
+    assert store.claim("bot-a:om-retry", retry_context=context) is True
+    store.finish(
+        "bot-a:om-retry",
+        "pre_dispatch_rejected",
+        stage="pre_dispatch",
+        reason="message_future_over_skew",
+        retry_context=context,
+    )
+    store.clock = _T0 + 601
+    assert store.claim("bot-a:om-retry", retry_context=context) is False
+
+    second = _ClockedDedupStore(tmp_path / "second.json", _T0)
+    assert second.claim("bot-a:om-before", retry_context=context) is True
+    second.finish(
+        "bot-a:om-before",
+        "pre_dispatch_rejected",
+        stage="pre_dispatch",
+        reason="message_before_binding",
+        retry_context=context,
+    )
+    second.clock = _T0 + 2
+    assert second.claim("bot-a:om-before", retry_context=context) is False
+
+
+def test_reply_failed_and_native_failed_claims_are_not_reexecuted(tmp_path: Path) -> None:
+    path = tmp_path / "feishu_bot_events.json"
+    context = _retry_context()
+    store = _ClockedDedupStore(path, _T0)
+
+    assert store.claim("bot-a:om-reply", retry_context=context) is True
+    store.finish(
+        "bot-a:om-reply",
+        "reply_failed",
+        stage="reply",
+        reason="message_future_over_skew",
+        retry_context=context,
+    )
+    assert store.claim("bot-a:om-reply", retry_context=context) is False
+
+    assert store.claim("bot-a:om-native", retry_context=context) is True
+    store.finish("bot-a:om-native", "failed", stage="native_dispatch", retry_context=context)
+    assert store.claim("bot-a:om-native", retry_context=context) is False
+
+
+@pytest.mark.parametrize("redelivery", [False, True], ids=["first-delivery", "safe-redelivery"])
+def test_atomic_claim_allows_only_one_concurrent_owner(tmp_path: Path, redelivery: bool) -> None:
+    path = tmp_path / "events.json"
+    store = _ClockedDedupStore(path, _T0)
+    context = _retry_context()
+    context["message_id"] = "om-concurrent"
+    if redelivery:
+        assert store.claim("bot-a:om-concurrent", retry_context=context)
+        store.finish(
+            "bot-a:om-concurrent",
+            "pre_dispatch_rejected",
+            stage="pre_dispatch",
+            reason="message_future_over_skew",
+            retry_context=context,
+        )
+        store.clock += 2
+    barrier = threading.Barrier(8)
+    results: list[bool] = []
+    results_lock = threading.Lock()
+
+    def claim_once() -> None:
+        barrier.wait(timeout=2)
+        claimed = store.claim("bot-a:om-concurrent", retry_context=context)
+        with results_lock:
+            results.append(claimed)
+
+    threads = [threading.Thread(target=claim_once) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert sorted(results) == [False, False, False, False, False, False, False, True]
+    assert set(_read(path)["events"]) == {"bot-a:om-concurrent"}
+
+
+def test_future_skew_retry_is_limited_to_two_total_attempts(tmp_path: Path) -> None:
+    path = tmp_path / "events.json"
+    store = _ClockedDedupStore(path, _T0)
+    context = _retry_context()
+
+    assert store.claim("bot-a:om-two", retry_context=context) is True
+    store.finish(
+        "bot-a:om-two",
+        "pre_dispatch_rejected",
+        stage="pre_dispatch",
+        reason="message_future_over_skew",
+        retry_context=context,
+    )
+    store.clock = _T0 + 2
+    assert store.claim("bot-a:om-two", retry_context=context) is True
+    store.finish(
+        "bot-a:om-two",
+        "pre_dispatch_rejected",
+        stage="pre_dispatch",
+        reason="message_future_over_skew",
+        retry_context=context,
+    )
+    store.clock = _T0 + 3
+
+    assert store.claim("bot-a:om-two", retry_context=context) is False
+
+
+def test_retry_window_does_not_reopen_when_the_clock_moves_backwards(tmp_path: Path) -> None:
+    store = _ClockedDedupStore(tmp_path / "events.json", _T0)
+    context = _retry_context()
+    assert store.claim("bot-a:om-retry", retry_context=context)
+    store.finish(
+        "bot-a:om-retry",
+        "pre_dispatch_rejected",
+        stage="pre_dispatch",
+        reason="message_future_over_skew",
+        retry_context=context,
+    )
+    store.clock -= 1
+    assert not store.claim("bot-a:om-retry", retry_context=context)
+
+
+def test_legacy_claim_vetoes_an_otherwise_retryable_namespaced_record(tmp_path: Path) -> None:
+    path = tmp_path / "events.json"
+    store = _ClockedDedupStore(path, _T0)
+    context = _retry_context()
+    assert store.claim("bot-a:om-retry", retry_context=context)
+    store.finish(
+        "bot-a:om-retry",
+        "pre_dispatch_rejected",
+        stage="pre_dispatch",
+        reason="message_future_over_skew",
+        retry_context=context,
+    )
+    saved = _read(path)
+    saved["legacy_events"]["om-retry"] = {"claimed_at": _T0, "status": "failed"}
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    store.clock += 1
+    assert not store.claim("bot-a:om-retry", retry_context=context)
+
+
+@pytest.mark.parametrize("context", [{}, {"bot_id": "bot-a"}], ids=["empty", "partial"])
+def test_retry_context_must_identify_the_original_message_and_binding(
+    tmp_path: Path, context: dict[str, str]
+) -> None:
+    path = tmp_path / "events.json"
+    store = _ClockedDedupStore(path, _T0)
+    with pytest.raises(FeishuBotError, match="retry context"):
+        store.claim("bot-a:om-retry", retry_context=context)
+    assert not path.exists()
