@@ -103,6 +103,11 @@ def persist_api(
         "_send_tmux_message_with_receipt",
         AsyncMock(),
     )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_capture_tmux_output",
+        AsyncMock(return_value="? for shortcuts"),
+    )
     _reset_singleton()
 
     async def fake_current_user() -> User:
@@ -145,6 +150,23 @@ def test_openapi_paths_exclude_agent_tree() -> None:
     openapi = _openapi_document()
     for path in openapi.get("paths", {}):
         assert _LEGACY_OPENAPI_PATH_FRAGMENT not in path, path
+
+
+def test_openapi_operation_ids_are_unique() -> None:
+    cached_schema = app.openapi_schema
+    try:
+        app.openapi_schema = None
+        openapi = app.openapi()
+    finally:
+        app.openapi_schema = cached_schema
+
+    operation_ids = [
+        operation["operationId"]
+        for path_item in openapi.get("paths", {}).values()
+        for operation in path_item.values()
+        if isinstance(operation, dict) and "operationId" in operation
+    ]
+    assert len(operation_ids) == len(set(operation_ids))
 
 
 def test_openapi_schemas_exclude_legacy_agent_tree_surface() -> None:

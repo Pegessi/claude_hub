@@ -1,11 +1,10 @@
 """Model normalizers for persisted workspace items."""
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _NormalizeMixin:
+class _NormalizeMixin(_WorkspaceManagerBase):
     def _normalize_workspace_item(self, item: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(item)
         normalized.pop("agent_session_id", None)

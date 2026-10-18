@@ -3,8 +3,6 @@
 import os
 from dataclasses import dataclass
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ._constants import *  # noqa: F401,F403
 
 
@@ -33,7 +31,10 @@ class _PreparedWorkspaceAttachment:
     content: bytes
 
 
-class _AttachmentsMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _AttachmentsMixin(_WorkspaceManagerBase):
     def _prepare_attachments(
         self,
         workspace_id: str,

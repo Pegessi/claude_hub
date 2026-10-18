@@ -1,242 +1,166 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { ref } from 'vue'
-import ts from 'typescript'
+import { computed, ref } from 'vue'
+import { loadChatFeature } from './chatPresentationTestHarness.mjs'
 
-const source = await readFile(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
-  'utf8',
-)
+const { useChatComposer } = await loadChatFeature('controllers/useChatComposer')
+const { useChatDelivery } = await loadChatFeature('controllers/useChatDelivery')
 
-function extractFunction(name) {
-  const asyncStart = source.indexOf(`async function ${name}(`)
-  const syncStart = source.indexOf(`function ${name}(`)
-  const start = asyncStart >= 0 ? asyncStart : syncStart
-  assert.ok(start >= 0, `${name} must exist`)
-  const brace = source.indexOf('{', start)
-  let depth = 0
-  for (let index = brace; index < source.length; index += 1) {
-    if (source[index] === '{') depth += 1
-    else if (source[index] === '}') {
-      depth -= 1
-      if (depth === 0) return source.slice(start, index + 1)
-    }
+const approval = (callId = 'call-current') => ({
+  key: 'card-current',
+  callId,
+  kind: 'ask_question',
+  title: 'Pick one',
+  questions: [{
+    id: 'q1', prompt: 'Pick one', allowMultiple: false,
+    options: [{ id: 'red', label: 'Red' }, { id: 'blue', label: 'Blue' }],
+  }],
+})
+
+function makeComposer({ managed = true, inFlight = true } = {}) {
+  const calls = []
+  let queued = 0
+  const deps = {
+    attachments: ref([]),
+    closeImageLightbox() {},
+    closeModeMenu() {},
+    closeModelMenu() {},
+    composerError: ref(null),
+    draftMessage: ref('durable follow-up'),
+    draftQueue: ref([]),
+    enqueueDraft() { queued += 1 },
+    goalComposerReason: ref(null),
+    goalInputBlocked: ref(false),
+    goalSteerOnly: ref(false),
+    imageLightboxUrl: ref(null),
+    isManagedChat: ref(managed),
+    isModeMenuOpen: ref(false),
+    isModelMenuOpen: ref(false),
+    isPaneActivated: ref(true),
+    isSending: ref(false),
+    lightboxEl: ref(null),
+    async sendQueuedDraft() {},
+    async submit(...args) { calls.push(args); return true },
+    turnInFlight: ref(inFlight),
+    composerTurnInFlight: ref(inFlight),
   }
-  throw new Error(`could not extract ${name}`)
+  return { controller: useChatComposer(deps), deps, calls, queued: () => queued }
 }
-
-function compile(name, dependencyNames) {
-  const { outputText } = ts.transpileModule(extractFunction(name), {
-    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
-  })
-  return new Function(
-    'deps',
-    `const { ${dependencyNames.join(', ')} } = deps;\n${outputText}\nreturn ${name};`,
-  )
-}
-
-const makeSubmitQuestionResponse = compile('submitQuestionResponse', [
-  'canSubmitQuestion',
-  'composerError',
-  'isManagedChat',
-  'turnInFlight',
-  'submit',
-  'formatAskQuestionResponse',
-  'answersFor',
-  'markResolved',
-])
-
-const makeHandleComposerEnter = compile('handleComposerEnter', [
-  'goalInputBlocked',
-  'composerError',
-  'goalComposerReason',
-  'resolveComposerEnterAction',
-  'isComposing',
-  'composerTurnInFlight',
-  'goalSteerOnly',
-  'draftMessage',
-  'attachments',
-  'draftQueue',
-  'isMobileViewport',
-  'isManagedChat',
-  'submit',
-  'enqueueDraft',
-])
-
-const makeCancelActiveTurn = compile('cancelActiveTurn', [
-  'isCancelling',
-  'isSending',
-  'stopArmed',
-  'stopTargetTurnId',
-  'composerError',
-  'isManagedChat',
-  'streamBasePath',
-  'optimisticCancelledTurnId',
-  'nudge',
-  'terminalStore',
-])
 
 test('managed question submission carries exact card identity as a normal delivery', async () => {
-  const composerError = ref(null)
-  const calls = []
-  const resolved = []
-  const submitQuestionResponse = makeSubmitQuestionResponse({
-    canSubmitQuestion: () => true,
-    composerError,
-    isManagedChat: ref(true),
-    turnInFlight: ref(true),
-    submit: async (...args) => {
-      calls.push(args)
-      return true
-    },
-    formatAskQuestionResponse: answers => JSON.stringify(answers),
-    answersFor: key => ({ [`answer-for-${key}`]: ['red'] }),
-    markResolved: key => resolved.push(key),
-  })
+  const { controller, calls } = makeComposer()
+  const card = approval()
+  controller.toggleQuestionOption(card.key, 'q1', 'red', false)
 
-  await submitQuestionResponse(
-    { turnId: 'turn-current' },
-    { key: 'card-current', callId: 'call-current' },
-  )
+  await controller.submitQuestionResponse({ turnId: 'turn-current' }, card)
 
-  assert.equal(composerError.value, null)
   assert.equal(calls.length, 1)
   assert.equal(calls[0][0], 'normal')
   assert.equal(calls[0][2], 'user')
   assert.deepEqual(calls[0][3], { turnId: 'turn-current', callId: 'call-current' })
-  assert.deepEqual(resolved, ['card-current'])
+  assert.equal(controller.isApprovalResolved(card), true)
 })
 
 test('question submission fails closed when provider identity is incomplete', async () => {
-  const composerError = ref(null)
-  let submitted = false
-  const submitQuestionResponse = makeSubmitQuestionResponse({
-    canSubmitQuestion: () => true,
-    composerError,
-    isManagedChat: ref(true),
-    turnInFlight: ref(false),
-    submit: async () => {
-      submitted = true
-      return true
-    },
-    formatAskQuestionResponse: () => '{}',
-    answersFor: () => ({}),
-    markResolved() {},
-  })
+  const { controller, deps, calls } = makeComposer()
+  const card = approval('')
+  controller.toggleQuestionOption(card.key, 'q1', 'red', false)
 
-  await submitQuestionResponse({ turnId: 'turn-current' }, { key: 'card', callId: '' })
+  await controller.submitQuestionResponse({ turnId: 'turn-current' }, card)
 
-  assert.equal(submitted, false)
-  assert.match(composerError.value, /missing its current request identity/)
+  assert.equal(calls.length, 0)
+  assert.match(deps.composerError.value, /missing its current request identity/)
 })
 
-test('managed busy Enter and Ctrl+Enter durably submit instead of using the local queue', () => {
-  const submissions = []
-  let queued = 0
+test('managed busy Enter and Ctrl+Enter durably submit instead of using local queue', () => {
+  const state = makeComposer()
   let prevented = 0
-  const deps = {
-    goalInputBlocked: ref(false),
-    composerError: ref(null),
-    goalComposerReason: ref(null),
-    resolveComposerEnterAction: ({ ctrlKey, metaKey }) => ctrlKey || metaKey ? 'steer' : 'queue',
-    isComposing: ref(false),
-    composerTurnInFlight: ref(true),
-    goalSteerOnly: ref(false),
-    draftMessage: ref('durable follow-up'),
-    draftQueue: ref([]),
-    attachments: ref([]),
-    isMobileViewport: ref(false),
-    isManagedChat: ref(true),
-    submit: delivery => {
-      submissions.push(delivery)
-      return Promise.resolve(true)
-    },
-    enqueueDraft: () => { queued += 1 },
-  }
-  const handleComposerEnter = makeHandleComposerEnter(deps)
   const event = ctrlKey => ({
     isComposing: false,
     shiftKey: false,
     metaKey: false,
     ctrlKey,
     altKey: false,
-    preventDefault: () => { prevented += 1 },
+    preventDefault() { prevented += 1 },
   })
 
-  handleComposerEnter(event(false))
-  handleComposerEnter(event(true))
-
-  assert.deepEqual(submissions, ['normal', 'normal'])
-  assert.equal(queued, 0)
+  state.controller.handleComposerEnter(event(false))
+  state.controller.handleComposerEnter(event(true))
+  assert.deepEqual(state.calls.map(call => call[0]), ['normal', 'normal'])
+  assert.equal(state.queued(), 0)
   assert.equal(prevented, 2)
 
-  deps.isManagedChat.value = false
-  handleComposerEnter(event(false))
-  handleComposerEnter(event(true))
-  assert.equal(queued, 1)
-  assert.deepEqual(submissions, ['normal', 'normal', 'steer'])
+  state.deps.isManagedChat.value = false
+  state.controller.handleComposerEnter(event(false))
+  state.controller.handleComposerEnter(event(true))
+  assert.equal(state.queued(), 1)
+  assert.deepEqual(state.calls.map(call => call[0]), ['normal', 'normal', 'steer'])
 })
 
-function cancelDeps() {
+function makeManagedDelivery() {
   let nudges = 0
   let statusRefreshes = 0
-  const deps = {
-    isCancelling: ref(false),
-    isSending: ref(false),
-    stopArmed: ref(true),
-    stopTargetTurnId: ref('turn-current'),
-    composerError: ref(null),
+  const controller = useChatDelivery({
+    attachments: ref([]),
+    authoritativeTurns: computed(() => [{ turnId: 'turn-current', completed: false, errors: [] }]),
+    connectionState: ref('live'),
+    draftQueue: ref([]),
+    enqueueDraft() {},
+    events: ref([]),
+    goal: ref(null),
+    goalComposerReason: ref(null),
+    goalError: ref(null),
+    goalImageRecovery: ref(false),
+    goalInputBlocked: ref(false),
+    goalSteerOnly: ref(false),
+    async hydrateGoal() {},
+    isDraftQueuePaused: ref(false),
+    isGoalHydrating: ref(false),
+    isGoalMutating: ref(false),
     isManagedChat: ref(true),
-    streamBasePath: ref('/api/workspaces/sessions/managed-1/stream'),
-    optimisticCancelledTurnId: ref(null),
+    isPreparingAttachments: ref(false),
+    isUpdatingMode: ref(false),
+    isUpdatingModel: ref(false),
+    isUpdatingReasoningEffort: ref(false),
     nudge() { nudges += 1 },
-    terminalStore: {
-      async fetchAgentStatuses() { statusRefreshes += 1 },
-    },
-  }
-  return {
-    deps,
-    getNudges: () => nudges,
-    getStatusRefreshes: () => statusRefreshes,
-  }
+    requestLatestAnchor() {},
+    streamBasePath: ref('/api/workspaces/sessions/managed-1/stream'),
+    syncComposerTextareaHeight() {},
+    terminalStore: { async fetchAgentStatuses() { statusRefreshes += 1 } },
+  })
+  return { controller, nudges: () => nudges, statusRefreshes: () => statusRefreshes }
 }
 
 test('stale managed Stop remains a conflict and cannot cancel a newer turn', async t => {
-  const state = cancelDeps()
+  const state = makeManagedDelivery()
   t.mock.method(globalThis, 'fetch', async () => ({
-    ok: false,
-    status: 409,
-    json: async () => ({ detail: 'A newer managed Chat turn is active' }),
+    ok: false, status: 409, json: async () => ({ detail: 'A newer managed Chat turn is active' }),
   }))
-  const cancelActiveTurn = makeCancelActiveTurn(state.deps)
 
-  await cancelActiveTurn()
+  await state.controller.cancelActiveTurn()
 
-  assert.match(state.deps.composerError.value, /newer managed Chat turn/)
-  assert.equal(state.deps.optimisticCancelledTurnId.value, null)
-  assert.equal(state.getNudges(), 0)
-  assert.equal(state.getStatusRefreshes(), 0)
+  assert.match(state.controller.composerError.value, /newer managed Chat turn/)
+  assert.equal(state.controller.optimisticCancelledTurnId.value, null)
+  assert.equal(state.nudges(), 0)
+  assert.equal(state.statusRefreshes(), 0)
 })
 
 test('already-terminal managed Stop is idempotent and releases local UI optimism', async t => {
-  const state = cancelDeps()
+  const state = makeManagedDelivery()
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     assert.equal(url, '/api/workspaces/sessions/managed-1/stream/cancel')
     assert.deepEqual(JSON.parse(options.body), { expected_turn_id: 'turn-current' })
     return {
-      ok: true,
-      status: 200,
+      ok: true, status: 200,
       json: async () => ({ ok: true, cancelled: false, outcome: 'already_terminal' }),
     }
   })
-  const cancelActiveTurn = makeCancelActiveTurn(state.deps)
 
-  await cancelActiveTurn()
-  await new Promise(resolve => setTimeout(resolve, 0))
+  await state.controller.cancelActiveTurn()
+  await Promise.resolve()
 
-  assert.equal(state.deps.composerError.value, null)
-  assert.equal(state.deps.optimisticCancelledTurnId.value, 'turn-current')
-  assert.equal(state.getNudges(), 1)
-  assert.equal(state.getStatusRefreshes(), 1)
+  assert.equal(state.controller.composerError.value, null)
+  assert.equal(state.controller.optimisticCancelledTurnId.value, 'turn-current')
+  assert.equal(state.nudges(), 1)
+  assert.equal(state.statusRefreshes(), 1)
 })

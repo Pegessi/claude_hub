@@ -1,0 +1,1088 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "ba117c9129297673aa2e54585f84a0ec828c0fd3",
+  "parents": [
+    "d728236c1c787fc0cc65a39cc0fa594134d16da6",
+    "2a173b0988cff708f1caae0e1fc8eb4a43a68874"
+  ],
+  "base": "b9e074cadcb15f6d88cc95270eca7b48e50b9b7e",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "fd168a7d5f936c7824df38b565fd1a9803f75272",
+  "reconstructed_tree": "0216497f50bba5ad67557e51aecece0c2750fd05",
+  "conflicts": [
+    "CHANGELOG.md",
+    "backend/claude_hub/api/agent_stream.py",
+    "backend/claude_hub/api/feishu_bot.py",
+    "backend/claude_hub/services/agent_stream/native.py",
+    "backend/claude_hub/services/agent_stream/tailer.py",
+    "backend/claude_hub/services/dot/context.py",
+    "backend/claude_hub/services/dot/service.py",
+    "backend/claude_hub/services/workspace_manager/_scheduling.py",
+    "frontend/src/components/AgentStatusFloatingPanel.vue",
+    "frontend/src/components/StructuredPane.vue",
+    "frontend/src/components/TabBar.vue",
+    "frontend/src/utils/agentStreamTimeline.ts",
+    "frontend/tests/chatFlowReliability.test.mjs",
+    "frontend/tests/chatGoalWiring.test.mjs",
+    "frontend/tests/managedChatControls.test.mjs"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7b082a548db3b16ffcc7f6e9f61ed4eced2587f7"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "485e0b8cf37a34747df74808cef2acd6c213bdd0"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fd81dde3a9219bf0f9e2065c31430eb69bfcd221"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "cd8ddbd0467a921dc9690664328c737ee7d29d04"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a66b6330db597c6af5d0c4ba9ddda2ce3006c6c6"
+      },
+      "reason": "Retain all five source-side governance/refactor/compatibility entries and both main-side MASO Goal/mobile Dot entries; neither parent history is discarded.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/api/agent_stream.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "49a552487f40939aa0ab949c7d2277f39dc7dbe6"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "36d8cfb4dd43eafec80de29ccd56580db8ba2f5d"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8839c67fcbb466ad37a6a2275114598944426be2"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b0de60b3d12292814c80041a40f4eee1a8aa043f"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8942854e41d9a5464fcf5cbbcfc518cc8c31275c"
+      },
+      "reason": "Preserve the split API facade and call-time patch bindings. Keep main scheduled-turn metadata in the facade; move main Dot yield behavior into the dispatch route while preserving admission ordering.",
+      "disposition": "transplant",
+      "destinations": [
+        "backend/claude_hub/api/routes/agent_stream/bindings.py",
+        "backend/claude_hub/api/routes/agent_stream/dispatch.py"
+      ]
+    },
+    {
+      "path": "backend/claude_hub/api/feishu_bot.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ebc9bf306b9df379678f3f90899e33fd436b5f65"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2f016582f65a739f96ab13da5530d1470e453249"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f295705de5a5ab9a6b1f6bb0ccf5c364dfac0b89"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "42c5c3a90d26c3f41993101b2181f71b388d748a"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f419b7793f634063ebab0f2761822d37d1c7588a"
+      },
+      "reason": "Keep the source facade, canonical pool and gates, and retain main public binding lookup and bounded push helpers used by Dot reach/notify.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/api/routes/agent_stream/bindings.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c59582c05a857b3b5df3c7e75bb9c1c2318f31db"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c59582c05a857b3b5df3c7e75bb9c1c2318f31db"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "daf4c7295032071b395e5e599e90b1f3bc0ac0fc"
+      },
+      "reason": "Add an explicitly typed Dot-yield dependency to the existing route binding contract rather than importing the API facade backwards.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/api/routes/agent_stream/dispatch.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5d35e6469bdcb21e7a0ef5f58e0aa4c825bb6001"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5d35e6469bdcb21e7a0ef5f58e0aa4c825bb6001"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ba375872bed9bcceefd813f59d1aea0a774b63aa"
+      },
+      "reason": "Execute main Dot yield logic through the facade binding inside admission and before send; preserve existing Goal and delivery decisions.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/native.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "07dcc1e5845af4933324f7aced71a77fbd56ece6"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1d95cb81e2583d8aa1d189833a2e3bce5f2bd0fb"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "eb36d99d8e0607535118f6d3e2aed41c89485d26"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "dd28aab961e189dec782cd2d90666ce0403ea0a7"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "eb36d99d8e0607535118f6d3e2aed41c89485d26"
+      },
+      "reason": "Retain the source compatibility facade unchanged; transplant main provider-owned Goal completion capability to its actual inherited provider owner.",
+      "disposition": "transplant",
+      "destinations": [
+        "backend/claude_hub/services/agent_stream/providers/session.py"
+      ]
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/providers/session.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "56e59a05254ab7f29304fd9a3ea3766ba2cf1212"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "56e59a05254ab7f29304fd9a3ea3766ba2cf1212"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8647b445e2d0b38d09f6dd4b8e3f342ffe45fa70"
+      },
+      "reason": "Place the default provider-owned Goal terminal capability on SessionCore, inherited by production provider transports.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/runtime/watchdog.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "efb6b1acf5b477a99c05a1cd0ca322d0a854df47"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "efb6b1acf5b477a99c05a1cd0ca322d0a854df47"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "17ca3a7377b7c288710cff7d1a244fc8370627eb"
+      },
+      "reason": "Retain main multi-stage provider checks at both Goal latch capture and synthetic terminal completion; a preexisting latch must not end MASO early.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/tailer.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1ce1b6483d74e09c08898c99a563fdac8afe9c81"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "df02ebdabf03e7bbf4361bc3244766ac1fa6015b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d5a98474e42f8006956b3d29755d103dbc0550be"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d81878e1d51a07c59afccce49d714bb06d4fe5f3"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d5a98474e42f8006956b3d29755d103dbc0550be"
+      },
+      "reason": "Retain the source tailer facade and unique registries unchanged; transplant main Goal completion guards into the extracted watchdog owner.",
+      "disposition": "transplant",
+      "destinations": [
+        "backend/claude_hub/services/agent_stream/runtime/watchdog.py"
+      ]
+    },
+    {
+      "path": "backend/claude_hub/services/dot/context.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b5d8cf53fcabf380438c7a32fc5bfd42aea6ee42"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "486903a81b3384155025194d2975ddf1e36e5bc6"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "935f752a8f07ebfdf466ee9bb61103c8d42fe088"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0bd3ea9443a7265bd7a0b0a1276382f9a2b1ba39"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3c9d803339d8214a1dd2b9d1d49fd01d5e10c2ad"
+      },
+      "reason": "Combine source type-only store dependencies with main user-first turn rules, inbox acknowledgement distinction, source and Feishu reach context.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/dot/runtime/common.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bb90033ad8451b6cb11597864a40ecbfd534b185"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bb90033ad8451b6cb11597864a40ecbfd534b185"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "97eac7e29cc2d2714f688c85a51930399797029e"
+      },
+      "reason": "Locate main yield/notice constants and pure helpers in the shared Dot runtime definitions without creating another runtime owner.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/dot/runtime/service.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a7f43fe596ea2bbccfefef9a48fe2c4f82f2188b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a7f43fe596ea2bbccfefef9a48fe2c4f82f2188b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9885772c8644f4d33b451943d608ddcea0e28fa7"
+      },
+      "reason": "Retain the extracted identity, wake, health and status owner unchanged; wake returns failure here, while unread-event continuation remains in the work loop.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/dot/runtime/session.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5dc6fe3e141fc46065736dbb05235956d5a6aa34"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5dc6fe3e141fc46065736dbb05235956d5a6aa34"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bef24633c4c6126a5d9016e1a160ee534d3df6c2"
+      },
+      "reason": "Transplant main system-schedule identification, queued-system cleanup, yielding, journal treatment, reach/source hints and successful-notice dedup to the existing session owner.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/dot/runtime/work.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "330ff581add0722cba8a7d81d7c6efe115d82c30"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "330ff581add0722cba8a7d81d7c6efe115d82c30"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "397a25aafe582b284651570da3595bd88856b3e5"
+      },
+      "reason": "Preserve main watch/wake throttling, in-flight suppression and retry behavior in the existing work loop; read configurable values through facade hooks.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/dot/service.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "76d475113d5297ea6ed4ead2a6923a0379dd69fe"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b2a9f16aaab37e6aaf78ea8207225b9d6a200f96"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "200dab549e4136b1cc2c77eef390c69cb7af7836"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b7cf4a655e7128d8995304e963e5340a7b0e083c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0c5d8c4ead2265581babcdc934290fd8127ce514"
+      },
+      "reason": "Keep the small public facade, singleton and existing clock/wake override hooks; expose the newly needed yield/notice hooks while moving main lifecycle additions into feature owners.",
+      "disposition": "transplant",
+      "destinations": [
+        "backend/claude_hub/services/dot/runtime/common.py",
+        "backend/claude_hub/services/dot/runtime/session.py",
+        "backend/claude_hub/services/dot/runtime/work.py",
+        "backend/claude_hub/services/dot/runtime/service.py"
+      ]
+    },
+    {
+      "path": "backend/claude_hub/services/workspace_manager/_scheduling.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "cba946c19e59b649360e1111aa8112f5d85a2fb0"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a59b0fe41efa9de7f88204e81ac624e6329cce42"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e894a4708f239c09567fad3ed864b915ae061ac9"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3a97c99d2f032c36ef212afa371397b88d06abc3"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e894a4708f239c09567fad3ed864b915ae061ac9"
+      },
+      "reason": "Keep the source composition facade; transplant main queued/waiting scheduled-run cancellation into the registry mixin while retaining the existing split MASO Goal waiting path.",
+      "disposition": "transplant",
+      "destinations": [
+        "backend/claude_hub/services/workspace_manager/scheduling/registry.py"
+      ]
+    },
+    {
+      "path": "backend/claude_hub/services/workspace_manager/scheduling/registry.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e856e57b48571bcc8bf5f98bbf2ac5467b75c24f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e856e57b48571bcc8bf5f98bbf2ac5467b75c24f"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "82539f4341c10c1a8748daa66af32dfea8ee0936"
+      },
+      "reason": "Implement main drop_pending_scheduled_task_runs on the actual registry owner: cancel only queued/waiting runs without draining the tab, then persist once.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_agent_stream_merge_contract.py",
+      "base": null,
+      "parent1": null,
+      "parent2": null,
+      "reconstructed": null,
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8d307dea6dc74fd3d7e86a698d0ac28c7b9f0410"
+      },
+      "reason": "Add behavioral merge regressions for a preexisting terminal latch on a multi-stage transport and the facade-preserving admit/yield/send/release order.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/components/AgentStatusFloatingPanel.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "088bf47da4a8fa8ad1f3207a3a1eaf3e88d8b81e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e21c84cf31bf01284279003bccb1d3b07b7cc797"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "dd7f62e0bde4ffa04a810ca1e95a7edcbbc1c4ac"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e1f281adf191ec286066f241415234b92400efd9"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "dd7f62e0bde4ffa04a810ca1e95a7edcbbc1c4ac"
+      },
+      "reason": "Keep the source pure component export; transplant main mobile summary visibility into the feature component without unmounting its polling owner.",
+      "disposition": "transplant",
+      "destinations": [
+        "frontend/src/features/agent-status/AgentStatusFloatingPanel.vue"
+      ]
+    },
+    {
+      "path": "frontend/src/components/StructuredPane.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b40c047d42823e0444f1da8e5e3e129d1319bf20"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "85e6c98307171080f74795362482df6eb974910c"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3f9dfb4886ca3827a184b81a977e14e97b91678f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6db5761d58fe489773252351f00ebda491a4983c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3f9dfb4886ca3827a184b81a977e14e97b91678f"
+      },
+      "reason": "Keep the source pure export and component identity; transplant main yielding-turn composer behavior into the actual feature owner, delivery/queue/composer controllers and composer component.",
+      "disposition": "transplant",
+      "destinations": [
+        "frontend/src/features/chat/StructuredPane.vue",
+        "frontend/src/features/chat/controllers/useChatDelivery.ts",
+        "frontend/src/features/chat/controllers/useChatQueue.ts",
+        "frontend/src/features/chat/controllers/useChatComposer.ts",
+        "frontend/src/features/chat/components/ChatComposer.vue"
+      ]
+    },
+    {
+      "path": "frontend/src/components/TabBar.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "efb7212d4c784023233390933cb05825d9de7e45"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "97b04c1d8f646a037399eaf5f1c1c3b0ddcc2bc3"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ddc8095e54ad2ab55caf144b650750f3b3b58e4e"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9f7dafe500103561cd9259dd3a3eebe78e170e5e"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ddc8095e54ad2ab55caf144b650750f3b3b58e4e"
+      },
+      "reason": "Keep the source pure export; transplant main mobile summary props and alignment into the feature TabBar and its scoped style file.",
+      "disposition": "transplant",
+      "destinations": [
+        "frontend/src/features/terminal/components/TabBar.vue",
+        "frontend/src/features/terminal/styles/tab-bar.css"
+      ]
+    },
+    {
+      "path": "frontend/src/features/agent-status/AgentStatusFloatingPanel.vue",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "44af8a33f3a26ed3d9fe06294380d1cb73636da3"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "44af8a33f3a26ed3d9fe06294380d1cb73636da3"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "29abc300913f13b22ab821fa4c965e4438ec84c3"
+      },
+      "reason": "Add main hideSummary prop/template conditions while retaining setup polling and unmount cleanup.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/StructuredPane.vue",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "45e3150e08b5c4ebd89a3471f53773b1c898409b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "45e3150e08b5c4ebd89a3471f53773b1c898409b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0bf82a26f4eb118a95ef18eaeb8058ab31209f10"
+      },
+      "reason": "Wire the new composer-only busy observation to queue/composer owners while retaining turnInFlight for mode, edit, Plan and approval constraints.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/components/ChatComposer.vue",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c2b94cc75707c6c516e5b800497a17f0d1b491ad"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c2b94cc75707c6c516e5b800497a17f0d1b491ad"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "47267d6e5305f710a9cf1b29e986607f1b9d95d2"
+      },
+      "reason": "Use main composer-only busy state for send/queue presentation without changing mode/settings locking.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/controllers/useChatComposer.ts",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "aad6b81979b8c111f8338a1eb8517c5c4122af6b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "aad6b81979b8c111f8338a1eb8517c5c4122af6b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d236999efb5dff87d8153abbee41d5991d8a6a89"
+      },
+      "reason": "Use the explicit composer busy dependency for Enter handling so a yielding Dot system turn permits normal user input.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/controllers/useChatDelivery.ts",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3c237e05b111a6ec2ed332918fa200ac5fc7e79c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3c237e05b111a6ec2ed332918fa200ac5fc7e79c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0ce878111a2e23ea7fdc2be1c18aa06e03c85555"
+      },
+      "reason": "Separate main composer hold from mode lock using isComposerHeldByTurn; pending user submission still immediately holds later input.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/controllers/useChatQueue.ts",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c01eee65d4bb16bdb7604af5ff90e906f89c55e8"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c01eee65d4bb16bdb7604af5ff90e906f89c55e8"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f77a95cac94197b10bb696d6bafaa8709d152aa7"
+      },
+      "reason": "Apply the composer-specific hold to queued delivery and flush, preserving existing ownership and pending-intent controls.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/timeline/eventValues.ts",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2394ba60033a942bbac2f8be4261b8c71c891643"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2394ba60033a942bbac2f8be4261b8c71c891643"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5df8ed3e4b31fd3fa6b7227c2beff9ed75e27094"
+      },
+      "reason": "Initialize the main yieldsToUser observation to false in the extracted timeline state factory.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/timeline/reducer.ts",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d8b2d2147cb5fa8d0bec805f62db71e3759586f3"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d8b2d2147cb5fa8d0bec805f62db71e3759586f3"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2e4f4217df9c532ced37e4cd53f06e0faef5e7ab"
+      },
+      "reason": "Preserve main strict-boolean turn-start metadata handling and retain the observation across provider echoes without metadata.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/timeline/types.ts",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "92fbadd80077ce1017ec7cce75a023519cc61f40"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "92fbadd80077ce1017ec7cce75a023519cc61f40"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d2ec27727d7b4f3fe8911768a41c0f70e5aa2a74"
+      },
+      "reason": "Declare the main yieldsToUser observation in the canonical extracted turn type.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/terminal/components/TabBar.vue",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5cfbe0e0f8fea3b718f97287e174980960846781"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5cfbe0e0f8fea3b718f97287e174980960846781"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e37917f58027af3c342236a54bc77e9e50a79fd5"
+      },
+      "reason": "Forward mobile hide-summary to both actual status-panel instances while retaining per-tab status behavior.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/terminal/styles/tab-bar.css",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "388e4cfb43579f58ac610e7e910707748ceebde3"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "388e4cfb43579f58ac610e7e910707748ceebde3"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "13180d51f3b5fdb02e5400064d3f29bce4dbadba"
+      },
+      "reason": "Retain main mobile vertical centering in the existing feature-local scoped style source.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/utils/agentStreamTimeline.ts",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "97d93e13ce687b2131054a7d3894283a6ae344c6"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "983f4633f49dd4de1b64f7c552a8b5e06d59fb04"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e87ebd88c9f390812f7bf8359afb8059387fe951"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b0533aa7b1311dbe72b6f610740c725a1bce2c5c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e87ebd88c9f390812f7bf8359afb8059387fe951"
+      },
+      "reason": "Keep the source compatibility exports; transplant main turn-state additions to the canonical feature type, factory and reducer.",
+      "disposition": "transplant",
+      "destinations": [
+        "frontend/src/features/chat/timeline/types.ts",
+        "frontend/src/features/chat/timeline/eventValues.ts",
+        "frontend/src/features/chat/timeline/reducer.ts"
+      ]
+    },
+    {
+      "path": "frontend/tests/chatFeatureLifecycle.test.mjs",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2dd7a99247f866ddc7da26932bd5e96200bb4b8b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2dd7a99247f866ddc7da26932bd5e96200bb4b8b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b89aaf4e84af0b0e8cf5452d986ef8195169268f"
+      },
+      "reason": "Add real mounted-component regressions for mode-locked but composer-yielding Dot turns and foreground queue delivery with renewed pending-user protection.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/chatFlowReliability.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "79597e4b751638af181e30e39f683eb6d3f8a9b3"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "651476352517901016726e45b9dc089f6bcb776b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1ab8be3a819ca3fe1c2c058b826660167de6d253"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "53c5fd794d25df895e628250f0340ff339b95a48"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b8c7699b65172e32737c9906dde15f6b1c08d505"
+      },
+      "reason": "Preserve behavioral controller tests while aligning main composer-vs-mode hold assertions with extracted dependencies.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/chatGoalWiring.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "986ffe08eecdae5350f5694e155da2aacd5b2b81"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0f8ae5de384c96139f53127ba90413a6014b0520"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "48a6c4fd74fbe970a2c5069f182fdb7397fb2ade"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d130f410446c85e433a0d916a4056d9cdd85b8ba"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "aa2a22b8c3e26f4327ee797218546c13f5188e34"
+      },
+      "reason": "Keep main provider-agnostic ordinary-Chat Goal assertions and target the actual split feature/Goal owner instead of the compatibility shell.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/dot.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "90da56abe4765cf87c1b397a3144680fb098029a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5e49442552d04c87bd9c4fa4f706ac65eeb12d65"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bf1deb52af9b78786c25199c6b4adbb391e9ef26"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4b949d90134a3c8e849c21d7c3777a916faac64"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e0905f65b20bd7b32f3a98eb7d752cf661afb5cf"
+      },
+      "reason": "Retain main mobile toolbar/polling assertions while reading the actual feature status panel and TabBar paths.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/managedChatControls.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "76b006f55095f55d484c1e509229f33dfe7a68e9"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4f9bc1767e82b628dbe15038163c9dd111a1dd70"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ac8e12f80ccc53bb08d50d09101e5e82477bb378"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "713faa17d325fd39524c71e3deb555421cc3d6a6"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a8363d7ce8449abcfe05624b69dc6926a66ddd01"
+      },
+      "reason": "Preserve managed/ordinary control distinctions and update only the split owner/dependency expression locations.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/structuredPaneApprovalMemo.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "71d1efe076a22903053be980a0ee0d77425be96c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "71d1efe076a22903053be980a0ee0d77425be96c"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a03dea9c6b111463857dba2c56afe55a1231cafb"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a03dea9c6b111463857dba2c56afe55a1231cafb"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "821bdf4ad84d530fefaae2af5e83896eb3487d7e"
+      },
+      "reason": "Supply the new composerTurnInFlight fixture dependency alongside the existing turnInFlight; approval memo assertions are unchanged.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

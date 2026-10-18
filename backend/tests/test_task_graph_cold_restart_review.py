@@ -133,8 +133,12 @@ def cold_review_env(
     async def fake_ensure_session_ready(_session) -> None:
         return None
 
+    async def fake_capture_tmux_output(_tmux_session: str) -> str:
+        return "? for shortcuts"
+
     _reset_singleton()
     monkeypatch.setattr(_wm.ttyd_manager, "create_tab", fake_create_tab)
+    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_tmux_output)
     monkeypatch.setattr(workspace_manager, "_send_tmux_message", fake_send_tmux_message)
     monkeypatch.setattr(
         workspace_manager,

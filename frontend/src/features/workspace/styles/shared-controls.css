@@ -1,0 +1,122 @@
+.workspace-select,
+.tool-button,
+.primary-button,
+.abort-button,
+.danger-button,
+.secondary-button,
+.advanced-start select {
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+}
+
+.workspace-select,
+.tool-button,
+.primary-button,
+.abort-button,
+.danger-button,
+.secondary-button {
+  height: 32px;
+  padding: 0 14px;
+  font-size: var(--ch-font-size-base);
+  font-weight: 500;
+  font-family: var(--ch-font-sans);
+  transition: all var(--ch-motion-fast);
+}
+
+.tool-button,
+.primary-button,
+.abort-button,
+.danger-button,
+.secondary-button {
+  gap: 6px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tool-button:hover,
+.primary-button:hover,
+.abort-button:hover,
+.danger-button:hover,
+.secondary-button:hover {
+  border-color: var(--ch-color-border-hover);
+}
+
+.tool-button:focus-visible,
+.primary-button:focus-visible,
+.abort-button:focus-visible,
+.danger-button:focus-visible,
+.secondary-button:focus-visible,
+.workspace-select:focus-visible,
+.path-nav-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+.tool-button,
+.primary-button,
+.abort-button,
+.danger-button,
+.secondary-button,
+.task-actions button,
+.agent-row button {
+  cursor: pointer;
+}
+
+.tool-button:disabled,
+.primary-button:disabled,
+.abort-button:disabled,
+.danger-button:disabled,
+.secondary-button:disabled,
+.task-actions button:disabled,
+.agent-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.primary-button {
+  background: var(--ch-color-accent-strong);
+  border-color: var(--ch-color-accent-strong);
+  color: var(--ch-color-text-inverse);
+  font-weight: 600;
+  box-shadow: var(--ch-shadow-button);
+}
+
+.primary-button:hover {
+  background: var(--ch-color-accent-fill-hover);
+  border-color: var(--ch-color-accent-fill-hover);
+  box-shadow: var(--ch-shadow-button-primary);
+}
+
+.danger-button {
+  background: var(--ch-color-danger-bg);
+  border-color: var(--ch-color-danger-border);
+  color: var(--ch-color-danger-text);
+}
+
+.danger-button:hover {
+  background: var(--ch-color-danger-strong);
+  border-color: var(--ch-color-danger-hover);
+  color: white;
+}
+
+.abort-button {
+  background: var(--ch-color-warning-bg);
+  border-color: color-mix(in srgb, var(--ch-color-warning-strong) 65%, var(--ch-color-border-strong));
+  color: var(--ch-color-warning);
+}
+
+.abort-button:hover {
+  background: color-mix(in srgb, var(--ch-color-warning-bg) 72%, var(--ch-color-warning-strong));
+  border-color: var(--ch-color-warning-strong);
+  color: var(--ch-color-text-strong);
+}
+
+.form-row > label,
+.form-row > .modal-field {
+  flex: 1;
+}

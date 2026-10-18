@@ -19,19 +19,20 @@ import test from 'node:test'
 // regressions even when the runtime DOM/xterm stack is not available.
 
 const vueSource = await readFile(
-  new URL('../src/components/TerminalView.vue', import.meta.url),
+  new URL('../src/features/terminal/components/TerminalView.vue', import.meta.url),
   'utf8',
 )
 
 // Extract the <script setup> block.
-const scriptMatch = vueSource.match(/<script setup[^>]*>([\s\S]*?)<\/script>/)
-assert.ok(scriptMatch, 'TerminalView.vue must contain a <script setup> block')
-const script = scriptMatch[1]
+const script = await readFile(
+  new URL('../src/features/terminal/composables/useTerminalView.ts', import.meta.url),
+  'utf8',
+)
 
-// Extract the <style scoped> block.
-const styleMatch = vueSource.match(/<style scoped>([\s\S]*?)<\/style>/)
-assert.ok(styleMatch, 'TerminalView.vue must contain a <style scoped> block')
-const style = styleMatch[1]
+const style = await readFile(
+  new URL('../src/features/terminal/styles/terminal-view.css', import.meta.url),
+  'utf8',
+)
 
 // --- Invariant 1: no blind timeout reveals content -----------------------
 //
@@ -169,7 +170,7 @@ test('contentError ref exists and is wired to a Retry overlay', () => {
 
 test('retryContentRefresh keeps contentReady=false until refresh-done', () => {
   const fnMatch = script.match(
-    /function retryContentRefresh\s*\([^)]*\)\s*\{([\s\S]*?)\n\}/,
+    /function retryContentRefresh\s*\([^)]*\)\s*\{([\s\S]*?)\n {2}\}/,
   )
   assert.ok(fnMatch, 'retryContentRefresh function must exist')
   const body = fnMatch[1]

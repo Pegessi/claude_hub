@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Callable, Optional, TypeVar
 
 from .lessons import STOP_WORDS
-from .store import Card, DotStore
+from .storage.store import DotStore
+from .store import Card
 
 logger = logging.getLogger(__name__)
 

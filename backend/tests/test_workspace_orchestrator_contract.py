@@ -191,12 +191,21 @@ def test_report_endpoint_curl_uses_session_and_task():
 def test_all_internal_api_curl_templates_use_loopback_proxy_bypass():
     """Every agent-facing Hub API command must bypass proxies for loopback hosts."""
     package_root = Path(__file__).parents[1] / "claude_hub" / "services" / "workspace_manager"
-    for module_name in ("_prompts.py", "_reports.py", "_workspaces.py"):
-        source = (package_root / module_name).read_text()
-        assert "curl -sS" not in source, f"{module_name} still has a proxyable curl example"
-        assert (
-            "INTERNAL_API_CURL" in source
-        ), f"{module_name} does not use the shared Hub curl command"
+    source_groups = (
+        (package_root / "_prompts.py", package_root / "prompts"),
+        (package_root / "_reports.py", package_root / "reports"),
+        (package_root / "_workspaces.py", package_root / "workspaces"),
+    )
+    for facade, feature_root in source_groups:
+        feature_sources = sorted(feature_root.rglob("*.py"))
+        assert feature_sources, f"{feature_root.name} has no implementation sources"
+        for source_path in (facade, *feature_sources):
+            source = source_path.read_text()
+            relative_path = source_path.relative_to(package_root)
+            assert "curl -sS" not in source, f"{relative_path} still has a proxyable curl example"
+        assert any(
+            "INTERNAL_API_CURL" in path.read_text() for path in feature_sources
+        ), f"{feature_root.name} implementations do not use the shared Hub curl command"
 
 
 def test_report_endpoint_curl_honors_remote_forward_port():

@@ -7,7 +7,7 @@ import test from 'node:test'
 // link handler (only confirms restore on success), so a future refactor can't
 // silently reintroduce the false "Restored archived session" toast.
 const storeSource = readFileSync(
-  new URL('../src/stores/terminalStore.ts', import.meta.url),
+  new URL('../src/stores/terminal/index.ts', import.meta.url),
   'utf8',
 )
 const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')

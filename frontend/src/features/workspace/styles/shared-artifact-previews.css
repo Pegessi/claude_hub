@@ -1,0 +1,54 @@
+.artifact-preview-button {
+  border: 1px solid var(--ch-color-border);
+  border-radius: 999px;
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 3px 8px;
+}
+
+.artifact-preview-button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.artifact-preview {
+  margin-top: 8px;
+}
+
+.artifact-preview-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-bottom: 0;
+  border-radius: var(--ch-radius-md) var(--ch-radius-md) 0 0;
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-xs);
+  padding: 7px 9px;
+}
+
+.artifact-preview-content {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 0 0 var(--ch-radius-md) var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  padding: 10px;
+}
+
+.artifact-preview-status {
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text-subtle);
+  font-size: var(--ch-font-size-sm);
+  padding: 8px 10px;
+}
+
+.artifact-preview-error {
+  border-color: var(--ch-color-danger);
+  color: var(--ch-color-danger);
+}

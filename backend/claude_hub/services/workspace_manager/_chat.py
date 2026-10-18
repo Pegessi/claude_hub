@@ -3,6 +3,8 @@
 import asyncio
 from typing import Optional
 
+import claude_hub.services.managed_chat as managed_chat
+
 from ...models import (
     AgentRuntimeStatus,
     ManagedSession,
@@ -11,11 +13,11 @@ from ...models import (
     WorkspaceAttachmentCreate,
     WorkspaceTaskStatus,
 )
-from .. import managed_chat
+from ._base import _WorkspaceManagerBase
 from ._constants import _now
 
 
-class _ChatMixin:
+class _ChatMixin(_WorkspaceManagerBase):
     async def send_chat_session_message(
         self,
         session_id: str,

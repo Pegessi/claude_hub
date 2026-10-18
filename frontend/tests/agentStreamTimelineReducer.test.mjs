@@ -1,52 +1,10 @@
 import assert from 'node:assert/strict'
 import { hrtime } from 'node:process'
-import { Buffer } from 'node:buffer'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import ts from 'typescript'
+import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-const source = await readFile(
-  new URL('../src/utils/agentStreamTimeline.ts', import.meta.url),
-  'utf8',
-)
-const questionSource = await readFile(
-  new URL('../src/utils/chatQuestionResponse.ts', import.meta.url),
-  'utf8',
-)
-const durationSource = await readFile(
-  new URL('../src/utils/duration.ts', import.meta.url),
-  'utf8',
-)
-const subagentSource = await readFile(
-  new URL('../src/utils/subagentTool.ts', import.meta.url),
-  'utf8',
-)
-const agentImageSource = await readFile(
-  new URL('../src/utils/agentImage.ts', import.meta.url),
-  'utf8',
-)
-const transpileOptions = {
-  compilerOptions: {
-    module: ts.ModuleKind.ES2022,
-    target: ts.ScriptTarget.ES2020,
-  },
-}
-const questionJs = ts.transpileModule(questionSource, transpileOptions).outputText
-const durationJs = ts.transpileModule(durationSource, transpileOptions).outputText
-const subagentJs = ts.transpileModule(subagentSource, transpileOptions).outputText
-const agentImageJs = ts.transpileModule(agentImageSource, transpileOptions).outputText
-// The timeline's `@/utils/*` imports are stripped and their transpiled sources
-// concatenated ahead of it: a data-URL module has no resolver, so its sibling
-// utils have to travel with it.
-const { outputText } = ts.transpileModule(
-  source.replace(/^import .* from '@\/utils\/.*$/gm, ''),
-  transpileOptions,
-)
-const bundled = `${durationJs}\n${questionJs}\n${subagentJs}\n${agentImageJs}\n${outputText}`
-const mod = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
-)
+const mod = await loadChatUtility('agentStreamTimeline')
 const { groupEventsIntoTurns, IncrementalTimelineReducer } = mod
 
 function makeEvent(seq, type, payload = {}, overrides = {}) {

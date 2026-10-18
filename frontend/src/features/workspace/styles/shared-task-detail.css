@@ -1,0 +1,71 @@
+.detail-eyebrow,
+.detail-section-title {
+  display: block;
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.icon-button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--ch-motion-fast);
+}
+
+.icon-button:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.icon-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+.detail-section {
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface);
+  padding: 14px;
+}
+
+.detail-section--collapsible {
+  transition: border-color var(--ch-motion-fast), box-shadow var(--ch-motion-fast), background var(--ch-motion-fast);
+}
+
+.detail-section--collapsible:not([open]) {
+  border-color: transparent;
+  background: transparent;
+  padding: 0;
+}
+
+.detail-section--collapsible > summary {
+  cursor: pointer;
+  padding: 8px 2px;
+  list-style: none;
+}
+
+.detail-section--collapsible > summary::-webkit-details-marker {
+  display: none;
+}
+
+.detail-section--collapsible[open] {
+  border-color: var(--ch-color-border-strong);
+  background: var(--ch-color-surface-raised);
+}
+
+.detail-section--collapsible[open] > summary {
+  margin-bottom: 10px;
+  padding: 0;
+}
