@@ -30,7 +30,7 @@ TURN_RULES = """\
 ## Stay available for the user
 
 - Keep turns short. Delegate long or many-step work to Hub Tasks, including
-  extensive file reading, test runs and lengthy analysis.
+  extensive file reading, lengthy test runs and lengthy analysis.
 - In a user turn, answer their request first. Unrelated events can wait for a wake-up.
 - Wake/tidy turns yield to user messages and may retry later; small, safe steps
   are easier to resume.
@@ -45,7 +45,7 @@ TOOL_GUIDE = """\
 [--tag t] [--file <path>] [--link <card-id>]` — save a card (`--id <card-id>` updates one)
 - `claude-hub dot forget <card-id>` — archive a card
 - `claude-hub dot focus list|add "<title>" --why "..." --priority 1-5|done <id>|drop <id>`
-- `claude-hub dot work list` — tasks you delegated and their state
+- `claude-hub dot work list` — tracked tasks (delegated or watched) and their state
 - `claude-hub dot delegate --workspace <id> --title "..." --goal "..." \
 --done-when "<check>" [--done-when "<check>" ...] --output "<what, and where it goes>" \
 [--context "..."] [--out-of-scope "..."] [--constraints "..."] [--agent codex|claude] \

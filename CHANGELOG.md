@@ -13,6 +13,9 @@
   Delegate long or many-step work to Hub Tasks; prefer task events while allowing
   targeted checks and quiet turns. Keep secret handling, tool contracts and human
   acceptance explicit.
+- Label tracked tasks and newly generated result cards as delegated or watched,
+  without changing review ownership. Clarify that long test runs are delegated
+  and document the existing cron-form wake timing migration accurately.
 - Refresh only exact known old wake/tidy schedule defaults; preserve custom text,
   existing `DOT.md` files and the current provider-session prompt snapshot.
 

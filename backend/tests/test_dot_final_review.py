@@ -157,11 +157,15 @@ async def test_final_pass_wakes_with_verdict_after_worker_event_was_consumed(
     assert "Final independent review" in card.body and reports[-1].message in card.body
     assert "All six acceptance criteria" in card.body
     assert "still in final independent review" not in card.body
+    tracking = "watched" if watched else "delegated"
+    assert f"Tracking: {tracking} by Dot" in card.body
     assert dot.store.pending_reviews() == [], "notification does not take review ownership"
     assert workspace_manager.tasks["task-1"].model_dump() == before
 
     plan = dot._prepare_turn(WAKE_MESSAGE, None, feishu_bound=True)
     assert events[0]["id"] in plan.delivered_event_ids
+    assert "## Tracked work" in plan.turn_pack
+    assert f"({tracking}; workspace ws-1)" in plan.turn_pack
     assert "PARTIAL" in plan.turn_pack
     assert "Consider a brief update if useful" in plan.turn_pack
     assert "[quiet] is fine if there is nothing new worth reporting" in plan.turn_pack
