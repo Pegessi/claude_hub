@@ -1,5 +1,9 @@
 # Markdown reader fixed-merge validation
 
+> Historical first candidate: publication was blocked by a concurrent main
+> update. Use the [latest-main validation](2026-10-18-markdown-reader-latest-main-validation.md)
+> for the final publication guard; the checks below remain first-round evidence.
+
 ## Authorized scope and fixed objects
 
 The user requested cross-validation and integration when checks pass. Publication
