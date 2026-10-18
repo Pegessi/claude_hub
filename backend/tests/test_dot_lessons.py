@@ -254,7 +254,7 @@ async def test_delegate_holds_a_weak_brief_until_fixed_or_confirmed(
     assert "## Done when (check each one)\n1. notes/fa3.md has 5 bullets" in brief
     assert "\n2. each bullet cites a section" in brief
     assert "## Output\nnotes/fa3.md in the repo" in brief
-    assert "`1. ✓ <evidence>`" in brief
+    assert 'Map each "Done when" item to evidence' in brief and "open gap" in brief
     work = result["work"]
     assert work["done_when"] == GOOD["done_when"] and "brief_warnings" not in work
 
@@ -563,7 +563,7 @@ def test_reviews_survive_a_full_inbox(service: DotService) -> None:
         store.add_inbox("task_done", f"event {index} " + "x" * 390)
     built = build_turn_pack(store, None, "", first_turn=False, session_turn=2)
     assert all(f"- [task-{index}] Paper {index}" in built.text for index in range(8))
-    assert "a brief miss needs `--lesson`" in built.text
+    assert "`claude-hub dot review --help`" in built.text
     assert len(built.text) <= 5000
     assert 0 < len(built.delivered_event_ids) < 12, "the rest of the events wait for a later turn"
 
