@@ -17,6 +17,7 @@ dependencies = [
     "python-multipart>=0.0.12",
     "click>=8.1.0",
     "lark-oapi==1.5.3",
+    "markdown-it-py>=4.0.0,<5",
 ]
 
 [project.scripts]
