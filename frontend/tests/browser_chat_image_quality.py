@@ -346,6 +346,14 @@ async def main(browser_run: BrowserRun) -> None:
             page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
             await page.goto(base + f"/?tab={TAB}", wait_until="domcontentloaded")
 
+            # Execution-derived cards and screenshots now start folded even
+            # when a legacy backend response already contains their payloads.
+            process = page.locator(".structured-turn").first.get_by_test_id(
+                "history-details-toggle"
+            )
+            await expect(process).to_have_attribute("aria-expanded", "false")
+            await process.click()
+            await expect(process).to_have_attribute("aria-expanded", "true")
             card = page.locator(".subagent-card").first
             await expect(card).to_be_visible()
             await expect(card.locator(".subagent-name")).to_contain_text("explore")
