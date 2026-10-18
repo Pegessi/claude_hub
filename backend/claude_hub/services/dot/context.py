@@ -180,7 +180,15 @@ def _event_lines(events: list[dict[str, Any]]) -> list[str]:
         )
     for event in events[-_EVENTS_PER_TURN:]:
         card = f" (card {event['card_id']})" if event.get("card_id") else ""
-        lines.append(f"- {event.get('kind', 'event')}: {_clip(event.get('text', ''), 400)}{card}")
+        action = (
+            " On wake, report this final verdict and ask for human acceptance; do not reply "
+            "[quiet] or accept automatically. Use `claude-hub dot notify` if Feishu is bound."
+            if event.get("kind") == "task_review_passed"
+            else ""
+        )
+        lines.append(
+            f"- {event.get('kind', 'event')}: {_clip(event.get('text', ''), 400)}{card}{action}"
+        )
     return lines
 
 

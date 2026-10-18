@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 
+from claude_hub.services import workspace_state_policy as state_policy
 from claude_hub.services.dot.runtime.common import (
     _ATTENTION_REPORT_STATES,
     _QUESTION_REPORT_STATES,
@@ -39,6 +40,35 @@ from claude_hub.services.dot.runtime.common import (
     timedelta,
 )
 from claude_hub.services.dot.runtime.session import DotSessionService
+
+
+def _final_review_report(task: Any, reports: list[Any]) -> Any:
+    """Return the applied final verdict, not a later reviewer echo or plan approval."""
+    completed = _parse_time(getattr(task, "review_completed_at", None))
+    requested = _parse_time(getattr(task, "review_requested_at", None))
+    cycle = getattr(task, "review_cycle", 1)
+    if (
+        task.status.value != "review"
+        or not getattr(task, "human_acceptance_requested_at", None)
+        or getattr(task, "human_accepted_at", None)
+        or completed is None
+        or requested is None
+        or not state_policy.current_round_has_verdict(cycle, getattr(task, "reviewed_cycle", 0))
+    ):
+        return None
+    # Intake records completion at the verdict's timestamp. Recovery may apply it
+    # later; limit the scan to that applied review window in both cases.
+    for report in reversed(reports):
+        at = _parse_time(getattr(report, "created_at", None))
+        if (
+            getattr(report, "review_cycle", 0) == cycle
+            and getattr(report, "session_id", None) == getattr(task, "review_session_id", None)
+            and at is not None
+            and requested <= at <= completed
+            and _report_state(report) in {"review_passed", "review_failed", "review_needs_input"}
+        ):
+            return report if _report_state(report) == "review_passed" else None
+    return None
 
 
 class DotWorkService(DotSessionService, ABC):
@@ -360,6 +390,10 @@ class DotWorkService(DotSessionService, ABC):
             # ... and so is the result: the Hub reviewer going over it is not news.
             announced_report_id=getattr(result, "id", None),
             announced_status=status,
+            # A newly watched task starts at its current review, not historical passes.
+            announced_review_cycle=(
+                task.review_cycle if _final_review_report(task, reports) is not None else 0
+            ),
             stall_hours=stall_hours,
         )
         await asyncio.to_thread(self.store.commit, f"dot: watch {task.id}")
@@ -471,7 +505,13 @@ class DotWorkService(DotSessionService, ABC):
         return max(parsed, default=None)
 
     def _result_card(
-        self, item: dict[str, Any], status: str, report: Any, failure: str = ""
+        self,
+        item: dict[str, Any],
+        status: str,
+        report: Any,
+        failure: str = "",
+        *,
+        final_review: Any = None,
     ) -> Card:
         message = _clip_text(str(getattr(report, "message", "") or "(no report)"))
         lines = [f"Task `{item['task_id']}` in workspace `{item.get('workspace_id')}`: {status}."]
@@ -502,6 +542,15 @@ class DotWorkService(DotSessionService, ABC):
             lines += ["", "## Changed files", *[f"- {path}" for path in changed[:50]]]
         if artifacts:
             lines += ["", "## Artifacts", *[f"- {ref}" for ref in artifacts[:50]]]
+        if final_review is not None:
+            headline = "Final independent review passed; awaiting human acceptance."
+            lines += ["", "## Final independent review", headline]
+            lines.append(_clip_text(final_review.message))
+            for label, attr in (("Validation", "validation"), ("Risks", "risks")):
+                value = getattr(final_review, attr, None)
+                if value:
+                    lines += ["", f"### {label}", _clip_text(str(value))]
+            lines += ["", "Only the user can authorize acceptance; do not accept automatically."]
         card = Card(
             id=str(item.get("result_card") or ""),
             kind="work",
@@ -632,8 +681,10 @@ class DotWorkService(DotSessionService, ABC):
         )
         # Why the Hub failed it, when the worker did not say (session died, timeout).
         failure = str(getattr(task, "failure_reason", None) or "") if status == "failed" else ""
+        final_review = _final_review_report(task, reports)
         if (
             status in ("review", "failed")
+            and final_review is None
             and (status != previous or again or rerun)
             and not same_result
         ):
@@ -655,6 +706,53 @@ class DotWorkService(DotSessionService, ABC):
             changes.update(result_card=card.id, review_due=review_due)
             changes.update(announced_report_id=result_id, announced_status=status)
             notices.append(("task_done", f"{title} — done", card.id))
+        if final_review is not None and item.get("announced_review_cycle") != task.review_cycle:
+            # The worker return that opened this review is the evidence it judged;
+            # late same-cycle returns are audit records, not reviewed artifacts.
+            requested_at = _parse_time(task.review_requested_at)
+            worker_result = next(
+                (
+                    old
+                    for old in reversed(reports)
+                    if _worker_return(old)
+                    and getattr(old, "review_cycle", 0) == task.review_cycle
+                    and (returned_at := _parse_time(getattr(old, "created_at", None))) is not None
+                    and requested_at is not None
+                    and returned_at <= requested_at
+                ),
+                None,
+            )
+            if worker_result is not None and worker_result.id != item.get("announced_report_id"):
+                changes.update(
+                    announced_report_id=worker_result.id,
+                    announced_status=status,
+                    review_due=review_due,
+                )
+            event_key = f"task_review_passed:{task_id}:{task.review_cycle}"
+            # The event can be delivered before a failed work-marker write retries.
+            # Recover from read events too, without replacing their evidence card.
+            existing = next(
+                (
+                    event
+                    for event in self.store.list_inbox(unread_only=False)
+                    if event.get("key") == event_key
+                ),
+                None,
+            )
+            if existing is not None:
+                changes["result_card"] = existing.get("card_id")
+            else:
+                card = self._result_card(item, status, worker_result, final_review=final_review)
+                changes["result_card"] = card.id
+                notices.append(
+                    (
+                        "task_review_passed",
+                        "Final independent review passed; awaiting human acceptance. "
+                        f"{_first_line(title, 80)} — {_first_line(final_review.message, 200)}",
+                        card.id,
+                    )
+                )
+            changes["announced_review_cycle"] = task.review_cycle
         asking = latest if _report_state(latest) in _ATTENTION_REPORT_STATES else None
         if asking is None and status == "review":
             # Worker progress after it does not answer the Hub reviewer's question.
@@ -667,6 +765,9 @@ class DotWorkService(DotSessionService, ABC):
                 None,
             )
             asking = step if _report_state(step) == "review_needs_input" else None
+        if final_review is not None:
+            # Sealed-review audit echoes cannot reopen a question or block acceptance.
+            asking = None
         if (
             asking is not None
             and status not in _TERMINAL_TASK_STATES
@@ -711,7 +812,12 @@ class DotWorkService(DotSessionService, ABC):
         )
         for kind, text, card_id in notices:
             extra = {"card_id": card_id} if card_id else {}
-            self.store.add_inbox(kind, text, task_id=task_id, key=f"{kind}:{key}", **extra)
+            event_key = (
+                f"task_review_passed:{task_id}:{task.review_cycle}"
+                if kind == "task_review_passed"
+                else f"{kind}:{key}"
+            )
+            self.store.add_inbox(kind, text, task_id=task_id, key=event_key, **extra)
         if changes:
             self.store.upsert_work(task_id, **changes)
         return len(notices)
