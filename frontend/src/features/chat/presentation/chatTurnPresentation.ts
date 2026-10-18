@@ -1,3 +1,4 @@
+import type { AgentStreamHistoryDetailEntry } from '@/utils/agentStreamHistoryCache'
 import type { TimelinePart, TimelineTool, TimelineTurn } from '../timeline/types'
 import {
   foldTurnParts,
@@ -6,41 +7,65 @@ import {
 } from '../timeline/turnProcess'
 import { presentThinkingParts, type ThinkingDisplayPart, type ThinkingState } from '@/utils/thinkingPresentation'
 
+function processMetaForDetail(detail: AgentStreamHistoryDetailEntry): string {
+  const count = detail.descriptor.event_count
+  return `Execution details · ${count} event${count === 1 ? '' : 's'}`
+}
+
+function lazyProcessPart(turn: TimelineTurn, detail: AgentStreamHistoryDetailEntry): TimelinePart {
+  return {
+    kind: 'process',
+    key: `process-${turn.key}`,
+    meta: processMetaForDetail(detail),
+    expanded: false,
+    turnId: turn.turnId,
+    detailStatus: detail.status,
+    ...(detail.errorMessage ? { detailError: detail.errorMessage } : {}),
+  }
+}
+
 /** Viewer overrides belong to the pane; the shared timeline is never mutated. */
 export function isTurnProcessExpanded(
   turn: TimelineTurn,
-  latestTurnKey: string | null,
+  _latestTurnKey: string | null,
   overrides: ReadonlyMap<string, boolean>,
 ): boolean {
-  const override = overrides.get(turn.key)
-  if (override !== undefined) return override
-  return turn.key === latestTurnKey
+  return overrides.get(turn.key) ?? false
 }
 
-/** Keep the newest turn open; running or unsafe process regions cannot fold. */
-export function isTurnFoldable(turn: TimelineTurn, latestTurnKey: string | null): boolean {
-  return turn.key !== latestTurnKey && splitTurnProcess(turn) !== null
+/** Fold only completed turns that actually contain a process region. */
+export function isTurnFoldable(turn: TimelineTurn, _latestTurnKey: string | null): boolean {
+  return splitTurnProcess(turn) !== null
 }
 
 export function presentTurnParts(
   turn: TimelineTurn,
   latestTurnKey: string | null,
   overrides: ReadonlyMap<string, boolean>,
+  detail?: AgentStreamHistoryDetailEntry,
 ): ThinkingDisplayPart<TimelinePart>[] {
-  const parts = isTurnFoldable(turn, latestTurnKey)
-    ? foldTurnParts(turn, isTurnProcessExpanded(turn, latestTurnKey, overrides)) : turn.parts
+  const isExpanded = isTurnProcessExpanded(turn, latestTurnKey, overrides)
+  const parts = detail && detail.status !== 'loaded'
+    ? [lazyProcessPart(turn, detail), ...turn.parts]
+    : isTurnFoldable(turn, latestTurnKey)
+      ? foldTurnParts(turn, isExpanded)
+      : turn.parts
   const terminal: Exclude<ThinkingState, 'active'> | null =
     turn.errors.length > 0 || ['failed', 'cancelled', 'interrupted'].includes(turn.completionStatus ?? '')
       ? 'interrupted' : turn.completed ? 'done' : null
   return presentThinkingParts(parts, terminal)
 }
 
-/** Memoize unaffected turns while reflecting the visible fold state and label. */
+/** Memoize unaffected turns while reflecting the visible fold/detail state and label. */
 export function turnProcessFoldSignature(
   turn: TimelineTurn,
   latestTurnKey: string | null,
   overrides: ReadonlyMap<string, boolean>,
+  detail?: AgentStreamHistoryDetailEntry,
 ): string {
+  if (detail && detail.status !== 'loaded') {
+    return `lazy|${detail.status}|${detail.errorMessage ?? ''}|${processMetaForDetail(detail)}`
+  }
   if (!isTurnFoldable(turn, latestTurnKey)) return ''
   const split = splitTurnProcess(turn)
   const label = split ? turnProcessLabel(turn, split.before) : ''

@@ -1,9 +1,18 @@
-import type { AgentStreamEvent, StreamCapabilities } from '@/types'
+import type { AgentStreamEvent, AgentStreamHistoryDetail, StreamCapabilities } from '@/types'
+
+export interface AgentStreamHistoryDetailEntry {
+  descriptor: AgentStreamHistoryDetail
+  status: 'idle' | 'loading' | 'loaded' | 'error'
+  errorMessage?: string
+}
 
 export interface AgentStreamHistorySnapshot {
   capabilities: StreamCapabilities
   events: AgentStreamEvent[]
   cursor: number
+  historyDetails?: Record<string, AgentStreamHistoryDetailEntry>
+  attributedToolIds?: ReadonlySet<string>
+  detailRevision?: number
 }
 
 export interface AgentStreamHistoryCache {

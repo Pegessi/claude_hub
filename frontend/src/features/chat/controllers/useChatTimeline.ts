@@ -1,5 +1,6 @@
 import { type Ref, type ComputedRef, computed, nextTick, onMounted, onUnmounted, ref, shallowReactive, watch } from 'vue'
 import { type AgentStreamEvent } from '@/types'
+import { type AgentStreamHistoryDetailEntry } from '@/utils/agentStreamHistoryCache'
 import { type TimelineTurn } from '../timeline/types'
 import { type ChatPaneProps, type PendingTurn } from './types'
 import { type useQuestionAnswers } from '@/composables/useQuestionAnswers'
@@ -15,6 +16,9 @@ import { isTurnProcessExpanded, presentTurnParts, turnProcessFoldSignature } fro
 interface Dependencies {
   connectionState: Ref<'idle' | 'hydrating' | 'live' | 'reconciling' | 'failed'>
   events: Ref<AgentStreamEvent[]>
+  historyDetails: Ref<Record<string, AgentStreamHistoryDetailEntry>>
+  historyDetailRevision: Ref<number>
+  loadHistoryDetail: (turnId: string) => Promise<void>
   isApprovalResolved: ReturnType<typeof useQuestionAnswers>['isApprovalResolved']
   isEditingTurn: (turn: TimelineTurn) => boolean
   optimisticCancelledTurnId: Ref<string | null>
@@ -163,7 +167,24 @@ export function useChatTimeline(deps: Dependencies) {
     return list.length > 0 ? list[list.length - 1].key : null
   })
 
+  async function loadAndExpandHistoryDetail(turn: TimelineTurn): Promise<void> {
+    const turnId = turn.turnId
+    if (!turnId) return
+    const visit = timelineVisit
+    await deps.loadHistoryDetail(turnId)
+    if (timelineDisposed || visit !== timelineVisit) return
+    if (deps.historyDetails.value[turnId]?.status !== 'loaded') return
+    const next = new Map(processExpandedOverrides.value)
+    next.set(turn.key, true)
+    processExpandedOverrides.value = next
+  }
+
   function toggleTurnProcess(turn: TimelineTurn): void {
+    const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
+    if (detail && detail.status !== 'loaded') {
+      void loadAndExpandHistoryDetail(turn)
+      return
+    }
     const next = new Map(processExpandedOverrides.value)
     next.set(turn.key, !isTurnProcessExpanded(turn, latestTurnKey.value, processExpandedOverrides.value))
     processExpandedOverrides.value = next
@@ -171,13 +192,20 @@ export function useChatTimeline(deps: Dependencies) {
 
   /** Parts to render for a turn, with its process folded away once it is history. */
   function turnPartsFor(turn: TimelineTurn) {
-    return presentTurnParts(turn, latestTurnKey.value, processExpandedOverrides.value)
+    const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
+    return presentTurnParts(turn, latestTurnKey.value, processExpandedOverrides.value, detail)
   }
 
   const subthreadPartsFor = createSubthreadThinkingPresenter()
 
+  function retryHistoryDetail(turn: TimelineTurn): void {
+    void loadAndExpandHistoryDetail(turn)
+  }
+
   function turnFoldSignature(turn: TimelineTurn): string {
-    return turnProcessFoldSignature(turn, latestTurnKey.value, processExpandedOverrides.value)
+    void deps.historyDetailRevision.value
+    const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
+    return turnProcessFoldSignature(turn, latestTurnKey.value, processExpandedOverrides.value, detail)
   }
 
   // visibleTurns creates a display copy on each stream update. Key folds by the
@@ -403,6 +431,7 @@ export function useChatTimeline(deps: Dependencies) {
     latestTurnKey,
     toggleTurnProcess,
     turnPartsFor,
+    retryHistoryDetail,
     subthreadPartsFor,
     turnFoldSignature,
     expandedToolGroups,

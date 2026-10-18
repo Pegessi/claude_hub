@@ -6,7 +6,24 @@
       class="conversation-avatar conversation-avatar--subagent"
       aria-hidden="true"
     >❯</span>
+    <div
+      v-if="part.compact"
+      class="subagent-card subagent-region subagent-region--compact"
+      data-testid="subagent-region"
+    >
+      <div class="subagent-header">
+        <span class="subagent-idline">
+          <span class="subagent-badge">Native sub-agents</span>
+        </span>
+        <span class="subagent-headline">{{ subagentRegionHeadline(part) }}</span>
+        <span
+          class="tool-status subagent-region-status"
+          :class="subagentRegionStatusClass(part)"
+        >{{ subagentRegionStatusLabel(part) }}</span>
+      </div>
+    </div>
     <details
+      v-else
       class="subagent-card subagent-region"
       data-testid="subagent-region"
     >
@@ -152,7 +169,8 @@ defineProps<{ turn: TimelineTurn; part: Extract<TimelinePart, { kind: 'subagents
   display: none;
 }
 
-.subagent-card summary {
+.subagent-card summary,
+.subagent-card .subagent-header {
   position: sticky;
   top: 0;
   z-index: 1;

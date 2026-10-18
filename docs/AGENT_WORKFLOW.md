@@ -222,6 +222,7 @@ task.
 | Structured Chat Goal mode | `docs/working-logs/2026-09-17-chat-goal-mode.md` |
 | Remote tabs / remote workspace agents and reviewers | `docs/working-logs/2026-09-20-remote-agent-pipeline.md` |
 | Long Chat turns / stream watchdog timeouts | `docs/working-logs/2026-09-20-chat-long-turn-watchdog.md` |
+| Slow Chat history / switching sessions / lazy execution details | `docs/working-logs/2026-10-18-chat-history-lazy-load.md`; `frontend/src/composables/useAgentStream.ts`; `backend/claude_hub/services/agent_stream/store.py`; `frontend/src/features/chat/controllers/useChatTimeline.ts` |
 | Scheduled Chat run wedge / stale reaper / backlog supersede | `docs/working-logs/2026-09-22-scheduled-chat-stale-run.md` |
 
 ## Common Edit Areas

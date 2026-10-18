@@ -193,10 +193,19 @@ export interface AgentStreamEvent {
   redacted: boolean
 }
 
+export interface AgentStreamHistoryDetail {
+  turn_id: string
+  first_sequence: number
+  last_sequence: number
+  event_count: number
+}
+
 export interface AgentStreamEventPage {
   events: AgentStreamEvent[]
   next_sequence: number
   has_more: boolean
+  history_details?: AgentStreamHistoryDetail[]
+  attributed_tool_ids?: string[]
 }
 
 export interface AgentReport {

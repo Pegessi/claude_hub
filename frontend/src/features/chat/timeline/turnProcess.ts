@@ -45,8 +45,12 @@ function isProcessPart(part: TimelinePart): boolean {
     part.kind === 'subagent' ||
     part.kind === 'subagents' ||
     part.kind === 'agent_image' ||
-    (part.kind === 'text' && part.fromPlan === true)
+    part.kind === 'text' && part.fromPlan === true
   )
+}
+
+function hasFoldableProcess(parts: TimelinePart[]): boolean {
+  return parts.some(isProcessPart)
 }
 
 /** Split a completed turn into its working process and its delivered answer.
@@ -67,9 +71,10 @@ function isProcessPart(part: TimelinePart): boolean {
 export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   if (!turn.completed) return null
   const index = deliveryIndex(turn.parts, turn.mode)
-  if (index <= 0) return null
+  if (index < 0) return null
   if (turn.parts.slice(index + 1).some(isProcessPart)) return null
   const before = turn.parts.slice(0, index)
+  if (!hasFoldableProcess(before)) return null
   return {
     before,
     pinned: before.filter(isPinnedPart),
@@ -114,8 +119,13 @@ export function subagentRegionErrorCount(
 function isPinnedPart(part: TimelinePart): boolean {
   return part.kind === 'error' || (part.kind === 'subagents' && (
     subagentRegionErrorCount(part) > 0 ||
-    part.threads.some(child => child.lifecycleStatus === 'failed')
+    part.threads.some(child => child.lifecycleStatus === 'failed' || child.lifecycleStatus === 'cancelled')
   ))
+}
+
+function foldedPart(part: TimelinePart): TimelinePart {
+  if (part.kind === 'subagents') return { ...part, key: `${part.key}-summary`, compact: true }
+  return part
 }
 
 /** When the turn's last message began, or ``null`` when it never spoke.
@@ -237,10 +247,10 @@ export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePa
     meta: turnProcessLabel(turn, split.before),
     expanded,
   }
-  // Expanded, the region replays in arrival order. Folded, the pinned parts
-  // stay on screen next to the header — an error is not something a fold may
-  // hide. Approval cards are not pinned: they fold with the record.
+  const foldedBefore = split.before
+    .filter(part => !isProcessPart(part) || isPinnedPart(part))
+    .map(foldedPart)
   return expanded
     ? [header, ...split.before, ...split.delivery]
-    : [header, ...split.pinned, ...split.delivery]
+    : [header, ...foldedBefore, ...split.delivery]
 }
