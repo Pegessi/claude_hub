@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "00c029f22004d0caa49a3b0296505fe1c6fcc548",
+  "parents": [
+    "3ae9132df8c1d004395616537eb21a2e578545b0",
+    "c1408cff3798d8721ba6adb86ef1145d23770488"
+  ],
+  "base": "5e3da89b1e7f76aa859021b1c74fb8d9da4408c9",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "0dcc8dbefb7b0a2937df32b732ad46175729d7d9",
+  "reconstructed_tree": "838cd420376636f47a76012f33fdc2013e7ae6a6",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "704af458e819bc55303f3735d9fa7c7e0c5e0241"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3872353411923f3d51eecb8142077ce3565c769a"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e5ff87cff0ace07696f2f2df4788afc0e11ae025"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "92977c37dc4f17e7d6835c062d59c0c0ca8881f2"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5c47ed9b8aff0d14bd3746e7ccc820aca125f328"
+      },
+      "reason": "Both parents prepend independent Released entries. Preserve the Markdown reader refinement and preview entries first, then the main history invalidation and lazy-loading entries, with all pre-existing entries unchanged. No product code was manually changed during conflict resolution.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

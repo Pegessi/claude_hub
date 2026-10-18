@@ -23,6 +23,51 @@
 - Do not replay historical records, create a durable inbox, or change Dot's
   independent notification policy in this patch.
 
+### feat(chat): refine Markdown reading layout and loading
+
+- Give standalone documents a centered reading width, larger type and headings,
+  clearer action hierarchy, roomier error states and reader-sized images without
+  changing Chat or Workspace Markdown typography.
+- Load the reader independently of the full Hub UI and keep parsed document DOM
+  mounted when switching between rendered content and source.
+- Reject temporary-file grants from inert select content and safely rewrite SVG
+  anchors with attributes rather than readonly DOM properties.
+- Add dedicated dark/light, desktop/mobile, keyboard, overflow and retained-DOM
+  browser acceptance alongside the existing Chat-link coverage.
+
+### feat(chat): open local Markdown links in a standalone reader
+
+- Open Chat Markdown file links in a separate page with rendered content, source
+  view, refresh, heading anchors, document-relative links, and recoverable errors.
+- Preserve external web links and reuse the sanitized rich Markdown renderer.
+- Scope reads to the owning local Chat directory or an exact assistant-linked
+  temporary file; reject symlinks, remote-host paths and non-text files, and bound
+  previews to 512 KiB without caching document content in the browser.
+
+### refactor(dot): keep assistant guidance concise and advisory
+
+- Shorten default role, turn, tool, task-brief, wake, tidy and contextual guidance.
+  Delegate long or many-step work to Hub Tasks; prefer task events while allowing
+  targeted checks and quiet turns. Keep secret handling, tool contracts and human
+  acceptance explicit.
+- Label tracked tasks and newly generated result cards as delegated or watched,
+  without changing review ownership. Clarify that long test runs are delegated
+  and document the existing cron-form wake timing migration accurately.
+- Refresh only exact known old wake/tidy schedule defaults; preserve custom text,
+  existing `DOT.md` files and the current provider-session prompt snapshot.
+
+### fix(dot): announce final review passes separately from worker progress
+
+- Wake Dot when a tracked task's current independent review passes and awaits
+  human acceptance, even if its earlier worker-result event was already consumed.
+  Include the final verdict and reviewed worker evidence, not late progress echoes.
+- Deduplicate the notification per review cycle across polls and restarts, and
+  recover a failed work-marker write from an already-delivered inbox event.
+- Guide Dot to report the verdict or pending acceptance decision when useful,
+  allowing `[quiet]` when there is nothing new worth reporting. Preserve watched-task
+  ownership and human authorization for acceptance; suggest `dot notify` only when
+  an update should reach the user now and Feishu is bound.
+
 ### fix(chat): invalidate stale detail ranges and edited history caches
 
 - Tie detail reads to their exact history range so older responses cannot mark

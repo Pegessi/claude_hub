@@ -1,10 +1,11 @@
 """Cached agent and quoted-image stream routes."""
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from claude_hub.api.routes.agent_stream.bindings import AgentStreamRouteBindings
 from claude_hub.auth.dependencies import get_current_user
@@ -13,6 +14,11 @@ from claude_hub.services.agent_stream import quoted_images
 from claude_hub.services.agent_stream.local_images import (
     AgentImageUnavailable,
     read_cached_agent_image,
+)
+from claude_hub.services.agent_stream.local_markdown import (
+    MarkdownEncodingError,
+    MarkdownUnavailable,
+    read_markdown_preview,
 )
 
 ATTACHMENT_NO_STORE = "no-store"
@@ -133,12 +139,31 @@ def serve_quoted_image(key: str) -> Response:
     raise quoted_image_not_available()
 
 
+async def serve_markdown(
+    session: ManagedSession, path: str, *, owner_is_current: Callable[[], bool]
+) -> Response:
+    headers = {"Cache-Control": ATTACHMENT_NO_STORE, "X-Content-Type-Options": "nosniff"}
+    try:
+        if not owner_is_current():
+            raise MarkdownUnavailable()
+        preview = await asyncio.to_thread(read_markdown_preview, session, path)
+        if not owner_is_current():
+            raise MarkdownUnavailable()
+    except MarkdownUnavailable:
+        raise HTTPException(404, "document not available", headers=headers) from None
+    except MarkdownEncodingError:
+        raise HTTPException(415, "document is not UTF-8 text", headers=headers) from None
+    return JSONResponse(preview.model_dump(mode="json"), headers=headers)
+
+
 @dataclass(frozen=True)
 class AgentStreamMediaEndpoints:
     get_session_agent_image: Callable[..., Any]
     get_tab_agent_image: Callable[..., Any]
     get_session_quoted_image: Callable[..., Any]
     get_tab_quoted_image: Callable[..., Any]
+    get_session_markdown: Callable[..., Any]
+    get_tab_markdown: Callable[..., Any]
 
 
 def register_media_routes(
@@ -212,7 +237,35 @@ def register_media_routes(
         bindings.terminal_tab_session_or_404(tab_id)
         return serve_quoted_image(key)
 
+    @router.get("/sessions/{managed_session_id}/stream/markdown")
+    async def get_session_markdown(
+        managed_session_id: str,
+        path: str = Query(..., min_length=1, max_length=4096),
+        current_user: User = Depends(get_current_user),
+    ) -> Response:
+        session = bindings.session_or_404(managed_session_id)
+        return await serve_markdown(
+            session,
+            path,
+            owner_is_current=lambda: managed_image_owner_is_current(session, bindings),
+        )
+
+    @router.get("/tabs/{tab_id}/stream/markdown")
+    async def get_tab_markdown(
+        tab_id: str,
+        path: str = Query(..., min_length=1, max_length=4096),
+        current_user: User = Depends(get_current_user),
+    ) -> Response:
+        session = bindings.terminal_tab_session_or_404(tab_id)
+        return await serve_markdown(
+            session,
+            path,
+            owner_is_current=lambda: tab_image_owner_is_current(session, bindings),
+        )
+
     return AgentStreamMediaEndpoints(
+        get_session_markdown=get_session_markdown,
+        get_tab_markdown=get_tab_markdown,
         get_session_agent_image=get_session_agent_image,
         get_tab_agent_image=get_tab_agent_image,
         get_session_quoted_image=get_session_quoted_image,

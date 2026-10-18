@@ -1,22 +1,24 @@
 # Dot — the persistent personal agent
 
 Dot is one long-lived Claude Chat tab with a stable role and a file-based
-memory. You talk to it casually. It answers small things from memory, hands
-real work to Hub Tasks, and keeps track of what matters.
+memory. It handles small requests directly, uses memory when helpful, and hands
+long or many-step work to Hub Tasks while keeping track of the user's priorities.
 
-The design goal is a *clean mind*: Dot never carries days of raw history.
-Every turn it gets a small, fresh context pack built from durable memory.
+Each turn receives a bounded context pack built from durable memory. The session
+pack stays fixed for a provider conversation; rotation limits accumulated history.
 
-## Why (the failure we avoid)
+## Guidance and operating boundaries
 
-A master agent in one endless conversation drifts. It forgets which task
-matters most, re-checks workers, drowns in detail, and writes vague briefs.
-Dot fixes this with structure, not a longer prompt:
+The defaults favor short, useful replies and event-driven task tracking. They
+allow targeted checks when the user asks, a task appears stuck, or evidence needs
+clarification. Long or many-step work is delegated to Hub Tasks so Dot remains
+available. Reporting and memory updates use judgment; permissions, secret handling
+and human acceptance remain explicit boundaries.
 
 | Problem | Dot mechanism |
 | --- | --- |
 | Forgets priorities | `focus.json`: at most 7 active items, shown every turn |
-| Micromanages workers | Delegation contract: brief once, then wake only on task events |
+| Repeated worker checks | Prefer task events; targeted checks remain available when useful |
 | Drowns in detail | Session rotation + per-turn context pack with a size cap |
 | Vague briefs | Brief template with a done-when checklist + a brief check before sending |
 | Same mistakes again | Review every returned task; a brief miss becomes a lesson rule |
@@ -88,9 +90,8 @@ the card's kind, even when a card was moved by hand without editing `kind`.
 1. Hub sends a user turn to the Dot tab.
 2. `ClaudeNativeSession` asks the Dot service to prepare the turn:
    - decide rotation (turn count, age, explicit request, `[Dot tidy]`);
-   - build the **session pack** (role, the Hub's "stay free for the user"
-     rules, user profile, concepts, delegation rules from lessons, tool
-     guide) —
+   - build the **session pack** (role, the Hub's "stay available for the user"
+     guidance, user profile, concepts, brief lessons and tool guide) —
      passed via `--append-system-prompt`, stable for the whole session;
    - build the **turn pack** (time, focus, open work, tasks waiting for
      review, new inbox events, cards recalled by the user's words (not on
@@ -110,6 +111,20 @@ the card's kind, even when a card was moved by hand without editing `kind`.
    failed first turn makes the next turn open a fresh session (so the recent
    talk is shown again).
 
+## Guidance updates
+
+`DEFAULT_ROLE` is written only when a home has no `DOT.md`; existing role files,
+including an unchanged older default, are not replaced. Session-level guidance
+and tools are rebuilt on the next normal or explicitly requested rotation, not
+mid-conversation. Restarting the backend alone does not rebuild a cached pack.
+
+On normal schedule setup/start, exact known old wake and tidy defaults are updated
+to their corresponding current wording. Custom text (including a whitespace edit)
+is preserved. Timings are preserved when already in the current form: an interval
+for wake and cron for tidy. The existing timing migration converts a cron-form
+wake schedule to the event-only interval, including a custom cron. This source
+change does not itself restart the service, rotate Dot, or edit its live memory home.
+
 ## Delegation and wake-up
 
 `claude-hub dot delegate` builds a brief from the template, registers and
@@ -120,8 +135,11 @@ panel) adds a Hub Task you started yourself;
 `dot unwatch` stops tracking it (the panel asks first when a review is
 waiting, since the review is dropped). Watching a watched task again keeps its
 place (unseen reports still raise events). Watching a task Dot delegated keeps it a
-delegated task (only `--stall-hours` changes), so its review is not lost. A
-background watcher checks tracked tasks every 60 seconds; one task that cannot
+delegated task (only `--stall-hours` changes), so its review is not lost. The
+`Tracked work` context section labels each task as `delegated` or `watched`.
+Newly generated result cards carry the same distinction; stored older cards are
+not rewritten. These labels describe tracking, not permission to accept a task.
+A background watcher checks tracked tasks every 60 seconds; one task that cannot
 be read does not stop the others. When one finishes, fails, needs input (the
 worker or the Hub reviewer asks), or looks stuck it:
 
@@ -151,16 +169,20 @@ worker or the Hub reviewer asks), or looks stuck it:
 An event is written before the task's new state, with a key, so a failed
 write is retried without a second copy of the event.
 
-So Dot wakes often when many tasks move and rarely when few do. On a wake it
-tells the user only what needs them. When nothing does, it replies exactly
-`[quiet]`; that turn is hidden from the chat and kept out of the journal.
+A current final independent-review pass awaiting human acceptance has a separate
+`task_review_passed` event. It includes the final verdict and reviewed worker
+artifacts, deduplicated per review cycle. It does not transfer watched-task
+ownership or accept the task. See the [final-review note](working-logs/2026-10-18-dot-final-review-wake.md)
+for authority and retry details.
+
+Dot can report a useful result, question or problem on a wake-up. If nothing new
+needs reporting, an exact `[quiet]` reply keeps the turn out of the chat and journal.
 
 A wake-up reply shows in the web Chat only. Each turn's context has a
 `Reach:` line: where the turn came from (the user on Feishu, the user on the
 web, a Hub wake-up or tidy), where the answer goes, and whether a Feishu bot is
-bound to the Dot Chat. On a Hub turn with a bound bot, it asks Dot to send what
-should reach the user now (a task they asked for is done or failed, a blocking
-decision, a problem) with `claude-hub dot notify "<text>"`: the
+bound to the Dot Chat. On a Hub turn with a bound bot, it suggests
+`claude-hub dot notify "<text>"` when an update should reach the user now. The
 Hub sends it to the Feishu chat bound to the Dot tab (`POST /api/dot/notify`;
 `sent: false` when no bot is bound). Known secret patterns are masked first.
 The same text sent in the last 30 minutes is not sent again (a wake-up that
@@ -179,11 +201,10 @@ so Dot's own turns must not keep the user waiting:
   for the next night. A stopped Hub turn stays out of the journal.
 - Its turns carry `yields_to_user` in their start metadata, so the web
   composer sends (instead of queueing behind the turn) while one runs.
-- Turns stay short. The session pack tells Dot to keep every turn to a few
-  steps, hand long work to a Task, judge a returned task from its result card
-  instead of redoing the worker's checks, and answer the user first.
-- A wake-up schedule that still has the earlier Hub words gets the current
-  ones; words the user wrote stay.
+- Keep Dot turns short by delegating long or many-step work to Hub Tasks.
+  Targeted verification is available when needed; routine rechecking is discouraged.
+- Wake and tidy schedules holding exact earlier defaults get the current wording;
+  user-customized messages stay unchanged.
 
 Not covered: a Feishu message that arrives during the user's own web turn on
 the Dot tab still gets the usual "busy" reply.
@@ -201,8 +222,8 @@ brief ──▶ worker ──▶ result card ──▶ review ──▶ lesson �
 1. **Brief.** `--done-when` is a checklist (repeat the flag, at most 7):
    each item must be something a stranger can check (a file, a command, a
    number, a behaviour). `--output` says what the result is and where it
-   goes; `--out-of-scope` says what not to touch. The worker must answer every
-   check by number, `1. ✓ <evidence>` or `1. ✗ <why not>`.
+   goes; `--out-of-scope` says what not to touch. The report maps each check
+   to evidence or an open gap and summarizes validation and risks.
 2. **Check before sending.** Plain code, no model call. The task is held
    (`held: true`, CLI exit 1) when a check is vague (`done`, `works`, `完成`…),
    there are more than 7 checks, or output or context is missing. Dot fixes
@@ -259,8 +280,8 @@ A task looks stuck when it is queued or working with no progress (task update,
 progress report, runtime status change or new report) for `--stall-hours`
 (default 2). It alarms once per stall; new progress resets it.
 
-Dot does not poll workers. It only reacts to these events. There is no daily
-summary; ask Dot when you want one.
+Dot normally relies on these events rather than repeated polling. Targeted checks
+remain available when useful. There is no automatic daily summary; ask when needed.
 
 A second schedule runs the nightly `[Dot tidy]` turn in a fresh session:
 compress yesterday's journal into cards and concepts, merge duplicates,
