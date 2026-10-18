@@ -634,13 +634,13 @@ async def test_a_failing_dedup_finish_does_not_send_a_second_reply(pool, monkeyp
             pytest.fail("a reply must never fall back to an unsolicited chat send")
 
     class FailingDedup:
-        def finish(self, key: str, status: str) -> None:
+        def finish(self, key: str, status: str, **metadata: object) -> None:
             raise RuntimeError("dedup bookkeeping failed")
 
     monkeypatch.setattr(bot_api, "FeishuBotClient", Counting)
     monkeypatch.setattr(bot_api, "_dedup", FailingDedup())
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="dedup bookkeeping failed"):
         await bot_api._handle_message_event(bot_id, _event("om-finish"), effective)
 
     assert posts == ["om-finish"]
