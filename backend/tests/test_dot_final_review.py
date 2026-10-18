@@ -162,9 +162,12 @@ async def test_final_pass_wakes_with_verdict_after_worker_event_was_consumed(
 
     plan = dot._prepare_turn(WAKE_MESSAGE, None, feishu_bound=True)
     assert events[0]["id"] in plan.delivered_event_ids
-    assert "PARTIAL" in plan.turn_pack and "do not reply [quiet]" in plan.turn_pack
-    assert "do not reply [quiet] or accept automatically" in plan.turn_pack
-    assert "dot notify" in plan.turn_pack
+    assert "PARTIAL" in plan.turn_pack
+    assert "consider a brief update" in plan.turn_pack
+    assert "[quiet] is fine if there is nothing new worth reporting" in plan.turn_pack
+    assert "Task acceptance still requires user authorization" in plan.turn_pack
+    assert "do not reply [quiet]" not in plan.turn_pack
+    assert "Consider `claude-hub dot notify` if Feishu is bound" in plan.turn_pack
     assert len(plan.turn_pack) <= TURN_PACK_CHARS
     dot.mark_delivered(plan.delivered_event_ids)
     assert dot.store.list_inbox() == []
