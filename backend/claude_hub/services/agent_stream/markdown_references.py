@@ -42,6 +42,7 @@ class _AnchorCollector(HTMLParser):
             "xmp",
             "plaintext",
             "noscript",
+            "select",
         }:
             self.excluded.append(tag)
         if tag == "a" and not self.excluded:

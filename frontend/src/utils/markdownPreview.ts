@@ -38,7 +38,7 @@ export function rewriteMarkdownLinks(html: string, scope: string, documentPath =
   if (!scope || typeof document === 'undefined' || !/<a[\s>]/i.test(html)) return html
   const template = document.createElement('template')
   template.innerHTML = html
-  template.content.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((link) => {
+  template.content.querySelectorAll('a[href]').forEach((link) => {
     const href = link.getAttribute('href') || ''
     let url = markdownPreviewUrl(scope, href, documentPath)
     if (href.startsWith('/?')) {
@@ -49,9 +49,10 @@ export function rewriteMarkdownLinks(html: string, scope: string, documentPath =
       }
     }
     if (!url) return
-    link.href = url
-    link.target = documentPath ? '_self' : '_blank'
-    link.rel = 'noopener noreferrer'
+    // Sanitized Markdown can contain SVG anchors with readonly animated properties.
+    link.setAttribute('href', url)
+    link.setAttribute('target', documentPath ? '_self' : '_blank')
+    link.setAttribute('rel', 'noopener noreferrer')
     link.removeAttribute('data-markdown-path')
   })
   return template.innerHTML
