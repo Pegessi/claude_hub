@@ -7,6 +7,22 @@
 
 ## Released
 
+### fix(feishu): tolerate small clock skew and distinguish pre-dispatch rejection
+
+- Allow a configurable future-message clock offset (5 seconds by default) without
+  relaxing exact binding activation, authorization or malformed-time checks.
+- Explain clock failures to authorized, still-bound users and retain bounded
+  diagnostic reasons without logging message bodies. Keep stale/malformed messages
+  and revoked owners silent.
+- Permit one same-ID redelivery within ten minutes only for an explicitly
+  future-skew-rejected, never-dispatched message with the same binding and payload.
+  Keep legacy failures, dispatched/uncertain turns and failed replies non-rerunnable.
+- Recheck every coalesced message under one admission gate before native handoff.
+  Reject the entire unsent batch if any member fails, retaining each message's
+  original binding and payload for the bounded redelivery check.
+- Do not replay historical records, create a durable inbox, or change Dot's
+  independent notification policy in this patch.
+
 ### fix(restart): capture interrupted Chats before draining Feishu routes
 
 - Stop new Feishu intake before recording eligible Chat continuations, stopping
