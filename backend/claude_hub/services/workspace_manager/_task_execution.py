@@ -6,8 +6,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-import claude_hub.services.workspace_manager as _wm
-
 from ...models.agent_stream import AgentStreamEvent, AgentStreamEventType
 from ...models.schemas import (
     TaskExecutionControl,
@@ -45,7 +43,10 @@ def reporter_key_digest(value: str | None) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-class _TaskExecutionMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _TaskExecutionMixin(_WorkspaceManagerBase):
     def _workspace_owns_task(self, task: WorkspaceTask) -> bool:
         return task.execution_control == TaskExecutionControl.WORKSPACE
 
@@ -264,7 +265,7 @@ class _TaskExecutionMixin:
             terminal = task.status in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
             if terminal and payload.state != TaskProgressState.RELEASED:
                 raise TaskExecutionConflict("task_record_is_terminal")
-            now = _wm._now()
+            now = self._runtime_now()
             progress = TaskProgressSnapshot(
                 state=payload.state,
                 summary=payload.summary,
@@ -369,7 +370,7 @@ class _TaskExecutionMixin:
                 and payload.execution_control == TaskExecutionControl.WORKSPACE
             ):
                 raise TaskExecutionConflict("task_already_workspace_controlled")
-            now = _wm._now()
+            now = self._runtime_now()
             changes: dict[str, Any] = {
                 "execution_control": payload.execution_control,
                 "execution_epoch": task.execution_epoch + 1,

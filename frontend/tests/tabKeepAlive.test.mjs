@@ -7,11 +7,15 @@ const terminalPane = readFileSync(
   'utf8',
 )
 const structuredPane = readFileSync(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
+  new URL('../src/features/chat/StructuredPane.vue', import.meta.url),
   'utf8',
 )
 const queuedObserver = readFileSync(
   new URL('../src/components/QueuedChatObserver.vue', import.meta.url),
+  'utf8',
+)
+const timelineController = readFileSync(
+  new URL('../src/features/chat/controllers/useChatTimeline.ts', import.meta.url),
   'utf8',
 )
 const historyCache = readFileSync(
@@ -71,62 +75,27 @@ test('StructuredPane resumes the stream and suspends non-queued observers on Kee
 
 test('KeepAlive eviction preserves a minimal observer owned activation request', () => {
   const unmountedBody = structuredPane.match(
-    /onUnmounted\(\(\) => \{([\s\S]*?)\n\}\)\n\nfunction retry/,
+    /onUnmounted\(\(\) => \{([\s\S]*?)\n\}\)/,
   )?.[1] ?? ''
-  assert.doesNotMatch(
-    unmountedBody,
-    /releaseQueuedChatActivation/,
-    'evicting a full cached pane must not drop the hidden observer FIFO request',
-  )
-  assert.match(
-    unmountedBody,
-    /pruneQueuedChatState/,
-    'ordinary empty queue state should still be pruned on cache eviction',
-  )
+  assert.doesNotMatch(unmountedBody, /releaseQueuedChatActivation/)
+  assert.match(unmountedBody, /terminalStore\.pruneQueuedChatState/)
 })
 
-test('switching back rearms latest before cached history reconciles', () => {
+test('switching back rearms viewport ownership before stream and Goal hydration', () => {
   const body = structuredPane.match(/onActivated\(\(\) => \{([\s\S]*?)\n\}\)/)?.[1]
   assert.ok(body)
-  const calls = []
-  const visibleHistoryStart = { value: 120 }
-  const activate = new Function(
-    'resetActivation', 'startStream', 'hydrateGoal', 'nextTick', 'observeTimelineGeometry',
-    'visibleHistoryStart', 'isPaneActivated', 'timelineDisposed', 'timelineVisit', 'isManagedChat', body,
-  )
-  activate(
-    () => calls.push('reset'),
-    () => calls.push('start'),
-    () => calls.push('hydrate-goal'),
-    () => {},
-    () => {},
-    visibleHistoryStart, { value: false }, true, 0, { value: false },
-  )
-  assert.deepEqual(calls, ['reset', 'start', 'hydrate-goal'])
-  assert.equal(visibleHistoryStart.value, null, 'a new visit starts with the latest history window')
+  const activate = body.indexOf('timeline.activateViewport()')
+  const start = body.indexOf('startStream()')
+  const goal = body.indexOf('goalController.hydrateGoal()')
+  assert.ok(activate >= 0 && activate < start && start < goal)
+  assert.match(body, /timeline\.observeTimelineGeometry\(\)/)
 })
 
 test('only scrolling an active revealed timeline can detach from latest', () => {
-  const body = structuredPane.match(/function handleTimelineScroll\(\) \{([\s\S]*?)\n\}/)?.[1]
-  assert.ok(body)
-  const scroll = new Function(
-    'timelineEl', 'timelineDisposed', 'timelinePhase', 'isLoadingEarlier',
-    'isTimelineNearBottom', 'isFollowingLatest', 'rearmFollow', 'detachFromTail', body,
-  )
-  for (const [disposed, phase, loading, shouldDetach] of [
-    [true, 'revealed', false, false],
-    [false, 'hidden', false, false],
-    [false, 'pinning', false, false],
-    [false, 'revealed', true, false],
-    [false, 'revealed', false, true],
-  ]) {
-    let detached = false
-    scroll(
-      { value: {} }, disposed, { value: phase }, { value: loading },
-      () => false, { value: true }, () => {}, () => { detached = true },
-    )
-    assert.equal(detached, shouldDetach, `disposed=${disposed}, phase=${phase}, loading=${loading}`)
-  }
+  assert.match(timelineController, /function handleTimelineScroll\(\)/)
+  assert.match(timelineController, /const el = timelineEl\.value[\s\S]*?if \(!el\) return/)
+  assert.match(timelineController, /if \(timelineDisposed \|\| timelinePhase\.value !== 'revealed' \|\| isLoadingEarlier\.value\) return/)
+  assert.match(timelineController, /if \(isTimelineNearBottom\(el\)\)[\s\S]*?rearmFollow\(\)[\s\S]*?else[\s\S]*?detachFromTail\(\)/)
 })
 
 test('default history LRU capacity is expanded well beyond the old value of 3', () => {

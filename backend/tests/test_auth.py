@@ -174,11 +174,9 @@ async def test_check_authenticated_with_valid_session_cookie(
 
     user = User(open_id="ou_session", name="Session User", email="s@example.com")
     created = session_store.create_session(user, "at", "rt")
+    client.cookies.set(settings.session_cookie_name, created.session_id)
 
-    resp = await client.get(
-        "/api/auth/check",
-        cookies={settings.session_cookie_name: created.session_id},
-    )
+    resp = await client.get("/api/auth/check")
 
     body = resp.json()
     assert resp.status_code == 200
@@ -219,11 +217,9 @@ async def test_logout_clears_session_and_cookie(
 
     user = User(open_id="ou_session", name="Session User", email="s@example.com")
     created = session_store.create_session(user, "at", "rt")
+    client.cookies.set(settings.session_cookie_name, created.session_id)
 
-    resp = await client.post(
-        "/api/auth/logout",
-        cookies={settings.session_cookie_name: created.session_id},
-    )
+    resp = await client.post("/api/auth/logout")
 
     assert resp.status_code == 200
     assert resp.json() == {"success": True}

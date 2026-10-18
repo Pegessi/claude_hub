@@ -11,38 +11,12 @@
 //     STATUS, never as a terminal error, so it must not release the lock;
 //   - a genuine ERROR is still terminal.
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import { Buffer } from 'node:buffer'
 import test from 'node:test'
 
-import ts from 'typescript'
+import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-const read = name => readFile(new URL(`../src/utils/${name}`, import.meta.url), 'utf8')
-const transpileOptions = {
-  compilerOptions: { module: ts.ModuleKind.ES2020, target: ts.ScriptTarget.ES2020 },
-}
-const [timelineSrc, durationSrc, questionSrc, subagentSrc, agentImageSrc, lifeSrc] = await Promise.all([
-  read('agentStreamTimeline.ts'),
-  read('duration.ts'),
-  read('chatQuestionResponse.ts'),
-  read('subagentTool.ts'),
-  read('agentImage.ts'),
-  read('chatTurnLifecycle.ts'),
-])
-const bundle = [durationSrc, questionSrc, subagentSrc, agentImageSrc, timelineSrc]
-  .map(src => ts.transpileModule(
-    src.replace(/^import .* from '@\/utils\/.*$/gm, ''),
-    transpileOptions,
-  ).outputText)
-  .join('\n')
-const mod = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle).toString('base64')}`
-)
-const life = await import(
-  `data:text/javascript;base64,${Buffer.from(ts.transpileModule(lifeSrc, transpileOptions).outputText).toString('base64')}`
-)
-const { groupEventsIntoTurns, IncrementalTimelineReducer } = mod
-const { isChatModeLocked } = life
+const { groupEventsIntoTurns, IncrementalTimelineReducer } = await loadChatUtility('agentStreamTimeline')
+const { isChatModeLocked } = await loadChatUtility('chatTurnLifecycle')
 
 function makeEvent(seq, type, payload = {}, overrides = {}) {
   return {

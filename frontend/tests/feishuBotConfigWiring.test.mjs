@@ -4,7 +4,7 @@ import test from 'node:test'
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8')
 const app = read('../src/App.vue')
 const actions = read('../src/components/AppExtensionActions.vue')
-const dialog = read('../src/components/FeishuBotSettingsDialog.vue')
+const dialog = read('../src/features/feishu-bot/FeishuBotSettingsDialog.vue')
 const panel = read('../src/components/FeishuBindingPanel.vue')
 const api = read('../src/utils/feishuBotConfig.ts')
 

@@ -1,0 +1,11 @@
+.workspace-actions,
+.form-row,
+.task-actions,
+.session-meta,
+.agent-status-toolbar,
+.agent-row-actions,
+.agent-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

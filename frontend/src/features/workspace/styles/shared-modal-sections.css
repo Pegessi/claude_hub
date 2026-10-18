@@ -1,0 +1,45 @@
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.modal-actions button {
+  white-space: nowrap;
+}
+
+.modal-actions .workspace-delete-button {
+  margin-right: auto;
+}
+
+.modal-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ch-color-border);
+}
+
+.modal-section--first {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.modal-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.modal-section-header h4 {
+  margin: 0;
+  color: var(--ch-color-text-strong);
+  font-size: 13px;
+}
+
+.modal-section-header span {
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}

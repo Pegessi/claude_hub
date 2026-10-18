@@ -64,7 +64,7 @@ test('Dot API validation errors show their messages', async t => {
 test('Dot launcher sits in the app bar and opens the Dot Chat tab', () => {
   const app = read('../src/App.vue')
   const launcher = read('../src/components/DotLauncher.vue')
-  const tabBar = read('../src/components/TabBar.vue')
+  const tabBar = read('../src/features/terminal/components/TabBar.vue')
   // Desktop: app bar. Phones hide the app bar, so the mobile TabBar carries a compact launcher.
   assert.match(app, /<div class="app-mode-tools">\s*<DotLauncher v-if="!isMobile" \/>/)
   assert.match(tabBar, /<DotLauncher\s+v-if="isMobile"\s+compact\s+\/>/)
@@ -80,8 +80,8 @@ test('Dot launcher sits in the app bar and opens the Dot Chat tab', () => {
 })
 
 test('phone tab bars hide status summary markup while retaining its polling owners', () => {
-  const tabBar = read('../src/components/TabBar.vue')
-  const statusPanel = read('../src/components/AgentStatusFloatingPanel.vue')
+  const tabBar = read('../src/features/terminal/components/TabBar.vue')
+  const statusPanel = read('../src/features/agent-status/AgentStatusFloatingPanel.vue')
   assert.match(tabBar, /v-if="manualTabs\.length > 0"\s+:hide-summary="isMobile"\s+source="manual"/)
   assert.match(tabBar, /v-if="managedTabs\.length > 0"\s+:hide-summary="isMobile"\s+source="managed"/)
   assert.match(statusPanel, /v-if="!hideSummary && availableRows\.length > 0"/)
@@ -96,36 +96,40 @@ test('first-pass rate and review coverage read plainly', () => {
 })
 
 test('Dot panel covers focus, work, lessons, memory and health', () => {
-  const panel = read('../src/components/DotPanel.vue')
+  const panel = read('../src/features/dot/DotPanel.vue')
+  const controller = read('../src/features/dot/useDotPanel.ts')
   for (const label of ["label: 'Focus'", "label: 'Work'", "label: 'Lessons'", "label: 'Memory'", "label: 'Health'"]) {
-    assert.ok(panel.includes(label), label)
+    assert.ok(controller.includes(label), label)
   }
   for (const call of [
     'recallDot(', 'archiveDotCard(', 'updateDotFocus(', 'ackDotInbox(', 'loadDotHealth(',
     'loadDotLessons(', 'addDotLesson(', 'updateDotLesson(', 'dropDotLesson(', 'formatFirstPass(',
     'formatReviewCoverage(', 'lesson.reach',
   ]) {
-    assert.ok(panel.includes(call), call)
+    const owner = ['formatFirstPass(', 'formatReviewCoverage(', 'lesson.reach']
+      .includes(call) ? panel : controller
+    assert.ok(owner.includes(call), call)
   }
-  assert.ok(panel.includes("event.key === 'Escape'"))
+  assert.ok(controller.includes("event.key === 'Escape'"))
   // No "just now ago"; a double Enter cannot add twice (the draft is cleared first).
-  assert.ok(!/\}\} ago|\)\} ago/.test(panel))
-  assert.match(panel, /newFocus\.value = ''\n {2}void run\(/)
-  assert.match(panel, /newLesson\.value = ''\n {2}void run\(/)
+  assert.ok(!/\}\} ago|\)\} ago/.test(controller))
+  assert.match(controller, /newFocus\.value = ''\n {4}void run\(/)
+  assert.match(controller, /newLesson\.value = ''\n {4}void run\(/)
   assert.ok(panel.includes('maxlength="2000"'))
   // A slow card load (or one left with Back) must not replace the card shown now.
-  assert.ok(panel.includes('if (request === cardRequest) selectedCard.value = card'))
+  assert.ok(controller.includes('if (request === cardRequest) selectedCard.value = card'))
   assert.ok(panel.includes('@click="closeCard"'))
 })
 
 test('Dot name and avatar are shared and editable', () => {
   const launcher = read('../src/components/DotLauncher.vue')
-  const panel = read('../src/components/DotPanel.vue')
+  const panel = read('../src/features/dot/DotPanel.vue')
+  const controller = read('../src/features/dot/useDotPanel.ts')
   const avatar = read('../src/components/DotAvatar.vue')
   assert.ok(launcher.includes('{{ identity.name }}') && panel.includes('{{ identity.name }}'))
   assert.ok(launcher.includes('<DotAvatar') && panel.includes('<DotAvatar'))
   for (const call of ['updateDotIdentity(', 'uploadDotAvatar(', 'clearDotAvatar(']) {
-    assert.ok(panel.includes(call), call)
+    assert.ok(controller.includes(call), call)
   }
   // Raster images only: no SVG (it can carry script).
   assert.ok(panel.includes('accept="image/png,image/jpeg,image/gif,image/webp"'))
@@ -134,17 +138,17 @@ test('Dot name and avatar are shared and editable', () => {
 })
 
 test('Dot panel can watch and stop watching tasks', () => {
-  const panel = read('../src/components/DotPanel.vue')
-  assert.ok(panel.includes('watchDotTask(taskId, watchStallHours.value)'))
-  assert.ok(panel.includes('unwatchDotTask(item.task_id)'))
+  const controller = read('../src/features/dot/useDotPanel.ts')
+  assert.ok(controller.includes('watchDotTask(taskId, watchStallHours.value)'))
+  assert.ok(controller.includes('unwatchDotTask(item.task_id)'))
   // Stopping a task that waits for review drops the review: ask first.
-  assert.match(panel, /item\.review_due && !window\.confirm\(/)
-  assert.ok(panel.includes("'task_stalled'"))
+  assert.match(controller, /item\.review_due && !window\.confirm\(/)
+  assert.ok(controller.includes("'task_stalled'"))
 })
 
 test('Dot panel is a full-screen sheet with touch-sized targets on phones', () => {
-  const panel = read('../src/components/DotPanel.vue')
-  const mobile = panel.slice(panel.indexOf('@media (max-width: 768px)'))
+  const panelStyle = read('../src/features/dot/dot-panel.css')
+  const mobile = panelStyle.slice(panelStyle.indexOf('@media (max-width: 768px)'))
   assert.ok(mobile.length > 30, 'mobile media query exists')
   assert.match(mobile, /\.dot-panel \{\s*width: 100%;/)
   assert.ok(mobile.includes('env(safe-area-inset-bottom)'))
@@ -160,6 +164,6 @@ test('quiet Dot wake and tidy turns are hidden from the chat', () => {
   assert.ok(!api.isQuietDotTurn(turn('[Dot wake] New events', 'Paper summary is ready.')))
   assert.ok(!api.isQuietDotTurn(turn('Say [quiet]', '[quiet]')), 'only Hub turns')
   assert.ok(!api.isQuietDotTurn(turn('[Dot wake] New events', '[quiet]', false)), 'running turns stay visible')
-  const pane = read('../src/components/StructuredPane.vue')
+  const pane = read('../src/features/chat/controllers/useChatTimeline.ts')
   assert.ok(pane.includes('.filter(({ turn }) => !isQuietDotTurn(turn))'))
 })

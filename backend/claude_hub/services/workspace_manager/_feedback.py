@@ -3,8 +3,6 @@
 import re
 from typing import Callable
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ...models import FeedbackSummaryMode
 from ..feedback_automation import FeedbackAutomationSettings, FeedbackAutomationStore
 from ._constants import *  # noqa: F401,F403
@@ -19,7 +17,10 @@ _CANONICAL_FP_RE = re.compile(r"^(workspace|family|global):[0-9a-f]{16}$")
 _MAX_FP_LEN_HARD = 64  # absolute ceiling — anything longer is treated as legacy
 
 
-class _FeedbackMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _FeedbackMixin(_WorkspaceManagerBase):
     _feedback_chat_busy: Callable[[], bool] | None = None
     _feedback_automation_task: asyncio.Task[None] | None = None
 
@@ -56,7 +57,7 @@ class _FeedbackMixin:
             raise KeyError(workspace_id)
         return (
             FeedbackAutomationStore(self._feedback_store().state_root)
-            .state(workspace_id, getattr(self, "_feedback_started_at", _wm._now()))
+            .state(workspace_id, getattr(self, "_feedback_started_at", self._runtime_now()))
             .model_dump(mode="json")
         )
 
@@ -66,7 +67,9 @@ class _FeedbackMixin:
         if workspace_id not in self.workspaces:
             raise KeyError(workspace_id)
         store = FeedbackAutomationStore(self._feedback_store().state_root)
-        state = store.state(workspace_id, getattr(self, "_feedback_started_at", _wm._now()))
+        state = store.state(
+            workspace_id, getattr(self, "_feedback_started_at", self._runtime_now())
+        )
         state.settings = settings
         store.save(workspace_id, state)
         return state.model_dump(mode="json")
@@ -83,7 +86,7 @@ class _FeedbackMixin:
         if self._feedback_automation_lock.locked():
             return
         async with self._feedback_automation_lock:
-            now = _wm._now()
+            now = self._runtime_now()
             # Existing manual reapers retain ownership too. Do not multiply
             # background model sessions across many quiet workspaces.
             active_reapers = [
@@ -97,6 +100,7 @@ class _FeedbackMixin:
             controls = FeedbackAutomationStore(store.state_root)
             for workspace_id in list(self.workspaces):
                 try:
+                    active_run: FeedbackSummaryRun | None = None
                     state = controls.state(workspace_id, getattr(self, "_feedback_started_at", now))
                     if active_reapers:
                         if (
@@ -152,7 +156,7 @@ class _FeedbackMixin:
                         summary_input["_prompt_char_limit"] = 24_000
                         state.last_attempt_at = now
                         state.last_run_id = (
-                            active_run.id if active_reapers else summary_input["run_id"]
+                            active_run.id if active_run is not None else summary_input["run_id"]
                         )
                         state.last_outcome = "dispatching"
                         controls.save(workspace_id, state)

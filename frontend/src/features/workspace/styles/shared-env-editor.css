@@ -1,0 +1,39 @@
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface-sunken);
+  padding: 3px;
+}
+
+.segment-button {
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-md);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  cursor: pointer;
+  font-size: var(--ch-font-size-sm);
+  font-weight: 600;
+  padding: 8px 10px;
+  font-family: var(--ch-font-sans);
+  transition: all var(--ch-motion-fast);
+}
+
+.segment-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+.segment-button.active {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text-strong);
+}
+
+.segment-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

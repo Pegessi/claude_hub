@@ -3,13 +3,12 @@
 import os
 import tempfile
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ..workspace_snapshot import render_workspace_snapshot
+from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
 
-class _PersistenceMixin:
+class _PersistenceMixin(_WorkspaceManagerBase):
     def _task_dump_for_state(self, task: WorkspaceTask) -> dict[str, Any]:
         """Serialize a task for durable state without null optional metadata keys."""
 
@@ -107,7 +106,7 @@ class _PersistenceMixin:
 
     def _save_state(self) -> None:
         """Write the index and all workspaces, without cross-workspace atomicity."""
-        _wm.STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        self._runtime_state_root.mkdir(parents=True, exist_ok=True)
         index_payload = {
             "workspaces": [self._workspace_index_item(item) for item in self.workspaces.values()]
         }
@@ -125,6 +124,6 @@ class _PersistenceMixin:
         if state_text is None:
             state_text = self._workspace_state_file(workspace_id).read_text(encoding="utf-8")
         snapshot = render_workspace_snapshot(
-            workspace.model_dump(mode="json"), state_text, _wm._now()
+            workspace.model_dump(mode="json"), state_text, self._runtime_now()
         )
         self._atomic_write_text(self.snapshot_path(workspace_id), snapshot)

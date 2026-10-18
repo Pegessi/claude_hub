@@ -1,43 +1,13 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import ts from 'typescript'
+import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-// Same data-URL bundling as the other timeline suites: the module's sibling
-// `@/utils/*` imports are stripped and concatenated ahead of it because a
-// data-URL module has no resolver.
-const timelineSource = await readFile(
-  new URL('../src/utils/agentStreamTimeline.ts', import.meta.url),
-  'utf8',
-)
-const transpileOptions = {
-  compilerOptions: {
-    module: ts.ModuleKind.ES2022,
-    target: ts.ScriptTarget.ES2020,
-  },
-}
-const siblings = await Promise.all(
-  ['duration', 'chatQuestionResponse', 'subagentTool', 'agentImage'].map(async name => {
-    const source = await readFile(
-      new URL(`../src/utils/${name}.ts`, import.meta.url),
-      'utf8',
-    )
-    return ts.transpileModule(source, transpileOptions).outputText
-  }),
-)
-const timelineJs = ts.transpileModule(
-  timelineSource.replace(/^import .* from '@\/utils\/.*$/gm, ''),
-  transpileOptions,
-).outputText
-const bundled = `${siblings.join('\n')}\n${timelineJs}`
-const { groupEventsIntoTurns } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
-)
+const { groupEventsIntoTurns } = await loadChatUtility('agentStreamTimeline')
 
 const paneSource = await readFile(
-  new URL('../src/components/StructuredPane.vue', import.meta.url),
+  new URL('../src/features/chat/components/ChatTurnParts.vue', import.meta.url),
   'utf8',
 )
 const errorStart = paneSource.indexOf(`v-else-if="part.kind === 'error'"`)

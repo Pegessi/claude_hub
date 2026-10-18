@@ -10,9 +10,10 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Tuple
 
+import claude_hub.services.workspace_state_policy as state_policy
+
 from ..models import WorkspaceTask
 from ..models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
-from . import workspace_state_policy as state_policy
 from .directed_wait import DirectedWaitCoordinator
 from .request_fingerprint import request_fingerprint
 from .task_graph import (

@@ -6,8 +6,6 @@ from contextvars import ContextVar
 
 from pydantic import ValidationError
 
-import claude_hub.services.workspace_manager as _wm  # noqa: F401  (call-time patch lookup)
-
 from ..legacy_state_migration import (
     LEGACY_TASK_KEYS,
     index_has_legacy_keys,
@@ -22,12 +20,15 @@ class _UnknownTaskFieldsError(ValueError):
     """A persisted task contains fields this build cannot interpret."""
 
 
-class _StateMixin:
+from ._base import _WorkspaceManagerBase
+
+
+class _StateMixin(_WorkspaceManagerBase):
     scheduled_task_runs: dict[str, ScheduledTaskRun]
     _scheduled_chat_recovery_pending: bool
 
     def __init__(self) -> None:
-        self._feedback_started_at = _wm._now()
+        self._feedback_started_at = self._runtime_now()
         self.workspaces: dict[str, Workspace] = {}
         self.tasks: dict[str, WorkspaceTask] = {}
         self._task_activity_cursors: dict[str, tuple[int, int]] = {}
@@ -47,13 +48,13 @@ class _StateMixin:
         # scheduler monitor, run-now, and completion-observer drain attempts.
         self._scheduled_chat_tab_locks: dict[str, asyncio.Lock] = {}
         self._scheduled_chat_recovery_pending = False
-        self._scheduled_chat_dispatch: Any = None
+        self._scheduled_chat_dispatch: ScheduledChatDispatch | None = None
         # Injected readiness probe: ensures the target Chat's native runtime
         # (tailer + provider) is spawned and reports whether it is ready to
         # accept a turn. A cold/idle Chat is lazily spawned here and the run is
         # parked WAITING with a bounded redrain instead of delivered into a
         # runtime that does not exist yet.
-        self._scheduled_chat_readiness: Any = None
+        self._scheduled_chat_readiness: ScheduledChatReadiness | None = None
         # Per-tab self-cleaning task that re-runs the FIFO drain after a short
         # delay when the head run is waiting on a cold runtime to come up. At
         # most one is pending per tab, so cold-start polling cannot pile up.
@@ -62,7 +63,7 @@ class _StateMixin:
         # "active" (provider still owns the turn), "terminalized" (a dead
         # orphan was just terminalized and its completion observer will fire),
         # "dead" (no start edge and the provider is idle), or "unknown".
-        self._scheduled_chat_liveness: Any = None
+        self._scheduled_chat_liveness: ScheduledChatLiveness | None = None
         # Throttle transcript reaps for runs stuck in DISPATCHING/RUNNING:
         # run id -> last reconciliation attempt. Process-local; cold-restart
         # reconciliation runs once unthrottled at startup.
@@ -102,7 +103,7 @@ class _StateMixin:
         self._load_state()
 
     def _workspace_dir(self, workspace_id: str) -> Path:
-        return _wm.STATE_ROOT / workspace_id
+        return self._runtime_state_root / workspace_id
 
     def _workspace_state_file(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "state.json"
@@ -142,7 +143,7 @@ class _StateMixin:
         return self._workspace_dir(workspace_id) / "attachments"
 
     def _feedback_store(self) -> FeedbackLessonStore:
-        return FeedbackLessonStore(_wm.STATE_ROOT)
+        return FeedbackLessonStore(self._runtime_state_root)
 
     def snapshot_path(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "snapshot.md"
@@ -223,7 +224,7 @@ class _StateMixin:
         state_file: Path,
         index_item: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        raw = json.loads(state_file.read_text(encoding="utf-8"))
+        raw: dict[str, Any] = json.loads(state_file.read_text(encoding="utf-8"))
         needs_migration = state_has_legacy_orchestration_keys(raw) or (
             index_item is not None and index_has_legacy_keys(index_item)
         )

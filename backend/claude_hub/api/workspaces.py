@@ -9,6 +9,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
 from fastapi.routing import APIRoute
 
+from claude_hub.api.routes.workspaces.common import (
+    TaskSecretSafeRoute,
+    board_etag,
+    task_public_http,
+)
+from claude_hub.api.routes.workspaces.execution import register_execution_routes
+
 from ..auth.dependencies import get_current_user
 from ..config import settings
 from ..models import (
@@ -54,7 +61,7 @@ from ..models.schemas import (
     TaskProgressRequest,
 )
 from ..models.task_mailbox import TaskEvent
-from ..services import workspace_manager
+from ..services import WorkspaceManager, workspace_manager
 from ..services.task_dependencies import TaskHasDependentsError
 from ..services.task_graph import TaskHasDescendantsError
 from ..services.task_mailbox import TaskCallIdConflict
@@ -73,86 +80,13 @@ from ..services.workspace_manager._task_execution import (
     TaskReporterForbidden,
 )
 
-
-class _TaskSecretSafeRoute(APIRoute):
-    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
-        handler = super().get_route_handler()
-        protected = self.endpoint.__name__ in {
-            "create_task",
-            "task_progress",
-            "manual_task_progress",
-            "handoff_task_execution",
-        }
-
-        async def handle(request: Request) -> Response:
-            try:
-                return await handler(request)
-            except RequestValidationError as exc:
-                body = exc.body
-                contains_secret = isinstance(body, dict) and bool(
-                    {"reporter_key", "new_reporter_key"}.intersection(body)
-                )
-                if protected or contains_secret:
-                    raise HTTPException(status_code=422, detail="invalid_task_request") from None
-                raise
-
-        return handle
+_TaskSecretSafeRoute = TaskSecretSafeRoute
+_board_etag = board_etag
+_task_public_http = task_public_http
 
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"], route_class=_TaskSecretSafeRoute)
 logger = logging.getLogger(__name__)
-
-# Per-session timestamps that tick on every status refresh without reflecting any
-# content the board UI renders. Excluding them from the ETag lets idle 2.5s polls
-# resolve to a 304 instead of re-shipping the whole (gzipped) board body.
-_VOLATILE_SESSION_FIELDS = ("updated_at", "last_activity_at")
-_VOLATILE_MARKDOWN_FIELDS = ("updated_at",)
-
-
-def _board_etag(board: WorkspaceBoard) -> str:
-    """Compute a stable, order-independent ETag over board *content*.
-
-    Volatile per-session/markdown timestamps are stripped so that an idle board
-    (heavy content byte-stable, only cosmetic timestamps churning) keeps the same
-    ETag across polls. Lists are sorted by id so server-side ordering jitter does
-    not change the hash.
-    """
-    payload: dict[str, Any] = json.loads(board.model_dump_json())
-
-    for session in payload.get("sessions") or []:
-        for field in _VOLATILE_SESSION_FIELDS:
-            session.pop(field, None)
-
-    for document in payload.get("markdown_documents") or []:
-        for field in _VOLATILE_MARKDOWN_FIELDS:
-            document.pop(field, None)
-
-    for key in ("tasks", "sessions", "reports", "markdown_documents"):
-        items = payload.get(key)
-        if isinstance(items, list):
-            items.sort(key=lambda item: item.get("id") or "")
-
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
-    return f'"{digest}"'
-
-
-def _task_public_http(exc: Exception) -> HTTPException:
-    if isinstance(exc, TaskReporterForbidden):
-        return HTTPException(status_code=403, detail=str(exc))
-    if isinstance(exc, TaskExecutionConflict):
-        return HTTPException(status_code=409, detail=str(exc))
-    if isinstance(exc, KeyError):
-        return HTTPException(status_code=404, detail=str(exc) or "Not found")
-    if isinstance(exc, TaskCallIdConflict):
-        return HTTPException(status_code=409, detail=str(exc))
-    if isinstance(exc, TaskHasDescendantsError):
-        return HTTPException(status_code=409, detail=str(exc))
-    if isinstance(exc, (DuplicateWorkspaceError, AmbiguousWorkspaceError)):
-        return HTTPException(status_code=409, detail=str(exc))
-    if isinstance(exc, (ValueError, RuntimeError)):
-        return HTTPException(status_code=400, detail=str(exc))
-    raise exc
 
 
 @router.get("", response_model=List[Workspace])
@@ -613,325 +547,28 @@ async def ensure_workspace_agent(
         raise HTTPException(status_code=502, detail=str(e)) from e
 
 
-@router.patch("/tasks/{task_id}", response_model=WorkspaceTask)
-async def update_task(
-    task_id: str,
-    payload: WorkspaceTaskUpdate,
-    current_user: User = Depends(get_current_user),
-) -> WorkspaceTask:
-    """Update task metadata or status."""
-    if (
-        payload.title is None
-        and payload.prompt is None
-        and payload.status is None
-        and payload.goal_packet is None
-        and payload.task_mode is None
-        and payload.review_profiles is None
-        and payload.autonomy_policy is None
-        and payload.autonomous_run is None
-        and payload.depends_on_task_ids is None
-        and "agent_tag" not in payload.model_fields_set
-    ):
-        raise HTTPException(status_code=400, detail="No task update provided")
-    try:
-        return await workspace_manager.update_task(task_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+class _WorkspaceBindings:
+    def workspace_manager(self) -> WorkspaceManager:
+        return workspace_manager
 
 
-@router.delete("/tasks/{task_id}", status_code=204)
-async def delete_task(
-    task_id: str,
-    current_user: User = Depends(get_current_user),
-) -> None:
-    """Delete a leaf workspace task and its durable reports/events."""
-    try:
-        workspace_manager.delete_task(task_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except (TaskHasDescendantsError, TaskHasDependentsError, TaskExecutionConflict) as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/cleanup", response_model=TaskCleanupResult)
-async def cleanup_task_session(
-    task_id: str,
-    current_user: User = Depends(get_current_user),
-) -> TaskCleanupResult:
-    """Safely delete a caller-owned ephemeral session after a terminal task."""
-    try:
-        return await workspace_manager.cleanup_task_session(task_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/feedback/reap", response_model=FeedbackReaperRun)
-async def reap_task_feedback(
-    task_id: str,
-    payload: FeedbackReaperRequest,
-    current_user: User = Depends(get_current_user),
-) -> FeedbackReaperRun:
-    """Manually collect task feedback evidence and optional lesson drafts."""
-    try:
-        return workspace_manager.reap_task_feedback(task_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/spawn", response_model=ManagedSessionPublic, status_code=201)
-async def spawn_worker(
-    task_id: str,
-    payload: SpawnWorkerRequest,
-    current_user: User = Depends(get_current_user),
-) -> ManagedSessionPublic:
-    """Spawn a worker session for a task."""
-    try:
-        session = await workspace_manager.spawn_worker(task_id, payload.agent_type)
-        return ManagedSessionPublic.from_managed_session(session)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except (RuntimeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/start", response_model=WorkspaceTask, status_code=201)
-async def start_task(
-    task_id: str,
-    payload: StartTaskRequest,
-    current_user: User = Depends(get_current_user),
-) -> WorkspaceTask:
-    """Queue a task and dispatch it when its target agent is available."""
-    try:
-        return await workspace_manager.start_task(task_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except (RuntimeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/continue", response_model=WorkspaceTask)
-async def continue_task(
-    task_id: str,
-    payload: ContinueTaskRequest,
-    current_user: User = Depends(get_current_user),
-) -> WorkspaceTask:
-    """Move a review task back to working on its original agent."""
-    try:
-        return await workspace_manager.continue_task(task_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except (RuntimeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/request-review", response_model=WorkspaceTask)
-async def request_task_review(
-    task_id: str,
-    payload: RequestTaskReviewRequest | None = None,
-    current_user: User = Depends(get_current_user),
-) -> WorkspaceTask:
-    """Manually request reviewer checks for a task."""
-    try:
-        return await workspace_manager.request_task_review(task_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/abort", response_model=WorkspaceTask)
-async def abort_task(
-    task_id: str,
-    payload: ManualTaskControlRequest,
-    current_user: User = Depends(get_current_user),
-) -> WorkspaceTask:
-    """Manually abort an active task and return it to the todo column."""
-    try:
-        return await workspace_manager.abort_task(task_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task not found") from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/tasks/{task_id}/dispatch-decision", response_model=WorkspaceTask)
-async def apply_dispatch_decision(
-    task_id: str,
-    payload: DispatchDecisionRequest,
-    current_user: User = Depends(get_current_user),
-) -> WorkspaceTask:
-    """Apply a structured dispatch decision from the dispatcher agent."""
-    try:
-        return await workspace_manager.apply_dispatch_decision(task_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Task or agent not found") from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/{workspace_id}/dispatch", status_code=204)
-async def dispatch_workspace(
-    workspace_id: str,
-    current_user: User = Depends(get_current_user),
-) -> None:
-    """Manually trigger dispatch for queued tasks in one workspace."""
-    try:
-        await workspace_manager.dispatch_workspace(workspace_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Workspace not found") from e
-
-
-@router.delete("/sessions/{managed_session_id}", status_code=204)
-async def delete_session(
-    managed_session_id: str,
-    current_user: User = Depends(get_current_user),
-) -> None:
-    """Delete an idle managed agent session and its terminal tab."""
-    try:
-        await workspace_manager.delete_session(managed_session_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Session not found") from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/sessions/{managed_session_id}/send", status_code=204)
-async def send_session_message(
-    managed_session_id: str,
-    payload: SendSessionMessageRequest,
-    current_user: User = Depends(get_current_user),
-) -> None:
-    """Send a message to a managed session."""
-    try:
-        session = workspace_manager.sessions.get(managed_session_id)
-        if session is not None and session.session_kind == SessionKind.CHAT:
-            await workspace_manager.send_chat_session_message(
-                managed_session_id, payload.message, payload.attachments, payload.call_id
-            )
-        else:
-            await workspace_manager.send_session_message(
-                managed_session_id,
-                payload.message,
-                payload.attachments,
-            )
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Session not found") from e
-    except (RuntimeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/sessions/{managed_session_id}/retry-uncertain", status_code=204)
-async def retry_uncertain_delivery(
-    managed_session_id: str,
-    payload: RetryUncertainDeliveryRequest,
-    current_user: User = Depends(get_current_user),
-) -> None:
-    """Operator retry of an uncertain delivery.
-
-    Moves ``call_id`` from ``uncertain_call_ids`` back to
-    ``pending_call_ids`` so the normal pump path can re-deliver it. The
-    original payload is preserved. Rejects unknown, delivered, processing,
-    and cross-session call_ids.
-
-    The actor identity is derived from the authenticated ``current_user``
-    (``open_id``) so the audit trail cannot be forged by the client.
-    """
-    try:
-        await workspace_manager.retry_uncertain_delivery(
-            managed_session_id,
-            payload.call_id,
-            reason=payload.reason,
-            actor=current_user.open_id,
-        )
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except DeliveryUncertain as e:
-        # The retry hit another ambiguous tmux failure; the delivery is
-        # still uncertain. Surface a visible 400 (not a false 204) so the
-        # operator can decide whether to retry again.
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.post("/sessions/{managed_session_id}/reports", response_model=AgentReport, status_code=201)
-async def create_session_report(
-    managed_session_id: str,
-    payload: AgentReportCreate,
-    current_user: User = Depends(get_current_user),
-) -> AgentReport:
-    """Append a progress report to a managed session."""
-    try:
-        return await workspace_manager.create_report(managed_session_id, payload)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail="Session not found") from e
-    except ReportCallIdConflict as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@router.get("/{workspace_id}/task-capabilities", response_model=TaskExecutionCapabilities)
-async def task_execution_capabilities(
-    workspace_id: str,
-    current_user: User = Depends(get_current_user),
-) -> TaskExecutionCapabilities:
-    if workspace_id not in workspace_manager.workspaces:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    return TaskExecutionCapabilities()
-
-
-@router.post("/{workspace_id}/tasks/{task_id}/progress", response_model=TaskExecutionMutationResult)
-async def task_progress(
-    workspace_id: str,
-    task_id: str,
-    payload: TaskProgressRequest,
-    request: Request,
-    current_user: User = Depends(get_current_user),
-) -> TaskExecutionMutationResult:
-    try:
-        return await workspace_manager.record_task_progress(
-            workspace_id, task_id, payload, request.headers.get("X-Task-Reporter-Key")
-        )
-    except (KeyError, ValueError, RuntimeError, TaskReporterForbidden) as exc:
-        raise _task_public_http(exc) from None
-
-
-@router.post(
-    "/{workspace_id}/tasks/{task_id}/progress/manual", response_model=TaskExecutionMutationResult
-)
-async def manual_task_progress(
-    workspace_id: str,
-    task_id: str,
-    payload: TaskManualProgressRequest,
-    current_user: User = Depends(get_current_user),
-) -> TaskExecutionMutationResult:
-    try:
-        return await workspace_manager.record_manual_task_progress(workspace_id, task_id, payload)
-    except (KeyError, ValueError, RuntimeError) as exc:
-        raise _task_public_http(exc) from None
-
-
-@router.post("/{workspace_id}/tasks/{task_id}/handoff", response_model=TaskExecutionMutationResult)
-async def handoff_task_execution(
-    workspace_id: str,
-    task_id: str,
-    payload: TaskExecutionHandoffRequest,
-    current_user: User = Depends(get_current_user),
-) -> TaskExecutionMutationResult:
-    try:
-        return await workspace_manager.handoff_task_execution(workspace_id, task_id, payload)
-    except TaskExecutionConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Task not found") from None
-    except ValueError:
-        raise HTTPException(status_code=400, detail="invalid_task_handoff") from None
+_execution_endpoints = register_execution_routes(router, _WorkspaceBindings())
+update_task = _execution_endpoints.update_task
+delete_task = _execution_endpoints.delete_task
+cleanup_task_session = _execution_endpoints.cleanup_task_session
+reap_task_feedback = _execution_endpoints.reap_task_feedback
+spawn_worker = _execution_endpoints.spawn_worker
+start_task = _execution_endpoints.start_task
+continue_task = _execution_endpoints.continue_task
+request_task_review = _execution_endpoints.request_task_review
+abort_task = _execution_endpoints.abort_task
+apply_dispatch_decision = _execution_endpoints.apply_dispatch_decision
+dispatch_workspace = _execution_endpoints.dispatch_workspace
+delete_session = _execution_endpoints.delete_session
+send_session_message = _execution_endpoints.send_session_message
+retry_uncertain_delivery = _execution_endpoints.retry_uncertain_delivery
+create_session_report = _execution_endpoints.create_session_report
+task_execution_capabilities = _execution_endpoints.task_execution_capabilities
+task_progress = _execution_endpoints.task_progress
+manual_task_progress = _execution_endpoints.manual_task_progress
+handoff_task_execution = _execution_endpoints.handoff_task_execution

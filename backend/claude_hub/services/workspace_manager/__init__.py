@@ -6,6 +6,14 @@ singleton, and all module-level constants/helpers are re-exported here so that
 monkeypatch targets such as ``STATE_ROOT`` and ``_now``.
 """
 
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import claude_hub.services.workspace_manager._scheduling as _scheduling_module
+
+from ...models import Workspace
 from ._artifacts import _ArtifactsMixin
 from ._attachments import _AttachmentsMixin
 from ._chat import _ChatMixin
@@ -62,6 +70,20 @@ class WorkspaceManager(
     _SchedulingMixin,
 ):
     """Human-orchestrated workspace/task/session layer above TTYDManager."""
+
+    def _runtime_now(self) -> datetime:
+        return _now()
+
+    @property
+    def _runtime_state_root(self) -> Path:
+        return STATE_ROOT
+
+    @property
+    def _runtime_scheduled_tasks_file(self) -> Path:
+        return _scheduling_module.SCHEDULED_TASKS_FILE
+
+    def _runtime_resident_prompt(self, workspace: Workspace, base_url: str, session_id: str) -> str:
+        return build_resident_agent_prompt(workspace, base_url, session_id)
 
 
 workspace_manager = WorkspaceManager()

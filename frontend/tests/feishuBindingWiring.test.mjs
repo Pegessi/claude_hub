@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 const pane = readFileSync(new URL('../src/components/TerminalPane.vue', import.meta.url), 'utf8')
-const structuredPane = readFileSync(new URL('../src/components/StructuredPane.vue', import.meta.url), 'utf8')
+const structuredPane = readFileSync(new URL('../src/features/chat/StructuredPane.vue', import.meta.url), 'utf8')
+const userMessage = readFileSync(new URL('../src/features/chat/components/ChatUserMessage.vue', import.meta.url), 'utf8')
+const timeline = readFileSync(new URL('../src/features/chat/components/ChatTimeline.vue', import.meta.url), 'utf8')
+const actions = readFileSync(new URL('../src/features/chat/controllers/useChatActions.ts', import.meta.url), 'utf8')
 const panel = readFileSync(new URL('../src/components/FeishuBindingPanel.vue', import.meta.url), 'utf8')
 const binding = readFileSync(new URL('../src/composables/useFeishuBinding.ts', import.meta.url), 'utf8')
 const identity = readFileSync(new URL('../src/utils/feishuIdentity.ts', import.meta.url), 'utf8')
@@ -19,10 +22,10 @@ test('local direct Chat surface mounts one Feishu binding panel beside its sessi
 })
 
 test('message source is rendered from each durable turn instead of binding state or turn id', () => {
-  assert.match(structuredPane, /:data-message-origin="turn\.origin"/)
-  assert.match(structuredPane, /v-if="turn\.origin === 'feishu'"/)
-  assert.match(structuredPane, /\{\{ messageSourceLabel\(turn\) \}\}/)
-  assert.doesNotMatch(structuredPane, /turn\.turnId.*(?:startsWith|includes).*feishu/)
+  assert.match(userMessage, /:data-message-origin="turn\.origin"/)
+  assert.match(userMessage, /v-if="turn\.origin === 'feishu'"/)
+  assert.match(userMessage, /\{\{ messageSourceLabel\(turn\) \}\}/)
+  assert.doesNotMatch(userMessage, /turn\.turnId.*(?:startsWith|includes).*feishu/)
 })
 
 test('pool binding retains accessible status and explicit pairing controls', () => {
@@ -66,10 +69,10 @@ test('the Feishu entry reuses the monochrome bird mark and scopes Bot avatars to
 })
 
 test('Feishu message provenance resolves a bound Bot avatar before the outline brand mark', () => {
-  assert.ok(structuredPane.includes('resolvedFeishuSourceAvatarUrl(turn)'))
-  assert.ok(structuredPane.includes('bot.app_id === turn.feishu?.appId'))
-  assert.ok(structuredPane.includes('feishuBotPoolStore.pool?.pool_revision'))
-  assert.match(structuredPane, /<FeishuIdentityMark[\s\S]{0,160}conversation-message-source__mark/)
-  assert.ok(structuredPane.includes(':identity-key="feishuSourceIdentityKey(turn)"'))
-  assert.doesNotMatch(structuredPane, /conversation-message-source__mark[\s\S]{0,120}>\s*飞/)
+  assert.ok(userMessage.includes('resolvedFeishuSourceAvatarUrl(turn)'))
+  assert.ok(actions.includes('bot.app_id === turn.feishu?.appId'))
+  assert.ok(timeline.includes('feishuBotPoolStore.pool?.pool_revision'))
+  assert.match(userMessage, /<FeishuIdentityMark[\s\S]{0,160}conversation-message-source__mark/)
+  assert.ok(userMessage.includes(':identity-key="feishuSourceIdentityKey(turn)"'))
+  assert.doesNotMatch(userMessage, /conversation-message-source__mark[\s\S]{0,120}>\s*飞/)
 })

@@ -59,14 +59,13 @@ _VALID_IMAGE_BYTES: dict[str, bytes] = {
 
 @pytest.fixture(autouse=True)
 def deterministic_workspace_runtime(monkeypatch: MonkeyPatch) -> None:
-    """Isolate metadata ports and use ready fake terminals for API tests."""
+    """Isolate ports and skip the handshake covered by prompt-focused test modules."""
     monkeypatch.setattr(workspace_module.settings, "port", 8173)
 
-    async def fake_capture_tmux_output(_tmux_session: str) -> str:
-        # Individual tests can override this module-local default as needed.
-        return "? for shortcuts"
+    async def fake_wait_for_agent_prompt(_session: ManagedSession) -> None:
+        return None
 
-    monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_tmux_output)
+    monkeypatch.setattr(workspace_manager, "_wait_for_agent_prompt", fake_wait_for_agent_prompt)
 
 
 def _data_url(mime: str, raw: bytes) -> str:

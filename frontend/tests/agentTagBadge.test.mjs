@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
 const viewSource = await readFile(
-  new URL('../src/components/AgentWorkspaceView.vue', import.meta.url),
+  new URL('../src/features/workspace/components/WorkspaceBoard.vue', import.meta.url),
   'utf8',
 )
 
@@ -12,8 +12,12 @@ test('agent tag badge renders only when task.agent_tag is set', () => {
   assert.match(viewSource, /class="agent-tag-badge"/)
 })
 
+const styleBlock = await readFile(
+  new URL('../src/features/workspace/styles/workspace-board-task-cards.css', import.meta.url),
+  'utf8',
+)
+
 test('agent tag badge styling stays restrained', () => {
-  const styleBlock = viewSource.slice(viewSource.lastIndexOf('<style'))
   assert.match(styleBlock, /\.agent-tag-badge\s*\{/)
   assert.match(styleBlock, /font-size:\s*10px/)
   assert.match(styleBlock, /text-overflow:\s*ellipsis/)
