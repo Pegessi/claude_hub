@@ -3,6 +3,7 @@ import type { TimelinePart, TimelineTool, TimelineTurn } from '../timeline/types
 import {
   foldTurnParts,
   splitTurnProcess,
+  subagentRegionErrorCount,
   turnProcessLabel,
 } from '../timeline/turnProcess'
 import { presentThinkingParts, type ThinkingDisplayPart, type ThinkingState } from '@/utils/thinkingPresentation'
@@ -38,6 +39,31 @@ export function isTurnFoldable(turn: TimelineTurn, _latestTurnKey: string | null
   return splitTurnProcess(turn) !== null
 }
 
+function isSummaryVisiblePart(part: TimelinePart): boolean {
+  switch (part.kind) {
+    case 'text':
+      return !(part.fromPlan && part.planKind === 'progress')
+    case 'status':
+    case 'approval':
+    case 'error':
+      return true
+    case 'subagents':
+      return subagentRegionErrorCount(part) > 0 ||
+        part.threads.some(child => child.lifecycleStatus === 'failed' || child.lifecycleStatus === 'cancelled')
+    default:
+      return false
+  }
+}
+
+function compactSummaryPart(part: TimelinePart): TimelinePart {
+  if (part.kind === 'subagents') return { ...part, key: `${part.key}-summary`, compact: true }
+  return part
+}
+
+function summaryPartsForPendingDetail(turn: TimelineTurn): TimelinePart[] {
+  return turn.parts.filter(isSummaryVisiblePart).map(compactSummaryPart)
+}
+
 export function presentTurnParts(
   turn: TimelineTurn,
   latestTurnKey: string | null,
@@ -46,7 +72,7 @@ export function presentTurnParts(
 ): ThinkingDisplayPart<TimelinePart>[] {
   const isExpanded = isTurnProcessExpanded(turn, latestTurnKey, overrides)
   const parts = detail && detail.status !== 'loaded'
-    ? [lazyProcessPart(turn, detail), ...turn.parts]
+    ? [lazyProcessPart(turn, detail), ...summaryPartsForPendingDetail(turn)]
     : isTurnFoldable(turn, latestTurnKey)
       ? foldTurnParts(turn, isExpanded)
       : turn.parts

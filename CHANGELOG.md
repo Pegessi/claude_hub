@@ -7,6 +7,16 @@
 
 ## Released
 
+### fix(chat): invalidate stale detail ranges and edited history caches
+
+- Tie detail reads to their exact history range so older responses cannot mark
+  a newer range complete or overwrite its request state.
+- Keep process content folded while a refreshed summary invalidates cached detail,
+  without hiding replies, approvals, errors or current status.
+- Clear the active history snapshot on explicit edit/reset so truncated and
+  renumbered history is read from the beginning, not an obsolete cached cursor.
+- Cover deferred detail responses, cached range growth and warm-cache edit/resend.
+
 ### feat(chat): load conversation history before execution details
 
 - Load historical questions, replies, attachments and essential state without

@@ -145,7 +145,10 @@ export function useAgentStream(): UseAgentStreamApi {
   /** Latest-wins owner for requests that replace active capabilities. */
   let capabilitiesUpdateAbort: AbortController | null = null
   let nextHistoryDetailRequestId = 1
-  const historyDetailRequests = new Map<string, number>()
+  const historyDetailRequests = new Map<
+    string,
+    { id: number; descriptor: AgentStreamHistoryDetail; abort: AbortController }
+  >()
   // Stream sequences are zero-based and cursors are exclusive. SSE is only an
   // accelerator: future events stay buffered until long-poll fills every gap.
   const sequenceBuffer = createContiguousEventBuffer<AgentStreamEvent>()
@@ -177,9 +180,16 @@ export function useAgentStream(): UseAgentStreamApi {
     batcher.enqueue(committed)
   }
 
+  function abortHistoryDetailRequests() {
+    for (const request of historyDetailRequests.values()) request.abort.abort()
+    historyDetailRequests.clear()
+  }
+
   function reset(snapshot?: AgentStreamHistorySnapshot) {
     // Flush any pending events before clearing so they are not lost.
     batcher.flushAndCancel()
+    if (!snapshot && currentStreamPath) agentStreamHistoryCache.delete(currentStreamPath)
+    abortHistoryDetailRequests()
     capabilities.value = snapshot?.capabilities ?? null
     events.value = snapshot?.events ?? []
     historyDetails.value = snapshot?.historyDetails
@@ -294,6 +304,18 @@ export function useAgentStream(): UseAgentStreamApi {
       previous.event_count !== next.event_count
   }
 
+  function sameHistoryDetailDescriptor(
+    previous: AgentStreamHistoryDetail,
+    next: AgentStreamHistoryDetail,
+  ): boolean {
+    return previous.turn_id === next.turn_id && !detailChanged(previous, next)
+  }
+
+  function currentHistoryDetailMatches(turnId: string, descriptor: AgentStreamHistoryDetail): boolean {
+    const current = historyDetails.value[turnId]
+    return Boolean(current && sameHistoryDetailDescriptor(current.descriptor, descriptor))
+  }
+
   function recordHistoryDetails(details: AgentStreamHistoryDetail[] | undefined) {
     if (!details || details.length === 0) return
     const next = { ...historyDetails.value }
@@ -306,7 +328,11 @@ export function useAgentStream(): UseAgentStreamApi {
       } else if (detailChanged(existing.descriptor, descriptor)) {
         // A newer summary covers a different raw range. Previously fetched
         // detail is no longer complete for this descriptor; make the next
-        // expansion read the fixed, current range.
+        // expansion read the fixed, current range and retire any in-flight
+        // request for the older range.
+        const request = historyDetailRequests.get(descriptor.turn_id)
+        request?.abort.abort()
+        historyDetailRequests.delete(descriptor.turn_id)
         next[descriptor.turn_id] = { descriptor, status: 'idle' }
         changed = true
       }
@@ -314,9 +340,14 @@ export function useAgentStream(): UseAgentStreamApi {
     if (changed) historyDetails.value = next
   }
 
-  function markHistoryDetail(turnId: string, patch: Partial<AgentStreamHistoryDetailEntry>) {
+  function markHistoryDetail(
+    turnId: string,
+    patch: Partial<AgentStreamHistoryDetailEntry>,
+    expectedDescriptor?: AgentStreamHistoryDetail,
+  ) {
     const existing = historyDetails.value[turnId]
     if (!existing) return
+    if (expectedDescriptor && !sameHistoryDetailDescriptor(existing.descriptor, expectedDescriptor)) return
     historyDetails.value = {
       ...historyDetails.value,
       [turnId]: { ...existing, ...patch },
@@ -634,14 +665,14 @@ export function useAgentStream(): UseAgentStreamApi {
     if (stopped || !sourceId || !streamPath || !entry || entry.status === 'loaded' || entry.status === 'loading') return
 
     const requestId = nextHistoryDetailRequestId++
-    historyDetailRequests.set(turnId, requestId)
-    markHistoryDetail(turnId, { status: 'loading', errorMessage: undefined })
-
     const descriptor = entry.descriptor
+    const controller = new AbortController()
+    historyDetailRequests.set(turnId, { id: requestId, descriptor, abort: controller })
+    markHistoryDetail(turnId, { status: 'loading', errorMessage: undefined }, descriptor)
+
     const detailGeneration = stateMachine.getGeneration()
     const since = Math.max(-1, descriptor.first_sequence - 1)
     const through = descriptor.last_sequence
-    const controller = new AbortController()
     const detailEvents: AgentStreamEvent[] = []
     try {
       let cursor = since
@@ -661,14 +692,16 @@ export function useAgentStream(): UseAgentStreamApi {
           currentSessionId !== sourceId ||
           currentStreamPath !== streamPath ||
           !stateMachine.isCurrent(detailGeneration) ||
-          historyDetailRequests.get(turnId) !== requestId
+          historyDetailRequests.get(turnId)?.id !== requestId ||
+          !currentHistoryDetailMatches(turnId, descriptor)
         ) return
         detailEvents.push(...page.events)
         cursor = page.next_sequence
         if (!page.has_more) break
       }
+      if (historyDetailRequests.get(turnId)?.id !== requestId || !currentHistoryDetailMatches(turnId, descriptor)) return
       replaceHistoryDetailEvents(turnId, descriptor, detailEvents)
-      markHistoryDetail(turnId, { status: 'loaded', errorMessage: undefined })
+      markHistoryDetail(turnId, { status: 'loaded', errorMessage: undefined }, descriptor)
     } catch (err) {
       if (
         stopped ||
@@ -676,13 +709,13 @@ export function useAgentStream(): UseAgentStreamApi {
         currentStreamPath !== streamPath ||
         !stateMachine.isCurrent(detailGeneration)
       ) return
-      if (historyDetailRequests.get(turnId) !== requestId) return
+      if (historyDetailRequests.get(turnId)?.id !== requestId || !currentHistoryDetailMatches(turnId, descriptor)) return
       markHistoryDetail(turnId, {
         status: 'error',
         errorMessage: err instanceof Error ? err.message : 'Failed to load execution details',
-      })
+      }, descriptor)
     } finally {
-      if (historyDetailRequests.get(turnId) === requestId) historyDetailRequests.delete(turnId)
+      if (historyDetailRequests.get(turnId)?.id === requestId) historyDetailRequests.delete(turnId)
     }
   }
 
@@ -813,6 +846,7 @@ export function useAgentStream(): UseAgentStreamApi {
     abortLongPoll()
     abortHydration()
     abortCapabilitiesUpdate()
+    abortHistoryDetailRequests()
     stateMachine.stop()
     connectionState.value = 'idle'
   }

@@ -65,6 +65,38 @@ test('parent completion and errors determine reasoning state without mutating ti
   }
 })
 
+test('pending lazy detail projection hides unfinished process while preserving summary text', () => {
+  const turn = groupEventsIntoTurns([
+    event(1, 'turn_started', { summary: 'question' }),
+    event(2, 'thinking_delta', { text: 'hidden thought' }),
+    event(3, 'text_delta', { text: 'visible answer' }),
+    event(4, 'tool_call_started', { tool_call_id: 'shell', name: 'Bash', args: {} }),
+  ])[0]
+  const parts = presentTurnParts(turn, turn.key, new Map(), {
+    descriptor: { turn_id: 'turn', first_sequence: 1, last_sequence: 4, event_count: 4 },
+    status: 'idle',
+  })
+  assert.deepEqual(parts.map(part => part.kind), ['process', 'text'])
+  assert.equal(parts[1].text, 'visible answer')
+})
+
+test('pending lazy detail projection preserves approval, error, status and compact failed subagent summaries', () => {
+  const childId = 'child-thread'
+  const turn = groupEventsIntoTurns([
+    event(1, 'turn_started', { summary: 'question' }),
+    event(2, 'approval_required', { tool_call_id: 'q', kind: 'question', title: 'Approve?' }),
+    event(3, 'status', { text: 'child failed', provider_status: 'error', subagent_thread: childId }, { message_id: 'child-status' }),
+    event(4, 'error', { message: 'top-level warning' }),
+    event(5, 'text_delta', { text: 'visible answer' }),
+  ])[0]
+  const parts = presentTurnParts(turn, turn.key, new Map(), {
+    descriptor: { turn_id: 'turn', first_sequence: 1, last_sequence: 5, event_count: 5 },
+    status: 'idle',
+  })
+  assert.deepEqual(parts.map(part => part.kind), ['process', 'approval', 'subagents', 'error', 'text'])
+  assert.equal(parts[2].compact, true)
+})
+
 test('tool group status preserves running, failed and all-cancelled precedence', () => {
   for (const [statuses, expected] of [
     [[], 'completed'],
