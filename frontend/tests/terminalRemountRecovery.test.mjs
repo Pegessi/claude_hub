@@ -2,10 +2,6 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-const vueSource = await readFile(
-  new URL('../src/components/TerminalView.vue', import.meta.url),
-  'utf8',
-)
 const policySource = await readFile(
   new URL('../src/utils/terminalSwitchPolicy.ts', import.meta.url),
   'utf8',
@@ -15,9 +11,10 @@ const recoverySource = await readFile(
   'utf8',
 )
 
-const scriptMatch = vueSource.match(/<script setup[^>]*>([\s\S]*?)<\/script>/)
-assert.ok(scriptMatch, 'TerminalView.vue must contain a <script setup> block')
-const script = scriptMatch[1]
+const script = await readFile(
+  new URL('../src/features/terminal/composables/useTerminalView.ts', import.meta.url),
+  'utf8',
+)
 
 test('terminalSwitchPolicy keeps tab-switch defer policy in decideSwitchReplay', () => {
   assert.match(policySource, /export function decideSwitchReplay/)
@@ -44,8 +41,8 @@ test('bootstrap document wait replaces forced remount/reload refresh', () => {
 })
 
 test('onIframeLoad bumps document generation and arms bootstrap wait', () => {
-  assert.match(vueSource, /bumpIframeDocumentGeneration\(iframeDocumentGeneration, tabId\)/)
-  assert.match(vueSource, /armBootstrapDocumentWait\(tabId, tabSwitchGeneration, docGen\)/)
+  assert.match(script, /bumpIframeDocumentGeneration\(iframeDocumentGeneration, tabId\)/)
+  assert.match(script, /armBootstrapDocumentWait\(tabId, tabSwitchGeneration, docGen\)/)
 })
 
 test('message bridge validates event.source for refresh-done', () => {
@@ -54,7 +51,7 @@ test('message bridge validates event.source for refresh-done', () => {
 })
 
 test('retryContentRefresh re-arms bootstrap wait', () => {
-  const fnMatch = script.match(/function retryContentRefresh\s*\([^)]*\)\s*\{([\s\S]*?)\n\}/)
+  const fnMatch = script.match(/function retryContentRefresh\s*\([^)]*\)\s*\{([\s\S]*?)\n {2}\}/)
   assert.ok(fnMatch)
   assert.match(fnMatch[1], /armBootstrapDocumentWait/)
   assert.match(fnMatch[1], /stopDocumentReadyWait/)
@@ -70,7 +67,7 @@ test('cached tab switch reveals live output without history refresh', () => {
   assert.match(script, /function revealCachedTabSwitch\s*\(/)
   assert.match(script, /revealCachedTabSwitch\(newTabId\)/)
   const fnStart = script.indexOf('function revealCachedTabSwitch')
-  const fnEnd = script.indexOf('/** New iframe document', fnStart)
+  const fnEnd = script.indexOf('function armBootstrapDocumentWait', fnStart)
   assert.ok(fnStart >= 0 && fnEnd > fnStart)
   const fnBody = script.slice(fnStart, fnEnd)
   assert.match(fnBody, /contentReady\.value\s*=\s*true/)
@@ -85,7 +82,7 @@ test('deferred bootstrap ready refreshes immediately when agent already stable',
 })
 
 test('bootstrap wait does not early-reveal for working agent status', () => {
-  const fnMatch = script.match(/function armBootstrapDocumentWait\s*\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)
+  const fnMatch = script.match(/function armBootstrapDocumentWait\s*\([^)]*\)[^{]*\{([\s\S]*?)\n {2}\}/)
   assert.ok(fnMatch)
   assert.doesNotMatch(fnMatch[1], /applyDeferredDocumentReveal/)
 })

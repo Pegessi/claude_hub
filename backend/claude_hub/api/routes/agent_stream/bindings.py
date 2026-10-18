@@ -1,0 +1,96 @@
+"""Typed runtime bindings for agent-stream routes."""
+
+from contextlib import AbstractAsyncContextManager
+from typing import Any, Dict, Optional, Protocol
+
+from fastapi.responses import StreamingResponse
+
+from claude_hub.models import AgentStreamEventPage, ManagedSession, StreamCapabilities
+from claude_hub.services.agent_stream import TailerManager
+from claude_hub.services.agent_stream.base import AgentStreamAdapter
+
+
+class AgentStreamRouteBindings(Protocol):
+    """Resolve compatibility-owned agent-stream dependencies and helpers."""
+
+    def session_or_404(self, session_id: str) -> ManagedSession: ...
+
+    def terminal_tab_session_or_404(self, tab_id: str) -> ManagedSession: ...
+
+    def terminal_tab_stream_session(self, tab_id: str) -> Optional[ManagedSession]: ...
+
+    def get_tailer_manager(self) -> TailerManager: ...
+
+    def get_tab_tailer_manager(self) -> TailerManager: ...
+
+    def managed_stream_interaction(
+        self, session: ManagedSession, *, require_chat: bool = False
+    ) -> AbstractAsyncContextManager[ManagedSession]: ...
+
+    def require_current_managed_session(
+        self, session: ManagedSession, manager: TailerManager
+    ) -> None: ...
+
+    async def capabilities_for(
+        self, session: ManagedSession, manager: Optional[TailerManager] = None
+    ) -> StreamCapabilities: ...
+
+    async def tab_capabilities_for(
+        self, session: ManagedSession, manager: TailerManager
+    ) -> StreamCapabilities: ...
+
+    async def stream_events_for(
+        self,
+        session: ManagedSession,
+        manager: TailerManager,
+        since_sequence: int,
+        limit: int,
+        allow_pending_source: bool = False,
+        compact: bool = False,
+    ) -> AgentStreamEventPage: ...
+
+    async def wait_stream_events_for(self, *args: Any, **kwargs: Any) -> AgentStreamEventPage: ...
+
+    def is_chat_native(self, session: ManagedSession) -> bool: ...
+
+    def raise_structured_unavailable(
+        self, session_id: str, manager: Optional[TailerManager] = None
+    ) -> None: ...
+
+    def structured_failure_message(
+        self, session_id: str, manager: Optional[TailerManager] = None
+    ) -> str: ...
+
+    def closed_unavailable_stream(
+        self, capabilities: StreamCapabilities, message: str
+    ) -> StreamingResponse: ...
+
+    def sse(self, event: str, data: Any) -> str: ...
+
+    def adapter_for_session(self, session: ManagedSession) -> Optional[AgentStreamAdapter]: ...
+
+    def workspace_manager(self) -> Any: ...
+
+    def ttyd_manager(self) -> Any: ...
+
+    def decode_attachments(self, attachments: Any) -> Any: ...
+
+    async def read_attachment_or_404(self, store: Any, attachment_id: str) -> Any: ...
+
+    async def send_to_native(self, *args: Any, **kwargs: Any) -> None: ...
+
+    async def dispatch_tab_stream_input(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    async def yield_dot_turn(
+        self, tab_id: str, session: ManagedSession, manager: TailerManager
+    ) -> None: ...
+
+    async def cancel_native_turn(self, *args: Any, **kwargs: Any) -> Dict[str, Any]: ...
+
+    def external_shutdown_cancel_timeout_seconds(self) -> float: ...
+
+    def initialized_tailer_manager(self) -> Optional[TailerManager]: ...
+
+    def initialized_tab_tailer_manager(self) -> Optional[TailerManager]: ...
+
+    def tab_stream_session_id(self, tab_id: str) -> str: ...

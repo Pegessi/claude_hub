@@ -10,7 +10,9 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
+
+import claude_hub.services.workspace_state_policy as state_policy
 
 from ...config import settings
 from ...models import (
@@ -75,13 +77,17 @@ from ...models import (
     WorkspaceUpdate,
 )
 from ...models.schemas import AGENT_TAG_MAX_LENGTH, normalize_agent_tag
-from .. import workspace_state_policy as state_policy
 from ..feedback_lessons import FeedbackLessonStore
 from ..remote_profiles import remote_profile_manager
 from ..runtime_isolation import resolve_state_root
 from ..ttyd_manager import ttyd_manager
 
 logger = logging.getLogger(__name__)
+
+ScheduledChatDispatch = Callable[[ScheduledTaskRun, ScheduledTask], Awaitable[None]]
+ScheduledChatReadiness = Callable[[str], Awaitable[bool]]
+ScheduledChatLivenessResult = Literal["active", "dead", "terminalized", "unknown"]
+ScheduledChatLiveness = Callable[[str, str], Awaitable[ScheduledChatLivenessResult | None]]
 
 STATE_ROOT = resolve_state_root()
 INDEX_FILE = STATE_ROOT / "index.json"
@@ -378,6 +384,10 @@ __all__ = [
     "SCHEDULED_TASKS_FILE",
     "RequestTaskReviewRequest",
     "ResidentPeriodicTask",
+    "ScheduledChatDispatch",
+    "ScheduledChatLiveness",
+    "ScheduledChatLivenessResult",
+    "ScheduledChatReadiness",
     "ScheduledTask",
     "ScheduledTaskCreate",
     "ScheduledTaskKind",

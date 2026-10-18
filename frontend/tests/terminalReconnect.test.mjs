@@ -5,13 +5,13 @@ import test from 'node:test'
 
 import ts from 'typescript'
 import { createPinia, setActivePinia } from 'pinia'
+import { useTerminalStore } from './terminalStoreTestHarness.mjs'
 
 // ── Load the real registry + terminalStore in Node ──────────────────────────
 // Same approach as forkFromTurn.test.mjs: transpile the TS sources to ESM and
 // rewrite bare imports to resolved file/data URLs so they load from a data:
 // URL (which has no base of its own). Type-only imports are erased.
 const vueUrl = await import.meta.resolve('vue')
-const piniaUrl = await import.meta.resolve('pinia')
 
 function transpileToDataUrl(source, rewrites = {}) {
   const { outputText } = ts.transpileModule(source, {
@@ -37,24 +37,6 @@ const reconnectSource = await readFile(
 const reconnectUrl = transpileToDataUrl(reconnectSource, { vue: vueUrl })
 const reconnectModule = await import(reconnectUrl)
 const { PaneReconnectRegistry, createPaneReconnectRegistry } = reconnectModule
-
-const chatGroupsSource = await readFile(
-  new URL('../src/utils/chatGroups.ts', import.meta.url),
-  'utf8',
-)
-const chatGroupsUrl = transpileToDataUrl(chatGroupsSource)
-
-const storeSource = await readFile(
-  new URL('../src/stores/terminalStore.ts', import.meta.url),
-  'utf8',
-)
-const storeUrl = transpileToDataUrl(storeSource, {
-  pinia: piniaUrl,
-  vue: vueUrl,
-  '@/utils/chatGroups': chatGroupsUrl,
-  '@/utils/terminalReconnect': reconnectUrl,
-})
-const useTerminalStore = (await import(storeUrl)).useTerminalStore
 
 // ── Browser globals the store touches ───────────────────────────────────────
 if (!globalThis.window) {
@@ -247,7 +229,7 @@ test('wiring: TerminalPane renders the reconnect button only on Terminal panes a
 
 test('wiring: TerminalView performs reconnect via the existing retryTab re-attach path and settles on load/error', async () => {
   const source = await readFile(
-    new URL('../src/components/TerminalView.vue', import.meta.url),
+    new URL('../src/features/terminal/composables/useTerminalView.ts', import.meta.url),
     'utf8',
   )
   // The nonce watcher drives the SAME path the overlay Retry button uses.

@@ -4,12 +4,14 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+import claude_hub.services.managed_chat as managed_chat
+
 from ...models import ChatMode, ManagedSession, SessionKind
-from .. import managed_chat
+from ._base import _WorkspaceManagerBase
 from ._constants import _now
 
 
-class _ChatControlsMixin:
+class _ChatControlsMixin(_WorkspaceManagerBase):
     @asynccontextmanager
     async def managed_chat_interaction_guard(
         self,

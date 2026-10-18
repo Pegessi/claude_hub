@@ -52,6 +52,7 @@ from claude_hub.models import (
 )
 from claude_hub.services.ttyd_manager import ttyd_manager
 from claude_hub.services.workspace_manager import WorkspaceManager
+from claude_hub.services.workspace_manager._constants import ScheduledChatLivenessResult
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -1299,7 +1300,7 @@ async def test_reaper_completes_stale_run_from_durable_completion_edge(
 
     probed: list[str] = []
 
-    async def liveness(tab_id: str, turn_id: str) -> str:
+    async def liveness(tab_id: str, turn_id: str) -> ScheduledChatLivenessResult:
         probed.append(turn_id)
         return "active"  # must not matter: transcript evidence wins
 
@@ -1342,7 +1343,7 @@ async def test_reaper_marks_dead_started_turn_uncertain_and_drains_queue(
     # A newer occurrence waiting behind the wedged head.
     queued = manager._queue_scheduled_chat_run(task, now - timedelta(minutes=5), now)
 
-    async def liveness(tab_id: str, turn_id: str) -> str:
+    async def liveness(tab_id: str, turn_id: str) -> ScheduledChatLivenessResult:
         return "dead" if turn_id == wedged.client_turn_id else "unknown"
 
     manager.configure_scheduled_chat_liveness(liveness)
@@ -1376,7 +1377,7 @@ async def test_reaper_leaves_active_turn_and_fresh_run_alone(
     async def lifecycle(run: Any) -> tuple[bool, str | None]:
         return (True, None)
 
-    async def liveness(tab_id: str, turn_id: str) -> str:
+    async def liveness(tab_id: str, turn_id: str) -> ScheduledChatLivenessResult:
         return "active"
 
     monkeypatch.setattr(manager, "_scheduled_turn_lifecycle", lifecycle)

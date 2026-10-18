@@ -62,6 +62,11 @@ def state_root(monkeypatch: MonkeyPatch, tmp_path: Path) -> Generator[Path, None
     monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message", AsyncMock())
     monkeypatch.setattr(_wm.WorkspaceManager, "_send_tmux_message_with_receipt", AsyncMock())
     monkeypatch.setattr(_wm.WorkspaceManager, "_ensure_session_ready_for_send", AsyncMock())
+    monkeypatch.setattr(
+        _wm.WorkspaceManager,
+        "_capture_tmux_output",
+        AsyncMock(return_value="? for shortcuts"),
+    )
     yield root
 
 

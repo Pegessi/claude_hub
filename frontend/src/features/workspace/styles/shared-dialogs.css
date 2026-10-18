@@ -1,0 +1,22 @@
+.workspace-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  background: var(--ch-color-overlay);
+  padding: 16px;
+}
+
+.workspace-modal {
+  width: min(520px, 100%);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface);
+  box-shadow: var(--ch-shadow-dialog);
+  padding: 20px;
+}

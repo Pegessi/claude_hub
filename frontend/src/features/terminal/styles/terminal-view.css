@@ -1,0 +1,117 @@
+.terminal-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  min-height: 0;
+}
+
+.terminal-iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.terminal-iframe.active {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* Content-ready boundary: while the active tab's history snapshot is being
+   fetched, written, and painted, hide the iframe so the user never sees a
+   transient incomplete frame. Revealed by setting contentReady=true once
+   terminal-history-refresh-done fires (the iframe-side double-rAF guarantees
+   the paint committed before that event).
+   - opacity:0 hides the canvas but keeps it in the layout and focusable.
+   - pointer-events is intentionally left as auto (inherited from .active) so
+     the iframe can still receive focus and keystrokes during the pending
+     window. The SAB fast-input path and direct xterm focus both keep working,
+     so the user never loses keystrokes while waiting for the snapshot. */
+.terminal-iframe.active.content-pending {
+  opacity: 0;
+}
+
+/* Connecting / error overlay: shown until the active iframe loads. Sits above
+   the iframe but below any pane chrome. pointer-events is auto because the
+   iframe underneath is not yet loaded (nothing to steal clicks from), and the
+   error state's Retry button must be clickable. */
+.terminal-connecting-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--ch-color-app-bg);
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.terminal-connecting-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--ch-color-border-strong);
+  border-top-color: var(--ch-color-accent);
+  border-radius: 999px;
+  animation: terminal-connecting-spin 650ms linear infinite;
+}
+
+.terminal-error-icon {
+  font-size: 18px;
+  line-height: 1;
+  color: var(--ch-color-warning-strong, var(--ch-color-accent));
+}
+
+.terminal-connecting-text {
+  letter-spacing: 0.02em;
+}
+
+.terminal-retry-button {
+  margin-top: 2px;
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--ch-motion-fast), border-color var(--ch-motion-fast);
+}
+
+.terminal-retry-button:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.terminal-retry-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+@keyframes terminal-connecting-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-connecting-spinner {
+    animation: none;
+    border-top-color: var(--ch-color-border-strong);
+  }
+}

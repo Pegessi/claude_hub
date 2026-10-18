@@ -1,61 +1,12 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
-import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import ts from 'typescript'
+import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-// Load the timeline the same way agentStreamTimelineReducer.test.mjs does:
-// transpile the TS and inline its sibling utils (a data-URL module has no
-// resolver). Events below are the exact normalized shapes the backend now
-// emits for tab 4ed6b70c (TraeX nested sub-agent / collab sendInput).
-const source = await readFile(
-  new URL('../src/utils/agentStreamTimeline.ts', import.meta.url),
-  'utf8',
-)
-const questionSource = await readFile(
-  new URL('../src/utils/chatQuestionResponse.ts', import.meta.url),
-  'utf8',
-)
-const durationSource = await readFile(
-  new URL('../src/utils/duration.ts', import.meta.url),
-  'utf8',
-)
-const subagentSource = await readFile(
-  new URL('../src/utils/subagentTool.ts', import.meta.url),
-  'utf8',
-)
-const agentImageSource = await readFile(
-  new URL('../src/utils/agentImage.ts', import.meta.url),
-  'utf8',
-)
-const copySource = await readFile(
-  new URL('../src/utils/chatTurnCopy.ts', import.meta.url),
-  'utf8',
-)
-const transpileOptions = {
-  compilerOptions: { module: ts.ModuleKind.ES2020, target: ts.ScriptTarget.ES2020 },
-}
-const js = (s) => ts.transpileModule(s, transpileOptions).outputText
-const { outputText } = ts.transpileModule(
-  source.replace(/^import .* from '@\/utils\/.*$/gm, ''),
-  transpileOptions,
-)
-const bundled = [
-  js(durationSource),
-  js(questionSource),
-  js(subagentSource),
-  js(agentImageSource),
-  outputText,
-  js(copySource),
-].join('\n')
-const mod = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`
-)
-const { groupEventsIntoTurns, countProcessSteps, buildTurnCopyText } = mod
-const { parseSubagent } = await import(
-  `data:text/javascript;base64,${Buffer.from(js(subagentSource)).toString('base64')}`
-)
+const mod = await loadChatUtility('agentStreamTimeline')
+const { groupEventsIntoTurns, countProcessSteps } = mod
+const { buildTurnCopyText } = await loadChatUtility('chatTurnCopy')
+const { parseSubagent } = await loadChatUtility('subagentTool')
 
 // Real receiver thread ids from tab 4ed6b70c (spawnAgent -> F6; sendInput to
 // F6 and FEC; nested exec_command items are code-mode-nested:29:…).

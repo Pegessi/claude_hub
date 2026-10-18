@@ -407,7 +407,9 @@ async def test_archive_records_capture_veto_before_runtime_stop(setup, monkeypat
     async def locked(tab_id):
         yield process
 
-    manager = SimpleNamespace(_locked_current_tab=locked, _save_state=lambda: None)
+    manager = TTYDManager.__new__(TTYDManager)
+    monkeypatch.setattr(manager, "_locked_current_tab", locked)
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
     monkeypatch.setattr(stream_module, "stop_session_stream", AsyncMock())
     await TTYDManager.archive_tab(manager, h.tab.id)
     assert process.archived

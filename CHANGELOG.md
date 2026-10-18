@@ -7,6 +7,62 @@
 
 ## Released
 
+### fix(services): restore call-time legacy facade overrides
+
+- Restore `feedback_lessons._now`, `dot.service.WAKE_INTERVAL_SECONDS` and
+  `feishu_bot_pool.MAX_BOTS` overrides for both new and existing service instances.
+- Reuse typed facade methods without adding dependency registries, import cycles,
+  constructor snapshots, or additional state/lock owners.
+- Cover override restoration, feedback persistence and explicit timestamps, Dot
+  timing preservation, Bot capacity boundaries, and public consumer class identity.
+
+### fix(governance): restore agreed source line ceilings
+
+- Restore hard limits to 1500 lines for backend Python and 2500 lines for all
+  covered frontend source formats; retain 800 lines as advisory refactoring guidance.
+- Align scoped structural tests with those ceilings and cover the inclusive
+  boundaries, including files above 800 that remain within the hard limit.
+- Retain the feature decomposition, empty legacy exemptions, acyclic import
+  requirement, strict schemas and Vue template type-coverage checks.
+
+### refactor(architecture): bound legacy sources and organize feature ownership
+
+- Apply the 800-line production-source limit to existing and new code, including
+  extracted frontend templates/styles; remove all legacy size and import-cycle exemptions.
+- Organize terminal, provider, stream, Workspace, API, model/CLI and UI behavior
+  into named feature directories instead of growing general helper directories.
+- Replace WorkspaceManager package back-references with explicit typed runtime
+  dependencies and remove module-initialization import cycles without new lazy-loading workarounds.
+- Preserve single state/lock/cache owners, public compatibility entrypoints,
+  protocol and command behavior; add static schema-reexport checks and real
+  component/KeepAlive/Workspace-detail browser coverage.
+- Keep Vue templates inline and type-checked, with feature-local setup composables;
+  reject external SFC templates that silently bypass the installed `vue-tsc`.
+
+### refactor(core): extract pure helpers from large runtime and UI owners
+
+- Separate terminal catalog/snapshot parsing, provider protocol/model formatting
+  and Goal stream sanitization from their process and session lifecycle owners.
+- Give stream API callers explicit read-only readiness observations while keeping
+  transport, send locks and tailer registries under their existing owners.
+- Move Workspace and Chat display projections into focused, behavior-tested
+  utilities without changing templates, scoped styles or component lifetimes.
+- Preserve historical Python helper imports and dependency lookup behavior;
+  reduce exact file-size ceilings without expanding the existing import cycle.
+
+### refactor(repo): enforce AI-native maintenance boundaries
+
+- Add an executable AI-maintainability gate for entry-document size, source-file
+  growth, import-cycle growth, strict task-state schemas and WorkspaceManager
+  type-check settings; make cleaned Pydantic, FastAPI and HTTPX warning families
+  fail tests while filtering two pinned upstream websocket deprecations.
+- Replace WorkspaceManager's cross-mixin mypy exemptions with an explicit,
+  runtime-complete abstract host contract and typed scheduled-Chat callbacks.
+- Remove fake terminal-startup polling from broad workspace tests while keeping
+  the readiness state machine in focused tests.
+- Split the terminal proxy's embedded CSS and JavaScript across bounded owner
+  modules, preserving rendered bytes and adding focused injection contracts.
+
 ### fix(ui): align the mobile Dot toolbar and omit status summaries
 
 - Keep the compact Dot launcher on the same 30px row as the adjacent controls,

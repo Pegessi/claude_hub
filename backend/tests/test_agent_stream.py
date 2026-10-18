@@ -2717,7 +2717,7 @@ class _FakeProbeTailer:
         cancel_raises: bool = False,
         orphan: Any = None,
     ) -> None:
-        self._native_transport = (
+        self.native_transport = (
             SimpleNamespace(turn_in_flight=turn_in_flight) if turn_in_flight else None
         )
         self._active_turn_id = active_turn_id
@@ -3984,9 +3984,15 @@ async def test_goal_turn_hides_internal_prompt_and_protocol_from_visible_transcr
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Goal protocol stays provider/audit-visible but not timeline-visible."""
+    from claude_hub.services.agent_stream import tailer as tailer_module
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 
     _isolate_state_root(monkeypatch, tmp_path)
+    sanitizer_factory = MagicMock(
+        wraps=tailer_module._GoalProtocolSanitizer,
+        _OPENERS=tailer_module._GoalProtocolSanitizer._OPENERS,
+    )
+    monkeypatch.setattr(tailer_module, "_GoalProtocolSanitizer", sanitizer_factory)
     transport = _FakeNativeTransport()
     session = _native_session()
     observed: List[AgentStreamEvent] = []
@@ -4049,6 +4055,7 @@ async def test_goal_turn_hides_internal_prompt_and_protocol_from_visible_transcr
     assert completed.payload["assistant_text"] == visible
     assert "_goal_protocol_text" not in completed.payload
     assert observed and "<goal-checkpoint>" in observed[-1].payload["_goal_protocol_text"]
+    sanitizer_factory.assert_called_once_with(trailing_only=False)
     await tailer.stop()
 
 

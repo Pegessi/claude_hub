@@ -7,7 +7,15 @@ import test from 'node:test'
 // duplicate list, so these assert the wiring that keeps groups/pinned/search/
 // archive and the edge gesture intact.
 const sidebar = readFileSync(
-  new URL('../src/components/ChatSidebar.vue', import.meta.url),
+  new URL('../src/features/chat/sidebar/ChatSidebar.vue', import.meta.url),
+  'utf8',
+)
+const sidebarGroup = readFileSync(
+  new URL('../src/features/chat/sidebar/ChatSidebarGroup.vue', import.meta.url),
+  'utf8',
+)
+const sidebarPointerDrag = readFileSync(
+  new URL('../src/features/chat/sidebar/useSidebarPointerDrag.ts', import.meta.url),
   'utf8',
 )
 const app = readFileSync(
@@ -15,7 +23,15 @@ const app = readFileSync(
   'utf8',
 )
 const tabBar = readFileSync(
-  new URL('../src/components/TabBar.vue', import.meta.url),
+  new URL('../src/features/terminal/components/TabBar.vue', import.meta.url),
+  'utf8',
+)
+const sessionCreator = readFileSync(
+  new URL('../src/features/terminal/components/SessionCreator.vue', import.meta.url),
+  'utf8',
+)
+const closeTabDialog = readFileSync(
+  new URL('../src/features/terminal/components/CloseTabDialog.vue', import.meta.url),
   'utf8',
 )
 const composable = readFileSync(
@@ -50,13 +66,13 @@ test('working-row beams hold still while the drawer is hidden or being dragged',
 
 test('pins scroll with the drawer list instead of sticking over the rows beneath', () => {
   const mobile = sidebar.match(/@media \(max-width: 768px\) \{[\s\S]*$/)?.[0] ?? ''
-  assert.match(mobile, /\.chat-sidebar\.mobile-drawer \.chat-sidebar__group--pinned \{\s*position: relative;\s*z-index: auto;\s*max-height: none;\s*overflow: visible;/)
-  assert.match(sidebar, /\.chat-sidebar__group--pinned \{\s*position: sticky;/)
+  assert.match(mobile, /\.chat-sidebar\.mobile-drawer :deep\(\.chat-sidebar__group--pinned\) \{\s*position: relative;\s*z-index: auto;\s*max-height: none;\s*overflow: visible;/)
+  assert.match(sidebarGroup, /\.chat-sidebar__group--pinned \{\s*position: sticky;/)
 })
 
 test('the pinned group markup from ChatSidebar is reused unchanged in the drawer', () => {
-  assert.match(sidebar, /group\.pinned/)
-  assert.match(sidebar, /class="chat-sidebar__group-header chat-sidebar__pinned-header"/)
+  assert.match(sidebarGroup, /group\.pinned/)
+  assert.match(sidebarGroup, /class="chat-sidebar__group-header chat-sidebar__pinned-header"/)
   assert.match(sidebar, /buildChatSidebarGroups\(chatTabs\.value, pinnedChatIds\.value/)
 })
 
@@ -70,7 +86,7 @@ test('the backdrop closes via @click.self so panel interactions do not dismiss i
 })
 
 test('selecting a row in the mobile drawer goes through selectMobileTab (switch + auto-close)', () => {
-  assert.match(sidebar, /if \(isMobile\.value\) \{\s*selectMobileTab\(tab\.id\)/)
+  assert.match(sidebarPointerDrag, /if \(isMobile\.value\) \{\s*selectMobileTab\(tab\.id\)/)
 })
 
 test('the edge gesture uses the pure composable, not inline template geometry', () => {
@@ -88,7 +104,8 @@ test('a rightward swipe on the main column opens the drawer, outside opted-out r
   // Surface touches are native, so only the edge band forwards untouched taps.
   assert.match(composable, /if \(!cancelled && touch && state\.zone === 'open'\) \{\s*forwardTap/)
   assert.match(mobileControls, /class="mobile-controls-overlay"\s+data-drawer-swipe-ignore/)
-  assert.equal(tabBar.match(/class="modal-overlay"\s+data-drawer-swipe-ignore/g)?.length, 2)
+  assert.equal(sessionCreator.match(/class="modal-overlay"\s+data-drawer-swipe-ignore/g)?.length, 1)
+  assert.equal(closeTabDialog.match(/class="modal-overlay"\s+data-drawer-swipe-ignore/g)?.length, 1)
 })
 
 test('TabBar keeps an explicit non-gesture drawer entry wired to the store action', () => {
