@@ -100,27 +100,46 @@
     <span>{{ part.text }}</span>
   </div>
 
-  <!-- Header of a finished turn's working region. Synthetic: it
-                 stands in for the thinking/tool parts the reducer produced, so
-                 it is only ever seen for turns that are already history. It
-                 keeps its place in both states — only the detail underneath
-                 grows — so expanding never moves the control out from under the
-                 pointer, and collapsing is one click wherever the reader has
-                 scrolled to. -->
-  <button
-    v-else-if="part.kind === 'process'"
-    type="button"
-    class="process-fold"
-    :class="{ 'process-fold--open': part.expanded }"
-    :aria-expanded="part.expanded"
-    @click="toggleTurnProcess(turn)"
-  >
-    <span
-      class="process-fold-chevron"
-      aria-hidden="true"
-    >{{ part.expanded ? '▾' : '▸' }}</span>
-    <span class="process-fold-meta">{{ part.meta }}</span>
-  </button>
+  <template v-else-if="part.kind === 'process'">
+    <button
+      type="button"
+      class="process-fold"
+      data-testid="history-details-toggle"
+      :class="{ 'process-fold--open': part.expanded, 'process-fold--error': part.detailStatus === 'error' }"
+      :aria-expanded="part.expanded"
+      aria-label="Execution details"
+      @click="toggleTurnProcess(turn)"
+    >
+      <span
+        class="process-fold-chevron"
+        aria-hidden="true"
+      >{{ part.expanded ? '▾' : '▸' }}</span>
+      <span class="process-fold-meta">{{ part.meta }}</span>
+      <span
+        v-if="part.detailStatus === 'loading'"
+        class="process-fold-status"
+      >Loading…</span>
+      <span
+        v-else-if="part.detailStatus === 'error'"
+        class="process-fold-status process-fold-status--error"
+      >Failed</span>
+    </button>
+    <div
+      v-if="part.detailStatus === 'error'"
+      class="history-details-error"
+      role="alert"
+    >
+      <span>{{ part.detailError || 'Failed to load execution details.' }}</span>
+      <button
+        type="button"
+        class="history-details-retry"
+        data-testid="history-details-retry"
+        @click="retryHistoryDetail(turn)"
+      >
+        Retry
+      </button>
+    </div>
+  </template>
 </template>
 
 <script setup lang="ts">
@@ -138,7 +157,7 @@ import type { TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
 import type { ThinkingDisplayPart } from '@/utils/thinkingPresentation'
 const { openImageLightbox } = requireChatOwner(chatImagesKey)
-const { toggleTurnProcess } = requireChatOwner(chatTimelineKey)
+const { toggleTurnProcess, retryHistoryDetail } = requireChatOwner(chatTimelineKey)
 const { markdownImageScope } = requireChatOwner(chatIdentityKey)
 defineProps<{
   turn: TimelineTurn
@@ -265,6 +284,40 @@ defineProps<{
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.process-fold-status {
+  flex-shrink: 0;
+  color: var(--ch-color-text-subtle);
+  font-size: 11px;
+}
+
+.process-fold-status--error,
+.process-fold--error {
+  color: var(--ch-color-danger-strong, #f85149);
+}
+
+.history-details-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 5px 10px;
+  border: 1px solid var(--ch-color-danger-border, rgba(248, 81, 73, 0.3));
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-danger-bg, rgba(248, 81, 73, 0.1));
+  color: var(--ch-color-danger-strong, #f85149);
+  font-size: 12px;
+}
+
+.history-details-retry {
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }
 
 .reasoning-status {

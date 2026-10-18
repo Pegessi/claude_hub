@@ -2,6 +2,7 @@ from .agent_stream import (  # noqa: E402
     AgentStreamEvent,
     AgentStreamEventPage,
     AgentStreamEventType,
+    AgentStreamHistoryDetail,
 )
 from .goal_run import (
     GOAL_CHECKPOINT_HISTORY_LIMIT,
@@ -263,6 +264,7 @@ __all__ = [
     "AgentStreamEvent",
     "AgentStreamEventType",
     "AgentStreamEventPage",
+    "AgentStreamHistoryDetail",
     "QuotaLimit",
     "ProviderQuota",
     "QuotaResponse",

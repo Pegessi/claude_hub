@@ -31,6 +31,27 @@
   ownership and human authorization for acceptance; suggest `dot notify` only when
   an update should reach the user now and Feishu is bound.
 
+### fix(chat): invalidate stale detail ranges and edited history caches
+
+- Tie detail reads to their exact history range so older responses cannot mark
+  a newer range complete or overwrite its request state.
+- Keep process content folded while a refreshed summary invalidates cached detail,
+  without hiding replies, approvals, errors or current status.
+- Clear the active history snapshot on explicit edit/reset so truncated and
+  renumbered history is read from the beginning, not an obsolete cached cursor.
+- Cover deferred detail responses, cached range growth and warm-cache edit/resend.
+
+### feat(chat): load conversation history before execution details
+
+- Load historical questions, replies, attachments and essential state without
+  downloading thinking, tool payloads or complete sub-agent transcripts up front.
+- Fetch complete per-turn execution details on expansion, with fixed-cursor
+  pagination, visible retry, request cancellation and cache reuse across Chat switches.
+- Preserve raw event API defaults, live-stream cursor ownership, replay identity
+  filtering, approvals, errors, edit/fork history and the original durable log.
+- Add an incremental store-owned history index and focused storage/API/UI regression
+  coverage; document the loading path and correct the shared Chat history API hint.
+
 ### fix(restart): capture interrupted Chats before draining Feishu routes
 
 - Stop new Feishu intake before recording eligible Chat continuations, stopping

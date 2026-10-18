@@ -97,12 +97,9 @@ test('a turn with no delivered text is not splittable', () => {
   assert.equal(splitTurnProcess(turn), null)
 })
 
-test('an approval card folds with the rest of the record', () => {
-  // Pinning it did not survive contact with how cards are actually answered:
-  // the agent asks, the tool returns the placeholder, and the user replies in
-  // the NEXT message rather than through the card. That reply is ordinary text,
-  // so approval_resolved is never emitted and "pin the unanswered card" meant
-  // "never fold this turn" — the bug this fixes.
+test('an approval card stays visible while tool/thinking process folds', () => {
+  // Pending approvals are action-critical history and must not be hidden by the
+  // process fold. Tool and thinking detail still fold around the delivered text.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
     makeEvent(2, 'thinking_delta', { text: 'hmm' }),
@@ -119,8 +116,8 @@ test('an approval card folds with the rest of the record', () => {
 
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
-    ['process', 'text'],
-    'folded, only the answer shows',
+    ['process', 'approval', 'text'],
+    'folded, the approval and answer stay visible',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
@@ -129,10 +126,9 @@ test('an approval card folds with the rest of the record', () => {
   )
 })
 
-test('an answered approval card folds away with the rest', () => {
-  // Cards fold whether or not they were answered — `resolved` is not a signal
-  // this can rely on (see the pinned-parts note above), and a card that could
-  // still be pending belongs to the newest turn, which never folds.
+test('an answered approval card remains visible while process folds', () => {
+  // Cards are action-critical evidence; resolved or not, they stay visible in
+  // folded history while adjacent thinking/tool detail folds away.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
     makeEvent(2, 'thinking_delta', { text: 'hmm' }),
@@ -148,8 +144,8 @@ test('an answered approval card folds away with the rest', () => {
   assert.deepEqual(split.pinned, [], 'a card folds with the record, answered or not')
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
-    ['process', 'text'],
-    'it folds away with the rest',
+    ['process', 'approval', 'text'],
+    'approval stays visible while surrounding process folds',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
@@ -457,25 +453,25 @@ test('the part loop renders the folded view, not raw parts', () => {
   assert.match(turnComponent, /v-for="part in turnPartsFor\(turn\)"/)
 })
 
-test('fold signature is empty for newest and unsafe turns', () => {
+test('fold signature is present for foldable turns and empty for unsafe turns', () => {
   const turn = completedTurn()
   const overrides = new Map([[turn.key, false]])
-  assert.equal(turnProcessFoldSignature(turn, turn.key, overrides), '')
+  assert.match(turnProcessFoldSignature(turn, turn.key, overrides), /^folded\|/)
   assert.equal(turnProcessFoldSignature({ ...turn, completed: false }, 'newest', overrides), '')
   assert.equal(turnProcessFoldSignature({ ...turn, parts: [] }, 'newest', overrides), '')
 })
 
-test('the newest turn is excluded from folding even with a closed override', () => {
+test('completed turns with process are foldable even when newest', () => {
   const turn = completedTurn()
   assert.ok(splitTurnProcess(turn))
-  assert.equal(isTurnFoldable(turn, turn.key), false)
+  assert.equal(isTurnFoldable(turn, turn.key), true)
   assert.equal(isTurnFoldable(turn, 'newest'), true)
   assert.equal(isTurnFoldable({ ...turn, completed: false }, 'newest'), false)
 })
 
 test('timeline owner passes current timeline and viewer state to pure projection', () => {
-  assert.match(timelineController, /presentTurnParts\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
-  assert.match(timelineController, /turnProcessFoldSignature\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
+  assert.match(timelineController, /presentTurnParts\(turn, latestTurnKey\.value, processExpandedOverrides\.value, detail\)/)
+  assert.match(timelineController, /turnProcessFoldSignature\(turn, latestTurnKey\.value, processExpandedOverrides\.value, detail\)/)
   assert.match(timelineController, /isTurnProcessExpanded\(turn, latestTurnKey\.value, processExpandedOverrides\.value\)/)
   assert.match(timelineController, /const latestTurnKey = computed\(\(\) => \{[\s\S]*?const list = turns\.value/)
 })

@@ -1,7 +1,7 @@
 """Typed runtime bindings for agent-stream routes."""
 
 from contextlib import AbstractAsyncContextManager
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Literal, Optional, Protocol
 
 from fastapi.responses import StreamingResponse
 
@@ -47,6 +47,9 @@ class AgentStreamRouteBindings(Protocol):
         limit: int,
         allow_pending_source: bool = False,
         compact: bool = False,
+        view: Literal["raw", "conversation"] = "raw",
+        turn_id: Optional[str] = None,
+        through_sequence: Optional[int] = None,
     ) -> AgentStreamEventPage: ...
 
     async def wait_stream_events_for(self, *args: Any, **kwargs: Any) -> AgentStreamEventPage: ...
