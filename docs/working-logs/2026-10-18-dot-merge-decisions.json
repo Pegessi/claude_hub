@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "8036b54f6c3275e54c4ffe723db30c56191dc0e6",
+  "parents": [
+    "7ea051712db0f55eb1c0b58719447ec4a5ac8c10",
+    "3ae9132df8c1d004395616537eb21a2e578545b0"
+  ],
+  "base": "5e3da89b1e7f76aa859021b1c74fb8d9da4408c9",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "4dfdae695e86bb83279203522a976e939df5f2ca",
+  "reconstructed_tree": "59ed52fb63201b233ad45dc5c0bf37c99169234a",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "704af458e819bc55303f3735d9fa7c7e0c5e0241"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "84b48fead75647879663f13db03df5b495ac34e9"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3872353411923f3d51eecb8142077ce3565c769a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "793166652d35fd036d9bba26cb8f74d645eee5fb"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8d9320f05002e7d8988c3eb7e85b4f14fe846017"
+      },
+      "reason": "Both parents prepended independent release notes. Retain both complete Dot and Chat blocks; preserve the common pre-existing changelog history unchanged. No runtime conflict required a manual decision.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
