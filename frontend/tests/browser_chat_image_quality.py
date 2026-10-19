@@ -4,6 +4,8 @@ Run only with a task-owned Vite server, never 5173/8173:
   python tests/browser_chat_image_quality.py <owned-loopback-url> <new-output-dir> <browser> [--html-report FILE]
 
 All APIs are mocked. No Hub backend or provider is contacted.
+Use --html-ids-only instead of --html-report FILE for the standalone ID regression;
+that focused mode works with the built SPA as well as the task-owned Vite server.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ THIRD_TAB = "third-image-tab"
 LONG_FILENAME = "generated_output_" * 13 + ".py"
 LONG_CODE_SOURCE = "print('This source must remain readable')\n" * 50
 REGISTERED_HTML_PATH = "/fixture/task-assets/report.html"
+REGISTERED_ID_HTML_PATH = "/fixture/task-assets/id-report.html"
+WINDOW_NAMED_IDS = ("parent", "postMessage", "scrollTo", "Element", "location", "crypto")
 UNREGISTERED_HTML_PATH = "/fixture/unregistered.html"
 UNAUTHORIZED_HTML_PATH = "/fixture/unauthorized.html"
 HTML_EXTERNAL_LINK = "https://example.com/html-preview-user-link"
@@ -45,6 +49,7 @@ OUTPUT_TEXT = (
     " · [empty.txt](empty.txt) · [slow.json](slow.json) · [archive.zip](archive.zip)"
     f"\n\n[Long generated code]({LONG_FILENAME})"
     "\n\n[HTML report](report.html) · [HTM report](report.htm) · [Truncated HTML](truncated.html)"
+    " · [HTML ID report](id-report.html)"
     f"\n\n[Registered HTML](HTML_PREVIEW_ORIGIN{REGISTERED_HTML_PATH})"
     f" · [Unregistered HTML](HTML_PREVIEW_ORIGIN{UNREGISTERED_HTML_PATH})"
 )
@@ -154,6 +159,32 @@ td {{ padding: 10px; border: 1px solid #456789; }}
 <a id="unsafe-link" href="javascript:window.__authoredHtmlRan=true" onclick="window.__authoredHtmlRan=true">Unsafe link</a>
 <div class="table-scroll" role="region" aria-label="Report table" tabindex="0"><table><tbody>{rows}</tbody></table></div>
 <h2 id="details" tabindex="0">Report details</h2><p>End of the static report.</p>
+</body></html>"""
+
+
+def html_id_fixture() -> str:
+    image = base64.b64encode(png(16, 10)).decode("ascii")
+    links = " ".join(f'<a href="#{name}">Jump {name}</a>' for name in WINDOW_NAMED_IDS)
+    headings = "".join(
+        f'<section style="margin-top:240px"><h3 id="{name}">Window {name} section</h3></section>'
+        for name in WINDOW_NAMED_IDS
+    )
+    return f"""<!doctype html><html><head><style>
+body {{ font: 14px sans-serif; }} h2 {{ color: rgb(2, 3, 4); }}
+#target {{ color: rgb(210, 0, 0); border-left: 5px solid rgb(210, 0, 0); }}
+</style></head><body>
+<h1>ID preservation report</h1>
+<a href="#target">Jump target</a> <a href="#details-safe">Jump safe control</a> {links}
+<img id="getElementById" name="safe-getter-image" alt="Named getter image" src="data:image/png;base64,{image}">
+<img id="addEventListener" name="safe-listener-image" alt="Named listener image" src="data:image/png;base64,{image}">
+<div style="height:1800px"></div><h2 id="target" tabindex="0">Target section</h2>
+<div style="height:260px"></div><h2 id="details-safe">Safe control section</h2>{headings}
+<p style="margin-top:240px"><a href="#">Back to top</a></p>
+<form id="removed-form"><input name="discarded-input"></form>
+<iframe id="removed-frame" src="https://html-preview.invalid/removed-frame"></iframe>
+<object id="removed-object" data="https://html-preview.invalid/removed-object"></object>
+<meta id="removed-meta" http-equiv="refresh" content="0;url=https://html-preview.invalid/removed-meta">
+<script id="untrusted-id-script">window.__idScriptRan = true; fetch('https://html-preview.invalid/id-probe');</script>
 </body></html>"""
 
 
@@ -950,6 +981,110 @@ async def check_html_preview(page, context, output: Path, report: dict) -> None:
     }
 
 
+async def check_html_id_document(page, frame, evidence: dict, *, initial_fragment: bool) -> None:
+    await expect(frame.get_by_role("heading", name="ID preservation report")).to_be_visible()
+    target = frame.get_by_role("heading", name="Target section", exact=True)
+    evidence.update(
+        {
+            "target_count": await frame.locator('[id="target"]').count(),
+            "target_color": await target.evaluate("el => getComputedStyle(el).color"),
+            "ids": await frame.evaluate("[...document.querySelectorAll('[id]')].map(el => el.id)"),
+            "initial_scroll": await frame.evaluate("scrollY"),
+            "target_rect": await target.bounding_box(),
+        }
+    )
+    assert evidence["target_count"] == 1, evidence
+    await expect(target).to_have_attribute("id", "target")
+    assert evidence["target_color"] == "rgb(210, 0, 0)", evidence
+    for image_name, expected_id, expected_name in (
+        ("Named getter image", "getElementById", "safe-getter-image"),
+        ("Named listener image", "addEventListener", "safe-listener-image"),
+    ):
+        image = frame.get_by_role("img", name=image_name, exact=True)
+        await expect(image).to_have_attribute("id", expected_id)
+        await expect(image).to_have_attribute("name", expected_name)
+        await expect(image).to_have_js_property("naturalWidth", 16)
+    evidence["document_named_properties"] = await frame.evaluate("""() => ({
+        getter: document.getElementById?.tagName,
+        listener: document.addEventListener?.tagName,
+        windowPostMessage: typeof window.postMessage,
+        windowElement: typeof window.Element,
+        windowScrollTo: typeof window.scrollTo})""")
+    assert evidence["document_named_properties"] == {
+        "getter": "IMG",
+        "listener": "IMG",
+        "windowPostMessage": "function",
+        "windowElement": "function",
+        "windowScrollTo": "function",
+    }, evidence["document_named_properties"]
+    await expect(
+        frame.locator(
+            "#untrusted-id-script, #removed-form, #removed-frame, #removed-object, #removed-meta, [onclick], [onerror], form, iframe, object, embed"
+        )
+    ).to_have_count(0)
+    assert not await frame.evaluate("Boolean(window.__idScriptRan)")
+    assert await frame.evaluate("() => {try {parent.document.body;return false}catch{return true}}")
+    if initial_fragment:
+        await expect(target).to_be_in_viewport()
+        assert await frame.evaluate("scrollY > 0")
+    history_before = await page.evaluate("history.length")
+    root_url = page.url
+    destinations = [
+        ("Jump safe control", "Safe control section", "details-safe"),
+        ("Jump target", "Target section", "target"),
+        *((f"Jump {name}", f"Window {name} section", name) for name in WINDOW_NAMED_IDS),
+    ]
+    for link_name, heading_name, target_id in destinations:
+        heading = frame.get_by_role("heading", name=heading_name, exact=True)
+        await expect(heading).to_have_attribute("id", target_id)
+        await frame.get_by_role("link", name=link_name, exact=True).click()
+        await expect(heading).to_be_in_viewport()
+        assert await frame.evaluate("scrollY > 0")
+        assert await page.evaluate("history.length") == history_before
+        assert page.url == root_url
+    await frame.get_by_role("link", name="Back to top", exact=True).click()
+    assert await frame.evaluate("scrollY") == 0
+    assert await page.evaluate("history.length") == history_before
+    assert page.url == root_url
+    evidence["empty_fragment_returns_top"] = True
+    evidence["removed_tag_ids_absent"] = True
+    evidence["click_targets"] = [target_id for _, _, target_id in destinations]
+    evidence["history_unchanged"] = True
+
+
+async def check_html_id_preview(page, context, output: Path, report: dict) -> None:
+    evidence: dict = {"dialog": {}, "initial": {}, "reload": {}}
+    report["html_id_preservation"] = evidence
+    await page.get_by_role("link", name="HTML ID report", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
+    _, frame = await html_frame(dialog)
+    await check_html_id_document(page, frame, evidence["dialog"], initial_fragment=False)
+    await frame.get_by_role("link", name="Jump target", exact=True).focus()
+    await page.keyboard.press("Escape")
+    await expect(dialog).to_be_hidden()
+    evidence["iframe_escape"] = True
+    reader = await context.new_page()
+    reader.on("pageerror", lambda error: report["page_errors"].append(str(error)))
+    try:
+        await reader.set_viewport_size({"width": 390, "height": 844})
+        url = (
+            page.url.split("?", 1)[0]
+            + "?"
+            + urlencode({"attachment": REGISTERED_ID_HTML_PATH, "registered": "1"})
+            + "#target"
+        )
+        await reader.goto(url, wait_until="domcontentloaded")
+        _, frame = await html_frame(reader)
+        await check_html_id_document(reader, frame, evidence["initial"], initial_fragment=True)
+        await reader.reload(wait_until="domcontentloaded")
+        _, frame = await html_frame(reader)
+        await check_html_id_document(reader, frame, evidence["reload"], initial_fragment=True)
+        await reader.screenshot(path=str(output / "html-id-preservation.png"), full_page=True)
+        report["screenshots"].append("html-id-preservation.png")
+    finally:
+        await close_secondary_page(reader, page)
+
+
 async def check_registered_html(
     page, context, output: Path, report: dict, real_report: Path | None = None
 ) -> None:
@@ -1243,6 +1378,111 @@ async def check_markdown_preview(page, context, output: Path, report: dict) -> N
         await close_secondary_page(reader, page)
 
 
+async def block_worker_registration(context) -> None:
+    # Playwright's built-in block script reads navigator.serviceWorker without
+    # guarding opaque sandbox origins. Keep registration blocked without that error.
+    await context.add_init_script("""(() => {
+        let workers;
+        try { workers = navigator.serviceWorker; }
+        catch (error) { if (error.name === 'SecurityError') return; throw error; }
+        if (!workers) return;
+        Object.defineProperty(Object.getPrototypeOf(workers), 'register', {
+            configurable: false, writable: false,
+            value() {
+                window.__workerRegistrationAttempts = (window.__workerRegistrationAttempts || 0) + 1;
+                return Promise.reject(new DOMException('Registration blocked by browser acceptance', 'NotAllowedError'));
+            }
+        });
+    })();""")
+
+
+async def html_ids_browser_main(browser_run: BrowserRun) -> None:
+    """Focused built-SPA regression for HTML IDs, also called by canonical coverage."""
+    base = sys.argv[1].rstrip("/")
+    parsed = urlparse(base)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "::1"}
+        or parsed.port in {None, 5173, 8173}
+    ):
+        raise ValueError("Use an owned numeric-loopback review server")
+    output = Path(sys.argv[2]).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    content = html_id_fixture()
+    report: dict = {
+        "result": "FAIL",
+        "api_requests": [],
+        "page_errors": [],
+        "html_probe_requests": [],
+        "initial": {},
+        "reload": {},
+        "boundary": "Built or development SPA with mocked registered HTML response; no backend authorization claim.",
+    }
+    failure = None
+    async with browser_run.context(
+        viewport={"width": 390, "height": 844}, service_workers="allow"
+    ) as context:
+        await block_worker_registration(context)
+
+        async def route_request(route) -> None:
+            request = route.request
+            address = urlparse(request.url)
+            if address.hostname == "html-preview.invalid":
+                report["html_probe_requests"].append(request.url)
+                await route.abort("blockedbyclient")
+            elif origin(request.url) != origin(base):
+                await route.abort("blockedbyclient")
+            elif address.path == "/api/workspaces/artifacts/html-preview":
+                report["api_requests"].append(request.url)
+                assert parse_qs(address.query).get("path") == [REGISTERED_ID_HTML_PATH]
+                await route.fulfill(
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "path": REGISTERED_ID_HTML_PATH,
+                            "filename": "id-report.html",
+                            "kind": "html",
+                            "language": "xml",
+                            "content": content,
+                            "size_bytes": len(content.encode("utf-8")),
+                            "truncated": False,
+                        }
+                    ),
+                )
+            elif address.path.startswith("/api/"):
+                raise AssertionError(f"Unexpected API: {address.path}")
+            else:
+                await route.continue_()
+
+        await context.route("**/*", route_request)
+        page = await context.new_page()
+        page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
+        try:
+            url = (
+                base
+                + "/?"
+                + urlencode({"attachment": REGISTERED_ID_HTML_PATH, "registered": "1"})
+                + "#target"
+            )
+            await page.goto(url, wait_until="domcontentloaded")
+            _, frame = await html_frame(page)
+            await check_html_id_document(page, frame, report["initial"], initial_fragment=True)
+            await page.reload(wait_until="domcontentloaded")
+            _, frame = await html_frame(page)
+            await check_html_id_document(page, frame, report["reload"], initial_fragment=True)
+            assert page.url == url
+            assert not report["page_errors"] and not report["html_probe_requests"]
+            report["result"] = "PASS"
+        except BaseException as error:
+            failure = error
+        finally:
+            await page.screenshot(path=str(output / "html-ids.png"), full_page=True)
+    (output / "report.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2))
+    if failure is not None:
+        raise failure
+
+
 async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None:
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
@@ -1262,6 +1502,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
     output = Path(sys.argv[2]).resolve()
     # run_browser_main validates the browser and creates the output dir.
     html_text = html_fixture()
+    html_id_text = html_id_fixture()
     real_html_text = None
     if real_report is not None:
         real_report = real_report.resolve(strict=True)
@@ -1341,21 +1582,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
         launch_args=["--disable-background-networking", "--disable-component-update"],
         service_workers="allow",
     ) as context:
-        # Playwright's built-in block script reads navigator.serviceWorker without
-        # guarding opaque sandbox origins. Keep registration blocked without that error.
-        await context.add_init_script("""(() => {
-            let workers;
-            try { workers = navigator.serviceWorker; }
-            catch (error) { if (error.name === 'SecurityError') return; throw error; }
-            if (!workers) return;
-            Object.defineProperty(Object.getPrototypeOf(workers), 'register', {
-                configurable: false, writable: false,
-                value() {
-                    window.__workerRegistrationAttempts = (window.__workerRegistrationAttempts || 0) + 1;
-                    return Promise.reject(new DOMException('Registration blocked by browser acceptance', 'NotAllowedError'));
-                }
-            });
-        })();""")
+        await block_worker_registration(context)
         try:
 
             async def block_websocket(socket) -> None:
@@ -1401,6 +1628,8 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
                     selected = parse_qs(parsed.query).get("path", [""])[0]
                     if selected == REGISTERED_HTML_PATH:
                         content = html_text
+                    elif selected == REGISTERED_ID_HTML_PATH:
+                        content = html_id_text
                     elif real_report is not None and selected == str(real_report):
                         content = real_html_text
                     else:
@@ -1487,12 +1716,13 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
                     if path.endswith("/attachment") and document_path in {
                         "report.html",
                         "report.htm",
+                        "id-report.html",
                         "truncated.html",
                     }:
                         content = (
                             TRUNCATED_HTML_SOURCE
                             if document_path == "truncated.html"
-                            else html_text
+                            else html_id_text if document_path == "id-report.html" else html_text
                         )
                         await route.fulfill(
                             status=200,
@@ -1962,6 +2192,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
             await check_standalone_attachment_mobile(page, context, output, report)
             await check_html_preview(page, context, output, report)
             await check_registered_html(page, context, output, report, real_report)
+            await check_html_id_preview(page, context, output, report)
             assert not report["html_probe_requests"], report["html_probe_requests"]
             report["markdown_requests"] = markdown_attempts
             report["attachment_requests"] = attachment_attempts
@@ -2046,12 +2277,18 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
 
 def run_with_optional_report() -> None:
     real_report = None
-    if len(sys.argv) == 6 and sys.argv[4] == "--html-report":
+    ids_only = sys.argv[4:] == ["--html-ids-only"]
+    if ids_only:
+        del sys.argv[4:]
+    elif len(sys.argv) == 6 and sys.argv[4] == "--html-report":
         real_report = Path(sys.argv[5])
         del sys.argv[4:]
 
     async def selected_main(browser_run: BrowserRun) -> None:
-        await main(browser_run, real_report)
+        if ids_only:
+            await html_ids_browser_main(browser_run)
+        else:
+            await main(browser_run, real_report)
 
     run_browser_main(selected_main)
 

@@ -7,6 +7,16 @@
 
 ## Released
 
+### fix(chat): preserve HTML fragment identifiers without weakening isolation
+
+- Retain plain element IDs such as `target` after HTML sanitization so local
+  fragments, entry hashes and ID-based styles address the same retained nodes.
+- Keep normal sanitizer checks and isolate the ID capture hook from Markdown.
+  Use native browser prototypes for navigation and Escape handling so named
+  images cannot replace the document methods used by the trusted bridge.
+- Add browser regressions for identifier preservation, authored styles, initial
+  fragment/reload/click behavior, history and named-property interference.
+
 ### feat(chat): render isolated HTML attachment pages
 
 - Render static HTML/HTM documents in the shared attachment viewer, preserving
