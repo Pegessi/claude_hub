@@ -49,9 +49,8 @@ test('main and child tool bodies are gated by native details state', () => {
   assert.match(toolGroup, /:open="expandedToolGroups\.get\(turn\.key\)\?\.has\(part\.key\)"/)
   assert.match(toolGroup, /@toggle="onToolGroupToggle\(turn, part\.key, \$event\)"/)
   assert.match(toolGroup, /<template v-if="expandedToolGroups\.get\(turn\.key\)\?\.has\(part\.key\)">/)
-  assert.match(subthread, /:open="expandedToolGroups\.get\(turn\.key\)\?\.has\(sub\.key\)"/)
-  assert.match(subthread, /@toggle="onToolGroupToggle\(turn, sub\.key, \$event\)"/)
-  assert.match(subthread, /<template v-if="expandedToolGroups\.get\(turn\.key\)\?\.has\(sub\.key\)">/)
+  // Child threads reuse the same gated card, keyed by the parent turn.
+  assert.match(subthread, /<ChatToolGroup\s+v-else-if="sub\.kind === 'tool_group'"\s+:turn="turn"\s+:part="sub"\s*\/>/)
   const memo = timeline.match(/v-memo="\[([^\]]*)\]"/)[1]
   assert.match(memo, /expandedToolGroups\.get\(turn\.key\)/)
   assert.match(controller, /shallowReactive\(new Map<string, ReadonlySet<string>>\(\)\)/)
@@ -59,7 +58,7 @@ test('main and child tool bodies are gated by native details state', () => {
 })
 
 test('tool data stays plain text and scrollable inputs/results support keyboard focus', () => {
-  for (const component of [toolGroup, subthread]) {
+  for (const component of [toolGroup]) {
     assert.match(component, /<pre\s+tabindex="0"\s+aria-label="Tool input"\s*>\{\{ tool\.argsText \}\}<\/pre>/)
     assert.match(component, /<pre\s+tabindex="0"\s+aria-label="Tool result"\s*>\{\{ tool\.resultText \}\}<\/pre>/)
     const styles = component.slice(component.indexOf('.tool-header {'), component.indexOf('.tool-name {', component.indexOf('.tool-header {')))

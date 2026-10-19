@@ -54,27 +54,11 @@
           <pre class="subthread-instruction-prompt">{{ subthreadInstructionText(sub.tool) }}</pre>
         </div>
 
-        <details
+        <ChatThinkingCard
           v-else-if="sub.kind === 'thinking'"
-          class="thinking-card subthread-thinking"
-          :class="{ 'thinking-card--active': sub.state === 'active' }"
-        >
-          <summary>
-            <ThinkingIndicator :state="sub.state" />
-            <span
-              class="thinking-chevron"
-              aria-hidden="true"
-            >›</span>
-          </summary>
-          <pre class="thinking-body">{{ sub.text }}</pre>
-          <button
-            type="button"
-            class="details-collapse"
-            @click="collapseDetails"
-          >
-            Collapse
-          </button>
-        </details>
+          class="subthread-thinking"
+          :part="sub"
+        />
 
         <div
           v-else-if="sub.kind === 'text'"
@@ -103,76 +87,13 @@
           <span>{{ sub.text }}</span>
         </div>
 
-        <details
+        <!-- Child tool calls use the same activity line as the parent turn;
+             they share the turn's expanded-group state. -->
+        <ChatToolGroup
           v-else-if="sub.kind === 'tool_group'"
-          class="tool-card tool-card--group"
-          :open="expandedToolGroups.get(turn.key)?.has(sub.key)"
-          @toggle="onToolGroupToggle(turn, sub.key, $event)"
-        >
-          <summary
-            class="tool-header"
-            :class="{ 'tool-header--single': sub.tools.length === 1 }"
-          >
-            <span class="tool-name">
-              {{ sub.tools.length === 1 ? sub.tools[0].name : `${sub.tools.length} tools` }}
-            </span>
-            <template v-if="sub.tools.length > 1">
-              <span class="tool-group-names">
-                {{ toolGroupNames(sub.tools) }}
-              </span>
-            </template>
-            <span
-              class="tool-status"
-              :class="toolGroupStatus(sub.tools)"
-            >{{ toolStatusLabel(toolGroupStatus(sub.tools)) }}</span>
-            <span
-              class="tool-chevron"
-              aria-hidden="true"
-            >›</span>
-          </summary>
-          <template v-if="expandedToolGroups.get(turn.key)?.has(sub.key)">
-            <div
-              v-for="tool in sub.tools"
-              :key="tool.key"
-              class="tool-group-item"
-            >
-              <div class="tool-group-item-header">
-                <span class="tool-name">{{ tool.name }}</span>
-                <span
-                  class="tool-status"
-                  :class="tool.status"
-                >{{ toolStatusLabel(tool.status) }}</span>
-              </div>
-              <div
-                v-if="tool.argsText"
-                class="tool-block"
-              >
-                <span>Input</span>
-                <pre
-                  tabindex="0"
-                  aria-label="Tool input"
-                >{{ tool.argsText }}</pre>
-              </div>
-              <div
-                v-if="tool.resultText"
-                class="tool-block"
-              >
-                <span>Result</span>
-                <pre
-                  tabindex="0"
-                  aria-label="Tool result"
-                >{{ tool.resultText }}</pre>
-              </div>
-            </div>
-            <button
-              type="button"
-              class="details-collapse"
-              @click="collapseDetails"
-            >
-              Collapse
-            </button>
-          </template>
-        </details>
+          :turn="turn"
+          :part="sub"
+        />
 
         <div
           v-else-if="sub.kind === 'agent_image'"
@@ -224,11 +145,11 @@ import { requireChatOwner, chatTimelineKey, chatImagesKey, chatIdentityKey } fro
 import ThinkingIndicator from '@/components/ThinkingIndicator.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import { subthreadHeadline, subthreadStatusClass, subthreadStatusLabel, subagentDispatchLabel, subthreadInstructionText, subthreadTerminal } from '@/features/chat/presentation/chatSubagentPresentation'
-import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
-import { toolGroupStatus } from '@/features/chat/presentation/chatTurnPresentation'
+import ChatToolGroup from './ChatToolGroup.vue'
+import ChatThinkingCard from './ChatThinkingCard.vue'
 import type { TimelineTurn } from '../timeline/types'
 import type { TimelineSubthread } from '../timeline/types'
-const { subthreadPartsFor, collapseDetails, expandedToolGroups, onToolGroupToggle } = requireChatOwner(chatTimelineKey)
+const { subthreadPartsFor, collapseDetails } = requireChatOwner(chatTimelineKey)
 const { openImageLightbox, erroredAgentImages, agentImageBasename, agentImageUrl, onAgentImageError } = requireChatOwner(chatImagesKey)
 const { markdownImageScope } = requireChatOwner(chatIdentityKey)
 defineProps<{
@@ -238,24 +159,6 @@ defineProps<{
 
 </script>
 <style scoped>
-.thinking-body {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--ch-color-text-muted);
-  white-space: pre-wrap;
-}
-
-.tool-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.tool-name {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 600;
-}
-
 .tool-status {
   font-size: 10px;
   text-transform: uppercase;
@@ -360,46 +263,6 @@ defineProps<{
   font-size: 11px;
   text-align: center;
 }
-
-.thinking-card {
-  align-self: flex-start;
-  width: 100%;
-  border: 1px dashed var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-soft);
-  color: var(--ch-color-text-muted);
-  padding: 7px 10px;
-}
-
-.thinking-card summary,
-
-.tool-card summary {
-  cursor: pointer;
-  list-style: none;
-}
-
-.thinking-card summary::-webkit-details-marker,
-
-.tool-card summary::-webkit-details-marker {
-  display: none;
-}
-.thinking-card summary,
-
-.tool-card summary {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-}
-
-.thinking-card summary {
-  margin: -7px -10px 0;
-  padding: 7px 10px;
-  background: var(--ch-color-surface-soft);
-}
-
-.tool-card summary {
-  background: var(--ch-color-surface);
-}
 .details-collapse {
   display: block;
   width: 100%;
@@ -424,23 +287,6 @@ defineProps<{
   border-radius: var(--ch-radius-sm);
 }
 
-.thinking-card summary {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--ch-color-text-subtle);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.thinking-card summary:focus-visible,
-
-.tool-card summary:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 2px;
-  border-radius: var(--ch-radius-sm);
-}
-
 .reasoning-status {
   display: inline-flex;
   align-self: flex-start;
@@ -451,181 +297,9 @@ defineProps<{
   background: var(--ch-color-surface-soft);
 }
 
-.thinking-card--active {
-  border-style: solid;
-}
-
-.thinking-chevron {
-  margin-left: auto;
-  font-size: 16px;
-  line-height: 1;
-  transition: transform 160ms ease;
-}
-
-.thinking-card[open] > summary .thinking-chevron {
-  transform: rotate(90deg);
-}
-
-.thinking-body {
-  margin: 8px 0 0;
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ch-color-text-muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.tool-card {
-  width: 100%;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface);
-  overflow: clip;
-}
-
-.tool-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 9px 12px;
-  transition: background-color 120ms ease;
-}
-
-.tool-card > .tool-header:hover,
-
-.tool-card[open] > .tool-header {
-  background: var(--ch-color-surface-soft);
-}
-
-.tool-chevron {
-  flex: 0 0 auto;
-  color: var(--ch-color-text-subtle);
-  font-size: 16px;
-  line-height: 1;
-  transition: transform 140ms ease;
-}
-
-.tool-card[open] > .tool-header .tool-chevron {
-  transform: rotate(90deg);
-}
-.tool-card .tool-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  white-space: nowrap;
-  text-transform: none;
-  font-weight: 500;
-}
-
-.tool-card .tool-status::before {
-  content: '·';
-  width: 10px;
-  text-align: center;
-}
-
-.tool-card .tool-status.completed::before { content: '✓'; }
-.tool-card .tool-status.failed::before { content: '!'; }
-.tool-card .tool-status.cancelled::before { content: '–'; }
-.tool-card .tool-status.running::before { content: '◷'; }
-
-.tool-card .tool-block pre {
-  border: 1px solid var(--ch-color-border-muted);
-  white-space: pre;
-  word-break: normal;
-  overscroll-behavior: contain;
-  tab-size: 2;
-}
-
-.tool-card .tool-block pre:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 1px;
-}
-
-.tool-name {
-  flex-shrink: 0;
-  min-width: 0;
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 600;
-}
-.tool-header--single .tool-name {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .tool-status {
   flex: 0 0 auto;
   padding: 2px 8px;
-}
-
-.tool-block {
-  padding: 0 10px 10px;
-}
-
-.tool-block > span {
-  display: block;
-  color: var(--ch-color-text-subtle);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.tool-block pre {
-  max-height: 220px;
-  margin: 5px 0 0;
-  padding: 8px;
-  overflow: auto;
-  border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-canvas);
-  color: var(--ch-color-text-code);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.tool-group-names {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ch-color-text-subtle);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-group-item {
-  padding: 8px 10px;
-  border-top: 1px solid var(--ch-color-border-muted);
-}
-
-.tool-group-item:first-child {
-  border-top: 0;
-}
-
-.tool-group-item-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-
-.tool-group-item-header .tool-name {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 12px;
-}
-
-.tool-group-item .tool-block {
-  padding: 0;
 }
 
 .subagent-name {
@@ -724,19 +398,12 @@ defineProps<{
   font-size: 12px;
 }
 
-.subthread-body > .tool-card {
-  width: 100%;
-  min-width: 0;
-}
-
 .subthread-thinking {
   margin: 0;
 }
 
 .event-status {
-  justify-content: center;
-  font-style: italic;
-  text-align: center;
+  padding: 2px 8px;
 }
 @media (max-width: 640px) {
 
@@ -754,24 +421,11 @@ defineProps<{
     flex: 1 1 180px;
   }
 
-
-  .thinking-card,
-
-  .tool-card {
-    width: 100%;
-    max-width: 100%;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
 
-  .turn-attachment-img,
-
-  .thinking-chevron,
-
-  .tool-chevron,
-
-  .tool-header {
+  .turn-attachment-img {
     transition: none;
   }
 }
