@@ -19,7 +19,14 @@ const POLICY = [
 /** Preserve document layout without granting active content or network access. */
 export function htmlPreviewDocument(source: string): { srcdoc: string; channel: string } {
   const channel = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('')
-  const root = DOMPurify.sanitize(source, {
+  // Keep the default clobbering checks during sanitization, including for names.
+  // A private instance lets us retain plain IDs without altering Markdown hooks.
+  const purifier = DOMPurify(window)
+  const ids = new WeakMap<Node, string>()
+  purifier.addHook('uponSanitizeAttribute', (node, { attrName, attrValue }) => {
+    if (attrName === 'id' && /^[A-Za-z_$][\w$]*$/.test(attrValue)) ids.set(node, attrValue)
+  })
+  const root = purifier.sanitize(source, {
     WHOLE_DOCUMENT: true,
     RETURN_DOM: true,
     USE_PROFILES: { html: true },
@@ -76,29 +83,42 @@ export function htmlPreviewDocument(source: string): { srcdoc: string; channel: 
   bridge.textContent = `(() => {
     const channel = '${channel}';
     const parentOrigin = ${parentOrigin};
+    const owner = window.parent;
+    // Restored IDs can shadow document methods through named HTML images.
+    // Use native prototypes, not properties resolved through the document.
+    const find = Document.prototype.getElementById.bind(document);
+    const documentRoot = Document.prototype.querySelector.call(document, 'html');
+    const listen = EventTarget.prototype.addEventListener;
     const scroll = (hash) => {
       if (typeof hash !== 'string' || !hash.startsWith('#')) return;
       let id; try { id = decodeURIComponent(hash.slice(1)); } catch { return; }
-      if (!id) { window.scrollTo(0, 0); return; }
-      document.getElementById(id)?.scrollIntoView();
+      if (!id) { Element.prototype.scrollTo.call(documentRoot, 0, 0); return; }
+      const target = find(id);
+      if (target) Element.prototype.scrollIntoView.call(target);
     };
-    document.addEventListener('click', event => {
-      const link = event.target instanceof Element ? event.target.closest('a[href], area[href]') : null;
-      const href = link?.getAttribute('href');
+    listen.call(document, 'click', event => {
+      const link = event.target instanceof Element ? Element.prototype.closest.call(event.target, 'a[href], area[href]') : null;
+      const href = link ? Element.prototype.getAttribute.call(link, 'href') : null;
       if (!href?.startsWith('#')) return;
       event.preventDefault(); scroll(href);
     });
-    document.addEventListener('keydown', event => {
+    listen.call(document, 'keydown', event => {
       if (event.key !== 'Escape') return;
       event.preventDefault(); event.stopPropagation();
-      parent.postMessage({ type: 'attachment-html-close', channel }, '*');
+      owner.postMessage({ type: 'attachment-html-close', channel }, '*');
     }, true);
-    window.addEventListener('message', event => {
-      if (event.source === parent && event.origin === parentOrigin && event.data?.type === 'attachment-html-init' && event.data.channel === channel) {
+    listen.call(window, 'message', event => {
+      if (event.source === owner && event.origin === parentOrigin && event.data?.type === 'attachment-html-init' && event.data.channel === channel) {
         scroll(event.data.hash);
       }
     });
   })();`
   root.querySelector('body')?.append(bridge)
+  // Restore only plain IDs on retained elements after the complete cleanup.
+  // This preserves fragment/CSS identity without restoring arbitrary rejected values.
+  for (const element of [root, ...root.querySelectorAll('*')]) {
+    const id = ids.get(element)
+    if (id !== undefined && !element.hasAttribute('id')) element.setAttribute('id', id)
+  }
   return { srcdoc: `<!doctype html>${root.outerHTML}`, channel }
 }
