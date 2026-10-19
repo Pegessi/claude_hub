@@ -97,7 +97,12 @@
       v-if="!isManagedChat"
     />
 
-    <ChatImageLightbox />
+    <AttachmentPreviewDialog
+      :target="preview.target.value"
+      :can-go-back="preview.canGoBack.value"
+      @close="preview.close()"
+      @back="preview.back"
+    />
   </div>
 </template>
 
@@ -107,7 +112,8 @@ import { chatIdentityKey, chatGoalKey, chatTimelineKey, chatActionsKey, chatDeli
 import ChatTimeline from './components/ChatTimeline.vue'
 import ChatComposer from './components/ChatComposer.vue'
 import ChatGoalSetup from './components/ChatGoalSetup.vue'
-import ChatImageLightbox from './components/ChatImageLightbox.vue'
+import AttachmentPreviewDialog from '@/components/AttachmentPreviewDialog.vue'
+import { provideAttachmentPreview } from '@/composables/useAttachmentPreview'
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import { useAgentStream } from '@/composables/useAgentStream'
 import { useTerminalStore } from '@/stores/terminalStore'
@@ -125,6 +131,7 @@ import { useChatActions } from '@/features/chat/controllers/useChatActions'
 import { useChatQueue } from '@/features/chat/controllers/useChatQueue'
 import { useChatImages } from '@/features/chat/controllers/useChatImages'
 const props = defineProps<ChatPaneProps>()
+const preview = provideAttachmentPreview()
 const isManagedChat = computed(() => Boolean(props.managedChat))
 const managedIdentityMissing = computed(() => isManagedChat.value && !props.managedSessionId)
 const streamSource = computed(() => isManagedChat.value ? 'managed-session' as const : 'terminal-tab' as const)
@@ -245,7 +252,6 @@ const settings = useChatSettings({
 })
 const composer = useChatComposer({
   get attachments() { return attachmentsController.attachments },
-  get closeImageLightbox() { return images.closeImageLightbox },
   get closeModeMenu() { return settings.closeModeMenu },
   get closeModelMenu() { return settings.closeModelMenu },
   get composerError() { return delivery.composerError },
@@ -255,13 +261,11 @@ const composer = useChatComposer({
   get goalComposerReason() { return goalController.goalComposerReason },
   get goalInputBlocked() { return goalController.goalInputBlocked },
   get goalSteerOnly() { return goalController.goalSteerOnly },
-  get imageLightboxUrl() { return images.imageLightboxUrl },
   get isManagedChat() { return isManagedChat },
   get isModeMenuOpen() { return settings.isModeMenuOpen },
   get isModelMenuOpen() { return settings.isModelMenuOpen },
   get isPaneActivated() { return isPaneActivated },
   get isSending() { return delivery.isSending },
-  get lightboxEl() { return images.lightboxEl },
   get sendQueuedDraft() { return queue.sendQueuedDraft },
   get submit() { return delivery.submit },
   get turnInFlight() { return delivery.turnInFlight },
@@ -324,6 +328,7 @@ const queue = useChatQueue({
   get composerTurnInFlight() { return delivery.composerTurnInFlight },
 })
 const images = useChatImages({
+  openPreview: preview.open,
   get streamBasePath() { return streamBasePath },
 })
 // The pane owns KeepAlive ordering; leaf components only borrow owner refs.
@@ -346,7 +351,7 @@ onActivated(() => {
 })
 onDeactivated(() => {
   isPaneActivated.value = false
-  images.dismissImageLightbox(false)
+  preview.close(false)
   settings.isAddMenuOpen.value = false
   goalController.isGoalSetupOpen.value = false
   goalController.cancelGoalRefresh()
@@ -368,7 +373,7 @@ onUnmounted(() => {
   document.removeEventListener('pointerdown', settings.handleModeOutsidePointer)
   document.removeEventListener('pointerdown', settings.handleModelOutsidePointer)
   window.removeEventListener('resize', composer.handleViewportResize)
-  images.dismissImageLightbox(false)
+  preview.close(false)
   actions.clearCopyFeedback()
   stop()
 })

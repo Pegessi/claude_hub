@@ -11,9 +11,10 @@ if (typeof window !== 'undefined') {
 }
 
 // Keep the standalone reader independent of the terminal/Workspace UI bundle.
-const rootComponent = new URLSearchParams(window.location.search).has('markdown')
+const query = new URLSearchParams(window.location.search)
+const rootComponent = query.has('markdown')
   ? import('@/views/MarkdownPreviewView.vue')
-  : import('./App.vue')
+  : query.has('attachment') ? import('@/views/AttachmentPreviewView.vue') : import('./App.vue')
 
 void rootComponent.then(({ default: root }) => {
   createApp(root).use(createPinia()).mount('#app')

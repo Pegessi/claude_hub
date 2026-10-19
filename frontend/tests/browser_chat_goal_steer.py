@@ -346,11 +346,12 @@ async def main(browser_run: BrowserRun) -> None:
             item = queue.locator(".queued-draft").first
             await item.locator("summary").click()
             await item.get_by_role("button", name="View shot.png", exact=True).click()
-            await expect(page.get_by_role("dialog", name="Image preview")).to_be_visible()
-            await expect(page.locator(".structured-image-lightbox img")).to_have_attribute(
+            await expect(page.get_by_role("dialog", name="Attachment preview")).to_be_visible()
+            await expect(page.locator(".attachment-preview-dialog img")).to_have_attribute(
                 "src", re.compile("^data:image/png;base64,")
             )
-            await page.get_by_role("button", name="Close image preview").click()
+            await page.get_by_role("button", name="Close preview").click()
+            await expect(page.get_by_role("dialog", name="Attachment preview")).not_to_be_visible()
             await page.screenshot(
                 path=str(output / "goal-queued-image-controls.png"), full_page=True
             )

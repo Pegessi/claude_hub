@@ -8,7 +8,6 @@ import { formatAskQuestionResponse } from '@/utils/chatQuestionResponse'
 
 interface Dependencies {
   attachments: Ref<DraftAttachment[]>
-  closeImageLightbox: () => void
   closeModeMenu: (restoreFocus: boolean) => void
   closeModelMenu: (focusTrigger: boolean) => void
   composerError: Ref<string | null>
@@ -18,13 +17,11 @@ interface Dependencies {
   goalComposerReason: Ref<string | null>
   goalInputBlocked: Ref<boolean>
   goalSteerOnly: Ref<boolean>
-  imageLightboxUrl: Ref<string | null>
   isManagedChat: Ref<boolean>
   isModeMenuOpen: Ref<boolean>
   isModelMenuOpen: Ref<boolean>
   isPaneActivated: Ref<boolean>
   isSending: Ref<boolean>
-  lightboxEl: Ref<HTMLElement | null>
   sendQueuedDraft: (id: string) => Promise<void>
   submit: (delivery?: 'normal' | 'steer', messageOverride?: string, source?: 'user' | 'queue', questionIdentity?: QuestionIdentity | null, queuedDraft?: QueuedChatDraft) => Promise<boolean>
   turnInFlight: Ref<boolean>
@@ -65,16 +62,6 @@ export function useChatComposer(deps: Dependencies) {
 
   function handleDocumentKeydown(event: KeyboardEvent) {
     if (!deps.isPaneActivated.value) return
-    if (event.key === 'Tab' && deps.imageLightboxUrl.value) {
-      const controls = deps.lightboxEl.value?.querySelectorAll<HTMLElement>('button, a[href]')
-      if (controls?.length) {
-        const index = Array.from(controls).indexOf(document.activeElement as HTMLElement)
-        const next = (index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length
-        event.preventDefault()
-        controls[next].focus()
-      }
-      return
-    }
     if (event.key === 'Escape' && deps.isModelMenuOpen.value) {
       event.preventDefault()
       deps.closeModelMenu(true)
@@ -84,10 +71,6 @@ export function useChatComposer(deps: Dependencies) {
       event.preventDefault()
       deps.closeModeMenu(true)
       return
-    }
-    if (event.key === 'Escape' && deps.imageLightboxUrl.value) {
-      event.preventDefault()
-      deps.closeImageLightbox()
     }
   }
 

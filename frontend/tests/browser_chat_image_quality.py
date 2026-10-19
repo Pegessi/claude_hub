@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import posixpath
+import re
 import struct
 import sys
 import zlib
@@ -31,6 +33,22 @@ OUTPUT_PATH = "/tmp/dotbm/dot-mobile-work.png"
 OUTPUT_TEXT = (
     "[View screenshot](/tmp/result.png)\n\n![Missing screenshot](/tmp/missing.png)"
     "\n\n[排查记录](<reports/排查 记录.md>)"
+    "\n\n[code.py](code.py) · [data.json](data.json) · [large.log](large.log)"
+    " · [empty.txt](empty.txt) · [slow.json](slow.json) · [archive.zip](archive.zip)"
+)
+PYTHON_SOURCE = (
+    'payload = "<script>window.__attachmentUnsafe = true</script>"\n'
+    "print(payload)\n"
+    "# Long source line: " + "preserve_spacing_and_text " * 40 + "\n"
+)
+JSON_SOURCE = '{\n  "markup": "<img src=x onerror=alert(1)>",\n  "value": 42\n}\n'
+LOG_SOURCE = "First available log line\n" * 30
+LONG_MARKDOWN_SOURCE = (
+    "# Long document\n\n"
+    + "\n\n".join(
+        f"Record {index}: this paragraph keeps the reader scrollable." for index in range(40)
+    )
+    + "\n\n[Read Python](../code.py)\n"
 )
 MARKDOWN_PATH = "/fixture/project/reports/排查 记录.md"
 MARKDOWN_SOURCE = (
@@ -40,6 +58,7 @@ MARKDOWN_SOURCE = (
     "| Sample | alpha | beta | gamma | delta | epsilon | zeta | eta |\n\n"
     '```python\nprint("preview")\n```\n\n'
     "[Details](details.md#evidence)\n\n[Missing document](missing.md)\n\n"
+    "[Python source](../code.py)\n\n[JSON data](../data.json)\n\n[Long document](long.md)\n\n"
     "[Scoped preview](/?markdown=%2Ffixture%2Fproject%2Freports%2Fdetails.md&scope=other-tab#evidence)\n\n"
     "![Parent plot](../plot.png)\n\n"
     "[Restricted document](denied.md)\n\n"
@@ -174,15 +193,213 @@ EVENTS = [
 ]
 
 
+async def check_attachment_preview(page, context, output: Path, report: dict) -> None:
+    """Use ordinary file links without leaving the Chat or losing its draft."""
+    composer = page.locator(".composer-textarea:visible").first
+    timeline = page.locator(".structured-timeline:visible").first
+    draft = "Keep this unsent draft while reading attachments."
+    await composer.fill(draft)
+    original_url = page.url
+    page_count = len(context.pages)
+    link = page.get_by_role("link", name="排查记录", exact=True)
+    await link.scroll_into_view_if_needed()
+    scroll_top = await timeline.evaluate("el => el.scrollTop")
+    await link.click()
+    dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
+    close = dialog.get_by_role("button", name="Close preview", exact=True)
+    article = dialog.locator(".attachment-article")
+    source = dialog.locator(".attachment-source")
+    await expect(dialog).to_be_visible()
+    assert await dialog.evaluate("el => el instanceof HTMLDialogElement && el.matches(':modal')")
+    await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+    await expect(close).to_be_focused()
+    assert page.url == original_url
+    assert len(context.pages) == page_count
+    await expect(composer).to_have_value(draft)
+    for _ in range(12):
+        await page.keyboard.press("Tab")
+        assert await dialog.evaluate("el => el.contains(document.activeElement)")
+    await dialog.get_by_role("button", name="Show source", exact=True).click()
+    await expect(source).to_be_visible()
+    assert await source.text_content() == MARKDOWN_SOURCE
+    await expect(source.locator("script, a, img")).to_have_count(0)
+    await dialog.get_by_role("button", name="Show preview", exact=True).click()
+    await article.get_by_role("link", name="Details", exact=True).click()
+    await expect(article.get_by_role("heading", name="Detail record", exact=True)).to_be_visible()
+    await expect(article.locator("blockquote #evidence")).to_be_in_viewport()
+    assert page.url == original_url
+    await dialog.get_by_role("button", name="Back", exact=True).click()
+    await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+    await expect(dialog.get_by_role("button", name="Back", exact=True)).to_have_count(0)
+    await expect(dialog.locator(".attachment-title h1")).to_be_focused()
+    assert await dialog.evaluate("el => el.contains(document.activeElement)")
+    await article.get_by_role("button", name="Open image Parent plot", exact=True).click()
+    await expect(dialog.get_by_role("link", name="Open original")).to_be_visible()
+    await expect(dialog.locator(".structured-image-lightbox-img")).to_have_js_property(
+        "naturalWidth", 1920
+    )
+    assert len(context.pages) == page_count
+    await dialog.get_by_role("button", name="Back", exact=True).click()
+    await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+    await article.get_by_role("link", name="Python source", exact=True).click()
+    await expect(source).to_be_visible()
+    assert await source.text_content() == PYTHON_SOURCE
+    await expect(source.locator("script, a, img")).to_have_count(0)
+    await dialog.get_by_role("button", name="Back", exact=True).click()
+    await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+    await article.get_by_role("link", name="Long document", exact=True).click()
+    nested_code = article.get_by_role("link", name="Read Python", exact=True)
+    await nested_code.scroll_into_view_if_needed()
+    body = dialog.locator(".attachment-body")
+    reader_scroll = await body.evaluate("el => el.scrollTop")
+    assert reader_scroll > 300
+    await nested_code.click()
+    await expect(source).to_be_visible()
+    assert await source.text_content() == PYTHON_SOURCE
+    await dialog.get_by_role("button", name="Back", exact=True).click()
+    await expect(nested_code).to_be_in_viewport()
+    assert abs(await body.evaluate("el => el.scrollTop") - reader_scroll) <= 2
+    await dialog.get_by_role("button", name="Back", exact=True).click()
+    await expect(article.get_by_role("heading", name="Investigation record")).to_be_visible()
+    await article.get_by_role("link", name="Missing document", exact=True).click()
+    error = dialog.get_by_role("alert")
+    await expect(error).to_be_visible()
+    await expect(article).to_have_count(0)
+    await error.get_by_role("button", name="Retry", exact=True).click()
+    await expect(article.get_by_role("heading", name="Recovered document")).to_be_visible()
+    await close.click()
+    await expect(dialog).to_be_hidden()
+    await expect(link).to_be_focused()
+    assert abs(await timeline.evaluate("el => el.scrollTop") - scroll_top) <= 2
+    await expect(composer).to_have_value(draft)
+
+    for width in (390, 320):
+        await page.set_viewport_size({"width": width, "height": 844})
+        code_link = page.get_by_role("link", name="code.py", exact=True)
+        await code_link.scroll_into_view_if_needed()
+        scroll_top = await timeline.evaluate("el => el.scrollTop")
+        await code_link.click()
+        await expect(dialog).to_be_visible()
+        await expect(source).to_be_visible()
+        assert await source.text_content() == PYTHON_SOURCE
+        await expect(source.locator(".hljs-string").first).to_be_attached()
+        await expect(source.locator("script, a, img")).to_have_count(0)
+        assert not await page.evaluate("Boolean(window.__attachmentUnsafe)")
+        for name in ("Close preview", "Wrap lines", "Copy"):
+            control = dialog.get_by_role("button", name=name, exact=True)
+            await expect(control).to_be_in_viewport()
+            bounds = await control.bounding_box()
+            assert bounds and bounds["height"] >= 44, (width, name, bounds)
+        wrap = dialog.get_by_role("button", name="Wrap lines", exact=True)
+        pressed = await wrap.get_attribute("aria-pressed")
+        await wrap.click()
+        await expect(wrap).to_have_attribute(
+            "aria-pressed", "false" if pressed == "true" else "true"
+        )
+        if await wrap.get_attribute("aria-pressed") != "true":
+            await wrap.click()
+        assert await dialog.evaluate("el => el.scrollWidth <= el.clientWidth")
+        await dialog.get_by_role("button", name="Copy", exact=True).click()
+        assert await page.evaluate("window.__copiedCode.at(-1)") == PYTHON_SOURCE
+        await page.screenshot(path=str(output / f"attachment-code-{width}.png"), full_page=True)
+        report["screenshots"].append(f"attachment-code-{width}.png")
+        await page.go_back()
+        await expect(dialog).to_be_hidden()
+        assert page.url == original_url
+        assert len(context.pages) == page_count
+        await expect(code_link).to_be_focused()
+        await expect(composer).to_have_value(draft)
+        assert abs(await timeline.evaluate("el => el.scrollTop") - scroll_top) <= 2
+
+        await page.get_by_role("link", name="data.json", exact=True).click()
+        await expect(source).to_be_visible()
+        assert await source.text_content() == JSON_SOURCE
+        await expect(source.locator("script, a, img")).to_have_count(0)
+        await close.click()
+        await expect(dialog).to_be_hidden()
+        await expect(composer).to_have_value(draft)
+
+    await page.get_by_role("link", name="large.log", exact=True).click()
+    await expect(source).to_be_visible()
+    assert await source.text_content() == LOG_SOURCE
+    await expect(dialog.get_by_role("status")).to_contain_text(
+        re.compile("first|truncat|large", re.I)
+    )
+    await close.click()
+    await expect(dialog).to_be_hidden()
+    await page.get_by_role("link", name="empty.txt", exact=True).click()
+    await expect(dialog).to_contain_text(re.compile("empty", re.I))
+    await close.click()
+    await expect(dialog).to_be_hidden()
+    await page.get_by_role("link", name="archive.zip", exact=True).click()
+    await expect(dialog.get_by_role("alert")).to_contain_text("no built-in preview")
+    await expect(dialog.get_by_role("button", name="Retry", exact=True)).to_have_count(0)
+    await close.click()
+    await expect(dialog).to_be_hidden()
+
+    await page.get_by_role("link", name="slow.json", exact=True).click()
+    await expect(dialog.get_by_role("status")).to_contain_text(re.compile("loading", re.I))
+    await close.click()
+    await expect(dialog).to_be_hidden()
+    await page.get_by_role("link", name="code.py", exact=True).click()
+    await expect(source).to_be_visible()
+    await asyncio.sleep(0.5)
+    assert await source.text_content() == PYTHON_SOURCE
+    await page.keyboard.press("Escape")
+    await expect(dialog).to_be_hidden()
+    await expect(composer).to_have_value(draft)
+
+    await page.get_by_role("link", name="code.py", exact=True).click()
+    await expect(source).to_be_visible()
+    await close.click()
+    await expect(dialog).to_be_hidden()
+    await page.go_forward()
+    await expect(dialog).to_be_hidden()
+    await page.get_by_role("link", name="code.py", exact=True).click()
+    await expect(source).to_be_visible()
+    await close.click()
+    await expect(dialog).to_be_hidden()
+    await expect(composer).to_have_value(draft)
+    assert page.url == original_url
+    await composer.fill("")
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    report["attachment_preview"] = {
+        "ordinary_click_stays_in_chat": True,
+        "native_modal_focus_containment": True,
+        "markdown_source_is_inert": True,
+        "nested_markdown_code_and_image_links": True,
+        "nested_fragment_visible": True,
+        "nested_reader_back_restores_scroll": True,
+        "last_back_restores_dialog_title_focus": True,
+        "missing_retry_preserves_target": True,
+        "mobile_widths": [390, 320],
+        "mobile_back_and_close_preserve_draft_scroll": True,
+        "code_highlight_and_exact_copy": True,
+        "json_source_is_inert": True,
+        "truncated_and_empty_states": True,
+        "unsupported_binary_explained_without_fetch": True,
+        "late_response_does_not_replace_next_file": True,
+        "forward_then_reopen_can_close": True,
+    }
+
+
 async def check_markdown_preview(page, context, output: Path, report: dict) -> None:
-    """Exercise the ordinary Chat link and the independent document reader."""
+    """Keep explicit standalone reading and reload compatibility covered."""
     link = page.get_by_role("link", name="排查记录", exact=True)
     await expect(link).to_be_visible()
     link_query = parse_qs(urlparse(await link.get_attribute("href")).query)
-    assert link_query == {"markdown": ["reports/排查 记录.md"], "scope": [TAB]}, link_query
+    assert link_query == {
+        "markdown": ["reports/排查 记录.md"],
+        "scope": [TAB],
+    }, link_query
+    await link.click()
+    dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
+    await expect(dialog).to_be_visible()
     async with context.expect_page() as opened:
-        await link.click()
+        await dialog.get_by_role("link", name="Open separately", exact=True).click()
     reader = await opened.value
+    await dialog.get_by_role("button", name="Close preview", exact=True).click()
+    await expect(dialog).to_be_hidden()
     reader.on("pageerror", lambda error: report["page_errors"].append(str(error)))
     try:
         await reader.wait_for_load_state("domcontentloaded")
@@ -330,7 +547,7 @@ async def check_markdown_preview(page, context, output: Path, report: dict) -> N
         await reader.screenshot(path=str(output / "markdown-reader-error.png"), full_page=True)
         report["screenshots"].append("markdown-reader-error.png")
         report["markdown_preview"] = {
-            "normal_chat_click_opens_independent_page": True,
+            "explicit_action_opens_independent_page": True,
             "unicode_space_path": True,
             "rendered_heading_table_code": True,
             "source_preserved_as_text": True,
@@ -388,6 +605,7 @@ async def main(browser_run: BrowserRun) -> None:
     tabs.append({**tabs[0], "id": OTHER_TAB, "name": "Other Image Chat"})
     send_payloads: list[dict] = []
     markdown_attempts: dict[str, int] = {}
+    attachment_attempts: dict[str, int] = {}
     report: dict = {
         "result": "FAIL",
         "api_requests": [],
@@ -468,9 +686,15 @@ async def main(browser_run: BrowserRun) -> None:
                         "next_sequence": next_sequence,
                         "has_more": False,
                     }
-                elif path == f"/api/workspaces/tabs/{TAB}/stream/markdown":
-                    document_path = parse_qs(parsed.query).get("path", [""])[0]
-                    markdown_attempts[document_path] = markdown_attempts.get(document_path, 0) + 1
+                elif path in {
+                    f"/api/workspaces/tabs/{TAB}/stream/markdown",
+                    f"/api/workspaces/tabs/{TAB}/stream/attachment",
+                }:
+                    document_path = posixpath.normpath(parse_qs(parsed.query).get("path", [""])[0])
+                    attempts = (
+                        attachment_attempts if path.endswith("/attachment") else markdown_attempts
+                    )
+                    attempts[document_path] = attempts.get(document_path, 0) + 1
                     missing_path = "/fixture/project/reports/missing.md"
                     if document_path == "/fixture/project/reports/denied.md":
                         await route.fulfill(
@@ -479,16 +703,63 @@ async def main(browser_run: BrowserRun) -> None:
                             body=json.dumps({"detail": "secret filesystem detail"}),
                         )
                         return
-                    if document_path == missing_path and markdown_attempts[document_path] == 1:
+                    if document_path == missing_path and attempts[document_path] == 1:
                         await route.fulfill(
                             status=404,
                             content_type="application/json",
                             body=json.dumps({"detail": "document not available"}),
                         )
                         return
+                    if path.endswith("/attachment") and document_path in {
+                        "code.py",
+                        "/fixture/project/code.py",
+                        "data.json",
+                        "/fixture/project/data.json",
+                        "large.log",
+                        "empty.txt",
+                        "slow.json",
+                    }:
+                        filename = Path(document_path).name
+                        if filename == "slow.json":
+                            await asyncio.sleep(0.35)
+                        content = {
+                            "code.py": PYTHON_SOURCE,
+                            "data.json": JSON_SOURCE,
+                            "large.log": LOG_SOURCE,
+                            "empty.txt": "",
+                            "slow.json": '{"late": true}',
+                        }[filename]
+                        body = {
+                            "path": f"/fixture/project/{filename}",
+                            "filename": filename,
+                            "content": content,
+                            "size_bytes": (
+                                900000 if filename == "large.log" else len(content.encode("utf-8"))
+                            ),
+                            "truncated": filename == "large.log",
+                            "kind": (
+                                "code"
+                                if filename == "code.py"
+                                else "data" if filename.endswith(".json") else "text"
+                            ),
+                            "language": (
+                                "python"
+                                if filename == "code.py"
+                                else ("json" if filename.endswith(".json") else "plaintext")
+                            ),
+                        }
+                        await route.fulfill(
+                            status=200,
+                            content_type="application/json",
+                            body=json.dumps(body),
+                        )
+                        return
                     if document_path in {"reports/排查 记录.md", MARKDOWN_PATH}:
                         resolved_path = MARKDOWN_PATH
                         content = MARKDOWN_SOURCE
+                    elif document_path == "/fixture/project/reports/long.md":
+                        resolved_path = document_path
+                        content = LONG_MARKDOWN_SOURCE
                     elif document_path == "/fixture/project/reports/details.md":
                         resolved_path = document_path
                         content = (
@@ -513,6 +784,14 @@ async def main(browser_run: BrowserRun) -> None:
                         "size_bytes": len(content.encode("utf-8")),
                         "truncated": False,
                     }
+                    if path.endswith("/attachment"):
+                        body.update(
+                            {
+                                "filename": Path(resolved_path).name,
+                                "kind": "markdown",
+                                "language": "markdown",
+                            }
+                        )
                 elif path.endswith("/stream/agent-image"):
                     image_path = parse_qs(parsed.query).get("path", [""])[0]
                     await route.fulfill(
@@ -617,7 +896,7 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(page.locator(".quoted-img-missing")).to_contain_text("image unavailable")
             assert await preview.locator("img").evaluate("img => img.naturalWidth") == 1920
             await preview.click()
-            dialog = page.get_by_role("dialog", name="Image preview", exact=True)
+            dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
             await expect(dialog).to_be_visible()
             original = dialog.get_by_role("link", name="Open original")
             assert await original.get_attribute("href") == await dialog.locator(
@@ -639,14 +918,14 @@ async def main(browser_run: BrowserRun) -> None:
             await preview.focus()
             await page.keyboard.press("Enter")
             await expect(dialog).to_be_visible()
-            await expect(dialog.get_by_role("button", name="Close image preview")).to_be_focused()
+            await expect(dialog.get_by_role("button", name="Close preview")).to_be_focused()
             await page.keyboard.press("Tab")
             assert await dialog.evaluate("el => el.contains(document.activeElement)")
             await expect(dialog.get_by_role("button", name="Actual size")).to_be_in_viewport()
             await expect(original).to_be_in_viewport()
             await page.screenshot(path=str(output / "assistant-image-mobile.png"), full_page=True)
             report["screenshots"].append("assistant-image-mobile.png")
-            await dialog.get_by_role("button", name="Close image preview").click()
+            await dialog.get_by_role("button", name="Close preview").click()
             await expect(preview).to_be_focused()
             assert await page.locator(".structured-pane").evaluate(
                 "el => el.scrollWidth <= el.clientWidth"
@@ -673,12 +952,12 @@ async def main(browser_run: BrowserRun) -> None:
             }""",
                 OTHER_TAB,
             )
-            await expect(dialog).to_have_count(0)
+            await expect(dialog).to_be_hidden()
             active_composer = page.locator(".composer-textarea:visible").first
             await active_composer.focus()
             await page.keyboard.press("Tab")
             assert await page.evaluate(
-                "!document.activeElement.closest('.structured-image-lightbox')"
+                "!document.activeElement.closest('.attachment-preview-dialog')"
             )
             await page.evaluate(
                 """async tabId => {
@@ -868,8 +1147,10 @@ async def main(browser_run: BrowserRun) -> None:
                 "lazy_renderers": True,
             }
             await page.set_viewport_size({"width": 1280, "height": 900})
+            await check_attachment_preview(page, context, output, report)
             await check_markdown_preview(page, context, output, report)
             report["markdown_requests"] = markdown_attempts
+            report["attachment_requests"] = attachment_attempts
 
             composer = page.locator(".composer-textarea").first
             file_input = page.locator(".composer-file-input").first
