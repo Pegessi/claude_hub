@@ -204,6 +204,34 @@ EVENTS = [
 ]
 
 
+async def click_timeline_link(page, link) -> float:
+    """Measure scroll after actionability, without locator click's later auto-scroll."""
+    await link.scroll_into_view_if_needed()
+    await expect(link).to_be_visible()
+    await expect(link).to_be_in_viewport()
+    # A closing mobile sidebar can still cover the link after resize. Wait for
+    # its real click point before recording the scroll position to preserve.
+    ready = await page.wait_for_function(
+        """el => {
+            const timeline = el.closest('.structured-timeline')
+            if (!el.isConnected || !timeline) return false
+            const rect = el.getBoundingClientRect()
+            const x = rect.left + rect.width / 2
+            const y = rect.top + rect.height / 2
+            const hit = document.elementFromPoint(x, y)
+            if (rect.width <= 0 || rect.height <= 0 || x < 0 || x >= innerWidth
+                || y < 0 || y >= innerHeight || !(hit === el || el.contains(hit))) return false
+            return {x, y, scrollTop: timeline.scrollTop}
+        }""",
+        arg=await link.element_handle(),
+        timeout=5000,
+    )
+    point = await ready.json_value()
+    await ready.dispose()
+    await page.mouse.click(point["x"], point["y"])
+    return point["scrollTop"]
+
+
 async def check_attachment_preview(page, context, output: Path, report: dict) -> None:
     """Use ordinary file links without leaving the Chat or losing its draft."""
     composer = page.locator(".composer-textarea:visible").first
@@ -213,9 +241,7 @@ async def check_attachment_preview(page, context, output: Path, report: dict) ->
     original_url = page.url
     page_count = len(context.pages)
     link = page.get_by_role("link", name="排查记录", exact=True)
-    await link.scroll_into_view_if_needed()
-    scroll_top = await timeline.evaluate("el => el.scrollTop")
-    await link.click()
+    scroll_top = await click_timeline_link(page, link)
     dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
     close = dialog.get_by_role("button", name="Close preview", exact=True)
     article = dialog.locator(".attachment-article")
@@ -287,9 +313,7 @@ async def check_attachment_preview(page, context, output: Path, report: dict) ->
     for width in (390, 320):
         await page.set_viewport_size({"width": width, "height": 844})
         code_link = page.get_by_role("link", name="code.py", exact=True)
-        await code_link.scroll_into_view_if_needed()
-        scroll_top = await timeline.evaluate("el => el.scrollTop")
-        await code_link.click()
+        scroll_top = await click_timeline_link(page, code_link)
         await expect(dialog).to_be_visible()
         await expect(source).to_be_visible()
         assert await source.text_content() == PYTHON_SOURCE
