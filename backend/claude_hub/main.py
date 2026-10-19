@@ -5,13 +5,16 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.middleware.gzip import GZipMiddleware
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
+from starlette.types import Scope
 
 from .api import api_router
 from .config import settings
@@ -287,12 +290,48 @@ async def health_check() -> dict[str, str]:
 # exports ``SERVE_FRONTEND=true``) and a built ``frontend/dist`` exists, FastAPI
 # serves the SPA at the same origin as the API — no separate vite dev server,
 # no HMR WebSocket (which force-reloads background tabs), no CORS/proxy. The app
-# has no vue-router, so ``StaticFiles(html=True)`` serves index.html at "/" and
-# 404s unknown paths; the API/health/docs routes above are registered first and
-# win route-ordering. COOP/COEP headers are added by the middleware above to
+# has no vue-router, so static serving handles index.html at "/" and leaves
+# unknown paths as 404s except for the HTML-reader compatibility redirect below.
+# The API/health/docs routes above are registered first and win route-ordering.
+# COOP/COEP headers are added by the middleware above to
 # every response, static assets included. When the build is absent (dev/CI),
 # fall back to the JSON root so backend tests asserting on it stay green.
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+def _html_reader_redirect(scope: Scope) -> Response | None:
+    original = scope["path"]
+    if (
+        scope["method"] not in {"GET", "HEAD"}
+        or original.startswith(("/api/", "/assets/", "/static/", "//"))
+        or "\\" in original
+        or any(ord(char) < 32 or ord(char) == 127 for char in original)
+        or len(original) > 4096
+        or ".." in Path(original).parts
+        or Path(original).suffix.lower() not in {".html", ".htm"}
+    ):
+        return None
+    # This is only a public shell redirect. The reader's JSON endpoint still
+    # authenticates and checks an exact live Task artifact grant.
+    query = urlencode({"attachment": original, "registered": "1"})
+    return RedirectResponse(f"/?{query}", status_code=307, headers={"Cache-Control": "no-store"})
+
+
+class FrontendStaticFiles(StaticFiles):
+    """Keep static handling, with a reader redirect for missing HTML file links."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                redirect = _html_reader_redirect(scope)
+                if redirect is not None:
+                    return redirect
+            raise
+        if response.status_code == 404:
+            return _html_reader_redirect(scope) or response
+        return response
 
 
 def register_frontend(fastapi_app: FastAPI, *, serve: bool, dist: Path) -> None:
@@ -301,7 +340,7 @@ def register_frontend(fastapi_app: FastAPI, *, serve: bool, dist: Path) -> None:
     Falls back to a JSON root endpoint otherwise (dev/CI without a build).
     """
     if serve and dist.is_dir():
-        fastapi_app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
+        fastapi_app.mount("/", FrontendStaticFiles(directory=dist, html=True), name="frontend")
         return
 
     @fastapi_app.get("/")

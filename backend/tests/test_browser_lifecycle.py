@@ -43,7 +43,7 @@ class _FakeBrowser:
         self.owner = owner
 
     async def new_context(self, **kwargs: Any) -> _FakeContext:
-        assert kwargs["service_workers"] == "block"
+        assert kwargs["service_workers"] == self.owner.expected_service_workers
         if self.owner.creation_failure == "context":
             raise RuntimeError("context creation failed")
         return _FakeContext(self.owner)
@@ -55,6 +55,7 @@ class _FakeBrowser:
 class _FakePlaywright:
     def __init__(self) -> None:
         self.chromium = self
+        self.expected_service_workers = "block"
         self.creation_failure: str | None = None
         self.close_failure: tuple[str, BaseException] | None = None
         self.hold_stage: str | None = None
@@ -119,6 +120,25 @@ async def _finish_owned(task: asyncio.Task[Any], fake: _FakePlaywright) -> None:
     if task.done() and not task.cancelled():
         task.exception()
     assert not pending, "test-owned browser lifecycle task did not finish"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service_workers", [None, "block", "allow"])
+async def test_service_worker_policy_is_explicit_and_default_stays_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lifecycle: ModuleType,
+    service_workers: str | None,
+) -> None:
+    fake = _FakePlaywright()
+    fake.expected_service_workers = service_workers or "block"
+    monkeypatch.setattr(lifecycle, "async_playwright", lambda: fake)
+    run = lifecycle.BrowserRun(tmp_path / "evidence", tmp_path / "unused-browser")
+    options = {} if service_workers is None else {"service_workers": service_workers}
+    async with run.context(viewport={"width": 800, "height": 600}, **options):
+        pass
+    assert run.cleanup_complete
+    assert fake.attempts == ["context", "browser", "driver"]
 
 
 @pytest.mark.asyncio

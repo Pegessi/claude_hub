@@ -14,7 +14,7 @@ import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from playwright.async_api import BrowserContext, ViewportSize, async_playwright
 
@@ -97,7 +97,11 @@ class BrowserRun:
 
     @asynccontextmanager
     async def context(
-        self, *, viewport: ViewportSize, launch_args: list[str] | None = None
+        self,
+        *,
+        viewport: ViewportSize,
+        launch_args: list[str] | None = None,
+        service_workers: Literal["allow", "block"] = "block",
     ) -> AsyncIterator[BrowserContext]:
         if self.used:
             raise RuntimeError("each browser runner must own exactly one browser context")
@@ -110,7 +114,7 @@ class BrowserRun:
             browser = await playwright.chromium.launch(
                 headless=True, executable_path=str(self.executable), args=launch_args or []
             )
-            context = await browser.new_context(viewport=viewport, service_workers="block")
+            context = await browser.new_context(viewport=viewport, service_workers=service_workers)
             yield context
         except BaseException:
             body_failed = True

@@ -27,6 +27,12 @@ from claude_hub.services.agent_stream.local_markdown import (
     MarkdownUnavailable,
     read_markdown_preview,
 )
+from claude_hub.services.agent_stream.registered_html import (
+    RegisteredHtmlGrant,
+    find_registered_html_grant,
+    read_registered_html_preview,
+    registered_html_path,
+)
 
 ATTACHMENT_NO_STORE = "no-store"
 AGENT_IMAGE_CACHE_CONTROL = "private, max-age=86400, immutable"
@@ -155,11 +161,69 @@ async def serve_markdown(
 
 
 async def serve_attachment(
-    session: ManagedSession, path: str, *, owner_is_current: Callable[[], bool]
+    session: ManagedSession,
+    path: str,
+    *,
+    owner_is_current: Callable[[], bool],
+    bindings: AgentStreamRouteBindings,
 ) -> Response:
-    return await _serve_text_preview(
-        session, path, owner_is_current=owner_is_current, reader=read_attachment_preview
+    try:
+        return await _serve_text_preview(
+            session, path, owner_is_current=owner_is_current, reader=read_attachment_preview
+        )
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+    return await serve_registered_html(
+        path, bindings=bindings, scope=session, owner_is_current=owner_is_current
     )
+
+
+def _registered_grant(
+    path: str,
+    bindings: AgentStreamRouteBindings,
+    scope: ManagedSession | None,
+    task_id: str | None = None,
+) -> RegisteredHtmlGrant:
+    registered_html_path(path)
+    manager = bindings.workspace_manager()
+    return find_registered_html_grant(
+        path,
+        tasks=list(manager.tasks.values()),
+        workspaces=manager.workspaces,
+        sessions=manager.sessions,
+        get_tab=bindings.ttyd_manager().get_tab,
+        scope=scope,
+        task_id=task_id,
+    )
+
+
+async def serve_registered_html(
+    path: str,
+    *,
+    bindings: AgentStreamRouteBindings,
+    scope: ManagedSession | None = None,
+    owner_is_current: Callable[[], bool] | None = None,
+) -> Response:
+    headers = {"Cache-Control": ATTACHMENT_NO_STORE, "X-Content-Type-Options": "nosniff"}
+    try:
+        if owner_is_current is not None and not owner_is_current():
+            raise MarkdownUnavailable()
+        grant = _registered_grant(path, bindings, scope)
+        try:
+            preview = await asyncio.to_thread(read_registered_html_preview, grant)
+        finally:
+            # Resolve from the current canonical Task/owner maps, including when
+            # decoding fails. Deleted grants must not reveal even file type.
+            if (owner_is_current is not None and not owner_is_current()) or _registered_grant(
+                path, bindings, scope, grant.task_id
+            ) != grant:
+                raise MarkdownUnavailable()
+    except MarkdownUnavailable:
+        raise HTTPException(404, "document not available", headers=headers) from None
+    except MarkdownEncodingError:
+        raise HTTPException(415, "document is not UTF-8 text", headers=headers) from None
+    return JSONResponse(preview.model_dump(mode="json"), headers=headers)
 
 
 async def _serve_text_preview(
@@ -193,6 +257,7 @@ class AgentStreamMediaEndpoints:
     get_tab_markdown: Callable[..., Any]
     get_session_attachment_preview: Callable[..., Any]
     get_tab_attachment_preview: Callable[..., Any]
+    get_registered_html_preview: Callable[..., Any]
 
 
 def register_media_routes(
@@ -304,6 +369,7 @@ def register_media_routes(
         return await serve_attachment(
             session,
             path,
+            bindings=bindings,
             owner_is_current=lambda: managed_image_owner_is_current(session, bindings),
         )
 
@@ -317,10 +383,19 @@ def register_media_routes(
         return await serve_attachment(
             session,
             path,
+            bindings=bindings,
             owner_is_current=lambda: tab_image_owner_is_current(session, bindings),
         )
 
+    @router.get("/artifacts/html-preview", response_model=StreamAttachmentPreview)
+    async def get_registered_html_preview(
+        path: str = Query(..., min_length=1, max_length=4096),
+        current_user: User = Depends(get_current_user),
+    ) -> Response:
+        return await serve_registered_html(path, bindings=bindings)
+
     return AgentStreamMediaEndpoints(
+        get_registered_html_preview=get_registered_html_preview,
         get_session_attachment_preview=get_session_attachment_preview,
         get_tab_attachment_preview=get_tab_attachment_preview,
         get_session_markdown=get_session_markdown,

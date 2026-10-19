@@ -59,7 +59,7 @@
         </template>
         <template v-else>
           <button
-            v-if="file?.kind === 'markdown'"
+            v-if="hasPreview"
             type="button"
             class="ch-btn"
             :aria-pressed="showSource"
@@ -68,7 +68,7 @@
             {{ showSource ? 'Show preview' : 'Show source' }}
           </button>
           <button
-            v-if="file && (file.kind !== 'markdown' || showSource)"
+            v-if="file && (!hasPreview || showSource)"
             type="button"
             class="ch-btn"
             :aria-pressed="wrap"
@@ -108,11 +108,17 @@
         class="attachment-copy-status"
         role="status"
       >{{ copyStatus }}</span>
+      <p
+        v-if="canRenderHtml"
+        class="attachment-html-notice"
+      >
+        Static HTML preview. Scripts, forms and automatic external requests are blocked.
+      </p>
     </header>
     <div
       ref="body"
       class="attachment-body"
-      :class="{ 'structured-image-lightbox--actual': actualSize }"
+      :class="{ 'structured-image-lightbox--actual': actualSize, 'attachment-body--html': canRenderHtml && !showSource }"
     >
       <p
         v-if="loading"
@@ -179,8 +185,22 @@
             complete
           />
         </article>
+        <p
+          v-if="file.kind === 'html' && file.truncated"
+          class="attachment-notice"
+          role="status"
+        >
+          This HTML file is truncated. Only source is available.
+        </p>
+        <AttachmentHtmlPreview
+          v-if="canRenderHtml"
+          v-show="!showSource"
+          :content="file.content"
+          :hash="target.hash"
+          @close="$emit('close')"
+        />
         <pre
-          v-if="file.kind !== 'markdown' || showSource"
+          v-if="!hasPreview || showSource"
           class="attachment-source"
           :class="{ 'attachment-source--wrap': wrap }"
           tabindex="0"
@@ -195,8 +215,9 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import DOMPurify from 'dompurify'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import AttachmentHtmlPreview from '@/components/AttachmentHtmlPreview.vue'
 import type { AttachmentTarget } from '@/composables/useAttachmentPreview'
-import { attachmentKind, attachmentPreviewUrl, markdownStreamBase } from '@/utils/markdownPreview'
+import { attachmentKind, attachmentPreviewUrl, markdownStreamBase, registeredHtmlPreviewUrl } from '@/utils/markdownPreview'
 import { ensureHighlighter, highlightCode, highlightReady } from '@/utils/codeHighlight'
 import { writeClipboard } from '@/utils/clipboard'
 
@@ -206,7 +227,7 @@ interface AttachmentDocument {
   content: string
   size_bytes: number
   truncated: boolean
-  kind: 'markdown' | 'code' | 'data' | 'text'
+  kind: 'markdown' | 'html' | 'code' | 'data' | 'text'
   language: string
 }
 const props = withDefaults(defineProps<{ target: AttachmentTarget; canGoBack?: boolean; closable?: boolean }>(), {
@@ -227,9 +248,13 @@ const dimensions = ref('')
 const imageAttempt = ref(0)
 const kind = computed(() => props.target.imageUrl ? 'image' : attachmentKind(props.target.path))
 const isImage = computed(() => kind.value === 'image')
+const canRenderHtml = computed(() => file.value?.kind === 'html' && !file.value.truncated && Boolean(file.value.content))
+const hasPreview = computed(() => file.value?.kind === 'markdown' || canRenderHtml.value)
 const filename = computed(() => props.target.name || (file.value?.path || props.target.path).split('/').pop() || 'Attachment')
 const imageUrl = computed(() => props.target.imageUrl || `${markdownStreamBase(props.target.scope)}/agent-image?${new URLSearchParams({ path: props.target.path })}`)
-const separateUrl = computed(() => attachmentPreviewUrl(props.target.scope, `${encodeURIComponent(props.target.path)}${props.target.hash || ''}`))
+const separateUrl = computed(() => props.target.registered
+  ? registeredHtmlPreviewUrl(props.target.path, props.target.hash)
+  : attachmentPreviewUrl(props.target.scope, `${encodeURIComponent(props.target.path)}${props.target.hash || ''}`))
 // Large inputs stay plain text; highlighter work must not freeze the mobile UI.
 const sourceHtml = computed(() => {
   void highlightReady.value
@@ -281,13 +306,16 @@ async function load() {
     return
   }
   const base = markdownStreamBase(props.target.scope)
-  if (!base || !props.target.path) {
+  const endpoint = props.target.registered
+    ? kind.value === 'html' && props.target.path.startsWith('/') ? '/api/workspaces/artifacts/html-preview' : null
+    : base ? `${base}/attachment` : null
+  if (!endpoint || !props.target.path) {
     error.value = 'This preview link is incomplete. Open the file from its Chat message again.'
     return
   }
   loading.value = true
   try {
-    const response = await fetch(`${base}/attachment?${new URLSearchParams({ path: props.target.path })}`, {
+    const response = await fetch(`${endpoint}?${new URLSearchParams({ path: props.target.path })}`, {
       credentials: 'include', cache: 'no-store', signal: current.signal,
     })
     if (request !== current || current.signal.aborted) return
@@ -296,7 +324,9 @@ async function load() {
       const messages: Record<number, string> = {
         401: 'Sign in to Hub, then retry this preview.',
         403: 'This file is outside the Chat’s allowed file locations.',
-        404: 'The file or its Chat is unavailable, or this location or file type is not allowed.',
+        404: props.target.registered
+          ? 'This HTML file is not registered as an available local Task artifact, or its owner is unavailable.'
+          : 'The file or its Chat is unavailable, or this location or file type is not allowed.',
         415: 'This file is not UTF-8 text. Binary files cannot be shown as source.',
         422: 'This file path is invalid.',
       }
@@ -361,6 +391,8 @@ onUnmounted(() => { request?.abort(); copyEpoch++ })
 .attachment-viewer :slotted(.ch-btn:focus-visible) { outline: 2px solid var(--ch-color-accent); outline-offset: 2px; }
 .attachment-copy-status { font-size: 12px; }
 .attachment-body { padding: 24px; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.attachment-body.attachment-body--html { padding: 0; overflow: hidden; }
+.attachment-html-notice { margin: 0; width: 100%; font-size: 12px; line-height: 1.5; color: var(--ch-color-text-muted); }
 .attachment-notice { margin: 0 0 16px; font-size: 14px; line-height: 1.6; color: var(--ch-color-text-muted); }
 .attachment-error { max-width: 560px; padding: 20px; border: 1px solid var(--ch-color-border); border-radius: 12px; }
 .attachment-error h2 { font-size: 18px; }

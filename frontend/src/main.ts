@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import '@/features/app-shell/styles/theme.css'
 import type { ClaudeHubNamespace } from '@/types'
+import { rawHtmlPreviewPath } from '@/utils/markdownPreview'
 
 // Create the single, application-wide namespace for any window-level globals
 // (F8: consolidate stray `window.xxx =` assignments to prevent leaky reactive
@@ -14,7 +15,8 @@ if (typeof window !== 'undefined') {
 const query = new URLSearchParams(window.location.search)
 const rootComponent = query.has('markdown')
   ? import('@/views/MarkdownPreviewView.vue')
-  : query.has('attachment') ? import('@/views/AttachmentPreviewView.vue') : import('./App.vue')
+  : query.has('attachment') || rawHtmlPreviewPath(window.location.pathname)
+    ? import('@/views/AttachmentPreviewView.vue') : import('./App.vue')
 
 void rootComponent.then(({ default: root }) => {
   createApp(root).use(createPinia()).mount('#app')

@@ -6,6 +6,7 @@ export interface AttachmentTarget {
   hash?: string
   imageUrl?: string
   name?: string
+  registered?: boolean
 }
 
 type OpenAttachment = (target: AttachmentTarget, event?: MouseEvent) => void
