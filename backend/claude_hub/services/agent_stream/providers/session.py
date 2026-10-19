@@ -36,6 +36,9 @@ class SessionCore(ABC):
     supports_goals: bool = True
     goal_execution_owner: Optional[Literal["provider_native", "hub_managed"]] = "hub_managed"
     goal_usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
+    # Providers with a native system/developer instruction channel consume
+    # ``_dot_system_pack`` outside the user prompt.
+    supports_native_system_instructions: bool = False
     # One-shot CLIs can leave stdout open after their final Goal response. Other
     # transports own a larger provider run and must emit its terminal event.
     goal_completion_requires_provider_event: bool = False
@@ -105,6 +108,12 @@ class SessionCore(ABC):
         # to avoid re-paying its tokens on every turn. Only native Chat
         # transports reach this class; Terminal sessions never construct one.
         self._hub_runtime_guidance_injected: bool = False
+        # Dot context is prepared at the shared transport boundary so every
+        # native provider gets the same memory, rotation, and inbox semantics.
+        self._dot_system_pack: str = ""
+        self._dot_event_ids: List[str] = []
+        self._dot_hidden_system_pack_delivered = False
+        self._dot_hidden_system_pack_pending = False
         # Forked-tab history seed: a sentinel-wrapped transcript body prepended
         # once to the first user turn of a fresh provider session so the model
         # actually carries the forked context (a forked tab starts a
@@ -334,40 +343,22 @@ class SessionCore(ABC):
                 raise
 
     async def _with_first_turn_prefixes(self, text: str) -> Tuple[str, bool]:
-        """Compose the first turn's prompt with its one-shot prefix blocks.
+        """Composes the first turn's prompt with its one-shot prefix blocks.
 
         Returns ``(prompt, seed_included)`` where ``seed_included`` is True only
         when the forked-history seed block was actually prepended on this turn.
         The caller commits the seed (and deletes its sidecar) solely when this
-        is True, so an image-only first turn (empty text) defers the seed to
-        the first text turn instead of marking it delivered without ever
-        sending it.
-
-        Two blocks are prepended, each at most once:
-
-        - The forked-tab history seed (when this session was created from a
-          fork): the copied Q/A transcript the model would otherwise lack.
-        - The Hub runtime/self-scheduling guidance.
-
-        Runs inside the send lock, so a racing second turn cannot also inject
-        them. This method only *composes* the prompt: the seed is not marked
-        delivered (and its sidecar not discarded) until the provider accepts
-        a turn that actually contained it, so a failed spawn retries with the
-        seed on the next attempt instead of losing the forked context.
-        Provider-specific prompt wrapping (Cursor's question/image blocks)
-        happens later in ``_send_text``, around this text. An image-only turn
-        (empty text) defers injection to the first turn that carries text.
+        is True, so an image-only first turn defers the seed to the first text
+        turn instead of marking it delivered without ever sending it.
         """
-        if not text:
-            # No prompt blocks, but provider session state is still kept.
-            await self._prepare_turn_context(text)
-            return text, False
+        turn_context = await self._prepare_turn_context(text)
         prefix = ""
         seed_included = False
-        if self._seed_history and not self._seed_history_injected:
+        if text and self._seed_history and not self._seed_history_injected:
             prefix = self._runtime.wrap_fork_seed_history(self._seed_history)
             seed_included = True
-        turn_context = await self._prepare_turn_context(text)
+        if not text and not turn_context:
+            return text, False
         if not self._hub_runtime_guidance_injected:
             self._hub_runtime_guidance_injected = True
             text = self._runtime.wrap_runtime_guidance()(text, context=turn_context)
@@ -376,16 +367,129 @@ class SessionCore(ABC):
         return prefix + text, seed_included
 
     async def _prepare_turn_context(self, text: str) -> str:
-        """Per-turn hook run inside the send lock before the prompt is composed.
+        """Prepares provider-neutral Dot context and conversation rotation."""
+        self._dot_event_ids = []
+        self._dot_hidden_system_pack_pending = False
+        from ...dot import get_dot_service
 
-        Returns an extra hidden context block for this turn ("" for none).
-        Subclasses may also adjust provider session state here (Claude uses it
-        for the Dot tab's context pack and session rotation).
-        """
-        return ""
+        service = get_dot_service()
+        raw_tab_id = getattr(self.session, "tab_id", None)
+        if not service.is_dot_tab(raw_tab_id):
+            return ""
+        tab_id = str(raw_tab_id)
+        try:
+            plan = await asyncio.to_thread(service.prepare_turn, text, self._conversation_id)
+        except Exception:
+            self._runtime.logger().exception(
+                "Dot context preparation failed; sending the turn without it"
+            )
+            return ""
+        if plan.rotate:
+            try:
+                conversation_id = await self.rotate_conversation()
+            except BaseException:
+                service.request_rotation(
+                    prepared_generation=plan.prepared_generation, tab_id=tab_id
+                )
+                raise
+            try:
+                associated = service.associate_conversation(
+                    conversation_id,
+                    prepared_generation=plan.prepared_generation,
+                    tab_id=tab_id,
+                )
+            except BaseException:
+                service.clear_conversation_association(
+                    conversation_id,
+                    prepared_generation=plan.prepared_generation,
+                    tab_id=tab_id,
+                )
+                await self._discard_rotation(conversation_id)
+                service.request_rotation(
+                    prepared_generation=plan.prepared_generation, tab_id=tab_id
+                )
+                raise
+            if not associated:
+                await self._discard_rotation(conversation_id)
+                service.request_rotation(
+                    prepared_generation=plan.prepared_generation, tab_id=tab_id
+                )
+                raise RuntimeError("Dot provider rotation no longer belongs to the current session")
+            try:
+                self.adopt_rotated_conversation(conversation_id)
+            except BaseException:
+                service.clear_conversation_association(
+                    conversation_id,
+                    prepared_generation=plan.prepared_generation,
+                    tab_id=tab_id,
+                )
+                await self._discard_rotation(conversation_id)
+                service.request_rotation(
+                    prepared_generation=plan.prepared_generation, tab_id=tab_id
+                )
+                raise
+            self._hub_runtime_guidance_injected = False
+            self._dot_hidden_system_pack_delivered = False
+        elif plan.new_session:
+            self._dot_hidden_system_pack_delivered = False
+        self._dot_system_pack = plan.system_pack
+        self._dot_event_ids = plan.delivered_event_ids
+        return self._dot_prompt_context(plan.turn_pack)
+
+    def _dot_prompt_context(self, turn_pack: str) -> str:
+        if self.supports_native_system_instructions or self._dot_hidden_system_pack_delivered:
+            return turn_pack
+        self._dot_hidden_system_pack_pending = bool(self._dot_system_pack)
+        return "\n\n".join(part for part in (self._dot_system_pack, turn_pack) if part)
 
     async def _on_turn_sent(self) -> None:
-        """Hook run once the provider accepted a turn (Claude acks Dot's events)."""
+        """Acknowledges Dot context only after the provider accepted the turn."""
+        if self._dot_hidden_system_pack_pending:
+            self._dot_hidden_system_pack_delivered = True
+            self._dot_hidden_system_pack_pending = False
+        event_ids, self._dot_event_ids = self._dot_event_ids, []
+        if not event_ids:
+            return
+        from ...dot import get_dot_service
+
+        try:
+            await asyncio.to_thread(get_dot_service().mark_delivered, event_ids)
+        except Exception:
+            self._runtime.logger().exception("Dot inbox ack failed")
+
+    async def rotate_conversation(self) -> str:
+        """Prepares a fresh provider conversation without adopting its identity."""
+        raise NotImplementedError(f"{self.adapter_id} does not support conversation rotation")
+
+    def adopt_rotated_conversation(self, conversation_id: str) -> None:
+        """Makes a guarded constructive rotation the active conversation."""
+        self._conversation_id = conversation_id
+        self._conversation_id_verified = False
+
+    async def discard_rotated_conversation(self, conversation_id: str) -> None:
+        """Releases a candidate rejected before its identity was adopted."""
+
+    async def _discard_rotation(self, conversation_id: str) -> None:
+        task = asyncio.create_task(self.discard_rotated_conversation(conversation_id))
+        cancellation: Optional[asyncio.CancelledError] = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+                continue
+            except Exception:
+                break
+        try:
+            await task
+        except Exception:
+            self._runtime.logger().exception(
+                "failed to discard rejected %s conversation rotation %s",
+                self.adapter_id,
+                conversation_id,
+            )
+        if cancellation is not None:
+            raise cancellation
 
     async def _mark_seed_delivered(self) -> None:
         """Record a successful first-turn seed delivery and drop its sidecar.
@@ -586,6 +690,25 @@ class SessionCore(ABC):
                 self._conversation_id_persist(cid)
             except Exception:
                 self._runtime.logger().exception("failed to persist conversation id %s", cid)
+
+    def _adopt_rotated_conversation_id(self, conversation_id: str) -> None:
+        """Persists a provider-assigned rotation before adopting it locally."""
+        previous = self._conversation_id
+        if self._conversation_id_persist is not None:
+            try:
+                self._conversation_id_persist(conversation_id)
+            except BaseException:
+                if previous:
+                    try:
+                        self._conversation_id_persist(previous)
+                    except Exception:
+                        self._runtime.logger().exception(
+                            "failed to restore conversation id %s after rotation persistence failed",
+                            previous,
+                        )
+                raise
+        self._conversation_id = conversation_id
+        self._conversation_id_verified = True
 
     def maybe_capture_conversation_id(self, record: Dict[str, Any]) -> None:
         """Provider-specific hook to extract the conversation id from a record.

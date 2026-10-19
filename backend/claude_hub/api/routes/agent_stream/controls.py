@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from claude_hub.api.routes.agent_stream.bindings import AgentStreamRouteBindings
+from claude_hub.api.routes.agent_stream.dispatch import require_tab_input_available
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.models import TERMINAL_GOAL_STATUSES, ManagedSession, User
 from claude_hub.services.agent_stream import StructuredSourceUnavailable, TailerManager
@@ -171,6 +172,7 @@ def register_control_routes(
         from claude_hub.services.goal_run import get_goal_admission_lock, get_goal_manager
 
         async with get_goal_admission_lock(tab_id):
+            require_tab_input_available(tab_id)
             goal = get_goal_manager().current(tab_id)
             if goal is not None and (
                 goal.status not in TERMINAL_GOAL_STATUSES or goal.dispatch_state.value != "idle"

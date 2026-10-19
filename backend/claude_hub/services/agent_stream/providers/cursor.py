@@ -7,6 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from uuid import uuid4
 
 from ....models import ChatMode, ManagedSession, StreamModeOption
 from .process import ProcessSession
@@ -85,6 +86,9 @@ class CursorSession(ProcessSession):
         if self._runtime.help_confirms_plan_mode("agent", "--mode"):
             return [self._runtime.default_mode(), self._runtime.plan_mode()]
         return [self._runtime.default_mode()]
+
+    async def rotate_conversation(self) -> str:
+        return str(uuid4())
 
     def _resume_arg(self) -> List[str]:
         """Cursor Agent's ``--resume`` is constructive: if the session does

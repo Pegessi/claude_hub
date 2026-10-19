@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,6 +22,8 @@ from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "dot-tab"
 NOW = "2026-10-15T08:00:00Z"
+REVISION_1 = "a" * 64
+REVISION_2 = "b" * 64
 
 
 def origin(url: str) -> tuple[str, str | None, int | None]:
@@ -57,6 +60,18 @@ async def main(browser_run: BrowserRun) -> None:
         "is_active": True,
         "created_at": NOW,
     }
+    execution = {
+        "tab_id": TAB,
+        "agent_type": "legacy-provider",
+        "env": {
+            "LEGACY_PROVIDER_TOKEN": "old-provider-secret",
+            "LEGACY_PROVIDER_MODEL": "legacy-old",
+        },
+        "revision": REVISION_1,
+        "supported_agent_types": ["claude", "codex", "cursor", "traex", "maso"],
+    }
+    execution_put_attempts = 0
+    fail_next_tabs_refresh = False
     agent_status = "working"
     work: list[dict] = []
     inbox = [
@@ -110,7 +125,7 @@ async def main(browser_run: BrowserRun) -> None:
             "set_up": True,
             "identity": identity,
             "home": "/fixture/dot",
-            "tab_id": TAB,
+            "tab_id": tab["id"],
             "tab_exists": True,
             "session": {
                 "conversation_id": None,
@@ -137,6 +152,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await socket.close(code=1000, reason="mocked dot smoke")
 
             async def route_all(route) -> None:
+                nonlocal execution_put_attempts, fail_next_tabs_refresh
                 request = route.request
                 parsed = urlparse(request.url)
                 if origin(request.url) != origin(base):
@@ -158,13 +174,17 @@ async def main(browser_run: BrowserRun) -> None:
                 if path == "/api/auth/check":
                     body = {"auth_required": False, "user": None}
                 elif path == "/api/tabs":
-                    body = [tab]
+                    if fail_next_tabs_refresh:
+                        fail_next_tabs_refresh = False
+                        code, body = 503, {"detail": "temporary tab refresh failure"}
+                    else:
+                        body = [tab]
                 elif path == "/api/tabs/status":
                     body = [
                         {
-                            "tab_id": TAB,
+                            "tab_id": tab["id"],
                             "tab_name": tab["name"],
-                            "agent_type": "claude",
+                            "agent_type": tab["agent_type"],
                             "status": agent_status,
                             "status_text": agent_status.title(),
                             "tmux_session": "fixture-dot-session",
@@ -209,6 +229,36 @@ async def main(browser_run: BrowserRun) -> None:
                     body = {"ok": True}
                 elif "network" in path:
                     body = {"hostname": "fixture", "addresses": []}
+                elif path == "/api/dot/execution" and method == "GET":
+                    body = execution
+                elif path == "/api/dot/execution" and method == "PUT":
+                    assert data["expected_revision"] == execution["revision"]
+                    execution_put_attempts += 1
+                    if execution_put_attempts == 1:
+                        code, body = 409, {
+                            "detail": (
+                                "Unbind the Feishu Bot before switching Dot's backend, "
+                                "then bind it to the new Dot chat."
+                            )
+                        }
+                    else:
+                        execution.update(
+                            {
+                                "tab_id": "dot-tab-next",
+                                "agent_type": data["agent_type"],
+                                "env": data["env"],
+                                "revision": REVISION_2,
+                            }
+                        )
+                        tab.update(
+                            {
+                                "id": execution["tab_id"],
+                                "agent_type": execution["agent_type"],
+                                "env": execution["env"],
+                            }
+                        )
+                        fail_next_tabs_refresh = True
+                        body = execution
                 elif path == "/api/dot/status":
                     body = status()
                 elif method == "POST" and path == "/api/dot/setup":
@@ -316,7 +366,12 @@ async def main(browser_run: BrowserRun) -> None:
                 menu_box = await page.locator(".mobile-app-menu-trigger").bounding_box()
                 assert launcher_box is not None and add_box is not None and menu_box is not None
                 report["toolbar_geometry"].append(
-                    {"width": width, "dot": launcher_box, "add": add_box, "menu": menu_box}
+                    {
+                        "width": width,
+                        "dot": launcher_box,
+                        "add": add_box,
+                        "menu": menu_box,
+                    }
                 )
                 for neighbor in (add_box, menu_box):
                     assert abs(launcher_box["height"] - neighbor["height"]) <= 1, report[
@@ -359,6 +414,53 @@ async def main(browser_run: BrowserRun) -> None:
             # Rename and set an emoji; the tab list is refreshed for the new tab name.
             await panel.get_by_role("button", name="Edit").click()
             editor = page.get_by_test_id("dot-identity-editor")
+            execution_editor = page.get_by_test_id("dot-execution-editor")
+            await expect(execution_editor.get_by_label("Execution backend")).to_have_value("claude")
+            initial_preset = await execution_editor.get_by_label(
+                "Dot environment preset"
+            ).input_value()
+            assert initial_preset != "custom", initial_preset
+            await expect(execution_editor).to_contain_text("Currently legacy-provider")
+            await execution_editor.get_by_label("Execution backend").select_option("codex")
+            await expect(execution_editor.get_by_label("Dot environment preset")).to_have_value(
+                "none"
+            )
+            await expect(execution_editor).to_contain_text(
+                "Applying this creates a fresh Dot chat and archives the current chat."
+            )
+            await expect(execution_editor).to_contain_text("Feishu Bot must be unbound")
+            await execution_editor.get_by_role("button", name="Switch backend", exact=True).click()
+            await expect(execution_editor).to_contain_text(
+                "Unbind the Feishu Bot before switching Dot's backend"
+            )
+            await expect(execution_editor.get_by_label("Execution backend")).to_have_value("codex")
+            await expect(execution_editor.get_by_label("Dot environment preset")).to_have_value(
+                "none"
+            )
+            await execution_editor.get_by_role("button", name="Retry", exact=True).click()
+            await expect(execution_editor).to_contain_text("Dot now uses Codex")
+            await expect(execution_editor).to_contain_text(
+                "Dot was updated, but the Chat list could not refresh."
+            )
+            switch_payloads = wrote("PUT", "/api/dot/execution")
+            expected_switch = {
+                "expected_revision": REVISION_1,
+                "agent_type": "codex",
+                "env": {},
+            }
+            assert switch_payloads == [expected_switch, expected_switch]
+            assert "old-provider-secret" not in json.dumps(switch_payloads)
+            await execution_editor.get_by_role("button", name="Retry tab refresh").click()
+            await expect(
+                execution_editor.get_by_role("button", name="Retry tab refresh")
+            ).to_be_hidden()
+            assert wrote("PUT", "/api/dot/execution") == [
+                expected_switch,
+                expected_switch,
+            ]
+            await expect(page.locator('.tab[data-tab-id="dot-tab-next"]')).to_have_class(
+                re.compile(r"\bactive\b")
+            )
             name_input = editor.get_by_label("Name")
             font = await name_input.evaluate("el => getComputedStyle(el).fontSize")
             assert font == "16px", f"phone inputs must be 16px to avoid iOS zoom, got {font}"

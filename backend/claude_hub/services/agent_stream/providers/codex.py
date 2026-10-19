@@ -40,6 +40,7 @@ class CodexConfiguredSession(ProcessSession):
     supports_tool_timeline = True
     supports_approval_ui = True
     supports_images = True
+    supports_native_system_instructions = True
     goal_usage_quality = "exact"
 
     @property
@@ -96,6 +97,8 @@ class CodexConfiguredSession(ProcessSession):
         self._model_discovery_attempted = False
         self._provider_model_options: Optional[List[StreamModelOption]] = None
         self._network_config_fingerprint: Optional[str] = None
+        self._defer_initial_thread_adoption = False
+        self._pending_rotation: Optional[Tuple[str, Dict[str, Any]]] = None
 
     def _build_command(self) -> List[str]:
         return ["codex", "app-server", "--stdio"]
@@ -124,6 +127,7 @@ class CodexConfiguredSession(ProcessSession):
             inflight = self._inflight_images
             self._staged_images = []
             self._inflight_images = []
+            self._pending_rotation = None
             # The app-server is being terminated; any unanswered questions die
             # with it.
             self._pending_questions = {}
@@ -249,11 +253,53 @@ class CodexConfiguredSession(ProcessSession):
             raise RuntimeError("the original provider thread could not be resumed")
         thread_resp = await self._send_request("thread/start", self._thread_config())
         if isinstance(thread_resp, dict):
-            self._capture_thread_model(thread_resp)
             thread = thread_resp.get("thread")
-            if isinstance(thread, dict) and thread.get("id"):
-                self._thread_id = thread["id"]
-                self._persist_conversation_id(thread["id"])
+            conversation_id = thread.get("id") if isinstance(thread, dict) else None
+            if isinstance(conversation_id, str) and conversation_id:
+                if self._defer_initial_thread_adoption:
+                    self._pending_rotation = (conversation_id, thread_resp)
+                    return
+                self._capture_thread_model(thread_resp)
+                self._thread_id = conversation_id
+                self._persist_conversation_id(conversation_id)
+
+    async def rotate_conversation(self) -> str:
+        if not self._started or self._process is None:
+            defer_initial = not self._conversation_id
+            self._defer_initial_thread_adoption = defer_initial
+            try:
+                await self.start()
+            finally:
+                self._defer_initial_thread_adoption = False
+            if defer_initial:
+                if self._pending_rotation is None:
+                    raise RuntimeError(
+                        f"{self.adapter_id} initial thread/start returned no thread id"
+                    )
+                return self._pending_rotation[0]
+        response = await self._send_request("thread/start", self._thread_config())
+        if not isinstance(response, dict):
+            raise RuntimeError(f"{self.adapter_id} thread/start returned no result")
+        thread = response.get("thread")
+        conversation_id = thread.get("id") if isinstance(thread, dict) else None
+        if not isinstance(conversation_id, str) or not conversation_id:
+            raise RuntimeError(f"{self.adapter_id} thread/start returned no thread id")
+        self._pending_rotation = (conversation_id, response)
+        return conversation_id
+
+    def adopt_rotated_conversation(self, conversation_id: str) -> None:
+        pending = self._pending_rotation
+        if pending is None or pending[0] != conversation_id:
+            raise RuntimeError(f"{self.adapter_id} has no matching prepared rotation")
+        self._adopt_rotated_conversation_id(conversation_id)
+        self._capture_thread_model(pending[1])
+        self._thread_id = conversation_id
+        self._provider_turn_id = None
+        self._pending_rotation = None
+
+    async def discard_rotated_conversation(self, conversation_id: str) -> None:
+        if self._pending_rotation is not None and self._pending_rotation[0] == conversation_id:
+            self._pending_rotation = None
 
     async def goal_get(self) -> Optional[ProviderGoal]:
         """Read the provider goal when the optional RPC is implemented."""
@@ -540,14 +586,19 @@ class CodexConfiguredSession(ProcessSession):
             # a default-mode collaborationMode with settings.model is accepted
             # and surfaces in thread/settings/updated.
             effort_override = self._selected_reasoning_effort()
-            if model_override is None and effort_override is None:
+            developer_instructions = self._dot_system_pack or None
+            if (
+                model_override is None
+                and effort_override is None
+                and developer_instructions is None
+            ):
                 return None
             model = model_override or self._thread_model
             if not isinstance(model, str) or not model:
-                raise RuntimeError("Codex reasoning effort requires the active thread model")
+                raise RuntimeError("Codex collaboration mode requires the active thread model")
             default_settings: Dict[str, Any] = {
                 "model": model,
-                "developer_instructions": None,
+                "developer_instructions": developer_instructions,
             }
             if effort_override is not None:
                 default_settings["reasoning_effort"] = effort_override
@@ -560,7 +611,7 @@ class CodexConfiguredSession(ProcessSession):
             raise RuntimeError("Codex collaboration mode requires the active thread model")
         settings: Dict[str, Any] = {
             "model": model,
-            "developer_instructions": None,
+            "developer_instructions": self._dot_system_pack or None,
         }
         effort = self._selected_reasoning_effort() or preset.get("reasoning_effort")
         if isinstance(effort, str) and effort:

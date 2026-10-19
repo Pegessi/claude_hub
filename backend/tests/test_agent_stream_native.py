@@ -1551,6 +1551,90 @@ async def test_codex_restart_discards_idle_stop_eof_sentinel() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport_type", [CodexNativeSession, TraexNativeSession])
+async def test_app_server_rotation_uses_provider_assigned_thread_id(
+    transport_type,
+) -> None:
+    persisted: list[str] = []
+    agent_type = AgentType.CODEX if transport_type is CodexNativeSession else AgentType.TRAEX
+    native = transport_type(_session(agent_type), persisted.append)
+    native._started = True
+    native._process = MagicMock()
+    native._conversation_id = "thread-old"
+    native._conversation_id_verified = True
+    native._thread_id = "thread-old"
+    native._send_request = AsyncMock(
+        return_value={"thread": {"id": "thread-provider-new"}, "model": "provider-model"}
+    )
+
+    result = await native.rotate_conversation()
+
+    assert result == "thread-provider-new"
+    assert native._conversation_id == native._thread_id == "thread-old"
+    assert persisted == []
+    native.adopt_rotated_conversation(result)
+    assert native._conversation_id == native._thread_id == "thread-provider-new"
+    assert persisted == ["thread-provider-new"]
+    native._send_request.assert_awaited_once_with("thread/start", native._thread_config())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_type", [CodexNativeSession, TraexNativeSession])
+async def test_cold_app_server_rotation_reuses_initial_thread_start(
+    transport_type,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    agent_type = AgentType.CODEX if transport_type is CodexNativeSession else AgentType.TRAEX
+    persisted: list[str] = []
+    native = transport_type(_session(agent_type), persisted.append)
+    process = _FakeProcess(
+        stdout_lines=[
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"thread": {"id": "initial-provider-thread"}, "model": "model"},
+                }
+            ).encode()
+            + b"\n",
+        ]
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    try:
+        candidate = await native.rotate_conversation()
+        requests = _written_requests(process)
+        assert [request["method"] for request in requests].count("thread/start") == 1
+        assert candidate == "initial-provider-thread"
+        assert native._conversation_id is None and native._thread_id is None
+        assert persisted == []
+        native.adopt_rotated_conversation(candidate)
+        assert native._conversation_id == native._thread_id == "initial-provider-thread"
+        assert persisted == ["initial-provider-thread"]
+    finally:
+        await native.stop()
+
+
+@pytest.mark.asyncio
+async def test_codex_failed_rotation_preserves_old_native_identity() -> None:
+    native = _codex_session()
+    native._started = True
+    native._process = MagicMock()
+    native._conversation_id = "thread-old"
+    native._conversation_id_verified = True
+    native._thread_id = "thread-old"
+    request = AsyncMock(side_effect=RuntimeError("thread start rejected"))
+
+    with patch.object(native, "_send_request", request):
+        with pytest.raises(RuntimeError, match="thread start rejected"):
+            await native.rotate_conversation()
+
+    assert native._conversation_id == "thread-old"
+    assert native._thread_id == "thread-old"
+    assert native._conversation_id_verified is True
+
+
+@pytest.mark.asyncio
 async def test_codex_thread_start_reads_thread_id_from_result() -> None:
     """thread/start result is {thread: {id, ...}}; read result.thread.id."""
     proc = _FakeProcess(

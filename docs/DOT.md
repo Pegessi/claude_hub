@@ -1,7 +1,8 @@
 # Dot — the persistent personal agent
 
-Dot is one long-lived Claude Chat tab with a stable role and a file-based
-memory. It handles small requests directly, uses memory when helpful, and hands
+Dot is a persistent personal agent with one current Chat tab, a stable role and
+file-based memory. Claude, Codex, Cursor, TraeX and MASO are supported execution
+backends. Dot handles small requests directly, uses memory when helpful, and hands
 long or many-step work to Hub Tasks while keeping track of the user's priorities.
 
 Each turn receives a bounded context pack built from durable memory. The session
@@ -88,11 +89,16 @@ the card's kind, even when a card was moved by hand without editing `kind`.
 ## Turn flow
 
 1. Hub sends a user turn to the Dot tab.
-2. `ClaudeNativeSession` asks the Dot service to prepare the turn:
-   - decide rotation (turn count, age, explicit request, `[Dot tidy]`);
+2. The native provider's shared `SessionCore` asks the Dot service to prepare the turn:
+   - decide rotation (turn count, age, explicit request, `[Dot tidy]`); the provider
+     creates its own next conversation id, then associates it with the prepared
+     Dot generation. Provider-assigned ids are never replaced by local UUIDs;
    - build the **session pack** (role, the Hub's "stay available for the user"
-     guidance, user profile, concepts, brief lessons and tool guide) —
-     passed via `--append-system-prompt`, stable for the whole session;
+     guidance, user profile, concepts, brief lessons and tool guide), stable for
+     the whole session. Claude receives `--append-system-prompt`; Codex/TraeX
+     receive developer instructions. Cursor/MASO receive a hidden first-turn
+     prompt prefix because their current transports expose no system-message field.
+     That fallback is provider user-input context, not a native system-role message;
    - build the **turn pack** (time, focus, open work, tasks waiting for
      review, new inbox events, cards recalled by the user's words (not on
      Hub wake-ups; common words like "the" and a bare "hi" do not count; a locked
@@ -110,6 +116,38 @@ the card's kind, even when a card was moved by hand without editing `kind`.
    waiting events and reviews too, but leaves them to the next wake-up. A
    failed first turn makes the next turn open a fresh session (so the recent
    talk is shown again).
+
+## Editing the execution backend
+
+Open **Dot → Edit → Execution backend** to choose a backend and its launch preset.
+This editor is separate from name/avatar changes. Applying changed execution
+settings creates a new Dot Chat and archives the previous one; the old conversation
+remains readable in Archived sessions. Dot keeps its memory home, focus, tracked
+work and wake/tidy schedule identities. Existing schedule timing, text and disabled
+state are preserved. An unchanged configuration is a no-op.
+
+Backend changes reset the draft to the chosen backend's own default environment;
+the old backend's API keys, endpoint and model are not implicitly inherited.
+MASO must pass the existing service preflight. Models can be supplied through a
+preset/environment; the new Chat's composer retains the verified model picker.
+
+A switch requires an idle Dot and never forcibly stops a user turn. It is rejected
+while a turn, unfinished transcript, uncertain MASO delivery, pending scheduled
+run or unfinished Goal exists. A Feishu Bot must first be unbound and then bound
+to the new Dot Chat. Other enabled schedules targeting the previous tab must be
+disabled, removed or retargeted explicitly. Their ownership is not transferred by
+this operation. A failed request keeps the browser draft for retry; stale settings
+require an explicit reload.
+
+`GET /api/dot/execution` returns the current tab, backend, env, revision and
+supported backend list with `Cache-Control: no-store`. `PUT` requires the observed
+`expected_revision`, the desired `agent_type` and an explicit complete `env` map.
+The env is stored only in the normal tab configuration, never in Dot's Git-tracked
+state or journal. Setup and replacement share one lock; input admission is held
+until the new identity is committed or rollback has finished. A durable, secret-free
+pending marker lets setup/the watcher roll back an interrupted replacement before
+accepting more input. Legacy setup does not seed Claude credentials into a
+non-Claude Dot, including when restoring a deleted tab.
 
 ## Guidance updates
 

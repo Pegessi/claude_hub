@@ -67,15 +67,19 @@ def test_new_home_uses_guidance_and_existing_session_keeps_its_snapshot(tmp_path
     assert store.role_path.read_text() == DEFAULT_ROLE
     store.role_path.write_text("Custom role first version.\n")
     service = DotService(store)
+    store.update_state(tab_id="tab-dot")
     first = service._prepare_turn("hi", None)
+    assert service.associate_conversation(
+        "provider-1", prepared_generation=first.prepared_generation, tab_id="tab-dot"
+    )
     assert "Custom role first version" in first.system_pack
     assert TURN_RULES.strip() in first.system_pack
     store.role_path.write_text("Custom role second version.\n")
-    same = service._prepare_turn("again", first.conversation_id)
+    same = service._prepare_turn("again", "provider-1")
     assert same.system_pack == first.system_pack
     assert not same.rotate
     service.request_rotation()
-    fresh = service._prepare_turn("new topic", first.conversation_id)
+    fresh = service._prepare_turn("new topic", "provider-1")
     assert fresh.rotate
     assert "Custom role second version" in fresh.system_pack
     assert "Custom role first version" not in fresh.system_pack

@@ -1,6 +1,22 @@
 // Thin client for /api/dot (Dot, the persistent personal agent; see docs/DOT.md).
 
 export type DotCardKind = 'user' | 'work' | 'knowledge' | 'concept'
+export type DotProvider = 'claude' | 'codex' | 'cursor' | 'traex' | 'maso'
+
+export interface DotExecution {
+  tab_id: string | null
+  agent_type: string | null
+  env: Record<string, string>
+  revision: string
+  supported_agent_types: DotProvider[]
+}
+
+export interface DotExecutionUpdate {
+  expected_revision: string
+  agent_type: DotProvider
+  // Full replacement. A provider change must never inherit the old provider's env.
+  env: Record<string, string>
+}
 
 export interface DotIdentity {
   name: string
@@ -188,6 +204,12 @@ function query(params: Record<string, string | number | boolean | undefined>): s
 
 export function loadDotStatus(): Promise<DotStatus> {
   return requestJson('/status')
+}
+export function loadDotExecution(): Promise<DotExecution> {
+  return requestJson('/execution')
+}
+export function updateDotExecution(input: DotExecutionUpdate): Promise<DotExecution> {
+  return requestJson('/execution', jsonRequest('PUT', input))
 }
 // Idempotent: creates (or restores) the memory home, Chat tab and schedules.
 // `env` is the provider launch env for Dot's Chat tab, like a normal new Chat.

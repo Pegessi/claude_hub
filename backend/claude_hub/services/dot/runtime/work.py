@@ -409,7 +409,7 @@ class DotWorkService(DotSessionService, ABC):
 
     def start(self) -> None:
         tab_id = self.tab_id()
-        if tab_id:
+        if tab_id and not self._peek_state().get("pending_execution"):
             # Bring standing schedules up to date (e.g. drop an old daily wake-up).
             try:
                 self.ensure_schedules(tab_id)
@@ -431,6 +431,11 @@ class DotWorkService(DotSessionService, ABC):
     async def _watch_loop(self) -> None:
         while True:
             try:
+                if self._peek_state().get("pending_execution"):
+                    from ..execution import recover_execution_locked
+
+                    async with self.setup_lock():
+                        await recover_execution_locked(self)
                 if self.is_set_up():
                     await self._wake_if_due()
             except asyncio.CancelledError:

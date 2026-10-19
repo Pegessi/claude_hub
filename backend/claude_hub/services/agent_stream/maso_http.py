@@ -218,6 +218,7 @@ class MasoHttpSession(ProviderSession):
         self._delivery_uncertain = False
         self._staged_images: List[bytes] = []
         self._guidance_in_this_send = False
+        self._pending_rotation: Optional[Tuple[str, Optional[Dict[str, Any]]]] = None
         if self._delivery_path.exists():
             try:
                 delivery = json.loads(self._delivery_path.read_text())
@@ -259,7 +260,10 @@ class MasoHttpSession(ProviderSession):
     def _path(self, suffix: str) -> str:
         if not self._conversation_id or not self._conversation_id_verified:
             raise RuntimeError("MASO session has not been created")
-        return f"/api/sessions/{quote(self._conversation_id, safe='')}/{suffix}"
+        return self._path_for(self._conversation_id, suffix)
+
+    def _path_for(self, conversation_id: str, suffix: str) -> str:
+        return f"/api/sessions/{quote(conversation_id, safe='')}/{suffix}"
 
     async def start(self) -> None:
         # Opening a Chat or fetching its model catalog must not create a MASO
@@ -319,9 +323,12 @@ class MasoHttpSession(ProviderSession):
         )
 
     async def _with_first_turn_prefixes(self, text: str) -> Tuple[str, bool]:
-        self._guidance_in_this_send = bool(text) and not self._hub_runtime_guidance_injected
+        guidance_was_injected = self._hub_runtime_guidance_injected
         prompt, seeded = await super()._with_first_turn_prefixes(text)
-        if prompt != text and text:
+        self._guidance_in_this_send = (
+            not guidance_was_injected and self._hub_runtime_guidance_injected
+        )
+        if prompt != text and prompt:
             # A service-side tool process cannot inherit this Hub tab's env.
             prompt = (
                 "MASO HTTP transport: for Hub CLI tool calls, first set "
@@ -330,32 +337,86 @@ class MasoHttpSession(ProviderSession):
             )
         return prompt, seeded
 
-    async def _ensure_session(self) -> Dict[str, Any]:
-        if not self._conversation_id_verified:
-            created = await self._request(
-                "POST",
-                "/api/sessions",
-                json={
-                    "agent_name": "MASOAgent",
-                    "working_dir": self._cwd or None,
-                    "model": self.session.env.get("MASO_MODEL") or None,
-                    "isolation": "shared",
-                    "inject_memory": False,
-                },
-            )
-            if not isinstance(created, dict) or not isinstance(created.get("session_id"), str):
-                raise RuntimeError("MASO returned an invalid session identity")
-            self._persist_conversation_id(created["session_id"])
-        status: Dict[str, Any] = await self._request("GET", self._path("status"))
-        if not isinstance(status, dict) or not isinstance(status.get("agent_id"), str):
-            raise RuntimeError("MASO returned an invalid session status")
+    async def _create_session(self, *, rotation: bool = False) -> Tuple[str, Dict[str, Any]]:
+        created = await self._request(
+            "POST",
+            "/api/sessions",
+            json={
+                "agent_name": "MASOAgent",
+                "working_dir": self._cwd or None,
+                "model": self.session.env.get("MASO_MODEL") or None,
+                "isolation": "shared",
+                "inject_memory": False,
+            },
+        )
+        conversation_id = created.get("session_id") if isinstance(created, dict) else None
+        if not isinstance(conversation_id, str) or not conversation_id:
+            raise RuntimeError("MASO returned an invalid session identity")
+        if rotation:
+            self._pending_rotation = (conversation_id, None)
+        else:
+            # The provider has allocated this identity even when its first status
+            # read fails. Retain it so an ordinary Chat retries the same session.
+            self._persist_conversation_id(conversation_id)
+        try:
+            status: Any = await self._request("GET", self._path_for(conversation_id, "status"))
+            if not isinstance(status, dict) or not isinstance(status.get("agent_id"), str):
+                raise RuntimeError("MASO returned an invalid session status")
+        except BaseException:
+            if rotation:
+                await self._discard_rotation(conversation_id)
+            raise
+        if rotation:
+            self._pending_rotation = (conversation_id, status)
+        return conversation_id, status
+
+    def _apply_session_status(self, status: Dict[str, Any]) -> None:
         self._root_agent_id = status["agent_id"]
         self._effective_model = status.get("preferred_model") or status.get("model")
+        self._handshake_complete = True
+
+    async def rotate_conversation(self) -> str:
+        pending = self._pending_rotation
+        if pending is not None:
+            await self.discard_rotated_conversation(pending[0])
+        old_conversation_id = self._conversation_id
+        old_verified = self._conversation_id_verified
+        if old_conversation_id and old_verified:
+            await self._close_stream()
+            await self._request("POST", self._path_for(old_conversation_id, "exit"))
+        conversation_id, _status = await self._create_session(rotation=True)
+        return conversation_id
+
+    def adopt_rotated_conversation(self, conversation_id: str) -> None:
+        pending = self._pending_rotation
+        if pending is None or pending[0] != conversation_id or pending[1] is None:
+            raise RuntimeError("MASO has no matching prepared rotation")
+        status = pending[1]
+        self._clear_delivery()
+        self._adopt_rotated_conversation_id(conversation_id)
+        self._apply_session_status(status)
+        self._needs_abort = False
+        self._pending_rotation = None
+
+    async def discard_rotated_conversation(self, conversation_id: str) -> None:
+        pending = self._pending_rotation
+        if pending is None or pending[0] != conversation_id:
+            return
+        await self._request("POST", self._path_for(conversation_id, "exit"))
+        self._pending_rotation = None
+
+    async def _ensure_session(self) -> Dict[str, Any]:
+        if not self._conversation_id_verified:
+            _conversation_id, status = await self._create_session()
+        else:
+            status = await self._request("GET", self._path("status"))
+            if not isinstance(status, dict) or not isinstance(status.get("agent_id"), str):
+                raise RuntimeError("MASO returned an invalid session status")
+        self._apply_session_status(status)
         # After a Hub crash the old display turn is interrupted by the tailer.
         # Stop its still-running service-side execution before a new prompt.
         if status.get("status") in {"running", "waiting", "aborting"} or self._message_id:
             status = await self._abort_and_wait()
-        self._handshake_complete = True
         return status
 
     async def _abort_and_wait(self) -> Dict[str, Any]:
@@ -701,10 +762,13 @@ class MasoHttpSession(ProviderSession):
                 await self.cancel_active_turn()
         finally:
             await self._close_stream()
-            if self._client is not None:
-                await self._client.aclose()
             self._started = False
             self._end_turn()
+            pending = self._pending_rotation
+            if pending is not None:
+                await self.discard_rotated_conversation(pending[0])
+            if self._client is not None:
+                await self._client.aclose()
 
     def update_env(self, env: Dict[str, str]) -> None:
         env = dict(env)

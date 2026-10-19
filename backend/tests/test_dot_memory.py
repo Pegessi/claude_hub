@@ -283,38 +283,49 @@ def test_prepare_turn_rotation_rules(store: DotStore) -> None:
     store.update_state(tab_id="tab-dot")
 
     first = service.prepare_turn("hello", None)
-    assert first.rotate and first.conversation_id
+    assert first.rotate and first.new_session and first.prepared_generation
     assert "You are Dot" in first.system_pack
     assert "dot review" in first.system_pack, "the review step is in every session"
-    cid = first.conversation_id
+    assert service.associate_conversation(
+        "provider-1", prepared_generation=first.prepared_generation, tab_id="tab-dot"
+    )
 
-    second = service.prepare_turn("next", cid)
-    assert not second.rotate and second.conversation_id == cid
+    second = service.prepare_turn("next", "provider-1")
+    assert not second.rotate and not second.new_session
+    assert second.prepared_generation == first.prepared_generation
     assert second.system_pack == first.system_pack
     assert "session turn 2" in second.turn_pack
 
     # A conversation changed outside Dot (e.g. cleared) starts a new session
     # without forcing another id.
     other = service.prepare_turn("hi", "external-id")
-    assert not other.rotate and "session turn 1" in other.turn_pack
+    assert not other.rotate and other.new_session and "session turn 1" in other.turn_pack
 
     store.update_state(session_turns=MAX_SESSION_TURNS)
-    assert service.prepare_turn("again", "external-id").rotate
+    at_limit = service.prepare_turn("again", "external-id")
+    assert at_limit.rotate
+    assert service.associate_conversation(
+        "provider-2", prepared_generation=at_limit.prepared_generation, tab_id="tab-dot"
+    )
 
     # A few turns spread over a long time also rotate once the session is too old.
-    fresh = service.prepare_turn("hi", None)
+    fresh = service.prepare_turn("hi", "provider-2")
     almost = utc_now() - MAX_SESSION_AGE + timedelta(minutes=5)
     store.update_state(session_started_at=almost.isoformat())
-    assert not service.prepare_turn("still here", fresh.conversation_id).rotate
+    assert not service.prepare_turn("still here", "provider-2").rotate
     store.update_state(session_started_at=(almost - timedelta(minutes=10)).isoformat())
-    old = service.prepare_turn("still here?", fresh.conversation_id)
-    assert old.rotate and old.conversation_id != fresh.conversation_id
-
-    tidy = service.prepare_turn(
-        "[Dot tidy] go", service.store.read_state()["session_conversation_id"]
+    old = service.prepare_turn("still here?", "provider-2")
+    assert old.rotate and old.prepared_generation != fresh.prepared_generation
+    assert service.associate_conversation(
+        "provider-3", prepared_generation=old.prepared_generation, tab_id="tab-dot"
     )
+
+    tidy = service.prepare_turn("[Dot tidy] go", "provider-3")
     assert tidy.rotate
-    after = service.prepare_turn("morning", tidy.conversation_id)
+    assert service.associate_conversation(
+        "provider-tidy", prepared_generation=tidy.prepared_generation, tab_id="tab-dot"
+    )
+    after = service.prepare_turn("morning", "provider-tidy")
     assert after.rotate, "the turn after a tidy starts a clean session"
 
 
@@ -324,11 +335,14 @@ def test_prepare_turn_delivers_events_once(store: DotStore) -> None:
     store.add_inbox("task_failed", "Build broke")
     first = service.prepare_turn(WAKE_MESSAGE, None)
     assert "Build broke" in first.turn_pack
+    assert service.associate_conversation(
+        "provider-1", prepared_generation=first.prepared_generation, tab_id="tab-dot"
+    )
     # Not sent yet (e.g. the provider failed): the event is shown again.
-    retry = service.prepare_turn(WAKE_MESSAGE, first.conversation_id)
+    retry = service.prepare_turn(WAKE_MESSAGE, "provider-1")
     assert "Build broke" in retry.turn_pack
     service.mark_delivered(retry.delivered_event_ids)
-    second = service.prepare_turn(WAKE_MESSAGE, first.conversation_id)
+    second = service.prepare_turn(WAKE_MESSAGE, "provider-1")
     assert "Build broke" not in second.turn_pack
 
 
@@ -342,7 +356,10 @@ def test_the_users_turn_shows_events_but_leaves_them_to_the_wake_up(store: DotSt
     assert "Events waiting for your next wake-up" in plan.turn_pack
     assert "answer the user first" in plan.turn_pack
     assert len(store.list_inbox()) == 1
-    wake = service.prepare_turn(WAKE_MESSAGE, plan.conversation_id)
+    assert service.associate_conversation(
+        "provider-1", prepared_generation=plan.prepared_generation, tab_id="tab-dot"
+    )
+    wake = service.prepare_turn(WAKE_MESSAGE, "provider-1")
     assert "New events since your last turn" in wake.turn_pack and wake.delivered_event_ids
     assert "Consider the evidence against each done-when item" in wake.turn_pack
 
@@ -365,8 +382,33 @@ def test_prepare_turn_keeps_a_concurrent_rotation_request(store: DotStore) -> No
     service = DotService(store)
     store.update_state(tab_id="tab-dot")
     first = service.prepare_turn("hi", None)
+    assert service.associate_conversation(
+        "provider-1", prepared_generation=first.prepared_generation, tab_id="tab-dot"
+    )
     service.request_rotation()
-    assert service.prepare_turn("again", first.conversation_id).rotate
+    assert service.prepare_turn("again", "provider-1").rotate
+
+
+def test_conversation_association_rejects_stale_generation_and_tab(store: DotStore) -> None:
+    service = DotService(store)
+    store.update_state(tab_id="tab-dot")
+    old = service.prepare_turn("old", None)
+    assert not service.associate_conversation(
+        "provider-old", prepared_generation=old.prepared_generation, tab_id="tab-other"
+    )
+
+    service.request_rotation()
+    current = service.prepare_turn("current", None)
+    assert current.prepared_generation != old.prepared_generation
+    assert not service.associate_conversation(
+        "provider-old", prepared_generation=old.prepared_generation, tab_id="tab-dot"
+    )
+    assert service.associate_conversation(
+        "provider-current",
+        prepared_generation=current.prepared_generation,
+        tab_id="tab-dot",
+    )
+    assert store.read_state()["session_conversation_id"] == "provider-current"
 
 
 def test_file_paths_stay_inside_files(store: DotStore) -> None:

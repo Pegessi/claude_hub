@@ -69,6 +69,23 @@ class ExternalInteractionRequired(RuntimeError):
     """The external turn was stopped because it needs Web Chat input."""
 
 
+def require_tab_input_available(tab_id: str) -> None:
+    """Keep history readable while refusing new input during retirement/recovery."""
+    from claude_hub.services import ttyd_manager
+    from claude_hub.services.dot import get_dot_service
+    from claude_hub.services.dot.execution import execution_pending_for
+
+    if execution_pending_for(get_dot_service(), tab_id):
+        raise HTTPException(
+            status_code=409, detail="Dot's backend change is being recovered. Retry shortly."
+        )
+    tab = ttyd_manager.get_tab(tab_id)
+    if tab is not None and getattr(tab, "archived", False):
+        raise HTTPException(
+            status_code=409, detail="Restore this archived chat before sending a message."
+        )
+
+
 async def send_to_native(
     session: ManagedSession,
     payload: AgentStreamSendRequest,
@@ -93,6 +110,8 @@ async def send_to_native(
             detail="native composer input is only available for CHAT sessions",
         )
 
+    if session.id == f"terminal-tab-{session.tab_id}":
+        require_tab_input_available(session.tab_id)
     images, previews = bindings.decode_attachments(payload.attachments)
     if images:
         # Verify the transport supports images before staging them.
@@ -186,6 +205,7 @@ async def dispatch_tab_stream_input(
     )
 
     async with get_goal_admission_lock(tab_id):
+        require_tab_input_available(tab_id)
         goal_manager = get_goal_manager()
         goal = goal_manager.current(tab_id)
         session = bindings.terminal_tab_session_or_404(tab_id)

@@ -103,6 +103,9 @@ class MasoServer:
         self.image_metadata: dict[str, Any] | None = None
         self.image_upload_entered: asyncio.Event | None = None
         self.image_upload_release: asyncio.Event | None = None
+        self.session_creations = 0
+        self.fail_status = False
+        self.malformed_status = False
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -158,8 +161,18 @@ class MasoServer:
         if path == "/api/models/default":
             return httpx.Response(200, json={"key": "seed"})
         if path == "/api/sessions":
-            return httpx.Response(201, json={"session_id": "opaque-sid", "agent_id": "main"})
+            self.session_creations += 1
+            session_id = (
+                "opaque-sid"
+                if self.session_creations == 1
+                else f"opaque-sid-{self.session_creations}"
+            )
+            return httpx.Response(201, json={"session_id": session_id, "agent_id": "main"})
         if path.endswith("/status"):
+            if self.fail_status:
+                return httpx.Response(503, json={"error": "status unavailable"})
+            if self.malformed_status:
+                return httpx.Response(200, json={"status": "idle"})
             return httpx.Response(
                 200,
                 json={
@@ -743,6 +756,188 @@ async def test_cancel_rejects_late_notifications_and_resumes_same_session() -> N
         assert server.model == "seed-high"
         assert len([1 for _, path, _ in server.calls if path == "/api/sessions"]) == 1
         assert "<claude_hub_instructions>" not in server.calls[-1][2]["content"]
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_rotation_adopts_only_maso_assigned_session_id() -> None:
+    server = MasoServer()
+    provider = transport(
+        server, session(agent_session_id="old-provider-session", agent_session_id_verified=True)
+    )
+    persisted: list[str] = []
+    provider._conversation_id_persist = persisted.append
+    try:
+        result = await provider.rotate_conversation()
+        assert result == "opaque-sid"
+        assert provider._conversation_id == "old-provider-session"
+        assert persisted == []
+        provider.adopt_rotated_conversation(result)
+        assert provider._conversation_id == "opaque-sid"
+        assert provider._conversation_id_verified is True
+        assert persisted == ["opaque-sid"]
+        assert ("POST", "/api/sessions/old-provider-session/exit", {}) in server.calls
+        assert len([call for call in server.calls if call[1] == "/api/sessions"]) == 1
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_rejected_maso_rotation_discards_candidate_without_persisting() -> None:
+    server = MasoServer()
+    provider = transport(
+        server, session(agent_session_id="old-provider-session", agent_session_id_verified=True)
+    )
+    persisted: list[str] = []
+    provider._conversation_id_persist = persisted.append
+    try:
+        candidate = await provider.rotate_conversation()
+        await provider.discard_rotated_conversation(candidate)
+        assert provider._conversation_id == "old-provider-session"
+        assert persisted == []
+        assert ("POST", "/api/sessions/opaque-sid/exit", {}) in server.calls
+        assert provider._pending_rotation is None
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_maso_rotation_discard_survives_repeated_cancellation() -> None:
+    server = MasoServer()
+    provider = transport(server)
+    candidate = await provider.rotate_conversation()
+    server.exit_entered = asyncio.Event()
+    server.exit_release = asyncio.Event()
+    cleanup = asyncio.create_task(provider._discard_rotation(candidate))
+    await server.exit_entered.wait()
+    cleanup.cancel()
+    await asyncio.sleep(0)
+    cleanup.cancel()
+    server.exit_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+    assert provider._pending_rotation is None
+    assert (
+        len(
+            [
+                path
+                for method, path, _ in server.calls
+                if method == "POST" and path.endswith("/exit")
+            ]
+        )
+        == 1
+    )
+    await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_maso_stop_retries_retained_candidate_after_exit_failure() -> None:
+    server = MasoServer()
+    provider = transport(server)
+    candidate = await provider.rotate_conversation()
+    server.fail_exit = True
+    with pytest.raises(RuntimeError, match="returned HTTP 503"):
+        await provider.stop()
+    assert provider._pending_rotation is not None
+    assert provider._pending_rotation[0] == candidate
+    assert provider._client is not None and not provider._client.is_closed
+
+    server.fail_exit = False
+    await provider.stop()
+    assert provider._pending_rotation is None
+    assert provider._client is not None and provider._client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_maso_next_rotation_cleans_retained_candidate_before_creating_another() -> None:
+    server = MasoServer()
+    provider = transport(server)
+    first = await provider.rotate_conversation()
+    server.fail_exit = True
+    with pytest.raises(RuntimeError, match="returned HTTP 503"):
+        await provider.discard_rotated_conversation(first)
+    assert provider._pending_rotation is not None
+
+    server.fail_exit = False
+    second = await provider.rotate_conversation()
+    assert second == "opaque-sid-2"
+    assert provider._pending_rotation is not None
+    assert provider._pending_rotation[0] == second
+    await provider.discard_rotated_conversation(second)
+    await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_rotation_status_failure_cleans_known_created_session() -> None:
+    server = MasoServer()
+    server.fail_status = True
+    provider = transport(server)
+    try:
+        with pytest.raises(RuntimeError, match="status returned HTTP 503"):
+            await provider.rotate_conversation()
+        assert provider._conversation_id is None
+        assert provider._pending_rotation is None
+        assert ("POST", "/api/sessions/opaque-sid/exit", {}) in server.calls
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_malformed_rotation_status_retains_candidate_when_cleanup_fails() -> None:
+    server = MasoServer()
+    server.malformed_status = True
+    server.fail_exit = True
+    provider = transport(server)
+    try:
+        with pytest.raises(RuntimeError, match="invalid session status"):
+            await provider.rotate_conversation()
+        assert provider._conversation_id is None
+        assert provider._pending_rotation is not None
+        assert provider._pending_rotation[0] == "opaque-sid"
+
+        server.malformed_status = False
+        server.fail_exit = False
+        candidate = await provider.rotate_conversation()
+        assert candidate == "opaque-sid-2"
+        await provider.discard_rotated_conversation(candidate)
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_creation_reuses_posted_id_after_status_failure() -> None:
+    server = MasoServer()
+    server.fail_status = True
+    provider = transport(server)
+    try:
+        with pytest.raises(RuntimeError, match="status returned HTTP 503"):
+            await provider._ensure_session()
+        assert provider._conversation_id == "opaque-sid"
+        assert provider._conversation_id_verified is True
+        assert server.session_creations == 1
+
+        server.fail_status = False
+        await provider._ensure_session()
+        assert provider._conversation_id == "opaque-sid"
+        assert server.session_creations == 1
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_maso_rotation_preserves_old_identity() -> None:
+    server = MasoServer()
+    server.fail_exit = True
+    provider = transport(
+        server, session(agent_session_id="old-provider-session", agent_session_id_verified=True)
+    )
+    try:
+        with pytest.raises(RuntimeError, match="MASO POST .*exit returned HTTP 503"):
+            await provider.rotate_conversation()
+        assert provider._conversation_id == "old-provider-session"
+        assert provider._conversation_id_verified is True
+        assert not any(path == "/api/sessions" for _, path, _ in server.calls)
     finally:
         await provider.stop()
 
