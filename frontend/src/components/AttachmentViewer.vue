@@ -6,11 +6,15 @@
         <span class="attachment-label">{{ isImage ? 'Image' : file?.kind || 'Attachment' }} preview</span>
         <h1
           ref="title"
+          :title="filename"
           tabindex="-1"
         >
           {{ filename }}
         </h1>
-        <p class="attachment-path">
+        <p
+          class="attachment-path"
+          tabindex="0"
+        >
           {{ file?.path || target.path || target.name }}
         </p>
       </div>
@@ -343,15 +347,18 @@ onUnmounted(() => { request?.abort(); copyEpoch++ })
 
 <style scoped>
 .attachment-viewer { display: flex; flex-direction: column; min-width: 0; height: 100%; color: var(--ch-color-text); background: var(--ch-color-main-bg); }
-.attachment-header { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; padding: 20px 24px 16px; border-bottom: 1px solid var(--ch-color-border); flex: none; }
+/* Reserve readable content space even with long names, large text or short screens. */
+.attachment-header { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; padding: 20px 24px 16px; border-bottom: 1px solid var(--ch-color-border); flex: none; box-sizing: border-box; max-height: 50%; overflow: auto; overscroll-behavior: contain; }
 .attachment-title { flex: 1; min-width: 0; }
 .attachment-label { font-size: 12px; color: var(--ch-color-text-muted); text-transform: capitalize; }
-.attachment-title h1 { font-size: 20px; margin: 4px 0; line-height: 1.3; overflow-wrap: anywhere; }
+.attachment-title h1 { font-size: 20px; margin: 4px 0; line-height: 1.3; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .attachment-path { margin: 0; font: 12px/1.5 var(--ch-font-mono); overflow-wrap: anywhere; max-height: 3em; overflow: auto; }
 .attachment-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; font-size: 12px; }
-.attachment-viewer .ch-btn { min-height: 44px; height: auto; padding: 8px 12px; text-decoration: none; }
+.attachment-viewer .ch-btn,
+.attachment-viewer :slotted(.ch-btn) { min-height: 44px; height: auto; padding: 8px 12px; text-decoration: none; }
 .attachment-viewer .attachment-close { width: 44px; flex: none; font-size: 24px; padding: 0; }
-.attachment-viewer :is(button, a, pre):focus-visible { outline: 2px solid var(--ch-color-accent); outline-offset: 2px; }
+.attachment-viewer :is(button, a, pre, .attachment-path):focus-visible,
+.attachment-viewer :slotted(.ch-btn:focus-visible) { outline: 2px solid var(--ch-color-accent); outline-offset: 2px; }
 .attachment-copy-status { font-size: 12px; }
 .attachment-body { padding: 24px; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .attachment-notice { margin: 0 0 16px; font-size: 14px; line-height: 1.6; color: var(--ch-color-text-muted); }

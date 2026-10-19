@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(chat): preserve navigation and readability in attachment previews
+
+- Distinguish preview-owned history transitions from real Chat navigation, so
+  closing a preview does not reactivate an old entry link and genuine tab
+  Back/Forward navigation still works.
+- Bound the preview header on short screens, clamp long titles, and retain a
+  keyboard-scrollable complete path and readable source area.
+- Apply the shared 44px action size and focus styling to standalone-reader slots.
+- Add browser regressions for stale deep links, deactivation cleanup, real
+  history navigation, long filenames and standalone return controls.
+
 ### feat(chat): unify in-page attachment previews
 
 - Open Chat file links and images in one native dialog; use a full-screen layout

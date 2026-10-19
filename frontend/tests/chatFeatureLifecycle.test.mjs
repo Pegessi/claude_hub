@@ -83,7 +83,17 @@ function runtime(t) {
     addEventListener(type, fn) { const set = scope.get(type) ?? new Set(); set.add(fn); scope.set(type, set) },
     removeEventListener(type, fn) { scope.get(type)?.delete(fn) },
   })
-  global('window', { ...listen(listeners.window), innerWidth: 1200, setTimeout, clearTimeout })
+  global('window', {
+    ...listen(listeners.window), innerWidth: 1200, setTimeout, clearTimeout,
+    location: { href: 'http://hub/?tab=one' },
+    history: {
+      state: null,
+      pushState(value) { this.state = value },
+      back() { state.calls.push(['history.back']) },
+    },
+  })
+  global('Element', class {})
+  global('HTMLElement', class {})
   class Document {}
   class ShadowRoot {}
   global('Document', Document)
@@ -139,7 +149,8 @@ const stubs = {
 function renderer() {
   const create = (tag, text) => ({ tag, text, props: {}, children: [], parent: null, style: {}, scrollTop: 0, scrollHeight: 600, clientHeight: 500,
     addEventListener() {}, removeEventListener() {}, setAttribute() {}, removeAttribute() {}, getRootNode() { return globalThis.document },
-    focus() {}, querySelectorAll() { return [] }, getBoundingClientRect() { return { top: 0, bottom: 500 } } })
+    focus() {}, querySelectorAll() { return [] }, getBoundingClientRect() { return { top: 0, bottom: 500 } },
+    showModal() { this.open = true }, close() { this.open = false } })
   const body = create('body')
   return vue.createRenderer({
     createElement: tag => create(tag), createText: text => create('#text', text), createComment: text => create('#comment', text),
@@ -382,3 +393,23 @@ test('foreground queued input can flush past a yielding Dot wake with normal del
   assert.equal(JSON.parse(sends[0][2].body).client_turn_id, 'queued-user')
   assert.equal(queue.draftQueue.value.length, 0)
 })
+
+for (const cleanup of ['deactivate', 'unmount']) {
+  test(`pending preview Close followed by ${cleanup} queues only one history traversal`, async t => {
+    const h = await mount(t)
+    h.owner(h.keys.chatImagesKey).openImageLightbox('data:image/png;base64,eA==', 'preview')
+    await flush()
+    const dialogType = (await h.load('components/AttachmentPreviewDialog.vue')).default
+    const instance = collectInstances(h.vm.$.subTree).find(i => i.type === dialogType)
+    const dialog = instance.subTree.children[0].el
+    assert.equal(dialog.open, true)
+    // Native cancel shares the Close handler; leave popstate pending while the
+    // real KeepAlive/unmount lifecycle clears the preview owner.
+    dialog.props.onCancel({ preventDefault() {} })
+    assert.equal(h.state.calls.filter(([name]) => name === 'history.back').length, 1)
+    if (cleanup === 'deactivate') h.selected.value = 'two'
+    else h.unmount()
+    await flush()
+    assert.equal(h.state.calls.filter(([name]) => name === 'history.back').length, 1)
+  })
+}

@@ -169,6 +169,7 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
 import { parseTabDeepLink } from '@/utils/deepLink'
+import { isAttachmentNavigation } from '@/utils/attachmentHistory'
 import { useViewport } from '@/composables/useViewport'
 
 const appStore = useAppStore()
@@ -460,6 +461,11 @@ async function handleDeepLink() {
   window.history.replaceState(null, '', window.location.pathname)
 }
 
+function handleHistoryNavigation(event: PopStateEvent) {
+  if (isAttachmentNavigation(event)) return
+  void handleDeepLink()
+}
+
 onMounted(async () => {
   // Always check auth first - it will handle the case when auth is not enabled
   await authStore.checkAuth()
@@ -470,14 +476,13 @@ onMounted(async () => {
   }
   // Set up mobile viewport sync
   setupMobileViewportSync()
-  // Browser back/forward re-runs the deep-link routing (app-internal tab
-  // switches deliberately do not pushState, so this only fires on nav).
-  window.addEventListener('popstate', handleDeepLink)
+  // Only preview-owned history transitions bypass normal deep-link routing.
+  window.addEventListener('popstate', handleHistoryNavigation)
 })
 
 onUnmounted(() => {
   cleanupMobileViewportSync()
-  window.removeEventListener('popstate', handleDeepLink)
+  window.removeEventListener('popstate', handleHistoryNavigation)
 })
 </script>
 
