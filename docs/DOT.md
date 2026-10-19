@@ -248,10 +248,14 @@ The same text sent in the last 30 minutes is not sent again (a wake-up that
 was stopped or failed runs again and may repeat its notice); Dot gets
 `sent: false` with a reason, and can add what differs.
 
-A Feishu reply carries the last message of the turn: the text after its last
-tool call (`final_text` on the turn's completion, set by the native Claude
-consumer when it differs from the whole text). Progress notes written before
-tool calls stay in the web Chat. The Hub-kept turn rules ask Dot to work like
+A Feishu reply to the Dot Chat carries the last message of the turn: the text
+after its last tool call (`final_text` on the turn's completion, set by the
+native Claude consumer when it differs from the whole text). Progress notes
+written before tool calls stay in the web Chat. Other Chats bound to a bot
+still send their whole text, since only Dot is told to write its answer last.
+A Claude Task sub-agent's own records (`parent_tool_use_id`) belong to its
+thread (`subagent_thread`), so they are not part of the parent's answer or
+journal. The Hub-kept turn rules ask Dot to work like
 a secretary (reply fast, delegate, follow up, relay results in plain words)
 and to put the whole answer in that last message: conclusion first, a few
 bullets.

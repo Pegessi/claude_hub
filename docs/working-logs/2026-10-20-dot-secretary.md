@@ -35,6 +35,19 @@ Design: [docs/DOT.md](../DOT.md) ("Delegation and wake-up").
   task the user asked for that is done, failed or needs them goes to Feishu as
   a card. The previous wake text is retired so schedules get the new one.
 
+## Cross-review fixes
+
+- `--session` checked only the workspace: a non-orchestrator or a Chat-kind
+  agent failed at start and left a `todo` task. Now the session must be a
+  workspace orchestrator, and the task takes its session kind.
+- Only the Dot Chat gets the last answer on Feishu; another bound Chat that
+  ends with "Done." after writing a report would have lost the report.
+- The Claude adapter never marked a Task sub-agent's records, so their text
+  joined the parent's answer (the journal showed English sub-agent notes after
+  `[quiet]`). Records with `parent_tool_use_id` now carry `subagent_thread`.
+- Not fixed: a task started from the Dot Chat that ends between two watcher
+  passes (under a minute) is not watched.
+
 ## Activation
 
 The live Dot keeps its session pack until the session rotates (`claude-hub dot

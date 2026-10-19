@@ -307,6 +307,15 @@ async def dispatch_tab_stream_input(
         return payload.client_turn_id
 
 
+def _answers_last(tab_id: str) -> bool:
+    from claude_hub.services.dot import get_dot_service
+
+    try:
+        return get_dot_service().is_dot_tab(tab_id)
+    except Exception:
+        return False
+
+
 async def dispatch_tab_chat_and_wait(
     tab_id: str,
     text: str,
@@ -319,8 +328,8 @@ async def dispatch_tab_chat_and_wait(
     timeout_seconds: float | None = None,
     admission_guard: Optional[ChatAdmissionGuard] = None,
 ) -> str:
-    """Send through an existing Chat tab and return its completed answer: the text
-    after the turn's last tool call, or all of its assistant text.
+    """Send through an existing Chat tab and return its completed assistant text
+    (for Dot, the text after the turn's last tool call).
 
     This is the narrow external-conversation adapter. It shares the same
     ``TailerManager`` and provider session as the Web Chat composer and never
@@ -435,9 +444,10 @@ async def dispatch_tab_chat_and_wait(
             assistant_text = event.payload.get("assistant_text")
             if not isinstance(assistant_text, str) or not assistant_text.strip():
                 raise RuntimeError(last_error or "Chat turn completed without assistant text")
-            # A chat app gets the last answer, not the narration between tool calls.
+            # Dot writes its whole answer last (its turn rules say so): the chat app
+            # gets that, not the notes between tool calls. Other Chats send it all.
             final_text = event.payload.get("final_text")
-            if isinstance(final_text, str) and final_text.strip():
+            if isinstance(final_text, str) and final_text.strip() and _answers_last(tab_id):
                 return final_text.strip()
             return assistant_text.strip()
     except asyncio.CancelledError:

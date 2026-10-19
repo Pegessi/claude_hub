@@ -407,8 +407,19 @@ async def test_delegate_registers_and_starts_task(
         started.append(request)
         return SimpleNamespace(id=task_id, title="Audit", status=SimpleNamespace(value="queued"))
 
+    from claude_hub.models.schemas import SessionKind, WorkspaceSessionRole
+
+    def agent(role: WorkspaceSessionRole) -> SimpleNamespace:
+        return SimpleNamespace(
+            workspace_id="ws",
+            agent_type=SimpleNamespace(value="codex"),
+            role=role,
+            session_kind=SessionKind.CHAT,
+        )
+
     sessions = {
-        "codex-61": SimpleNamespace(workspace_id="ws", agent_type=SimpleNamespace(value="codex"))
+        "codex-61": agent(WorkspaceSessionRole.ORCHESTRATOR),
+        "reviewer": agent(WorkspaceSessionRole.REVIEWER),
     }
     monkeypatch.setattr(workspace_manager, "sessions", sessions)
     monkeypatch.setattr(workspace_manager, "start_task", start_in)
@@ -424,8 +435,11 @@ async def test_delegate_registers_and_starts_task(
     await service.delegate(**audit, agent_type="claude", session_id="codex-61")
     assert started[-1].target_session_id == "codex-61"
     assert created["payload"].agent_type.value == "codex"
+    assert created["payload"].session_kind == SessionKind.CHAT, "on that agent's surface"
     with pytest.raises(ValueError):
         await service.delegate(**{**audit, "workspace_id": "ws-2"}, session_id="codex-61")
+    with pytest.raises(ValueError, match="not an agent"):
+        await service.delegate(**audit, session_id="reviewer")
 
 
 def test_health_flags_problems(service: DotService) -> None:

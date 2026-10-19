@@ -3003,22 +3003,33 @@ def test_unbinding_revokes_outstanding_codes(pool: FeishuBotPoolStore) -> None:
 
 
 @pytest.mark.parametrize(
-    ("payload", "answer"),
+    ("payload", "dot", "answer"),
     [
         (
             {"assistant_text": "Reading.\nDone: 3 fixes.", "final_text": "Done: 3 fixes."},
+            True,
             "Done: 3 fixes.",
         ),
-        ({"assistant_text": "Hi."}, "Hi."),
+        # Other Chats were not asked to write their answer last: they send it all.
+        (
+            {"assistant_text": "Reading.\nDone: 3 fixes.", "final_text": "Done: 3 fixes."},
+            False,
+            "Reading.\nDone: 3 fixes.",
+        ),
+        ({"assistant_text": "Hi."}, True, "Hi."),
     ],
 )
-def test_a_chat_app_gets_the_last_answer_of_the_turn(
-    monkeypatch: pytest.MonkeyPatch, payload: dict[str, str], answer: str
+def test_dot_on_feishu_gets_the_last_answer_of_the_turn(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, str], dot: bool, answer: str
 ) -> None:
-    """Narration between tool calls stays on the web; Feishu gets the answer."""
+    """Dot's notes between tool calls stay on the web; Feishu gets its answer."""
     from types import SimpleNamespace
 
     from claude_hub.api import agent_stream as stream_api
+    from claude_hub.services import dot as dot_module
+
+    service = SimpleNamespace(is_dot_tab=lambda tab_id: dot and tab_id == "tab-1")
+    monkeypatch.setattr(dot_module, "get_dot_service", lambda: service)
 
     async def scenario() -> str:
         queue: asyncio.Queue[Any] = asyncio.Queue()
