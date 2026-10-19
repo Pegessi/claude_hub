@@ -1,8 +1,10 @@
-import { type Ref, nextTick, ref } from 'vue'
+import { type Ref, ref } from 'vue'
+import type { AttachmentTarget } from '@/composables/useAttachmentPreview'
 import { type TimelineAttachment } from '../timeline/types'
 
 interface Dependencies {
   streamBasePath: Ref<string>
+  openPreview: (target: AttachmentTarget, event?: MouseEvent) => void
 }
 
 export function useChatImages(deps: Dependencies) {
@@ -15,49 +17,8 @@ export function useChatImages(deps: Dependencies) {
    *  degrade to a stable path-only placeholder instead of a broken icon. */
   const erroredAgentImages = ref<Set<string>>(new Set())
 
-  const imageLightboxUrl = ref<string | null>(null)
-
-  const imageLightboxAlt = ref('')
-
-  const imageLightboxActualSize = ref(false)
-
-  const imageLightboxDimensions = ref('')
-
-  const lightboxEl = ref<HTMLElement | null>(null)
-
-  const lightboxCloseEl = ref<HTMLButtonElement | null>(null)
-
-  let imageLightboxTrigger: HTMLElement | null = null
-
   function openImageLightbox(url: string, alt: string, event: MouseEvent) {
-    imageLightboxUrl.value = url
-    imageLightboxAlt.value = alt
-    imageLightboxActualSize.value = false
-    imageLightboxDimensions.value = ''
-    const delegated = event.target instanceof Element
-      ? event.target.closest<HTMLElement>('button[data-image-preview]') : null
-    imageLightboxTrigger = delegated || (event.currentTarget instanceof HTMLElement
-      ? event.currentTarget
-      : null)
-    void nextTick(() => lightboxCloseEl.value?.focus())
-  }
-
-  function onLightboxImageLoad(event: Event) {
-    const image = event.target as HTMLImageElement
-    imageLightboxDimensions.value = `${image.naturalWidth} × ${image.naturalHeight}`
-  }
-
-  function dismissImageLightbox(restoreFocus: boolean) {
-    if (!imageLightboxUrl.value) return
-    const trigger = imageLightboxTrigger
-    imageLightboxUrl.value = null
-    imageLightboxAlt.value = ''
-    imageLightboxTrigger = null
-    if (restoreFocus) void nextTick(() => trigger?.focus())
-  }
-
-  function closeImageLightbox() {
-    dismissImageLightbox(true)
+    deps.openPreview({ scope: deps.streamBasePath.value, path: '', imageUrl: url, name: alt }, event)
   }
 
   /**
@@ -108,16 +69,7 @@ export function useChatImages(deps: Dependencies) {
   return {
     erroredAttachments,
     erroredAgentImages,
-    imageLightboxUrl,
-    imageLightboxAlt,
-    imageLightboxActualSize,
-    imageLightboxDimensions,
-    lightboxEl,
-    lightboxCloseEl,
     openImageLightbox,
-    onLightboxImageLoad,
-    dismissImageLightbox,
-    closeImageLightbox,
     attachmentUrl,
     agentImageUrl,
     agentImageBasename,

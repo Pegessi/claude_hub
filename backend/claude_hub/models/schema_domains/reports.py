@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -127,6 +127,13 @@ class WorkspaceArtifactPreview(BaseModel):
     content: str
     size_bytes: int
     truncated: bool = False
+
+
+class StreamAttachmentPreview(WorkspaceArtifactPreview):
+    """Bounded local source text; language is a display hint, never executable."""
+
+    kind: Literal["markdown", "code", "data", "text"]
+    language: str
 
 
 class WorkspaceMarkdownDocumentSource(str, Enum):
