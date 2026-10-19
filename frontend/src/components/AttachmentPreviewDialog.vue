@@ -24,16 +24,19 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import AttachmentViewer from '@/components/AttachmentViewer.vue'
 import type { AttachmentTarget } from '@/composables/useAttachmentPreview'
+import { backFromAttachmentPreview, markAttachmentNavigation } from '@/utils/attachmentHistory'
 
 const props = defineProps<{ target: AttachmentTarget | null; canGoBack: boolean }>()
 const emit = defineEmits<{ close: []; back: [] }>()
 const dialog = ref<HTMLDialogElement | null>(null)
 let marker = ''
+let previewUrl = ''
 let ownsHistory = false
 let closing = false
 
-function onPopState() {
-  if (!ownsHistory || window.history.state?.attachmentPreview === marker) return
+function onPopState(event: PopStateEvent) {
+  if (!ownsHistory || (window.history.state?.attachmentPreview === marker && window.location.href === previewUrl)) return
+  markAttachmentNavigation(event, previewUrl)
   ownsHistory = false
   closing = false
   if (dialog.value?.open) dialog.value.close()
@@ -41,14 +44,14 @@ function onPopState() {
 }
 function requestClose() {
   if (closing) return
-  if (ownsHistory && window.history.state?.attachmentPreview === marker) {
+  if (ownsHistory) {
     closing = true
-    window.history.back()
-  } else {
-    ownsHistory = false
-    if (dialog.value?.open) dialog.value.close()
-    emit('close')
+    if (backFromAttachmentPreview(marker, previewUrl)) return
+    closing = false
   }
+  ownsHistory = false
+  if (dialog.value?.open) dialog.value.close()
+  emit('close')
 }
 function onBackdrop(event: MouseEvent) {
   if (!dialog.value || event.target !== dialog.value) return
@@ -57,25 +60,28 @@ function onBackdrop(event: MouseEvent) {
 }
 function release() {
   if (dialog.value?.open) dialog.value.close()
-  const goBack = ownsHistory && window.history.state?.attachmentPreview === marker
+  // A pending Close already owns the traversal and its surviving capture callback.
+  const goBack = ownsHistory && !closing
   ownsHistory = false
   closing = false
-  if (goBack) window.history.back()
+  if (goBack) backFromAttachmentPreview(marker, previewUrl)
 }
-window.addEventListener('popstate', onPopState)
+// Mark preview departures before App's ordinary bubbling routing listener runs.
+window.addEventListener('popstate', onPopState, { capture: true })
 watch(() => Boolean(props.target), (open) => {
   if (!open) { release(); return }
   dialog.value?.showModal()
   if (!ownsHistory) {
     // A previous preview entry can remain in Forward history after closing.
     marker = `attachment-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    window.history.pushState({ ...window.history.state, attachmentPreview: marker }, '')
+    previewUrl = window.location.href
+    window.history.pushState({ ...window.history.state, attachmentPreview: marker, attachmentPreviewUrl: previewUrl }, '')
     ownsHistory = true
   }
 }, { flush: 'post' })
 onBeforeUnmount(() => {
   release()
-  window.removeEventListener('popstate', onPopState)
+  window.removeEventListener('popstate', onPopState, true)
 })
 </script>
 
