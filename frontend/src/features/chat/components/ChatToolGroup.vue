@@ -32,6 +32,12 @@
           v-if="part.tools.length > 1"
           class="tool-group-names"
         >{{ toolGroupNames(part.tools) }}</span>
+        <!-- A failure inside a still-running group must not hide behind
+             the spinner. -->
+        <span
+          v-if="groupStatus() === 'running' && failedCount() > 0"
+          class="tool-status failed tool-status--count"
+        ><span class="tool-status-text">{{ failedCount() }} failed</span></span>
         <span
           class="tool-status"
           :class="groupStatus()"
@@ -108,8 +114,10 @@
                 >{{ line.sign === '@' ? '' : line.sign }}</span><span>{{ line.text }}</span>
               </div>
             </div>
+            <!-- The headline already names the target, so the arguments
+                 become secondary evidence. -->
             <details
-              v-if="tool.argsText && activity.diff"
+              v-if="tool.argsText && (activity.diff || activity.target)"
               class="tool-block tool-block--raw"
             >
               <summary>Raw input</summary>
@@ -174,6 +182,10 @@ function groupStatus(): ReturnType<typeof toolGroupStatus> {
   return toolGroupStatus(props.part.tools)
 }
 
+function failedCount(): number {
+  return props.part.tools.reduce((count, tool) => count + (tool.status === 'failed' ? 1 : 0), 0)
+}
+
 /** A single call names its action; a group names what it did in aggregate. */
 function headline(): { kind: ToolActivityKind, verb: string, target: string } {
   const tools = props.part.tools
@@ -218,7 +230,7 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   box-shadow: 0 10px 28px var(--ch-shadow-color-soft);
 }
 
-.tool-card summary {
+.tool-card > summary {
   cursor: pointer;
   list-style: none;
   position: sticky;
@@ -226,16 +238,16 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   z-index: 1;
 }
 
-.tool-card summary::-webkit-details-marker {
+.tool-card > summary::-webkit-details-marker {
   display: none;
 }
 
-.tool-card[open] summary {
+.tool-card[open] > summary {
   background: var(--ch-color-surface);
   border-bottom: 1px solid var(--ch-color-border-muted);
 }
 
-.tool-card summary:focus-visible {
+.tool-card > summary:focus-visible {
   outline: 2px solid var(--ch-color-accent-ring);
   outline-offset: 2px;
   border-radius: var(--ch-radius-sm);
@@ -333,7 +345,7 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   height: 12px;
 }
 
-.activity-icon[data-kind='command'] { color: var(--ch-terminal-green, var(--ch-color-success)); }
+.activity-icon[data-kind='command'] { color: var(--ch-color-success-strong, var(--ch-color-success)); }
 .activity-icon[data-kind='edit'],
 .activity-icon[data-kind='write'] { color: var(--ch-color-accent); }
 .activity-icon[data-kind='search'],
@@ -535,7 +547,7 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
 }
 
 .activity-prompt {
-  color: var(--ch-terminal-green, var(--ch-color-success));
+  color: var(--ch-color-success-strong, var(--ch-color-success));
   user-select: none;
 }
 
@@ -615,6 +627,25 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
 
 .tool-block--raw > summary {
   cursor: pointer;
+  list-style: none;
+}
+
+.tool-block--raw > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-block--raw > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 12px;
+}
+
+.tool-block--raw[open] > summary::before {
+  content: '▾';
+}
+
+.tool-block--raw > summary:hover {
+  color: var(--ch-color-text-muted);
 }
 
 .tool-block pre {

@@ -76,3 +76,10 @@ test('group headlines aggregate by kind without parsing arguments', () => {
 test('expanded tool items parse arguments only while their card is open', () => {
   assert.match(toolGroup, /function expandedItems\(\)[^\n]*\n\s*if \(!expandedToolGroups\.get\(props\.turn\.key\)\?\.has\(props\.part\.key\)\) return \[\]/)
 })
+
+test('a failure inside a running group stays visible next to the spinner', () => {
+  assert.match(toolGroup, /v-if="groupStatus\(\) === 'running' && failedCount\(\) > 0"/)
+  // Nested raw-input toggles must not inherit the sticky card header.
+  assert.match(toolGroup, /\.tool-card > summary \{[^}]*position: sticky/)
+  assert.doesNotMatch(toolGroup, /\.tool-card summary \{/)
+})
