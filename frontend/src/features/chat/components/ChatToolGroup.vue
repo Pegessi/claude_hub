@@ -1,32 +1,41 @@
 <template>
   <div
-    class="conversation-row conversation-row--assistant"
+    class="conversation-row conversation-row--assistant conversation-row--activity"
   >
-    <span
-      class="conversation-avatar conversation-avatar--tool"
-      aria-hidden="true"
-    >⌘</span>
     <details
       class="tool-card tool-card--group"
+      :class="[`tool-card--${groupStatus()}`, { 'tool-card--single': part.tools.length === 1 }]"
       :open="expandedToolGroups.get(turn.key)?.has(part.key)"
       @toggle="onToolGroupToggle(turn, part.key, $event)"
     >
+      <!-- One headline per render (single-item v-for); the key changes only
+           when the group's mix of kinds does. -->
       <summary
+        v-for="head in [headline()]"
+        :key="head.kind"
         class="tool-header"
         :class="{ 'tool-header--single': part.tools.length === 1 }"
       >
-        <span class="tool-name">
-          {{ part.tools.length === 1 ? part.tools[0].name : `${part.tools.length} tools` }}
+        <span
+          class="activity-icon"
+          :data-kind="head.kind"
+          aria-hidden="true"
+        ><svg viewBox="0 0 16 16"><path :d="ACTIVITY_ICONS[head.kind]" /></svg></span>
+        <span class="tool-name activity-title">
+          <span class="activity-verb">{{ head.verb }}</span>
+          <code
+            v-if="head.target"
+            class="activity-target"
+          >{{ head.target }}</code>
         </span>
-        <template v-if="part.tools.length > 1">
-          <span class="tool-group-names">
-            {{ toolGroupNames(part.tools) }}
-          </span>
-        </template>
+        <span
+          v-if="part.tools.length > 1"
+          class="tool-group-names"
+        >{{ toolGroupNames(part.tools) }}</span>
         <span
           class="tool-status"
-          :class="toolGroupStatus(part.tools)"
-        >{{ toolStatusLabel(toolGroupStatus(part.tools)) }}</span>
+          :class="groupStatus()"
+        ><span class="tool-status-text">{{ toolStatusLabel(groupStatus()) }}</span></span>
         <span
           class="tool-chevron"
           aria-hidden="true"
@@ -34,37 +43,102 @@
       </summary>
       <template v-if="expandedToolGroups.get(turn.key)?.has(part.key)">
         <div
-          v-for="tool in part.tools"
+          v-for="{ tool, activity } in expandedItems()"
           :key="tool.key"
           class="tool-group-item"
         >
-          <div class="tool-group-item-header">
-            <span class="tool-name">{{ tool.name }}</span>
+          <div
+            v-if="part.tools.length > 1"
+            class="tool-group-item-header"
+          >
+            <span
+              class="activity-icon activity-icon--small"
+              :data-kind="activity.kind"
+              aria-hidden="true"
+            ><svg viewBox="0 0 16 16"><path :d="ACTIVITY_ICONS[activity.kind]" /></svg></span>
+            <span class="tool-name activity-title">
+              <span class="activity-verb">{{ activity.verb }}</span>
+              <code
+                v-if="activity.target"
+                class="activity-target"
+              >{{ activity.target }}</code>
+            </span>
             <span
               class="tool-status"
               :class="tool.status"
-            >{{ toolStatusLabel(tool.status) }}</span>
+            ><span class="tool-status-text">{{ toolStatusLabel(tool.status) }}</span></span>
           </div>
+          <!-- Commands read as a terminal: the prompt line, then the output. -->
           <div
-            v-if="tool.argsText"
-            class="tool-block"
+            v-if="activity.command"
+            class="activity-terminal"
           >
-            <span>Input</span>
             <pre
+              class="activity-terminal-command"
               tabindex="0"
-              aria-label="Tool input"
-            >{{ tool.argsText }}</pre>
-          </div>
-          <div
-            v-if="tool.resultText"
-            class="tool-block"
-          >
-            <span>Result</span>
+              aria-label="Command"
+            ><span
+              class="activity-prompt"
+              aria-hidden="true"
+            >$ </span>{{ activity.command }}</pre>
             <pre
+              v-if="tool.resultText"
+              class="activity-terminal-output"
               tabindex="0"
-              aria-label="Tool result"
+              aria-label="Command output"
             >{{ tool.resultText }}</pre>
           </div>
+          <template v-else>
+            <!-- Edits read as a diff when the arguments carry one. -->
+            <div
+              v-if="activity.diff"
+              class="activity-diff"
+              tabindex="0"
+              aria-label="Edit diff"
+            >
+              <div
+                v-for="(line, index) in activity.diff"
+                :key="index"
+                class="activity-diff-line"
+                :class="`activity-diff-line--${DIFF_CLASS[line.sign]}`"
+              >
+                <span
+                  class="activity-diff-sign"
+                  aria-hidden="true"
+                >{{ line.sign === '@' ? '' : line.sign }}</span><span>{{ line.text }}</span>
+              </div>
+            </div>
+            <details
+              v-if="tool.argsText && activity.diff"
+              class="tool-block tool-block--raw"
+            >
+              <summary>Raw input</summary>
+              <pre
+                tabindex="0"
+                aria-label="Tool input"
+              >{{ tool.argsText }}</pre>
+            </details>
+            <div
+              v-else-if="tool.argsText"
+              class="tool-block"
+            >
+              <span>Input</span>
+              <pre
+                tabindex="0"
+                aria-label="Tool input"
+              >{{ tool.argsText }}</pre>
+            </div>
+            <div
+              v-if="tool.resultText"
+              class="tool-block"
+            >
+              <span>Result</span>
+              <pre
+                tabindex="0"
+                aria-label="Tool result"
+              >{{ tool.resultText }}</pre>
+            </div>
+          </template>
         </div>
         <button
           type="button"
@@ -81,111 +155,487 @@
 <script setup lang="ts">
 import { requireChatOwner, chatTimelineKey } from '../owners'
 import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
+import { ACTIVITY_ICONS, describeToolActivity, toolActivityKind, toolGroupHeadline, type ToolActivity, type ToolActivityKind, type ToolDiffLine } from '@/utils/toolActivity'
 import { toolGroupStatus } from '@/features/chat/presentation/chatTurnPresentation'
-import type { TimelineTurn } from '../timeline/types'
+import type { TimelineTool, TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
 const { expandedToolGroups, onToolGroupToggle, collapseDetails } = requireChatOwner(chatTimelineKey)
-defineProps<{
+const props = defineProps<{
   turn: TimelineTurn
   part: Extract<TimelinePart, { kind: 'tool_group' }>
 }>()
+
+const DIFF_CLASS: Record<ToolDiffLine['sign'], string> = { '+': 'add', '-': 'del', ' ': 'ctx', '@': 'hunk' }
+
+// Plain render-time functions, not computeds: the timeline mutates tool rows
+// in place and signals change through the turn's renderRevision, which a
+// computed cannot observe.
+function groupStatus(): ReturnType<typeof toolGroupStatus> {
+  return toolGroupStatus(props.part.tools)
+}
+
+/** A single call names its action; a group names what it did in aggregate. */
+function headline(): { kind: ToolActivityKind, verb: string, target: string } {
+  const tools = props.part.tools
+  if (tools.length === 1) return describeToolActivity(tools[0])
+  const kinds = new Set(tools.map(tool => toolActivityKind(tool.name)))
+  return {
+    kind: kinds.size === 1 ? [...kinds][0] : 'other',
+    verb: toolGroupHeadline(tools),
+    target: '',
+  }
+}
+
+/** Arguments are parsed only while the card is open. */
+function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
+  if (!expandedToolGroups.get(props.turn.key)?.has(props.part.key)) return []
+  return props.part.tools.map(tool => ({ tool, activity: describeToolActivity(tool) }))
+}
 </script>
 
 <style scoped>
-.tool-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.tool-name {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 600;
-}
-
-.tool-status {
-  font-size: 10px;
-  text-transform: uppercase;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background-color: var(--ch-color-border);
-  color: var(--ch-color-text-muted);
-}
-
-.tool-status.completed {
-  background-color: var(--ch-color-success-bg, rgba(46, 160, 67, 0.12));
-  color: var(--ch-color-success-strong, #2ea043);
-}
-
-.tool-status.failed {
-  background-color: var(--ch-color-danger-bg, rgba(248, 81, 73, 0.12));
-  color: var(--ch-color-danger-strong, #f85149);
-}
-
-.tool-status.running {
-  background-color: var(--ch-color-warning-bg, rgba(224, 168, 0, 0.12));
-  color: var(--ch-color-warning, #e0a800);
-}
-
-.tool-status.cancelled {
-  background-color: var(--ch-color-surface-muted, rgba(139, 148, 158, 0.12));
-  color: var(--ch-color-text-muted, #8b949e);
-}
-
+/* Tool calls read as a quiet activity log between the prose: one line per
+   group ("Ran `pnpm test`"), a card only once someone opens it. */
 .conversation-row {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
   min-width: 0;
 }
 
-.conversation-avatar {
-  width: 23px;
-  height: 23px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border-radius: var(--ch-radius-sm);
-  border: 1px solid var(--ch-color-border-selected);
-  background: var(--ch-color-surface-selected);
-  color: var(--ch-color-text-selected);
-  font-size: 11px;
-  font-weight: 600;
+.tool-card {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: var(--ch-radius-md);
+  background: transparent;
+  overflow: clip;
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
 }
 
-.conversation-avatar--tool {
+.tool-card[open] {
   border-color: var(--ch-color-border-muted);
-  background: var(--ch-color-surface-control);
-  color: var(--ch-color-text-muted);
-  font-size: 10px;
+  background: var(--ch-color-surface);
+  box-shadow: 0 10px 28px var(--ch-shadow-color-soft);
 }
-
 
 .tool-card summary {
   cursor: pointer;
   list-style: none;
-}
-
-
-.tool-card summary::-webkit-details-marker {
-  display: none;
-}
-
-.tool-card summary {
   position: sticky;
   top: 0;
   z-index: 1;
 }
 
-.tool-card summary {
-  background: var(--ch-color-surface);
+.tool-card summary::-webkit-details-marker {
+  display: none;
 }
+
+.tool-card[open] summary {
+  background: var(--ch-color-surface);
+  border-bottom: 1px solid var(--ch-color-border-muted);
+}
+
+.tool-card summary:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--ch-radius-sm);
+}
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: var(--ch-radius-md);
+  color: var(--ch-color-text-subtle);
+  font-size: 13px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.tool-card:not([open]) > .tool-header:hover {
+  background: var(--ch-color-row-hover, var(--ch-color-surface-soft));
+  color: var(--ch-color-text-muted);
+}
+
+.tool-card[open] > .tool-header {
+  border-radius: 0;
+  color: var(--ch-color-text-muted);
+}
+
+.tool-name {
+  flex-shrink: 0;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.activity-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tool-header--single .activity-title {
+  flex: 1 1 auto;
+}
+
+.activity-verb {
+  flex: 0 0 auto;
+  color: inherit;
+  font-weight: 500;
+}
+
+.activity-target {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-sunken, var(--ch-color-surface-soft));
+  color: var(--ch-color-text-code, var(--ch-color-text));
+  font-family: var(--ch-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+
+.activity-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  color: var(--ch-color-text-subtle);
+}
+
+.activity-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.activity-icon--small {
+  width: 16px;
+  height: 16px;
+}
+
+.activity-icon--small svg {
+  width: 12px;
+  height: 12px;
+}
+
+.activity-icon[data-kind='command'] { color: var(--ch-terminal-green, var(--ch-color-success)); }
+.activity-icon[data-kind='edit'],
+.activity-icon[data-kind='write'] { color: var(--ch-color-accent); }
+.activity-icon[data-kind='search'],
+.activity-icon[data-kind='web'] { color: var(--ch-color-info, var(--ch-color-accent)); }
+
+.tool-card--running .activity-verb {
+  background: linear-gradient(
+    90deg,
+    var(--ch-color-text-subtle) 0%,
+    var(--ch-color-text-strong, var(--ch-color-text)) 50%,
+    var(--ch-color-text-subtle) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: activity-shimmer 1.8s linear infinite;
+}
+
+@keyframes activity-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+.tool-group-names {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ch-color-text-subtle);
+  font-family: var(--ch-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  opacity: 0.75;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status stays as text for assistive tech; sighted readers get a glyph,
+   and only a failure is loud. */
+.tool-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  min-width: 16px;
+  height: 18px;
+  color: var(--ch-color-text-subtle);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tool-status-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.tool-status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tool-status.completed {
+  color: var(--ch-color-success-strong, #2ea043);
+}
+
+.tool-status.completed::before {
+  content: '✓';
+  width: auto;
+  height: auto;
+  background: none;
+  font-size: 11px;
+}
+
+.tool-status.cancelled {
+  color: var(--ch-color-text-subtle);
+}
+
+.tool-status.cancelled::before {
+  width: 7px;
+  height: 1.5px;
+  border-radius: 1px;
+}
+
+.tool-status.running {
+  color: var(--ch-color-warning, #e0a800);
+}
+
+.tool-status.running::before {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  background: none;
+  animation: activity-spin 0.8s linear infinite;
+}
+
+.tool-status.failed {
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--ch-color-danger-bg, rgba(248, 81, 73, 0.12));
+  color: var(--ch-color-danger-strong, #f85149);
+}
+
+.tool-status.failed::before {
+  content: '!';
+  width: auto;
+  height: auto;
+  background: none;
+  font-weight: 700;
+}
+
+.tool-status.failed .tool-status-text {
+  position: static;
+  width: auto;
+  height: auto;
+  clip-path: none;
+}
+
+@keyframes activity-spin {
+  to { transform: rotate(360deg); }
+}
+
+.tool-chevron {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--ch-color-text-subtle);
+  font-size: 15px;
+  line-height: 1;
+  opacity: 0;
+  transition: transform 140ms ease, opacity 120ms ease;
+}
+
+.tool-header:hover .tool-chevron,
+.tool-card[open] > .tool-header .tool-chevron,
+.tool-header:focus-visible .tool-chevron {
+  opacity: 1;
+}
+
+.tool-card[open] > .tool-header .tool-chevron {
+  transform: rotate(90deg);
+}
+
+.tool-group-item {
+  padding: 10px 12px;
+  border-top: 1px solid var(--ch-color-border-muted);
+}
+
+.tool-group-item:first-of-type {
+  border-top: 0;
+}
+
+.tool-group-item-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}
+
+.tool-group-item-header .activity-title {
+  flex: 1 1 auto;
+}
+
+.activity-terminal {
+  overflow: hidden;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-terminal-bg, var(--ch-color-canvas));
+}
+
+.activity-terminal pre,
+.tool-block pre {
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-family: var(--ch-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+  word-break: normal;
+}
+
+.activity-terminal-command {
+  color: var(--ch-terminal-fg, var(--ch-color-text));
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+}
+
+.activity-prompt {
+  color: var(--ch-terminal-green, var(--ch-color-success));
+  user-select: none;
+}
+
+.activity-terminal-output {
+  max-height: 260px;
+  border-top: 1px dashed var(--ch-color-border-muted);
+  color: var(--ch-terminal-fg, var(--ch-color-text-code));
+  opacity: 0.86;
+}
+
+.activity-diff {
+  max-height: 320px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-canvas);
+  font-family: var(--ch-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.activity-diff-line {
+  display: flex;
+  min-width: max-content;
+  padding-right: 10px;
+  white-space: pre;
+}
+
+.activity-diff-sign {
+  width: 22px;
+  flex: 0 0 auto;
+  text-align: center;
+  opacity: 0.7;
+  user-select: none;
+}
+
+.activity-diff-line--add {
+  background: color-mix(in srgb, var(--ch-code-addition, #2ea043) 14%, transparent);
+  color: var(--ch-code-addition, var(--ch-color-success-strong));
+}
+
+.activity-diff-line--del {
+  background: color-mix(in srgb, var(--ch-code-deletion, #f85149) 12%, transparent);
+  color: var(--ch-code-deletion, var(--ch-color-danger-strong));
+}
+
+.activity-diff-line--ctx {
+  color: var(--ch-color-text-code);
+}
+
+.activity-diff-line--hunk {
+  padding-top: 3px;
+  padding-bottom: 3px;
+  background: var(--ch-color-surface-soft);
+  color: var(--ch-color-text-subtle);
+}
+
+.tool-block {
+  margin-top: 8px;
+}
+
+.tool-block:first-child {
+  margin-top: 0;
+}
+
+.tool-block > span,
+.tool-block--raw > summary {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ch-color-text-subtle);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.tool-block--raw > summary {
+  cursor: pointer;
+}
+
+.tool-block pre {
+  max-height: 220px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-canvas);
+  color: var(--ch-color-text-code);
+}
+
+.tool-block pre:focus-visible,
+.activity-terminal pre:focus-visible,
+.activity-diff:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
+}
+
 .details-collapse {
   display: block;
   width: 100%;
-  margin-top: 8px;
-  padding: 5px 0;
+  padding: 6px 0;
   border: none;
   border-top: 1px solid var(--ch-color-border-muted);
   background: none;
@@ -205,184 +655,22 @@ defineProps<{
   border-radius: var(--ch-radius-sm);
 }
 
-
-.tool-card summary:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 2px;
-  border-radius: var(--ch-radius-sm);
-}
-
-.tool-card {
-  width: min(85%, 680px);
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface);
-  overflow: clip;
-}
-
-.tool-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 9px 12px;
-  transition: background-color 120ms ease;
-}
-
-.tool-card > .tool-header:hover,
-
-.tool-card[open] > .tool-header {
-  background: var(--ch-color-surface-soft);
-}
-
-.tool-chevron {
-  flex: 0 0 auto;
-  color: var(--ch-color-text-subtle);
-  font-size: 16px;
-  line-height: 1;
-  transition: transform 140ms ease;
-}
-
-.tool-card[open] > .tool-header .tool-chevron {
-  transform: rotate(90deg);
-}
-.tool-card .tool-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  white-space: nowrap;
-  text-transform: none;
-  font-weight: 500;
-}
-
-.tool-card .tool-status::before {
-  content: '·';
-  width: 10px;
-  text-align: center;
-}
-
-.tool-card .tool-status.completed::before { content: '✓'; }
-.tool-card .tool-status.failed::before { content: '!'; }
-.tool-card .tool-status.cancelled::before { content: '–'; }
-.tool-card .tool-status.running::before { content: '◷'; }
-
-.tool-card .tool-block pre {
-  border: 1px solid var(--ch-color-border-muted);
-  white-space: pre;
-  word-break: normal;
-  overscroll-behavior: contain;
-  tab-size: 2;
-}
-
-.tool-card .tool-block pre:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 1px;
-}
-
-.tool-name {
-  flex-shrink: 0;
-  min-width: 0;
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 600;
-}
-.tool-header--single .tool-name {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.tool-status {
-  flex: 0 0 auto;
-  padding: 2px 8px;
-}
-
-.tool-block {
-  padding: 0 10px 10px;
-}
-
-.tool-block > span {
-  display: block;
-  color: var(--ch-color-text-subtle);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.tool-block pre {
-  max-height: 220px;
-  margin: 5px 0 0;
-  padding: 8px;
-  overflow: auto;
-  border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-canvas);
-  color: var(--ch-color-text-code);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.tool-group-names {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ch-color-text-subtle);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-group-item {
-  padding: 8px 10px;
-  border-top: 1px solid var(--ch-color-border-muted);
-}
-
-.tool-group-item:first-child {
-  border-top: 0;
-}
-
-.tool-group-item-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-
-.tool-group-item-header .tool-name {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 12px;
-}
-
-.tool-group-item .tool-block {
-  padding: 0;
-}
-
-.tool-status.unknown {
-  color: var(--ch-color-text-subtle);
-}
 @media (max-width: 640px) {
-
-
-  .tool-card {
-    width: min(92%, 680px);
-    max-width: 92%;
+  .tool-group-names {
+    display: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-
-
+  .tool-card,
   .tool-chevron,
-
   .tool-header {
     transition: none;
+  }
+
+  .tool-card--running .activity-verb,
+  .tool-status.running::before {
+    animation: none;
   }
 }
 </style>

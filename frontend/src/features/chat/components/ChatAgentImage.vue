@@ -2,10 +2,6 @@
   <div
     class="conversation-row conversation-row--assistant conversation-row--agent-image"
   >
-    <span
-      class="conversation-avatar conversation-avatar--tool"
-      aria-hidden="true"
-    >⌘</span>
     <div class="agent-image-card">
       <button
         v-if="!erroredAgentImages.has(part.key)"
@@ -126,27 +122,7 @@ defineProps<{
   text-align: center;
 }
 
-.conversation-avatar {
-  width: 23px;
-  height: 23px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border-radius: var(--ch-radius-sm);
-  border: 1px solid var(--ch-color-border-selected);
-  background: var(--ch-color-surface-selected);
-  color: var(--ch-color-text-selected);
-  font-size: 11px;
-  font-weight: 600;
-}
 
-.conversation-avatar--tool {
-  border-color: var(--ch-color-border-muted);
-  background: var(--ch-color-surface-control);
-  color: var(--ch-color-text-muted);
-  font-size: 10px;
-}
 
 @media (prefers-reduced-motion: reduce) {
 

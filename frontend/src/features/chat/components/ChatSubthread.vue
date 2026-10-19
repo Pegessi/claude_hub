@@ -363,7 +363,7 @@ defineProps<{
 
 .thinking-card {
   align-self: flex-start;
-  width: min(85%, 680px);
+  width: 100%;
   border: 1px dashed var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface-soft);
@@ -477,7 +477,7 @@ defineProps<{
 }
 
 .tool-card {
-  width: min(85%, 680px);
+  width: 100%;
   border: 1px solid var(--ch-color-border-muted);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);
@@ -758,8 +758,8 @@ defineProps<{
   .thinking-card,
 
   .tool-card {
-    width: min(92%, 680px);
-    max-width: 92%;
+    width: 100%;
+    max-width: 100%;
   }
 }
 

@@ -7,6 +7,18 @@
 
 ## Released
 
+### feat(chat): Codex-style transcript with readable tool activity
+
+- Render assistant prose as unboxed, full-width document text; drop the
+  per-part avatars so tool, thinking, approval and sub-agent rows share one
+  reading column.
+- Summarize each tool call as one activity line (`Ran pnpm test`,
+  `Edited src/app.ts`, `Ran 2 commands, read 3 files`) across Claude, Codex,
+  Cursor and MCP names. Expanded commands render as a terminal block and edits
+  as a colored diff, with raw input still available.
+- Quiet status glyphs replace pills except for failures; running work, active
+  thinking and the waiting state use a reduced-motion-aware shimmer.
+
 ### fix(chat): preserve HTML fragment identifiers without weakening isolation
 
 - Retain plain element IDs such as `target` after HTML sanitization so local

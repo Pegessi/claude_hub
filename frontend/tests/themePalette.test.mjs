@@ -196,7 +196,8 @@ test('selected, focus, and primary-action roles remain separate in key controls'
   assert.match(appShell, /\.mode-button:focus-visible[\s\S]*?box-shadow: 0 0 0 3px var\(--ch-color-accent-ring\);/)
   assert.match(layout, /\.layout-btn\.active[\s\S]*?border-color: var\(--ch-color-border-selected\);[\s\S]*?background-color: var\(--ch-color-surface-selected\);/)
   assert.match(pane, /\.terminal-pane\.active[\s\S]*?border-color: var\(--ch-color-border-selected\);/)
-  assert.match(chatTurn, /\.conversation-avatar \{[\s\S]*?background: var\(--ch-color-surface-selected\);[\s\S]*?color: var\(--ch-color-text-selected\);/)
+  // Assistant output is unboxed prose; no avatar chip competes with the selected role.
+  assert.doesNotMatch(chatTurn, /conversation-avatar/)
   assert.match(userBubble, /background: var\(--ch-color-message-user-bg\);/)
   assert.match(userBubble, /color: var\(--ch-color-text-inverse\);/)
   assert.match(messageSource, /color: var\(--ch-color-message-user-muted\);/)
