@@ -9,8 +9,15 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from claude_hub.api.routes.agent_stream.bindings import AgentStreamRouteBindings
 from claude_hub.auth.dependencies import get_current_user
-from claude_hub.models import ManagedSession, SessionKind, User
+from claude_hub.models import (
+    ManagedSession,
+    SessionKind,
+    StreamAttachmentPreview,
+    User,
+    WorkspaceArtifactPreview,
+)
 from claude_hub.services.agent_stream import quoted_images
+from claude_hub.services.agent_stream.local_attachments import read_attachment_preview
 from claude_hub.services.agent_stream.local_images import (
     AgentImageUnavailable,
     read_cached_agent_image,
@@ -142,11 +149,31 @@ def serve_quoted_image(key: str) -> Response:
 async def serve_markdown(
     session: ManagedSession, path: str, *, owner_is_current: Callable[[], bool]
 ) -> Response:
+    return await _serve_text_preview(
+        session, path, owner_is_current=owner_is_current, reader=read_markdown_preview
+    )
+
+
+async def serve_attachment(
+    session: ManagedSession, path: str, *, owner_is_current: Callable[[], bool]
+) -> Response:
+    return await _serve_text_preview(
+        session, path, owner_is_current=owner_is_current, reader=read_attachment_preview
+    )
+
+
+async def _serve_text_preview(
+    session: ManagedSession,
+    path: str,
+    *,
+    owner_is_current: Callable[[], bool],
+    reader: Callable[[ManagedSession, str], WorkspaceArtifactPreview],
+) -> Response:
     headers = {"Cache-Control": ATTACHMENT_NO_STORE, "X-Content-Type-Options": "nosniff"}
     try:
         if not owner_is_current():
             raise MarkdownUnavailable()
-        preview = await asyncio.to_thread(read_markdown_preview, session, path)
+        preview = await asyncio.to_thread(reader, session, path)
         if not owner_is_current():
             raise MarkdownUnavailable()
     except MarkdownUnavailable:
@@ -164,6 +191,8 @@ class AgentStreamMediaEndpoints:
     get_tab_quoted_image: Callable[..., Any]
     get_session_markdown: Callable[..., Any]
     get_tab_markdown: Callable[..., Any]
+    get_session_attachment_preview: Callable[..., Any]
+    get_tab_attachment_preview: Callable[..., Any]
 
 
 def register_media_routes(
@@ -263,7 +292,37 @@ def register_media_routes(
             owner_is_current=lambda: tab_image_owner_is_current(session, bindings),
         )
 
+    @router.get(
+        "/sessions/{managed_session_id}/stream/attachment", response_model=StreamAttachmentPreview
+    )
+    async def get_session_attachment_preview(
+        managed_session_id: str,
+        path: str = Query(..., min_length=1, max_length=4096),
+        current_user: User = Depends(get_current_user),
+    ) -> Response:
+        session = bindings.session_or_404(managed_session_id)
+        return await serve_attachment(
+            session,
+            path,
+            owner_is_current=lambda: managed_image_owner_is_current(session, bindings),
+        )
+
+    @router.get("/tabs/{tab_id}/stream/attachment", response_model=StreamAttachmentPreview)
+    async def get_tab_attachment_preview(
+        tab_id: str,
+        path: str = Query(..., min_length=1, max_length=4096),
+        current_user: User = Depends(get_current_user),
+    ) -> Response:
+        session = bindings.terminal_tab_session_or_404(tab_id)
+        return await serve_attachment(
+            session,
+            path,
+            owner_is_current=lambda: tab_image_owner_is_current(session, bindings),
+        )
+
     return AgentStreamMediaEndpoints(
+        get_session_attachment_preview=get_session_attachment_preview,
+        get_tab_attachment_preview=get_tab_attachment_preview,
         get_session_markdown=get_session_markdown,
         get_tab_markdown=get_tab_markdown,
         get_session_agent_image=get_session_agent_image,

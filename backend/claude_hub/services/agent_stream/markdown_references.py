@@ -84,7 +84,9 @@ def _references_path(text: str, path: Path, cwd: str) -> bool:
         if re.match(r"^[#?]|^[a-z][a-z\d+.-]*:|^//", source, re.I):
             continue
         source = unquote(source.split("#", 1)[0].split("?", 1)[0])
-        source = re.sub(r"(\.(?:md|markdown|mdown|mkd)):\d+$", r"\1", source, flags=re.I)
+        # Code links can include source locations (file.py:12:4). The requested
+        # file still has to pass the reader's separate format allowlist.
+        source = re.sub(r":\d+(?::\d+)?$", "", source)
         try:
             candidate = Path(source).expanduser()
             absolute = candidate if candidate.is_absolute() else Path(cwd).expanduser() / candidate

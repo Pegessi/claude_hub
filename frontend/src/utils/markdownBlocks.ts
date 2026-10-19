@@ -3,7 +3,7 @@ import DOMPurify from 'dompurify'
 import { highlightVersion, renderCodeBlockHtml } from '@/utils/codeHighlight'
 import { resolveLocalImageUrl, rewriteQuotedImageSrcs } from '@/utils/quotedImage'
 import { mathExtension, mathVersion } from '@/utils/mathRendering'
-import { markdownPreviewUrl, rewriteMarkdownLinks } from '@/utils/markdownPreview'
+import { attachmentPreviewUrl, rewriteMarkdownLinks } from '@/utils/markdownPreview'
 
 /**
  * Marked render options.
@@ -375,8 +375,8 @@ export class MarkdownBlockCache {
             token.href = '/' + parts.map(encodeURIComponent).join('/')
           }
         }
-        if (token.type === 'link') {
-          token.href = markdownPreviewUrl(quotedTabId, token.href, documentPath) || token.href
+        if (token.type === 'link' && !resolveLocalImageUrl(quotedTabId, token.href)) {
+          token.href = attachmentPreviewUrl(quotedTabId, token.href, documentPath) || token.href
         }
       })
       promoteLocalImageLinks(tokens, quotedTabId)

@@ -8,10 +8,10 @@ const read = path => readFileSync(new URL(`../src/features/chat/${path}`, import
 const pane = read('StructuredPane.vue')
 const pendingTurn = read('components/ChatPendingTurn.vue')
 const userMessage = read('components/ChatUserMessage.vue')
-const lightbox = read('components/ChatImageLightbox.vue')
+const lightbox = readFileSync(new URL('../src/components/AttachmentPreviewDialog.vue', import.meta.url), 'utf8')
+const viewer = readFileSync(new URL('../src/components/AttachmentViewer.vue', import.meta.url), 'utf8')
 const types = read('controllers/types.ts')
 const attachmentsController = read('controllers/useChatAttachments.ts')
-const composerController = read('controllers/useChatComposer.ts')
 const { useChatDelivery } = await loadChatFeature('controllers/useChatDelivery')
 
 function makeDelivery() {
@@ -108,16 +108,15 @@ test('attachment thumbnails have a bounded footprint', () => {
   }
 })
 
-test('image lightbox supports backdrop, close button, Escape, and viewport bounds', () => {
-  assert.match(lightbox, /<Teleport to="body">[\s\S]*?class="structured-image-lightbox"/)
-  assert.match(lightbox, /role="dialog"/)
-  assert.match(lightbox, /aria-modal="true"/)
-  assert.match(lightbox, /@click\.self="closeImageLightbox"/)
-  assert.match(lightbox, /aria-label="Close image preview"/)
-  assert.match(composerController, /event\.key === 'Escape'[\s\S]*?deps\.imageLightboxUrl\.value/)
-  assert.match(lightbox, /max-width:\s*min\([^;]*calc\(100vw\s*-\s*48px\)\)/)
-  assert.match(lightbox, /max-height:\s*calc\(100dvh\s*-\s*96px\)/)
-  assert.match(lightbox, /\.structured-image-lightbox-close\s*\{[\s\S]*?width:\s*44px[\s\S]*?height:\s*44px/)
+test('attachments share a native modal with mobile bounds and keyboard dismissal', () => {
+  assert.match(lightbox, /<dialog/)
+  assert.match(lightbox, /aria-label="Attachment preview"/)
+  assert.match(lightbox, /@cancel\.prevent="requestClose"/)
+  assert.match(lightbox, /@click="onBackdrop"/)
+  assert.match(viewer, /aria-label="Close preview"/)
+  assert.match(lightbox, /showModal\(\)/)
+  assert.match(lightbox, /height: 100dvh/)
+  assert.match(viewer, /min-height: 44px/)
 })
 
 test('unmount invalidates in-flight attachment preparation', () => {

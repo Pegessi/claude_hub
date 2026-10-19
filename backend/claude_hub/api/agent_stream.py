@@ -792,6 +792,8 @@ get_session_quoted_image = _media_endpoints.get_session_quoted_image
 get_tab_quoted_image = _media_endpoints.get_tab_quoted_image
 get_session_markdown = _media_endpoints.get_session_markdown
 get_tab_markdown = _media_endpoints.get_tab_markdown
+get_session_attachment_preview = _media_endpoints.get_session_attachment_preview
+get_tab_attachment_preview = _media_endpoints.get_tab_attachment_preview
 
 
 async def _notify_task_activity(event: AgentStreamEvent) -> None:
