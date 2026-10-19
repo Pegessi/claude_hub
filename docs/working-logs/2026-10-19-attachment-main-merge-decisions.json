@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "e9aa1a118439749e27d758792c6710d2523361ea",
+  "parents": [
+    "c1f5ddb6ea6ddf8bc5132e2e701567be13678fbe",
+    "831e2af808a328bc386a515197dcdaf175a5a88b"
+  ],
+  "base": "44e68edf89ce953fcc85b9dbd745dc2e129177aa",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "7e02c2e1c47c8e0128ed6df393d0f91b83951d49",
+  "reconstructed_tree": "029ce6fd2559f7f01b1de4c6d5c8812cf879e81e",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0ab54c3867bc5c0fc49a7d2e14aa2a3578a4410d"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "da775a35f922680995af2c028235d5ef93e9b707"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b6046e1b05c2a90208e9fa1e4af00dba14268c70"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "745282a282467e7758141b620bc509198bf160cc"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0e92e292838685e9432d7acd69caa1bc66f92ad2"
+      },
+      "reason": "Retain the complete Dot execution entry from parent1 and both attachment feature/fix entries from parent2. Place the attachment entries first, preserve all existing entries, and make no source-code merge edits.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
