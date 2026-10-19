@@ -548,11 +548,11 @@ class DotSessionService(object):
             self.store.update_state(rotate_requested=True)
             return True
 
-    async def notify(self, text: str) -> str:
+    async def notify(self, text: str, *, title: Optional[str] = None, tone: str = "info") -> str:
         """Dot chose to reach the user now: send ``text`` to the Feishu chat bound
-        to the Dot tab. ``sent``; ``repeat`` when the same text was sent a short
-        while ago (not sent again); ``failed`` when no bot is bound there or the
-        send failed."""
+        to the Dot tab, as a card when it has a ``title``. ``sent``; ``repeat``
+        when the same notice was sent a short while ago (not sent again);
+        ``failed`` when no bot is bound there or the send failed."""
         from ....api.feishu_bot import push_to_tab
         from ...agent_stream.redaction import mask_secrets
 
@@ -560,17 +560,19 @@ class DotSessionService(object):
         if not tab_id:
             return "failed"
         text = mask_secrets(text.strip())
+        title = mask_secrets(title.strip()) if title and title.strip() else None
+        key = f"{title}\n{text}" if title else text
         now = time.monotonic()
         self._notified = {
             one: at
             for one, at in self._notified.items()
             if now - at < self._notify_repeat_seconds()
         }
-        if text in self._notified:
+        if key in self._notified:
             return "repeat"
-        if not await push_to_tab(tab_id, text):
+        if not await push_to_tab(tab_id, text, title=title, tone=tone):
             return "failed"
-        self._notified[text] = now
+        self._notified[key] = now
         return "sent"
 
     async def on_stream_event(self, event: Any) -> None:

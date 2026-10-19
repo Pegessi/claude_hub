@@ -19,6 +19,13 @@ logger = logging.getLogger("claude_hub.services.agent_stream.tailer")
 class NativeConsumerMixin(SessionState):
     """Native consumer behavior on the sole session owner."""
 
+    def _note_final_text(self, text: str) -> None:
+        """Text after a tool call starts a new last answer."""
+        if self._final_text_after_tool:
+            self._final_assistant_text = ""
+            self._final_text_after_tool = False
+        self._final_assistant_text += text
+
     async def _run_native(self) -> None:
         """Push consumer for native provider transports.
 
@@ -503,6 +510,11 @@ class NativeConsumerMixin(SessionState):
                                 continue
                             event.payload["text"] = visible
                             self._visible_assistant_text += visible
+                        self._note_final_text(event.payload["text"])
+                elif event.type == AgentStreamEventType.TOOL_CALL_STARTED and not event.payload.get(
+                    "subagent_thread"
+                ):
+                    self._final_text_after_tool = True
                 goal_protocol_text: Optional[str] = None
                 if is_turn_completed and self._assistant_text:
                     if self._goal_protocol_sanitizer is None:
@@ -526,10 +538,16 @@ class NativeConsumerMixin(SessionState):
                     visible = self._goal_protocol_sanitizer.feed("", final=True)
                     if visible:
                         self._visible_assistant_text += visible
+                        self._note_final_text(visible)
                         await self._publish(
                             ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": visible})
                         )
                     event.payload.setdefault("assistant_text", self._visible_assistant_text)
+                if is_turn_completed:
+                    final = self._final_assistant_text.strip()
+                    whole = event.payload.get("assistant_text")
+                    if final and isinstance(whole, str) and final != whole.strip():
+                        event.payload.setdefault("final_text", final)
                 observer_event = (
                     event.model_copy(
                         deep=True,

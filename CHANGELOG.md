@@ -7,6 +7,17 @@
 
 ## Released
 
+### feat(dot): secretary-style Feishu replies, notice cards and tracked handoffs
+
+- Feishu replies carry the turn's last answer (text after its last tool call);
+  progress notes stay in the web Chat.
+- `dot notify --title --tone` sends a Feishu card with a coloured header, and
+  falls back to a post when the card is refused.
+- `dot delegate --session` runs a task in a chosen agent session; Hub Tasks
+  started from the Dot Chat are watched automatically, so their results wake Dot.
+- Hub-kept turn rules and the wake message ask Dot to reply fast, delegate,
+  and report results on Feishu briefly: conclusion first, a few bullets.
+
 ### fix(chat): preserve HTML fragment identifiers without weakening isolation
 
 - Retain plain element IDs such as `target` after HTML sanitization so local

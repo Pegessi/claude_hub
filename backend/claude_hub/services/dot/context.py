@@ -199,7 +199,10 @@ def reach_note(source: str, feishu_bound: bool) -> str:
     ``source`` is ``feishu``, ``web``, ``wake`` or ``tidy``.
     """
     if source == "feishu":
-        return "Reach: the user wrote from Feishu; your answer goes back to their Feishu chat."
+        return (
+            "Reach: the user wrote from Feishu; the last message of your turn goes back "
+            "to their Feishu chat. Keep it short: conclusion first, a few bullets."
+        )
     if source == "web":
         line = "Reach: the user wrote in the web Chat; your answer shows there."
         if feishu_bound:
@@ -211,8 +214,9 @@ def reach_note(source: str, feishu_bound: bool) -> str:
     )
     if feishu_bound:
         return line + (
-            " A Feishu bot is bound. Consider `claude-hub dot notify` if an update "
-            "should reach the user now."
+            " A Feishu bot is bound and the user reads there: a task they asked for that "
+            "is done, failed or needs them goes there with `claude-hub dot notify` "
+            "(a card with --title and --tone)."
         )
     return line + " No Feishu bot is bound, so `claude-hub dot notify` cannot reach them."
 
