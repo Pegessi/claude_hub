@@ -18,6 +18,12 @@
   as a colored diff, with raw input still available.
 - Quiet status glyphs replace pills except for failures; running work, active
   thinking and the waiting state use a reduced-motion-aware shimmer.
+- Sub-agent threads reuse the same tool and thinking cards. A running group
+  keeps a visible failed count, and the turn in flight ends with a live
+  `Working · m:ss` footer that ticks without re-rendering the turn.
+- Activity parsing is cached per tool row and handles Codex argv payloads,
+  `patch` keys, path-keyed change maps, multi-file patch headers and explicit
+  diff truncation.
 
 ### fix(chat): preserve HTML fragment identifiers without weakening isolation
 

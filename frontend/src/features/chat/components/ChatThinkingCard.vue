@@ -19,7 +19,7 @@
       class="details-collapse"
       @click="collapseDetails"
     >
-      收起
+      Collapse
     </button>
   </details>
 </template>

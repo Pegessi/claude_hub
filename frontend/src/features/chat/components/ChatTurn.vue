@@ -66,6 +66,11 @@
       :part="part"
     />
 
+    <ChatTurnWorking
+      v-if="!turn.completed && !turn.awaitingAgentActivity && turn.key === latestTurnKey"
+      :started-at="turn.startedAt"
+    />
+
     <!-- A user Stop (or a watchdog reap) terminalized the turn: mark the
                cancelled round instead of leaving its thinking/working
                placeholder spinning. -->
@@ -141,11 +146,12 @@ import { requireChatOwner, chatActionsKey, chatDeliveryKey, chatGoalKey, chatTim
 import { messageClockLabel, turnClockLabel } from '../timeline/turnProcess'
 import ChatUserMessage from './ChatUserMessage.vue'
 import ChatTurnParts from './ChatTurnParts.vue'
+import ChatTurnWorking from './ChatTurnWorking.vue'
 import type { TimelineTurn } from '../timeline/types'
 const { isEditingTurn, startEdit, turnCopyText, copyFeedbackLabel, copyTurnButtonLabel, copyTurn, copyFeedbackState, completedPlanText, implementingPlanKey, implementPlan, forkingOrdinal, forkFromTurn } = requireChatOwner(chatActionsKey)
 const { turnInFlight } = requireChatOwner(chatDeliveryKey)
 const { goalEditReason, goalComposerLocked, goalComposerReason } = requireChatOwner(chatGoalKey)
-const { turnPartsFor } = requireChatOwner(chatTimelineKey)
+const { turnPartsFor, latestTurnKey } = requireChatOwner(chatTimelineKey)
 const { supportsEditResend, isManagedChat } = requireChatOwner(chatIdentityKey)
 defineProps<{
   turn: TimelineTurn & { awaitingAgentActivity?: boolean }

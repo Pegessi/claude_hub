@@ -37,7 +37,7 @@
       <ChatTurn
         v-for="{ turn, ordinal } in visibleTurns"
         :key="turn.key"
-        v-memo="[turn.renderRevision, ordinal, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), expandedToolGroups.get(turn.key), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
+        v-memo="[turn.renderRevision, ordinal, latestTurnKey === turn.key, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), expandedToolGroups.get(turn.key), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
         :turn="turn"
         :ordinal="ordinal"
       />
@@ -56,7 +56,7 @@
 import { requireChatOwner, chatTimelineKey, chatDeliveryKey, chatImagesKey, chatComposerKey, chatActionsKey, chatIdentityKey } from '../owners'
 import ChatTurn from './ChatTurn.vue'
 import ChatPendingTurn from './ChatPendingTurn.vue'
-const { timelineEl, timelinePhase, timelineLoadingMessage, handleTimelineScroll, timelineContentEl, historyWindowStart, isLoadingEarlier, loadEarlierTurns, turns, visibleTurns, turnFoldSignature, expandedToolGroups } = requireChatOwner(chatTimelineKey)
+const { latestTurnKey, timelineEl, timelinePhase, timelineLoadingMessage, handleTimelineScroll, timelineContentEl, historyWindowStart, isLoadingEarlier, loadEarlierTurns, turns, visibleTurns, turnFoldSignature, expandedToolGroups } = requireChatOwner(chatTimelineKey)
 const { pendingDirectTurns, pendingTurns } = requireChatOwner(chatDeliveryKey)
 const { erroredAttachments, erroredAgentImages } = requireChatOwner(chatImagesKey)
 const { turnApprovalSignature } = requireChatOwner(chatComposerKey)
