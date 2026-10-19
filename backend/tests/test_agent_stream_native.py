@@ -1285,6 +1285,20 @@ async def test_claude_turn_marks_the_answer_after_its_last_tool_call(
                     },
                 }
             )
+            # A Task sub-agent's own message is its thread's, not the parent's answer.
+            push(
+                {
+                    "type": "assistant",
+                    "parent_tool_use_id": "tu-1",
+                    "message": {
+                        "id": "c-1",
+                        "content": [
+                            {"type": "text", "text": "Child notes."},
+                            {"type": "tool_use", "id": "tu-c", "name": "Read", "input": {}},
+                        ],
+                    },
+                }
+            )
             push(
                 {
                     "type": "user",
@@ -1306,7 +1320,17 @@ async def test_claude_turn_marks_the_answer_after_its_last_tool_call(
             push({"type": "result", "subtype": "success", "user_message_uuid": envelope["uuid"]})
             done = await completed("t-1")
             assert "Reading the report." in done.payload["assistant_text"]
+            assert "Child notes." not in done.payload["assistant_text"]
             assert done.payload["final_text"] == "Done: 3 fixes."
+            child = [
+                e
+                for e in (await tailer.store.read_since(-1, 100)).events
+                if e.payload.get("subagent_thread") == "tu-1"
+            ]
+            assert {e.type for e in child} >= {
+                AgentStreamEventType.TEXT_DELTA,
+                AgentStreamEventType.TOOL_CALL_STARTED,
+            }
 
             # No tool call: the answer is the whole text, so no second copy.
             await tailer.send_message("again", [], client_turn_id="t-2")

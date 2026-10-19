@@ -107,6 +107,16 @@ def _normalize_ask_user_question_args(
     return normalized or None
 
 
+_SUBAGENT_EVENT_TYPES = frozenset(
+    {
+        AgentStreamEventType.TEXT_DELTA,
+        AgentStreamEventType.THINKING_DELTA,
+        AgentStreamEventType.TOOL_CALL_STARTED,
+        AgentStreamEventType.TOOL_CALL_COMPLETED,
+    }
+)
+
+
 class ClaudeJsonlAdapter(AgentStreamAdapter):
     """Adapter for Claude Code's ``~/.claude/projects/**/*.jsonl`` logs."""
 
@@ -156,6 +166,24 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
     # ── normalization ────────────────────────────────────────────────────────
 
     def normalize_line(self, raw: Dict[str, Any], ctx: NormalizeContext) -> List[AgentStreamEvent]:
+        events = self._normalize_record(raw, ctx)
+        parent = raw.get("parent_tool_use_id") if isinstance(raw, dict) else None
+        if not isinstance(parent, str) or not parent:
+            return events
+        # A Task sub-agent's own messages: attribute them to its thread, so its
+        # text never becomes the parent's answer (journal, chat apps).
+        for event in events:
+            if event.type not in _SUBAGENT_EVENT_TYPES or event.payload.get("subagent_thread"):
+                continue
+            event.payload = {**event.payload, "subagent_thread": parent}
+            for role in ("assistant", "thinking"):
+                if event.message_id == f"{ctx.turn_id}:{role}":
+                    event.message_id = ctx._sub_message_id(parent, role)
+        return events
+
+    def _normalize_record(
+        self, raw: Dict[str, Any], ctx: NormalizeContext
+    ) -> List[AgentStreamEvent]:
         events: List[AgentStreamEvent] = []
         if not isinstance(raw, dict):
             return events

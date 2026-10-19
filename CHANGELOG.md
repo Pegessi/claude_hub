@@ -9,8 +9,9 @@
 
 ### feat(dot): secretary-style Feishu replies, notice cards and tracked handoffs
 
-- Feishu replies carry the turn's last answer (text after its last tool call);
-  progress notes stay in the web Chat.
+- Feishu replies from the Dot Chat carry the turn's last answer (text after
+  its last tool call); progress notes stay in the web Chat. Claude Task
+  sub-agent records are attributed to their thread, not the parent's answer.
 - `dot notify --title --tone` sends a Feishu card with a coloured header, and
   falls back to a post when the card is refused.
 - `dot delegate --session` runs a task in a chosen agent session; Hub Tasks
