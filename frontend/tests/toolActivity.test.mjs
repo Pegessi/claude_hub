@@ -8,7 +8,7 @@ const source = await readFile(new URL('../src/utils/toolActivity.ts', import.met
 const js = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 }).outputText
-const { describeToolActivity, toolActivityKind, toolGroupHeadline, ACTIVITY_ICONS } =
+const { describeToolActivity, toolActivityKind, toolGroupHeadline, toolGroupSummary, ACTIVITY_ICONS } =
   await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
 const toolGroup = await readFile(new URL('../src/features/chat/components/ChatToolGroup.vue', import.meta.url), 'utf8')
 
@@ -52,7 +52,7 @@ test('edits expose a line diff from Claude and Codex argument shapes', () => {
   assert.deepEqual(patch.diff.map(line => `${line.sign}${line.text}`), ['@src/b.ts', '@@@ -1 +1 @@', '-old', '+new', ' same'])
   const raw = describeToolActivity(call('apply_patch', '*** Begin Patch\n*** Update File: c.py\n-a\n+b\n*** End Patch'))
   assert.equal(raw.target, 'c.py')
-  assert.deepEqual(raw.diff.map(line => line.sign), ['-', '+'])
+  assert.deepEqual(raw.diff.map(line => `${line.sign}${line.text}`), ['@c.py', '-a', '+b'])
 })
 
 test('malformed or empty arguments degrade to the tool name, never throw', () => {
@@ -82,4 +82,37 @@ test('a failure inside a running group stays visible next to the spinner', () =>
   // Nested raw-input toggles must not inherit the sticky card header.
   assert.match(toolGroup, /\.tool-card > summary \{[^}]*position: sticky/)
   assert.doesNotMatch(toolGroup, /\.tool-card summary \{/)
+})
+
+test('review regressions: argv payloads, patch keys, content dashes, path maps', () => {
+  assert.equal(describeToolActivity(call('shell', ['bash', '-lc', 'ls -la'])).command, 'ls -la')
+  const patch = describeToolActivity(call('apply_patch', { patch: '*** Begin Patch\n*** Update File: src/a.ts\n@@\n-x\n+y\n*** End Patch' }))
+  assert.equal(patch.target, 'src/a.ts')
+  const sql = describeToolActivity(call('apply_patch', {
+    changes: [{ path: 'q.sql', diff: '--- a/q.sql\n+++ b/q.sql\n@@ -1 +1 @@\n--- old comment\n+-- new comment' }],
+  }))
+  assert.deepEqual(sql.diff.map(line => `${line.sign}${line.text}`), ['@q.sql', '@@@ -1 +1 @@', '--- old comment', '+-- new comment'])
+  const map = describeToolActivity(call('apply_patch', { changes: { 'a.md': { unified_diff: '@@\n+hi' }, 'b.md': {} } }))
+  assert.equal(map.target, '2 files')
+  assert.deepEqual(map.diff.map(line => line.sign), ['@', '@', '+', '@'])
+})
+
+test('long diffs end with an explicit truncation row', () => {
+  const edit = describeToolActivity(call('Edit', { file_path: 'a', old_string: '', new_string: 'x\n'.repeat(1000) }))
+  assert.equal(edit.diff.at(-1).text, '… diff truncated')
+  assert.ok(edit.diff.length <= 402)
+})
+
+test('activity and group summaries are cached until their inputs change', () => {
+  const tool = call('Bash', { command: 'a' })
+  const first = describeToolActivity(tool)
+  assert.equal(describeToolActivity(tool), first)
+  tool.argsText = JSON.stringify({ command: 'b' })
+  assert.equal(describeToolActivity(tool).command, 'b')
+  const tools = [call('Bash', {}), call('Read', {})]
+  const summary = toolGroupSummary(tools)
+  assert.equal(toolGroupSummary(tools), summary)
+  tools.push(call('Edit', {}))
+  assert.equal(toolGroupSummary(tools).verb, 'Ran 1 command, read 1 file, edited 1 file')
+  assert.doesNotMatch(toolGroup, /v-for="head in/, 'the summary must not remount while streaming')
 })

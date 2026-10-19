@@ -8,25 +8,21 @@
       :open="expandedToolGroups.get(turn.key)?.has(part.key)"
       @toggle="onToolGroupToggle(turn, part.key, $event)"
     >
-      <!-- One headline per render (single-item v-for); the key changes only
-           when the group's mix of kinds does. -->
       <summary
-        v-for="head in [headline()]"
-        :key="head.kind"
         class="tool-header"
         :class="{ 'tool-header--single': part.tools.length === 1 }"
       >
         <span
           class="activity-icon"
-          :data-kind="head.kind"
+          :data-kind="headline().kind"
           aria-hidden="true"
-        ><svg viewBox="0 0 16 16"><path :d="ACTIVITY_ICONS[head.kind]" /></svg></span>
+        ><svg viewBox="0 0 16 16"><path :d="ACTIVITY_ICONS[headline().kind]" /></svg></span>
         <span class="tool-name activity-title">
-          <span class="activity-verb">{{ head.verb }}</span>
+          <span class="activity-verb">{{ headline().verb }}</span>
           <code
-            v-if="head.target"
+            v-if="headline().target"
             class="activity-target"
-          >{{ head.target }}</code>
+          >{{ headline().target }}</code>
         </span>
         <span
           v-if="part.tools.length > 1"
@@ -81,6 +77,7 @@
           >
             <pre
               class="activity-terminal-command"
+              role="region"
               tabindex="0"
               aria-label="Command"
             ><span
@@ -90,6 +87,7 @@
             <pre
               v-if="tool.resultText"
               class="activity-terminal-output"
+              role="region"
               tabindex="0"
               aria-label="Command output"
             >{{ tool.resultText }}</pre>
@@ -99,6 +97,7 @@
             <div
               v-if="activity.diff"
               class="activity-diff"
+              role="region"
               tabindex="0"
               aria-label="Edit diff"
             >
@@ -108,10 +107,7 @@
                 class="activity-diff-line"
                 :class="`activity-diff-line--${DIFF_CLASS[line.sign]}`"
               >
-                <span
-                  class="activity-diff-sign"
-                  aria-hidden="true"
-                >{{ line.sign === '@' ? '' : line.sign }}</span><span>{{ line.text }}</span>
+                <span class="activity-diff-sign">{{ line.sign === '@' || line.sign === ' ' ? '' : line.sign }}</span><span>{{ line.text }}</span>
               </div>
             </div>
             <!-- The headline already names the target, so the arguments
@@ -163,7 +159,7 @@
 <script setup lang="ts">
 import { requireChatOwner, chatTimelineKey } from '../owners'
 import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
-import { ACTIVITY_ICONS, describeToolActivity, toolActivityKind, toolGroupHeadline, type ToolActivity, type ToolActivityKind, type ToolDiffLine } from '@/utils/toolActivity'
+import { ACTIVITY_ICONS, describeToolActivity, toolGroupSummary, type ToolActivity, type ToolDiffLine, type ToolGroupSummary } from '@/utils/toolActivity'
 import { toolGroupStatus } from '@/features/chat/presentation/chatTurnPresentation'
 import type { TimelineTool, TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
@@ -186,16 +182,9 @@ function failedCount(): number {
   return props.part.tools.reduce((count, tool) => count + (tool.status === 'failed' ? 1 : 0), 0)
 }
 
-/** A single call names its action; a group names what it did in aggregate. */
-function headline(): { kind: ToolActivityKind, verb: string, target: string } {
-  const tools = props.part.tools
-  if (tools.length === 1) return describeToolActivity(tools[0])
-  const kinds = new Set(tools.map(tool => toolActivityKind(tool.name)))
-  return {
-    kind: kinds.size === 1 ? [...kinds][0] : 'other',
-    verb: toolGroupHeadline(tools),
-    target: '',
-  }
+/** Cached per group, so reading it once per header field costs nothing. */
+function headline(): ToolGroupSummary {
+  return toolGroupSummary(props.part.tools)
 }
 
 /** Arguments are parsed only while the card is open. */
@@ -385,6 +374,7 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
 /* Status stays as text for assistive tech; sighted readers get a glyph,
    and only a failure is loud. */
 .tool-status {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;

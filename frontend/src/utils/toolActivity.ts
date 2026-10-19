@@ -60,10 +60,16 @@ const KIND_BY_NAME: Record<string, ToolActivityKind> = {
   run_terminal_cmd: 'command',
   terminal: 'command',
   command: 'command',
+  shell_command: 'command',
+  unified_exec: 'command',
+  'container.exec': 'command',
+  write_stdin: 'command',
+  bashoutput: 'command',
   read: 'read',
   read_file: 'read',
   view: 'read',
   notebookread: 'read',
+  view_image: 'read',
   edit: 'edit',
   multiedit: 'edit',
   apply_patch: 'edit',
@@ -139,12 +145,14 @@ export function toolActivityKind(name: string): ToolActivityKind {
 
 function parseArgs(argsText: string): Record<string, unknown> | null {
   const text = argsText.trim()
-  if (!text.startsWith('{')) return null
+  if (!text.startsWith('{') && !text.startsWith('[')) return null
   try {
     const parsed: unknown = JSON.parse(text)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null
+    if (Array.isArray(parsed)) {
+      // Codex can send a bare argv array as the whole argument payload.
+      return parsed.length && parsed.every(item => typeof item === 'string') ? { command: parsed } : null
+    }
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null
   } catch {
     return null
   }
@@ -171,7 +179,8 @@ function shellJoin(parts: string[]): string {
 }
 
 function bounded(text: string): string {
-  const line = text.replace(/\s+/g, ' ').trim()
+  // Slice first: a multi-megabyte argument must not be normalized whole.
+  const line = text.slice(0, TARGET_LIMIT * 4).replace(/\s+/g, ' ').trim()
   return line.length > TARGET_LIMIT ? `${line.slice(0, TARGET_LIMIT - 1)}…` : line
 }
 
@@ -181,62 +190,112 @@ function shortPath(path: string): string {
   return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : path
 }
 
-function pushLines(out: ToolDiffLine[], sign: '+' | '-', text: unknown): void {
-  if (typeof text !== 'string') return
-  for (const line of text.split('\n')) {
-    if (out.length >= DIFF_LINE_LIMIT) return
-    out.push({ sign, text: line })
+/** Bounded line sink: past the limit it records one truncation marker. */
+class DiffBuilder {
+  readonly lines: ToolDiffLine[] = []
+  truncated = false
+
+  push(line: ToolDiffLine): boolean {
+    if (this.lines.length >= DIFF_LINE_LIMIT) {
+      this.truncated = true
+      return false
+    }
+    this.lines.push(line)
+    return true
+  }
+
+  result(): ToolDiffLine[] | undefined {
+    if (!this.lines.length) return undefined
+    return this.truncated ? [...this.lines, { sign: '@', text: '… diff truncated' }] : this.lines
   }
 }
 
-function unifiedDiffLines(text: string, out: ToolDiffLine[]): void {
+function pushLines(out: DiffBuilder, sign: '+' | '-', text: unknown): void {
+  if (typeof text !== 'string') return
   for (const line of text.split('\n')) {
-    if (out.length >= DIFF_LINE_LIMIT) return
-    if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('*** ')) continue
-    if (line.startsWith('@@')) out.push({ sign: '@', text: line })
-    else if (line.startsWith('+')) out.push({ sign: '+', text: line.slice(1) })
-    else if (line.startsWith('-')) out.push({ sign: '-', text: line.slice(1) })
-    else out.push({ sign: ' ', text: line.startsWith(' ') ? line.slice(1) : line })
+    if (!out.push({ sign, text: line })) return
   }
+}
+
+const PATCH_FILE_HEADER = /^\*\*\* (Update|Add|Delete) File: (.+)$/
+
+/** Unified diff or Codex patch envelope. File headers become hunk rows;
+ *  ``---``/``+++`` count as headers only before a file's first ``@@``, so a
+ *  removed ``-- comment`` or Markdown ``---`` line is kept as content. */
+function unifiedDiffLines(text: string, out: DiffBuilder): void {
+  let inHunk = false
+  for (const line of text.split('\n')) {
+    const file = PATCH_FILE_HEADER.exec(line)
+    if (file) {
+      inHunk = file[1] === 'Add'
+      if (!out.push({ sign: '@', text: file[2].trim() })) return
+      continue
+    }
+    if (line.startsWith('*** ')) continue
+    if (!inHunk && (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff ') || line.startsWith('index '))) continue
+    let pushed: boolean
+    if (line.startsWith('@@')) {
+      inHunk = true
+      pushed = out.push({ sign: '@', text: line })
+    } else if (line.startsWith('+')) pushed = out.push({ sign: '+', text: line.slice(1) })
+    else if (line.startsWith('-')) pushed = out.push({ sign: '-', text: line.slice(1) })
+    else pushed = out.push({ sign: ' ', text: line.startsWith(' ') ? line.slice(1) : line })
+    if (!pushed) return
+  }
+}
+
+function changeEntries(changes: unknown): { path: string, diff: unknown }[] {
+  if (Array.isArray(changes)) {
+    return changes
+      .map(change => change as Record<string, unknown> | null)
+      .filter((change): change is Record<string, unknown> => Boolean(change) && typeof change?.path === 'string')
+      .map(change => ({ path: change.path as string, diff: change.diff ?? change.unified_diff }))
+  }
+  // Codex also reports changes as a path-keyed map.
+  if (changes && typeof changes === 'object') {
+    return Object.entries(changes as Record<string, unknown>).map(([path, change]) => {
+      const record = change && typeof change === 'object' ? change as Record<string, unknown> : {}
+      return { path, diff: record.unified_diff ?? record.diff ?? record.content }
+    })
+  }
+  return []
+}
+
+function patchSource(args: Record<string, unknown> | null, argsText: string): string {
+  if (typeof args?.input === 'string') return args.input
+  if (typeof args?.patch === 'string') return args.patch
+  return args ? '' : argsText
 }
 
 function editDiff(args: Record<string, unknown> | null, argsText: string): ToolDiffLine[] | undefined {
-  const out: ToolDiffLine[] = []
-  if (args) {
-    if ('old_string' in args || 'new_string' in args) {
-      pushLines(out, '-', args.old_string)
-      pushLines(out, '+', args.new_string)
-    } else if (Array.isArray(args.edits)) {
-      for (const edit of args.edits as Record<string, unknown>[]) {
-        if (out.length) out.push({ sign: '@', text: '' })
-        pushLines(out, '-', edit?.old_string)
-        pushLines(out, '+', edit?.new_string)
-      }
-    } else if (Array.isArray(args.changes)) {
-      for (const change of args.changes as Record<string, unknown>[]) {
-        if (typeof change?.path === 'string') out.push({ sign: '@', text: change.path })
-        if (typeof change?.diff === 'string') unifiedDiffLines(change.diff, out)
-      }
-    } else if (typeof args.input === 'string' || typeof args.patch === 'string') {
-      unifiedDiffLines(String(args.input ?? args.patch), out)
+  const out = new DiffBuilder()
+  if (args && ('old_string' in args || 'new_string' in args)) {
+    pushLines(out, '-', args.old_string)
+    pushLines(out, '+', args.new_string)
+  } else if (args && Array.isArray(args.edits)) {
+    for (const edit of args.edits as (Record<string, unknown> | null)[]) {
+      if (out.lines.length && !out.push({ sign: '@', text: '' })) break
+      pushLines(out, '-', edit?.old_string)
+      pushLines(out, '+', edit?.new_string)
     }
-  } else if (argsText.includes('*** Begin Patch')) {
-    unifiedDiffLines(argsText, out)
+  } else if (args && args.changes) {
+    for (const change of changeEntries(args.changes)) {
+      if (!out.push({ sign: '@', text: change.path })) break
+      if (typeof change.diff === 'string') unifiedDiffLines(change.diff, out)
+    }
+  } else {
+    const source = patchSource(args, argsText)
+    if (source && (source.includes('*** Begin Patch') || source.includes('@@'))) unifiedDiffLines(source, out)
   }
-  return out.length ? out : undefined
+  return out.result()
 }
 
 function patchTarget(args: Record<string, unknown> | null, argsText: string): string {
-  const changes = args?.changes
-  if (Array.isArray(changes)) {
-    const paths = changes
-      .map(change => (change as Record<string, unknown>)?.path)
-      .filter((path): path is string => typeof path === 'string')
-    if (paths.length === 1) return shortPath(paths[0])
-    if (paths.length > 1) return `${paths.length} files`
-  }
-  const source = typeof args?.input === 'string' ? args.input : argsText
-  const files = [...source.matchAll(/\*\*\* (?:Update|Add|Delete) File: (.+)/g)].map(match => match[1].trim())
+  const paths = changeEntries(args?.changes).map(change => change.path)
+  if (paths.length === 1) return shortPath(paths[0])
+  if (paths.length > 1) return `${paths.length} files`
+  const source = patchSource(args, argsText)
+  const files = [...source.matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm)].map(match => match[1].trim())
   if (files.length === 1) return shortPath(files[0])
   if (files.length > 1) return `${files.length} files`
   return ''
@@ -247,8 +306,23 @@ function mcpLabel(name: string): string {
   return parts.length >= 3 ? `${parts[1]} · ${parts.slice(2).join('__')}` : name
 }
 
-/** Describe one call for its activity line. Parses ``argsText`` once. */
-export function describeToolActivity(tool: Pick<TimelineTool, 'name' | 'argsText'>): ToolActivity {
+type ToolLike = Pick<TimelineTool, 'name' | 'argsText'>
+
+// Tool rows are mutated in place while streaming, so the cache is keyed by the
+// row and validated against the inputs it was derived from.
+const activityCache = new WeakMap<ToolLike, { name: string, argsText: string, activity: ToolActivity }>()
+
+/** Describe one call for its activity line, parsing ``argsText`` at most once
+ *  per distinct value. */
+export function describeToolActivity(tool: ToolLike): ToolActivity {
+  const cached = activityCache.get(tool)
+  if (cached && cached.name === tool.name && cached.argsText === tool.argsText) return cached.activity
+  const activity = deriveToolActivity(tool)
+  activityCache.set(tool, { name: tool.name, argsText: tool.argsText, activity })
+  return activity
+}
+
+function deriveToolActivity(tool: ToolLike): ToolActivity {
   const kind = toolActivityKind(tool.name)
   const args = parseArgs(tool.argsText)
   const verb = VERBS[kind]
@@ -314,4 +388,32 @@ export function toolGroupHeadline(tools: readonly Pick<TimelineTool, 'name'>[]):
   const shown = phrases.slice(0, 3)
   const text = shown.join(', ')
   return phrases.length > shown.length ? `${text}, …` : text
+}
+
+export interface ToolGroupSummary {
+  kind: ToolActivityKind
+  verb: string
+  target: string
+}
+
+const groupCache = new WeakMap<readonly ToolLike[], { length: number, summary: ToolGroupSummary }>()
+
+/** Headline for a whole group: a single call names its action, several calls
+ *  name what they did in aggregate. Groups only grow by appending, so the
+ *  aggregate is cached per array and recomputed when its length changes. */
+export function toolGroupSummary(tools: readonly ToolLike[]): ToolGroupSummary {
+  if (tools.length === 1) {
+    const { kind, verb, target } = describeToolActivity(tools[0])
+    return { kind, verb, target }
+  }
+  const cached = groupCache.get(tools)
+  if (cached && cached.length === tools.length) return cached.summary
+  const kinds = new Set(tools.map(tool => toolActivityKind(tool.name)))
+  const summary: ToolGroupSummary = {
+    kind: kinds.size === 1 ? [...kinds][0] : 'other',
+    verb: toolGroupHeadline(tools),
+    target: '',
+  }
+  groupCache.set(tools, { length: tools.length, summary })
+  return summary
 }
