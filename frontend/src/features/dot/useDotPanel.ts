@@ -227,6 +227,7 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
   }
 
   function saveIdentity() {
+    if (executionBusy.value) return
     void run(async () => {
       const renamed = nameDraft.value.trim() !== identity.value.name
       setIdentity(await updateDotIdentity({ name: nameDraft.value.trim(), avatar: avatarDraft.value.trim() }))
@@ -240,7 +241,7 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
     const input = event.target as HTMLInputElement
     const file = input.files?.[0]
     input.value = ''
-    if (!file) return
+    if (!file || executionBusy.value) return
     if (file.size > AVATAR_MAX_BYTES) {
       errorText.value = 'The picture must be at most 2 MB.'
       return
@@ -251,6 +252,7 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
   }
 
   function removeAvatar() {
+    if (executionBusy.value) return
     void run(async () => {
       setIdentity(await clearDotAvatar())
     })

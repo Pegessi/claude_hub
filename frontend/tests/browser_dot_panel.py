@@ -71,6 +71,8 @@ async def main(browser_run: BrowserRun) -> None:
         "supported_agent_types": ["claude", "codex", "cursor", "traex", "maso"],
     }
     execution_put_attempts = 0
+    execution_apply_started = asyncio.Event()
+    allow_execution_apply = asyncio.Event()
     fail_next_tabs_refresh = False
     agent_status = "working"
     work: list[dict] = []
@@ -242,6 +244,8 @@ async def main(browser_run: BrowserRun) -> None:
                             )
                         }
                     else:
+                        execution_apply_started.set()
+                        await allow_execution_apply.wait()
                         execution.update(
                             {
                                 "tab_id": "dot-tab-next",
@@ -438,6 +442,23 @@ async def main(browser_run: BrowserRun) -> None:
                 "none"
             )
             await execution_editor.get_by_role("button", name="Retry", exact=True).click()
+            await asyncio.wait_for(execution_apply_started.wait(), timeout=5)
+            try:
+                await expect(editor.get_by_role("button", name="Save", exact=True)).to_be_disabled()
+                await expect(editor.locator('input[type="file"]')).to_be_disabled()
+                await expect(editor.get_by_label("Name", exact=True)).to_be_disabled()
+                # A submitted identity form must not unmount the pending execution
+                # editor, even if submission bypasses the disabled native button.
+                await editor.evaluate(
+                    "el => el.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}))"
+                )
+                await page.evaluate(
+                    "() => fetch('/api/dot/status').then(response => response.json())"
+                )
+                await expect(execution_editor).to_be_visible()
+                assert wrote("PATCH", "/api/dot/identity") == []
+            finally:
+                allow_execution_apply.set()
             await expect(execution_editor).to_contain_text("Dot now uses Codex")
             await expect(execution_editor).to_contain_text(
                 "Dot was updated, but the Chat list could not refresh."

@@ -19,6 +19,14 @@
 - Reject unsafe switches during active/unfinished turns, pending delivery, Goals,
   Feishu bindings or other enabled schedules. Preserve schedule settings and recover
   interrupted replacements before accepting more input.
+- Serialize Dot-affecting tab mutations with replacement, route provider,
+  credential and endpoint edits through Dot's execution API, and retain the
+  current backend's model/reasoning picker. Restore schedule ownership even if
+  the prior tab was deleted; detect unfinished turns independently of journal progress.
+- Settle provider submission through caller cancellation without downgrading
+  confirmed acceptance or moving failure observers outside their lock-owning task.
+- Keep identity editing and execution updates mutually exclusive, and preserve
+  newer Chat or empty-pane selections while the replacement list refreshes.
 
 ### fix(feishu): tolerate small clock skew and distinguish pre-dispatch rejection
 

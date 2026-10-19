@@ -267,11 +267,14 @@ export const useTerminalStore = defineStore('terminal', () => {
     return tabSnapshotGeneration
   }
 
-  function fetchTabs(options: { force?: boolean } = {}): Promise<void> {
+  function fetchTabs(options: {
+    force?: boolean
+    activeTabReplacement?: { from: string, to: string }
+  } = {}): Promise<void> {
     // Mutation callers (restore, switch-env, create agent, ...) rely on the
     // awaited refresh reflecting the change they just made, so they bypass
     // coalescing — a poll-started fetch could have raced the server.
-    if (tabsFetchPromise && !options.force) return tabsFetchPromise
+    if (tabsFetchPromise && !options.force && !options.activeTabReplacement) return tabsFetchPromise
     const generation = invalidateTabSnapshots()
     const run = async () => {
       try {
@@ -285,6 +288,17 @@ export const useTerminalStore = defineStore('terminal', () => {
         if (generation !== tabSnapshotGeneration) return
         const nextTabs = snapshot as TerminalTab[]
         const nextIds = new Set(nextTabs.map(tab => tab.id))
+        // Decide at snapshot application, not before the request: a later user
+        // selection must win, while our own removed-tab fallback is not navigation.
+        const replacement = options.activeTabReplacement
+        const activePane = panes.value.find(pane => pane.id === activePaneId.value)
+        // Empty-pane selection retains activeTabId, but must not receive the replacement.
+        const replacementId = replacement
+          && activeTabId.value === replacement.from
+          && (!activePane || activePane.tabId === replacement.from)
+          && nextIds.has(replacement.to)
+          ? replacement.to
+          : null
         const removedIds = tabs.value
           .map(tab => tab.id)
           .filter(tabId => !nextIds.has(tabId))
@@ -311,6 +325,7 @@ export const useTerminalStore = defineStore('terminal', () => {
             firstPane.tabId = manualTabs.value[0].id
           }
         }
+        if (replacementId) setActiveTab(replacementId)
         await syncChatSidebarPreferences()
       } catch (e) {
         notifyError(e instanceof Error ? e.message : 'Unknown error')

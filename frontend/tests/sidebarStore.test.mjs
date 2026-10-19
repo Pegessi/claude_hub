@@ -133,6 +133,106 @@ test('full tab snapshots remove stale managed state from panes and queued activa
   assert.equal(store.observedQueuedChatIds(paneId).includes('a'), false)
 })
 
+for (const navigation of ['none', 'before snapshot', 'after snapshot']) {
+  test(`tab replacement respects navigation ${navigation}`, async t => {
+    const { store } = setup(t)
+    store.initializePanes()
+    store.setActiveTab('a')
+    const snapshot = deferred()
+    const preferences = deferred()
+    const applyingPreferences = deferred()
+    const replacement = { id: 'replacement', cwd: '/repo', session_kind: 'chat' }
+    const nextTabs = [...store.tabs.filter(tab => tab.id !== 'a'), replacement]
+    globalThis.fetch.mock.mockImplementation(async url => {
+      if (url === '/api/tabs') return snapshot.promise
+      if (url === '/api/tabs/sidebar-preferences/migrate-browser-pins') {
+        applyingPreferences.resolve()
+        return preferences.promise
+      }
+      if (url.endsWith('/view')) return { ok: true, json: async () => ({}) }
+      throw new Error(`unexpected request: ${url}`)
+    })
+
+    const loading = store.fetchTabs({
+      force: true,
+      activeTabReplacement: { from: 'a', to: replacement.id },
+    })
+    if (navigation === 'before snapshot') store.setActiveTab('b')
+    snapshot.resolve({ ok: true, json: async () => nextTabs })
+    await applyingPreferences.promise
+    if (navigation === 'after snapshot') store.setActiveTab('b')
+    preferences.resolve({ ok: true, json: async () => ({ pinned_tab_ids: [] }) })
+    await loading
+
+    const expected = navigation === 'none' ? replacement.id : 'b'
+    assert.equal(store.activeTabId, expected)
+    assert.equal(store.panes.find(pane => pane.id === store.activePaneId)?.tabId, expected)
+  })
+}
+
+test('tab replacement leaves a later selected empty pane empty', async t => {
+  const { store } = setup(t)
+  store.setLayout('1x2')
+  store.setActiveTab('a')
+  const emptyPane = store.panes[1]
+  const snapshot = deferred()
+  const nextTabs = [...store.tabs.filter(tab => tab.id !== 'a'), { id: 'replacement', session_kind: 'chat' }]
+  globalThis.fetch.mock.mockImplementation(async url => url === '/api/tabs'
+    ? snapshot.promise
+    : { ok: true, json: async () => ({ pinned_tab_ids: [] }) })
+
+  const loading = store.fetchTabs({ force: true, activeTabReplacement: { from: 'a', to: 'replacement' } })
+  store.setActivePane(emptyPane.id)
+  assert.equal(store.activeTabId, 'a', 'empty panes retain the previous global tab id')
+  snapshot.resolve({ ok: true, json: async () => nextTabs })
+  await loading
+
+  assert.equal(store.activePaneId, emptyPane.id)
+  assert.equal(store.panes[1].tabId, null)
+})
+
+test('superseded replacement fetch cannot navigate after a newer snapshot', async t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  store.setActiveTab('a')
+  const stale = deferred()
+  const fresh = deferred()
+  const replacement = { id: 'replacement', session_kind: 'chat' }
+  const nextTabs = [...store.tabs.filter(tab => tab.id !== 'a'), replacement]
+  let tabGets = 0
+  globalThis.fetch.mock.mockImplementation(async url => {
+    if (url === '/api/tabs') return ++tabGets === 1 ? stale.promise : fresh.promise
+    return { ok: true, json: async () => ({ pinned_tab_ids: [] }) }
+  })
+
+  const replacing = store.fetchTabs({ force: true, activeTabReplacement: { from: 'a', to: replacement.id } })
+  const newer = store.fetchTabs({ force: true })
+  fresh.resolve({ ok: true, json: async () => nextTabs })
+  await newer
+  store.setActiveTab('b')
+  stale.resolve({ ok: true, json: async () => nextTabs })
+  await replacing
+
+  assert.equal(store.activeTabId, 'b')
+  assert.equal(store.panes.find(pane => pane.id === store.activePaneId)?.tabId, 'b')
+})
+
+test('tab replacement never selects a target absent from the returned snapshot', async t => {
+  const { store } = setup(t)
+  store.initializePanes()
+  store.setActiveTab('a')
+  const nextTabs = store.tabs.filter(tab => tab.id !== 'a')
+  globalThis.fetch.mock.mockImplementation(async url => ({
+    ok: true,
+    json: async () => url === '/api/tabs' ? nextTabs : { pinned_tab_ids: [] },
+  }))
+
+  await store.fetchTabs({ force: true, activeTabReplacement: { from: 'a', to: 'missing' } })
+
+  assert.notEqual(store.activeTabId, 'missing')
+  assert.ok(store.tabs.some(tab => tab.id === store.activeTabId))
+})
+
 test('pin and unpin use server preferences and ignore other session surfaces', async t => {
   const { store, storage } = setup(t)
   globalThis.fetch.mock.mockImplementation(async (url, request) => {

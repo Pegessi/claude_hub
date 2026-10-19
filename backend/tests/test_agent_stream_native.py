@@ -11,6 +11,7 @@ import importlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -19,6 +20,7 @@ from pytest import MonkeyPatch
 
 import claude_hub.services.agent_stream.native as native_module
 from claude_hub.models import (
+    AgentStreamEvent,
     AgentStreamEventType,
     AgentType,
     ChatMode,
@@ -1233,6 +1235,470 @@ async def test_claude_background_result_does_not_retire_user_stream(
             assert not any(e.type == AgentStreamEventType.ERROR for e in page.events)
         finally:
             await tailer.stop()
+
+
+class _BlockingSubmitTransport:
+    def __init__(self, *, fail: bool = False) -> None:
+        self._started = True
+        self.turn_in_flight = False
+        self.last_error = None
+        self.exit_error = None
+        self.eof_is_fatal = False
+        self.fail = fail
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def start(self) -> None:
+        self._started = True
+
+    async def send_message(self, text: str, images: List[bytes]) -> None:
+        self.calls += 1
+        self.turn_in_flight = True
+        self.entered.set()
+        await self.release.wait()
+        if self.fail:
+            self.turn_in_flight = False
+            raise RuntimeError("provider rejected")
+
+    async def read_line(self) -> None:
+        await asyncio.Event().wait()
+
+    async def stop(self) -> None:
+        self.turn_in_flight = False
+
+    async def cancel_active_turn(self) -> None:
+        self.turn_in_flight = False
+
+
+@pytest.mark.asyncio
+async def test_tailer_cancel_waits_for_provider_submit_without_rejecting_turn(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    session = _session(AgentType.CLAUDE)
+    transport = _BlockingSubmitTransport()
+    store = AgentStreamStore(session.workspace_id, session.id)
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=cast(Any, transport),
+    )
+    send = asyncio.create_task(tailer.send_message("hello", [], "turn-accepted"))
+    try:
+        await asyncio.wait_for(transport.entered.wait(), 1)
+        for _ in range(3):
+            send.cancel()
+            await asyncio.sleep(0)
+            assert not send.done()
+        transport.release.set()
+        await asyncio.wait_for(send, 1)
+        page = await store.read_since(-1, 100)
+        assert [(event.type, event.turn_id) for event in page.events] == [
+            (AgentStreamEventType.TURN_STARTED, "turn-accepted")
+        ]
+        assert transport.calls == 1
+        assert tailer._active_turn_id == "turn-accepted"
+        assert transport.turn_in_flight is True
+    finally:
+        transport.release.set()
+        await tailer.stop()
+        if not send.done():
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_tailer_cancel_waits_for_provider_rejection_and_terminalizes_turn(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    session = _session(AgentType.CLAUDE)
+    transport = _BlockingSubmitTransport(fail=True)
+    store = AgentStreamStore(session.workspace_id, session.id)
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=cast(Any, transport),
+    )
+    send = asyncio.create_task(tailer.send_message("hello", [], "turn-rejected"))
+    try:
+        await asyncio.wait_for(transport.entered.wait(), 1)
+        send.cancel()
+        await asyncio.sleep(0)
+        assert not send.done()
+        transport.release.set()
+        with pytest.raises(RuntimeError, match="provider rejected"):
+            await asyncio.wait_for(send, 1)
+        page = await store.read_since(-1, 100)
+        assert [event.type for event in page.events] == [
+            AgentStreamEventType.TURN_STARTED,
+            AgentStreamEventType.ERROR,
+            AgentStreamEventType.TURN_COMPLETED,
+        ]
+        assert page.events[-1].turn_id == "turn-rejected"
+        assert page.events[-1].payload["status"] == "failed"
+        assert tailer._active_turn_id is None
+        assert transport.calls == 1
+    finally:
+        transport.release.set()
+        await tailer.stop()
+        if not send.done():
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_tailer_cancel_during_rejection_terminal_publish_still_settles(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    session = _session(AgentType.CLAUDE)
+    transport = _BlockingSubmitTransport(fail=True)
+    store = AgentStreamStore(session.workspace_id, session.id)
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=cast(Any, transport),
+    )
+    publish_entered = asyncio.Event()
+    publish_release = asyncio.Event()
+    original_append = tailer._store.append
+
+    async def blocked_append(event: Any) -> Any:
+        if event.type == AgentStreamEventType.ERROR and not publish_entered.is_set():
+            publish_entered.set()
+            await publish_release.wait()
+        return await original_append(event)
+
+    monkeypatch.setattr(tailer._store, "append", blocked_append)
+    send = asyncio.create_task(tailer.send_message("hello", [], "turn-rejected"))
+    try:
+        await asyncio.wait_for(transport.entered.wait(), 1)
+        send.cancel()
+        await asyncio.sleep(0)
+        assert not send.done()
+        transport.release.set()
+        await asyncio.wait_for(publish_entered.wait(), 1)
+        send.cancel()
+        await asyncio.sleep(0)
+        assert not send.done()
+        publish_release.set()
+        with pytest.raises(RuntimeError, match="provider rejected"):
+            await asyncio.wait_for(send, 1)
+        page = await store.read_since(-1, 100)
+        assert [event.type for event in page.events] == [
+            AgentStreamEventType.TURN_STARTED,
+            AgentStreamEventType.ERROR,
+            AgentStreamEventType.TURN_COMPLETED,
+        ]
+        assert page.events[-1].turn_id == "turn-rejected"
+        assert page.events[-1].payload["status"] == "failed"
+        assert tailer._active_turn_id is None
+    finally:
+        transport.release.set()
+        publish_release.set()
+        await tailer.stop()
+        if not send.done():
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_rejected_submit_terminal_write_failure_wakes_completion_waiters(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    session = _session(AgentType.CLAUDE)
+    store = AgentStreamStore(session.workspace_id, session.id)
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=cast(Any, _BlockingSubmitTransport()),
+    )
+    completion_queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue(maxsize=1)
+    tailer._completion_subscribers.add(completion_queue)
+
+    async def fail_append(_event: AgentStreamEvent) -> AgentStreamEvent:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tailer._store, "append", fail_append)
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=1,
+        turn_id="turn-rejected",
+    )
+    completed = ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "failed"})
+    try:
+        with pytest.raises(OSError, match="disk full"):
+            await tailer._publish_delivery_rejection_event(completed)
+        volatile = completion_queue.get_nowait()
+        assert volatile.type == AgentStreamEventType.TURN_COMPLETED
+        assert volatile.stream_sequence == -1
+        assert volatile.turn_id == "turn-rejected"
+        assert volatile.payload["_hub_volatile_terminal_failure"] is True
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_rejected_submit_waits_for_inflight_text_flush_before_terminal_event(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    session = _session(AgentType.CLAUDE)
+    store = AgentStreamStore(session.workspace_id, session.id)
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=cast(Any, _BlockingSubmitTransport()),
+    )
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=1,
+        turn_id="turn-flush",
+    )
+    first_text = ctx.event(
+        AgentStreamEventType.TEXT_DELTA,
+        {"text": "first"},
+        message_id="turn-flush:text:first",
+    )
+    second_text = ctx.event(
+        AgentStreamEventType.TEXT_DELTA,
+        {"text": "second"},
+        message_id="turn-flush:text:second",
+    )
+    # Keep both text events buffered; otherwise the first coalescable event
+    # flushes immediately as the leading edge.
+    tailer._coalescer._last_flush_at = asyncio.get_running_loop().time()
+    assert await tailer._coalescer.handle(first_text)
+    assert await tailer._coalescer.handle(second_text)
+
+    first_entered = asyncio.Event()
+    first_release = asyncio.Event()
+    second_entered = asyncio.Event()
+    second_release = asyncio.Event()
+    original_persist = tailer._persist_and_fanout
+    text_count = 0
+
+    async def blocked_persist(event: Any) -> None:
+        nonlocal text_count
+        if event.type == AgentStreamEventType.TEXT_DELTA:
+            text_count += 1
+            if text_count == 1:
+                first_entered.set()
+                await first_release.wait()
+            elif text_count == 2:
+                second_entered.set()
+                await second_release.wait()
+        await original_persist(event)
+
+    monkeypatch.setattr(tailer._coalescer, "_on_flush", blocked_persist)
+    flush_task = asyncio.create_task(tailer._coalescer.flush_async())
+    rejection = asyncio.create_task(
+        tailer._publish_delivery_rejection_event(
+            ctx.event(AgentStreamEventType.ERROR, {"message": "failed"})
+        )
+    )
+    try:
+        await asyncio.wait_for(first_entered.wait(), 1)
+        await asyncio.sleep(0)
+        assert not rejection.done()
+        first_release.set()
+        await asyncio.wait_for(second_entered.wait(), 1)
+        await asyncio.sleep(0)
+        assert not rejection.done()
+        second_release.set()
+        await asyncio.wait_for(asyncio.gather(flush_task, rejection), 1)
+        page = await store.read_since(-1, 100)
+        assert [event.type for event in page.events] == [
+            AgentStreamEventType.TEXT_DELTA,
+            AgentStreamEventType.TEXT_DELTA,
+            AgentStreamEventType.ERROR,
+        ]
+    finally:
+        first_release.set()
+        second_release.set()
+        await asyncio.gather(flush_task, rejection, return_exceptions=True)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_dot_rotation_cancellation_before_submit_releases_provider_guard(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import claude_hub.services.dot as dot_module
+
+    class FakeDotService:
+        def __init__(self) -> None:
+            self.rotation_requests: list[tuple[str, str]] = []
+            self.associations: list[str] = []
+            self.enabled = True
+
+        def is_dot_tab(self, tab_id: Optional[str]) -> bool:
+            return self.enabled and tab_id == "tab-1"
+
+        def prepare_turn(self, _text: str, _conversation_id: Optional[str]) -> Any:
+            return SimpleNamespace(
+                rotate=True,
+                new_session=True,
+                prepared_generation="prepared-1",
+                system_pack="system pack",
+                turn_pack="turn pack",
+                delivered_event_ids=[],
+            )
+
+        def associate_conversation(
+            self, conversation_id: str, *, prepared_generation: str, tab_id: str
+        ) -> bool:
+            self.associations.append(conversation_id)
+            return True
+
+        def clear_conversation_association(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
+
+        def request_rotation(self, *, prepared_generation: str, tab_id: str) -> bool:
+            self.rotation_requests.append((prepared_generation, tab_id))
+            return True
+
+    fake = FakeDotService()
+    monkeypatch.setattr(dot_module, "get_dot_service", lambda: fake)
+    native = ClaudeNativeSession(_session(AgentType.CLAUDE))
+    entered = asyncio.Event()
+
+    async def blocked_rotation() -> str:
+        entered.set()
+        await asyncio.Event().wait()
+        return "new-conversation"
+
+    monkeypatch.setattr(native, "rotate_conversation", blocked_rotation)
+    send = asyncio.create_task(native.send_message("hello", []))
+    await asyncio.wait_for(entered.wait(), 1)
+    send.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(send, 1)
+    assert native.turn_in_flight is False
+    assert fake.rotation_requests == [("prepared-1", "tab-1")]
+    assert fake.associations == []
+
+    fake.enabled = False
+    with patch.object(native, "_spawn_oneshot", AsyncMock()) as spawn:
+        await native.send_message("ordinary retry", [])
+    assert spawn.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_dot_prepare_failure_falls_back_to_ordinary_prompt(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import claude_hub.services.dot as dot_module
+
+    class FailingDotService:
+        def is_dot_tab(self, tab_id: Optional[str]) -> bool:
+            return tab_id == "tab-1"
+
+        def prepare_turn(self, _text: str, _conversation_id: Optional[str]) -> Any:
+            raise RuntimeError("context index unavailable")
+
+    monkeypatch.setattr(dot_module, "get_dot_service", lambda: FailingDotService())
+    native = ClaudeNativeSession(_session(AgentType.CLAUDE))
+    with patch.object(native, "_spawn_oneshot", AsyncMock()) as spawn:
+        await native.send_message("ordinary text", [])
+    call_args = spawn.await_args
+    assert call_args is not None
+    stdin = call_args.args[1]
+    content = json.loads(stdin)["message"]["content"]
+    text = next(block["text"] for block in content if block.get("type") == "text")
+    assert text.endswith("ordinary text")
+    assert "You are Dot" not in text
+    native.acknowledge_turn_complete()
+    assert native.turn_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_dot_prepare_failure_prefers_cancellation_and_releases_guard(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import threading
+
+    import claude_hub.services.dot as dot_module
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class FailingDotService:
+        def is_dot_tab(self, tab_id: Optional[str]) -> bool:
+            return tab_id == "tab-1"
+
+        def prepare_turn(self, _text: str, _conversation_id: Optional[str]) -> Any:
+            entered.set()
+            release.wait(2)
+            raise RuntimeError("context index unavailable")
+
+    monkeypatch.setattr(dot_module, "get_dot_service", lambda: FailingDotService())
+    native = ClaudeNativeSession(_session(AgentType.CLAUDE))
+    send = asyncio.create_task(native.send_message("will cancel", []))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        send.cancel()
+        await asyncio.sleep(0)
+        assert not send.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(send, 1)
+        assert native.turn_in_flight is False
+        with patch.object(native, "_spawn_oneshot", AsyncMock()) as spawn:
+            await native.send_message("ordinary retry", [])
+        assert spawn.await_count == 1
+    finally:
+        release.set()
+        if not send.done():
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
 
 
 def test_claude_unknown_stream_event_is_skipped() -> None:

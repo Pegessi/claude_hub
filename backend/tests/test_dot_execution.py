@@ -59,7 +59,14 @@ def setup(
     async def create(**kwargs: Any) -> SimpleNamespace:
         created.append(kwargs)
         tab = SimpleNamespace(
-            id=f"dot-{len(created)}", archived=False, workspace_role=None, **kwargs
+            id=f"dot-{len(created)}",
+            archived=False,
+            port=0,
+            is_active=True,
+            created_at=datetime.now(),
+            managed_session_id=None,
+            workspace_role=None,
+            **kwargs,
         )
         tabs[tab.id] = tab
         return tab
@@ -74,10 +81,23 @@ def setup(
             tabs[tab_id].archived = False
         return tabs.get(tab_id)
 
+    async def switch_env(tab_id: str, env: dict[str, str], *, solo_mode: bool | None = None) -> Any:
+        tab = tabs[tab_id]
+        tab.env = dict(env)
+        if solo_mode is not None:
+            tab.solo_mode = solo_mode
+        return tab
+
     monkeypatch.setattr(ttyd_manager, "create_tab", create)
     monkeypatch.setattr(ttyd_manager, "get_tab", tabs.get)
     monkeypatch.setattr(ttyd_manager, "archive_tab", archive)
     monkeypatch.setattr(ttyd_manager, "unarchive_tab", unarchive)
+    monkeypatch.setattr(ttyd_manager, "switch_env", switch_env)
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.api.tabs"),
+        "_terminal_tab_stream_session",
+        lambda _tab_id: None,
+    )
     user = User(open_id="local", name="Local", email="local@localhost", avatar_url=None)
     app.dependency_overrides[get_current_user] = lambda: user
     yield SimpleNamespace(
@@ -485,3 +505,367 @@ async def test_late_old_tab_input_is_rejected_after_switch(setup: SimpleNamespac
             SimpleNamespace(),
         )
     assert captured.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_missing_previous_tab_late_failure_rolls_back_and_retries(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    old_id = first["tab_id"]
+    state = setup.service.store.read_state()
+    wake_id = state["wake_schedule_id"]
+    tidy_id = state["tidy_schedule_id"]
+    wake = workspace_manager.scheduled_tasks[wake_id]
+    tidy = workspace_manager.scheduled_tasks[tidy_id]
+    wake.enabled = False
+    wake.message = "Keep this wake text"
+    wake.interval_seconds = 777
+    tidy.message = "Keep this tidy text"
+    tidy.cron = "45 4 * * *"
+    setup.tabs.pop(old_id)
+    missing_revision = execution.execution_view(setup.service)["revision"]
+
+    original_update = setup.service.store.update_state
+    fail_once = True
+
+    def fail_final_identity(**changes: Any) -> Any:
+        nonlocal fail_once
+        if fail_once and changes.get("execution_agent_type") == "codex":
+            fail_once = False
+            raise RuntimeError("late state write failed")
+        return original_update(**changes)
+
+    monkeypatch.setattr(setup.service.store, "update_state", fail_final_identity)
+    with pytest.raises(RuntimeError, match="late state write failed"):
+        await execution.switch_execution(
+            setup.service,
+            expected_revision=missing_revision,
+            agent_type=AgentType.CODEX,
+            env={},
+        )
+
+    assert setup.service.store.read_state().get("pending_execution") is None
+    assert setup.tabs["dot-2"].archived
+    wake = workspace_manager.scheduled_tasks[wake_id]
+    tidy = workspace_manager.scheduled_tasks[tidy_id]
+    assert (wake.tab_id, wake.enabled, wake.agent_type) == (
+        old_id,
+        False,
+        AgentType.CLAUDE,
+    )
+    assert (wake.message, wake.interval_seconds) == ("Keep this wake text", 777)
+    assert (tidy.tab_id, tidy.agent_type, tidy.message, tidy.cron) == (
+        old_id,
+        AgentType.CLAUDE,
+        "Keep this tidy text",
+        "45 4 * * *",
+    )
+
+    retried = await execution.switch_execution(
+        setup.service,
+        expected_revision=missing_revision,
+        agent_type=AgentType.CODEX,
+        env={},
+    )
+    assert retried["agent_type"] == "codex"
+    assert workspace_manager.scheduled_tasks[wake_id].tab_id == retried["tab_id"]
+    assert workspace_manager.scheduled_tasks[wake_id].agent_type == AgentType.CODEX
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_sequence_rewind_orphan_blocks_switch(setup: SimpleNamespace) -> None:
+    first = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    tab_id = first["tab_id"]
+    stream = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
+
+    async def append(
+        event_type: AgentStreamEventType, turn_id: str, payload: dict[str, Any]
+    ) -> None:
+        await stream.append(
+            AgentStreamEvent(
+                stream_sequence=0,
+                session_id=f"terminal-tab-{tab_id}",
+                tab_id=tab_id,
+                agent_type=AgentType.CLAUDE,
+                turn_id=turn_id,
+                type=event_type,
+                payload=payload,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+    await append(AgentStreamEventType.TURN_STARTED, "one", {"summary": "one"})
+    await append(
+        AgentStreamEventType.TURN_COMPLETED,
+        "one",
+        {"assistant_text": "done", "status": "completed"},
+    )
+    await append(AgentStreamEventType.TURN_STARTED, "two", {"summary": "two"})
+    await append(
+        AgentStreamEventType.TURN_COMPLETED,
+        "two",
+        {"assistant_text": "done", "status": "completed"},
+    )
+    await setup.service.sync_journal()
+    assert setup.service.store.read_state()["journal_seq"] == 3
+
+    await stream.truncate_before(2)
+    await append(
+        AgentStreamEventType.TURN_STARTED,
+        "edited-orphan",
+        {"summary": "edited"},
+    )
+    with pytest.raises(execution.DotExecutionConflict, match="unfinished turn"):
+        await execution.switch_execution(
+            setup.service,
+            expected_revision=first["revision"],
+            agent_type=AgentType.CODEX,
+            env={},
+        )
+    assert setup.service.tab_id() == tab_id
+    assert not setup.tabs[tab_id].archived
+    assert len(setup.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_old_archive_api_waits_before_pending_marker(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.api import tabs as tabs_api
+
+    first = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def block_candidate_creation(**kwargs: Any) -> Any:
+        entered.set()
+        await release.wait()
+        return await setup.create(**kwargs)
+
+    monkeypatch.setattr(ttyd_manager, "create_tab", block_candidate_creation)
+    switch = asyncio.create_task(
+        execution.switch_execution(
+            setup.service,
+            expected_revision=first["revision"],
+            agent_type=AgentType.CODEX,
+            env={},
+        )
+    )
+    await entered.wait()
+    assert setup.service.store.read_state().get("pending_execution") is None
+    user = User(open_id="local", name="Local", email="local@localhost", avatar_url=None)
+    archive = asyncio.create_task(tabs_api.archive_tab(first["tab_id"], user))
+    await asyncio.sleep(0)
+    assert not archive.done()
+    assert not setup.tabs[first["tab_id"]].archived
+
+    release.set()
+    switched = await switch
+    await archive
+    assert switched["tab_id"] != first["tab_id"]
+    assert setup.tabs[first["tab_id"]].archived
+
+
+@pytest.mark.asyncio
+async def test_candidate_archive_api_waits_for_execution_switch(setup: SimpleNamespace) -> None:
+    from claude_hub.api import tabs as tabs_api
+
+    first = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def block_old_retirement(_session_id: str) -> None:
+        entered.set()
+        await release.wait()
+
+    setup.manager.forget_session.side_effect = block_old_retirement
+    switch = asyncio.create_task(
+        execution.switch_execution(
+            setup.service,
+            expected_revision=first["revision"],
+            agent_type=AgentType.CODEX,
+            env={},
+        )
+    )
+    await entered.wait()
+    candidate = setup.service.store.read_state()["pending_execution"]["candidate_tab_id"]
+    user = User(open_id="local", name="Local", email="local@localhost", avatar_url=None)
+    archive = asyncio.create_task(tabs_api.archive_tab(candidate, user))
+    await asyncio.sleep(0)
+    assert not archive.done()
+    assert not setup.tabs[candidate].archived
+
+    release.set()
+    switched = await switch
+    assert switched["tab_id"] == candidate
+    await archive
+    assert setup.tabs[candidate].archived
+
+
+def test_generic_dot_execution_mutations_use_dedicated_api(setup: SimpleNamespace) -> None:
+    assert apply(setup, "claude").status_code == 200
+    tab_id = setup.service.tab_id()
+    assert tab_id is not None
+
+    provider = setup.client.put(f"/api/tabs/{tab_id}", json={"agent_type": "codex"})
+    assert provider.status_code == 409
+    assert "Dot" in provider.json()["detail"] and "Execution backend" in provider.json()["detail"]
+    env = setup.client.put(f"/api/tabs/{tab_id}", json={"env": {"ANTHROPIC_MODEL": "changed"}})
+    assert env.status_code == 409
+    hot_swap = setup.client.post(
+        f"/api/tabs/{tab_id}/switch-env", json={"env": {"ANTHROPIC_API_KEY": "changed"}}
+    )
+    assert hot_swap.status_code == 409
+    assert setup.tabs[tab_id].agent_type == AgentType.CLAUDE
+    assert setup.tabs[tab_id].env == {}
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_env"),
+    [
+        ("claude", {"ANTHROPIC_MODEL": "model-next"}),
+        ("codex", {"CODEX_MODEL": "model-next", "CODEX_REASONING_EFFORT": "high"}),
+        ("cursor", {"CURSOR_MODEL": "model-next"}),
+        ("traex", {"CODEX_MODEL": "model-next", "CODEX_REASONING_EFFORT": "high"}),
+        ("maso", {"MASO_MODEL": "model-next"}),
+    ],
+)
+def test_dot_composer_model_picker_preserves_execution_ownership(
+    setup: SimpleNamespace, provider: str, model_env: dict[str, str]
+) -> None:
+    initial_env = {"KEEP": "configured-value"}
+    if provider == "traex":
+        initial_env["TRAEX_REASONING_EFFORT"] = "low"
+    assert apply(setup, provider, initial_env).status_code == 200
+    tab_id = setup.service.tab_id()
+    before = execution.execution_view(setup.service)
+    schedules = execution._schedule_snapshot(setup.service)
+    env = {"KEEP": "configured-value", **model_env}
+
+    response = setup.client.post(f"/api/tabs/{tab_id}/switch-env", json={"env": env})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["env"] == env
+    assert setup.service.tab_id() == tab_id
+    assert setup.service.store.read_state()["execution_agent_type"] == provider
+    assert execution._schedule_snapshot(setup.service) == schedules
+    assert execution.execution_view(setup.service)["revision"] != before["revision"]
+    assert len(setup.created) == 1
+
+    for payload in (
+        {"env": {**env, "KEEP": "changed-credential"}},
+        {"env": {**env, "ANTHROPIC_BASE_URL": "https://changed.invalid"}},
+        {"env": env, "solo_mode": False},
+    ):
+        rejected = setup.client.post(f"/api/tabs/{tab_id}/switch-env", json=payload)
+        assert rejected.status_code == 409, rejected.text
+        assert setup.tabs[tab_id].env == env
+
+
+def test_legacy_setup_still_seeds_current_claude_env(setup: SimpleNamespace) -> None:
+    assert apply(setup, "claude").status_code == 200
+    tab_id = setup.service.tab_id()
+    response = setup.client.post(
+        "/api/dot/setup", json={"env": {"ANTHROPIC_API_KEY": "setup-secret"}}
+    )
+    assert response.status_code == 200, response.text
+    assert setup.service.tab_id() == tab_id
+    assert setup.tabs[tab_id].env == {"ANTHROPIC_API_KEY": "setup-secret"}
+
+
+@pytest.mark.asyncio
+async def test_setup_env_seed_rechecks_current_tab_after_competing_switch(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.api.dot import SetupRequest, dot_setup
+
+    first = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    original_ensure = setup.service.ensure_tab
+    ensured = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated_ensure(env: dict[str, str] | None = None) -> str:
+        tab_id = await original_ensure(env)
+        ensured.set()
+        await release.wait()
+        return str(tab_id)
+
+    monkeypatch.setattr(setup.service, "ensure_tab", gated_ensure)
+    user = User(open_id="local", name="Local", email="local@localhost", avatar_url=None)
+    setup_call = asyncio.create_task(
+        dot_setup(SetupRequest(env={"ANTHROPIC_API_KEY": "stale-secret"}), user)
+    )
+    await ensured.wait()
+    switched = await execution.switch_execution(
+        setup.service,
+        expected_revision=first["revision"],
+        agent_type=AgentType.CODEX,
+        env={"CODEX_MODEL": "new"},
+    )
+    release.set()
+    result = await setup_call
+
+    assert result["tab_id"] == switched["tab_id"]
+    assert setup.tabs[switched["tab_id"]].env == {"CODEX_MODEL": "new"}
+    assert "stale-secret" not in str(setup.tabs[switched["tab_id"]].env)
+
+
+@pytest.mark.asyncio
+async def test_deleted_dot_tab_pending_run_blocks_migration_until_settled(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert apply(setup, "claude").status_code == 200
+    old_id = setup.service.tab_id()
+    assert old_id is not None
+    wake_id = setup.service.store.read_state()["wake_schedule_id"]
+    run = scheduled_run(wake_id, old_id, "deleted-tab-run")
+    workspace_manager.scheduled_task_runs[run.id] = run
+
+    async def delete_tab(tab_id: str) -> bool:
+        # The tab owner removes its record; schedules/runs are separate owners.
+        return setup.tabs.pop(tab_id, None) is not None
+
+    monkeypatch.setattr(ttyd_manager, "delete_tab", delete_tab)
+    deleted = setup.client.delete(f"/api/tabs/{old_id}")
+    assert deleted.status_code == 204, deleted.text
+    assert workspace_manager.scheduled_task_runs[run.id].status == ScheduledTaskRunStatus.WAITING
+
+    rejected = apply(setup, "codex")
+    assert rejected.status_code == 409, rejected.text
+    assert "pending scheduled turns" in rejected.json()["detail"]
+    assert len(setup.created) == 1
+    assert workspace_manager.scheduled_tasks[wake_id].tab_id == old_id
+
+    workspace_manager.drop_pending_scheduled_task_runs(wake_id, "settled", tab_id=old_id)
+    switched = apply(setup, "codex")
+    assert switched.status_code == 200, switched.text
+    new_id = switched.json()["tab_id"]
+    await workspace_manager._drain_scheduled_chat_tab(old_id)
+    assert workspace_manager.scheduled_tasks[wake_id].tab_id == new_id
+    assert workspace_manager.scheduled_tasks[wake_id].enabled

@@ -225,6 +225,33 @@ class _ScheduleRegistryMixin(_SchedulingHost):
         logger.info("Updated scheduled task id=%s name=%r", task_id, merged.name)
         return merged
 
+    def restore_scheduled_chat_task_target(
+        self,
+        task_id: str,
+        *,
+        tab_id: str,
+        enabled: bool,
+        agent_type: AgentType,
+    ) -> ScheduledTask:
+        """Restore previously persisted Chat ownership without revalidating a deleted target."""
+        task = self.scheduled_tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if task.kind != ScheduledTaskKind.CHAT_TURN:
+            raise ValueError("only scheduled Chat turns have restorable Chat ownership")
+        restored = task.model_copy(
+            update={
+                "tab_id": tab_id,
+                "enabled": enabled,
+                "agent_type": agent_type,
+                "updated_at": self._runtime_now(),
+            }
+        )
+        self.scheduled_tasks[task_id] = restored
+        self._save_scheduled_tasks()
+        logger.info("Restored scheduled Chat task id=%s target=%s", task_id, tab_id)
+        return restored
+
     def delete_scheduled_task(self, task_id: str) -> bool:
         task = self.scheduled_tasks.pop(task_id, None)
         if task is None:

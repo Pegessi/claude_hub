@@ -60,6 +60,7 @@
               <span>Name</span>
               <input
                 v-model="nameDraft"
+                :disabled="executionBusy"
                 class="ch-input"
                 maxlength="40"
                 required
@@ -70,6 +71,7 @@
               <span>Emoji</span>
               <input
                 v-model="avatarDraft"
+                :disabled="executionBusy"
                 class="ch-input dot-identity__emoji"
                 maxlength="16"
                 placeholder="e.g. 🤖"
@@ -83,6 +85,7 @@
                   {{ identity.avatar_image ? 'Change' : 'Upload' }}
                   <input
                     type="file"
+                    :disabled="executionBusy"
                     accept="image/png,image/jpeg,image/gif,image/webp"
                     @change="uploadAvatar"
                   >
@@ -91,6 +94,7 @@
                   v-if="identity.avatar_image"
                   type="button"
                   class="ch-btn ch-btn--ghost ch-btn--sm"
+                  :disabled="executionBusy"
                   @click="removeAvatar"
                 >
                   Remove
@@ -103,7 +107,7 @@
             <button
               type="submit"
               class="ch-btn ch-btn--primary ch-btn--sm dot-identity__save"
-              :disabled="!nameDraft.trim() || loading"
+              :disabled="!nameDraft.trim() || loading || executionBusy"
             >
               Save
             </button>

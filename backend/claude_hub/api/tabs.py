@@ -1,7 +1,7 @@
 import asyncio
 import logging
-from contextlib import suppress
-from typing import List
+from contextlib import asynccontextmanager, suppress
+from typing import AsyncIterator, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tabs", tags=["tabs"])
 
 _MANAGED_CODEX_HOT_ENV_KEYS = frozenset({"CODEX_MODEL", "CODEX_REASONING_EFFORT"})
+_DOT_MODEL_HOT_ENV_KEYS = {
+    "claude": frozenset({"ANTHROPIC_MODEL"}),
+    "codex": _MANAGED_CODEX_HOT_ENV_KEYS,
+    "cursor": frozenset({"CURSOR_MODEL"}),
+    "traex": _MANAGED_CODEX_HOT_ENV_KEYS | {"TRAEX_REASONING_EFFORT"},
+    "maso": frozenset({"MASO_MODEL"}),
+}
 
 
 def _managed_chat_session_for_tab(tab_id: str) -> ManagedSession | None:
@@ -66,6 +73,53 @@ def _reject_managed_chat_tab_mutation(tab_id: str) -> None:
             status_code=409,
             detail="Use the Workspace session controls to modify a managed Chat tab",
         )
+
+
+def _is_dot_execution_tab(tab_id: str) -> bool:
+    from ..services.dot import get_dot_service
+    from ..services.dot.execution import execution_pending_for
+
+    service = get_dot_service()
+    return service.is_dot_tab(tab_id) or execution_pending_for(service, tab_id)
+
+
+@asynccontextmanager
+async def _dot_tab_mutation_guard(tab_id: str) -> AsyncIterator[None]:
+    """Serialize current/pending Dot tab mutations with setup and replacement."""
+    if not _is_dot_execution_tab(tab_id):
+        yield
+        return
+    from ..services.dot import get_dot_service
+    from ..services.dot.execution import recover_execution_locked
+
+    service = get_dot_service()
+    async with service.setup_lock():
+        await recover_execution_locked(service)
+        yield
+
+
+def _reject_dot_execution_mutation(tab_id: str) -> None:
+    if _is_dot_execution_tab(tab_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Use Dot → Edit → Execution backend to change Dot's provider or environment.",
+        )
+
+
+def _validate_dot_model_update(tab_id: str, req: SwitchEnvRequest) -> None:
+    if not _is_dot_execution_tab(tab_id):
+        return
+    tab = ttyd_manager.get_tab(tab_id)
+    if tab is None:
+        raise KeyError(tab_id)
+    changed = {
+        key for key in tab.env.keys() | req.env.keys() if tab.env.get(key) != req.env.get(key)
+    }
+    # The existing composer picker sends a full env copy. Keep only its model/
+    # reasoning delta in place; credentials and launch settings still replace Dot.
+    allowed = _DOT_MODEL_HOT_ENV_KEYS.get(tab.agent_type.value, frozenset())
+    if changed - allowed or (req.solo_mode is not None and req.solo_mode != tab.solo_mode):
+        _reject_dot_execution_mutation(tab_id)
 
 
 def _validate_managed_chat_env_update(session: ManagedSession, req: SwitchEnvRequest) -> None:
@@ -365,6 +419,18 @@ async def switch_tab_env(
     ``codex resume --last`` for Codex).
     Returns 400 for non-Claude/Codex, remote, or stopped tabs.
     """
+    async with _dot_tab_mutation_guard(tab_id):
+        return await _switch_tab_env_locked(tab_id, req, current_user)
+
+
+async def _switch_tab_env_locked(
+    tab_id: str,
+    req: SwitchEnvRequest,
+    current_user: User,
+    *,
+    allow_dot_setup: bool = False,
+) -> TerminalTab:
+    """Apply an env change after the caller has serialized Dot ownership when needed."""
     logger.info(
         "switch_env for tab %s: %d env vars, solo_mode=%s, user=%s",
         tab_id,
@@ -375,6 +441,8 @@ async def switch_tab_env(
     managed_session = _managed_chat_session_for_tab(tab_id)
     try:
         if managed_session is None:
+            if not allow_dot_setup:
+                _validate_dot_model_update(tab_id, req)
             tab = await ttyd_manager.switch_env(tab_id, req.env, solo_mode=req.solo_mode)
         else:
             async with workspace_manager.managed_chat_configuration_guard(
@@ -452,11 +520,12 @@ async def archive_tab(
     JSONL conversation log is retained so it can be restored later.
     """
     logger.info(f"Archiving tab {tab_id}, user={current_user.email}")
-    _reject_managed_chat_tab_mutation(tab_id)
-    tab = await ttyd_manager.archive_tab(tab_id)
-    if not tab:
-        raise HTTPException(status_code=404, detail="Tab not found")
-    return tab
+    async with _dot_tab_mutation_guard(tab_id):
+        _reject_managed_chat_tab_mutation(tab_id)
+        tab = await ttyd_manager.archive_tab(tab_id)
+        if not tab:
+            raise HTTPException(status_code=404, detail="Tab not found")
+        return tab
 
 
 @router.post("/{tab_id}/unarchive", response_model=TerminalTab)
@@ -469,14 +538,15 @@ async def unarchive_tab(
     Returns 404 if the tab is missing and 429 at the live tab limit.
     """
     logger.info(f"Unarchiving tab {tab_id}, user={current_user.email}")
-    _reject_managed_chat_tab_mutation(tab_id)
-    try:
-        tab = await ttyd_manager.unarchive_tab(tab_id)
-    except TabLimitExceededError as exc:
-        raise HTTPException(status_code=429, detail=str(exc))
-    if not tab:
-        raise HTTPException(status_code=404, detail="Tab not found")
-    return tab
+    async with _dot_tab_mutation_guard(tab_id):
+        _reject_managed_chat_tab_mutation(tab_id)
+        try:
+            tab = await ttyd_manager.unarchive_tab(tab_id)
+        except TabLimitExceededError as exc:
+            raise HTTPException(status_code=429, detail=str(exc))
+        if not tab:
+            raise HTTPException(status_code=404, detail="Tab not found")
+        return tab
 
 
 @router.post("/{tab_id}/view", response_model=TerminalTab)
@@ -516,26 +586,29 @@ async def update_tab(
     current_user: User = Depends(get_current_user),
 ) -> TerminalTab:
     """Update a terminal tab."""
-    _reject_managed_chat_tab_mutation(tab_id)
-    try:
-        tab = await ttyd_manager.update_tab(
-            tab_id,
-            tab_update.name,
-            tab_update.shell,
-            tab_update.cwd,
-            tab_update.solo_mode,
-            tab_update.agent_type,
-            tab_update.target,
-            tab_update.remote_profile_id,
-            tab_update.remote_cwd,
-            tab_update.remote_reconnect,
-            tab_update.env,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not tab:
-        raise HTTPException(status_code=404, detail="Tab not found")
-    return tab
+    async with _dot_tab_mutation_guard(tab_id):
+        _reject_managed_chat_tab_mutation(tab_id)
+        if tab_update.agent_type is not None or tab_update.env is not None:
+            _reject_dot_execution_mutation(tab_id)
+        try:
+            tab = await ttyd_manager.update_tab(
+                tab_id,
+                tab_update.name,
+                tab_update.shell,
+                tab_update.cwd,
+                tab_update.solo_mode,
+                tab_update.agent_type,
+                tab_update.target,
+                tab_update.remote_profile_id,
+                tab_update.remote_cwd,
+                tab_update.remote_reconnect,
+                tab_update.env,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not tab:
+            raise HTTPException(status_code=404, detail="Tab not found")
+        return tab
 
 
 @router.delete("/{tab_id}", status_code=204)
@@ -544,18 +617,21 @@ async def delete_tab(
     current_user: User = Depends(get_current_user),
 ) -> None:
     """Delete a terminal tab."""
-    _reject_managed_chat_tab_mutation(tab_id)
-    try:
-        success = await ttyd_manager.delete_tab(tab_id)
-    except (TabCleanupPendingError, TabStateError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "5"}) from exc
-    if not success:
-        raise HTTPException(status_code=404, detail="Tab not found")
-    try:
-        chat_sidebar_preferences.get_store().remove_tab(tab_id)
-    except OSError:
-        # The destructive operation already succeeded. A stale preference is
-        # filtered from every API response, so do not misreport the deletion
-        # as failed solely because best-effort preference cleanup could not be
-        # persisted.
-        logger.exception("Failed to remove deleted tab %s from Chat pins", tab_id)
+    async with _dot_tab_mutation_guard(tab_id):
+        _reject_managed_chat_tab_mutation(tab_id)
+        try:
+            success = await ttyd_manager.delete_tab(tab_id)
+        except (TabCleanupPendingError, TabStateError) as exc:
+            raise HTTPException(
+                status_code=503, detail=str(exc), headers={"Retry-After": "5"}
+            ) from exc
+        if not success:
+            raise HTTPException(status_code=404, detail="Tab not found")
+        try:
+            chat_sidebar_preferences.get_store().remove_tab(tab_id)
+        except OSError:
+            # The destructive operation already succeeded. A stale preference is
+            # filtered from every API response, so do not misreport the deletion
+            # as failed solely because best-effort preference cleanup could not be
+            # persisted.
+            logger.exception("Failed to remove deleted tab %s from Chat pins", tab_id)

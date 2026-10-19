@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, cast
 
 from ....models import AgentStreamEvent, AgentStreamEventType, AgentType
 from ..base import NormalizeContext
@@ -96,6 +96,106 @@ class PublicationMixin(SessionState):
             self._goal_protocol_turn = False
         return True
 
+    async def _publish_delivery_rejection_event(self, event: AgentStreamEvent) -> None:
+        """Persist a rejected-submit terminal event without changing observer ownership.
+
+        The normal native-consumer path is already owned by the tailer task. A
+        composer caller can cancel ``send_message`` after the user-visible
+        ``turn_started`` has been persisted but before provider submission is
+        rejected. For that narrow rejected-submit path, durable append must run
+        to completion despite caller cancellation, while fanout and the task
+        activity observer must remain in this original task so Workspace's
+        task-reentrant mutation lock still recognizes the owner.
+        """
+        if event.type == AgentStreamEventType.TURN_COMPLETED and event.agent_type == AgentType.MASO:
+            await self._emit_approval_resolved([], publisher=self._publish_delivery_rejection_event)
+        try:
+            if await self._coalescer.handle(event):
+                return
+            await self._await_without_caller_cancellation(
+                self._coalescer.flush_async(),
+                name=f"agent-stream-flush-{self.session_id[:8]}",
+            )
+            persisted = await self._append_without_caller_cancellation(event)
+            if self._is_live:
+                self._fanout(persisted)
+                if persisted.type in {
+                    AgentStreamEventType.APPROVAL_REQUIRED,
+                    AgentStreamEventType.ERROR,
+                    AgentStreamEventType.TURN_COMPLETED,
+                }:
+                    self._fanout_completion(persisted)
+            await self._observe_task_activity_for_persisted_event(persisted)
+        except Exception:
+            if event.type == AgentStreamEventType.TURN_COMPLETED and self._is_live:
+                self._fanout_volatile_terminal_failure(event)
+            raise
+
+    @staticmethod
+    async def _await_without_caller_cancellation(awaitable: Awaitable[Any], *, name: str) -> Any:
+        task: asyncio.Future[Any] = asyncio.ensure_future(awaitable)
+        if isinstance(task, asyncio.Task):
+            task.set_name(name)
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.done():
+                    return await task
+                current = asyncio.current_task()
+                if current is None or current.cancelling() == 0:
+                    raise
+                current.uncancel()
+                continue
+            except Exception:
+                raise
+
+    async def _append_without_caller_cancellation(
+        self, event: AgentStreamEvent
+    ) -> AgentStreamEvent:
+        self._require_publishable_incarnation()
+        persisted = await self._await_without_caller_cancellation(
+            self._store.append(event),
+            name=f"agent-stream-append-{self.session_id[:8]}",
+        )
+        return cast(AgentStreamEvent, persisted)
+
+    async def _observe_task_activity_for_persisted_event(self, event: AgentStreamEvent) -> None:
+        if (
+            not self._is_live
+            or self._task_activity_observer is None
+            or event.type
+            not in {
+                AgentStreamEventType.TURN_STARTED,
+                AgentStreamEventType.TURN_COMPLETED,
+                AgentStreamEventType.TOOL_CALL_STARTED,
+                AgentStreamEventType.TOOL_CALL_COMPLETED,
+                AgentStreamEventType.APPROVAL_REQUIRED,
+                AgentStreamEventType.APPROVAL_RESOLVED,
+                AgentStreamEventType.ERROR,
+            }
+        ):
+            return
+        main_thread = (
+            self._native_transport.active_thread_id if self._native_transport is not None else None
+        )
+        observation = event.model_copy(
+            update={"payload": {**event.payload, "_hub_main_thread_id": main_thread}}
+        )
+        while True:
+            try:
+                await self._task_activity_observer(observation)
+                return
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is None or current.cancelling() == 0:
+                    raise
+                current.uncancel()
+                continue
+            except Exception as exc:
+                logger.warning("Task activity observer failed: %s", type(exc).__name__)
+                return
+
     def _notify_post_persist(self, event: AgentStreamEvent) -> None:
         """Schedule observers after completion persistence and guard release."""
         for observer in tuple(self._post_persist_observers):
@@ -150,6 +250,7 @@ class PublicationMixin(SessionState):
         *,
         expected_turn_id: Optional[str] = None,
         expected_call_id: Optional[str] = None,
+        publisher: Optional[Callable[[AgentStreamEvent], Awaitable[None]]] = None,
     ) -> None:
         """Persist + fan out ``approval_resolved`` for the answered cards.
 
@@ -207,7 +308,7 @@ class PublicationMixin(SessionState):
             )
             event = redact_event(event)
             try:
-                await self._publish(event)
+                await (publisher or self._publish)(event)
             except Exception:
                 logger.exception(
                     "agent_stream store append failed for approval_resolved session %s",

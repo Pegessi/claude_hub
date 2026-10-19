@@ -327,7 +327,12 @@ class SessionCore(ABC):
             try:
                 if images:
                     self._stage_images(images)
-                prompt, seed_included = await self._with_first_turn_prefixes(text)
+                try:
+                    prompt, seed_included = await self._with_first_turn_prefixes(text)
+                except asyncio.CancelledError:
+                    self._clear_staged_images()
+                    self._end_turn()
+                    raise
                 await self._send_text(prompt)
                 await self._on_turn_sent()
                 # The provider accepted the turn; commit the one-shot fork
@@ -377,13 +382,38 @@ class SessionCore(ABC):
         if not service.is_dot_tab(raw_tab_id):
             return ""
         tab_id = str(raw_tab_id)
+        prepare_task = asyncio.create_task(
+            asyncio.to_thread(service.prepare_turn, text, self._conversation_id)
+        )
+        cancellation: Optional[asyncio.CancelledError] = None
+        while not prepare_task.done():
+            try:
+                await asyncio.shield(prepare_task)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+                continue
+            except Exception:
+                break
         try:
-            plan = await asyncio.to_thread(service.prepare_turn, text, self._conversation_id)
+            plan = prepare_task.result()
         except Exception:
             self._runtime.logger().exception(
                 "Dot context preparation failed; sending the turn without it"
             )
+            if cancellation is not None:
+                raise cancellation
             return ""
+        if cancellation is not None:
+            try:
+                service.request_rotation(
+                    prepared_generation=plan.prepared_generation,
+                    tab_id=tab_id,
+                )
+            except Exception:
+                self._runtime.logger().exception(
+                    "Dot context preparation cancellation retry marker failed"
+                )
+            raise cancellation
         if plan.rotate:
             try:
                 conversation_id = await self.rotate_conversation()
