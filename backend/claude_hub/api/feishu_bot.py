@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -43,6 +44,7 @@ from claude_hub.services.agent_stream.turn_source import (
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotConfig,
+    FeishuBotError,
     FeishuBotProfile,
     FeishuBotRemoteError,
     FeishuMessageDedupStore,
@@ -85,7 +87,10 @@ from claude_hub.services.feishu_bot_websocket import (
     FeishuBotWebSocketSupervisor,
     message_event_from_sdk,
 )
-from claude_hub.services.feishu_message_format import build_feishu_message_payload
+from claude_hub.services.feishu_message_format import (
+    build_feishu_card_payload,
+    build_feishu_message_payload,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/feishu/bot", tags=["feishu-bot"])
@@ -495,8 +500,11 @@ def feishu_bound_to_tab(tab_id: str) -> bool:
         return False
 
 
-async def push_to_tab(tab_id: str, text: str) -> bool:
-    """Push an unsolicited message to the Feishu chat bound to a tab."""
+async def push_to_tab(
+    tab_id: str, text: str, *, title: str | None = None, tone: str = "info"
+) -> bool:
+    """Push an unsolicited message to the Feishu chat bound to a tab: a card with a
+    coloured title when ``title`` is given (a post when Feishu refuses the card)."""
     try:
         entry = _bot_bound_to_tab(tab_id)
         if entry is None or entry.binding is None:
@@ -506,18 +514,31 @@ async def push_to_tab(tab_id: str, text: str) -> bool:
     except FeishuBotPoolError:
         return False
     client = FeishuBotClient(effective.config)
-    payload = build_feishu_message_payload(text)
+    payloads = [build_feishu_message_payload(text)]
+    if title and title.strip():
+        card = build_feishu_card_payload(title, text, tone)
+        if card.msg_type == "interactive":
+            payloads.insert(0, card)
     try:
         # Token acquisition can block on Feishu and must stay outside the gate.
         await client.get_tenant_token()
         async with _gate(effective.bot_id):
-            if not _pool.is_current(effective) or not _binding_still_routes(effective, binding):
-                return False
-            await asyncio.wait_for(
-                client.send_message(binding.chat_id, payload.msg_type, payload.content),
-                timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
-            )
-            return True
+            for index, payload in enumerate(payloads):
+                if not _pool.is_current(effective) or not _binding_still_routes(effective, binding):
+                    return False
+                try:
+                    await asyncio.wait_for(
+                        client.send_message(binding.chat_id, payload.msg_type, payload.content),
+                        timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
+                    )
+                except (FeishuBotError, httpx.HTTPStatusError):
+                    # Feishu refused the card (no card scope, bad layout): send it plain.
+                    if index + 1 < len(payloads):
+                        logger.warning("Feishu Bot card refused; sending it as a post")
+                        continue
+                    raise
+                return True
+            return False
     except Exception as exc:
         logger.warning("Feishu Bot push failed: %s", type(exc).__name__)
         return False

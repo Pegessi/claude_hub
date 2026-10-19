@@ -319,7 +319,8 @@ async def dispatch_tab_chat_and_wait(
     timeout_seconds: float | None = None,
     admission_guard: Optional[ChatAdmissionGuard] = None,
 ) -> str:
-    """Send through an existing Chat tab and return its completed assistant text.
+    """Send through an existing Chat tab and return its completed answer: the text
+    after the turn's last tool call, or all of its assistant text.
 
     This is the narrow external-conversation adapter. It shares the same
     ``TailerManager`` and provider session as the Web Chat composer and never
@@ -434,6 +435,10 @@ async def dispatch_tab_chat_and_wait(
             assistant_text = event.payload.get("assistant_text")
             if not isinstance(assistant_text, str) or not assistant_text.strip():
                 raise RuntimeError(last_error or "Chat turn completed without assistant text")
+            # A chat app gets the last answer, not the narration between tool calls.
+            final_text = event.payload.get("final_text")
+            if isinstance(final_text, str) and final_text.strip():
+                return final_text.strip()
             return assistant_text.strip()
     except asyncio.CancelledError:
         if expected_turn_id is not None:

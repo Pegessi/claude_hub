@@ -1237,6 +1237,94 @@ async def test_claude_background_result_does_not_retire_user_stream(
             await tailer.stop()
 
 
+@pytest.mark.asyncio
+async def test_claude_turn_marks_the_answer_after_its_last_tool_call(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A chat app gets the last answer; the web keeps the whole turn."""
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    native = ClaudeNativeSession(_session())
+    proc = _FakeProcess(stdout_lines=[])
+    monkeypatch.setattr(native, "_build_provider_env", AsyncMock(return_value={"PATH": "/bin"}))
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id="sess-1",
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: native.session,
+        store=AgentStreamStore("ws-1", "sess-1"),
+        native_transport=native,
+    )
+
+    def push(record: dict[str, Any]) -> None:
+        proc.stdout.push(json.dumps(record).encode() + b"\n")
+
+    async def completed(turn_id: str) -> Any:
+        while True:
+            event = await asyncio.wait_for(queue.get(), 1)
+            if event.type == AgentStreamEventType.TURN_COMPLETED and event.turn_id == turn_id:
+                return event
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        queue = await tailer.subscribe()
+        try:
+            await tailer.send_message("hello", [], client_turn_id="t-1")
+            push(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "m-1",
+                        "content": [
+                            {"type": "text", "text": "Reading the report."},
+                            {"type": "tool_use", "id": "tu-1", "name": "Bash", "input": {}},
+                        ],
+                    },
+                }
+            )
+            push(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [{"type": "tool_result", "tool_use_id": "tu-1", "content": "ok"}]
+                    },
+                }
+            )
+            push(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "m-2",
+                        "content": [{"type": "text", "text": "Done: 3 fixes."}],
+                    },
+                }
+            )
+            envelope = json.loads(proc.stdin.written[-1])
+            push({"type": "result", "subtype": "success", "user_message_uuid": envelope["uuid"]})
+            done = await completed("t-1")
+            assert "Reading the report." in done.payload["assistant_text"]
+            assert done.payload["final_text"] == "Done: 3 fixes."
+
+            # No tool call: the answer is the whole text, so no second copy.
+            await tailer.send_message("again", [], client_turn_id="t-2")
+            push(
+                {
+                    "type": "assistant",
+                    "message": {"id": "m-3", "content": [{"type": "text", "text": "Hi."}]},
+                }
+            )
+            envelope = json.loads(proc.stdin.written[-1])
+            push({"type": "result", "subtype": "success", "user_message_uuid": envelope["uuid"]})
+            done = await completed("t-2")
+            assert done.payload["assistant_text"] == "Hi."
+            assert "final_text" not in done.payload
+        finally:
+            await tailer.stop()
+
+
 class _BlockingSubmitTransport:
     def __init__(self, *, fail: bool = False) -> None:
         self._started = True

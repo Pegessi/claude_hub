@@ -21,7 +21,7 @@ _BIDI_CONTROL_CHARACTERS = frozenset(
 class FeishuMessagePayload:
     """A Feishu message type and its JSON-compatible content mapping."""
 
-    msg_type: Literal["post", "text"]
+    msg_type: Literal["post", "text", "interactive"]
     content: Mapping[str, object]
 
 
@@ -59,6 +59,36 @@ def build_feishu_message_payload(text: str) -> FeishuMessagePayload:
             msg_type="text",
             content={"text": _bound_plain_text(_sanitize_plain_text(normalized))},
         )
+
+
+# Card header colour per kind of notice.
+FEISHU_CARD_TONES = {"done": "green", "failed": "red", "decision": "orange", "info": "blue"}
+_CARD_TITLE_MAX_CHARS = 80
+
+
+def build_feishu_card_payload(
+    title: str, markdown: str, tone: str = "info"
+) -> FeishuMessagePayload:
+    """A card with a coloured title over a Markdown body; a post when the body is
+    not safe for a card."""
+
+    heading = _sanitize_plain_text(" ".join(title.split()))[:_CARD_TITLE_MAX_CHARS]
+    body = markdown.strip()
+    if not heading:
+        return build_feishu_message_payload(body)
+    try:
+        content = _prepare_post_markdown(body) if body else ""
+    except ValueError:
+        return build_feishu_message_payload(f"**{heading}**\n\n{body}")
+    card: dict[str, object] = {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": heading},
+            "template": FEISHU_CARD_TONES.get(tone, FEISHU_CARD_TONES["info"]),
+        },
+        "body": {"elements": [{"tag": "markdown", "content": content}] if content else []},
+    }
+    return FeishuMessagePayload(msg_type="interactive", content=card)
 
 
 def _prepare_post_markdown(markdown: str) -> str:

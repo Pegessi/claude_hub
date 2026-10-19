@@ -180,7 +180,12 @@ change does not itself restart the service, rotate Dot, or edit its live memory 
 `claude-hub dot delegate` builds a brief from the template, registers and
 starts a Hub Task, and records it in `work.json` (before it starts, so a task
 that fails to start is still tracked; retry it with the same
-`--request-key`). `claude-hub dot watch <task_id>` (or the Work tab in the
+`--request-key`). `--session <id>` runs it in an existing agent session of
+that workspace (for example one set to a model the user chose); the task then
+runs as that session's agent. A Hub Task started from the Dot Chat another way
+(its source is the Dot tab, e.g. `task register`) is watched on the next
+watcher pass, so its result wakes Dot too; one unwatched by hand stays
+unwatched. `claude-hub dot watch <task_id>` (or the Work tab in the
 panel) adds a Hub Task you started yourself;
 `dot unwatch` stops tracking it (the panel asks first when a review is
 waiting, since the review is dropped). Watching a watched task again keeps its
@@ -231,13 +236,25 @@ needs reporting, an exact `[quiet]` reply keeps the turn out of the chat and jou
 A wake-up reply shows in the web Chat only. Each turn's context has a
 `Reach:` line: where the turn came from (the user on Feishu, the user on the
 web, a Hub wake-up or tidy), where the answer goes, and whether a Feishu bot is
-bound to the Dot Chat. On a Hub turn with a bound bot, it suggests
-`claude-hub dot notify "<text>"` when an update should reach the user now. The
-Hub sends it to the Feishu chat bound to the Dot tab (`POST /api/dot/notify`;
-`sent: false` when no bot is bound). Known secret patterns are masked first.
+bound to the Dot Chat. On a Hub turn with a bound bot, it says the user reads
+Feishu and that a task they asked for that is done, failed or needs them goes
+there with `claude-hub dot notify "<markdown>" [--title "..." --tone
+done|failed|decision|info]`. The Hub sends it to the Feishu chat bound to the
+Dot tab (`POST /api/dot/notify`; `sent: false` when no bot is bound). With a
+title it is a card (JSON 2.0) with a coloured header (green, red, orange,
+blue) over the Markdown body; a card Feishu refuses is sent again as a post.
+Known secret patterns are masked first.
 The same text sent in the last 30 minutes is not sent again (a wake-up that
 was stopped or failed runs again and may repeat its notice); Dot gets
 `sent: false` with a reason, and can add what differs.
+
+A Feishu reply carries the last message of the turn: the text after its last
+tool call (`final_text` on the turn's completion, set by the native Claude
+consumer when it differs from the whole text). Progress notes written before
+tool calls stay in the web Chat. The Hub-kept turn rules ask Dot to work like
+a secretary (reply fast, delegate, follow up, relay results in plain words)
+and to put the whole answer in that last message: conclusion first, a few
+bullets.
 
 ### The user comes first
 

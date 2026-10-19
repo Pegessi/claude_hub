@@ -105,6 +105,10 @@ class SessionState(ABC):
         # Goal continuation turns may synthesize a completion from the signal.
         self._goal_protocol_turn: bool = False
         self._visible_assistant_text: str = ""
+        # The turn's last answer: visible text after its last tool call. A chat
+        # app gets this, not the narration between tool calls.
+        self._final_assistant_text: str = ""
+        self._final_text_after_tool: bool = False
         # Runtime status is terminalized as soon as the authoritative
         # TURN_COMPLETED event has been persisted and fanned out. The turn
         # guard (``turn_in_flight``) is also released at TURN_COMPLETED for

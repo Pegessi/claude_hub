@@ -20,6 +20,8 @@ class WatchdogMixin(SessionState):
         """Clear per-turn output buffers and external-wait tracking."""
         self._assistant_text = ""
         self._visible_assistant_text = ""
+        self._final_assistant_text = ""
+        self._final_text_after_tool = False
         self._active_tool_call_ids.clear()
         self._blocking_approval_call_ids.clear()
         self._reset_queue_wait_state()
@@ -205,6 +207,8 @@ class WatchdogMixin(SessionState):
         self._notify_post_persist(observer_event)
         self._assistant_text = ""
         self._visible_assistant_text = ""
+        self._final_assistant_text = ""
+        self._final_text_after_tool = False
         self._goal_protocol_sanitizer = None
         self._goal_protocol_turn = False
 

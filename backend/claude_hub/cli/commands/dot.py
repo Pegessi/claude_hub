@@ -127,10 +127,21 @@ def dot_rotate(ctx: click.Context) -> None:
 
 @dot.command("notify")
 @click.argument("text")
+@click.option("--title", default=None, help="Card title; without it a plain message is sent.")
+@click.option(
+    "--tone",
+    type=click.Choice(["done", "failed", "decision", "info"]),
+    default="info",
+    show_default=True,
+    help="Card colour: done green, failed red, decision orange, info blue.",
+)
 @click.pass_context
-def dot_notify(ctx: click.Context, text: str) -> None:
+def dot_notify(ctx: click.Context, text: str, title: Optional[str], tone: str) -> None:
     """Send a short message to the user's Feishu chat (the bot bound to the Dot Chat)."""
-    emit(_call(ctx, "POST", "/notify", json={"text": text}), cli_main.as_json(ctx))
+    body: dict[str, Any] = {"text": text, "tone": tone}
+    if title:
+        body["title"] = title
+    emit(_call(ctx, "POST", "/notify", json=body), cli_main.as_json(ctx))
 
 
 # ── memory ──────────────────────────────────────────────────────────────
@@ -442,6 +453,12 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
     default=None,
     help="Alert Dot when the task shows no progress this long (default: 2).",
 )
+@click.option(
+    "--session",
+    "session_id",
+    default=None,
+    help="Run it in this existing agent session (e.g. one set to a model the user chose).",
+)
 @click.option("--confirm", is_flag=True, help="Send even if the brief check warns.")
 @click.pass_context
 def dot_delegate(
@@ -459,6 +476,7 @@ def dot_delegate(
     no_start: bool,
     request_key: Optional[str],
     stall_hours: Optional[float],
+    session_id: Optional[str],
     confirm: bool,
 ) -> None:
     """Hand a job to a Hub Task with a full brief. Dot is woken when it ends.
@@ -485,6 +503,8 @@ def dot_delegate(
         body["request_key"] = request_key
     if stall_hours is not None:
         body["stall_hours"] = stall_hours
+    if session_id:
+        body["session_id"] = session_id
     result = _call(ctx, "POST", "/delegate", json=body)
     if cli_main.as_json(ctx):
         emit(result, True)

@@ -394,10 +394,38 @@ async def test_delegate_registers_and_starts_task(
     brief = created["payload"].prompt
     assert "## Goal\nSummarize FA3" in brief and "\n1. 5 bullets in notes/fa3.md" in brief
     assert created["payload"].source.tab_id == TAB_ID
+    assert not item.get("watched"), "Dot's own task, with a review"
     with pytest.raises(ValueError):
         await service.delegate(
             workspace_id="ws", title="x", goal=" ", done_when=["y"], actor_key="a"
         )
+
+    # A chosen agent session (e.g. set to a model the user picked) runs it as itself.
+    started: list[Any] = []
+
+    async def start_in(task_id: str, request: Any) -> Any:
+        started.append(request)
+        return SimpleNamespace(id=task_id, title="Audit", status=SimpleNamespace(value="queued"))
+
+    sessions = {
+        "codex-61": SimpleNamespace(workspace_id="ws", agent_type=SimpleNamespace(value="codex"))
+    }
+    monkeypatch.setattr(workspace_manager, "sessions", sessions)
+    monkeypatch.setattr(workspace_manager, "start_task", start_in)
+    audit: dict[str, Any] = dict(
+        workspace_id="ws",
+        title="Audit",
+        goal="Audit the backtest",
+        done_when=["REPORT.md lists each finding"],
+        output="REPORT.md",
+        context="repo at /src",
+        actor_key="actor",
+    )
+    await service.delegate(**audit, agent_type="claude", session_id="codex-61")
+    assert started[-1].target_session_id == "codex-61"
+    assert created["payload"].agent_type.value == "codex"
+    with pytest.raises(ValueError):
+        await service.delegate(**{**audit, "workspace_id": "ws-2"}, session_id="codex-61")
 
 
 def test_health_flags_problems(service: DotService) -> None:
@@ -836,6 +864,41 @@ def _hub_task(status: str, updated_at: datetime) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
+async def test_tasks_started_from_the_dot_chat_are_watched(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    """A task Dot started without `dot delegate` still wakes it when it ends."""
+    start = datetime.now(timezone.utc)
+
+    def task(task_id: str, status: str, tab_id: Optional[str]) -> SimpleNamespace:
+        hub = _hub_task(status, start)
+        hub.id = task_id
+        hub.source = SimpleNamespace(kind="chat", tab_id=tab_id) if tab_id else None
+        return hub
+
+    tasks: dict[str, Any] = {
+        "own": task("own", "working", TAB_ID),
+        "other-chat": task("other-chat", "working", "tab-other"),
+        "no-source": task("no-source", "working", None),
+        "own-done": task("own-done", "done", TAB_ID),
+    }
+    monkeypatch.setattr(workspace_manager, "tasks", tasks)
+    monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _id: [])
+    assert await service.check_work() == 0
+    assert [item["task_id"] for item in service.store.list_work()] == ["own"]
+    assert service.store.get_work("own")["watched"]  # type: ignore[index]
+
+    tasks["own"] = task("own", "review", TAB_ID)
+    assert await service.check_work() == 1, "its result wakes Dot"
+
+    # Stopped by hand: it stays stopped.
+    await service.unwatch("own")
+    tasks["own"] = task("own", "working", TAB_ID)
+    assert await service.check_work() == 0
+    assert service.store.list_work() == []
+
+
+@pytest.mark.asyncio
 async def test_watch_an_existing_task_and_alarm_once_per_stall(
     service: DotService, monkeypatch: MonkeyPatch
 ) -> None:
@@ -1161,13 +1224,13 @@ def test_each_turn_says_where_it_came_from_and_where_the_answer_goes(
         pack = service.prepare_turn(text, "conv-1").turn_pack
         return next(line for line in pack.splitlines() if line.startswith("Reach: "))
 
-    assert "from Feishu; your answer goes back" in reach(feishu)
+    assert "from Feishu; the last message of your turn goes back" in reach(feishu)
     assert "notify" not in reach(feishu)
     assert "web Chat; your answer shows there" in reach("hi")
     assert "they are here now" in reach("hi")
     woke = reach(WAKE_MESSAGE)
-    assert "web Chat only" in woke and "Consider `claude-hub dot notify`" in woke
-    assert "should reach the user now" in woke
+    assert "web Chat only" in woke and "goes there with `claude-hub dot notify`" in woke
+    assert "done, failed or needs them" in woke
     assert "Hub tidy" in reach(TIDY_MESSAGE)
     bound = False
     assert "No Feishu bot is bound" in reach(WAKE_MESSAGE)
@@ -1183,10 +1246,12 @@ async def test_dot_decides_what_reaches_feishu(
     _system_runs(service, monkeypatch)
     monkeypatch.setattr(service, "sync_journal", AsyncMock(return_value=0))
     pushed: list[tuple[str, str]] = []
+    cards: list[dict[str, Any]] = []
     bound = True
 
-    async def push(tab_id: str, text: str) -> bool:
+    async def push(tab_id: str, text: str, **card: Any) -> bool:
         pushed.append((tab_id, text))
+        cards.append(card)
         return bound
 
     monkeypatch.setattr(bot_api, "push_to_tab", push)
@@ -1204,6 +1269,12 @@ async def test_dot_decides_what_reaches_feishu(
     assert pushed == [(TAB_ID, "Paper task is done. Key [REDACTED]")]
     assert await service.notify("Paper task is done. Key " + key) == "repeat"
     assert len(pushed) == 1, "a wake-up that ran again does not send it twice"
+    assert cards == [{"title": None, "tone": "info"}]
+    # A card is its own notice, even with the same body.
+    assert await service.notify("Paper task is done. Key " + key, title="Paper", tone="done") == (
+        "sent"
+    )
+    assert cards[-1] == {"title": "Paper", "tone": "done"}
     bound = False
     assert await service.notify("No bot bound") == "failed"
 
