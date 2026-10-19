@@ -9,7 +9,7 @@ import hashlib
 import json
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -49,6 +49,15 @@ class SetupRequest(BaseModel):
 
     env: Optional[Dict[str, str]] = None
     env_preset: Optional[str] = Field(default=None, max_length=200)
+
+
+class ExecutionUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    expected_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    agent_type: Literal["claude", "codex", "cursor", "traex", "maso"]
+    # Full replacement is required: another provider never inherits old credentials.
+    env: Dict[str, str]
 
 
 class FileUpload(BaseModel):
@@ -205,6 +214,47 @@ async def dot_setup(
     except TabLimitExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from None
     return service.status()
+
+
+@router.get("/execution")
+async def dot_execution(
+    response: Response, current_user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    from ..services.dot.execution import execution_view
+
+    response.headers["Cache-Control"] = "no-store"
+    return execution_view(_service())
+
+
+@router.put("/execution")
+async def dot_update_execution(
+    payload: ExecutionUpdate,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from ..models.schemas import AgentType
+    from ..services.agent_stream.maso_http import MasoServiceUnavailable
+    from ..services.dot.execution import DotExecutionConflict, switch_execution
+    from ..services.ttyd_manager import TabStartupTimeoutError
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await switch_execution(
+            _service(),
+            expected_revision=payload.expected_revision,
+            agent_type=AgentType(payload.agent_type),
+            env=payload.env,
+        )
+    except DotExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except TabLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from None
+    except (MasoServiceUnavailable, TabStartupTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
 
 
 @router.get("/identity")

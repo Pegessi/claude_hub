@@ -7,6 +7,19 @@
 
 ## Released
 
+### feat(dot): configure and switch the execution backend
+
+- Add a separate execution editor for Claude, Codex, Cursor, TraeX and MASO,
+  with provider-specific environment drafts, MASO readiness checks and explicit retry.
+- Create a fresh Dot Chat when execution settings change; archive the previous
+  Chat and retain its history, Dot memory, focus, watched work and standing schedules.
+  Never reuse another provider's conversation id or implicitly inherit its env.
+- Share Dot context preparation and delivery acknowledgement across native providers,
+  with provider-owned conversation rotation and the available instruction channels.
+- Reject unsafe switches during active/unfinished turns, pending delivery, Goals,
+  Feishu bindings or other enabled schedules. Preserve schedule settings and recover
+  interrupted replacements before accepting more input.
+
 ### fix(feishu): tolerate small clock skew and distinguish pre-dispatch rejection
 
 - Allow a configurable future-message clock offset (5 seconds by default) without

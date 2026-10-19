@@ -25,6 +25,7 @@ class _SchedulingHost(_WorkspaceManagerBase):
         statuses: set[ScheduledTaskRunStatus],
         reason: str,
         now: datetime,
+        tab_id: Optional[str] = None,
     ) -> int: ...
 
     @abstractmethod

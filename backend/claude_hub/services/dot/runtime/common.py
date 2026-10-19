@@ -80,7 +80,8 @@ class TurnPlan:
     """What the provider transport must apply before sending one Dot turn."""
 
     rotate: bool
-    conversation_id: Optional[str]
+    new_session: bool
+    prepared_generation: str
     system_pack: str
     turn_pack: str
     # Inbox events shown in ``turn_pack``; ack them only once the turn is sent.

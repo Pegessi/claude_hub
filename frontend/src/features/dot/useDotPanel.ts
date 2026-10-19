@@ -86,6 +86,7 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
   const { identity, setIdentity } = useDotIdentity()
   const terminalStore = useTerminalStore()
   const editingIdentity = ref(false)
+  const executionBusy = ref(false)
   const nameDraft = ref('')
   const avatarDraft = ref('')
   let searchTimer: ReturnType<typeof setTimeout> | null = null
@@ -211,9 +212,18 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
   }
 
   function toggleIdentityEditor() {
+    if (executionBusy.value) return
     editingIdentity.value = !editingIdentity.value
     nameDraft.value = identity.value.name
     avatarDraft.value = identity.value.avatar
+  }
+
+  function setExecutionBusy(busy: boolean) {
+    executionBusy.value = busy
+  }
+
+  function closePanel() {
+    if (!executionBusy.value) events.close()
   }
 
   function saveIdentity() {
@@ -300,7 +310,7 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') events.close()
+    if (event.key === 'Escape') closePanel()
   }
 
   watch(
@@ -358,6 +368,7 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
       watchStallHours,
       identity,
       editingIdentity,
+      executionBusy,
       nameDraft,
       avatarDraft,
       causeText,
@@ -370,6 +381,9 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
       saveLesson,
       dropLesson,
       toggleIdentityEditor,
+      setExecutionBusy,
+      closePanel,
+      loadSection,
       saveIdentity,
       uploadAvatar,
       removeAvatar,

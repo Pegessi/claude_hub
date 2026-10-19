@@ -9,9 +9,12 @@ const source = read('../src/utils/dotApi.ts')
 const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 } }).outputText
 const api = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
 const response = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+const revision = 'a'.repeat(64)
 
 const cases = [
   ['loadDotStatus', [], 'GET', '/api/dot/status', undefined],
+  ['loadDotExecution', [], 'GET', '/api/dot/execution', undefined],
+  ['updateDotExecution', [{ expected_revision: revision, agent_type: 'codex', env: {} }], 'PUT', '/api/dot/execution', { expected_revision: revision, agent_type: 'codex', env: {} }],
   ['setupDot', [], 'POST', '/api/dot/setup', { env: null }],
   ['setupDot', [{ ANTHROPIC_MODEL: 'm' }], 'POST', '/api/dot/setup', { env: { ANTHROPIC_MODEL: 'm' } }],
   ['loadDotHealth', [], 'GET', '/api/dot/health', undefined],
@@ -93,6 +96,25 @@ test('first-pass rate and review coverage read plainly', () => {
   assert.equal(api.formatFirstPass({ reviewed: 4, first_pass: 3, rate: 0.75 }), 'First pass 3/4 (75%)')
   assert.equal(api.formatReviewCoverage({ judged: 4, returned: 5 }), 'judged 4/5 returned')
   assert.equal(api.formatReviewCoverage({ judged: 0, returned: 0 }), '')
+})
+
+test('Dot execution editor replaces provider env and preserves recoverable drafts', () => {
+  const editor = read('../src/features/dot/DotExecutionEditor.vue')
+  const panel = read('../src/features/dot/DotPanel.vue')
+  assert.match(panel, /<DotExecutionEditor[\s\S]*@busy-change="setExecutionBusy"[\s\S]*@updated="loadSection"/)
+  assert.ok(editor.includes("draftPreset.value = defaultLaunchEnvPresetForAgent(provider)"))
+  assert.ok(editor.includes("draftEnv.value = envFromText(defaultPresetTextForAgent(provider))"))
+  assert.ok(editor.includes('if (provider && next.agent_type === provider)'))
+  assert.ok(!editor.includes('...execution.value.env'), 'backend changes must not spread the old env')
+  assert.match(editor, /env: draftEnv\.value/)
+  assert.ok(editor.includes("applyErrorStatus === 409"))
+  assert.ok(editor.includes('Reload configuration'))
+  assert.match(editor, /oldDotWasActive[\s\S]*terminalStore\.setActiveTab\(pending\.newTabId\)/)
+  assert.ok(editor.includes('await refreshCommittedTabs()'))
+  assert.ok(editor.includes('Retry tab refresh'))
+  assert.equal((editor.match(/updateDotExecution\(/g) ?? []).length, 1)
+  assert.ok(editor.includes('Applying this creates a fresh Dot chat and archives the current chat.'))
+  assert.ok(editor.includes("draftAgentType.value === 'maso' && masoState.value !== 'available'"))
 })
 
 test('Dot panel covers focus, work, lessons, memory and health', () => {

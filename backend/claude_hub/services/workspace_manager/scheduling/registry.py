@@ -309,13 +309,16 @@ class _ScheduleRegistryMixin(_SchedulingHost):
                 await self._drain_scheduled_chat_runs(tab_id)
         return count
 
-    def drop_pending_scheduled_task_runs(self, task_id: str, reason: str) -> int:
-        """Cancel queued and waiting runs without draining their Chat tab."""
+    def drop_pending_scheduled_task_runs(
+        self, task_id: str, reason: str, *, tab_id: Optional[str] = None
+    ) -> int:
+        """Cancel queued/waiting runs, optionally for one target, without draining."""
         count = self._cancel_scheduled_task_runs(
             task_id,
             statuses={ScheduledTaskRunStatus.QUEUED, ScheduledTaskRunStatus.WAITING},
             reason=reason,
             now=self._runtime_now(),
+            tab_id=tab_id,
         )
         if count:
             self._save_scheduled_tasks()

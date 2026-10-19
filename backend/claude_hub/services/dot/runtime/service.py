@@ -25,15 +25,18 @@ class DotService(DotWorkService):
         """Change Dot's name/avatar; a new name renames the tab and starts a fresh session."""
         from ... import ttyd_manager
 
-        before = self.store.read_identity()
-        identity = self.store.update_identity(name=name, avatar=avatar, avatar_image=avatar_image)
-        if identity["name"] != before["name"]:
-            self.request_rotation()
-            tab_id = self.tab_id()
-            if tab_id:
-                ttyd_manager.rename_tab(tab_id, identity["name"])
-        await asyncio.to_thread(self.store.commit, "dot: identity")
-        return identity
+        async with self.setup_lock():
+            before = self.store.read_identity()
+            identity = self.store.update_identity(
+                name=name, avatar=avatar, avatar_image=avatar_image
+            )
+            if identity["name"] != before["name"]:
+                self.request_rotation()
+                tab_id = self.tab_id()
+                if tab_id:
+                    ttyd_manager.rename_tab(tab_id, identity["name"])
+            await asyncio.to_thread(self.store.commit, "dot: identity")
+            return identity
 
     async def wake(self) -> bool:
         """Queue one wake-up turn in the Dot Chat (coalesced by the scheduler)."""

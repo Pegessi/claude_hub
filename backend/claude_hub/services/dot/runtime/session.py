@@ -164,6 +164,12 @@ class DotSessionService(object):
         if ids:
             self.store.mark_inbox_unread(ids)
 
+    def setup_lock(self) -> asyncio.Lock:
+        """Serialize setup, identity edits and execution replacement on one owner."""
+        if self._setup_lock is None:
+            self._setup_lock = asyncio.Lock()
+        return self._setup_lock
+
     async def ensure_tab(self, env: Optional[dict[str, str]] = None) -> str:
         """Create (or reuse) the Dot Chat tab and its standing schedules.
 
@@ -172,9 +178,10 @@ class DotSessionService(object):
         existing tab.
         """
         # Two setups at once (double click, CLI) must not create two tabs.
-        if self._setup_lock is None:
-            self._setup_lock = asyncio.Lock()
-        async with self._setup_lock:
+        async with self.setup_lock():
+            from ..execution import recover_execution_locked
+
+            await recover_execution_locked(self)
             return await self._ensure_tab(env)
 
     async def _ensure_tab(self, env: Optional[dict[str, str]]) -> str:
@@ -187,13 +194,16 @@ class DotSessionService(object):
         if tab is not None and getattr(tab, "archived", False):
             await ttyd_manager.unarchive_tab(tab.id)
         if tab is None:
+            agent_type = AgentType(self._peek_state().get("execution_agent_type", "claude"))
+            # Legacy setup callers supply a Claude env. Never copy that into a
+            # different backend when restoring a deleted Dot tab.
             created = await ttyd_manager.create_tab(
                 name=self.store.read_identity()["name"],
                 cwd=str(self.store.home),
                 solo_mode=True,
-                agent_type=AgentType.CLAUDE,
+                agent_type=agent_type,
                 session_kind=SessionKind.CHAT,
-                env=env or None,
+                env=(env or None) if agent_type == AgentType.CLAUDE else None,
             )
             tab_id = created.id
             self.store.update_state(
@@ -214,17 +224,18 @@ class DotSessionService(object):
         Such a tab has no working provider yet, so setup may give it ``env``;
         a tab whose env the user chose keeps it.
         """
+        from ....models.schemas import AgentType
         from ... import ttyd_manager
         from ...ttyd_manager import DEFAULT_CLAUDE_LAUNCH_ENV
 
         tab_id = self.tab_id()
         tab = ttyd_manager.get_tab(tab_id) if tab_id and env else None
-        if tab is None:
+        if tab is None or getattr(tab, "agent_type", AgentType.CLAUDE) != AgentType.CLAUDE:
             return False
         current = dict(getattr(tab, "env", None) or {})
         return current in ({}, DEFAULT_CLAUDE_LAUNCH_ENV) and current != dict(env or {})
 
-    def ensure_schedules(self, tab_id: str) -> None:
+    def ensure_schedules(self, tab_id: str, *, migrate: bool = False) -> None:
         """Keep the wake-up and nightly tidy Chat schedules pointing at the Dot tab."""
         from ....models.schemas import (
             ScheduledTaskCreate,
@@ -253,6 +264,14 @@ class DotSessionService(object):
         for key, name, timing, message, retired_messages in timings:
             existing = workspace_manager.scheduled_tasks.get(state.get(key) or "")
             if existing is not None:
+                if migrate:
+                    # An explicit provider switch preserves timing, text and the
+                    # user's enabled/disabled choice, even for retired defaults.
+                    if existing.tab_id != tab_id:
+                        workspace_manager.update_scheduled_task(
+                            existing.id, ScheduledTaskUpdate(tab_id=tab_id)
+                        )
+                    continue
                 update: dict[str, Any] = {}
                 if existing.tab_id != tab_id:
                     # The Hub turns off a schedule whose Chat was deleted. Its time is
@@ -335,8 +354,9 @@ class DotSessionService(object):
             or (same_session and started is not None and now - started > MAX_SESSION_AGE)
         )
         new_session = rotate or not same_session
-        if rotate:
-            conversation_id = str(uuid.uuid4())
+        prepared_generation = str(state.get("session_prepared_generation") or "")
+        if new_session or not prepared_generation:
+            prepared_generation = str(uuid.uuid4())
         if new_session:
             turns = 0
             system_pack = build_session_pack(self.store)
@@ -379,7 +399,10 @@ class DotSessionService(object):
             # Counted as a tidy only when the turn ends well (see ``_turn_ended``).
             sent["tidy"] = True
         updates: dict[str, Any] = {
-            "session_conversation_id": conversation_id,
+            # Rotation is provider-owned. Until it succeeds, no provider id is
+            # associated with this prepared generation.
+            "session_conversation_id": None if rotate else conversation_id,
+            "session_prepared_generation": prepared_generation,
             "session_turns": turns,
             "session_pack": system_pack,
             # A tidy runs in its own session; the next real turn starts clean.
@@ -391,11 +414,55 @@ class DotSessionService(object):
         self.store.update_state(**updates)
         return TurnPlan(
             rotate=rotate,
-            conversation_id=conversation_id,
+            new_session=new_session,
+            prepared_generation=prepared_generation,
             system_pack=system_pack,
             turn_pack=pack.text,
             delivered_event_ids=delivered,
         )
+
+    def associate_conversation(
+        self,
+        conversation_id: str,
+        *,
+        prepared_generation: str,
+        tab_id: str,
+    ) -> bool:
+        """Associates a prepared Dot session with its provider-owned identity."""
+        if not conversation_id or not prepared_generation or not tab_id:
+            return False
+        self.store.ensure()
+        with self.store.lock:
+            state = self.store.read_state()
+            if state.get("tab_id") != tab_id:
+                return False
+            if state.get("session_prepared_generation") != prepared_generation:
+                return False
+            current = state.get("session_conversation_id")
+            if current is not None:
+                return isinstance(current, str) and current == conversation_id
+            self.store.update_state(session_conversation_id=conversation_id)
+            return True
+
+    def clear_conversation_association(
+        self,
+        conversation_id: str,
+        *,
+        prepared_generation: str,
+        tab_id: str,
+    ) -> bool:
+        """Clears only the still-current failed rotation association."""
+        self.store.ensure()
+        with self.store.lock:
+            state = self.store.read_state()
+            if state.get("tab_id") != tab_id:
+                return False
+            if state.get("session_prepared_generation") != prepared_generation:
+                return False
+            if state.get("session_conversation_id") != conversation_id:
+                return False
+            self.store.update_state(session_conversation_id=None)
+            return True
 
     def _turn_ended(
         self, started_at: Any, until: Any, ended_at: Any, failed: bool, cancelled: bool = False
@@ -463,8 +530,23 @@ class DotSessionService(object):
                     self.store.update_state(sent_turns=sent)
                     break
 
-    def request_rotation(self) -> None:
-        self.store.update_state(rotate_requested=True)
+    def request_rotation(
+        self,
+        *,
+        prepared_generation: Optional[str] = None,
+        tab_id: Optional[str] = None,
+    ) -> bool:
+        with self.store.lock:
+            state = self.store.read_state()
+            if tab_id is not None and state.get("tab_id") != tab_id:
+                return False
+            if (
+                prepared_generation is not None
+                and state.get("session_prepared_generation") != prepared_generation
+            ):
+                return False
+            self.store.update_state(rotate_requested=True)
+            return True
 
     async def notify(self, text: str) -> str:
         """Dot chose to reach the user now: send ``text`` to the Feishu chat bound

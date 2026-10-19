@@ -38,6 +38,7 @@ class ClaudeSession(ProcessSession):
     # Image support uses the SDKUserMessage image content block. Marked True
     # only after the envelope was validated against the installed CLI.
     supports_images = True
+    supports_native_system_instructions = True
     goal_usage_quality = "exact"
 
     def __init__(
@@ -55,9 +56,6 @@ class ClaudeSession(ProcessSession):
         )
         # Staged image bytes for the next turn's user message content blocks.
         self._staged_images: List[bytes] = []
-        # Dot tab only: the session pack appended to the system prompt.
-        self._dot_system_pack: str = ""
-        self._dot_event_ids: List[str] = []
         self._network_settings_by_gen: Dict[int, Path] = {}
         self._validated_tab_settings_payload: Optional[Dict[str, Any]] = None
         self._validated_claude_launch_env: Optional[Dict[str, str]] = None
@@ -232,47 +230,8 @@ class ClaudeSession(ProcessSession):
             return [self._runtime.default_mode(), self._runtime.plan_mode()]
         return [self._runtime.default_mode()]
 
-    async def _prepare_turn_context(self, text: str) -> str:
-        """Dot tab only: fresh context pack, stable session pack and rotation."""
-        self._dot_event_ids = []
-        from ...dot import get_dot_service
-
-        service = get_dot_service()
-        if not service.is_dot_tab(getattr(self.session, "tab_id", None)):
-            return ""
-        if not text:
-            # An image-only turn carries no pack, but keeps Dot's role (after a
-            # restart the session pack is not loaded yet).
-            if not self._dot_system_pack:
-                self._dot_system_pack = service.session_pack()
-            return ""
-        try:
-            plan = await asyncio.to_thread(service.prepare_turn, text, self._conversation_id)
-        except Exception:
-            self._runtime.logger().exception(
-                "Dot context preparation failed; sending the turn without it"
-            )
-            return ""
-        if plan.rotate and plan.conversation_id:
-            # Start a new provider conversation: ``--session-id`` creates it and
-            # the init record persists it, exactly like a fresh tab.
-            self._conversation_id = plan.conversation_id
-            self._conversation_id_verified = False
-            self._hub_runtime_guidance_injected = False
-        self._dot_system_pack = plan.system_pack
-        self._dot_event_ids = plan.delivered_event_ids
-        return plan.turn_pack
-
-    async def _on_turn_sent(self) -> None:
-        event_ids, self._dot_event_ids = self._dot_event_ids, []
-        if not event_ids:
-            return
-        from ...dot import get_dot_service
-
-        try:
-            await asyncio.to_thread(get_dot_service().mark_delivered, event_ids)
-        except Exception:
-            self._runtime.logger().exception("Dot inbox ack failed")
+    async def rotate_conversation(self) -> str:
+        return str(uuid4())
 
     def _resume_arg(self) -> List[str]:
         """Claude: ``--session-id`` creates the conversation; ``--resume``

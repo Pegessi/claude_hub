@@ -1228,7 +1228,10 @@ async def main(browser_run: BrowserRun) -> None:
         assert await tool_result.evaluate("element => element.scrollHeight > element.clientHeight")
         await tool_result.focus()
         await tool_result.press("PageDown")
-        assert await tool_result.evaluate("element => element.scrollTop > 0")
+        # Keyboard scrolling is applied on a later browser frame.
+        await page.wait_for_function(
+            "element => element.scrollTop > 0", arg=await tool_result.element_handle()
+        )
         await page.screenshot(path=str(tool_evidence / "bulk-expanded.png"), full_page=True)
 
         # Folding the memoized historical process unmounts the card, but its

@@ -264,11 +264,16 @@ class _ScheduledChatRunsMixin(_SchedulingHost):
         statuses: set[ScheduledTaskRunStatus],
         reason: str,
         now: datetime,
+        tab_id: Optional[str] = None,
     ) -> int:
         """Move matching active runs of one task to CANCELLED. Returns count."""
         count = 0
         for run in self.scheduled_task_runs.values():
-            if run.scheduled_task_id == task_id and run.status in statuses:
+            if (
+                run.scheduled_task_id == task_id
+                and run.status in statuses
+                and (tab_id is None or run.tab_id == tab_id)
+            ):
                 run.status = ScheduledTaskRunStatus.CANCELLED
                 run.error = reason
                 run.waiting_reason = None

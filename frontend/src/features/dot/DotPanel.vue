@@ -4,7 +4,7 @@
       <div
         v-if="open"
         class="dot-overlay"
-        @click.self="$emit('close')"
+        @click.self="closePanel"
       >
         <aside
           class="dot-panel"
@@ -33,6 +33,7 @@
               type="button"
               class="ch-btn ch-btn--ghost ch-btn--sm"
               :aria-expanded="editingIdentity"
+              :disabled="executionBusy"
               @click="toggleIdentityEditor"
             >
               {{ editingIdentity ? 'Cancel' : 'Edit' }}
@@ -41,7 +42,8 @@
               type="button"
               class="dot-panel__close"
               :aria-label="`Close ${identity.name} memory`"
-              @click="$emit('close')"
+              :disabled="executionBusy"
+              @click="closePanel"
             >
               ×
             </button>
@@ -106,6 +108,13 @@
               Save
             </button>
           </form>
+
+          <DotExecutionEditor
+            v-if="editingIdentity"
+            :disabled="loading"
+            @busy-change="setExecutionBusy"
+            @updated="loadSection"
+          />
 
           <div class="dot-panel__tabs">
             <div
@@ -557,6 +566,7 @@
 
 <script setup lang="ts">
 import DotAvatar from '@/components/DotAvatar.vue'
+import DotExecutionEditor from './DotExecutionEditor.vue'
 import { useDotPanel, type DotPanelProps } from './useDotPanel'
 
 const props = defineProps<DotPanelProps>()
@@ -565,10 +575,10 @@ const {
   SECTIONS, KINDS, DEFAULT_STALL_HOURS, STALL_CHOICES, ALERT_EVENTS, section, loading, errorText, status,
   focus, work, inbox, cards, health, lessons, reviewStats, newLesson, editingLesson,
   lessonDraft, selectedCard, newFocus, newPriority, searchText, kindFilter, watchId,
-  watchStallHours, identity, editingIdentity, nameDraft, avatarDraft, causeText, cardTotal,
+  watchStallHours, identity, editingIdentity, executionBusy, nameDraft, avatarDraft, causeText, cardTotal,
   ago, addFocus, closeFocus, addLesson, editLesson, saveLesson, dropLesson,
-  toggleIdentityEditor, saveIdentity, uploadAvatar, removeAvatar, watchTask, unwatchTask,
-  ackInbox, openCard, closeCard, archiveCard, formatFirstPass, formatReviewCoverage,
+  toggleIdentityEditor, setExecutionBusy, closePanel, loadSection, saveIdentity, uploadAvatar, removeAvatar,
+  watchTask, unwatchTask, ackInbox, openCard, closeCard, archiveCard, formatFirstPass, formatReviewCoverage,
 } = useDotPanel(props, { close: () => emit('close') })
 </script>
 
