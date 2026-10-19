@@ -7,6 +7,21 @@
 
 ## Released
 
+### feat(chat): render isolated HTML attachment pages
+
+- Render static HTML/HTM documents in the shared attachment viewer, preserving
+  authored styling and embedded raster images with an exact-source toggle.
+- Remove authored scripts, forms and active embeds; use an opaque sandbox and
+  restrictive CSP. A nonce-only bridge handles fragments and Escape without
+  adding iframe entries to Chat history. Truncated HTML stays source-only.
+- Resolve exact registered initiator Task HTML artifacts outside Chat cwd through
+  an authenticated JSON reader, with canonical local-owner and post-read checks.
+  Never grant a containing directory or execute server-side HTML.
+- Recognize same-origin HTML file links and redirect old missing HTML web paths
+  to the registered reader while preserving ordinary static/API behavior.
+- Keep same-epoch artifact references when execution is released without new
+  references; other progress updates and handoffs retain replacement semantics.
+
 ### fix(chat): preserve navigation and readability in attachment previews
 
 - Distinguish preview-owned history transitions from real Chat navigation, so

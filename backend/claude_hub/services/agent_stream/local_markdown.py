@@ -91,6 +91,25 @@ def read_text_preview(
         data, size = _read_beneath(root, relative)
     except (OSError, RuntimeError, ValueError):
         raise MarkdownUnavailable() from None
+    return _decode_preview(path, data, size)
+
+
+def read_authorized_text_preview(path: Path) -> WorkspaceArtifactPreview:
+    """Read one already-authorized absolute path without following symlinks.
+
+    Callers must verify an exact file grant before and after the threaded read;
+    this helper deliberately grants neither the parent directory nor siblings.
+    """
+    if not path.is_absolute() or ".." in path.parts:
+        raise MarkdownUnavailable()
+    try:
+        data, size = _read_beneath(Path(path.anchor), path.relative_to(path.anchor))
+    except (OSError, RuntimeError, ValueError):
+        raise MarkdownUnavailable() from None
+    return _decode_preview(path, data, size)
+
+
+def _decode_preview(path: Path, data: bytes, size: int) -> WorkspaceArtifactPreview:
     truncated = len(data) > MARKDOWN_PREVIEW_MAX_BYTES
     try:
         content = (

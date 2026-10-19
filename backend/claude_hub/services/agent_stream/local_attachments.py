@@ -6,7 +6,7 @@ from typing import Literal
 from claude_hub.models import ManagedSession, StreamAttachmentPreview
 from claude_hub.services.agent_stream.local_markdown import read_text_preview
 
-_AttachmentKind = Literal["markdown", "code", "data", "text"]
+_AttachmentKind = Literal["markdown", "html", "code", "data", "text"]
 _AttachmentFormat = tuple[_AttachmentKind, str]
 
 # These are display hints only. Every allowed file is UTF-8-validated and returned
@@ -50,8 +50,8 @@ _SUFFIX_FORMATS: dict[str, _AttachmentFormat] = {
     ".css": ("code", "css"),
     ".scss": ("code", "scss"),
     ".less": ("code", "less"),
-    ".html": ("code", "xml"),
-    ".htm": ("code", "xml"),
+    ".html": ("html", "xml"),
+    ".htm": ("html", "xml"),
     ".vue": ("code", "xml"),
     ".svelte": ("code", "xml"),
     ".json": ("data", "json"),

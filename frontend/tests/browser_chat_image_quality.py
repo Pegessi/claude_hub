@@ -1,7 +1,7 @@
 """Exercise Chat image fidelity and the Cursor sub-agent card in the real SPA.
 
 Run only with a task-owned Vite server, never 5173/8173:
-  python tests/browser_chat_image_quality.py <owned-loopback-url> <new-output-dir> <browser>
+  python tests/browser_chat_image_quality.py <owned-loopback-url> <new-output-dir> <browser> [--html-report FILE]
 
 All APIs are mocked. No Hub backend or provider is contacted.
 """
@@ -29,6 +29,11 @@ OTHER_TAB = "other-image-tab"
 THIRD_TAB = "third-image-tab"
 LONG_FILENAME = "generated_output_" * 13 + ".py"
 LONG_CODE_SOURCE = "print('This source must remain readable')\n" * 50
+REGISTERED_HTML_PATH = "/fixture/task-assets/report.html"
+UNREGISTERED_HTML_PATH = "/fixture/unregistered.html"
+UNAUTHORIZED_HTML_PATH = "/fixture/unauthorized.html"
+HTML_EXTERNAL_LINK = "https://example.com/html-preview-user-link"
+TRUNCATED_HTML_SOURCE = "<!doctype html><html><body><h1>Incomplete HTML</h1><script>"
 TURN = "cursor-turn"
 NOW = "2026-10-12T08:00:00Z"
 REPORT = "Run B regressed on 3 cases."
@@ -39,6 +44,9 @@ OUTPUT_TEXT = (
     "\n\n[code.py](code.py) · [data.json](data.json) · [large.log](large.log)"
     " · [empty.txt](empty.txt) · [slow.json](slow.json) · [archive.zip](archive.zip)"
     f"\n\n[Long generated code]({LONG_FILENAME})"
+    "\n\n[HTML report](report.html) · [HTM report](report.htm) · [Truncated HTML](truncated.html)"
+    f"\n\n[Registered HTML](HTML_PREVIEW_ORIGIN{REGISTERED_HTML_PATH})"
+    f" · [Unregistered HTML](HTML_PREVIEW_ORIGIN{UNREGISTERED_HTML_PATH})"
 )
 PYTHON_SOURCE = (
     'payload = "<script>window.__attachmentUnsafe = true</script>"\n'
@@ -109,6 +117,44 @@ def png(width: int, height: int) -> bytes:
         + chunk(b"IDAT", zlib.compress(rows))
         + chunk(b"IEND", b"")
     )
+
+
+def html_fixture() -> str:
+    image = base64.b64encode(png(16, 10)).decode("ascii")
+    rows = "".join(
+        f"<tr><td>Case {index}</td><td>Static report content</td></tr>" for index in range(45)
+    )
+    return f"""<!doctype html>
+<html><head><title>Authored HTML report</title>
+<base id="untrusted-base" href="https://html-preview.invalid/base/">
+<meta http-equiv="refresh" content="0;url=https://html-preview.invalid/refresh">
+<link rel="stylesheet" href="https://html-preview.invalid/stylesheet.css">
+<style>
+@import url('https://html-preview.invalid/import.css');
+body {{ margin: 0; padding: 16px; background: #f3f6fa; color: #18222f; font: 14px sans-serif; }}
+.report-title {{ color: rgb(18, 52, 86); border-bottom: 3px solid #123456; }}
+.table-scroll {{ overflow: auto; max-width: 100%; }}
+table {{ width: 1100px; border-collapse: collapse; }}
+td {{ padding: 10px; border: 1px solid #456789; }}
+.remote-background {{ background-image: url('https://html-preview.invalid/background.png'); }}
+</style></head><body>
+<h1 class="report-title">Authored HTML report</h1>
+<a href="#details">Jump to details</a>
+<a href="{HTML_EXTERNAL_LINK}" target="_top" ping="https://html-preview.invalid/ping">External reference</a>
+<img alt="Embedded report one" src="data:image/png;base64,{image}" width="16" height="10">
+<img alt="Embedded report two" src="data:image/png;base64,{image}" width="16" height="10">
+<div class="remote-background">No automatic external resources</div>
+<img id="untrusted-remote-image" src="https://html-preview.invalid/image.png" srcset="https://html-preview.invalid/image2.png 2x" onerror="window.__authoredHtmlRan = true">
+<img id="untrusted-local-image" src="/api/html-preview-probe">
+<script id="untrusted-script">window.__authoredHtmlRan = true; parent.__authoredHtmlRan = true; fetch('/api/html-preview-probe'); top.location = 'https://html-preview.invalid/top';</script>
+<iframe id="untrusted-frame" src="https://html-preview.invalid/frame"></iframe>
+<object id="untrusted-object" data="https://html-preview.invalid/object"></object>
+<embed id="untrusted-embed" src="https://html-preview.invalid/embed">
+<form id="untrusted-form" action="https://html-preview.invalid/form"><input autofocus><button>Submit unsafe form</button></form>
+<a id="unsafe-link" href="javascript:window.__authoredHtmlRan=true" onclick="window.__authoredHtmlRan=true">Unsafe link</a>
+<div class="table-scroll" role="region" aria-label="Report table" tabindex="0"><table><tbody>{rows}</tbody></table></div>
+<h2 id="details" tabindex="0">Report details</h2><p>End of the static report.</p>
+</body></html>"""
 
 
 def png_size(data_url: str) -> tuple[int, int]:
@@ -588,6 +634,14 @@ async def check_long_attachment_mobile(page, context, output: Path, report: dict
     await page.set_viewport_size({"width": 1280, "height": 900})
 
 
+async def close_secondary_page(secondary, parent) -> None:
+    # Per-page emulation shares a native headless window. Restore its bounds so
+    # returning to a desktop parent does not leave iframe hit testing mobile-sized.
+    if parent.viewport_size and secondary.viewport_size != parent.viewport_size:
+        await secondary.set_viewport_size(parent.viewport_size)
+    await secondary.close()
+
+
 async def check_standalone_attachment_mobile(page, context, output: Path, report: dict) -> None:
     await page.get_by_role("link", name="code.py", exact=True).click()
     dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
@@ -630,9 +684,375 @@ async def check_standalone_attachment_mobile(page, context, output: Path, report
         assert await active_chat(reader) == TAB
         evidence["back_to_hub_routes_to_owner"] = True
     finally:
-        await reader.close()
+        await close_secondary_page(reader, page)
         await dialog.get_by_role("button", name="Close preview", exact=True).click()
         await expect(dialog).to_be_hidden()
+
+
+async def html_frame(container):
+    iframe = container.locator('iframe.attachment-html-preview[title="HTML preview"]')
+    await expect(iframe).to_be_visible()
+    handle = await iframe.element_handle()
+    frame = await handle.content_frame()
+    assert frame is not None
+    return iframe, frame
+
+
+async def wait_for_frame_scroll(frame, selector: str = "") -> None:
+    # wait_for_function evaluates its predicate inside the document and is
+    # correctly blocked by the preview's no-unsafe-eval CSP. Poll read-only CDP
+    # evaluations instead; the scroll itself must still come from keyboard input.
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
+        position = await frame.evaluate(
+            "selector => selector ? document.querySelector(selector).scrollLeft : scrollY", selector
+        )
+        if position > 0:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"HTML frame did not scroll: {selector or 'document'}")
+
+
+async def check_html_preview(page, context, output: Path, report: dict) -> None:
+    """Render authored HTML while its scripts, origin and automatic fetches stay blocked."""
+    source_text = html_fixture()
+    composer = page.locator(".composer-textarea:visible").first
+    draft = "Keep this draft while reading HTML."
+    await composer.fill(draft)
+    original_url = page.url
+    pages_before = len(context.pages)
+    link = page.get_by_role("link", name="HTML report", exact=True)
+    await click_timeline_link(page, link)
+    dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
+    iframe, frame = await html_frame(dialog)
+    await expect(frame.get_by_role("heading", name="Authored HTML report")).to_be_visible()
+    await expect(dialog).to_contain_text("Static HTML preview.")
+    sandbox = (await iframe.get_attribute("sandbox") or "").split()
+    assert "allow-same-origin" not in sandbox
+    assert "allow-top-navigation" not in sandbox
+    assert "allow-forms" not in sandbox
+    await expect(
+        frame.locator(
+            "#untrusted-script, #untrusted-base, meta[http-equiv=refresh], iframe, object, embed, form"
+        )
+    ).to_have_count(0)
+    await expect(
+        frame.locator("[onclick], [onerror], [srcset], [ping], [href^='javascript:']")
+    ).to_have_count(0)
+    assert not await frame.evaluate("Boolean(window.__authoredHtmlRan)")
+    assert not await page.evaluate("Boolean(window.__authoredHtmlRan)")
+    assert (
+        await frame.locator(".report-title").evaluate("el => getComputedStyle(el).color")
+        == "rgb(18, 52, 86)"
+    )
+    for name in ("Embedded report one", "Embedded report two"):
+        await expect(frame.get_by_role("img", name=name)).to_have_js_property("naturalWidth", 16)
+    # DevTools evaluation bypasses script CSP; these checks test origin isolation,
+    # separately from the authored script's removal and non-execution above.
+    origin_checks = await frame.evaluate("""() => {
+        const blocked = operation => { try { operation(); return false } catch { return true } }
+        return {parentDom: blocked(() => parent.document.body),
+          cookies: blocked(() => document.cookie),
+          localStorage: blocked(() => localStorage.getItem('html-preview-test'))}
+    }""")
+    assert all(origin_checks.values()), origin_checks
+    bridge_scripts = await frame.evaluate(
+        "[...document.scripts].map(script => ({nonce: script.nonce || script.getAttribute('nonce') || '', hasNonce: script.hasAttribute('nonce')}))"
+    )
+    serialized_frame = await iframe.get_attribute("srcdoc") or ""
+    report["html_bridge_diagnostics"] = {
+        "child_scripts": [
+            {"nonce_length": len(item["nonce"]), "has_nonce_attribute": item["hasNonce"]}
+            for item in bridge_scripts
+        ],
+        "serialized_script_count": len(re.findall(r"<script\b", serialized_frame)),
+        "serialized_nonce_count": len(re.findall(r'nonce="[0-9a-f]{32}"', serialized_frame)),
+    }
+    channel_match = re.search(r'nonce="([0-9a-f]{32})"', serialized_frame)
+    assert channel_match, report["html_bridge_diagnostics"]
+    channel = channel_match.group(1)
+    assert re.fullmatch(r"[0-9a-f]{32}", channel)
+    # These are deliberate test-only forgeries, not evidence that authored
+    # scripts can read the nonce or synthesize a cross-origin event.
+    await page.evaluate(
+        """channel => {
+        dispatchEvent(new MessageEvent('message', {origin: 'null', source: window,
+          data: {type: 'attachment-html-close', channel}}))
+        const iframe = document.querySelector('iframe.attachment-html-preview')
+        dispatchEvent(new MessageEvent('message', {origin: location.origin, source: iframe.contentWindow,
+          data: {type: 'attachment-html-close', channel}}))
+    }""",
+        channel,
+    )
+    await frame.evaluate(
+        "parent.postMessage({type: 'attachment-html-close', channel: 'wrong-channel'}, '*')"
+    )
+    await page.evaluate(
+        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+    )
+    await expect(dialog).to_be_visible()
+    parent_origin = await page.evaluate("location.origin")
+    await frame.evaluate(
+        """({channel, parentOrigin}) => {
+        scrollTo(0, 0)
+        dispatchEvent(new MessageEvent('message', {origin: 'https://wrong-origin.invalid', source: parent,
+          data: {type: 'attachment-html-init', channel, hash: '#details'}}))
+        dispatchEvent(new MessageEvent('message', {origin: parentOrigin, source: window,
+          data: {type: 'attachment-html-init', channel, hash: '#details'}}))
+    }""",
+        {"channel": channel, "parentOrigin": parent_origin},
+    )
+    await page.evaluate(
+        """() => document.querySelector('iframe.attachment-html-preview').contentWindow.postMessage(
+        {type: 'attachment-html-init', channel: 'wrong-channel', hash: '#details'}, '*')"""
+    )
+    await frame.evaluate(
+        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+    )
+    assert await frame.evaluate("scrollY") == 0
+    assert not report["html_probe_requests"], report["html_probe_requests"]
+    requests_before_anchor = len(report["html_probe_requests"])
+    history_before_anchor = await page.evaluate("history.length")
+    await frame.evaluate("""() => {
+        window.__htmlClickTrace = []
+        document.addEventListener('click', event => queueMicrotask(() => window.__htmlClickTrace.push({
+          target: event.target?.getAttribute?.('href'), prevented: event.defaultPrevented})))
+    }""")
+    report["html_fragment_diagnostics"] = {"before": await frame.evaluate("""() => ({
+        readyState: document.readyState, url: location.href, scrollY, height: innerHeight,
+        target: document.getElementById('details').getBoundingClientRect().toJSON()})""")}
+    await frame.get_by_role("link", name="Jump to details", exact=True).click()
+    report["html_fragment_diagnostics"]["after"] = await frame.evaluate(
+        """() => ({
+        readyState: document.readyState, url: location.href, scrollY, height: innerHeight,
+        target: document.getElementById('details').getBoundingClientRect().toJSON(), clicks: window.__htmlClickTrace})"""
+    )
+    (output / "html-fragment.json").write_text(
+        json.dumps(report["html_fragment_diagnostics"], indent=2)
+    )
+    await expect(frame.get_by_role("heading", name="Report details")).to_be_in_viewport()
+    assert await frame.evaluate("scrollY > 0")
+    assert page.url == original_url and len(context.pages) == pages_before
+    assert len(report["html_probe_requests"]) == requests_before_anchor
+    assert await page.evaluate("history.length") == history_before_anchor
+    await frame.evaluate("document.documentElement.dataset.retainedHtml = 'yes'")
+    saved_scroll = await frame.evaluate("scrollY")
+    reads_before_toggle = sum(
+        request[1].endswith("/attachment") for request in report["api_requests"]
+    )
+    await dialog.get_by_role("button", name="Show source", exact=True).click()
+    source = dialog.locator(".attachment-source")
+    await expect(source).to_be_visible()
+    assert await source.text_content() == source_text
+    await expect(source.locator("script, img, style, iframe")).to_have_count(0)
+    await expect(iframe).to_be_hidden()
+    await dialog.get_by_role("button", name="Copy", exact=True).click()
+    assert await page.evaluate("window.__copiedCode.at(-1)") == source_text
+    await dialog.get_by_role("button", name="Show preview", exact=True).click()
+    await expect(iframe).to_be_visible()
+    assert await frame.evaluate("document.documentElement.dataset.retainedHtml") == "yes"
+    assert abs(await frame.evaluate("scrollY") - saved_scroll) <= 2
+    assert (
+        sum(request[1].endswith("/attachment") for request in report["api_requests"])
+        == reads_before_toggle
+    )
+
+    external = frame.get_by_role("link", name="External reference", exact=True)
+    await expect(external).to_have_attribute("target", "_blank")
+    assert "noopener" in (await external.get_attribute("rel") or "").split()
+    assert not report["html_explicit_external_requests"]
+    async with context.expect_page() as opened:
+        await external.click()
+    external_page = await opened.value
+    try:
+        await external_page.wait_for_load_state("domcontentloaded")
+        assert await external_page.evaluate("window.opener === null")
+        await expect(
+            external_page.get_by_text("Explicit external reference opened")
+        ).to_be_visible()
+    finally:
+        await close_secondary_page(external_page, page)
+    assert page.url == original_url
+    await frame.get_by_role("link", name="Jump to details", exact=True).focus()
+    await page.keyboard.press("Escape")
+    await expect(dialog).to_be_hidden()
+    await expect(link).to_be_focused()
+    await expect(composer).to_have_value(draft)
+
+    mobile_geometry = []
+    for width, height in ((390, 844), (320, 844), (320, 390)):
+        await page.set_viewport_size({"width": width, "height": height})
+        await click_timeline_link(page, link)
+        iframe, frame = await html_frame(dialog)
+        await expect(frame.get_by_role("heading", name="Authored HTML report")).to_be_visible()
+        await check_mobile_actions(
+            dialog, ("Close preview", "Show source", "Copy", "Open separately")
+        )
+        geometry = await iframe.evaluate("""el => {
+            const r = el.getBoundingClientRect()
+            const body = el.closest('.attachment-body').getBoundingClientRect()
+            return {width: innerWidth, height: innerHeight, frameHeight: r.height,
+              visibleHeight: Math.min(r.bottom, body.bottom, innerHeight) - Math.max(r.top, body.top, 0)}
+        }""")
+        assert geometry["visibleHeight"] >= 80, geometry
+        mobile_geometry.append(geometry)
+        await frame.get_by_role("link", name="Jump to details", exact=True).focus()
+        await page.keyboard.press("PageDown")
+        await wait_for_frame_scroll(frame)
+        table = frame.get_by_role("region", name="Report table", exact=True)
+        await table.focus()
+        await page.keyboard.press("ArrowRight")
+        await wait_for_frame_scroll(frame, ".table-scroll")
+        await page.screenshot(
+            path=str(output / f"html-preview-{width}x{height}.png"), full_page=True
+        )
+        report["screenshots"].append(f"html-preview-{width}x{height}.png")
+        if width == 390:
+            await page.keyboard.press("Escape")
+        else:
+            await page.go_back()
+        await expect(dialog).to_be_hidden()
+        await expect(composer).to_have_value(draft)
+        assert page.url == original_url
+
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    await page.get_by_role("link", name="HTM report", exact=True).click()
+    _, frame = await html_frame(dialog)
+    await expect(frame.get_by_role("heading", name="Authored HTML report")).to_be_visible()
+    await dialog.get_by_role("button", name="Close preview", exact=True).click()
+    await expect(dialog).to_be_hidden()
+    await page.get_by_role("link", name="Truncated HTML", exact=True).click()
+    await expect(dialog.locator(".attachment-source")).to_be_visible()
+    assert await dialog.locator(".attachment-source").text_content() == TRUNCATED_HTML_SOURCE
+    await expect(dialog).to_contain_text("This HTML file is truncated. Only source is available.")
+    await expect(dialog.locator("iframe")).to_have_count(0)
+    await expect(
+        dialog.get_by_role("button", name=re.compile("Show (source|preview)"))
+    ).to_have_count(0)
+    await dialog.get_by_role("button", name="Close preview", exact=True).click()
+    await expect(dialog).to_be_hidden()
+    await composer.fill("")
+    report["html_preview"] = {
+        "authored_css_and_embedded_pngs": True,
+        "source_and_copy_exact": True,
+        "source_toggle_preserves_frame_dom_and_scroll": True,
+        "origin_isolation": origin_checks,
+        "authored_script_removed_and_unexecuted": True,
+        "test_only_forged_source_origin_channel_rejected": True,
+        "test_only_child_init_forgery_rejected": True,
+        "automatic_resources_blocked": True,
+        "internal_anchor_local": True,
+        "explicit_external_noopener": True,
+        "iframe_focused_escape_and_browser_back": True,
+        "mobile_geometry": mobile_geometry,
+        "truncated_source_only": True,
+        "htm_extension": True,
+    }
+
+
+async def check_registered_html(
+    page, context, output: Path, report: dict, real_report: Path | None = None
+) -> None:
+    dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
+    original_url = page.url
+    pages_before = len(context.pages)
+    await page.get_by_role("link", name="Registered HTML", exact=True).click()
+    _, frame = await html_frame(dialog)
+    await expect(frame.get_by_role("heading", name="Authored HTML report")).to_be_visible()
+    assert len(context.pages) == pages_before and page.url == original_url
+    separate = dialog.get_by_role("link", name="Open separately", exact=True)
+    href = await separate.get_attribute("href")
+    anchor_query = parse_qs(urlparse(href).query)
+    assert anchor_query.get("attachment") == [REGISTERED_HTML_PATH]
+    assert anchor_query.get("registered") == ["1"]
+    async with context.expect_page() as opened:
+        await separate.click()
+    reader = await opened.value
+    reader.on("pageerror", lambda error: report["page_errors"].append(str(error)))
+    report["registered_popup_navigation"] = {"href": href, "initial_url": reader.url}
+    try:
+        try:
+            await reader.wait_for_url(
+                lambda url: urlparse(url).path == "/"
+                and parse_qs(urlparse(url).query).get("attachment") == [REGISTERED_HTML_PATH]
+                and parse_qs(urlparse(url).query).get("registered") == ["1"],
+                wait_until="domcontentloaded",
+                timeout=10000,
+            )
+        finally:
+            report["registered_popup_navigation"]["settled_url"] = reader.url
+        query = parse_qs(urlparse(reader.url).query)
+        assert query["attachment"] == [REGISTERED_HTML_PATH] and query["registered"] == ["1"]
+        _, frame = await html_frame(reader)
+        await expect(frame.get_by_role("heading", name="Authored HTML report")).to_be_visible()
+        await expect(reader.locator(".app, .structured-pane")).to_have_count(0)
+        await reader.reload(wait_until="domcontentloaded")
+        _, frame = await html_frame(reader)
+        await expect(frame.get_by_role("heading", name="Authored HTML report")).to_be_visible()
+        base = original_url.split("?", 1)[0]
+        # A hash-only goto on the existing reader is same-document navigation.
+        # Load a fresh document to exercise the initial parent-to-frame message.
+        await reader.goto("about:blank")
+        await reader.goto(
+            base
+            + "?"
+            + urlencode({"attachment": REGISTERED_HTML_PATH, "registered": "1"})
+            + "#details",
+            wait_until="domcontentloaded",
+        )
+        _, frame = await html_frame(reader)
+        await expect(frame.get_by_role("heading", name="Report details")).to_be_in_viewport()
+        assert await frame.evaluate("scrollY > 0")
+        await reader.reload(wait_until="domcontentloaded")
+        _, frame = await html_frame(reader)
+        await expect(frame.get_by_role("heading", name="Report details")).to_be_in_viewport()
+        assert await frame.evaluate("scrollY > 0")
+        for path, status_text in (
+            (UNREGISTERED_HTML_PATH, "not registered"),
+            (UNAUTHORIZED_HTML_PATH, "Sign in to Hub"),
+        ):
+            await reader.goto(
+                base + "?" + urlencode({"attachment": path, "registered": "1"}),
+                wait_until="domcontentloaded",
+            )
+            await expect(reader.get_by_role("alert")).to_contain_text(status_text)
+            await expect(reader.locator("iframe")).to_have_count(0)
+            assert "private backend detail" not in await reader.get_by_role("alert").inner_text()
+        if real_report is not None:
+            await reader.goto(
+                base + "?" + urlencode({"attachment": str(real_report), "registered": "1"}),
+                wait_until="domcontentloaded",
+            )
+            iframe, frame = await html_frame(reader)
+            await expect(frame.locator("body")).to_be_visible()
+            images = await frame.locator('img[src^="data:image/png"]').count()
+            assert images >= 2
+            for index in range(images):
+                image = frame.locator('img[src^="data:image/png"]').nth(index)
+                await expect(image).not_to_have_js_property("naturalWidth", 0)
+            await reader.set_viewport_size({"width": 390, "height": 844})
+            await expect(iframe).to_be_visible()
+            report["real_html_report"] = {
+                "size_bytes": real_report.stat().st_size,
+                "embedded_pngs": images,
+                "rendered_with_mocked_registered_endpoint": True,
+            }
+    finally:
+        await close_secondary_page(reader, page)
+        await dialog.get_by_role("button", name="Close preview", exact=True).click()
+        await expect(dialog).to_be_hidden()
+    await page.get_by_role("link", name="Unregistered HTML", exact=True).click()
+    await expect(dialog.get_by_role("alert")).to_contain_text("not registered")
+    await expect(dialog.locator("iframe")).to_have_count(0)
+    await dialog.get_by_role("button", name="Close preview", exact=True).click()
+    await expect(dialog).to_be_hidden()
+    report["registered_html"] = {
+        "same_origin_path_opens_inline": True,
+        "standalone_registered_query_and_reload": True,
+        "initial_fragment_load_and_reload": True,
+        "unregistered_and_401_response_ui": True,
+        "boundary": "Mocked response handling only; backend authorization is tested separately.",
+    }
 
 
 async def check_markdown_preview(page, context, output: Path, report: dict) -> None:
@@ -820,10 +1240,10 @@ async def check_markdown_preview(page, context, output: Path, report: dict) -> N
         await reader.screenshot(path=str(output / "markdown-reader-failure.png"), full_page=True)
         raise
     finally:
-        await reader.close()
+        await close_secondary_page(reader, page)
 
 
-async def main(browser_run: BrowserRun) -> None:
+async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None:
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
     base = sys.argv[1].rstrip("/")
@@ -841,6 +1261,18 @@ async def main(browser_run: BrowserRun) -> None:
         raise SystemExit("Use an owned numeric-loopback review server")
     output = Path(sys.argv[2]).resolve()
     # run_browser_main validates the browser and creates the output dir.
+    html_text = html_fixture()
+    real_html_text = None
+    if real_report is not None:
+        real_report = real_report.resolve(strict=True)
+        if real_report.stat().st_size > 512 * 1024:
+            raise ValueError("The optional report must fit the complete HTML preview limit")
+        real_html_text = real_report.read_text(encoding="utf-8")
+    for row in EVENTS:
+        for field in ("text", "assistant_text"):
+            value = row["payload"].get(field)
+            if isinstance(value, str):
+                row["payload"][field] = value.replace("HTML_PREVIEW_ORIGIN", base)
 
     tabs = [
         {
@@ -895,6 +1327,9 @@ async def main(browser_run: BrowserRun) -> None:
         "sends": [],
         "screenshots": [],
         "renderer_requests": [],
+        "html_probe_requests": [],
+        "html_explicit_external_requests": [],
+        "service_worker_registration_requests": [],
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
     failure: BaseException | None = None
@@ -904,7 +1339,23 @@ async def main(browser_run: BrowserRun) -> None:
     async with browser_run.context(
         viewport={"width": 1280, "height": 900},
         launch_args=["--disable-background-networking", "--disable-component-update"],
+        service_workers="allow",
     ) as context:
+        # Playwright's built-in block script reads navigator.serviceWorker without
+        # guarding opaque sandbox origins. Keep registration blocked without that error.
+        await context.add_init_script("""(() => {
+            let workers;
+            try { workers = navigator.serviceWorker; }
+            catch (error) { if (error.name === 'SecurityError') return; throw error; }
+            if (!workers) return;
+            Object.defineProperty(Object.getPrototypeOf(workers), 'register', {
+                configurable: false, writable: false,
+                value() {
+                    window.__workerRegistrationAttempts = (window.__workerRegistrationAttempts || 0) + 1;
+                    return Promise.reject(new DOMException('Registration blocked by browser acceptance', 'NotAllowedError'));
+                }
+            });
+        })();""")
         try:
 
             async def block_websocket(socket) -> None:
@@ -914,6 +1365,25 @@ async def main(browser_run: BrowserRun) -> None:
             async def route_all(route) -> None:
                 request = route.request
                 parsed = urlparse(request.url)
+                if parsed.path == "/html-preview-worker.js":
+                    report["service_worker_registration_requests"].append(request.url)
+                    await route.abort("blockedbyclient")
+                    return
+                if request.url == HTML_EXTERNAL_LINK:
+                    report["html_explicit_external_requests"].append(request.url)
+                    await route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body="<p>Explicit external reference opened</p>",
+                    )
+                    return
+                if (
+                    parsed.hostname == "html-preview.invalid"
+                    or parsed.path == "/api/html-preview-probe"
+                ):
+                    report["html_probe_requests"].append(request.url)
+                    await route.abort("blockedbyclient")
+                    return
                 if origin(request.url) != origin(base):
                     report["blocked_external_requests"].append(request.url)
                     await route.abort("blockedbyclient")
@@ -927,7 +1397,29 @@ async def main(browser_run: BrowserRun) -> None:
                 report["api_requests"].append([request.method, path, parsed.query])
 
                 body: object
-                if path == "/api/auth/check":
+                if path == "/api/workspaces/artifacts/html-preview":
+                    selected = parse_qs(parsed.query).get("path", [""])[0]
+                    if selected == REGISTERED_HTML_PATH:
+                        content = html_text
+                    elif real_report is not None and selected == str(real_report):
+                        content = real_html_text
+                    else:
+                        await route.fulfill(
+                            status=401 if selected == UNAUTHORIZED_HTML_PATH else 404,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "private backend detail"}),
+                        )
+                        return
+                    body = {
+                        "path": selected,
+                        "filename": Path(selected).name,
+                        "content": content,
+                        "size_bytes": len(content.encode("utf-8")),
+                        "truncated": False,
+                        "kind": "html",
+                        "language": "xml",
+                    }
+                elif path == "/api/auth/check":
                     body = {"auth_required": False, "user": None}
                 elif path == "/api/tabs":
                     body = tabs
@@ -990,6 +1482,36 @@ async def main(browser_run: BrowserRun) -> None:
                             status=404,
                             content_type="application/json",
                             body=json.dumps({"detail": "document not available"}),
+                        )
+                        return
+                    if path.endswith("/attachment") and document_path in {
+                        "report.html",
+                        "report.htm",
+                        "truncated.html",
+                    }:
+                        content = (
+                            TRUNCATED_HTML_SOURCE
+                            if document_path == "truncated.html"
+                            else html_text
+                        )
+                        await route.fulfill(
+                            status=200,
+                            content_type="application/json",
+                            body=json.dumps(
+                                {
+                                    "path": f"/fixture/project/{document_path}",
+                                    "filename": document_path,
+                                    "content": content,
+                                    "size_bytes": (
+                                        700000
+                                        if document_path == "truncated.html"
+                                        else len(content.encode("utf-8"))
+                                    ),
+                                    "truncated": document_path == "truncated.html",
+                                    "kind": "html",
+                                    "language": "xml",
+                                }
+                            ),
                         )
                         return
                     if path.endswith("/attachment") and document_path in {
@@ -1438,6 +1960,9 @@ async def main(browser_run: BrowserRun) -> None:
             await check_preview_routing(page, context, output, report)
             await check_long_attachment_mobile(page, context, output, report)
             await check_standalone_attachment_mobile(page, context, output, report)
+            await check_html_preview(page, context, output, report)
+            await check_registered_html(page, context, output, report, real_report)
+            assert not report["html_probe_requests"], report["html_probe_requests"]
             report["markdown_requests"] = markdown_attempts
             report["attachment_requests"] = attachment_attempts
 
@@ -1489,6 +2014,18 @@ async def main(browser_run: BrowserRun) -> None:
             assert wide["preview_mime"] == "data:image/png", wide
             assert wide["preview_size"][0] == 8192, wide
 
+            report["service_worker_harness"] = await page.evaluate("""async () => {
+                let rejection = '';
+                try { await navigator.serviceWorker.register('/html-preview-worker.js'); }
+                catch (error) { rejection = error.name; }
+                return {mode: 'allow with guarded prototype registration blocker', rejection,
+                  registrations: (await navigator.serviceWorker.getRegistrations()).length,
+                  attempts: window.__workerRegistrationAttempts};
+            }""")
+            assert report["service_worker_harness"]["rejection"] == "NotAllowedError"
+            assert report["service_worker_harness"]["registrations"] == 0
+            assert report["service_worker_harness"]["attempts"] == 1
+            assert not report["service_worker_registration_requests"]
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]
             report["result"] = "PASS"
@@ -1507,5 +2044,17 @@ async def main(browser_run: BrowserRun) -> None:
         raise failure
 
 
+def run_with_optional_report() -> None:
+    real_report = None
+    if len(sys.argv) == 6 and sys.argv[4] == "--html-report":
+        real_report = Path(sys.argv[5])
+        del sys.argv[4:]
+
+    async def selected_main(browser_run: BrowserRun) -> None:
+        await main(browser_run, real_report)
+
+    run_browser_main(selected_main)
+
+
 if __name__ == "__main__":
-    run_browser_main(main)
+    run_with_optional_report()

@@ -5,6 +5,8 @@ backend serves the SPA at the same origin as the API. Otherwise it falls back
 to a JSON root endpoint (dev/CI without a build).
 """
 
+from urllib.parse import parse_qs, quote, urlparse
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -61,3 +63,76 @@ async def test_register_frontend_falls_back_to_json_root(tmp_path) -> None:
         assert data["message"] == "Claude Hub API"
         assert data["version"] == "0.1.0"
         assert data["docs"] == "/docs"
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("custom_404", [False, True])
+async def test_missing_absolute_html_link_redirects_to_registered_reader(
+    tmp_path, method, custom_404
+):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("SPA")
+    if custom_404:
+        (dist / "404.html").write_text("custom missing")
+    app = FastAPI()
+    register_frontend(app, serve=True, dist=dist)
+    path = "/mnt/hdfs/reports/记录 # &?.HTML"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.request(method, quote(path, safe="/"))
+        assert response.status_code == 307
+        location = urlparse(response.headers["location"])
+        assert location.path == "/"
+        assert parse_qs(location.query) == {"attachment": [path], "registered": ["1"]}
+        assert response.headers["cache-control"] == "no-store"
+        assert "<!doctype" not in response.text
+        shell = await client.get(response.headers["location"])
+        assert shell.status_code == 200 and shell.text == "SPA"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/absent.html",
+        "/assets/absent.html",
+        "/static/absent.htm",
+        "/missing.json",
+        "/missing",
+        "/mnt/%2e%2e/private.html",
+        "/mnt/bad%5cname.html",
+    ],
+)
+async def test_html_redirect_does_not_change_other_missing_routes(tmp_path, path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("SPA")
+    app = FastAPI()
+    register_frontend(app, serve=True, dist=dist)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(path)
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Not Found"}
+        assert "location" not in response.headers
+
+
+async def test_existing_html_api_and_static_methods_keep_their_behavior(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("SPA")
+    (dist / "help.html").write_text("bundled help")
+    app = FastAPI()
+
+    @app.get("/api/existing.html")
+    async def existing_api():
+        return {"source": "api"}
+
+    register_frontend(app, serve=True, dist=dist)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        static = await client.get("/help.html")
+        assert static.status_code == 200 and static.text == "bundled help"
+        assert "location" not in static.headers
+        api = await client.get("/api/existing.html")
+        assert api.json() == {"source": "api"}
+        missing_post = await client.post("/mnt/report.html")
+        assert missing_post.status_code == 405
+        assert "location" not in missing_post.headers

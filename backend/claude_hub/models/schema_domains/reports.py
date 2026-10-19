@@ -132,7 +132,7 @@ class WorkspaceArtifactPreview(BaseModel):
 class StreamAttachmentPreview(WorkspaceArtifactPreview):
     """Bounded local source text; language is a display hint, never executable."""
 
-    kind: Literal["markdown", "code", "data", "text"]
+    kind: Literal["markdown", "html", "code", "data", "text"]
     language: str
 
 

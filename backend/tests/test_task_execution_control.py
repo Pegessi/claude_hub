@@ -1046,3 +1046,62 @@ async def test_register_nested_create_uses_one_explicit_workspace_commit(
     fresh = WorkspaceManager()
     loaded, replayed = await fresh.register_task(workspace.id, payload, "actor-a")
     assert replayed is True and loaded.id == created.id
+
+
+@pytest.mark.parametrize("release_refs", [None, [], ["/published/new.html"]])
+async def test_release_preserves_same_epoch_artifacts_unless_replaced(
+    manager, workspace, release_refs
+):
+    task = await register(manager, workspace)
+    published = (
+        await manager.record_task_progress(
+            workspace.id, task.id, progress(task, artifact_refs=["/published/report.html"]), KEY
+        )
+    ).task
+    options = {} if release_refs is None else {"artifact_refs": release_refs}
+    request = progress(published, "released", "release-artifacts", **options)
+    released = await manager.record_task_progress(workspace.id, task.id, request, KEY)
+    expected = release_refs or ["/published/report.html"]
+    assert released.task.execution_released
+    assert released.task.latest_progress.artifact_refs == expected
+    repeated = await manager.record_task_progress(workspace.id, task.id, request, KEY)
+    assert repeated.replayed
+    assert repeated.task.latest_progress.artifact_refs == expected
+    fresh = WorkspaceManager()
+    assert fresh.tasks[task.id].latest_progress.artifact_refs == expected
+    moved = await manager.handoff_task_execution(workspace.id, task.id, handoff(released.task))
+    assert moved.task.execution_epoch == published.execution_epoch + 1
+    assert moved.task.latest_progress is None
+
+
+@pytest.mark.parametrize("state", ["working", "blocked", "needs_input", "completed", "failed"])
+async def test_non_release_progress_still_replaces_and_removes_artifacts(manager, workspace, state):
+    task = await register(manager, workspace)
+    task = (
+        await manager.record_task_progress(
+            workspace.id, task.id, progress(task, artifact_refs=["/published/report.html"]), KEY
+        )
+    ).task
+    changed = await manager.record_task_progress(
+        workspace.id, task.id, progress(task, state, "replace-artifacts"), KEY
+    )
+    assert changed.task.latest_progress.artifact_refs == []
+    released = await manager.record_task_progress(
+        workspace.id, task.id, progress(changed.task, "released", "release-empty"), KEY
+    )
+    assert released.task.latest_progress.artifact_refs == []
+
+
+async def test_release_does_not_recover_artifacts_from_a_previous_epoch(manager, workspace):
+    task = await register(manager, workspace)
+    task = (
+        await manager.record_task_progress(
+            workspace.id, task.id, progress(task, artifact_refs=["/published/old.html"]), KEY
+        )
+    ).task
+    manager.tasks[task.id] = task.model_copy(update={"execution_epoch": task.execution_epoch + 1})
+    current = manager.tasks[task.id]
+    released = await manager.record_task_progress(
+        workspace.id, task.id, progress(current, "released", "new-epoch-release"), KEY
+    )
+    assert released.task.latest_progress.artifact_refs == []

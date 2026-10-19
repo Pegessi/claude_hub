@@ -266,12 +266,22 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
             if terminal and payload.state != TaskProgressState.RELEASED:
                 raise TaskExecutionConflict("task_record_is_terminal")
             now = self._runtime_now()
+            artifact_refs = payload.artifact_refs
+            if (
+                payload.state == TaskProgressState.RELEASED
+                and not artifact_refs
+                and task.latest_progress is not None
+                and task.latest_progress.execution_epoch == task.execution_epoch
+            ):
+                # Releasing execution does not withdraw already-published files.
+                # Other progress states still replace the list, including with [].
+                artifact_refs = task.latest_progress.artifact_refs
             progress = TaskProgressSnapshot(
                 state=payload.state,
                 summary=payload.summary,
                 validation=payload.validation,
                 risks=payload.risks,
-                artifact_refs=payload.artifact_refs,
+                artifact_refs=artifact_refs,
                 call_id=payload.call_id,
                 execution_epoch=task.execution_epoch,
                 reported_at=now,
