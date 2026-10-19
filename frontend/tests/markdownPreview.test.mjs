@@ -8,7 +8,7 @@ const source = await readFile(new URL('../src/utils/markdownPreview.ts', import.
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 })
-const { localMarkdownTarget, markdownPreviewUrl, markdownStreamBase } = await import(
+const { localMarkdownTarget, markdownPreviewUrl, markdownStreamBase, localAttachmentTarget, attachmentKind, attachmentPreviewUrl, attachmentTargetFromLink } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
 
@@ -48,4 +48,30 @@ test('document-relative targets and managed identity stay scoped', () => {
   assert.equal(url.hash, '#details')
   assert.equal(localMarkdownTarget('/tmp/other.md', '/work/docs/report.md').path, '/tmp/other.md')
   assert.equal(localMarkdownTarget('../other.md', '/work/docs/report.md').path, '/work/docs/../other.md')
+})
+
+test('code, data and named text files use one scoped attachment URL', () => {
+  for (const path of ['code.py', 'data.json', 'events.jsonl', 'task.yaml', 'query.sql', 'notes.txt', 'run.log', 'Dockerfile', 'Makefile', 'README', 'CMakeLists.txt', 'notebook.ipynb', 'index.html']) {
+    assert.equal(attachmentKind(path), 'text', path)
+    const url = new URL(attachmentPreviewUrl('tab-a', path), 'http://hub')
+    assert.equal(url.searchParams.get('attachment'), path)
+    assert.equal(url.searchParams.get('scope'), 'tab-a')
+  }
+  assert.deepEqual(localAttachmentTarget('file:///tmp/code.py:12:3'), { path: '/tmp/code.py', hash: '' })
+  assert.deepEqual(localAttachmentTarget('../数据.json#item', '/work/docs/report.md'), { path: '/work/docs/../数据.json', hash: '#item' })
+  assert.equal(attachmentKind('archive.zip'), 'unsupported')
+  assert.equal(attachmentKind('plot.png'), 'image')
+  assert.equal(attachmentKind('.env'), null)
+})
+
+test('attachment reader links cannot override the current Chat scope', () => {
+  assert.deepEqual(attachmentTargetFromLink('/?attachment=%2Fwork%2Fa.json&scope=another-tab#item'), {
+    path: '/work/a.json', hash: '#item',
+  })
+  for (const href of [
+    'https://other/code.py', '//other/data.json', 'file://remote/code.py', '/api/data.json',
+    '%2Fapi%2Fdata.json', '%2F%2Fevil/a.py', 'code%00.py', 'code%5C.py', '%ZZ.json',
+    '#code.py', '&num;code.py', '?file=data.json', 'javascript:alert.py',
+  ]) assert.equal(localAttachmentTarget(href), null, href)
+  assert.equal(attachmentPreviewUrl('https://evil', 'data.json'), null)
 })

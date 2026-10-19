@@ -7,6 +7,29 @@
 
 ## Released
 
+### fix(chat): preserve navigation and readability in attachment previews
+
+- Distinguish preview-owned history transitions from real Chat navigation, so
+  closing a preview does not reactivate an old entry link and genuine tab
+  Back/Forward navigation still works.
+- Bound the preview header on short screens, clamp long titles, and retain a
+  keyboard-scrollable complete path and readable source area.
+- Apply the shared 44px action size and focus styling to standalone-reader slots.
+- Add browser regressions for stale deep links, deactivation cleanup, real
+  history navigation, long filenames and standalone return controls.
+
+### feat(chat): unify in-page attachment previews
+
+- Open Chat file links and images in one native dialog; use a full-screen layout
+  on phones, preserve Chat state, and support Close, Escape and browser Back.
+- Add bounded, authenticated code/data/text previews (including Python, JSON,
+  logs and source-only HTML/notebooks), with syntax highlighting, line wrapping,
+  exact text copy, nested previews and explicit unsupported-file states.
+- Keep standalone Markdown URLs and their reader compatible; separate opening
+  is now optional rather than the default Chat interaction.
+- Reuse the existing directory containment, exact temporary-file references,
+  no-follow opens, 512 KiB limit, UTF-8 validation and session-incarnation checks.
+
 ### feat(dot): configure and switch the execution backend
 
 - Add a separate execution editor for Claude, Codex, Cursor, TraeX and MASO,

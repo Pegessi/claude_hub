@@ -1,10 +1,11 @@
-"""Bounded Markdown previews scoped to a local Chat's working directory."""
+"""Bounded text previews and the compatible local Markdown reader."""
 
 import codecs
 import os
 import stat
 import tempfile
 from pathlib import Path
+from typing import Collection
 
 from claude_hub.models import ExecutionTarget, ManagedSession, WorkspaceArtifactPreview
 from claude_hub.services.agent_stream.markdown_references import referenced_temporary_markdown
@@ -44,7 +45,18 @@ def _read_beneath(root: Path, relative: Path) -> tuple[bytes, int]:
 
 
 def read_markdown_preview(session: ManagedSession, raw_path: str) -> WorkspaceArtifactPreview:
-    """Read local UTF-8 Markdown without widening the session's file access.
+    """Read local UTF-8 Markdown without widening the session's file access."""
+    return read_text_preview(session, raw_path, allowed_suffixes=MARKDOWN_SUFFIXES)
+
+
+def read_text_preview(
+    session: ManagedSession,
+    raw_path: str,
+    *,
+    allowed_suffixes: Collection[str],
+    allowed_names: Collection[str] = (),
+) -> WorkspaceArtifactPreview:
+    """Read an allowed local text format under the shared preview limits.
 
     An outside-cwd temporary file requires an exact reference in this Chat's
     persisted assistant output, using the same policy as assistant images.
@@ -61,7 +73,7 @@ def read_markdown_preview(session: ManagedSession, raw_path: str) -> WorkspaceAr
     try:
         root = Path(session.workspace_path).expanduser().resolve(strict=True)
         path = Path(raw_path).expanduser()
-        if path.suffix.lower() not in MARKDOWN_SUFFIXES:
+        if path.suffix.lower() not in allowed_suffixes and path.name.lower() not in allowed_names:
             raise MarkdownUnavailable()
         path = Path(os.path.abspath(path if path.is_absolute() else root / path))
         if not path.is_relative_to(root):

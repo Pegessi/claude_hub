@@ -53,6 +53,10 @@ import { MarkdownBlockCache } from '@/utils/markdownBlocks'
 import { ensureHighlighter, highlightReady } from '@/utils/codeHighlight'
 import { ensureMathRenderer, mathVersion } from '@/utils/mathRendering'
 import { writeClipboard } from '@/utils/clipboard'
+import { useAttachmentOpener } from '@/composables/useAttachmentPreview'
+import { attachmentTargetFromLink } from '@/utils/markdownPreview'
+
+const openAttachment = useAttachmentOpener()
 
 const props = withDefaults(defineProps<{
   text?: string | null
@@ -148,8 +152,29 @@ async function handleClick(event: MouseEvent) {
   const image = imageButton?.querySelector('img')
   if (image) {
     event.preventDefault()
-    emit('imageClick', image.src, image.alt, event)
+    if (openAttachment) openAttachment({ scope: props.tabId, path: '', imageUrl: image.src, name: image.alt }, event)
+    else emit('imageClick', image.src, image.alt, event)
     return
+  }
+  const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null
+  if (anchor && openAttachment && props.tabId && event.button === 0
+    && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+    const target = attachmentTargetFromLink(anchor.getAttribute('href') || '', props.documentPath)
+    if (target) {
+      event.preventDefault()
+      openAttachment({ ...target, scope: props.tabId }, event)
+      return
+    }
+    // Document headings scroll inside the viewer without changing Chat history.
+    const href = anchor.getAttribute('href') || ''
+    if (props.documentPath && href.startsWith('#')) {
+      event.preventDefault()
+      let id: string
+      try { id = decodeURIComponent(href.slice(1)) } catch { return }
+      const root = anchor.closest('.markdown-content')
+      Array.from(root?.querySelectorAll('[id]') || []).find(element => element.id === id)?.scrollIntoView()
+      return
+    }
   }
   const target = event.target instanceof Element
     ? event.target.closest<HTMLAnchorElement>('a[data-markdown-path]')

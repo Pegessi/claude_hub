@@ -110,8 +110,8 @@ const mocked = outputText
     'const { mathExtension, mathVersion } = globalThis.__mathRendering;',
   )
   .replace(
-    /import \{ markdownPreviewUrl, rewriteMarkdownLinks \} from ['"]@\/utils\/markdownPreview['"];?/,
-    'const { markdownPreviewUrl, rewriteMarkdownLinks } = globalThis.__markdownPreview;',
+    /import \{ attachmentPreviewUrl, rewriteMarkdownLinks \} from ['"]@\/utils\/markdownPreview['"];?/,
+    'const { attachmentPreviewUrl, rewriteMarkdownLinks } = globalThis.__markdownPreview;',
   )
 
 globalThis.__marked = marked

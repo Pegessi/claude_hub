@@ -53,6 +53,7 @@ from claude_hub.models.schema_domains.quota import (
 from claude_hub.models.schema_domains.reports import (
     AgentReport,
     AgentReportCreate,
+    StreamAttachmentPreview,
     WorkspaceArtifactPreview,
     WorkspaceMarkdownDocument,
     WorkspaceMarkdownDocumentSource,
