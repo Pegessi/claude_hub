@@ -43,10 +43,6 @@
       role="status"
       aria-live="polite"
     >
-      <span
-        class="conversation-avatar conversation-avatar--waiting"
-        aria-hidden="true"
-      >✦</span>
       <div class="agent-waiting-card">
         <span
           class="agent-waiting-pulse"
@@ -260,8 +256,15 @@ defineProps<{
 .structured-turn {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-bottom: 22px;
+  gap: 10px;
+  margin-bottom: 26px;
+}
+
+/* Hover actions hug the message they belong to instead of reserving a full
+   row of empty space between the question and the answer. */
+.turn-actions--message {
+  margin-top: -6px;
+  margin-bottom: -4px;
 }
 
 .conversation-row {
@@ -295,39 +298,33 @@ defineProps<{
   cursor: not-allowed;
 }
 
-.conversation-avatar {
-  width: 23px;
-  height: 23px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border-radius: var(--ch-radius-sm);
-  border: 1px solid var(--ch-color-border-selected);
-  background: var(--ch-color-surface-selected);
-  color: var(--ch-color-text-selected);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.conversation-avatar--waiting {
-  border-color: var(--ch-color-border-muted);
-  color: var(--ch-color-text-subtle);
-  background: var(--ch-color-surface-control);
-}
-
 .agent-waiting-card {
-  min-height: 34px;
+  min-height: 28px;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 11px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  border-bottom-left-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-soft);
+  gap: 10px;
+  padding: 2px 2px;
   color: var(--ch-color-text-subtle);
-  font-size: 12px;
+  font-size: 13px;
+}
+
+.agent-waiting-card > span:last-child {
+  background: linear-gradient(
+    90deg,
+    var(--ch-color-text-subtle) 0%,
+    var(--ch-color-text-strong, var(--ch-color-text)) 50%,
+    var(--ch-color-text-subtle) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: agent-waiting-shimmer 1.8s linear infinite;
+}
+
+@keyframes agent-waiting-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
 }
 
 .agent-waiting-pulse {
@@ -337,10 +334,10 @@ defineProps<{
 }
 
 .agent-waiting-pulse i {
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: currentcolor;
+  background: var(--ch-color-accent);
   animation: agent-waiting-dot 1.2s ease-in-out infinite;
 }
 
@@ -367,7 +364,8 @@ defineProps<{
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-waiting-pulse i {
+  .agent-waiting-pulse i,
+  .agent-waiting-card > span:last-child {
     animation: none;
   }
 }

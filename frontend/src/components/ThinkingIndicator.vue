@@ -37,6 +37,26 @@ defineProps<{ state: ThinkingState }>()
   color: var(--ch-color-text-muted);
 }
 
+/* Active reasoning breathes as a light sweep across the label. */
+.thinking-label--active > span:last-child {
+  background: linear-gradient(
+    90deg,
+    var(--ch-color-text-subtle) 0%,
+    var(--ch-color-text-strong, var(--ch-color-text)) 50%,
+    var(--ch-color-text-subtle) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: thinking-shimmer 1.8s linear infinite;
+}
+
+@keyframes thinking-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
 .thinking-indicator {
   display: inline-flex;
   align-items: center;
@@ -62,7 +82,8 @@ defineProps<{ state: ThinkingState }>()
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .thinking-indicator--active {
+  .thinking-indicator--active,
+  .thinking-label--active > span:last-child {
     animation: none;
   }
 }

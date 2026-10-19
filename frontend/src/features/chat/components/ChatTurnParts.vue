@@ -8,10 +8,6 @@
     v-else-if="part.kind === 'text'"
     class="conversation-row conversation-row--assistant"
   >
-    <span
-      class="conversation-avatar"
-      aria-hidden="true"
-    >✦</span>
     <div class="conversation-bubble conversation-bubble--assistant">
       <MarkdownContent
         :text="stripTrailingGoalProtocol(part.text)"
@@ -212,54 +208,49 @@ defineProps<{
   min-width: 0;
 }
 
+/* Assistant prose is the document itself, Codex/ChatGPT style: no bubble,
+   no avatar, full reading width. Chrome is reserved for things that are
+   not prose (tool activity, approvals, errors). */
 .conversation-bubble {
-  max-width: min(85%, 680px);
   min-width: 0;
-  padding: 9px 12px;
-  border-radius: var(--ch-radius-md);
   overflow-wrap: anywhere;
 }
 
 .conversation-bubble--assistant {
-  background: var(--ch-color-surface);
-  border: 1px solid var(--ch-color-border-muted);
-  border-bottom-left-radius: var(--ch-radius-sm);
-  box-shadow: 0 6px 18px var(--ch-shadow-color-soft);
+  width: 100%;
+  padding: 0 2px;
+  color: var(--ch-color-text);
 }
 
-.conversation-avatar {
-  width: 23px;
-  height: 23px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border-radius: var(--ch-radius-sm);
-  border: 1px solid var(--ch-color-border-selected);
-  background: var(--ch-color-surface-selected);
-  color: var(--ch-color-text-selected);
-  font-size: 11px;
-  font-weight: 600;
-}
 .process-fold {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   align-self: flex-start;
   max-width: 100%;
-  margin: 2px 0;
-  padding: 5px 10px;
-  border: 1px dashed var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-soft);
+  margin: 0;
+  padding: 4px 10px 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
   color: var(--ch-color-text-subtle);
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: pointer;
   text-align: left;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.process-fold::before {
+  content: '';
+  width: 14px;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.5;
 }
 
 .process-fold:hover {
+  background: var(--ch-color-row-hover, var(--ch-color-surface-soft));
   color: var(--ch-color-text-muted);
 }
 
@@ -271,12 +262,17 @@ defineProps<{
   position: sticky;
   top: 0;
   z-index: 1;
-  border-style: solid;
+  border-color: var(--ch-color-border-muted);
+  background: var(--ch-color-surface-glass, var(--ch-color-surface));
+  backdrop-filter: blur(10px);
+  color: var(--ch-color-text-muted);
 }
 
 .process-fold-chevron {
+  order: 3;
   flex-shrink: 0;
   font-size: 10px;
+  opacity: 0.7;
 }
 
 .process-fold-meta {
@@ -324,33 +320,29 @@ defineProps<{
   display: inline-flex;
   align-self: flex-start;
   max-width: 100%;
-  padding: 5px 10px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-soft);
+  padding: 2px 8px;
 }
 
 .event-error {
-  align-self: flex-start;
-  width: min(85%, 680px);
+  align-self: stretch;
   margin: 0;
 }
 
+/* Status notes sit in the transcript's reading column like tool activity. */
 .event-status {
-  justify-content: center;
-  font-style: italic;
-  text-align: center;
-}
-@media (max-width: 640px) {
-
-  .conversation-bubble,
-
-  .event-error {
-    width: min(92%, 680px);
-    max-width: 92%;
-  }
+  padding: 2px 8px;
+  font-size: 12.5px;
 }
 
+.event-status::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+}
 /* Compact Chat prose stays larger than dense Workspace Markdown. */
 .conversation-bubble :deep(.markdown-content.compact) {
   font-size: 14px;

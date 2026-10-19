@@ -2,10 +2,6 @@
   <div
     class="conversation-row conversation-row--assistant conversation-row--subagent"
   >
-    <span
-      class="conversation-avatar conversation-avatar--subagent"
-      aria-hidden="true"
-    >❯</span>
     <details class="subagent-card subagent-card--standalone">
       <summary
         class="subagent-header"
@@ -107,20 +103,6 @@ defineProps<{
   min-width: 0;
 }
 
-.conversation-avatar {
-  width: 23px;
-  height: 23px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  border-radius: var(--ch-radius-sm);
-  border: 1px solid var(--ch-color-border-selected);
-  background: var(--ch-color-surface-selected);
-  color: var(--ch-color-text-selected);
-  font-size: 11px;
-  font-weight: 600;
-}
 .details-collapse {
   display: block;
   width: 100%;
@@ -181,13 +163,9 @@ defineProps<{
   padding-left: 14px;
 }
 
-.conversation-avatar--subagent {
-  background: var(--ch-color-accent-soft);
-  color: var(--ch-color-accent);
-}
 
 .subagent-card {
-  width: min(85%, 680px);
+  width: 100%;
   border: 1px solid var(--ch-color-border-muted);
   border-left: 2px solid var(--ch-color-accent);
   border-radius: var(--ch-radius-md);
@@ -297,8 +275,8 @@ defineProps<{
 
 
   .subagent-card {
-    width: min(92%, 680px);
-    max-width: 92%;
+    width: 100%;
+    max-width: 100%;
   }
 }
 </style>
