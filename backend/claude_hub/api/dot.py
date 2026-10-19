@@ -196,8 +196,9 @@ async def dot_setup(
 ) -> dict[str, Any]:
     """Create the memory home, the Dot Chat tab and its schedules (idempotent)."""
     from ..models.schemas import SwitchEnvRequest
+    from ..services.dot.execution import recover_execution_locked
     from ..services.env_preset_resolver import merge_env_with_preset
-    from .tabs import switch_tab_env
+    from .tabs import _switch_tab_env_locked
 
     service = _service()
     try:
@@ -206,9 +207,17 @@ async def dot_setup(
             explicit_env=dict(payload.env or {}) if payload else {},
         )
         tab_id = await service.ensure_tab(env=env)
-        if service.env_seed_needed(env):
-            # Same path as the tab env switcher, so a live Chat picks it up too.
-            await switch_tab_env(tab_id, SwitchEnvRequest(env=env), current_user)
+        async with service.setup_lock():
+            await recover_execution_locked(service)
+            if service.tab_id() == tab_id and service.env_seed_needed(env):
+                # Use the tab switcher's runtime handoff, but retain setup's
+                # ownership lock so a replacement cannot adopt this env.
+                await _switch_tab_env_locked(
+                    tab_id,
+                    SwitchEnvRequest(env=env),
+                    current_user,
+                    allow_dot_setup=True,
+                )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except TabLimitExceededError as exc:

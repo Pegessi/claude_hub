@@ -486,6 +486,10 @@ class SessionState(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    async def _publish_delivery_rejection_event(self, event: AgentStreamEvent) -> None:
+        raise NotImplementedError()
+
+    @abstractmethod
     def _notify_post_persist(self, event: AgentStreamEvent) -> None:
         raise NotImplementedError()
 

@@ -10,7 +10,6 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 from claude_hub.models import AgentType, SessionKind
-from claude_hub.models.schemas import ScheduledTaskUpdate
 from claude_hub.services.dot.runtime.session import DotSessionService
 from claude_hub.services.goal_run import get_goal_admission_lock, get_goal_manager
 from claude_hub.services.ttyd_manager import ttyd_manager
@@ -83,7 +82,6 @@ def _check_switchable(service: DotSessionService, tab_id: str) -> None:
 
 async def _require_idle(service: DotSessionService, tab_id: str) -> None:
     from claude_hub.api.agent_stream import _get_tab_tailer_manager
-    from claude_hub.models import AgentStreamEventType
     from claude_hub.services.agent_stream.store import AgentStreamStore
 
     tailer = _get_tab_tailer_manager().get_tailer(f"terminal-tab-{tab_id}")
@@ -97,16 +95,10 @@ async def _require_idle(service: DotSessionService, tab_id: str) -> None:
     if stream.path.with_suffix(".maso-delivery.json").exists():
         raise DotExecutionConflict("Resolve Dot's pending MASO delivery before switching backend.")
     await service.sync_journal()
-    cursor = int(service._peek_state().get("journal_seq", -1))
-    while True:
-        page = await stream.read_since(cursor, limit=500)
-        if any(event.type == AgentStreamEventType.TURN_STARTED for event in page.events):
-            raise DotExecutionConflict(
-                "Recover or finish Dot's unfinished turn before switching backend."
-            )
-        if not page.has_more:
-            break
-        cursor = page.next_sequence
+    if await stream.latest_unfinished_turn() is not None:
+        raise DotExecutionConflict(
+            "Recover or finish Dot's unfinished turn before switching backend."
+        )
     _check_switchable(service, tab_id)
 
 
@@ -120,6 +112,7 @@ def _schedule_snapshot(service: DotSessionService) -> dict[str, Any]:
             "id": schedule_id,
             "tab_id": task.tab_id if task else None,
             "enabled": task.enabled if task else None,
+            "agent_type": task.agent_type.value if task and task.agent_type else None,
         }
     return result
 
@@ -164,10 +157,16 @@ async def _rollback_execution(service: DotSessionService, pending: dict[str, Any
         if current_id and current_id != before["id"]:
             workspace_manager.delete_scheduled_task(current_id)
         schedule_id = before["id"]
-        if schedule_id in workspace_manager.scheduled_tasks and before["tab_id"]:
-            workspace_manager.update_scheduled_task(
+        if (
+            schedule_id in workspace_manager.scheduled_tasks
+            and before["tab_id"]
+            and before["agent_type"]
+        ):
+            workspace_manager.restore_scheduled_chat_task_target(
                 schedule_id,
-                ScheduledTaskUpdate(tab_id=before["tab_id"], enabled=before["enabled"]),
+                tab_id=before["tab_id"],
+                enabled=bool(before["enabled"]),
+                agent_type=AgentType(before["agent_type"]),
             )
         restored[key] = schedule_id
     # Keep the marker until runtime cleanup succeeds. A retry cannot create a
@@ -207,9 +206,9 @@ async def switch_execution(
         async with AsyncExitStack() as stack:
             if old_id:
                 await _lock_tab_admission(stack, old_id)
-            if old:
-                _check_switchable(service, old.id)
-                await _require_idle(service, old.id)
+                # Deleting the tab does not delete its delivery/automation owners.
+                _check_switchable(service, old_id)
+                await _require_idle(service, old_id)
             service.store.ensure()
             created = await ttyd_manager.create_tab(
                 name=service.store.read_identity()["name"],
@@ -222,23 +221,24 @@ async def switch_execution(
             await _lock_tab_admission(stack, created.id)
             pending = {
                 "candidate_tab_id": created.id,
-                "previous_tab_id": old.id if old else None,
+                "previous_tab_id": old_id,
                 "previous_archived": bool(old and old.archived),
                 "schedules": _schedule_snapshot(service),
             }
             try:
                 service.store.update_state(pending_execution=pending)
-                if old:
+                if old_id:
                     from claude_hub.api.agent_stream import _get_tab_tailer_manager
 
                     # Admission is blocked; stop also drains the final observer so
                     # the last exchange reaches memory before ownership changes.
-                    await _require_idle(service, old.id)
-                    await _get_tab_tailer_manager().forget_session(f"terminal-tab-{old.id}")
+                    await _require_idle(service, old_id)
+                    await _get_tab_tailer_manager().forget_session(f"terminal-tab-{old_id}")
                     await service.sync_journal()
-                    _check_switchable(service, old.id)
-                    await ttyd_manager.archive_tab(old.id)
-                    _check_switchable(service, old.id)
+                    _check_switchable(service, old_id)
+                    if old:
+                        await ttyd_manager.archive_tab(old_id)
+                    _check_switchable(service, old_id)
                 if execution_view(service)["revision"] != expected_revision:
                     raise DotExecutionConflict(
                         "Dot's configuration changed. Reload it before applying your settings."

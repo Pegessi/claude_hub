@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from claude_hub.api import agent_stream as agent_stream_api
 from claude_hub.models import (
     AgentRuntimeStatus,
+    AgentStreamEvent,
+    AgentStreamEventType,
     AgentType,
     ExecutionTarget,
     ManagedSession,
@@ -20,9 +23,12 @@ from claude_hub.models import (
     WorkspaceAttachmentCreate,
     WorkspaceSessionRole,
 )
-from claude_hub.services import managed_chat
-from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError
+from claude_hub.services import managed_chat, workspace_manager
+from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError, NormalizeContext
+from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 from claude_hub.services.agent_stream.native import ProviderSession
+from claude_hub.services.agent_stream.runtime.values import _PendingApproval
+from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import (
     SessionTailer,
     TailerManager,
@@ -44,6 +50,40 @@ class _MemoryProvider(ProviderSession):
 
     async def _send_text(self, text: str) -> None:
         self.inputs.append(text)
+
+
+class _BlockingSubmitTransport:
+    def __init__(self, session: ManagedSession, *, fail: bool = False) -> None:
+        self.session = session
+        self._started = True
+        self.turn_in_flight = False
+        self.last_error = None
+        self.exit_error = None
+        self.eof_is_fatal = False
+        self.active_thread_id = None
+        self.fail = fail
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def start(self) -> None:
+        self._started = True
+
+    async def send_message(self, _text: str, _images: list[bytes]) -> None:
+        self.turn_in_flight = True
+        self.entered.set()
+        await self.release.wait()
+        if self.fail:
+            self.turn_in_flight = False
+            raise RuntimeError("provider rejected")
+
+    async def read_line(self) -> None:
+        await asyncio.Event().wait()
+
+    async def stop(self) -> None:
+        self.turn_in_flight = False
+
+    async def cancel_active_turn(self) -> None:
+        self.turn_in_flight = False
 
 
 def _user() -> User:
@@ -131,6 +171,178 @@ async def test_send_persists_attempt_before_handoff_and_accepts_once(
 
     with pytest.raises(ValueError, match="different Chat payload"):
         await managed_chat.send_message(session, "changed", [], "call-1")
+
+
+@pytest.mark.asyncio
+async def test_managed_chat_caller_cancellation_after_acceptance_records_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    workspace_manager_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager_module, "STATE_ROOT", tmp_path)
+    session = _session()
+    transport = _BlockingSubmitTransport(session)
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=AgentStreamStore(session.workspace_id, session.id),
+        native_transport=cast(ProviderSession, transport),
+    )
+
+    class Manager:
+        async def send_message(
+            self,
+            _session: ManagedSession,
+            text: str,
+            images: list[bytes],
+            turn_id: str,
+            **kwargs: Any,
+        ) -> None:
+            await tailer.send_message(text, images, turn_id, **kwargs)
+
+    monkeypatch.setattr(managed_chat, "_manager", lambda: Manager())
+    send = asyncio.create_task(managed_chat.send_message(session, "hello", [], "call-accepted"))
+    try:
+        await asyncio.wait_for(transport.entered.wait(), 1)
+        send.cancel()
+        await asyncio.sleep(0)
+        assert not send.done()
+        transport.release.set()
+        await asyncio.wait_for(send, 1)
+        assert transport.turn_in_flight is True
+        assert managed_chat.delivery_state(session, "call-accepted") == "accepted"
+    finally:
+        transport.release.set()
+        await tailer.stop()
+        if not send.done():
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_rejected_submit_observer_keeps_parent_workspace_lock_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    workspace_manager_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager_module, "STATE_ROOT", tmp_path)
+    session = _session()
+    transport = _BlockingSubmitTransport(session, fail=True)
+    observer_entered = asyncio.Event()
+
+    async def observer(event: AgentStreamEvent) -> None:
+        if event.type == AgentStreamEventType.ERROR:
+            observer_entered.set()
+        async with workspace_manager.workspace_mutation_lock(session.workspace_id):
+            pass
+
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=AgentStreamStore(session.workspace_id, session.id),
+        native_transport=cast(ProviderSession, transport),
+        task_activity_observer=observer,
+    )
+
+    async def locked_send() -> None:
+        async with workspace_manager.workspace_mutation_lock(session.workspace_id):
+            await tailer.send_message("hello", [], "call-rejected")
+
+    send = asyncio.create_task(locked_send())
+    try:
+        await asyncio.wait_for(transport.entered.wait(), 1)
+        transport.release.set()
+        with pytest.raises(RuntimeError, match="provider rejected"):
+            await asyncio.wait_for(send, 1)
+        assert observer_entered.is_set()
+        assert tailer._active_turn_id is None
+        page = await AgentStreamStore(session.workspace_id, session.id).read_since(-1, 100)
+        assert [event.type for event in page.events] == [
+            AgentStreamEventType.TURN_STARTED,
+            AgentStreamEventType.ERROR,
+            AgentStreamEventType.TURN_COMPLETED,
+        ]
+    finally:
+        transport.release.set()
+        await tailer.stop()
+        if not send.done():
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_rejected_maso_completion_resolves_approval_with_parent_workspace_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    workspace_manager_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager_module, "STATE_ROOT", tmp_path)
+    session = _session().model_copy(update={"agent_type": AgentType.MASO})
+    transport = _BlockingSubmitTransport(session)
+    observed_resolved = asyncio.Event()
+    parent_task = asyncio.current_task()
+    approval_observed_in_parent: list[bool] = []
+    completion_observed_in_parent: list[bool] = []
+
+    async def observer(event: AgentStreamEvent) -> None:
+        is_parent_task = asyncio.current_task() is parent_task
+        if event.type == AgentStreamEventType.APPROVAL_RESOLVED:
+            approval_observed_in_parent.append(is_parent_task)
+            observed_resolved.set()
+        if event.type == AgentStreamEventType.TURN_COMPLETED:
+            completion_observed_in_parent.append(is_parent_task)
+        if is_parent_task:
+            async with workspace_manager.workspace_mutation_lock(session.workspace_id):
+                pass
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    tailer = SessionTailer(
+        workspace_id=session.workspace_id,
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        store=store,
+        native_transport=cast(ProviderSession, transport),
+        task_activity_observer=observer,
+    )
+    tailer._pending_approvals["approval-1"] = _PendingApproval(
+        call_id="approval-1",
+        turn_id="approval-turn",
+        run_epoch=7,
+    )
+    ctx = NormalizeContext(
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        run_epoch=8,
+        turn_id="rejected-turn",
+    )
+    try:
+        async with asyncio.timeout(1):
+            async with workspace_manager.workspace_mutation_lock(session.workspace_id):
+                await tailer._publish_delivery_rejection_event(
+                    ctx.event(AgentStreamEventType.TURN_COMPLETED, {"status": "failed"})
+                )
+        assert observed_resolved.is_set()
+        assert approval_observed_in_parent == [True]
+        assert completion_observed_in_parent == [True]
+        assert not tailer._pending_approvals
+        page = await store.read_since(-1, 100)
+        assert [event.type for event in page.events] == [
+            AgentStreamEventType.APPROVAL_RESOLVED,
+            AgentStreamEventType.TURN_COMPLETED,
+        ]
+        assert page.events[0].turn_id == "approval-turn"
+        assert page.events[1].turn_id == "rejected-turn"
+    finally:
+        await tailer.stop()
 
 
 @pytest.mark.asyncio

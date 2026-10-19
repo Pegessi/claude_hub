@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from functools import partial
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -366,8 +367,15 @@ class InputMixin(SessionState):
 
             # 6. Deliver to the provider. Previews are retained from here on:
             #    the user turn is durably recorded and must remain renderable
-            #    even if the provider rejects the input.
-            try:
+            #    even if the provider rejects the input.  Once the durable
+            #    turn_started exists, this tailer owns submission to the
+            #    provider: a client disconnect must not cancel a partially
+            #    written provider request, skip Dot adoption/ack, or turn an
+            #    accepted/uncertain delivery into a local rejection.  Shield
+            #    only provider submission in a child task; the parent task owns
+            #    failure publication and observers so workspace mutation locks
+            #    remain re-entrant for managed Chat callers.
+            async def submit_to_provider() -> None:
                 if self._send_admission is not None and not self._send_admission():
                     raise NativeInputNotSubmittedError(
                         "service is shutting down; try again after it reconnects"
@@ -375,7 +383,35 @@ class InputMixin(SessionState):
                 if before_delivery is not None:
                     before_delivery()
                 await transport.send_message(text, images)
-            except Exception:
+
+            submit_task = asyncio.create_task(
+                submit_to_provider(),
+                name=f"agent-stream-submit-{self.session_id[:8]}",
+            )
+            submit_exception: Optional[Exception] = None
+            while True:
+                try:
+                    await asyncio.shield(submit_task)
+                    break
+                except asyncio.CancelledError:
+                    if submit_task.done():
+                        if submit_task.cancelled():
+                            raise
+                        break
+                    current = asyncio.current_task()
+                    if current is None or current.cancelling() == 0:
+                        raise
+                    current.uncancel()
+                    continue
+                except Exception as exc:
+                    submit_exception = exc
+                    break
+            if submit_exception is None:
+                try:
+                    submit_task.result()
+                except Exception as exc:
+                    submit_exception = exc
+            if submit_exception is not None:
                 # The provider rejected or failed to start the turn. Publish an
                 # error and a failed completion for the same turn_id so the
                 # frontend can mark it failed instead of leaving it pending.
@@ -385,7 +421,7 @@ class InputMixin(SessionState):
                 )
                 err_event = redact_event(err_event)
                 try:
-                    await self._publish(err_event)
+                    await self._publish_delivery_rejection_event(err_event)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for error session %s",
@@ -397,7 +433,7 @@ class InputMixin(SessionState):
                 )
                 completed = redact_event(completed)
                 try:
-                    await self._publish(completed)
+                    await self._publish_delivery_rejection_event(completed)
                 except Exception:
                     logger.exception(
                         "agent_stream store append failed for turn_completed session %s",
@@ -405,7 +441,11 @@ class InputMixin(SessionState):
                     )
                 self._terminalize_native_runtime("failed")
                 self._active_turn_id = None
-                raise
+                raise submit_exception
+            # Provider submission reached the transport's known accepted (or
+            # provider-owned uncertain) boundary. A cancelled HTTP caller no
+            # longer owns the outcome; return normally so managed Chat records
+            # the handoff as accepted instead of overwriting it as uncertain.
 
     @staticmethod
     def _answer_covers_card(

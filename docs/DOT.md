@@ -120,8 +120,8 @@ the card's kind, even when a card was moved by hand without editing `kind`.
 ## Editing the execution backend
 
 Open **Dot → Edit → Execution backend** to choose a backend and its launch preset.
-This editor is separate from name/avatar changes. Applying changed execution
-settings creates a new Dot Chat and archives the previous one; the old conversation
+This editor is separate from name/avatar changes. Applying its changed settings
+creates a new Dot Chat and archives the previous one; the old conversation
 remains readable in Archived sessions. Dot keeps its memory home, focus, tracked
 work and wake/tidy schedule identities. Existing schedule timing, text and disabled
 state are preserved. An unchanged configuration is a no-op.
@@ -130,6 +130,9 @@ Backend changes reset the draft to the chosen backend's own default environment;
 the old backend's API keys, endpoint and model are not implicitly inherited.
 MASO must pass the existing service preflight. Models can be supplied through a
 preset/environment; the new Chat's composer retains the verified model picker.
+The composer can update only the current backend's model/reasoning keys in place.
+Provider, credential and endpoint changes must use the execution editor; generic
+Tab updates cannot bypass that ownership boundary.
 
 A switch requires an idle Dot and never forcibly stops a user turn. It is rejected
 while a turn, unfinished transcript, uncertain MASO delivery, pending scheduled
@@ -137,7 +140,9 @@ run or unfinished Goal exists. A Feishu Bot must first be unbound and then bound
 to the new Dot Chat. Other enabled schedules targeting the previous tab must be
 disabled, removed or retargeted explicitly. Their ownership is not transferred by
 this operation. A failed request keeps the browser draft for retry; stale settings
-require an explicit reload.
+require an explicit reload. These ownership checks still apply when the previous
+tab record is missing: deleting a Chat does not settle its pending schedules,
+Goals or bindings.
 
 `GET /api/dot/execution` returns the current tab, backend, env, revision and
 supported backend list with `Cache-Control: no-store`. `PUT` requires the observed
@@ -148,6 +153,13 @@ until the new identity is committed or rollback has finished. A durable, secret-
 pending marker lets setup/the watcher roll back an interrupted replacement before
 accepting more input. Legacy setup does not seed Claude credentials into a
 non-Claude Dot, including when restoring a deleted tab.
+
+As provider submission begins, the Chat delivery owner waits for its result even
+if the waiting request is cancelled. Confirmed acceptance is not
+rewritten as uncertainty; failure events retain their original observer/lock
+owner and are not appended twice after cancellation. Provider-owned uncertainty
+still follows that provider's recovery path. Use the Chat Stop action to stop a
+running turn rather than relying on closing a request.
 
 ## Guidance updates
 

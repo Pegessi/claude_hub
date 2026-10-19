@@ -219,7 +219,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import {
@@ -407,23 +407,20 @@ async function refreshCommittedTabs() {
   const pending = committedRefresh.value
   if (!pending || refreshingTabs.value) return
   const standalone = !saving.value
-  const shouldActivate = Boolean(
-    pending.oldDotWasActive
-    && pending.oldTabId
-    && terminalStore.activeTabId === pending.oldTabId,
-  )
+  const activeTabReplacement = pending.oldDotWasActive && pending.oldTabId && pending.newTabId
+    ? { from: pending.oldTabId, to: pending.newTabId }
+    : undefined
   refreshingTabs.value = true
   if (standalone) emit('busyChange', true)
   refreshError.value = ''
   try {
-    await terminalStore.fetchTabs({ force: true })
+    await terminalStore.fetchTabs({ force: true, activeTabReplacement })
     if (
       pending.newTabId
       && !terminalStore.tabs.some(tab => tab.id === pending.newTabId)
     ) {
       throw new Error('The new Dot chat is not visible yet.')
     }
-    if (shouldActivate && pending.newTabId) terminalStore.setActiveTab(pending.newTabId)
     committedRefresh.value = null
   } catch (error) {
     const detail = error instanceof Error ? error.message : 'Could not refresh the Chat list.'
@@ -472,6 +469,9 @@ async function applyExecution() {
 }
 
 onMounted(() => { void loadExecution() })
+// A parent may remove this editor while a request is pending. Vue ignores emits
+// after unmount, so release the mounted editor's busy state before that boundary.
+onBeforeUnmount(() => { emit('busyChange', false) })
 </script>
 
 <style scoped>
