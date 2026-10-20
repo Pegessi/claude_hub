@@ -65,7 +65,7 @@
           class="subthread-message"
         >
           <MarkdownContent
-            :text="sub.text"
+            :text="renderAgentDirectives(sub.text)"
             :tab-id="markdownImageScope"
             compact
             :complete="subthreadTerminal(thread)"
@@ -144,6 +144,7 @@
 import { requireChatOwner, chatTimelineKey, chatImagesKey, chatIdentityKey } from '../owners'
 import ThinkingIndicator from '@/components/ThinkingIndicator.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import { renderAgentDirectives } from '@/utils/agentDirectives'
 import { subthreadHeadline, subthreadStatusClass, subthreadStatusLabel, subagentDispatchLabel, subthreadInstructionText, subthreadTerminal } from '@/features/chat/presentation/chatSubagentPresentation'
 import ChatToolGroup from './ChatToolGroup.vue'
 import ChatThinkingCard from './ChatThinkingCard.vue'

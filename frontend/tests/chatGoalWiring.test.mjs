@@ -106,7 +106,7 @@ test('active Goal accepts steers while queued drafts wait for the Goal to stop',
 })
 
 test('assistant text hides an unsanitized trailing Goal envelope', () => {
-  assert.ok(turnParts.includes(':text="stripTrailingGoalProtocol(part.text)"'))
+  assert.ok(turnParts.includes(':text="renderAgentDirectives(stripTrailingGoalProtocol(part.text))"'))
 })
 
 test('expanded Goal details have a visible collapse control and stay above the status bar', () => {

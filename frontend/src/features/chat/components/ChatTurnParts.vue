@@ -10,7 +10,7 @@
   >
     <div class="conversation-bubble conversation-bubble--assistant">
       <MarkdownContent
-        :text="stripTrailingGoalProtocol(part.text)"
+        :text="renderAgentDirectives(stripTrailingGoalProtocol(part.text))"
         :tab-id="markdownImageScope"
         compact
         :complete="turn.completed"
@@ -143,6 +143,7 @@ import { requireChatOwner, chatImagesKey, chatTimelineKey, chatIdentityKey } fro
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import ThinkingIndicator from '@/components/ThinkingIndicator.vue'
 import { stripTrailingGoalProtocol } from '@/utils/chatGoalPolicy'
+import { renderAgentDirectives } from '@/utils/agentDirectives'
 import ChatThinkingCard from './ChatThinkingCard.vue'
 import ChatToolGroup from './ChatToolGroup.vue'
 import ChatSubagentCard from './ChatSubagentCard.vue'
@@ -360,5 +361,48 @@ defineProps<{
   .conversation-bubble :deep(.markdown-content.compact) {
     font-size: 15px;
   }
+}
+
+/* Codex inline directives (e.g. the visualize skill) render as a card that
+   opens the file in the in-page preview. */
+.conversation-bubble :deep(.agent-directive-card) {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  padding: 8px 14px 8px 12px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text);
+  text-decoration: none;
+  box-shadow: 0 6px 18px var(--ch-shadow-color-soft);
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.conversation-bubble :deep(.agent-directive-card)::before {
+  content: '◩';
+  color: var(--ch-color-accent);
+  font-size: 15px;
+}
+
+.conversation-bubble :deep(.agent-directive-card:hover) {
+  border-color: var(--ch-color-accent);
+  background: var(--ch-color-surface-soft);
+}
+
+.conversation-bubble :deep(.agent-directive-label) {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.conversation-bubble :deep(.agent-directive-file) {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ch-color-text-subtle);
+  font-family: var(--ch-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

@@ -44,7 +44,7 @@ test('copy is hidden until the turn has copyable text', () => {
 test('copy action assembles text via the pure helper and writes via the clipboard helper', () => {
   assert.match(actionsController, /import \{ buildTurnCopyText \} from '@\/utils\/chatTurnCopy'/)
   assert.match(actionsController, /import \{ writeClipboard \} from '@\/utils\/clipboard'/)
-  assert.match(actionsController, /await writeClipboard\(buildTurnCopyText\(turn\)\)/)
+  assert.match(actionsController, /await writeClipboard\(buildTurnCopyText\(turn, plainAgentDirectives\)\)/)
 })
 
 test('copy exposes transient copied and visible error feedback with aria-live', () => {

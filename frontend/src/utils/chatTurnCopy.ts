@@ -13,7 +13,12 @@ export interface TurnCopySource {
   parts: ReadonlyArray<{ kind: string; text?: string }>
 }
 
-export function buildTurnCopyText(turn: TurnCopySource): string {
+/** ``normalizeText`` lets the caller turn renderer-only markup (e.g. Codex
+ *  inline directives) into plain text without this module importing it. */
+export function buildTurnCopyText(
+  turn: TurnCopySource,
+  normalizeText: (text: string) => string = text => text,
+): string {
   const sections: string[] = []
 
   const userText = turn.userText?.trim()
@@ -28,7 +33,8 @@ export function buildTurnCopyText(turn: TurnCopySource): string {
         && typeof part.text === 'string'
         && part.text.trim().length > 0,
     )
-    .map(part => part.text.trim())
+    .map(part => normalizeText(part.text).trim())
+    .filter(text => text.length > 0)
 
   if (assistantTexts.length > 0) {
     sections.push(`Assistant:\n${assistantTexts.join('\n\n')}`)
