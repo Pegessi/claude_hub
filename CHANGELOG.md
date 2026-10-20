@@ -10,6 +10,7 @@
 ### refactor(chat): share inbox delivery between timers and direct messages
 
 - Route scheduled Chat turns through the same durable FIFO, native submission fence and recovery pump as direct tab messages. Keep schedule superseding/cancellation policy, legacy run history, stale-turn recovery and Dot provenance; let one-shot Chat schedules fire once even after their timer disables itself.
+- Keep scheduled recovery pending when transcript evidence cannot be read; retry startup recovery through the coordinator without releasing its FIFO slot or losing the occurrence.
 
 ### feat(chat): add a durable tab message inbox
 

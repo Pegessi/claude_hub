@@ -53,3 +53,25 @@ Pre-ship requires explicit deploy/restart and push/MR decisions; integrate inbox
 ancestor first/with this branch, then separately reconcile the busy-status sibling
 and retain both changelog entries. Exactly-once provider execution is not claimed.
 No live provider acceptance has been exercised. **no lessons needed**.
+
+
+## Independent review correction: evidence-read failure
+
+Workspace reviewer rejected e36c042 after reproducing an evidence I/O failure
+being treated as started, then terminal scheduled uncertainty. That prematurely
+released the FIFO and prevented later evidence from recovering the occurrence.
+Previous passing checks did not exercise this failure boundary.
+
+Scheduled evidence exceptions now retain state and queue ownership, log and retry.
+Process-local pending startup recovery remembers which intents still need their
+first successful evidence read; ordinary coordinator passes keep startup policy
+until that read succeeds. A fresh process reconstructs this from durable in-flight
+states, so no new persisted state/schema is required. Live stale failures keep the
+existing 60-second recheck; direct-message uncertainty behavior is unchanged.
+
+Eight parametrized restart/live-stale, dispatching/running, absent/completed
+regressions failed on e36c042 and pass after correction. An additional real inbox
+coordinator test covers startup failure followed by automatic retry and mixed FIFO
+completion. Final focused/full verification and correction commit evidence are
+recorded in UNIFICATION.md. Independent re-review and human acceptance pending;
+no primary restart/deploy/push or real message. **no lessons needed**.
