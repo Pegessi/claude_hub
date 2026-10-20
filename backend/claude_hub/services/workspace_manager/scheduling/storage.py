@@ -2,7 +2,13 @@
 
 from pydantic import ValidationError
 
-from .._constants import *  # noqa: F401,F403
+from .._constants import (
+    ScheduledTask,
+    ScheduledTaskRun,
+    ScheduledTaskRunStatus,
+    json,
+    logger,
+)
 from ._contract import _SchedulingHost
 
 
@@ -46,6 +52,9 @@ class _ScheduleStorageMixin(_SchedulingHost):
                     self.scheduled_task_runs[run.id] = run
                 except Exception as exc:
                     logger.warning("Skipping invalid scheduled task run entry: %s", exc)
+        self._scheduled_legacy_run_ids = {
+            run.id for run in self.scheduled_task_runs.values() if self._chat_run_active(run)
+        }
         # A dispatch/running marker owned by a prior process must be reconciled
         # against the durable stream before another turn can be sent.
         self._scheduled_chat_recovery_pending = any(

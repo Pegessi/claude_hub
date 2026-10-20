@@ -112,7 +112,8 @@ def test_concise_guidance_retains_feedback_and_schedule_boundaries() -> None:
         "feedback configure",
         "lessons get",
         "schedule create --kind hub_task --help",
-        "--kind chat_turn",
+        "tab message",
+        "tab message-status",
         "--kind tab_message",
         "schedule list",
         "schedule delete",
@@ -123,6 +124,11 @@ def test_concise_guidance_retains_feedback_and_schedule_boundaries() -> None:
         in HUB_RUNTIME_GUIDANCE
     )
     assert "queue behind active turns or Goals; they do not interrupt them" in HUB_RUNTIME_GUIDANCE
+    assert (
+        "For an immediate queued message to an existing Chat (no schedule)" in HUB_RUNTIME_GUIDANCE
+    )
+    assert "--call-id" in HUB_RUNTIME_GUIDANCE
+    assert "--interval <seconds>" not in HUB_RUNTIME_GUIDANCE
     assert "plain Terminal sessions, not this Chat" in HUB_RUNTIME_GUIDANCE
     assert "not on every turn" in HUB_RUNTIME_GUIDANCE
     assert "cite the exact quote" in HUB_RUNTIME_GUIDANCE

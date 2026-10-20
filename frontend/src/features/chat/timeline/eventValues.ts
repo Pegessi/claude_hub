@@ -1,5 +1,5 @@
 import type { AgentStreamEvent } from '@/types'
-import type { TimelineTurnOrigin, TimelineFeishuProvenance, TimelineTurn } from './types'
+import type { TimelineTurnOrigin, TimelineFeishuProvenance, TimelineHubMessageProvenance, TimelineTurn } from './types'
 
 export function payloadString(event: AgentStreamEvent, key: string): string {
   const value = event.payload[key]
@@ -16,15 +16,32 @@ type ExplicitTimelineTurnOrigin = Exclude<TimelineTurnOrigin, 'unknown'>
 export function turnProvenance(event: AgentStreamEvent): {
   origin: ExplicitTimelineTurnOrigin
   feishu: TimelineFeishuProvenance | null
+  hubMessage: TimelineHubMessageProvenance | null
 } | null {
   const metadata = payloadRecord(event, 'metadata')
   const origin = metadata.origin
+  if (origin === 'hub_message') {
+    const raw = metadata.hub_message
+    const value = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw as Record<string, unknown> : {}
+    const valid = typeof value.message_id === 'string' && value.message_id.trim() &&
+      typeof value.actor === 'string' && value.actor.trim()
+    return {
+      origin, feishu: null,
+      hubMessage: valid ? {
+        messageId: (value.message_id as string).trim(),
+        actor: (value.actor as string).trim(),
+        sourceTabId: typeof value.source_tab_id === 'string' && value.source_tab_id.trim()
+          ? value.source_tab_id.trim() : null,
+      } : null,
+    }
+  }
   if (origin !== 'feishu' && origin !== 'web') return null
-  if (origin === 'web') return { origin, feishu: null }
+  if (origin === 'web') return { origin, feishu: null, hubMessage: null }
 
   const rawFeishu = metadata.feishu
   if (!rawFeishu || typeof rawFeishu !== 'object' || Array.isArray(rawFeishu)) {
-    return { origin, feishu: null }
+    return { origin, feishu: null, hubMessage: null }
   }
   const value = rawFeishu as Record<string, unknown>
   const appId = value.app_id
@@ -42,10 +59,11 @@ export function turnProvenance(event: AgentStreamEvent): {
     typeof messageId !== 'string' || !messageId ||
     typeof senderOpenId !== 'string' || !senderOpenId
   ) {
-    return { origin, feishu: null }
+    return { origin, feishu: null, hubMessage: null }
   }
   return {
     origin,
+    hubMessage: null,
     feishu: { appId, botName, botAvatarUrl, chatId, messageId, senderOpenId },
   }
 }
@@ -62,6 +80,7 @@ export function createTurn(key: string, turnId: string | null): TimelineTurn {
     userText: '',
     origin: 'unknown',
     feishu: null,
+    hubMessage: null,
     mode: null,
     yieldsToUser: false,
     attachments: [],
@@ -81,6 +100,8 @@ export function createTurn(key: string, turnId: string | null): TimelineTurn {
 }
 
 export function messageSourceLabel(turn: TimelineTurn): string | null {
+  if (turn.origin === 'hub_message') return turn.hubMessage?.actor
+    ? `Hub message · ${turn.hubMessage.actor}` : 'Hub message'
   if (turn.origin !== 'feishu') return null
   return turn.feishu?.botName || 'Feishu'
 }

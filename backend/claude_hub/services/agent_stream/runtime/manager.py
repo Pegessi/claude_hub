@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from ....models import AgentStreamEvent, AgentType, ManagedSession, SessionKind
 from ..base import NativeInputNotSubmittedError
@@ -182,6 +182,7 @@ class TailerManager(EditResendMixin):
         strip_goal_protocol: bool = False,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
+        allow_question_answer: bool = True,
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
 
@@ -206,6 +207,7 @@ class TailerManager(EditResendMixin):
             strip_goal_protocol=strip_goal_protocol,
             before_send=before_send,
             before_delivery=before_delivery,
+            allow_question_answer=allow_question_answer,
         )
 
     async def cancel_turn(

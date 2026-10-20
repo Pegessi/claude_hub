@@ -114,6 +114,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         if (provenance !== null) {
           turn.origin = provenance.origin
           turn.feishu = provenance.feishu
+          turn.hubMessage = provenance.hubMessage
           mutated = true
         }
       }

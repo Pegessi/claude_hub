@@ -2,11 +2,21 @@
 
 from abc import abstractmethod
 
+from ...chat_message_inbox import ChatMessageInbox
 from .._base import _WorkspaceManagerBase
-from .._constants import *  # noqa: F401,F403
+from .._constants import (
+    Optional,
+    ScheduledTask,
+    ScheduledTaskRun,
+    ScheduledTaskRunStatus,
+    datetime,
+)
 
 
 class _SchedulingHost(_WorkspaceManagerBase):
+    @abstractmethod
+    def _delivery_inbox(self) -> ChatMessageInbox: ...
+
     @abstractmethod
     def _save_scheduled_tasks(self) -> None: ...
 

@@ -118,10 +118,10 @@ def _schedule_snapshot(service: DotSessionService) -> dict[str, Any]:
 
 
 async def _lock_tab_admission(stack: AsyncExitStack, tab_id: str) -> None:
-    # The scheduler takes its tab lock before Goal admission. Keep that order so
-    # rollback cannot race a waiter that would revive a discarded occurrence.
+    # Both entry modes use this inbox pump lock before Goal admission. Keep
+    # rollback serialized with all native delivery, including direct messages.
     await stack.enter_async_context(
-        workspace_manager._scheduled_chat_tab_locks.setdefault(tab_id, asyncio.Lock())
+        workspace_manager._delivery_inbox()._pump_locks.setdefault(tab_id, asyncio.Lock())
     )
     await stack.enter_async_context(get_goal_admission_lock(tab_id))
 
