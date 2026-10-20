@@ -32,11 +32,21 @@ class AgentStreamRouteBindings(Protocol):
     ) -> None: ...
 
     async def capabilities_for(
-        self, session: ManagedSession, manager: Optional[TailerManager] = None
+        self,
+        session: ManagedSession,
+        manager: Optional[TailerManager] = None,
+        *,
+        cache_preparation: bool = False,
+        refresh: bool = False,
     ) -> StreamCapabilities: ...
 
     async def tab_capabilities_for(
-        self, session: ManagedSession, manager: TailerManager
+        self,
+        session: ManagedSession,
+        manager: TailerManager,
+        *,
+        cache_preparation: bool = False,
+        refresh: bool = False,
     ) -> StreamCapabilities: ...
 
     async def stream_events_for(
@@ -50,6 +60,7 @@ class AgentStreamRouteBindings(Protocol):
         view: Literal["raw", "conversation"] = "raw",
         turn_id: Optional[str] = None,
         through_sequence: Optional[int] = None,
+        persisted_only: bool = False,
     ) -> AgentStreamEventPage: ...
 
     async def wait_stream_events_for(self, *args: Any, **kwargs: Any) -> AgentStreamEventPage: ...

@@ -123,13 +123,13 @@ const stubs = {
   'composables/useAgentStream.ts': `
     import { ref } from 'vue'
     export function useAgentStream() {
-      const events = ref([]), connectionState = ref('idle'), errorMessage = ref(null)
+      const events = ref([]), connectionState = ref('idle'), errorMessage = ref(null), historyReady = ref(false)
       const historyDetails = ref({}), historyDetailRevision = ref(0), attributedToolIds = ref(new Set())
       const capabilities = ref({ available_models: [], current_model: null, current_reasoning_effort: null, available_modes: [], current_mode: null, supports_images: true, supports_goals: true })
-      const start = async (id, source) => { globalThis.__chatLifecycleTest.calls.push(['start', id, source]); connectionState.value = 'live' }
+      const start = async (id, source) => { globalThis.__chatLifecycleTest.calls.push(['start', id, source]); historyReady.value = true; connectionState.value = 'live' }
       const stop = () => globalThis.__chatLifecycleTest.calls.push(['stop'])
       const loadHistoryDetail = async id => { globalThis.__chatLifecycleTest.calls.push(['loadHistoryDetail', id]) }
-      const stream = { events, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, retry: start, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
+      const stream = { events, historyReady, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, retry: start, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
       globalThis.__chatLifecycleTest.streams.push(stream)
       return stream
     }
@@ -413,3 +413,29 @@ for (const cleanup of ['deactivate', 'unmount']) {
     assert.equal(h.state.calls.filter(([name]) => name === 'history.back').length, 1)
   })
 }
+
+test('cached settings cannot mutate a Chat while hydration, reconciliation or failure locks readiness', async t => {
+  const h = await mount(t)
+  const delivery = h.owner(h.keys.chatDeliveryKey)
+  const settings = h.owner(h.keys.chatSettingsKey)
+  const stream = h.state.streams[0]
+  let mutations = 0
+  h.state.store.switchEnv = async () => { mutations += 1 }
+  const model = { id: 'test-model', label: 'Test', supported_reasoning_efforts: [] }
+  for (const state of ['hydrating', 'reconciling', 'failed']) {
+    stream.connectionState.value = state
+    await flush()
+    assert.equal(delivery.modeInteractionLocked.value, true)
+    settings.toggleModelMenu()
+    settings.toggleModeMenu()
+    assert.equal(settings.isModelMenuOpen.value, false)
+    assert.equal(settings.isModeMenuOpen.value, false)
+    await settings.selectModelAndEffort(model, '')
+    assert.equal(mutations, 0)
+  }
+  stream.connectionState.value = 'live'
+  await flush()
+  assert.equal(delivery.modeInteractionLocked.value, false)
+  await settings.selectModelAndEffort(model, '')
+  assert.equal(mutations, 1)
+})

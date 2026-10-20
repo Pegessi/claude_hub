@@ -287,6 +287,7 @@ async def main(browser_run: BrowserRun) -> None:
                             "since_sequence": ["-1"],
                             "limit": ["5000"],
                             "compact": ["true"],
+                            "persisted_only": ["true"],
                             "view": ["conversation"],
                         }
                     ):

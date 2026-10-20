@@ -662,7 +662,7 @@ async def test_managed_capability_preparation_is_serialized_before_replacement(
     release_preparation = asyncio.Event()
 
     async def blocked_capabilities(
-        _session: ManagedSession, _manager: TailerManager
+        _session: ManagedSession, _manager: TailerManager, **_kwargs: Any
     ) -> stream_api.StreamCapabilities:
         preparation_entered.set()
         await release_preparation.wait()
@@ -710,7 +710,7 @@ async def test_managed_diagnostics_preparation_is_serialized_before_replacement(
     release_preparation = asyncio.Event()
 
     async def blocked_capabilities(
-        _session: ManagedSession, _manager: TailerManager
+        _session: ManagedSession, _manager: TailerManager, **_kwargs: Any
     ) -> stream_api.StreamCapabilities:
         preparation_entered.set()
         await release_preparation.wait()

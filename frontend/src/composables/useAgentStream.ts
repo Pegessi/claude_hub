@@ -9,6 +9,7 @@ import { validateImageAttachment, fileToDataUrl, generatePreviewDataUrl } from '
 import { createContiguousEventBuffer } from '@/utils/agentStreamSequence'
 import { AgentStreamBatcher } from '@/utils/agentStreamBatcher'
 import { StreamConnectionStateMachine } from '@/utils/streamConnectionStateMachine'
+import { agentStreamCapabilitiesCache } from '@/utils/agentStreamCapabilitiesCache'
 import {
   agentStreamHistoryCache,
   type AgentStreamHistoryDetailEntry,
@@ -67,6 +68,8 @@ export interface UseAgentStreamApi {
   historyDetailRevision: Ref<number>
   connectionState: Ref<StreamConnectionState>
   errorMessage: Ref<string | null>
+  /** Durable history can be shown before runtime controls are ready. */
+  historyReady: Ref<boolean>
   /** Start (or restart) a managed-session or direct Chat-tab stream. */
   start: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Fetch a folded historical turn's full process without advancing the live cursor. */
@@ -89,8 +92,8 @@ export interface UseAgentStreamApi {
  * Structured Chat-stream client.
  *
  * Hydration contract (sequence-safe):
- *   1. GET /stream/capabilities — fail closed if ``structured=false``.
- *   2. GET /stream/events — backfill from -1 or resume at a cached cursor.
+ *   1. GET persisted history and prepare capabilities concurrently.
+ *   2. Reveal history independently; enable live controls only with valid capabilities.
  *   3. POST /stream/wait — authoritative live reconciliation loop.
  *   4. GET /stream/live (SSE) — optional low-latency accelerator.
  *
@@ -115,7 +118,7 @@ export interface UseAgentStreamApi {
  * Chat sessions never silently fall back to raw; the composable reports an
  * explicit retryable failure to StructuredPane.
  */
-export function useAgentStream(): UseAgentStreamApi {
+export function useAgentStream(configuration: () => string = () => ''): UseAgentStreamApi {
   const capabilities = shallowRef<StreamCapabilities | null>(null)
   // Batches replace the array; event payloads are immutable. Deep proxies
   // make replaying a long transcript substantially more expensive.
@@ -125,6 +128,8 @@ export function useAgentStream(): UseAgentStreamApi {
   const historyDetailRevision = ref(0)
   const connectionState = ref<StreamConnectionState>('idle')
   const errorMessage = ref<string | null>(null)
+  const historyReady = ref(false)
+  let capabilitiesRevision = 0
 
   const stateMachine = new StreamConnectionStateMachine()
 
@@ -144,6 +149,7 @@ export function useAgentStream(): UseAgentStreamApi {
   let hydrationAbort: AbortController | null = null
   /** Latest-wins owner for requests that replace active capabilities. */
   let capabilitiesUpdateAbort: AbortController | null = null
+  let pendingCapabilitiesUpdate: Promise<void> | null = null
   let nextHistoryDetailRequestId = 1
   const historyDetailRequests = new Map<
     string,
@@ -190,6 +196,8 @@ export function useAgentStream(): UseAgentStreamApi {
     batcher.flushAndCancel()
     if (!snapshot && currentStreamPath) agentStreamHistoryCache.delete(currentStreamPath)
     abortHistoryDetailRequests()
+    capabilitiesRevision += 1
+    historyReady.value = Boolean(snapshot)
     capabilities.value = snapshot?.capabilities ?? null
     events.value = snapshot?.events ?? []
     historyDetails.value = snapshot?.historyDetails
@@ -247,6 +255,7 @@ export function useAgentStream(): UseAgentStreamApi {
   }
 
   function abortCapabilitiesUpdate() {
+    pendingCapabilitiesUpdate = null
     if (capabilitiesUpdateAbort) {
       capabilitiesUpdateAbort.abort()
       capabilitiesUpdateAbort = null
@@ -426,8 +435,10 @@ export function useAgentStream(): UseAgentStreamApi {
   async function fetchCapabilities(
     streamPath: string,
     signal: AbortSignal,
+    refresh = false,
   ): Promise<StreamCapabilities> {
-    const res = await fetchWithTimeout(`${streamPath}/capabilities`, { signal }, HYDRATION_FETCH_TIMEOUT_MS)
+    const suffix = refresh ? '?refresh=true' : ''
+    const res = await fetchWithTimeout(`${streamPath}/capabilities${suffix}`, { signal }, HYDRATION_FETCH_TIMEOUT_MS)
     if (!res.ok) throw new Error(`capabilities HTTP ${res.status}`)
     return (await res.json()) as StreamCapabilities
   }
@@ -442,6 +453,7 @@ export function useAgentStream(): UseAgentStreamApi {
       since_sequence: String(since),
       limit: String(HYDRATION_PAGE_LIMIT),
       compact: 'true',
+      persisted_only: 'true',
     })
     if (options.view) params.set('view', options.view)
     if (options.turnId) params.set('turn_id', options.turnId)
@@ -518,6 +530,7 @@ export function useAgentStream(): UseAgentStreamApi {
           continue
         }
         // Budget exhausted — surface the failure and stop; fail closed.
+        agentStreamCapabilitiesCache.delete(streamPath)
         const message = err instanceof Error ? err.message : 'stream wait failed'
         if (stateMachine.fail(generationId, message)) {
           errorMessage.value = message
@@ -534,12 +547,16 @@ export function useAgentStream(): UseAgentStreamApi {
   function startSse(sourceId: string, streamPath: string, generationId: number) {
     const url = `${streamPath}/live?since_sequence=${sequenceBuffer.cursor}`
     eventSource = new EventSource(url)
+    const helloRevision = capabilitiesRevision
+    const helloConfiguration = configuration()
 
     eventSource.addEventListener('hello', (ev: MessageEvent) => {
-      if (!stateMachine.isCurrent(generationId)) return
+      if (!stateMachine.isCurrent(generationId) || capabilitiesRevision !== helloRevision) return
+      if (configuration() !== helloConfiguration) return
       try {
         const caps = JSON.parse(ev.data) as StreamCapabilities
         capabilities.value = caps
+        agentStreamCapabilitiesCache.set(streamPath, helloConfiguration, caps)
         if (!caps.structured) {
           const message = caps.unavailable_reason || 'structured observation unavailable for this session'
           if (stateMachine.fail(generationId, message)) {
@@ -547,6 +564,9 @@ export function useAgentStream(): UseAgentStreamApi {
             connectionState.value = 'failed'
           }
           stop()
+          // stop() retires delivery ownership; retain the failure and readable
+          // history rather than replacing the error with an idle loading banner.
+          connectionState.value = 'failed'
         }
       } catch {
         // ignore malformed hello
@@ -603,20 +623,17 @@ export function useAgentStream(): UseAgentStreamApi {
     hydrationAbort = new AbortController()
     const signal = hydrationAbort.signal
 
-    try {
-      const caps = await fetchCapabilities(streamPath, signal)
-      if (!stateMachine.isCurrent(generationId)) return
-      capabilities.value = caps
-      if (!caps.structured) {
-        agentStreamHistoryCache.delete(streamPath)
-        const message = caps.unavailable_reason || 'structured observation unavailable for this session'
-        if (stateMachine.fail(generationId, message)) {
-          errorMessage.value = message
-          connectionState.value = 'failed'
-        }
-        return
-      }
+    const requestConfiguration = configuration()
+    const requestRevision = capabilitiesRevision
+    const cachedCapabilities = agentStreamCapabilitiesCache.get(streamPath, requestConfiguration)
+    // Handle rejection immediately: history may finish after a failed capability
+    // request, and remains useful even when the execution backend is unavailable.
+    const prepared = (cachedCapabilities
+      ? Promise.resolve(cachedCapabilities)
+      : fetchCapabilities(streamPath, signal)
+    ).then(value => ({ value }), error => ({ error }))
 
+    try {
       // A cold mount pulls full history. A remount resumes at the cached
       // contiguous cursor and fetches only events published while hidden.
       let since = sequenceBuffer.cursor
@@ -635,6 +652,52 @@ export function useAgentStream(): UseAgentStreamApi {
       // The activation gate may reveal immediately on live. Commit the final
       // delta-only page before that transition, even with rAF suspended.
       batcher.flushAndCancel()
+      historyReady.value = true
+      connectionState.value = 'reconciling'
+      const result = await prepared
+      if (stopped || !stateMachine.isCurrent(generationId)) return
+      if (configuration() !== requestConfiguration) {
+        await start(sourceId, source)
+        return
+      }
+      // A settings request may supersede preparation while history is loading.
+      // Wait for its result rather than admitting input with the older snapshot.
+      let pending = pendingCapabilitiesUpdate
+      while (pending) {
+        try {
+          await pending
+        } catch (error) {
+          if (pending === pendingCapabilitiesUpdate) throw error
+        }
+        if (stopped || !stateMachine.isCurrent(generationId)) return
+        if (pending === pendingCapabilitiesUpdate) break
+        pending = pendingCapabilitiesUpdate
+      }
+      // A settings response in this generation takes precedence over the older
+      // hydration response, even when a mocked/remote fetch ignores cancellation.
+      if (capabilitiesRevision === requestRevision) {
+        if ('error' in result) throw result.error
+        capabilities.value = result.value
+        if (!cachedCapabilities) agentStreamCapabilitiesCache.set(streamPath, requestConfiguration, result.value)
+      }
+      const caps = capabilities.value
+      if (!caps?.structured) {
+        agentStreamCapabilitiesCache.delete(streamPath)
+        throw new Error(caps?.unavailable_reason || 'structured observation unavailable for this session')
+      }
+      // A legacy transcript can be imported during first-time preparation.
+      // Preserve summary/detail folding instead of replaying that whole import
+      // through the raw live path when the initial durable view was empty.
+      if (!cachedCapabilities && events.value.length === 0) {
+        while (true) {
+          const page = await fetchEvents(streamPath, since, signal, { view: 'conversation' })
+          if (stopped || !stateMachine.isCurrent(generationId)) return
+          applyCompactedHistoryPage(page, generationId)
+          since = page.next_sequence
+          if (!page.has_more) break
+        }
+        batcher.flushAndCancel()
+      }
       if (stateMachine.success(generationId)) {
         connectionState.value = 'live'
       }
@@ -650,6 +713,7 @@ export function useAgentStream(): UseAgentStreamApi {
       }
     } catch (err) {
       if (stopped || !stateMachine.isCurrent(generationId)) return
+      agentStreamCapabilitiesCache.delete(streamPath)
       const message = err instanceof Error ? err.message : 'stream start failed'
       if (stateMachine.fail(generationId, message)) {
         errorMessage.value = message
@@ -720,6 +784,7 @@ export function useAgentStream(): UseAgentStreamApi {
   }
 
   async function retry(sourceId: string, source: StreamSource = 'managed-session') {
+    agentStreamCapabilitiesCache.delete(streamBasePath(sourceId, source))
     stop()
     stopped = false
     currentSessionId = sourceId
@@ -770,41 +835,56 @@ export function useAgentStream(): UseAgentStreamApi {
     }
   }
 
-  async function refreshCapabilities() {
+  async function updateCapabilities(
+    request: (streamPath: string, signal: AbortSignal) => Promise<StreamCapabilities>,
+  ) {
     const sourceId = currentSessionId
     const streamPath = currentStreamPath
-    if (stopped || !sourceId || !streamPath) {
-      throw new Error('Structured source is unavailable.')
-    }
+    if (stopped || !sourceId || !streamPath) throw new Error('Structured source is unavailable.')
 
     abortCapabilitiesUpdate()
+    capabilitiesRevision += 1
+    agentStreamCapabilitiesCache.delete(streamPath)
+    const generationId = stateMachine.getGeneration()
+    const requestConfiguration = configuration()
     const controller = new AbortController()
     capabilitiesUpdateAbort = controller
-    try {
-      const nextCapabilities = await fetchCapabilities(streamPath, controller.signal)
+    const pending = (async () => {
+      const nextCapabilities = await request(streamPath, controller.signal)
       if (
-        stopped
-        || currentSessionId !== sourceId
-        || currentStreamPath !== streamPath
+        stopped || currentSessionId !== sourceId || currentStreamPath !== streamPath
+        || !stateMachine.isCurrent(generationId) || capabilitiesUpdateAbort !== controller
+        || controller.signal.aborted || configuration() !== requestConfiguration
       ) return
       capabilities.value = nextCapabilities
+      agentStreamCapabilitiesCache.set(streamPath, requestConfiguration, nextCapabilities)
+      if (!nextCapabilities.structured) {
+        const message = nextCapabilities.unavailable_reason || 'structured observation unavailable for this session'
+        if (stateMachine.fail(generationId, message)) {
+          errorMessage.value = message
+          connectionState.value = 'failed'
+          closeSse()
+          abortLongPoll()
+        }
+        throw new Error(message)
+      }
+    })()
+    pendingCapabilitiesUpdate = pending
+    try {
+      await pending
     } finally {
       if (capabilitiesUpdateAbort === controller) capabilitiesUpdateAbort = null
+      // Retain the settled result until replaced/reset, so hydration can observe
+      // a failure even if its original capability response finishes later.
     }
   }
 
+  async function refreshCapabilities() {
+    await updateCapabilities((streamPath, signal) => fetchCapabilities(streamPath, signal, true))
+  }
+
   async function setMode(mode: string) {
-    const sourceId = currentSessionId
-    const streamPath = currentStreamPath
-    if (stopped || !sourceId || !streamPath) {
-      throw new Error('Structured source is unavailable.')
-    }
-
-    abortCapabilitiesUpdate()
-    const controller = new AbortController()
-    capabilitiesUpdateAbort = controller
-
-    try {
+    await updateCapabilities(async (streamPath, signal) => {
       const res = await fetchWithTimeout(
         `${streamPath}/mode`,
         {
@@ -812,7 +892,7 @@ export function useAgentStream(): UseAgentStreamApi {
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
           body: JSON.stringify({ mode }),
-          signal: controller.signal,
+          signal,
         },
         HYDRATION_FETCH_TIMEOUT_MS,
       )
@@ -826,15 +906,8 @@ export function useAgentStream(): UseAgentStreamApi {
         }
         throw new Error(detail)
       }
-
-      const nextCapabilities = (await res.json()) as StreamCapabilities
-      // A late response from the previous Chat must not replace the active
-      // Chat's capabilities after a tab switch.
-      if (stopped || currentSessionId !== sourceId || currentStreamPath !== streamPath) return
-      capabilities.value = nextCapabilities
-    } finally {
-      if (capabilitiesUpdateAbort === controller) capabilitiesUpdateAbort = null
-    }
+      return (await res.json()) as StreamCapabilities
+    })
   }
 
   function stop() {
@@ -863,6 +936,7 @@ export function useAgentStream(): UseAgentStreamApi {
     historyDetailRevision,
     connectionState,
     errorMessage,
+    historyReady,
     start,
     loadHistoryDetail,
     retry,

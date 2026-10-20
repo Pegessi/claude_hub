@@ -130,6 +130,7 @@ async def stream_events_for(
     view: Literal["raw", "conversation"] = "raw",
     turn_id: Optional[str] = None,
     through_sequence: Optional[int] = None,
+    persisted_only: bool = False,
 ) -> AgentStreamEventPage:
     if (turn_id is None) != (through_sequence is None):
         raise HTTPException(
@@ -137,7 +138,18 @@ async def stream_events_for(
         )
     if view == "conversation" and turn_id is not None:
         raise HTTPException(status_code=400, detail="conversation view cannot filter one turn")
-    caps = await bindings.capabilities_for(session, manager)
+    if persisted_only:
+        store = manager.get_store(session.workspace_id, session.id)
+        if view == "conversation":
+            return await store.read_conversation(since_sequence, limit, compact=compact)
+        if turn_id is not None and through_sequence is not None:
+            return await store.read_turn_since(
+                turn_id, since_sequence, through_sequence, limit, compact=compact
+            )
+        if compact:
+            return await store.read_since(since_sequence, limit, compact=True)
+        return await store.read_since(since_sequence, limit)
+    caps = await bindings.capabilities_for(session, manager, cache_preparation=True)
     if not caps.structured and not allow_pending_source:
         return AgentStreamEventPage(events=[], next_sequence=since_sequence, has_more=False)
     try:
@@ -170,7 +182,11 @@ async def wait_stream_events_for(
     capabilities: Optional[StreamCapabilities] = None,
 ) -> AgentStreamEventPage:
     since = payload.since_sequence
-    caps = capabilities or await bindings.capabilities_for(session, manager)
+    caps = capabilities or await bindings.capabilities_for(
+        session,
+        manager,
+        cache_preparation=True,
+    )
     if not caps.structured and not allow_pending_source:
         return AgentStreamEventPage(events=[], next_sequence=since, has_more=False)
 
@@ -276,8 +292,13 @@ async def stream_live_for(
     since_sequence: int,
     bindings: AgentStreamRouteBindings,
     allow_pending_source: bool = False,
+    cache_preparation: bool = False,
 ) -> StreamingResponse:
-    caps = await bindings.capabilities_for(session, manager)
+    caps = await bindings.capabilities_for(
+        session,
+        manager,
+        cache_preparation=cache_preparation,
+    )
     if not session_exists():
         return bindings.closed_unavailable_stream(caps, missing_message)
     if not caps.structured and not allow_pending_source:
@@ -302,7 +323,11 @@ async def stream_live_for(
         manager.unsubscribe(session.id, queue)
         return bindings.closed_unavailable_stream(caps, missing_message)
     if allow_pending_source:
-        caps = await bindings.tab_capabilities_for(session, manager)
+        caps = await bindings.tab_capabilities_for(
+            session,
+            manager,
+            cache_preparation=cache_preparation,
+        )
     store = manager.get_store(session.workspace_id, session.id)
 
     async def event_stream() -> Any:
@@ -403,11 +428,17 @@ def register_observation_routes(
     async def get_stream_capabilities(
         managed_session_id: str,
         current_user: User = Depends(get_current_user),
+        refresh: bool = False,
     ) -> StreamCapabilities:
         session = bindings.session_or_404(managed_session_id)
         manager = bindings.get_tailer_manager()
         async with bindings.managed_stream_interaction(session) as live:
-            capabilities = await bindings.capabilities_for(live, manager)
+            capabilities = await bindings.capabilities_for(
+                live,
+                manager,
+                cache_preparation=True,
+                refresh=refresh,
+            )
         bindings.require_current_managed_session(session, manager)
         return managed_default_mode_capabilities(capabilities)
 
@@ -418,11 +449,17 @@ def register_observation_routes(
     async def get_tab_stream_capabilities(
         tab_id: str,
         current_user: User = Depends(get_current_user),
+        refresh: bool = False,
     ) -> StreamCapabilities:
         """Return structured-stream capability for a direct Chat tab."""
 
         session = bindings.terminal_tab_session_or_404(tab_id)
-        return await bindings.tab_capabilities_for(session, bindings.get_tab_tailer_manager())
+        return await bindings.tab_capabilities_for(
+            session,
+            bindings.get_tab_tailer_manager(),
+            cache_preparation=True,
+            refresh=refresh,
+        )
 
     @router.post(
         "/sessions/{managed_session_id}/stream/retry",
@@ -506,6 +543,7 @@ def register_observation_routes(
         turn_id: Optional[str] = Query(None, min_length=1),
         through_sequence: Optional[int] = Query(None, ge=0),
         current_user: User = Depends(get_current_user),
+        persisted_only: bool = False,
     ) -> AgentStreamEventPage:
         session = bindings.session_or_404(managed_session_id)
         manager = bindings.get_tailer_manager()
@@ -519,6 +557,7 @@ def register_observation_routes(
                 view=view,
                 turn_id=turn_id,
                 through_sequence=through_sequence,
+                persisted_only=persisted_only,
             )
         bindings.require_current_managed_session(session, manager)
         return page
@@ -536,6 +575,7 @@ def register_observation_routes(
         turn_id: Optional[str] = Query(None, min_length=1),
         through_sequence: Optional[int] = Query(None, ge=0),
         current_user: User = Depends(get_current_user),
+        persisted_only: bool = False,
     ) -> AgentStreamEventPage:
         session = bindings.terminal_tab_session_or_404(tab_id)
         return await bindings.stream_events_for(
@@ -548,6 +588,7 @@ def register_observation_routes(
             view=view,
             turn_id=turn_id,
             through_sequence=through_sequence,
+            persisted_only=persisted_only,
         )
 
     @router.post(
@@ -562,7 +603,11 @@ def register_observation_routes(
         session = bindings.session_or_404(managed_session_id)
         manager = bindings.get_tailer_manager()
         async with bindings.managed_stream_interaction(session) as live:
-            capabilities = await bindings.capabilities_for(live, manager)
+            capabilities = await bindings.capabilities_for(
+                live,
+                manager,
+                cache_preparation=True,
+            )
         page = await bindings.wait_stream_events_for(
             session,
             manager,
@@ -583,12 +628,19 @@ def register_observation_routes(
         current_user: User = Depends(get_current_user),
     ) -> AgentStreamEventPage:
         session = bindings.terminal_tab_session_or_404(tab_id)
+        manager = bindings.get_tab_tailer_manager()
+        capabilities = await bindings.tab_capabilities_for(
+            session,
+            manager,
+            cache_preparation=True,
+        )
         return await bindings.wait_stream_events_for(
             session,
-            bindings.get_tab_tailer_manager(),
+            manager,
             lambda: bindings.terminal_tab_stream_session(tab_id) is not None,
             payload,
             allow_pending_source=True,
+            capabilities=capabilities,
         )
 
     @router.get("/sessions/{managed_session_id}/stream/live")
@@ -607,6 +659,7 @@ def register_observation_routes(
                 "session was deleted or replaced",
                 since_sequence,
                 bindings,
+                cache_preparation=True,
             )
         bindings.require_current_managed_session(session, manager)
         return response
@@ -626,6 +679,7 @@ def register_observation_routes(
             since_sequence,
             bindings,
             allow_pending_source=True,
+            cache_preparation=True,
         )
 
     @router.get("/sessions/{managed_session_id}/stream/diagnostics")
