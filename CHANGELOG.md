@@ -26,7 +26,8 @@
   diff truncation.
 - Mobile: expand chevrons stay visible and tool, thinking and process rows
   grow to 40px targets on touch screens; phones get denser tool blocks and
-  15px prose; the Goal bar stays on one row; copy/fork wait until a turn ends.
+  15px prose; the Goal bar stays on one row; fork/plan actions wait until the
+  live turn ends while Copy stays available.
 
 ### fix(chat): preserve HTML fragment identifiers without weakening isolation
 

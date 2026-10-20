@@ -51,3 +51,13 @@ export function formatElapsedDuration(valueMs: number): string {
   const hours = totalHours % 24
   return hours > 0 && days < 14 ? `${days}d ${hours}h` : `${days}d`
 }
+
+/** A live stopwatch: ``0:07``, ``2:41``, ``1:02:13``. Unlike
+ *  ``formatElapsedDuration`` it keeps seconds, because it ticks in view. */
+export function formatStopwatch(valueMs: number): string {
+  const total = Math.max(0, Math.floor(valueMs / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = String(total % 60).padStart(2, '0')
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`
+}

@@ -22,21 +22,40 @@ and only what needs attention (failures, approvals) is loud.
   Status is a glyph with screen-reader text; failures stay a labelled pill,
   including a failed count inside a still-running group.
 - `ChatSubthread` delegates to `ChatToolGroup` and `ChatThinkingCard`.
-- `ChatTurnWorking` adds a live stopwatch to the latest incomplete turn. It
-  owns its interval so the memoized turn does not re-render each second;
-  `ChatTimeline`'s `v-memo` includes whether a turn is the latest.
+- `ChatTurnWorking` adds a live stopwatch (`formatStopwatch`) to the turn
+  that is live: incomplete, latest, and with a turn in flight. It owns its
+  interval so the memoized turn does not re-render each second; `ChatTimeline`'s
+  `v-memo` includes that live flag. An incomplete turn whose completion never
+  arrived is treated as history: no footer, actions visible.
+- While a turn is live, fork/plan actions and the time are hidden; Copy stays
+  so a partial answer can still be taken.
+- Mobile and touch: chevrons do not depend on hover, touch rows are 40px,
+  phones get denser tool blocks and 15px prose, and the Goal bar stays on one
+  row with sideways-scrolling actions.
+- Diff parsing treats `--- `/`+++ ` as headers only as a pair, skips
+  `diff --git`/`index` lines, and keeps dash-prefixed content in patches
+  without `@@`. Very large arguments that are still streaming (incomplete JSON
+  over 64 KiB) are re-parsed per 32 KiB chunk instead of per delta.
 
 ## Validation
 
-- `node --test tests/*.test.mjs`: 1074 pass, 0 fail (new `toolActivity.test.mjs`).
-- `vue-tsc --noEmit`, `eslint src tests`: clean.
+- `node --test tests/*.test.mjs`: 1080 pass, 0 fail (new `toolActivity.test.mjs`
+  covers parsing, caching, truncation, streaming throttle and the stopwatch).
+- `vue-tsc --noEmit`, `eslint src tests`, `vite build`: clean.
 - `tests/browser_chat_composer.py` against an owned Vite server (5291): PASS.
 - Mocked showcase screenshots in dark/light, desktop/mobile: no page errors.
-- Independent read-only review: confirmed child cards re-render because
-  `visibleTurns` copies each turn; parsing, a11y and remount findings fixed.
+- Two independent read-only reviews. The first confirmed child cards re-render
+  because `visibleTurns` copies each turn and found parsing/a11y/remount issues;
+  the second (approve with nits) found the multi-file diff header bug, the
+  stale-incomplete-turn footer, streaming re-parse cost, weak source-regex
+  tests and this log's drift. All were fixed.
 
 ## Known limits
 
 - Rendering freshness of child tool cards relies on `visibleTurns` copying
   turns (`useChatTimeline.ts`); if that copy is removed, pass a revision prop.
 - Nested sticky summaries inside an open sub-agent thread can share `top: 0`.
+- The stopwatch trusts the server `startedAt`; a server clock behind the
+  client inflates it (a server clock ahead is clamped to mount time).
+- Several layout guarantees are still asserted by source-pattern tests;
+  behavior is covered by `browser_chat_composer.py` and showcase screenshots.

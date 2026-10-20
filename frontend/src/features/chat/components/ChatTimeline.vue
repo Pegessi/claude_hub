@@ -37,7 +37,7 @@
       <ChatTurn
         v-for="{ turn, ordinal } in visibleTurns"
         :key="turn.key"
-        v-memo="[turn.renderRevision, ordinal, latestTurnKey === turn.key, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), expandedToolGroups.get(turn.key), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
+        v-memo="[turn.renderRevision, ordinal, latestTurnKey === turn.key && turnInFlight, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), expandedToolGroups.get(turn.key), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
         :turn="turn"
         :ordinal="ordinal"
       />
@@ -57,7 +57,7 @@ import { requireChatOwner, chatTimelineKey, chatDeliveryKey, chatImagesKey, chat
 import ChatTurn from './ChatTurn.vue'
 import ChatPendingTurn from './ChatPendingTurn.vue'
 const { latestTurnKey, timelineEl, timelinePhase, timelineLoadingMessage, handleTimelineScroll, timelineContentEl, historyWindowStart, isLoadingEarlier, loadEarlierTurns, turns, visibleTurns, turnFoldSignature, expandedToolGroups } = requireChatOwner(chatTimelineKey)
-const { pendingDirectTurns, pendingTurns } = requireChatOwner(chatDeliveryKey)
+const { pendingDirectTurns, pendingTurns, turnInFlight } = requireChatOwner(chatDeliveryKey)
 const { erroredAttachments, erroredAgentImages } = requireChatOwner(chatImagesKey)
 const { turnApprovalSignature } = requireChatOwner(chatComposerKey)
 const { forkingOrdinal, implementingPlanKey, isEditingTurn, editError, isEditSending, copyFeedback } = requireChatOwner(chatActionsKey)
