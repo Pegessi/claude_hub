@@ -233,6 +233,7 @@ async def test_native_adapter_disables_approval_interception_and_records_metadat
     )
     monkeypatch.setattr(stream, "_get_tab_tailer_manager", lambda: manager)
     monkeypatch.setattr(stream, "_terminal_tab_session_or_404", lambda tab: SimpleNamespace())
+    monkeypatch.setattr(messages, "ensure_chat_runtime", AsyncMock(return_value=True))
     await messages._submit(item, lambda: None)
     kwargs = manager.send_message.await_args.kwargs
     assert kwargs["allow_question_answer"] is False
@@ -471,3 +472,61 @@ async def test_corrupt_inbox_startup_preserves_other_service_cleanup(monkeypatch
     stop.assert_awaited_once()
     main.ttyd_manager.cleanup.assert_awaited_once()
     main.workspace_manager.stop_background_monitor.assert_awaited_once()
+
+
+async def test_both_entry_modes_use_one_native_adapter_and_submission_fence(setup, monkeypatch):
+    _, inbox = setup
+    monkeypatch.setattr(
+        goal_run,
+        "get_goal_manager",
+        lambda: SimpleNamespace(current=lambda tab: None, has_goal_history=lambda tab: False),
+    )
+    monkeypatch.setattr(messages, "_target", lambda tab: InboxTarget("inc"))
+    monkeypatch.setattr(messages, "ensure_chat_runtime", AsyncMock(return_value=True))
+    monkeypatch.setattr(stream, "_terminal_tab_session_or_404", lambda tab: SimpleNamespace())
+    sent = []
+
+    async def send(session, text, images, turn_id, **kwargs):
+        await kwargs["before_send"]()
+        kwargs["before_delivery"]()
+        assert kwargs["allow_question_answer"] is False
+        sent.append((turn_id, kwargs["turn_metadata"]))
+
+    manager = SimpleNamespace(turn_in_flight=AsyncMock(return_value=False), send_message=send)
+    monkeypatch.setattr(stream, "_get_tab_tailer_manager", lambda: manager)
+    inbox.submit = messages._submit
+    first = await inbox.enqueue(
+        "t", "local", "CLI", ChatMessageCreate(message="first", call_id="a")
+    )
+    # Only the internal timer policy can create this trusted envelope.
+    scheduled = inbox.messages[first.message_id].model_copy(
+        deep=True,
+        update={
+            "message_id": "occurrence",
+            "call_id": "occurrence",
+            "turn_id": "scheduled-occurrence",
+            "scheduled_run_id": "occurrence",
+            "scheduled_task_id": "timer",
+            "principal": "scheduler",
+            "turn_metadata": {
+                "origin": "scheduled_task",
+                "scheduled_task_id": "timer",
+                "yields_to_user": True,
+            },
+        },
+    )
+    inbox.admit_scheduled(scheduled)
+    last = await inbox.enqueue("t", "local", "CLI", ChatMessageCreate(message="last", call_id="b"))
+    await inbox.pump("t")
+    await inbox.completed("t", first.turn_id, "completed")
+    await inbox.pump("t")
+    await inbox.completed("t", scheduled.turn_id, "completed")
+    await inbox.pump("t")
+    assert [turn for turn, _ in sent] == [first.turn_id, scheduled.turn_id, last.turn_id]
+    assert [metadata["origin"] for _, metadata in sent] == [
+        "hub_message",
+        "scheduled_task",
+        "hub_message",
+    ]
+    assert sent[1][1]["yields_to_user"] is True
+    assert all(item.submission_started for item in inbox.messages.values())

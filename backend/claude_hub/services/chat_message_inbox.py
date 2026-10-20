@@ -1,4 +1,4 @@
-"""Durable ordinary-tab FIFO. No schedules, Task ownership, or automatic replay.
+"""Durable per-tab delivery core shared by direct and timer-owned intents.
 
 The application runtime lock ensures single-process ownership of the atomic JSON
 store. A 202 receipt acknowledges intent persistence, not provider execution.
@@ -13,7 +13,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from typing import Awaitable, Callable, Literal, cast
@@ -49,6 +49,39 @@ class InboxEvidence:
     state: Literal["absent", "started", "completed", "failed", "cancelled", "live"]
 
 
+async def inspect_chat_delivery(
+    tab_id: str, turn_id: str, *, legacy_errors_terminal: bool = False
+) -> InboxEvidence:
+    """Read durable native evidence without creating a runtime (both front doors)."""
+    from ..models import AgentStreamEventType
+    from .agent_stream.store import AgentStreamStore
+
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
+    cursor, started = -1, False
+    while True:
+        page = await store.read_since(cursor, limit=5000)
+        for event in page.events:
+            if event.turn_id != turn_id:
+                continue
+            if event.type == AgentStreamEventType.TURN_STARTED:
+                started = True
+            elif event.type == AgentStreamEventType.TURN_COMPLETED:
+                if event.payload.get("delivery_rejected"):
+                    started = True  # synthetic rejection is never absence evidence
+                    continue
+                status = event.payload.get("status")
+                return InboxEvidence(
+                    "completed"
+                    if status in {"completed", "success", "ok"}
+                    else ("cancelled" if status in {"cancelled", "canceled"} else "failed")
+                )
+            elif legacy_errors_terminal and event.type == AgentStreamEventType.ERROR:
+                return InboxEvidence("failed")
+        if not page.has_more:
+            return InboxEvidence("started" if started else "absent")
+        cursor = page.next_sequence
+
+
 class ChatMessageInbox:
     def __init__(
         self,
@@ -60,6 +93,9 @@ class ChatMessageInbox:
         max_pending: int = 100,
         max_bytes: int = 1024 * 1024,
     ) -> None:
+        self.scheduled_prepare: Callable[[ChatMessageEnvelope], Awaitable[str | None]] | None = None
+        self.scheduled_changed: Callable[[ChatMessageEnvelope], None] | None = None
+        self.scheduled_liveness: Callable[[ChatMessageEnvelope], Awaitable[str]] | None = None
         self.path, self.target, self.submit, self.evidence = path, target, submit, evidence
         self.max_pending, self.max_bytes = max_pending, max_bytes
         self.messages: dict[str, ChatMessageEnvelope] = {}
@@ -69,6 +105,7 @@ class ChatMessageInbox:
         self._pump_locks: dict[str, asyncio.Lock] = {}
         self._wakeup = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
+        self._retry_handles: dict[str, asyncio.TimerHandle] = {}
         self._pump_tasks: dict[str, asyncio.Task[None]] = {}
         self.redrain_seconds = 3.0
         self._closing = False
@@ -131,6 +168,45 @@ class ChatMessageInbox:
         item.waiting_reason = reason if state == "waiting" else None
         item.error = reason if state in {"failed", "uncertain"} else None
         self._save()
+        if item.scheduled_run_id and self.scheduled_changed:
+            self.scheduled_changed(item)
+
+    def admit_scheduled(
+        self, item: ChatMessageEnvelope, *, enforce_limit: bool = True
+    ) -> ChatMessageEnvelope:
+        """Idempotent internal admission. Caller persists occurrence before pumping."""
+        if self._closing:
+            raise InboxError(503, "Chat inbox unavailable")
+        existing = self.messages.get(item.message_id)
+        if existing is not None:
+            return existing
+        item.sequence = max((m.sequence for m in self.messages.values()), default=0) + 1
+        pending = [m for m in self.messages.values() if m.tab_id == item.tab_id and m.blocks_queue]
+        # Existing persisted occurrences are migrated even above the new shared
+        # cap; limits govern new intent acceptance, never discard old work.
+        # Scheduled message size keeps its existing contract; public sends keep
+        # their 64-KiB/1-MiB bounds.
+        if (
+            enforce_limit
+            and item.state in {"queued", "waiting"}
+            and len(pending) >= self.max_pending
+        ):
+            raise InboxError(429, "Chat inbox backlog limit reached")
+        self.messages[item.message_id] = item
+        self._save()
+        self.wake()
+        return item
+
+    def cancel_scheduled(self, message_id: str, *, release: bool = False) -> bool:
+        """Trusted schedule policy; public cancellation remains unsent-only."""
+        item = self.messages.get(message_id)
+        if item is None or not item.scheduled_run_id:
+            return False
+        if item.state in {"queued", "waiting"} or (release and item.blocks_queue):
+            self._change(message_id, "cancelled")
+            self.wake()
+            return True
+        return False
 
     def _target(self, tab_id: str) -> InboxTarget:
         target = self.target(tab_id)
@@ -175,11 +251,7 @@ class ChatMessageInbox:
                     return item.receipt()
             if target.waiting_reason == "archived":
                 raise InboxError(409, "Restore this archived Chat before sending")
-            pending = [
-                m
-                for m in self.messages.values()
-                if m.tab_id == tab_id and m.state not in TERMINAL_STATES
-            ]
+            pending = [m for m in self.messages.values() if m.tab_id == tab_id and m.blocks_queue]
             if (
                 len(pending) >= self.max_pending
                 or sum(len(m.message.encode()) for m in pending) + len(payload.message.encode())
@@ -246,19 +318,34 @@ class ChatMessageInbox:
     def wake(self) -> None:
         self._wakeup.set()
 
+    def retry_after(self, tab_id: str, seconds: float) -> None:
+        """Bounded delayed wakeup for standalone embeddings; coordinator owns live retry."""
+        if self._runner is not None:
+            self.wake()
+            return
+        if tab_id in self._retry_handles or self._closing:
+            return
+
+        def retry() -> None:
+            self._retry_handles.pop(tab_id, None)
+            if self._closing or tab_id in self._pump_tasks:
+                return
+            task = asyncio.create_task(self.pump(tab_id), name=f"chat-inbox-retry-{tab_id}")
+            self._pump_tasks[tab_id] = task
+            task.add_done_callback(partial(self._pump_finished, tab_id))
+
+        self._retry_handles[tab_id] = asyncio.get_running_loop().call_later(seconds, retry)
+
     async def completed(self, tab_id: str, turn_id: str, status: str) -> None:
         async with self._lock:
             if self._closing:
                 return
             for item in self.messages.values():
-                if (
-                    item.tab_id == tab_id
-                    and item.turn_id == turn_id
-                    and item.state not in TERMINAL_STATES
-                ):
+                if item.tab_id == tab_id and item.turn_id == turn_id and item.blocks_queue:
                     state: ChatMessageState = (
                         "completed"
                         if status == "completed"
+                        or (item.scheduled_run_id and status in {"success", "ok"})
                         else ("cancelled" if status in {"cancelled", "canceled"} else "failed")
                     )
                     self._change(item.message_id, state)
@@ -270,25 +357,78 @@ class ChatMessageInbox:
         if self._closing:
             raise InboxError(503, "Chat inbox is shutting down")
         item = self.messages[message_id]
+        if item.state != "dispatching":
+            raise InboxError(409, "Intent was cancelled before provider submission")
         current = self._target(item.tab_id)
         if current.incarnation != item.incarnation or current.waiting_reason:
             raise InboxError(409, "Chat target changed before submission")
         item.submission_started = True
         self._save()
 
-    async def reconcile(self, *, restarting: bool = False) -> None:
+    @staticmethod
+    def _aware(stamp: datetime) -> datetime:
+        return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+
+    async def reconcile(self, *, restarting: bool = False, now: datetime | None = None) -> None:
+        current_time = self._aware(now or utc_now())
         for old in list(self.messages.values()):
+            if old.scheduled_run_id and old.state == "uncertain":
+                continue  # scheduler uncertainty is terminal history, not a direct-send fence
+            if old.scheduled_run_id and old.state in {"dispatching", "accepted"} and not restarting:
+                if current_time - self._aware(old.updated_at) < timedelta(minutes=10):
+                    continue
+                if old.recovery_checked_at and current_time - self._aware(
+                    old.recovery_checked_at
+                ) < timedelta(seconds=60):
+                    continue
+                old.recovery_checked_at = current_time
             if old.state in {"dispatching", "accepted", "uncertain"}:
+                observed_state, observed_stamp = old.state, old.updated_at
                 try:
                     proof = await self.evidence(old)
                 except Exception:
                     proof = InboxEvidence("started")  # unknown is never absent
+                liveness = "unknown"
+                if old.scheduled_run_id and proof.state not in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "live",
+                }:
+                    try:
+                        liveness = (
+                            "dead"
+                            if restarting
+                            else (
+                                await self.scheduled_liveness(old)
+                                if self.scheduled_liveness
+                                else "unknown"
+                            )
+                        )
+                    except Exception:
+                        logger.exception("Chat inbox liveness probe failed")
                 async with self._lock:
                     item = self.messages[old.message_id]
+                    if (item.state, item.updated_at) != (observed_state, observed_stamp):
+                        continue
                     if item.state in TERMINAL_STATES:
                         continue
                     if proof.state in {"completed", "failed", "cancelled"}:
                         self._change(item.message_id, cast(ChatMessageState, proof.state))
+                    elif item.scheduled_run_id:
+                        if liveness != "dead":
+                            continue
+                        if proof.state == "absent" and not item.submission_started:
+                            item.legacy_recovery = False
+                            self._change(
+                                item.message_id, "queued", "recovered before provider dispatch"
+                            )
+                        else:
+                            self._change(
+                                item.message_id,
+                                "uncertain",
+                                "Chat turn stopped reporting while it was in flight",
+                            )
                     elif (
                         item.state == "accepted"
                         and proof.state != "live"
@@ -317,7 +457,10 @@ class ChatMessageInbox:
             changed = False
             for item in self.messages.values():
                 if (
-                    item.state in TERMINAL_STATES
+                    (
+                        item.state in TERMINAL_STATES
+                        or (item.scheduled_run_id and item.state == "uncertain")
+                    )
                     and not item.expired
                     and utc_now() - item.updated_at > timedelta(days=30)
                 ):
@@ -339,15 +482,22 @@ class ChatMessageInbox:
                         (
                             m
                             for m in self.messages.values()
-                            if m.tab_id == tab_id and m.state not in TERMINAL_STATES
+                            if m.tab_id == tab_id and m.blocks_queue
                         ),
                         key=lambda m: m.sequence,
                     )
                     if not active:
                         return
                     item = active[0]
-                    if item.state in {"dispatching", "accepted", "uncertain"}:
+                    if any(m.state in {"dispatching", "accepted", "uncertain"} for m in active):
                         return
+                    if item.scheduled_run_id and self.scheduled_prepare:
+                        reason = await self.scheduled_prepare(item)
+                        if not item.blocks_queue:
+                            continue
+                        if reason:
+                            self._change(item.message_id, "waiting", reason)
+                            return
                     try:
                         target = self._target(tab_id)
                     except InboxError as exc:
@@ -357,6 +507,9 @@ class ChatMessageInbox:
                             exc.detail,
                         )
                         continue
+                    if item.scheduled_run_id and not item.incarnation:
+                        item.incarnation = target.incarnation
+                        self._save()
                     if target.incarnation != item.incarnation:
                         self._change(item.message_id, "failed", "Chat incarnation/backend changed")
                         continue
@@ -379,12 +532,30 @@ class ChatMessageInbox:
                                     "uncertain",
                                     "Submission may have reached provider; no automatic replay",
                                 )
+                            elif item.scheduled_run_id and isinstance(exc, RuntimeError):
+                                if "turn is already in flight" in str(exc):
+                                    live.attempts = max(0, live.attempts - 1)
+                                    self._change(
+                                        item.message_id,
+                                        "waiting",
+                                        "waiting for the current Chat response",
+                                    )
+                                else:
+                                    self._change(item.message_id, "failed", str(exc))
+                            elif (
+                                live.scheduled_run_id
+                                and isinstance(exc, Exception)
+                                and not isinstance(exc, InboxError)
+                            ):
+                                self._change(item.message_id, "failed", str(exc))
                             elif isinstance(exc, InboxError) and exc.status in {403, 404}:
                                 self._change(item.message_id, "failed", exc.detail)
                             elif isinstance(exc, InboxError) and exc.status == 409:
-                                live.attempts = 0
+                                live.attempts = (
+                                    max(0, live.attempts - 1) if live.scheduled_run_id else 0
+                                )
                                 self._change(item.message_id, "waiting", exc.detail)
-                            elif live.attempts >= 12:
+                            elif live.attempts >= (13 if live.scheduled_run_id else 12):
                                 self._change(
                                     item.message_id,
                                     "failed",
@@ -421,11 +592,7 @@ class ChatMessageInbox:
         # owns its slot. Retry the next queued head after the slot is released.
         # Waiting heads retain periodic backoff rather than spinning on busy.
         pending = sorted(
-            (
-                m
-                for m in self.messages.values()
-                if m.tab_id == tab_id and m.state not in TERMINAL_STATES
-            ),
+            (m for m in self.messages.values() if m.tab_id == tab_id and m.blocks_queue),
             key=lambda m: m.sequence,
         )
         if pending and pending[0].state == "queued" and not self._closing:
@@ -436,9 +603,7 @@ class ChatMessageInbox:
             self._wakeup.clear()
             try:
                 await self.reconcile()
-                for tab in {
-                    m.tab_id for m in self.messages.values() if m.state not in TERMINAL_STATES
-                }:
+                for tab in {m.tab_id for m in self.messages.values() if m.blocks_queue}:
                     if self._closing:
                         break
                     # Submission can wait on readiness, Goal admission, or a
@@ -457,6 +622,9 @@ class ChatMessageInbox:
 
     async def stop(self) -> None:
         self._closing = True
+        for handle in self._retry_handles.values():
+            handle.cancel()
+        self._retry_handles.clear()
         self.wake()
         if self._runner:
             await self._runner  # do not cancel provider submission

@@ -3,9 +3,11 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from typing import Callable
 
 from pydantic import ValidationError
 
+from ..chat_message_inbox import ChatMessageInbox
 from ..legacy_state_migration import (
     LEGACY_TASK_KEYS,
     index_has_legacy_keys,
@@ -13,14 +15,31 @@ from ..legacy_state_migration import (
     state_has_legacy_orchestration_keys,
 )
 from ..task_mailbox import TaskMailbox
-from ._constants import *  # noqa: F401,F403
+from ._base import _WorkspaceManagerBase
+from ._constants import (
+    INDEX_FILE,
+    LEGACY_STATE_FILE,
+    AgentReport,
+    Any,
+    FeedbackLessonStore,
+    ManagedSession,
+    ManagedSessionStatus,
+    Path,
+    ScheduledChatDispatch,
+    ScheduledChatLiveness,
+    ScheduledChatReadiness,
+    ScheduledTask,
+    ScheduledTaskRun,
+    Workspace,
+    WorkspaceTask,
+    asyncio,
+    json,
+    logger,
+)
 
 
 class _UnknownTaskFieldsError(ValueError):
     """A persisted task contains fields this build cannot interpret."""
-
-
-from ._base import _WorkspaceManagerBase
 
 
 class _StateMixin(_WorkspaceManagerBase):
@@ -44,10 +63,10 @@ class _StateMixin(_WorkspaceManagerBase):
         # scheduled hub_task whose worker session died. Keyed by the internal
         # WorkspaceTask id (distinct from the ScheduledTask fire lock above).
         self._hubtask_orphan_locks: dict[str, asyncio.Lock] = {}
-        # One native Chat turn may run per tab. These locks serialize the
-        # scheduler monitor, run-now, and completion-observer drain attempts.
-        self._scheduled_chat_tab_locks: dict[str, asyncio.Lock] = {}
+        self._scheduled_legacy_run_ids: set[str] = set()
         self._scheduled_chat_recovery_pending = False
+        self._chat_delivery_getter: Callable[[], ChatMessageInbox] | None = None
+        self._chat_delivery_instance: ChatMessageInbox | None = None
         self._scheduled_chat_dispatch: ScheduledChatDispatch | None = None
         # Injected readiness probe: ensures the target Chat's native runtime
         # (tailer + provider) is spawned and reports whether it is ready to
@@ -55,19 +74,11 @@ class _StateMixin(_WorkspaceManagerBase):
         # parked WAITING with a bounded redrain instead of delivered into a
         # runtime that does not exist yet.
         self._scheduled_chat_readiness: ScheduledChatReadiness | None = None
-        # Per-tab self-cleaning task that re-runs the FIFO drain after a short
-        # delay when the head run is waiting on a cold runtime to come up. At
-        # most one is pending per tab, so cold-start polling cannot pile up.
-        self._sched_chat_redrain_tasks: dict[str, asyncio.Task[None]] = {}
         # Injected live liveness probe for a dispatched Chat turn. Returns
         # "active" (provider still owns the turn), "terminalized" (a dead
         # orphan was just terminalized and its completion observer will fire),
         # "dead" (no start edge and the provider is idle), or "unknown".
         self._scheduled_chat_liveness: ScheduledChatLiveness | None = None
-        # Throttle transcript reaps for runs stuck in DISPATCHING/RUNNING:
-        # run id -> last reconciliation attempt. Process-local; cold-restart
-        # reconciliation runs once unthrottled at startup.
-        self._sched_reap_checked_at: dict[str, datetime] = {}
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
         # Per-session pump locks: serialize _pump_session_messages so two

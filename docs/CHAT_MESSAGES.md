@@ -66,3 +66,27 @@ periodic recovery. Shutdown quiesces new submissions and waits owned submission;
 a stuck provider may delay shutdown. Corrupt inbox state disables inbox delivery
 without taking down unrelated Chat service. No manual state-file editing is a
 supported recovery operation.
+
+
+## Scheduled entry mode
+
+Scheduled `chat_turn` occurrences use this same inbox coordinator, per-tab FIFO,
+native before-delivery fence and recovery core. The timer owns occurrence UUID5
+identity and explicit supersede/disable/delete policy; distinct direct intents
+are never coalesced. Scheduled metadata remains `origin=scheduled_task` and Dot
+system turns retain `yields_to_user`. Public message bodies cannot request these
+internal capabilities. Existing scheduler run APIs remain a history projection.
+
+Scheduled uncertainty remains terminal history after the existing 10-minute
+stale grace / 60-second liveness recheck, while direct uncertainty still blocks
+its FIFO until reliable evidence resolves it. Operator cancellation of a running
+scheduled occurrence releases its scheduler slot without killing the provider;
+public message cancellation remains unsent-only. One-shot timer exhaustion does
+not cancel its pending occurrence; an explicit disable does.
+
+On first load, existing scheduled records are imported idempotently using their
+original turn IDs. Existing persisted occurrences are retained even when their
+combined backlog with direct messages exceeds the shared new-intent cap; new
+admissions wait for space. Scheduled message sizes retain their existing contract;
+public direct-message byte limits remain unchanged. No deployment is performed
+by this implementation.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import asyncio as asyncio
 import json
 import logging
 
@@ -48,8 +48,6 @@ from ..models import (
 )
 from ..models import ManagedSessionStatus as ManagedSessionStatus
 from ..models import (
-    ScheduledTask,
-    ScheduledTaskRun,
     SessionKind,
     StreamCapabilities,
 )
@@ -61,8 +59,8 @@ from ..models.schemas import TaskExecutionControl as TaskExecutionControl
 from ..models.schemas import TaskExecutionReference as TaskExecutionReference
 from ..services import ttyd_manager, workspace_manager
 from ..services.agent_stream import ExternalTurnRetirement as ExternalTurnRetirement
+from ..services.agent_stream import StructuredSourceUnavailable as StructuredSourceUnavailable
 from ..services.agent_stream import (
-    StructuredSourceUnavailable,
     TailerManager,
     get_adapter_for_session,
 )
@@ -231,29 +229,6 @@ def _get_tab_tailer_manager() -> TailerManager:
     return _tab_tailer_manager
 
 
-async def _dispatch_scheduled_chat_turn(run: ScheduledTaskRun, task: ScheduledTask) -> None:
-    """Deliver one durable automation run through the native Chat path."""
-    from ..services.dot import get_dot_service
-
-    session = _terminal_tab_session_or_404(run.tab_id)
-    metadata: Dict[str, Any] = {
-        "origin": "scheduled_task",
-        "scheduled_task_id": task.id,
-        "scheduled_task_run_id": run.id,
-        "scheduled_task_name": task.name,
-    }
-    if get_dot_service().is_system_schedule(task.id):
-        # The user's next message stops this turn (see ``_yield_dot_turn``), so the
-        # composer sends right away instead of queueing behind it.
-        metadata["yields_to_user"] = True
-    await _send_to_native(
-        session,
-        AgentStreamSendRequest(text=run.message, client_turn_id=run.client_turn_id),
-        _get_tab_tailer_manager(),
-        turn_metadata=metadata,
-    )
-
-
 async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> _ChatLiveness | None:
     return await stream_runtime.scheduled_chat_turn_liveness(
         tab_id,
@@ -262,38 +237,6 @@ async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> _ChatLiven
         get_tab_tailer_manager=_get_tab_tailer_manager,
         logger=logger,
     )
-
-
-async def _ensure_scheduled_chat_runtime(tab_id: str) -> bool:
-    """Ensure a direct Chat tab's native runtime is spawned and ready.
-
-    The scheduler's cold-runtime gate. Idempotent: a warm Chat returns
-    immediately; a cold or idle-reaped Chat is lazily created and its consumer
-    started. Returns ``True`` only once a turn can actually be delivered, so the
-    scheduler parks and retries while a first-time provider spawn (or a Codex
-    app-server handshake) is still in flight instead of delivering into a
-    runtime that does not exist yet.
-    """
-    session = _terminal_tab_stream_session(tab_id)
-    if session is None:
-        return False
-    manager = _get_tab_tailer_manager()
-    try:
-        tailer = await manager.ensure_started(session)
-    except (ValueError, StructuredSourceUnavailable):
-        logger.info(
-            "scheduled Chat cold runtime unavailable for tab=%s; will retry",
-            tab_id,
-        )
-        return False
-    transport = tailer.native_transport
-    if transport is None or tailer.native_error is not None or manager.hard_failed(session.id):
-        return False
-    # Let the freshly started consumer's first tick run provider start().
-    # Persistent app-servers also require a completed protocol handshake.
-    if not tailer.native_started:
-        await asyncio.sleep(0)
-    return tailer.native_ready
 
 
 def _feedback_chat_busy() -> bool:
@@ -311,9 +254,8 @@ def _feedback_chat_busy() -> bool:
 
 
 workspace_manager._feedback_chat_busy = _feedback_chat_busy
-workspace_manager.configure_scheduled_chat_dispatch(_dispatch_scheduled_chat_turn)
+workspace_manager.configure_chat_delivery(messages.get_inbox)
 workspace_manager.configure_scheduled_chat_liveness(_scheduled_chat_turn_liveness)
-workspace_manager.configure_scheduled_chat_readiness(_ensure_scheduled_chat_runtime)
 
 
 async def _stop_all_tailer_managers() -> None:

@@ -1,6 +1,24 @@
 """Scheduled-task implementation split from the compatibility mixin."""
 
-from .._constants import *  # noqa: F401,F403
+from .._constants import (
+    AgentType,
+    Optional,
+    ScheduledChatDispatch,
+    ScheduledChatReadiness,
+    ScheduledTask,
+    ScheduledTaskCreate,
+    ScheduledTaskKind,
+    ScheduledTaskRun,
+    ScheduledTaskRunStatus,
+    ScheduledTaskUpdate,
+    ScheduledTaskView,
+    SessionKind,
+    datetime,
+    logger,
+    timedelta,
+    ttyd_manager,
+    uuid,
+)
 from ._contract import _SchedulingHost
 
 
@@ -114,29 +132,8 @@ class _ScheduleRegistryMixin(_SchedulingHost):
         self._scheduled_chat_readiness = callback
 
     def _schedule_chat_redrain(self, tab_id: str) -> None:
-        """Re-run one tab's FIFO drain after the cold-start backoff.
-
-        Self-scheduling and de-duplicated per tab: only one delayed redrain is
-        ever pending for a given tab, so a backlog of cold runs cannot enqueue
-        an unbounded number of wakeups.
-        """
-        existing = self._sched_chat_redrain_tasks.get(tab_id)
-        if existing is not None and not existing.done():
-            return
-
-        async def _redrain() -> None:
-            try:
-                await asyncio.sleep(self._SCHEDULED_CHAT_COLD_REDRAIN_DELAY.total_seconds())
-                await self._drain_scheduled_chat_runs(tab_id)
-            except asyncio.CancelledError:  # pragma: no cover - shutdown cancellation
-                raise
-            except Exception:
-                logger.exception("Scheduled Chat cold-start redrain failed for tab=%s", tab_id)
-            finally:
-                self._sched_chat_redrain_tasks.pop(tab_id, None)
-
-        self._sched_chat_redrain_tasks[tab_id] = asyncio.create_task(
-            _redrain(), name=f"sched-chat-cold-redrain-{tab_id[:8]}"
+        self._delivery_inbox().retry_after(
+            tab_id, self._SCHEDULED_CHAT_COLD_REDRAIN_DELAY.total_seconds()
         )
 
     async def _ensure_scheduled_chat_runtime_ready(self, tab_id: str) -> bool:
@@ -212,7 +209,7 @@ class _ScheduleRegistryMixin(_SchedulingHost):
         # occurrences so they are not replayed in a burst if the task is later
         # re-enabled. A run already executing on the provider is left to finish
         # (its completion edge is terminal and no longer drains anything).
-        if updates.get("enabled") is False and task.enabled:
+        if updates.get("enabled") is False:
             self._cancel_scheduled_task_runs(
                 task.id,
                 statuses={ScheduledTaskRunStatus.QUEUED, ScheduledTaskRunStatus.WAITING},
@@ -253,6 +250,14 @@ class _ScheduleRegistryMixin(_SchedulingHost):
         return restored
 
     def delete_scheduled_task(self, task_id: str) -> bool:
+        task = self.scheduled_tasks.get(task_id)
+        if task is not None:
+            self._cancel_scheduled_task_runs(
+                task_id,
+                statuses={ScheduledTaskRunStatus.QUEUED, ScheduledTaskRunStatus.WAITING},
+                reason="scheduled task was deleted",
+                now=self._runtime_now(),
+            )
         task = self.scheduled_tasks.pop(task_id, None)
         if task is None:
             return False
@@ -308,6 +313,7 @@ class _ScheduleRegistryMixin(_SchedulingHost):
         if self._chat_run_active(run):
             now = self._runtime_now()
             run.status = ScheduledTaskRunStatus.CANCELLED
+            self._delivery_inbox().cancel_scheduled(run.id, release=True)
             run.waiting_reason = None
             run.error = "cancelled manually"
             run.completed_at = now
