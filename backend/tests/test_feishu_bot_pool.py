@@ -3056,3 +3056,80 @@ def test_dot_on_feishu_gets_the_last_answer_of_the_turn(
         return await stream_api.dispatch_tab_chat_and_wait("tab-1", "hi", "t-1")
 
     assert asyncio.run(scenario()) == answer
+
+
+@pytest.mark.parametrize("stopped", [True, False])
+def test_on_the_dot_chat_a_newer_message_stops_the_answer_in_progress(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch, stopped: bool
+) -> None:
+    """Dot answers the newer message together with the stopped one; no failure reply.
+    When the answer ended first, it is sent and the newer message follows it."""
+    from types import SimpleNamespace
+
+    from claude_hub.api import agent_stream as stream_api
+    from claude_hub.services import dot as dot_module
+
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.02)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.08)
+        bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+        _pair(api.pool, bot_id, owner=LOCAL, environ={})
+        tab_id = api.pool.snapshot({}).get(bot_id).binding.tab_id
+        dot = SimpleNamespace(is_dot_tab=lambda one: one == tab_id)
+        monkeypatch.setattr(dot_module, "get_dot_service", lambda: dot)
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        submitted: list[str] = []
+        cancelled: list[str] = []
+
+        class Manager:
+            async def cancel_turn(self, _session: Any, *, expected_turn_id: str) -> bool:
+                cancelled.append(expected_turn_id)
+                if stopped:
+                    release_first.set()
+                return stopped
+
+        monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab: object())
+        monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: Manager())
+
+        async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                submitted.append(visible_text)
+            if len(submitted) == 1:
+                first_started.set()
+                await release_first.wait()
+                if cancelled and stopped:
+                    raise RuntimeError("Chat turn ended with status cancelled")
+            return f"answer-{len(submitted)}"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        first = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "initial", clock.value, message_id="om-first")
+            )
+        )
+        await first_started.wait()
+        newer = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id, _message("app-1", "actually, X", clock.value, message_id="om-newer")
+            )
+        )
+        await asyncio.sleep(0.04)
+        assert cancelled == [turn_id_for(bot_id, "om-first")]
+        if not stopped:
+            release_first.set()
+        await asyncio.gather(first, newer)
+
+        assert len(submitted) == 2
+        if stopped:
+            assert "上一次回复已停止" in submitted[1]
+            assert submitted[1].index("[上一条]\ninitial") < submitted[1].index(
+                "[新消息 1]\nactually, X"
+            )
+            assert api.wire.reply_texts() == ["answer-2"], "no failure reply for the stopped one"
+        else:
+            assert "处理上一条消息期间补充" in submitted[1]
+            assert api.wire.reply_texts() == ["answer-1", "answer-2"]
+        assert bot_api._tab_dispatch_queues == {}
+
+    asyncio.run(scenario())
