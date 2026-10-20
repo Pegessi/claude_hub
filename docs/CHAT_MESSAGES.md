@@ -60,7 +60,9 @@ is rechecked at submission; no new ACL or credential is introduced.
 
 Enqueue/completion wake delivery immediately. A three-second lifecycle-owned
 redrain also notices Goal release, unarchive and cold-runtime readiness, without
-the scheduler. Shutdown quiesces new submissions and waits owned submission;
+the scheduler. Each tab has one independently tracked submission task: a stalled
+provider acknowledgement in one tab cannot block another tab's delivery or
+periodic recovery. Shutdown quiesces new submissions and waits owned submission;
 a stuck provider may delay shutdown. Corrupt inbox state disables inbox delivery
 without taking down unrelated Chat service. No manual state-file editing is a
 supported recovery operation.

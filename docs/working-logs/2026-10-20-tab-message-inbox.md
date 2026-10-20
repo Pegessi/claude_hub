@@ -30,3 +30,20 @@ workspace handoff `/home/tiger/evo_workspace/hub-chat-inject-20261020/IMPLEMENTA
 Backend tests use a locked worktree environment and private runtime homes; browser
 APIs are mocked. No production provider, primary service restart, push or MR.
 Live provider delivery and deployment remain separate pre-ship authorization.
+
+## Review correction R1: cross-tab liveness
+
+The first final reviewer reproduced global starvation: the coordinator awaited
+all tab submissions, so one held acknowledgement blocked newly queued tabs and
+periodic recovery. Track each owned pump independently, with one slot per tab,
+and keep the coordinator's wakeup/recovery loop free of provider submission.
+Done callbacks retrieve errors, release only their own slot and wake queued
+successors after fast completion; unexpected errors retain periodic backoff.
+Shutdown fences new work and joins owned pumps without cancelling potentially
+submitted native work.
+
+Three held-submit cases failed before this fix and passed afterward. Added
+coverage checks busy pre-submission and possible-submission holds, another tab's
+FIFO and periodic evidence recovery, shutdown/no-replay at both boundaries, and
+non-spinning handling of an unexpected resolver error. Exact final counts and
+logs are recorded in the workspace IMPLEMENTATION.md review addendum.
