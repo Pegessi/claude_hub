@@ -126,7 +126,9 @@ class ManagerStatusMixin(ManagerHost):
         # during a turn. Its explicit live indicator must win over that chrome;
         # the prompt alone is not evidence of idle. Preserve attention/shell
         # precedence and the frozen-frame guard.
-        if process.agent_type == AgentType.CODEX and codex_output_is_working(output):
+        if process.agent_type == AgentType.CODEX and codex_output_is_working(
+            output, allow_resized=True
+        ):
             return working_or_stale()
 
         # Claude Code / Codex idle hints ("? for shortcuts", "/ for commands")
