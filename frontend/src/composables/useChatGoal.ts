@@ -112,7 +112,8 @@ export function useChatGoal(tabId: Ref<string>) {
       })
       if (!response.ok) throw new Error(await errorDetail(response))
       if (response.status === 204) return null
-      const result = await response.json() as ChatGoal
+      const result = await response.json() as ChatGoal | null
+      if (!result) return null
       return result.status === 'cancelled' && result.dispatch_state === 'idle' ? null : result
     })
   }

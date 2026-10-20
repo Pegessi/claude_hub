@@ -6,6 +6,7 @@ import { toStreamSendAttachment } from '@/utils/agentStreamAttachments'
 import { useChatGoal as useGoalResource } from '@/composables/useChatGoal'
 import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary } from '@/utils/chatTurnLifecycle'
+import { goalObservationVersion, goalTurnCompletionReflected, latestNativeGoalNotification, nativeGoalNotificationReflected } from '@/utils/chatGoalObservation'
 
 interface Dependencies {
   attachments: Ref<DraftAttachment[]>
@@ -88,24 +89,11 @@ export function useChatGoal(deps: Dependencies) {
   let goalRefreshEpoch = 0
 
   function goalSnapshotVersion(): string {
-    const current = goal.value
-    if (!current) return 'none'
-    return [
-      current.updated_at,
-      current.status,
-      current.turns_completed,
-      current.checkpoint?.turn_id ?? '',
-    ].join('\u0000')
+    return goalObservationVersion(goal.value)
   }
 
   function goalReflectsCompletedTurn(turnId: string | null, baselineVersion: string): boolean {
-    const current = goal.value
-    if (!current || current.status !== 'active') return true
-    if (turnId && (
-      current.completed_turn_ids?.includes(turnId) ||
-      current.checkpoint?.turn_id === turnId
-    )) return true
-    return turnId ? false : goalSnapshotVersion() !== baselineVersion
+    return goalTurnCompletionReflected(goal.value, turnId, baselineVersion)
   }
 
   function waitForGoalRefresh(delayMs: number): Promise<void> {
@@ -118,7 +106,7 @@ export function useChatGoal(deps: Dependencies) {
    * snapshot. Retry with a short bounded backoff until either the completed turn
    * is visible or the authoritative Goal version advances.
    */
-  async function refreshGoalAfterTurn(turnId: string | null): Promise<void> {
+  async function refreshGoalAfterTurn(turnId: string | null, notification: AgentStreamEvent | null = null): Promise<void> {
     const refreshEpoch = ++goalRefreshEpoch
     const baselineVersion = goalSnapshotVersion()
     for (const delayMs of GOAL_REFRESH_DELAYS_MS) {
@@ -126,7 +114,9 @@ export function useChatGoal(deps: Dependencies) {
       if (refreshEpoch !== goalRefreshEpoch || deps.timelineDisposed) return
       await hydrateGoal()
       if (refreshEpoch !== goalRefreshEpoch || deps.timelineDisposed) return
-      if (goalReflectsCompletedTurn(turnId, baselineVersion)) return
+      if (notification
+        ? nativeGoalNotificationReflected(goal.value, notification, baselineVersion)
+        : goalReflectsCompletedTurn(turnId, baselineVersion)) return
     }
   }
 
@@ -149,8 +139,15 @@ export function useChatGoal(deps: Dependencies) {
     // status once per committed boundary. Goal completion gets a bounded poll
     // because its observer updates the separate control plane asynchronously.
     watch(deps.events, (latest, previous) => {
-      if (hasChatStatusRefreshBoundary(previous, latest)) {
-        void deps.terminalStore.fetchAgentStatuses()
+      const lifecycleBoundary = hasChatStatusRefreshBoundary(previous, latest)
+      if (lifecycleBoundary) void deps.terminalStore.fetchAgentStatuses()
+      if (deps.isManagedChat.value) return
+      // Provider Goals also change between turns; do not wait for completion to
+      // discover a paused, resumed, limited or cleared native Goal.
+      const notification = latestNativeGoalNotification(previous, latest)
+      if (notification) {
+        void refreshGoalAfterTurn(null, notification)
+      } else if (lifecycleBoundary) {
         const previousLength = previous.length <= latest.length ? previous.length : 0
         let completed = null as (typeof latest)[number] | null
         for (let index = latest.length - 1; index >= previousLength; index -= 1) {
@@ -159,8 +156,8 @@ export function useChatGoal(deps: Dependencies) {
             break
           }
         }
-        if (!deps.isManagedChat.value && completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
-        else if (!deps.isManagedChat.value) void hydrateGoal()
+        if (completed) void refreshGoalAfterTurn(completed.turn_id ?? null)
+        else void hydrateGoal()
       }
     })
   }

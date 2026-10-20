@@ -75,10 +75,26 @@ _native_input_shutting_down = False
 
 async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
     """Bridge persisted completion to Goal and scheduled Chat state."""
-    if event.type != AgentStreamEventType.TURN_COMPLETED or not event.turn_id:
-        return
     from ..services.goal_run import get_goal_manager
 
+    direct = event.session_id == _tab_stream_session_id(event.tab_id)
+    notification = str(event.payload.get("provider_notification") or "")
+    if direct and (
+        event.type == AgentStreamEventType.TURN_STARTED
+        or (
+            event.type == AgentStreamEventType.STATUS
+            and notification.startswith(("thread/goal/", "goal/"))
+        )
+    ):
+        await get_goal_manager().refresh_current(event.tab_id)
+        return
+    if event.type != AgentStreamEventType.TURN_COMPLETED or not event.turn_id:
+        return
+    if not direct:
+        await workspace_manager.on_scheduled_chat_turn_completed(
+            event.tab_id, event.turn_id, str(event.payload.get("status") or "failed")
+        )
+        return
     payload = event.payload
     try:
         await get_goal_manager().on_turn_completed(

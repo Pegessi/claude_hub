@@ -93,6 +93,14 @@ class GoalRunStore:
         with self._lock:
             return any(goal.tab_id == tab_id for goal in self._goals.values())
 
+    def latest_for_tab(self, tab_id: str) -> GoalRun | None:
+        """Include cleared records when reconciling a provider-owned Goal."""
+        with self._lock:
+            candidates = [goal for goal in self._goals.values() if goal.tab_id == tab_id]
+            if not candidates:
+                return None
+            return max(candidates, key=lambda goal: goal.created_at).model_copy(deep=True)
+
     def current_for_tab(self, tab_id: str) -> GoalRun | None:
         with self._lock:
             candidates = [goal for goal in self._goals.values() if goal.tab_id == tab_id]

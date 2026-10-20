@@ -76,9 +76,28 @@ test('active Goal also blocks implementing a historical Plan turn', () => {
 
 test('turn completion uses bounded version-aware Goal reconciliation', () => {
   assert.ok(goalController.includes('GOAL_REFRESH_DELAYS_MS'))
-  assert.ok(goalController.includes('goalSnapshotVersion() !== baselineVersion'))
+  assert.ok(goalController.includes('goalTurnCompletionReflected(goal.value, turnId, baselineVersion)'))
   assert.ok(goalController.includes("latest[index].type === 'turn_completed'"))
-  assert.ok(goalController.includes('current.completed_turn_ids?.includes(turnId)'))
+})
+
+test('native Goal status notifications and completion refresh authoritative state', () => {
+  assert.ok(goalController.includes('latestNativeGoalNotification(previous, latest)'))
+  assert.ok(goalController.includes('refreshGoalAfterTurn(null, notification)'))
+  assert.ok(goalController.includes('nativeGoalNotificationReflected(goal.value, notification, baselineVersion)'))
+  assert.ok(goalController.includes('goalObservationVersion(goal.value)'))
+})
+
+test('Retry stop uses the owner-aware interruption policy', () => {
+  assert.ok(statusBar.includes("goalStopRetryAction(props.goal) === 'pause'"))
+  assert.match(statusBar, /function retryStop\(\)[\s\S]*emit\('pause'\)[\s\S]*emit\('clear'\)/)
+})
+
+test('native limited states show their real label without offering Resume', () => {
+  assert.match(statusBar, /goal\.status === 'paused' \|\| goal\.status === 'blocked'/)
+  assert.ok(statusBar.includes("[data-status='usageLimited']"))
+  assert.ok(statusBar.includes("[data-status='budgetLimited']"))
+  assert.ok(statusBar.includes('Managed by provider'))
+  assert.ok(statusBar.includes('Managed by Claude Hub'))
 })
 
 test('active Goal accepts steers while queued drafts wait for the Goal to stop', () => {

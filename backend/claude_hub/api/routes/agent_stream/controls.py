@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
@@ -138,16 +139,48 @@ def register_control_routes(
         payload: Optional[StreamCancelRequest] = None,
         current_user: User = Depends(get_current_user),
     ) -> Dict[str, Any]:
+        from claude_hub.services.goal_run import get_goal_admission_lock, get_goal_manager
+        from claude_hub.services.goal_run.native import NativeGoalError
         from claude_hub.services.restart_continuation import cancel_pending_continuation
 
         session = bindings.terminal_tab_session_or_404(tab_id)
+        if not bindings.is_chat_native(session):
+            return await bindings.cancel_native_turn(
+                session, bindings.get_tab_tailer_manager(), payload
+            )
         expected = payload.expected_turn_id if payload is not None else None
         continuation = cancel_pending_continuation(tab_id, expected)
         if continuation is not None:
             payload = StreamCancelRequest(expected_turn_id=continuation)
-        return await bindings.cancel_native_turn(
-            session, bindings.get_tab_tailer_manager(), payload
-        )
+            expected = continuation
+        async with get_goal_admission_lock(tab_id):
+            try:
+                manager = bindings.get_tab_tailer_manager()
+                goal_manager = get_goal_manager()
+                goal = await goal_manager.refresh_current(tab_id)
+                active = (
+                    await manager.active_turn_id(session)
+                    if goal is not None and goal.execution_owner == "provider_native"
+                    else None
+                )
+                if (
+                    goal is not None
+                    and goal.execution_owner == "provider_native"
+                    and active is not None
+                    and active in goal.provider_owned_turn_ids
+                    and (goal.status not in TERMINAL_GOAL_STATUSES or goal.provider_stop_pending)
+                ):
+                    if expected is not None and active != expected:
+                        return {"ok": True, "cancelled": False, "outcome": "already_terminal"}
+                    paused = await goal_manager.pause(goal.id, f"stop:{uuid4()}")
+                    if paused.dispatch_state.value != "idle":
+                        raise NativeGoalError(
+                            paused.status_message or "Provider Goal stop is unconfirmed"
+                        )
+                    return {"ok": True, "cancelled": True, "outcome": "cancelled_matching"}
+                return await bindings.cancel_native_turn(session, manager, payload)
+            except NativeGoalError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @router.post("/sessions/{managed_session_id}/stream/edit-resend")
     async def edit_resend_stream(

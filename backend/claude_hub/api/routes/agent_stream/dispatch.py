@@ -207,7 +207,7 @@ async def dispatch_tab_stream_input(
     async with get_goal_admission_lock(tab_id):
         require_tab_input_available(tab_id)
         goal_manager = get_goal_manager()
-        goal = goal_manager.current(tab_id)
+        goal = await goal_manager.refresh_current(tab_id)
         session = bindings.terminal_tab_session_or_404(tab_id)
         manager = bindings.get_tab_tailer_manager()
         if goal is not None and allow_question_answer:
@@ -273,6 +273,8 @@ async def dispatch_tab_stream_input(
                         detail=str(exc),
                         headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
                     ) from exc
+                if goal.execution_owner == "provider_native":
+                    return payload.client_turn_id
                 delivered = payload.client_turn_id in goal.completed_turn_ids or (
                     goal.current_turn_id == payload.client_turn_id
                     and goal.dispatch_state.value == "dispatched"
@@ -302,7 +304,7 @@ async def dispatch_tab_stream_input(
                 manager,
                 visible_text=visible_text,
                 turn_metadata=turn_metadata,
-                strip_goal_protocol=goal_manager.has_goal_history(tab_id),
+                strip_goal_protocol=goal_manager.uses_hub_goal_protocol(tab_id),
             )
         return payload.client_turn_id
 

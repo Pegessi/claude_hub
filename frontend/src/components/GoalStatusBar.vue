@@ -2,6 +2,7 @@
   <section
     class="goal-status"
     :data-status="goal.status"
+    :data-execution-owner="goal.execution_owner ?? 'hub_managed'"
     aria-label="Chat Goal status"
     :aria-busy="busy || undefined"
     @keydown.esc="expanded = false"
@@ -46,6 +47,7 @@
       </div>
       <p>{{ goal.objective }}</p>
       <div class="goal-status-meta">
+        <span>{{ goal.execution_owner === 'provider_native' ? 'Managed by provider' : 'Managed by Claude Hub' }}</span>
         <span>Started {{ formatTime(goal.created_at) }}</span>
         <span>Updated {{ formatTime(goal.updated_at) }}</span>
       </div>
@@ -163,15 +165,15 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { ChatGoal } from '@/types'
-import { goalStatusLabel, isGoalTerminal } from '@/utils/chatGoalPolicy'
+import { goalStatusLabel, goalStopRetryAction, isGoalTerminal } from '@/utils/chatGoalPolicy'
 
 const props = defineProps<{ goal: ChatGoal; busy?: boolean; error?: string | null }>()
 const emit = defineEmits<{ pause: []; resume: []; complete: []; clear: []; edit: []; refresh: [] }>()
 const expanded = ref(false)
 const needsReconciliation = computed(() => props.goal.dispatch_state === 'uncertain')
 function retryStop() {
-  if (props.goal.status === 'cancelled' || isGoalTerminal(props.goal.status)) emit('clear')
-  else emit('pause')
+  if (goalStopRetryAction(props.goal) === 'pause') emit('pause')
+  else emit('clear')
 }
 const detailsId = computed(() => `goal-status-details-${props.goal.id}`)
 const liveStatus = computed(() => `Goal ${needsReconciliation.value ? 'stop unconfirmed' : goalStatusLabel(props.goal.status)}`)
@@ -182,7 +184,7 @@ function formatTime(value: string): string { return new Date(value).toLocaleStri
 .goal-status { position: relative; display: flex; align-items: center; gap: 8px; padding: 7px 28px; border-top: 1px solid var(--ch-color-border-muted); border-bottom: 1px solid var(--ch-color-border-muted); background: var(--ch-color-surface); font-size: 12px; }
 .goal-status-summary { display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; padding: 2px 0; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
 .goal-status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--ch-color-accent); }
-[data-status='paused'] .goal-status-dot, [data-status='blocked'] .goal-status-dot { background: var(--ch-color-warning, #e0a800); }
+[data-status='paused'] .goal-status-dot, [data-status='blocked'] .goal-status-dot, [data-status='usageLimited'] .goal-status-dot, [data-status='budgetLimited'] .goal-status-dot { background: var(--ch-color-warning, #e0a800); }
 [data-status='complete'] .goal-status-dot { background: var(--ch-color-success, #30a46c); }
 [data-status='cancelled'] .goal-status-dot, [data-status='failed'] .goal-status-dot { background: var(--ch-color-danger, #e5484d); }
 .goal-objective { min-width: 0; overflow: hidden; color: var(--ch-color-text-muted); text-overflow: ellipsis; white-space: nowrap; }

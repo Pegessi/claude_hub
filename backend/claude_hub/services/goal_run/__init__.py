@@ -7,6 +7,7 @@ from .controller import (
     GoalRunController,
     build_continuation_prompt,
 )
+from .native import NativeGoalResolver
 from .policy import GoalPolicyError
 from .store import GoalRunStore
 
@@ -22,10 +23,14 @@ def get_goal_admission_lock(tab_id: str) -> asyncio.Lock:
 
 
 def configure_goal_dispatch(
-    callback: DispatchCallback | None, *, cancel: CancelCallback | None = None
+    callback: DispatchCallback | None,
+    *,
+    cancel: CancelCallback | None = None,
+    provider_resolver: NativeGoalResolver | None = None,
 ) -> None:
     goal_run_controller.set_dispatch_callback(callback)
     goal_run_controller.set_cancel_callback(cancel)
+    goal_run_controller.native.resolver = provider_resolver
 
 
 def get_goal_manager() -> GoalRunController:

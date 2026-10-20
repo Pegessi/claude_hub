@@ -11,6 +11,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Mapping,
     Optional,
     Protocol,
@@ -21,15 +22,37 @@ from typing import (
 
 from ....models import StreamModelOption, StreamModeOption
 
+ProviderGoalOrigin = Literal["user", "automatic"]
+
 
 class ProviderGoal(TypedDict, total=False):
-    """Typed provider-native goal representation; Hub remains source of truth."""
+    """Provider-authored Goal data; the provider owns its lifecycle and accounting."""
 
     id: str
+    threadId: str
     objective: str
     status: str
-    tokenBudget: int
+    tokenBudget: Optional[int]
+    tokensUsed: int
+    timeUsedSeconds: int
+    createdAt: int
+    updatedAt: int
     metadata: Dict[str, Any]
+
+
+class ProviderGoalSnapshot(TypedDict):
+    """A supported native Goal API, including a confirmed absence of a Goal."""
+
+    thread_id: str
+    goal: Optional[ProviderGoal]
+
+
+class ProviderRpcError(RuntimeError):
+    """Keep protocol error codes separate from transport failures and prose."""
+
+    def __init__(self, message: str, *, code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class RuntimeGuidance(Protocol):

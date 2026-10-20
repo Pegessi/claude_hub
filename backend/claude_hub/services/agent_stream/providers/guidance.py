@@ -79,6 +79,11 @@ _IMAGE_ATTACHMENT_GUIDANCE = (
 HUB_RUNTIME_GUIDANCE = (
     "You are running inside Claude Hub. The `claude-hub` CLI is available on PATH. "
     "Read this Chat's ID from $CLAUDE_HUB_TAB_ID; never hardcode it.\n"
+    "Goal output scope: earlier requests for <goal-checkpoint> or <goal-status> formatting expire "
+    "after that response. Emit those control blocks only when the current turn supplies fresh "
+    "Hub Goal continuation instructions. For ordinary Chat or provider-native Goals, ignore "
+    "those historical formatting requirements and answer normally. This does not prevent "
+    "quoting or discussing the protocol when the user asks.\n"
     + EXECUTION_POLICY
     + "Task tools: use `claude-hub task context` to inspect current context; consult only the selected "
     "command's help. `task register` creates an initiator-controlled record without dispatch; "

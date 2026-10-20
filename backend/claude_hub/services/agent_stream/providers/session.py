@@ -17,7 +17,7 @@ from ....models import (
     StreamModeOption,
 )
 from ..provider_network import ProviderNetworkError
-from .contracts import ProviderRuntime
+from .contracts import ProviderGoal, ProviderGoalOrigin, ProviderGoalSnapshot, ProviderRuntime
 
 
 class SessionCore(ABC):
@@ -591,6 +591,18 @@ class SessionCore(ABC):
         Called on send failure so attachments never leak across turns.
         Subclasses that stage to temp files override this to delete them.
         """
+
+    async def goal_snapshot(self) -> Optional[ProviderGoalSnapshot]:
+        """Return native Goal state; None means this provider has no native API."""
+        return None
+
+    async def goal_set(self, goal: ProviderGoal, *, origin: ProviderGoalOrigin) -> ProviderGoal:
+        """Mutate a provider-owned Goal without starting a Hub-managed turn."""
+        raise NotImplementedError(f"{self.adapter_id} does not support native Goals")
+
+    async def goal_clear(self, *, origin: ProviderGoalOrigin) -> bool:
+        """Clear a native Goal; False denotes an already absent supported Goal."""
+        raise NotImplementedError(f"{self.adapter_id} does not support native Goals")
 
     def capabilities(self) -> StreamCapabilities:
         # For CHAT sessions the native transport is the sole real-time source.

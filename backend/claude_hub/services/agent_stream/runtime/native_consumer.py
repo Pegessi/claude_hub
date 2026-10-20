@@ -444,6 +444,11 @@ class NativeConsumerMixin(SessionState):
                     self._run_epoch += 1
                     self._reset_turn_watchdog_state()
                     self._turn_completed_seen = False
+                    # Native continuation starts a new turn, not a continuation
+                    # of Hub's previous output protocol or terminal status.
+                    self._native_terminal_status = None
+                    self._goal_protocol_turn = False
+                    self._goal_protocol_sanitizer = None
                     transport.acknowledge_provider_turn_started()
                     event.turn_id = self._active_turn_id
                     event.message_id = f"{self._active_turn_id}:user"
@@ -587,3 +592,13 @@ class NativeConsumerMixin(SessionState):
                         self.session_id,
                     )
                     continue
+                notification = event.payload.get("provider_notification")
+                goal_update = (
+                    event.type == AgentStreamEventType.STATUS
+                    and isinstance(notification, str)
+                    and notification.startswith(("thread/goal/", "goal/"))
+                )
+                if not event.payload.get("subagent_thread") and (
+                    event.type == AgentStreamEventType.TURN_STARTED or goal_update
+                ):
+                    self._notify_post_persist(event)

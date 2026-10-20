@@ -7,6 +7,23 @@
 
 ## Released
 
+### fix(goal): follow native provider state and continuation ownership
+
+- Native-capable providers own Goal state and continuation. Hub reads their
+  current Goal, routes controls with explicit user origin, and never injects
+  its checkpoint prompt or runs a second continuation scheduler there.
+- Pause and Goal-owned Stop pause native continuation before interrupting;
+  Clear confirms both actions. Retry stop preserves a completed native Goal.
+  Rejected or unconfirmed requests cannot become successful cached retries.
+- Native automatic turns clear stale cancelled/waiting state. Goal notifications
+  refresh the status bar, including usage and budget limits. Ordinary turns
+  under an inactive Goal do not change its limits or count as Goal work.
+- Limit Hub checkpoint/status formatting instructions to their own response.
+  One-shot runtime guidance on a fresh/resumed transport also expires historical
+  formatting instructions; assistant output remains unchanged and visible.
+- Providers without native Goal support retain Hub management. Temporary errors
+  do not trigger fallback, and native absence does not rewrite terminal history.
+
 ### fix(chat): render Codex inline directives instead of leaking markers
 
 - Codex writes rich-content requests inline as private-use-delimited
