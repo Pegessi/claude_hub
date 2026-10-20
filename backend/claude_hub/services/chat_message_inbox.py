@@ -14,6 +14,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Awaitable, Callable, Literal, cast
 
@@ -68,6 +69,8 @@ class ChatMessageInbox:
         self._pump_locks: dict[str, asyncio.Lock] = {}
         self._wakeup = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
+        self._pump_tasks: dict[str, asyncio.Task[None]] = {}
+        self.redrain_seconds = 3.0
         self._closing = False
         self._committed = ""
         if path.exists():
@@ -403,25 +406,52 @@ class ChatMessageInbox:
         self._closing = False
         self._runner = asyncio.create_task(self._run(), name="chat-message-inbox")
 
+    def _pump_finished(self, tab_id: str, task: asyncio.Task[None]) -> None:
+        if self._pump_tasks.get(tab_id) is task:
+            del self._pump_tasks[tab_id]
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.warning("Chat inbox pump was cancelled for tab %s", tab_id)
+            return
+        except Exception:
+            logger.exception("Chat inbox pump failed for tab %s", tab_id)
+            return
+        # A fast completion can wake the coordinator while this task still
+        # owns its slot. Retry the next queued head after the slot is released.
+        # Waiting heads retain periodic backoff rather than spinning on busy.
+        pending = sorted(
+            (
+                m
+                for m in self.messages.values()
+                if m.tab_id == tab_id and m.state not in TERMINAL_STATES
+            ),
+            key=lambda m: m.sequence,
+        )
+        if pending and pending[0].state == "queued" and not self._closing:
+            self.wake()
+
     async def _run(self) -> None:
         while not self._closing:
             self._wakeup.clear()
             try:
                 await self.reconcile()
-                await asyncio.gather(
-                    *(
-                        self.pump(tab)
-                        for tab in {
-                            m.tab_id
-                            for m in self.messages.values()
-                            if m.state not in TERMINAL_STATES
-                        }
-                    )
-                )
+                for tab in {
+                    m.tab_id for m in self.messages.values() if m.state not in TERMINAL_STATES
+                }:
+                    if self._closing:
+                        break
+                    # Submission can wait on readiness, Goal admission, or a
+                    # provider acknowledgement. It never owns the coordinator:
+                    # new tabs, completion wakeups and recovery keep advancing.
+                    if tab not in self._pump_tasks:
+                        task = asyncio.create_task(self.pump(tab), name=f"chat-inbox-pump-{tab}")
+                        self._pump_tasks[tab] = task
+                        task.add_done_callback(partial(self._pump_finished, tab))
             except Exception:
                 logger.exception("Chat inbox recovery/drain failed")
             try:
-                await asyncio.wait_for(self._wakeup.wait(), timeout=3)
+                await asyncio.wait_for(self._wakeup.wait(), timeout=self.redrain_seconds)
             except asyncio.TimeoutError:
                 pass
 
@@ -431,3 +461,6 @@ class ChatMessageInbox:
         if self._runner:
             await self._runner  # do not cancel provider submission
             self._runner = None
+        # Quiescing forbids new provider submissions. Join owned pumps without
+        # cancelling possibly submitted native work or losing its evidence.
+        await asyncio.gather(*list(self._pump_tasks.values()), return_exceptions=True)
