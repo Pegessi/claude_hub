@@ -32,6 +32,8 @@ test('configuration changes and unavailable results retire prior hints', () => {
   assert.equal(cache.get('a', 'new'), undefined)
   cache.set('a', 'new', { structured: true, unavailable_reason: 'offline' })
   assert.equal(cache.get('a', 'new'), undefined)
+  cache.set('a', 'new', { structured: true, metadata_cacheable: false })
+  assert.equal(cache.get('a', 'new'), undefined)
   cache.set('a', 'new', { structured: true, adapter_id: 'maso_http' })
   assert.equal(cache.get('a', 'new'), undefined)
 })
@@ -49,10 +51,20 @@ test('capabilities have bounded, source-scoped LRU retention', () => {
 })
 
 test('configuration signatures ignore presentation changes but include provider, env and incarnation', () => {
-  const tab = { id: 'a', agent_type: 'codex', env: { B: '2', A: '1' }, agent_session_id: 'native-a' }
+  const tab = {
+    id: 'a', created_at: '2026-01-01T00:00:00Z', agent_type: 'codex', env: { B: '2', A: '1' },
+    agent_session_id: 'native-a', remote_reconnect: true,
+  }
   const signature = streamCapabilityConfiguration(tab)
   assert.equal(signature, streamCapabilityConfiguration({ ...tab, env: { A: '1', B: '2' }, name: 'renamed', is_unread: true }))
-  for (const changed of [{ agent_type: 'claude' }, { env: { A: 'changed' } }, { agent_session_id: 'native-b' }]) {
+  for (const changed of [
+    { id: 'b' },
+    { created_at: '2026-01-02T00:00:00Z' },
+    { agent_type: 'claude' },
+    { env: { A: 'changed' } },
+    { agent_session_id: 'native-b' },
+    { remote_reconnect: false },
+  ]) {
     assert.notEqual(signature, streamCapabilityConfiguration({ ...tab, ...changed }))
   }
 })

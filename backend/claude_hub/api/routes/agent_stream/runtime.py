@@ -94,12 +94,14 @@ async def _capabilities_from_transport(
         now = time.monotonic()
         cached = not refresh and state.key == key and state.expires_at > now
         if cached:
-            return cast(StreamCapabilities, transport.capabilities())
+            caps = cast(StreamCapabilities, transport.capabilities())
+            if caps.metadata_cacheable:
+                return caps
         state.key = None
         state.expires_at = 0.0
         await transport.prepare_capabilities()
         caps = cast(StreamCapabilities, transport.capabilities())
-        if caps.structured:
+        if caps.structured and caps.metadata_cacheable:
             state.key = key
             state.expires_at = time.monotonic() + _CAPABILITY_PREPARATION_TTL_S
         else:

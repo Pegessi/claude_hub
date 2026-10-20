@@ -209,17 +209,22 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     sequenceBuffer.reset(snapshot?.cursor ?? -1)
   }
 
-  function cacheCurrentHistory() {
+  function currentHistorySnapshot(): AgentStreamHistorySnapshot {
     batcher.flushAndCancel()
-    if (!currentStreamPath || !capabilities.value?.structured) return
-    agentStreamHistoryCache.set(currentStreamPath, {
+    return {
       capabilities: capabilities.value,
       events: events.value,
       cursor: sequenceBuffer.cursor,
       historyDetails: normalizeHistoryDetailsForCache(historyDetails.value),
       attributedToolIds: new Set(attributedToolIds.value),
       detailRevision: historyDetailRevision.value,
-    })
+    }
+  }
+
+  function cacheCurrentHistory() {
+    const snapshot = currentHistorySnapshot()
+    if (!currentStreamPath || !capabilities.value?.structured) return
+    agentStreamHistoryCache.set(currentStreamPath, snapshot)
   }
 
   function closeSse() {
@@ -784,20 +789,22 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
   }
 
   async function retry(sourceId: string, source: StreamSource = 'managed-session') {
-    agentStreamCapabilitiesCache.delete(streamBasePath(sourceId, source))
+    const streamPath = streamBasePath(sourceId, source)
+    agentStreamCapabilitiesCache.delete(streamPath)
+    const retryHistory = currentStreamPath === streamPath && historyReady.value
+      ? currentHistorySnapshot()
+      : undefined
     stop()
     stopped = false
     currentSessionId = sourceId
-    reset()
+    currentStreamPath = streamPath
+    reset(retryHistory)
 
     const generationId = stateMachine.start()
     connectionState.value = 'hydrating'
 
     hydrationAbort = new AbortController()
     const signal = hydrationAbort.signal
-
-    const streamPath = streamBasePath(sourceId, source)
-    currentStreamPath = streamPath
 
     try {
       const res = await fetchWithTimeout(
@@ -824,6 +831,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
         || currentSessionId !== sourceId
         || currentStreamPath !== streamPath
       ) return
+      if (retryHistory) agentStreamHistoryCache.set(streamPath, currentHistorySnapshot())
       await start(sourceId, source)
     } catch (err) {
       if (stopped || !stateMachine.isCurrent(generationId)) return

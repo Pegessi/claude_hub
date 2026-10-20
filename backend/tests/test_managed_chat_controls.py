@@ -697,6 +697,103 @@ async def test_managed_capability_preparation_is_serialized_before_replacement(
 
 
 @pytest.mark.asyncio
+async def test_managed_persisted_only_history_bypasses_blocked_capability_preparation(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, workspace = managed_workspace
+    session = _managed_session(workspace, tab_id="persisted-history-owner")
+    manager.sessions[session.id] = session
+    tailers = TailerManager(session_getter=lambda session_id: manager.sessions.get(session_id))
+    monkeypatch.setattr(stream_api, "workspace_manager", manager)
+    monkeypatch.setattr(stream_api, "_tailer_manager", tailers)
+    preparation_entered = asyncio.Event()
+    release_preparation = asyncio.Event()
+    history_entered = asyncio.Event()
+    page = stream_api.AgentStreamEventPage(events=[], next_sequence=-1, has_more=False)
+
+    async def blocked_capabilities(
+        _session: ManagedSession, _manager: TailerManager, **_kwargs: Any
+    ) -> stream_api.StreamCapabilities:
+        preparation_entered.set()
+        await release_preparation.wait()
+        return stream_api.StreamCapabilities(structured=True)
+
+    class Store:
+        async def read_conversation(
+            self, *_args: Any, **_kwargs: Any
+        ) -> stream_api.AgentStreamEventPage:
+            history_entered.set()
+            return page
+
+    monkeypatch.setattr(stream_api, "_capabilities_for", blocked_capabilities)
+    monkeypatch.setattr(tailers, "get_store", lambda *_args: Store())
+    user = User(open_id="user", name="User", email="user@example.com")
+    capability_task = asyncio.create_task(stream_api.get_stream_capabilities(session.id, user))
+    await asyncio.wait_for(preparation_entered.wait(), timeout=2)
+
+    history = await asyncio.wait_for(
+        stream_api.get_stream_events(
+            session.id,
+            since_sequence=-1,
+            limit=200,
+            compact=True,
+            view="conversation",
+            turn_id=None,
+            through_sequence=None,
+            current_user=user,
+            persisted_only=True,
+        ),
+        timeout=2,
+    )
+
+    assert history is page
+    assert history_entered.is_set()
+    assert not capability_task.done()
+    release_preparation.set()
+    capabilities = await asyncio.wait_for(capability_task, timeout=2)
+    assert capabilities.structured is True
+
+
+@pytest.mark.asyncio
+async def test_managed_persisted_only_history_rejects_replaced_incarnation_after_read(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, workspace = managed_workspace
+    session = _managed_session(workspace, tab_id="persisted-history-replaced")
+    manager.sessions[session.id] = session
+    tailers = TailerManager(session_getter=lambda session_id: manager.sessions.get(session_id))
+    monkeypatch.setattr(stream_api, "workspace_manager", manager)
+    monkeypatch.setattr(stream_api, "_tailer_manager", tailers)
+    page = stream_api.AgentStreamEventPage(events=[], next_sequence=-1, has_more=False)
+    replacement = session.model_copy(
+        update={"created_at": session.created_at + timedelta(seconds=1)}
+    )
+
+    class Store:
+        async def read_conversation(
+            self, *_args: Any, **_kwargs: Any
+        ) -> stream_api.AgentStreamEventPage:
+            manager.sessions[session.id] = replacement
+            return page
+
+    monkeypatch.setattr(tailers, "get_store", lambda *_args: Store())
+    with pytest.raises(HTTPException) as stale:
+        await stream_api.get_stream_events(
+            session.id,
+            since_sequence=-1,
+            limit=200,
+            compact=True,
+            view="conversation",
+            turn_id=None,
+            through_sequence=None,
+            current_user=User(open_id="user", name="User", email="user@example.com"),
+            persisted_only=True,
+        )
+
+    assert stale.value.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_managed_diagnostics_preparation_is_serialized_before_replacement(
     managed_workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

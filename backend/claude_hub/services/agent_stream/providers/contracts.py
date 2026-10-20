@@ -37,6 +37,12 @@ class RuntimeGuidance(Protocol):
 
 
 @dataclass(frozen=True)
+class ModelCatalog:
+    options: List[StreamModelOption]
+    metadata_cacheable: bool = True
+
+
+@dataclass(frozen=True)
 class ProviderRuntime:
     """Stateless callbacks, explicitly provided by each concrete session owner."""
 
@@ -53,7 +59,7 @@ class ProviderRuntime:
     proxy_env_names: Callable[[], Tuple[str, ...]]
     logger: Callable[[], logging.Logger]
     claude_env_options: Callable[[Dict[str, str]], List[StreamModelOption]]
-    available_models_for: Callable[[str], Awaitable[List[StreamModelOption]]]
+    model_catalog_for: Callable[[str], Awaitable[ModelCatalog]]
     provider_subprocess_env: Callable[[str, Mapping[str, str], Mapping[str, str]], Dict[str, str]]
     redact_diagnostic: Callable[[str], str]
     select_provider_env: Callable[[str, Mapping[str, str]], Awaitable[Dict[str, str]]]
