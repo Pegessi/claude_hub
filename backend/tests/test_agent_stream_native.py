@@ -422,11 +422,13 @@ def test_strip_hub_runtime_guidance_never_pairs_different_formats(first) -> None
     assert strip_hub_runtime_guidance(later_complete) == later_complete
 
 
-def test_hub_runtime_guidance_content_uses_literal_env_and_chat_kind() -> None:
+def test_hub_runtime_guidance_content_uses_literal_env_and_tab_inbox() -> None:
     """The model must expand the tab id from its own env (no backend
-    substitution) and be steered to the Chat-native schedule kind."""
+    substitution) and use the durable ordinary Chat inbox."""
     assert "$CLAUDE_HUB_TAB_ID" in HUB_RUNTIME_GUIDANCE
-    assert "--kind chat_turn" in HUB_RUNTIME_GUIDANCE
+    assert 'tab message "$CLAUDE_HUB_TAB_ID"' in HUB_RUNTIME_GUIDANCE
+    assert "--call-id" in HUB_RUNTIME_GUIDANCE
+    assert "--interval <seconds>" not in HUB_RUNTIME_GUIDANCE
     assert "tab_message" in HUB_RUNTIME_GUIDANCE
     # The literal marker is the only tab reference; no concrete id is baked in.
     assert "tab-1" not in HUB_RUNTIME_GUIDANCE
