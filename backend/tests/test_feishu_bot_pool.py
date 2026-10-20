@@ -850,6 +850,7 @@ class _Wire:
         self.replies: list[dict[str, Any]] = []
         self.reply_message_ids: list[str] = []
         self.pushes: list[tuple[str, dict[str, Any]]] = []
+        self.refuse_cards = False
         self.reaction_creates: list[str] = []
         self.reaction_types: list[tuple[str, str]] = []
         self.reaction_deletes: list[tuple[str, str]] = []
@@ -879,6 +880,8 @@ class _Wire:
         if request.method == "POST" and request.url.path == "/open-apis/im/v1/messages":
             body = json.loads(request.content)
             assert request.url.params["receive_id_type"] == "chat_id"
+            if self.refuse_cards and body["msg_type"] == "interactive":
+                return httpx.Response(400, json={"code": 230099, "msg": "card refused"})
             self.pushes.append((body["receive_id"], body))
             return httpx.Response(200, json={"code": 0})
         if request.url.path.endswith("/reply"):
@@ -990,6 +993,21 @@ def test_a_push_goes_only_to_the_chat_bound_to_the_tab(api) -> None:
     assert [chat for chat, _body in api.wire.pushes] == ["oc-1"]
     assert "Task done" in api.wire.pushes[0][1]["content"]
     assert api.wire.replies == []
+
+    # A titled notice is a card with a coloured header; a refused card goes plain.
+    assert asyncio.run(
+        bot_api.push_to_tab("tab-1", "- **3** fixes", title="MR review done", tone="done")
+    )
+    card = api.wire.pushes[-1][1]
+    assert card["msg_type"] == "interactive"
+    content = json.loads(card["content"])
+    assert content["header"]["template"] == "green"
+    assert content["header"]["title"]["content"] == "MR review done"
+    assert content["body"]["elements"][0]["content"] == "- **3** fixes"
+    api.wire.refuse_cards = True
+    assert asyncio.run(bot_api.push_to_tab("tab-1", "Body", title="Title", tone="failed"))
+    assert api.wire.pushes[-1][1]["msg_type"] == "post"
+    api.wire.pushes[1:] = []
 
     entry = api.pool.snapshot({}).get(bot_id)
     api.pool.release_binding(bot_id, expected_revision=entry.revision, environ={})
@@ -2982,3 +3000,59 @@ def test_unbinding_revokes_outstanding_codes(pool: FeishuBotPoolStore) -> None:
                 chat_id="oc-1",
                 environ={},
             )
+
+
+@pytest.mark.parametrize(
+    ("payload", "dot", "answer"),
+    [
+        (
+            {"assistant_text": "Reading.\nDone: 3 fixes.", "final_text": "Done: 3 fixes."},
+            True,
+            "Done: 3 fixes.",
+        ),
+        # Other Chats were not asked to write their answer last: they send it all.
+        (
+            {"assistant_text": "Reading.\nDone: 3 fixes.", "final_text": "Done: 3 fixes."},
+            False,
+            "Reading.\nDone: 3 fixes.",
+        ),
+        ({"assistant_text": "Hi."}, True, "Hi."),
+    ],
+)
+def test_dot_on_feishu_gets_the_last_answer_of_the_turn(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, str], dot: bool, answer: str
+) -> None:
+    """Dot's notes between tool calls stay on the web; Feishu gets its answer."""
+    from types import SimpleNamespace
+
+    from claude_hub.api import agent_stream as stream_api
+    from claude_hub.services import dot as dot_module
+
+    service = SimpleNamespace(is_dot_tab=lambda tab_id: dot and tab_id == "tab-1")
+    monkeypatch.setattr(dot_module, "get_dot_service", lambda: service)
+
+    async def scenario() -> str:
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        queue.put_nowait(
+            SimpleNamespace(
+                turn_id="t-1", type=AgentStreamEventType.TURN_COMPLETED, payload=payload
+            )
+        )
+
+        class Manager:
+            async def subscribe_completion(self, _session: Any) -> asyncio.Queue[Any]:
+                return queue
+
+            def unsubscribe_completion(self, _session_id: str, _queue: Any) -> None:
+                pass
+
+        async def dispatch(_tab_id: str, request: Any, **_kwargs: Any) -> str:
+            return str(request.client_turn_id)
+
+        session = SimpleNamespace(id="terminal-tab-tab-1", tab_id="tab-1")
+        monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: session)
+        monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: Manager())
+        monkeypatch.setattr(stream_api, "_dispatch_tab_stream_input", dispatch)
+        return await stream_api.dispatch_tab_chat_and_wait("tab-1", "hi", "t-1")
+
+    assert asyncio.run(scenario()) == answer

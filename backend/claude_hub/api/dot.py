@@ -103,6 +103,8 @@ class DelegateRequest(BaseModel):
     start: bool = True
     request_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
     stall_hours: Optional[float] = Field(default=None, gt=0, le=720)
+    # An existing agent session to run it in (its agent type wins).
+    session_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
     # Send even when the brief check has warnings.
     confirm: bool = False
 
@@ -140,6 +142,8 @@ class NotifyRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     text: str = Field(min_length=1, max_length=2000)
+    title: Optional[str] = Field(default=None, max_length=80)
+    tone: Literal["done", "failed", "decision", "info"] = "info"
 
 
 class IdentityUpdate(BaseModel):
@@ -311,7 +315,7 @@ async def dot_notify(
 ) -> dict[str, Any]:
     if not payload.text.strip():
         raise HTTPException(status_code=422, detail="text is empty")
-    result = await _service().notify(payload.text)
+    result = await _service().notify(payload.text, title=payload.title, tone=payload.tone)
     if result == "sent":
         return {"sent": True}
     if result == "repeat":

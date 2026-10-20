@@ -92,6 +92,8 @@ class PublicationMixin(SessionState):
                 self._notify_post_persist(observer_event)
             self._assistant_text = ""
             self._visible_assistant_text = ""
+            self._final_assistant_text = ""
+            self._final_text_after_tool = False
             self._goal_protocol_sanitizer = None
             self._goal_protocol_turn = False
         return True

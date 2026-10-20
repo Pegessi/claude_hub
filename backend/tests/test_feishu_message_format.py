@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
+
+from claude_hub.services.feishu_message_format import build_feishu_card_payload
 
 
 def test_feishu_v2_provider_text_adds_delivery_format_guidance() -> None:
@@ -293,3 +296,28 @@ def test_stored_v2_turn_rebuilds_the_versioned_provider_text() -> None:
             sender_open_id="ou-owner",
         )
     )
+
+
+def test_a_titled_notice_is_a_card_with_a_coloured_header() -> None:
+    payload = build_feishu_card_payload("  MR  review\ndone ", "## Result\n- **3** fixes", "failed")
+    assert payload.msg_type == "interactive"
+    card = cast(dict[str, Any], payload.content)
+    assert card["schema"] == "2.0"
+    assert card["header"] == {
+        "title": {"tag": "plain_text", "content": "MR review done"},
+        "template": "red",
+    }
+    assert card["body"]["elements"] == [
+        {"tag": "markdown", "content": "##### Result\n- **3** fixes"}
+    ]
+    assert build_feishu_card_payload("T", "x", "loud").content["header"]["template"] == "blue"  # type: ignore[index]
+    # Mentions are neutralized in the body like in a post.
+    body = build_feishu_card_payload("T", '<at user_id="all"></at> hi').content
+    assert "<at" not in json.dumps(body, ensure_ascii=False)
+
+
+def test_a_card_that_is_not_safe_falls_back_to_a_post() -> None:
+    assert build_feishu_card_payload("", "plain").msg_type == "post"
+    fallback = build_feishu_card_payload("Title", "```\nopen fence")
+    assert fallback.msg_type in {"post", "text"}
+    assert "Title" in json.dumps(fallback.content, ensure_ascii=False)
