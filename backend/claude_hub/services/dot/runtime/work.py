@@ -93,6 +93,7 @@ class DotWorkService(DotSessionService, ABC):
         start: bool = True,
         request_key: Optional[str] = None,
         stall_hours: Optional[float] = None,
+        session_id: Optional[str] = None,
         confirm: bool = False,
         actor_key: str,
     ) -> dict[str, Any]:
@@ -107,6 +108,7 @@ class DotWorkService(DotSessionService, ABC):
             AgentType,
             StartTaskRequest,
             TaskSourceReference,
+            WorkspaceSessionRole,
             WorkspaceTaskCreate,
             WorkspaceTaskMode,
         )
@@ -116,6 +118,18 @@ class DotWorkService(DotSessionService, ABC):
         checks = [" ".join(item.split()) for item in done_when if item.strip()]
         if not title.strip() or not goal.strip() or not checks:
             raise ValueError("title, goal and done_when are required")
+        session_kind = None
+        if session_id:
+            target = workspace_manager.sessions.get(session_id)
+            if (
+                target is None
+                or target.workspace_id != workspace_id
+                or target.role != WorkspaceSessionRole.ORCHESTRATOR
+            ):
+                raise ValueError(f"session {session_id} is not an agent of this workspace")
+            # The task runs as that agent, on its surface (terminal or Chat).
+            agent_type = getattr(target.agent_type, "value", str(target.agent_type))
+            session_kind = target.session_kind
         self.store.ensure()
         warnings = lint_brief(done_when=checks, context=context, output=output)
         replay = bool(request_key) and any(
@@ -143,6 +157,8 @@ class DotWorkService(DotSessionService, ABC):
             fields["source"] = TaskSourceReference(kind="chat", tab_id=tab_id)
         if task_mode:
             fields["task_mode"] = WorkspaceTaskMode(task_mode)
+        if session_kind is not None:
+            fields["session_kind"] = session_kind
         task, _replayed = await workspace_manager.register_task(
             workspace_id, WorkspaceTaskCreate(**fields), actor_key
         )
@@ -162,12 +178,17 @@ class DotWorkService(DotSessionService, ABC):
             request_key=request_key,
             # Kept so a later review can see which warnings Dot sent past.
             brief_warnings=warnings or None,
+            # Dot's own, even if the watcher saw it first (it watches Dot's tasks).
+            watched=False,
         )
         try:
             if start and task.status.value == "todo":
                 try:
                     task = await workspace_manager.start_task(
-                        task.id, StartTaskRequest(agent_type=AgentType(agent_type))
+                        task.id,
+                        StartTaskRequest(
+                            agent_type=AgentType(agent_type), target_session_id=session_id
+                        ),
                     )
                 except TaskExecutionConflict:
                     raise
@@ -577,6 +598,7 @@ class DotWorkService(DotSessionService, ABC):
         """Turn tracked task transitions into inbox events and result cards."""
         from ... import workspace_manager
 
+        await self._watch_own_tasks(workspace_manager)
         events = 0
         for item in self.store.list_work(include_closed=True):
             try:
@@ -587,6 +609,27 @@ class DotWorkService(DotSessionService, ABC):
         if events:
             await asyncio.to_thread(self.store.commit, f"dot: {events} task event(s)")
         return events
+
+    async def _watch_own_tasks(self, workspace_manager: Any) -> None:
+        """Watch Hub tasks started from the Dot Chat without `dot delegate` (e.g.
+        `task register`): their result must wake Dot too. One stopped by hand
+        stays stopped."""
+        tab_id = self.tab_id()
+        if not tab_id:
+            return
+        for task in list(workspace_manager.tasks.values()):
+            source = getattr(task, "source", None)
+            if (
+                getattr(source, "kind", None) != "chat"
+                or getattr(source, "tab_id", None) != tab_id
+                or task.status.value in _TERMINAL_TASK_STATES
+                or self.store.get_work(task.id) is not None
+            ):
+                continue
+            try:
+                await self.watch(task.id)
+            except Exception:
+                logger.exception("dot: watching task %s failed", task.id)
 
     def _check_item(self, workspace_manager: Any, item: dict[str, Any]) -> int:
         """Look at one tracked task; returns how many inbox events it raised."""

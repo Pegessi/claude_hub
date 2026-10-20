@@ -6,7 +6,7 @@ import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Generator
+from typing import Any, Generator, Optional
 
 import httpx
 import pytest
@@ -220,9 +220,11 @@ def test_notify_reports_whether_feishu_got_it(
     client, service = api
     _route_to_app(client, monkeypatch)
     sent: list[str] = []
+    cards: list[tuple[Optional[str], str]] = []
 
-    async def fake_notify(text: str) -> str:
+    async def fake_notify(text: str, *, title: Optional[str] = None, tone: str = "info") -> str:
         sent.append(text)
+        cards.append((title, tone))
         return {"unbound": "failed", "again": "repeat"}.get(text, "sent")
 
     monkeypatch.setattr(service, "notify", fake_notify)
@@ -236,6 +238,14 @@ def test_notify_reports_whether_feishu_got_it(
     assert client.post("/api/dot/notify", json={"text": "  "}).status_code == 422
     assert client.post("/api/dot/notify", json={"text": "x" * 2001}).status_code == 422
     assert sent == ["Paper task is done", "unbound", "again"]
+    assert cards[0] == (None, "info")
+
+    card = ["--json", "dot", "notify", "3 fixes", "--title", "MR done", "--tone", "done"]
+    result = CliRunner().invoke(cli, card)
+    assert result.exit_code == 0, result.output
+    assert cards[-1] == ("MR done", "done")
+    bad = client.post("/api/dot/notify", json={"text": "x", "tone": "loud"})
+    assert bad.status_code == 422
 
 
 def test_cli_remember_recall_and_merge(
