@@ -7,6 +7,10 @@
 
 ## Released
 
+### feat(chat): add a durable tab message inbox
+
+- Add a durable native Chat tab message inbox, enqueue/status/cancel CLI, and Hub message provenance with pending receipt UI. Ambiguous delivery never auto-replays; no scheduler records are created.
+
 ### fix(chat): render Codex inline directives instead of leaking markers
 
 - Codex writes rich-content requests inline as private-use-delimited
