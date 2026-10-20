@@ -10,7 +10,7 @@
   >
     <div class="conversation-bubble conversation-bubble--assistant">
       <MarkdownContent
-        :text="renderAgentDirectives(stripTrailingGoalProtocol(part.text))"
+        :text="renderAgentDirectives(stripTrailingGoalProtocol(part.text), { complete: turn.completed })"
         :tab-id="markdownImageScope"
         compact
         :complete="turn.completed"
