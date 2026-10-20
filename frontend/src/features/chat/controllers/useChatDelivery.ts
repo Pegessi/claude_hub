@@ -101,7 +101,8 @@ export function useChatDelivery(deps: Dependencies) {
     deps.authoritativeTurns.value,
   ))
 
-  const modeInteractionLocked = computed(() => isSending.value || turnInFlight.value)
+  const modeInteractionLocked = computed(() =>
+    deps.connectionState.value !== 'live' || isSending.value || turnInFlight.value)
 
   // ── Manual Stop: unconditional recovery ─────────────────────────────────────
   // A user Stop is explicit intent and must work for ANY wedged active turn,

@@ -446,6 +446,353 @@ def test_tailer_manager_set_env_skips_when_tailer_missing_or_errored() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persisted_only_history_skips_capabilities_and_startup() -> None:
+    from claude_hub.api.routes.agent_stream import observation
+
+    session = _sse_session("terminal-tabs", "persisted-only")
+    page = AgentStreamEventPage(events=[], next_sequence=10, has_more=False)
+    store = SimpleNamespace(read_conversation=AsyncMock(return_value=page))
+    manager = MagicMock()
+    manager.get_store.return_value = store
+    manager.ensure_started = AsyncMock(side_effect=AssertionError("must not start runtime"))
+    bindings = MagicMock()
+    bindings.capabilities_for = AsyncMock(side_effect=AssertionError("must not read capabilities"))
+
+    result = await observation.stream_events_for(
+        session,
+        manager,
+        -1,
+        100,
+        bindings,
+        view="conversation",
+        compact=True,
+        persisted_only=True,
+    )
+
+    assert result is page
+    store.read_conversation.assert_awaited_once_with(-1, 100, compact=True)
+    bindings.capabilities_for.assert_not_awaited()
+    manager.ensure_started.assert_not_awaited()
+
+
+class _CapabilityTransport:
+    def __init__(self) -> None:
+        self.prepare_count = 0
+        self.current_mode = "default"
+        self.structured = True
+        self.failures_remaining = 0
+        self.entered: Optional[asyncio.Event] = None
+        self.release: Optional[asyncio.Event] = None
+
+    async def prepare_capabilities(self) -> None:
+        self.prepare_count += 1
+        if self.entered is not None:
+            self.entered.set()
+        if self.release is not None:
+            await self.release.wait()
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise RuntimeError("capability preparation failed")
+
+    def capabilities(self) -> StreamCapabilities:
+        return StreamCapabilities(structured=self.structured, current_mode=self.current_mode)
+
+
+def _capability_manager(session: ManagedSession, transport: _CapabilityTransport) -> MagicMock:
+    tailer = SimpleNamespace(native_error=None, native_transport=transport)
+    manager = MagicMock()
+    manager.ensure_started = AsyncMock(return_value=tailer)
+    manager.hard_failed.return_value = False
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_capability_preparation_cache_keeps_dynamic_capabilities_current() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    manager = _capability_manager(session, transport)
+
+    caps = await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    transport.current_mode = "plan"
+    cached = await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    refreshed = await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+        refresh=True,
+    )
+
+    assert caps.current_mode == "default"
+    assert cached.current_mode == "plan"
+    assert refreshed.current_mode == "plan"
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_capability_preparation_failures_are_not_cached() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    transport.failures_remaining = 1
+    manager = _capability_manager(session, transport)
+
+    with pytest.raises(RuntimeError, match="capability preparation failed"):
+        await stream_runtime.capabilities_for(
+            lambda: manager,
+            lambda _session: True,
+            lambda _session: None,
+            session,
+            manager,
+            cache_preparation=True,
+        )
+    caps = await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+
+    assert caps.structured is True
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_capability_preparation_cache_coalesces_concurrent_requests() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    transport.entered = asyncio.Event()
+    transport.release = asyncio.Event()
+    manager = _capability_manager(session, transport)
+
+    async def load() -> StreamCapabilities:
+        return await stream_runtime.capabilities_for(
+            lambda: manager,
+            lambda _session: True,
+            lambda _session: None,
+            session,
+            manager,
+            cache_preparation=True,
+        )
+
+    first = asyncio.create_task(load())
+    await asyncio.wait_for(transport.entered.wait(), 1)
+    second = asyncio.create_task(load())
+    await asyncio.sleep(0)
+    assert transport.prepare_count == 1
+    transport.release.set()
+    first_caps, second_caps = await asyncio.wait_for(asyncio.gather(first, second), 1)
+
+    assert first_caps.structured is True
+    assert second_caps.structured is True
+    assert transport.prepare_count == 1
+
+
+@pytest.mark.asyncio
+async def test_capability_preparation_does_not_cache_unstructured_result() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    transport.structured = False
+    manager = _capability_manager(session, transport)
+
+    first = await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    transport.structured = True
+    second = await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+
+    assert first.structured is False
+    assert second.structured is True
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_capability_preparation_cache_invalidates_on_env_change() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    manager = _capability_manager(session, transport)
+
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    changed = session.model_copy(update={"env": {"CODEX_MODEL": "other"}})
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        changed,
+        manager,
+        cache_preparation=True,
+    )
+
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_maso_capability_preparation_is_not_cached() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.MASO).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    manager = _capability_manager(session, transport)
+
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_capability_refresh_invalidates_cached_success() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    manager = _capability_manager(session, transport)
+
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    transport.entered = asyncio.Event()
+    transport.release = asyncio.Event()
+    refresh = asyncio.create_task(
+        stream_runtime.capabilities_for(
+            lambda: manager,
+            lambda _session: True,
+            lambda _session: None,
+            session,
+            manager,
+            cache_preparation=True,
+            refresh=True,
+        )
+    )
+    await asyncio.wait_for(transport.entered.wait(), 1)
+    assert transport.prepare_count == 2
+    refresh.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh
+    transport.release.set()
+    transport.entered = None
+    transport.release = None
+
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+
+    assert transport.prepare_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"workspace_path": "/tmp/other-workspace"},
+        {"target": ExecutionTarget.REMOTE},
+        {"remote_profile_id": "profile-1"},
+        {"remote_cwd": "/remote/workspace"},
+        {"remote_reconnect": False},
+        {"solo_mode": True},
+    ],
+)
+async def test_capability_preparation_cache_invalidates_on_session_configuration_change(
+    updates: Dict[str, Any],
+) -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    manager = _capability_manager(session, transport)
+
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    changed = session.model_copy(update=updates)
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        changed,
+        manager,
+        cache_preparation=True,
+    )
+
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
 async def test_tab_capability_keeps_empty_claude_composer_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

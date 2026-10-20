@@ -7,6 +7,18 @@
 
 ## Released
 
+### fix(chat): show history before runtime preparation and reuse capability metadata
+
+- Read durable Chat history and execution details without starting a provider;
+  model/network preparation no longer blocks the existing transcript, including
+  when capabilities fail. Input remains gated on valid observation readiness.
+- Reuse successful capability metadata for up to 30 minutes, with bounded
+  browser retention, configuration-aware invalidation, and explicit refresh on
+  retry or settings updates. Dynamic model/mode state and action validation stay
+  current; MASO's combined service-readiness check is not cached.
+- Ignore superseded capability responses and retain a clear error with readable
+  history when a live capability handshake becomes unavailable.
+
 ### fix(chat): render Codex inline directives instead of leaking markers
 
 - Codex writes rich-content requests inline as private-use-delimited
