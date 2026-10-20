@@ -126,6 +126,56 @@ test('touch screens get visible affordances and finger-sized targets', async () 
     assert.match(touch[0], new RegExp(`\\.${chevron} \\{\\s*opacity: 0\\.7;`))
     assert.match(touch[0], /min-height: 40px;/)
   }
-  // Copy/fork appear once the answer is finished, not while it streams.
-  assert.match(turn, /:class="\{ 'turn-actions--live': !turn\.completed \}"/)
+  // Only the turn streaming right now is live; an incomplete turn whose
+  // completion never arrived keeps its actions and gets no ticking footer.
+  assert.match(turn, /return !turn\.completed && turn\.key === latestTurnKey\.value && turnInFlight\.value/)
+  assert.match(turn, /:class="\{ 'turn-actions--live': isLive\(turn\) \}"/)
+  assert.match(turn, /\.turn-actions--live > :not\(\.turn-copy-button\) \{\s*display: none;/)
+})
+
+const durationSource = await readFile(new URL('../src/utils/duration.ts', import.meta.url), 'utf8')
+const durationJs = ts.transpileModule(durationSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
+}).outputText
+const { formatStopwatch } = await import(`data:text/javascript;base64,${Buffer.from(durationJs).toString('base64')}`)
+
+test('the working stopwatch keeps seconds and never goes negative', () => {
+  assert.equal(formatStopwatch(-5000), '0:00')
+  assert.equal(formatStopwatch(7_900), '0:07')
+  assert.equal(formatStopwatch(161_000), '2:41')
+  assert.equal(formatStopwatch(3_733_000), '1:02:13')
+})
+
+test('multi-file git diffs keep headers out of the content', () => {
+  const diff = [
+    'diff --git a/x.ts b/x.ts', 'index 1..2 100644', '--- a/x.ts', '+++ b/x.ts', '@@ -1 +1 @@', '-a', '+b',
+    'diff --git a/y.ts b/y.ts', '--- a/y.ts', '+++ b/y.ts', '@@ -1 +1 @@', '-c', '+d', '',
+  ].join('\n')
+  const edit = describeToolActivity(call('apply_patch', { changes: [{ path: 'x.ts', diff }] }))
+  assert.deepEqual(edit.diff.map(line => `${line.sign}${line.text}`),
+    ['@x.ts', '@@@ -1 +1 @@', '-a', '+b', '@@@ -1 +1 @@', '-c', '+d'])
+})
+
+test('a Codex patch without @@ keeps removed dash lines as content', () => {
+  const patch = '*** Begin Patch\n*** Update File: notes.md\n---- old rule\n+++ new line\n*** End Patch'
+  const edit = describeToolActivity(call('apply_patch', { input: patch }))
+  assert.deepEqual(edit.diff.map(line => `${line.sign}${line.text}`), ['@notes.md', '---- old rule', '+++ new line'])
+})
+
+test('session follow-ups, empty patterns and Windows paths read naturally', () => {
+  const input = describeToolActivity(call('write_stdin', { session_id: 3, chars: 'y\n' }))
+  assert.deepEqual([input.kind, input.verb, input.target], ['command', 'Sent input', 'y'])
+  assert.equal(describeToolActivity(call('BashOutput', { bash_id: 'b1' })).verb, 'Read output')
+  assert.equal(describeToolActivity(call('Grep', { path: 'src' })).target, 'src')
+  assert.equal(describeToolActivity(call('Read', { file_path: 'C:\\repo\\src\\utils\\a.ts' })).target, '…\\src\\utils\\a.ts')
+})
+
+test('huge streaming arguments are re-parsed per chunk, not per delta', () => {
+  const tool = { name: 'Write', argsText: `{"file_path": "big.txt", "content": "${'x'.repeat(70 * 1024)}` }
+  const first = describeToolActivity(tool)
+  tool.argsText += 'y'.repeat(100)
+  assert.equal(describeToolActivity(tool), first, 'an incomplete large payload reuses the last parse')
+  tool.argsText += '"}'
+  assert.notEqual(describeToolActivity(tool), first, 'a complete payload is parsed again')
+  assert.equal(describeToolActivity(tool).target, 'big.txt')
 })

@@ -19,6 +19,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { formatStopwatch, parseTimestampMs } from '@/utils/duration'
 
 const props = defineProps<{ startedAt: string | null }>()
 
@@ -34,15 +35,11 @@ onBeforeUnmount(() => {
   if (timer !== null) clearInterval(timer)
 })
 
-/** ``0:07``, ``2:41``, ``1:02:13`` — a stopwatch, not a coarse duration. */
+// A future server timestamp (client clock behind) must not show negative time.
 const elapsedLabel = computed(() => {
-  const parsed = props.startedAt ? Date.parse(props.startedAt) : Number.NaN
-  const start = Number.isFinite(parsed) ? Math.min(parsed, mountedAt) : mountedAt
-  const total = Math.max(0, Math.floor((now.value - start) / 1000))
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const seconds = String(total % 60).padStart(2, '0')
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`
+  const parsed = parseTimestampMs(props.startedAt)
+  const start = parsed === null ? mountedAt : Math.min(parsed, mountedAt)
+  return formatStopwatch(now.value - start)
 })
 </script>
 

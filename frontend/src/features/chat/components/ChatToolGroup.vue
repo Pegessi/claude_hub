@@ -71,27 +71,36 @@
             ><span class="tool-status-text">{{ toolStatusLabel(tool.status) }}</span></span>
           </div>
           <!-- Commands read as a terminal: the prompt line, then the output. -->
-          <div
-            v-if="activity.command"
-            class="activity-terminal"
-          >
-            <pre
-              class="activity-terminal-command"
-              role="region"
-              tabindex="0"
-              aria-label="Command"
-            ><span
-              class="activity-prompt"
-              aria-hidden="true"
-            >$ </span>{{ activity.command }}</pre>
-            <pre
-              v-if="tool.resultText"
-              class="activity-terminal-output"
-              role="region"
-              tabindex="0"
-              aria-label="Command output"
-            >{{ tool.resultText }}</pre>
-          </div>
+          <template v-if="activity.command">
+            <div class="activity-terminal">
+              <pre
+                class="activity-terminal-command"
+                role="region"
+                tabindex="0"
+                aria-label="Command"
+              ><span
+                class="activity-prompt"
+                aria-hidden="true"
+              >$ </span>{{ activity.command }}</pre>
+              <pre
+                v-if="tool.resultText"
+                class="activity-terminal-output"
+                role="region"
+                tabindex="0"
+                aria-label="Command output"
+              >{{ tool.resultText }}</pre>
+            </div>
+            <details
+              v-if="tool.argsText"
+              class="tool-block tool-block--raw"
+            >
+              <summary>Raw input</summary>
+              <pre
+                tabindex="0"
+                aria-label="Tool input"
+              >{{ tool.argsText }}</pre>
+            </details>
+          </template>
           <template v-else>
             <!-- Edits read as a diff when the arguments carry one. -->
             <div

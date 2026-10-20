@@ -67,7 +67,7 @@
     />
 
     <ChatTurnWorking
-      v-if="!turn.completed && !turn.awaitingAgentActivity && turn.key === latestTurnKey"
+      v-if="isLive(turn) && !turn.awaitingAgentActivity"
       :started-at="turn.startedAt"
     />
 
@@ -91,7 +91,7 @@
                than floating back at the top. -->
     <div
       class="turn-actions turn-actions--turn"
-      :class="{ 'turn-actions--live': !turn.completed }"
+      :class="{ 'turn-actions--live': isLive(turn) }"
     >
       <button
         v-if="turnCopyText(turn)"
@@ -156,6 +156,12 @@ const { turnInFlight } = requireChatOwner(chatDeliveryKey)
 const { goalEditReason, goalComposerLocked, goalComposerReason } = requireChatOwner(chatGoalKey)
 const { turnPartsFor, latestTurnKey } = requireChatOwner(chatTimelineKey)
 const { supportsEditResend, isManagedChat } = requireChatOwner(chatIdentityKey)
+/** Live means still streaming now: the latest turn while one is in flight.
+ *  An incomplete turn whose completion never arrived is history, not live. */
+function isLive(turn: TimelineTurn): boolean {
+  return !turn.completed && turn.key === latestTurnKey.value && turnInFlight.value
+}
+
 defineProps<{
   turn: TimelineTurn & { awaitingAgentActivity?: boolean }
   ordinal: number
@@ -204,9 +210,10 @@ defineProps<{
   opacity: 1;
   pointer-events: auto;
 }
-/* Copy/fork describe a finished answer; while it streams they are noise,
-   especially on touch where action rows are always visible. */
-.turn-actions--live {
+/* Fork and plan actions describe a finished answer; while it streams they
+   are noise (touch shows action rows permanently). Copy stays, so a partial
+   answer can still be taken. */
+.turn-actions--live > :not(.turn-copy-button) {
   display: none;
 }
 

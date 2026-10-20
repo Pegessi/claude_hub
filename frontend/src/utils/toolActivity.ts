@@ -50,6 +50,8 @@ export const ACTIVITY_ICONS: Record<ToolActivityKind, string> = {
 }
 
 const TARGET_LIMIT = 120
+const LARGE_ARGS = 64 * 1024
+const LARGE_ARGS_STEP = 32 * 1024
 const DIFF_LINE_LIMIT = 400
 
 const KIND_BY_NAME: Record<string, ToolActivityKind> = {
@@ -63,8 +65,10 @@ const KIND_BY_NAME: Record<string, ToolActivityKind> = {
   shell_command: 'command',
   unified_exec: 'command',
   'container.exec': 'command',
+  'functions.exec_command': 'command',
   write_stdin: 'command',
   bashoutput: 'command',
+  'functions.shell': 'command',
   read: 'read',
   read_file: 'read',
   view: 'read',
@@ -186,8 +190,9 @@ function bounded(text: string): string {
 
 /** Paths read better relative to wherever the agent works; keep the tail. */
 function shortPath(path: string): string {
-  const parts = path.split('/').filter(Boolean)
-  return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : path
+  const separator = !path.includes('/') && path.includes('\\') ? '\\' : '/'
+  const parts = path.split(separator).filter(Boolean)
+  return parts.length > 3 ? `…${separator}${parts.slice(-3).join(separator)}` : path
 }
 
 /** Bounded line sink: past the limit it records one truncation marker. */
@@ -219,25 +224,29 @@ function pushLines(out: DiffBuilder, sign: '+' | '-', text: unknown): void {
 
 const PATCH_FILE_HEADER = /^\*\*\* (Update|Add|Delete) File: (.+)$/
 
-/** Unified diff or Codex patch envelope. File headers become hunk rows;
- *  ``---``/``+++`` count as headers only before a file's first ``@@``, so a
- *  removed ``-- comment`` or Markdown ``---`` line is kept as content. */
+/** Unified diff or Codex patch envelope; file headers become hunk rows. */
 function unifiedDiffLines(text: string, out: DiffBuilder): void {
-  let inHunk = false
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n')
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]
     const file = PATCH_FILE_HEADER.exec(line)
     if (file) {
-      inHunk = file[1] === 'Add'
       if (!out.push({ sign: '@', text: file[2].trim() })) return
       continue
     }
     if (line.startsWith('*** ')) continue
-    if (!inHunk && (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff ') || line.startsWith('index '))) continue
+    // Git file headers can appear between hunks of a multi-file diff; a
+    // ``--- `` line is a header only when a ``+++ `` line follows it, so a
+    // removed ``-- comment`` or Markdown rule stays content.
+    if (line.startsWith('diff --git ') || line.startsWith('index ')) continue
+    if (line.startsWith('--- ') && lines[index + 1]?.startsWith('+++ ')) {
+      index++
+      continue
+    }
     let pushed: boolean
-    if (line.startsWith('@@')) {
-      inHunk = true
-      pushed = out.push({ sign: '@', text: line })
-    } else if (line.startsWith('+')) pushed = out.push({ sign: '+', text: line.slice(1) })
+    if (line.startsWith('@@')) pushed = out.push({ sign: '@', text: line })
+    else if (line.startsWith('+')) pushed = out.push({ sign: '+', text: line.slice(1) })
     else if (line.startsWith('-')) pushed = out.push({ sign: '-', text: line.slice(1) })
     else pushed = out.push({ sign: ' ', text: line.startsWith(' ') ? line.slice(1) : line })
     if (!pushed) return
@@ -317,6 +326,13 @@ const activityCache = new WeakMap<ToolLike, { name: string, argsText: string, ac
 export function describeToolActivity(tool: ToolLike): ToolActivity {
   const cached = activityCache.get(tool)
   if (cached && cached.name === tool.name && cached.argsText === tool.argsText) return cached.activity
+  // A multi-megabyte argument streaming in would otherwise be re-parsed on
+  // every delta. While it is still incomplete JSON, refresh only per chunk.
+  if (
+    cached && cached.name === tool.name &&
+    tool.argsText.length > LARGE_ARGS && tool.argsText.length - cached.argsText.length < LARGE_ARGS_STEP &&
+    !/[}\]]\s*$/.test(tool.argsText.slice(-64))
+  ) return cached.activity
   const activity = deriveToolActivity(tool)
   activityCache.set(tool, { name: tool.name, argsText: tool.argsText, activity })
   return activity
@@ -328,6 +344,10 @@ function deriveToolActivity(tool: ToolLike): ToolActivity {
   const verb = VERBS[kind]
   switch (kind) {
     case 'command': {
+      // Follow-ups on an existing shell session carry no command of their own.
+      const lower = tool.name.toLowerCase()
+      if (lower === 'write_stdin') return { kind, verb: 'Sent input', target: bounded(firstString(args, ['chars', 'input', 'text'])) }
+      if (lower === 'bashoutput') return { kind, verb: 'Read output', target: bounded(firstString(args, ['bash_id', 'shell_id', 'session_id'])) }
       const command = firstString(args, ['command', 'cmd', 'script', 'commandLine']) ||
         (args ? '' : tool.argsText.trim())
       return { kind, verb, target: bounded(command), ...(command ? { command } : {}) }
@@ -351,7 +371,8 @@ function deriveToolActivity(tool: ToolLike): ToolActivity {
     case 'search': {
       const pattern = firstString(args, ['pattern', 'query', 'regex', 'search_term'])
       const where = firstString(args, ['path', 'glob', 'include', 'target_directories'])
-      return { kind, verb, target: bounded(where ? `${pattern} in ${shortPath(where)}` : pattern) }
+      const target = pattern && where ? `${pattern} in ${shortPath(where)}` : pattern || shortPath(where)
+      return { kind, verb, target: bounded(target) }
     }
     case 'list':
       return { kind, verb, target: bounded(firstString(args, ['pattern', 'path', 'target_directory', 'directory'])) }
