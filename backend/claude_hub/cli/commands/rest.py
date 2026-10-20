@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import uuid
+from typing import Any, Dict, Optional, TextIO
 
 import click
 
@@ -317,6 +318,88 @@ def tab_get(ctx: click.Context, tab_id: str) -> None:
     try:
         with cli_main.get_client(ctx) as client:
             data = client.get_tab(tab_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@tab.command("message")
+@click.argument("tab_id")
+@click.option("--message", default=None, help="Text to enqueue as an ordinary user turn.")
+@click.option(
+    "--message-file",
+    type=click.File("r", encoding="utf-8"),
+    default=None,
+    help="Read UTF-8 text from FILE (use - for stdin); alternative to --message.",
+)
+@click.option("--call-id", default=None, help="Stable retry id; generated when omitted.")
+@click.option("--source-tab-id", default=None, help="Unverified caller hint; grants no authority.")
+@click.pass_context
+def tab_message(
+    ctx: click.Context,
+    tab_id: str,
+    message: Optional[str],
+    message_file: Optional[TextIO],
+    call_id: Optional[str],
+    source_tab_id: Optional[str],
+) -> None:
+    """Durably enqueue text. A receipt is not model completion.
+
+    Reuse the printed call_id and identical text when retrying a failed request.
+    Delivery waits for the target's current turn and Goal ownership to clear.
+    """
+    if (message is None) == (message_file is None):
+        raise click.UsageError("Provide exactly one of --message or --message-file.")
+    if message_file is not None:
+        try:
+            message = message_file.read()
+        except (OSError, UnicodeError) as e:
+            raise click.ClickException(f"Cannot read message file: {e}") from e
+    if message is None or not message.strip():
+        raise click.UsageError("Message must not be blank.")
+    if len(message.encode("utf-8")) > 65536:
+        raise click.UsageError("Message must not exceed 65536 UTF-8 bytes.")
+    if call_id is not None and (not call_id.strip() or len(call_id) > 256):
+        raise click.UsageError("--call-id must be nonblank and at most 256 characters.")
+    if source_tab_id is not None and not source_tab_id.strip():
+        raise click.UsageError("--source-tab-id must not be blank.")
+    effective_call_id = call_id if call_id is not None else f"tab-message:{uuid.uuid4()}"
+    body: Dict[str, Any] = {"message": message, "call_id": effective_call_id}
+    if source_tab_id is not None:
+        body["source_tab_id"] = source_tab_id
+    # Emit before creating a client: even transport failure must preserve retry identity.
+    click.echo(f"call_id={effective_call_id}", err=True)
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.send_tab_message(tab_id, body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@tab.command("message-status")
+@click.argument("tab_id")
+@click.argument("message_id")
+@click.pass_context
+def tab_message_status(ctx: click.Context, tab_id: str, message_id: str) -> None:
+    """Read an inbox receipt; queued/accepted/completed are distinct states."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.get_tab_message(tab_id, message_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(data, cli_main.as_json(ctx))
+
+
+@tab.command("message-cancel")
+@click.argument("tab_id")
+@click.argument("message_id")
+@click.pass_context
+def tab_message_cancel(ctx: click.Context, tab_id: str, message_id: str) -> None:
+    """Cancel a queued/waiting message; submitted messages cannot be cancelled here."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            data = client.cancel_tab_message(tab_id, message_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(data, cli_main.as_json(ctx))

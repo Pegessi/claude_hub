@@ -464,6 +464,18 @@ class HubClient:
         """DELETE /api/tabs/{tab_id}."""
         self._request("DELETE", f"/api/tabs/{tab_id}")
 
+    def send_tab_message(self, tab_id: str, body: Dict[str, Any]) -> Any:
+        """POST a durable ordinary Chat-tab turn; response is an inbox receipt."""
+        return self._request("POST", f"/api/workspaces/tabs/{tab_id}/messages", json=body)
+
+    def get_tab_message(self, tab_id: str, message_id: str) -> Any:
+        """GET a Chat-tab inbox receipt/status."""
+        return self._request("GET", f"/api/workspaces/tabs/{tab_id}/messages/{message_id}")
+
+    def cancel_tab_message(self, tab_id: str, message_id: str) -> Any:
+        """DELETE a queued/waiting inbox message (not an active provider turn)."""
+        return self._request("DELETE", f"/api/workspaces/tabs/{tab_id}/messages/{message_id}")
+
     def list_directory(self, path: Optional[str] = None) -> Any:
         """GET /api/filesystem/list."""
         params = {"path": path} if path is not None else None
