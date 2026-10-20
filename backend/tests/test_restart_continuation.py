@@ -200,7 +200,9 @@ async def test_noneligible_chat_is_not_captured(setup, reason):
             get_goal_manager(),
             "current",
             lambda _: SimpleNamespace(
-                status="paused", dispatch_state=SimpleNamespace(value="idle")
+                status="paused",
+                dispatch_state=SimpleNamespace(value="idle"),
+                execution_owner="hub_managed",
             ),
         )
     elif reason == "stop":

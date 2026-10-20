@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from abc import abstractmethod
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 
 from ....models import (
     AgentType,
@@ -17,8 +19,41 @@ from ....models import (
     StreamReasoningEffortOption,
 )
 from ..provider_network import ProviderNetworkError
-from .contracts import ProviderGoal
+from .contracts import ProviderGoal, ProviderGoalOrigin, ProviderGoalSnapshot, ProviderRpcError
 from .process import ProcessSession
+
+_NATIVE_GOAL_STATUSES = frozenset(
+    {"active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"}
+)
+
+
+def _validate_native_goal(value: Any, thread_id: str) -> ProviderGoal:
+    if not isinstance(value, dict) or value.get("threadId") != thread_id:
+        raise RuntimeError("native Goal response does not match the requested thread")
+    status = value.get("status")
+    if (
+        not isinstance(value.get("objective"), str)
+        or not isinstance(status, str)
+        or status not in _NATIVE_GOAL_STATUSES
+    ):
+        raise RuntimeError("native Goal response has an invalid objective or status")
+    for key in ("tokensUsed", "timeUsedSeconds", "createdAt", "updatedAt"):
+        if type(value.get(key)) is not int:
+            raise RuntimeError(f"native Goal response has invalid {key}")
+    if value.get("tokenBudget") is not None and type(value["tokenBudget"]) is not int:
+        raise RuntimeError("native Goal response has invalid tokenBudget")
+    return cast(ProviderGoal, dict(value))
+
+
+@dataclass
+class _CodexTurnCancellation:
+    thread_id: Optional[str]
+    process: Optional[asyncio.subprocess.Process]
+    initial_turn_id: Optional[str]
+    current_turn_id: Optional[str]
+    requires_confirmation: bool = False
+    unidentified_start: bool = False
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class CodexConfiguredSession(ProcessSession):
@@ -64,10 +99,14 @@ class CodexConfiguredSession(ProcessSession):
         self._jsonrpc_id = 0
         self._thread_id: Optional[str] = None
         self._provider_turn_id: Optional[str] = None
-        # Stop retires one provider turn while the persistent app-server keeps
-        # running. Filter its late notifications until turn/completed confirms
-        # the interrupt, so they cannot be attributed to the next Hub turn.
+        # Stop may encounter a native continuation before the tailer consumes
+        # its start. Keep those turns fenced until their execution has stopped.
         self._discard_turn_id: Optional[str] = None
+        self._discarded_provider_turn_ids: deque[str] = deque(maxlen=64)
+        self._retired_provider_turn_ids: deque[str] = deque(maxlen=64)
+        self._cancel_state: Optional[_CodexTurnCancellation] = None
+        self._cancel_lock = asyncio.Lock()
+        self._native_stop_requires_confirmation = False
         self._interrupted = asyncio.Event()
         # Per-request response futures keyed by JSON-RPC id.
         self._pending_requests: Dict[int, asyncio.Future[Dict[str, Any]]] = {}
@@ -128,10 +167,12 @@ class CodexConfiguredSession(ProcessSession):
             self._staged_images = []
             self._inflight_images = []
             self._pending_rotation = None
+            self._provider_goal_api_available = None
             # The app-server is being terminated; any unanswered questions die
             # with it.
             self._pending_questions = {}
             await super().stop()
+            self._native_stop_requires_confirmation = False
             self._cleanup_images(staged)
             self._cleanup_images(inflight)
 
@@ -222,6 +263,7 @@ class CodexConfiguredSession(ProcessSession):
 
     async def _initialize_protocol(self) -> None:
         """Complete the local app-server protocol handshake."""
+        self._provider_goal_api_available = None
         init_params = {
             "clientInfo": {"name": "claude-hub", "version": "1.0.0"},
             "capabilities": {"experimentalApi": True},
@@ -301,48 +343,95 @@ class CodexConfiguredSession(ProcessSession):
         if self._pending_rotation is not None and self._pending_rotation[0] == conversation_id:
             self._pending_rotation = None
 
-    async def goal_get(self) -> Optional[ProviderGoal]:
-        """Read the provider goal when the optional RPC is implemented."""
-        result = await self._goal_request("thread/goal/get", {"threadId": self._thread_id})
-        if result is None:
+    async def goal_snapshot(self) -> Optional[ProviderGoalSnapshot]:
+        """Probe native support and read state without creating or resuming a Goal."""
+        if self._provider_goal_api_available is False:
             return None
-        goal = result.get("goal") if isinstance(result, dict) else None
-        return dict(goal) if isinstance(goal, dict) else None  # type: ignore[return-value]
+        thread_id = self._require_goal_thread()
+        previous_error = self._last_error
+        try:
+            result = await self._goal_request("thread/goal/get", {"threadId": thread_id})
+        except ProviderRpcError as exc:
+            if exc.code != -32601:
+                raise
+            self._provider_goal_api_available = False
+            # Optional method discovery must not make an otherwise healthy
+            # transport appear offline, or erase an unrelated earlier error.
+            if self._last_error == str(exc):
+                self._last_error = previous_error
+            return None
+        if "goal" not in result:
+            raise RuntimeError("native Goal snapshot omitted goal")
+        goal = result["goal"]
+        validated = None if goal is None else _validate_native_goal(goal, thread_id)
+        self._provider_goal_api_available = True
+        return {"thread_id": thread_id, "goal": validated}
 
-    async def goal_set(self, goal: ProviderGoal) -> bool:
-        """Set a provider goal, returning False when the RPC is unavailable."""
-        params: Dict[str, Any] = {"threadId": self._thread_id}
+    async def goal_get(self) -> Optional[ProviderGoal]:
+        """Read native state; use goal_snapshot when distinguishing absent/support."""
+        snapshot = await self.goal_snapshot()
+        return snapshot["goal"] if snapshot is not None else None
+
+    async def goal_set(self, goal: ProviderGoal, *, origin: ProviderGoalOrigin) -> ProviderGoal:
+        """Return the provider's accepted mutation result, never a guessed state."""
+        params: Dict[str, Any] = {"threadId": self._require_goal_thread(), "origin": origin}
         for key in ("objective", "status", "tokenBudget"):
             if key in goal:
                 params[key] = goal[key]
-        result = await self._goal_request("thread/goal/set", params)
-        return result is not None
+        result = await self._mutate_goal("thread/goal/set", params)
+        return _validate_native_goal(result.get("goal"), params["threadId"])
 
-    async def goal_clear(self) -> bool:
-        """Clear a provider goal, returning False when the RPC is unavailable."""
-        result = await self._goal_request("thread/goal/clear", {"threadId": self._thread_id})
-        return result is not None
+    async def goal_clear(self, *, origin: ProviderGoalOrigin) -> bool:
+        """Clear provider state; an unsupported RPC is not an already-absent Goal."""
+        result = await self._mutate_goal(
+            "thread/goal/clear", {"threadId": self._require_goal_thread(), "origin": origin}
+        )
+        if type(result.get("cleared")) is not bool:
+            raise RuntimeError("native Goal clear response omitted a boolean cleared value")
+        return cast(bool, result["cleared"])
 
-    async def _goal_request(self, method: str, params: Dict[str, Any]) -> Any:
+    def _require_goal_thread(self) -> str:
+        if not isinstance(self._thread_id, str) or not self._thread_id:
+            raise RuntimeError("native Goal API requires an initialized provider thread")
+        return self._thread_id
+
+    async def _mutate_goal(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        if params["origin"] not in ("user", "automatic"):
+            raise ValueError("native Goal mutation origin must be user or automatic")
         if self._provider_goal_api_available is False:
-            return None
+            raise NotImplementedError(f"{self.adapter_id} does not support native Goals")
+        try:
+            return await self._goal_request(method, params)
+        except ProviderRpcError as exc:
+            if exc.code == -32601:
+                raise NotImplementedError(f"{self.adapter_id} does not support {method}") from exc
+            raise
+
+    async def _goal_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        thread_id = self._require_goal_thread()
+        process = self._process
+        if params["threadId"] != thread_id:
+            raise RuntimeError("native Goal request does not match the current thread")
         try:
             result = await self._send_request(method, params)
-        except RuntimeError as exc:
-            message = str(exc).lower()
-            if "-32601" in message or "method not found" in message:
-                self._provider_goal_api_available = False
-                return None
+        except ProviderRpcError as exc:
+            if self._thread_id != thread_id or self._process is not process:
+                raise RuntimeError("provider thread changed during native Goal request") from exc
             raise
-        self._provider_goal_api_available = True
+        if self._thread_id != thread_id or self._process is not process:
+            raise RuntimeError("provider thread changed during native Goal request")
+        if not isinstance(result, dict):
+            raise RuntimeError("native Goal RPC returned a malformed response")
         return result
 
     def capabilities(self) -> StreamCapabilities:
         caps = super().capabilities()
-        # Hub remains the only scheduler until provider Goal state is fully
-        # reconciled into GoalRun. RPC availability alone must never switch
-        # ownership and accidentally enable two continuation schedulers.
-        return caps.model_copy(update={"goal_execution_owner": "hub_managed"})
+        owner = (
+            None
+            if self._provider_goal_api_available is None
+            else "provider_native" if self._provider_goal_api_available else "hub_managed"
+        )
+        return caps.model_copy(update={"goal_execution_owner": owner})
 
     def _sandbox_plan_solo(self) -> Tuple[bool, bool]:
         """Return ``(plan, solo)`` honouring the existing Chat mode semantics.

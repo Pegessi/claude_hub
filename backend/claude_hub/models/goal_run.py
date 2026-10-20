@@ -1,10 +1,10 @@
-"""Persistent contracts for Hub-managed Chat Goals."""
+"""Persistent contracts for Hub-managed and provider-native Chat Goals."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -25,6 +25,8 @@ class GoalRunStatus(str, Enum):
     ACTIVE = "active"
     PAUSED = "paused"
     BLOCKED = "blocked"
+    USAGE_LIMITED = "usageLimited"
+    BUDGET_LIMITED = "budgetLimited"
     COMPLETE = "complete"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -85,6 +87,14 @@ class GoalCheckpoint(BaseModel):
 class GoalRun(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     tab_id: str
+    execution_owner: Literal["hub_managed", "provider_native"] = "hub_managed"
+    provider_thread_id: str | None = None
+    provider_goal_created_at: int | None = None
+    provider_updated_at: int | None = None
+    provider_status: str | None = None
+    provider_goal_absent: bool = False
+    provider_stop_pending: bool = False
+    provider_owned_turn_ids: list[str] = Field(default_factory=list)
     objective: str = Field(min_length=1, max_length=GOAL_OBJECTIVE_MAX_LENGTH)
     objective_revision: int = 0
     dispatched_objective_revision: int = 0

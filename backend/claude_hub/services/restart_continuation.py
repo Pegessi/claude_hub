@@ -192,6 +192,12 @@ def _eligible_tab(tab_id: str, *, goal_id: str | None = None) -> Any:
     if any(session.tab_id == tab_id for session in workspace_manager.sessions.values()):
         raise ContinuationSkipped("Managed work retains its own recovery owner")
     goal = get_goal_manager().current(tab_id)
+    if (
+        goal is not None
+        and goal.execution_owner == "provider_native"
+        and goal.status not in TERMINAL_GOAL_STATUSES
+    ):
+        raise ContinuationSkipped("Provider-native Goal retains its own recovery controls")
     if goal_id is not None:
         if goal is None or goal.id != goal_id:
             raise ContinuationSkipped("The original Goal is no longer current")
@@ -410,6 +416,7 @@ def _validate_goal(target: ChatContinuation, tab: Any) -> GoalRun:
     goal = get_goal_manager().current(target.tab_id)
     if (
         goal is None
+        or goal.execution_owner == "provider_native"
         or goal.id != target.goal_id
         or _goal_control_digest(goal, tab, target.continuation_id) != target.goal_control_digest
     ):

@@ -118,6 +118,8 @@ export type ChatGoalStatus =
   | 'active'
   | 'paused'
   | 'blocked'
+  | 'usageLimited'
+  | 'budgetLimited'
   | 'complete'
   | 'cancelled'
   | 'failed'
@@ -140,6 +142,13 @@ export interface ChatGoal {
   tab_id: string
   objective: string
   status: ChatGoalStatus
+  /** Absent on older Hub-managed snapshots. */
+  execution_owner?: 'provider_native' | 'hub_managed'
+  provider_thread_id?: string | null
+  provider_goal_created_at?: number | null
+  provider_updated_at?: number | null
+  provider_status?: string | null
+  provider_stop_pending?: boolean
   token_usage: number | null
   usage_quality: ChatGoalUsageQuality
   turns_completed: number

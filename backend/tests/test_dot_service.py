@@ -1090,7 +1090,12 @@ def _install_tab_dispatch(monkeypatch: MonkeyPatch, manager: Any, calls: list[An
     monkeypatch.setattr(
         goal_run,
         "get_goal_manager",
-        lambda: SimpleNamespace(current=lambda tab_id: None, has_goal_history=lambda tab_id: False),
+        lambda: SimpleNamespace(
+            current=lambda tab_id: None,
+            refresh_current=AsyncMock(return_value=None),
+            uses_hub_goal_protocol=lambda tab_id: False,
+            has_goal_history=lambda tab_id: False,
+        ),
     )
 
     async def user(tab_id: str, text: str) -> None:

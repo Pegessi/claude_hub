@@ -24,7 +24,9 @@ from ..services.goal_run import (
     get_goal_manager,
 )
 from ..services.goal_run.images import goal_image_input, pending_goal_images
+from ..services.goal_run.native import NativeGoalError
 from ..services.ttyd_manager import ttyd_manager
+from .routes.goal_provider import resolve_goal_provider
 
 router = APIRouter(tags=["goals"])
 
@@ -97,7 +99,9 @@ async def _cancel_goal_turn(goal: GoalRun) -> None:
         raise RuntimeError("a newer Chat turn is already in flight")
 
 
-configure_goal_dispatch(_dispatch_goal_turn, cancel=_cancel_goal_turn)
+configure_goal_dispatch(
+    _dispatch_goal_turn, cancel=_cancel_goal_turn, provider_resolver=resolve_goal_provider
+)
 
 
 def _direct_chat_tab(tab_id: str) -> None:
@@ -136,6 +140,8 @@ def _cancel_restart_for_mutation(goal: GoalRun, request_id: str) -> None:
 def _call(operation: Callable[..., GoalRun], *args: object) -> GoalRun:
     try:
         return operation(*args)
+    except NativeGoalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
     except (ValueError, GoalPolicyError) as exc:
@@ -154,6 +160,13 @@ async def create_goal(
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
         if replay is not None:
+            await _refresh_current(tab_id)
+            replay = manager.get(replay.id)
+            if replay.execution_owner == "provider_native":
+                try:
+                    return await manager.create_and_start(tab_id, body)
+                except NativeGoalError as exc:
+                    raise HTTPException(status_code=503, detail=str(exc)) from None
             return replay
         try:
             await _ensure_goal_ready(tab_id)
@@ -163,6 +176,8 @@ async def create_goal(
             if result.dispatch_state.value == "uncertain":
                 raise HTTPException(status_code=503, detail=result.status_message)
             return result
+        except NativeGoalError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
         except (ValueError, GoalPolicyError) as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
 
@@ -175,12 +190,23 @@ async def current_goal(
     # A steer parks the Goal while cancelling/dispatching. Do not expose that
     # intermediate snapshot as a completed recovery to a lost-response client.
     async with get_goal_admission_lock(tab_id):
-        return get_goal_manager().current(tab_id)
+        return await _refresh_current(tab_id)
+
+
+async def _refresh_current(tab_id: str) -> GoalRun | None:
+    try:
+        return await get_goal_manager().refresh_current(tab_id)
+    except NativeGoalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
 
 
 @router.get("/api/goals/{goal_id}", response_model=GoalRun)
 async def get_goal(goal_id: str, current_user: User = Depends(get_current_user)) -> GoalRun:
-    return _call(get_goal_manager().get, goal_id)
+    goal = _call(get_goal_manager().get, goal_id)
+    _direct_chat_tab(goal.tab_id)
+    async with get_goal_admission_lock(goal.tab_id):
+        await _refresh_current(goal.tab_id)
+        return _call(get_goal_manager().get, goal_id)
 
 
 @router.patch("/api/goals/{goal_id}/objective", response_model=GoalRun)
@@ -193,6 +219,8 @@ async def update_goal_objective(
         _direct_chat_tab(goal.tab_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.update_objective(goal_id, body.client_request_id, body.objective)
+    except NativeGoalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except (ValueError, GoalPolicyError) as exc:
@@ -209,6 +237,8 @@ async def pause_goal(
         _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.pause(goal_id, body.client_request_id)
+    except NativeGoalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
     except (ValueError, GoalPolicyError) as exc:
@@ -230,6 +260,8 @@ async def resume_goal(
             ):
                 return await manager.resume(goal_id, body.client_request_id)
             await _ensure_goal_ready(goal.tab_id, check_busy=False)
+            if goal.execution_owner == "provider_native":
+                return await manager.resume(goal_id, body.client_request_id)
             if goal.dispatch_state.value != "idle":
                 return await manager.resume(goal_id, body.client_request_id)
             from .agent_stream import _get_tab_tailer_manager, _terminal_tab_session_or_404
@@ -245,6 +277,8 @@ async def resume_goal(
             if not await stream_manager.turn_in_flight(session):
                 goal = await manager.release_deferred_resume(goal_id)
             return goal
+    except NativeGoalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
     except (ValueError, GoalPolicyError) as exc:
@@ -261,6 +295,8 @@ async def complete_goal(
         _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.complete(goal_id, body.client_request_id)
+    except NativeGoalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
     except (ValueError, GoalPolicyError) as exc:
@@ -277,6 +313,8 @@ async def clear_goal(
         _cancel_restart_for_mutation(goal, body.client_request_id)
         async with get_goal_admission_lock(goal.tab_id):
             return await manager.clear(goal_id, body.client_request_id)
+    except NativeGoalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
     except (ValueError, GoalPolicyError) as exc:

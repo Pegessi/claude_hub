@@ -304,7 +304,11 @@ def install_stream(monkeypatch, on_send, *, subscribe_release=None, goal_lock=No
     monkeypatch.setattr(
         goal_run,
         "get_goal_manager",
-        lambda: SimpleNamespace(current=lambda tab_id: None, has_goal_history=lambda tab_id: False),
+        lambda: SimpleNamespace(
+            current=lambda tab_id: None,
+            refresh_current=AsyncMock(return_value=None),
+            uses_hub_goal_protocol=lambda tab_id: False,
+        ),
     )
     return SimpleNamespace(
         queue=queue, subscribed=subscribed, unsubscribed=unsubscribed, goal_lock=lock

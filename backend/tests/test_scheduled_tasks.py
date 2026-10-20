@@ -169,11 +169,17 @@ def _stub_goal(monkeypatch: MonkeyPatch, goal_ref: dict[str, Any] | None = None)
     state = goal_ref if goal_ref is not None else {"goal": None}
     locks: dict[str, asyncio.Lock] = {}
     goal_module = import_module("claude_hub.services.goal_run")
+
+    async def refresh_current(_tab_id: str) -> Any:
+        return state.get("goal")
+
     monkeypatch.setattr(
         goal_module,
         "get_goal_manager",
         lambda: SimpleNamespace(
             current=lambda _tab_id: state.get("goal"),
+            refresh_current=refresh_current,
+            uses_hub_goal_protocol=lambda _tab_id: state.get("goal") is not None,
             has_goal_history=lambda _tab_id: state.get("goal") is not None,
         ),
     )

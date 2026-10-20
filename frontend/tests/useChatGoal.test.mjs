@@ -40,6 +40,36 @@ test('clear preserves unconfirmed cancellation and hides only a stopped Goal', a
   assert.equal(state.goal.value, null)
 })
 
+for (const clearResponse of ['null', '204']) {
+  test(`native Goal clear accepts authoritative ${clearResponse} absence`, async t => {
+    const state = useChatGoal(ref('tab-1'))
+    t.after(state.dispose)
+    t.mock.method(globalThis, 'fetch', async () => response(snapshot({ execution_owner: 'provider_native' })))
+    await state.hydrate()
+    globalThis.fetch = async () => clearResponse === '204' ? new Response(null, { status: 204 }) : response(null)
+    assert.equal(await state.clear(), true)
+    assert.equal(state.goal.value, null)
+    assert.equal(state.error.value, null)
+    assert.equal(state.isHydrated.value, true)
+  })
+}
+
+test('native limited states and ownership fields survive hydration unchanged', async t => {
+  const state = useChatGoal(ref('tab-1'))
+  t.after(state.dispose)
+  const native = snapshot({
+    execution_owner: 'provider_native', status: 'usageLimited', provider_status: 'usageLimited',
+    provider_thread_id: 'thread-1', provider_goal_created_at: 100, provider_updated_at: 200,
+  })
+  t.mock.method(globalThis, 'fetch', async () => response(native))
+  await state.hydrate()
+  assert.deepEqual(state.goal.value, native)
+  globalThis.fetch = async () => response(null)
+  await state.hydrate()
+  assert.equal(state.hasGoal.value, false)
+  assert.equal(state.error.value, null)
+})
+
 test('lost mutation response reconciles server state before showing the error', async t => {
   const state = useChatGoal(ref('tab-1'))
   t.after(state.dispose)

@@ -2517,7 +2517,8 @@ async def test_direct_tab_route_reuses_durable_tab_incarnation_and_rejects_repla
     monkeypatch.setattr(agent_stream_api.ttyd_manager, "get_tab", tabs.get_tab)
     goal_manager = SimpleNamespace(
         current=lambda _tab_id: None,
-        has_goal_history=lambda _tab_id: False,
+        refresh_current=AsyncMock(return_value=None),
+        uses_hub_goal_protocol=lambda _tab_id: False,
     )
     monkeypatch.setattr(goal_run_service, "get_goal_manager", lambda: goal_manager)
 

@@ -10,52 +10,55 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ....models import ChatMode
-from .codex import CodexConfiguredSession
+from .codex import CodexConfiguredSession, _CodexTurnCancellation
+from .contracts import ProviderRpcError
 
 
 class CodexProtocolSession(CodexConfiguredSession):
     """Transport operations over the state owned by the typed base."""
 
     async def cancel_active_turn(self) -> None:
-        if not self._turn_in_flight:
-            return
-        self._discard_turn_id = self._provider_turn_id
+        async with self._cancel_lock:
+            await self._cancel_active_turn_locked()
+
+    async def _cancel_active_turn_locked(self) -> None:
+        initial_turn_id = self._provider_turn_id if self._turn_in_flight else None
+        state = _CodexTurnCancellation(
+            self._thread_id,
+            self._process,
+            initial_turn_id,
+            initial_turn_id if initial_turn_id not in self._retired_provider_turn_ids else None,
+            requires_confirmation=self._native_stop_requires_confirmation,
+            unidentified_start=(
+                self._turn_in_flight
+                and initial_turn_id is None
+                and self._native_stop_requires_confirmation
+            ),
+        )
+        self._cancel_state = state
+        self._discard_turn_id = initial_turn_id
         self._interrupted.clear()
-        # Discard output already queued before Stop. A completion already in the
-        # queue means the turn finished before the interrupt RPC was necessary.
-        retained = []
-        while not self._notification_queue.empty():
-            record = self._notification_queue.get_nowait()
-            if record is not None and self._notification_turn_id(record) == self._discard_turn_id:
-                if record.get("method") == "turn/completed":
-                    self._interrupted.set()
-            else:
-                retained.append(record)
-        for record in retained:
-            self._notification_queue.put_nowait(record)
+        if initial_turn_id and initial_turn_id not in self._discarded_provider_turn_ids:
+            self._discarded_provider_turn_ids.append(initial_turn_id)
         restart_required = False
         try:
-            if not self._interrupted.is_set():
-                if not self._thread_id or not self._provider_turn_id:
-                    raise RuntimeError("Codex did not return an active turn id")
-                await self._send_request(
-                    "turn/interrupt",
-                    {"threadId": self._thread_id, "turnId": self._provider_turn_id},
-                )
-                # The empty JSON-RPC result confirms that interrupt was
-                # accepted; turn/completed confirms that execution stopped.
-                await asyncio.wait_for(
-                    self._interrupted.wait(), timeout=self._runtime.startup_grace_s()
-                )
-        except Exception:
-            # An error response (including an unsupported method), a missing
-            # completion, or a dead app-server is not a confirmed interrupt.
-            # Replace the process and resume the thread before the next turn.
+            await self._cancel_observed_turns(state)
+        except Exception as exc:
+            if (
+                state.requires_confirmation
+                or self._thread_id != state.thread_id
+                or self._process is not state.process
+            ):
+                # Releasing the guard would claim that a native continuation
+                # stopped even though its matching completion never arrived.
+                raise RuntimeError("Codex native turn stop could not be confirmed") from exc
+            # Preserve the bounded process-replacement fallback for ordinary
+            # single-turn Stop when no native continuation was observed.
             self._runtime.logger().exception("codex turn/interrupt failed; restarting app-server")
             restart_required = True
-        # The interrupted turn's unanswered questions and image files cannot
-        # belong to the next turn, regardless of whether native interrupt or
-        # process replacement performed the cancellation.
+        finally:
+            self._cancel_state = None
+        self._native_stop_requires_confirmation = False
         self._pending_questions.clear()
         self._clear_staged_images()
         inflight = self._inflight_images
@@ -66,11 +69,127 @@ class CodexProtocolSession(CodexConfiguredSession):
             try:
                 await self.restart_for_recovery()
             except Exception:
-                # The dead server is already stopped; release the guard so the
-                # tab is not wedged on a 409. The next send (or the push loop's
-                # start retry) relaunches and resumes the thread.
+                # The old server is stopped. Ordinary Stop retains its existing
+                # recovery behavior: the next send may relaunch the thread.
                 self._runtime.logger().exception("codex app-server recovery restart failed")
         self._end_turn()
+
+    async def _cancel_observed_turns(self, state: _CodexTurnCancellation) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2 * self._runtime.startup_grace_s()
+        while True:
+            self._drain_cancel_notifications()
+            if state.unidentified_start:
+                raise RuntimeError("Codex native turn start did not include an id")
+            if self._thread_id != state.thread_id or self._process is not state.process:
+                raise RuntimeError("Codex thread or process changed during Stop")
+            turn_id = state.current_turn_id
+            if turn_id is None:
+                if (
+                    self._turn_in_flight
+                    and state.initial_turn_id is None
+                    and not state.requires_confirmation
+                ):
+                    raise RuntimeError("Codex did not return an active turn id")
+                # A read_line waiter may already own a dequeued start. Let it
+                # join the cancellation fence before declaring the queue idle.
+                await asyncio.sleep(0)
+                self._drain_cancel_notifications()
+                if self._thread_id != state.thread_id or self._process is not state.process:
+                    raise RuntimeError("Codex thread or process changed during Stop")
+                if state.current_turn_id is None and not state.unidentified_start:
+                    return
+                continue
+            if not state.thread_id:
+                raise RuntimeError("Codex did not return an active thread id")
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError("Codex Stop exceeded its confirmation deadline")
+            try:
+                async with asyncio.timeout(remaining):
+                    await self._send_request(
+                        "turn/interrupt", {"threadId": state.thread_id, "turnId": turn_id}
+                    )
+            except Exception:
+                # The interrupted turn may have ended while its successor was
+                # accepted. The successor still needs its own interrupt.
+                if state.current_turn_id != turn_id and turn_id in self._retired_provider_turn_ids:
+                    continue
+                raise
+            while state.current_turn_id == turn_id:
+                self._drain_cancel_notifications()
+                if state.current_turn_id != turn_id:
+                    break
+                state.changed.clear()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError("Codex Stop exceeded its confirmation deadline")
+                await asyncio.wait_for(state.changed.wait(), timeout=remaining)
+
+    def _drain_cancel_notifications(self) -> None:
+        retained: List[Optional[Dict[str, Any]]] = []
+        while not self._notification_queue.empty():
+            record = self._notification_queue.get_nowait()
+            if record is None or not self._capture_cancel_notification(record):
+                retained.append(record)
+        for record in retained:
+            self._notification_queue.put_nowait(record)
+
+    def _capture_cancel_notification(self, record: Dict[str, Any]) -> bool:
+        state = self._cancel_state
+        if (
+            state is None
+            or self._process is not state.process
+            or self._thread_id != state.thread_id
+        ):
+            return False
+        params = record.get("params")
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        if isinstance(thread_id, str) and thread_id and thread_id != state.thread_id:
+            return False
+        method = record.get("method")
+        if isinstance(method, str) and method.startswith(("thread/goal/", "goal/")):
+            return False
+        turn_id = self._notification_turn_id(record)
+        if not turn_id:
+            if method != "turn/started":
+                return False
+            state.unidentified_start = True
+            state.requires_confirmation = True
+            self._native_stop_requires_confirmation = True
+            if not self._turn_in_flight:
+                self._begin_turn()
+            state.changed.set()
+            return True
+        if method == "turn/started":
+            if turn_id in self._retired_provider_turn_ids:
+                return True
+            previous = state.current_turn_id
+            if previous and previous != turn_id and previous not in self._retired_provider_turn_ids:
+                # Codex runs one main turn per thread. A successor start retires
+                # the previous turn even if its completion has not been consumed.
+                self._retired_provider_turn_ids.append(previous)
+            state.requires_confirmation |= turn_id != state.initial_turn_id
+            # A failed native Stop must retain this requirement on retry;
+            # otherwise the retained successor would look like an ordinary turn.
+            self._native_stop_requires_confirmation = state.requires_confirmation
+            state.current_turn_id = turn_id
+            self._provider_turn_id = turn_id
+            self._discard_turn_id = turn_id
+            if turn_id not in self._discarded_provider_turn_ids:
+                self._discarded_provider_turn_ids.append(turn_id)
+            if not self._turn_in_flight:
+                self._begin_turn()
+            state.changed.set()
+            return True
+        if method == "turn/completed":
+            self._remember_retired_turn(record)
+            if turn_id == state.current_turn_id:
+                state.current_turn_id = None
+                self._interrupted.set()
+            state.changed.set()
+            return True
+        return turn_id in self._discarded_provider_turn_ids
 
     async def restart_for_recovery(self) -> None:
         await super().restart_for_recovery()
@@ -102,11 +221,22 @@ class CodexProtocolSession(CodexConfiguredSession):
         # waited for the response to set _inflight_images, the completed
         # handler would see an empty list and the temp files would leak.
         self._inflight_images = image_paths
+        previous_turn_id = self._provider_turn_id
         try:
             self.check_delivery_admission()
             response = await self._send_request("turn/start", params)
             turn = response.get("turn") if isinstance(response, dict) else None
-            self._provider_turn_id = turn.get("id") if isinstance(turn, dict) else None
+            turn_id = turn.get("id") if isinstance(turn, dict) else None
+            # A queued native continuation can already have been consumed
+            # before this RPC response. Do not overwrite its newer turn ID.
+            if self._provider_turn_id == previous_turn_id and (
+                turn_id is None
+                or (
+                    turn_id not in self._retired_provider_turn_ids
+                    and turn_id != self._discard_turn_id
+                )
+            ):
+                self._provider_turn_id = turn_id
         except Exception:
             # The turn never started (or the server rejected it). The image
             # temp files are still ours to clean up; the turn/completed
@@ -228,8 +358,10 @@ class CodexProtocolSession(CodexConfiguredSession):
             self._last_error = f"codex {method} timed out"
             raise RuntimeError(self._last_error)
         if "error" in response:
-            self._last_error = f"codex {method} error: {response['error']}"
-            raise RuntimeError(self._last_error)
+            error = response["error"]
+            self._last_error = f"codex {method} error: {error}"
+            code = error.get("code") if isinstance(error, dict) else None
+            raise ProviderRpcError(self._last_error, code=code if type(code) is int else None)
         return response.get("result")
 
     async def _send_notification(self, method: str, params: Dict[str, Any]) -> None:
@@ -369,7 +501,27 @@ class CodexProtocolSession(CodexConfiguredSession):
 
     async def read_line(self) -> Optional[Dict[str, Any]]:
         """Await one server notification, or ``None`` on EOF."""
-        return await self._notification_queue.get()
+        while True:
+            record = await self._notification_queue.get()
+            if record is None or not self._capture_cancel_notification(record):
+                break
+        if record is None or not self.accepts_notification(record):
+            return record
+        params = record.get("params")
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        is_child = (
+            isinstance(thread_id, str) and bool(thread_id) and thread_id != self.active_thread_id
+        )
+        if not is_child:
+            if record.get("method") == "turn/started":
+                # Track the consumed turn, not a later start already queued by
+                # stdout while the tailer still owns the preceding turn.
+                turn_id = self._notification_turn_id(record)
+                if turn_id:
+                    self._provider_turn_id = turn_id
+            elif record.get("method") == "turn/completed":
+                self._remember_retired_turn(record)
+        return record
 
     @staticmethod
     def _notification_turn_id(record: Dict[str, Any]) -> Optional[str]:
@@ -381,16 +533,33 @@ class CodexProtocolSession(CodexConfiguredSession):
         return value if isinstance(value, str) else None
 
     def accepts_notification(self, record: Dict[str, Any]) -> bool:
+        method = record.get("method")
+        if isinstance(method, str) and method.startswith(("thread/goal/", "goal/")):
+            return True
+        turn_id = self._notification_turn_id(record)
         return not (
-            self._discard_turn_id and self._notification_turn_id(record) == self._discard_turn_id
+            (self._discard_turn_id and turn_id == self._discard_turn_id)
+            or turn_id in self._discarded_provider_turn_ids
+            or (
+                record.get("method") == "turn/started"
+                and turn_id in self._retired_provider_turn_ids
+            )
         )
 
+    def _remember_retired_turn(self, record: Dict[str, Any]) -> None:
+        turn_id = self._notification_turn_id(record)
+        if turn_id and turn_id not in self._retired_provider_turn_ids:
+            self._retired_provider_turn_ids.append(turn_id)
+
     async def _handle_notification(self, record: Dict[str, Any]) -> None:
+        if self._capture_cancel_notification(record):
+            return
         if not self.accepts_notification(record):
             if record.get("method") == "turn/completed":
                 # cancel_active_turn already reclaimed the cancelled turn's
                 # images. A duplicate completion may arrive after the next
                 # turn owns _inflight_images, so it must only confirm Stop.
+                self._remember_retired_turn(record)
                 self._interrupted.set()
             return
         self._handshake_complete = True

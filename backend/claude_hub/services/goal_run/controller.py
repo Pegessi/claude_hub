@@ -25,6 +25,7 @@ from ...models.goal_run import (
     utc_now,
 )
 from .images import image_fingerprint
+from .native import NativeGoalCoordinator
 from .policy import GoalPolicyError, ensure_unfinished
 from .store import GoalRunStore
 
@@ -73,6 +74,8 @@ End the final assistant response with exactly one trailing structured signal:
 <goal-status state=\"continue|complete|blocked|needs_input\">brief evidence, blocker, or next step</goal-status>
 Use one concrete state value. Use complete only when the whole objective is verified; use continue
 when another autonomous turn is needed; use blocked or needs_input when progress cannot continue.
+The checkpoint and goal-status requirements in this message apply only to this response.
+In later turns, use them only when that turn supplies fresh Hub Goal continuation instructions.
 """
 
 
@@ -119,6 +122,7 @@ class GoalRunController:
         cancel: CancelCallback | None = None,
     ) -> None:
         self.store = store
+        self.native = NativeGoalCoordinator(store)
         self.dispatch = dispatch
         self.cancel = cancel
         self._locks: dict[str, asyncio.Lock] = {}
@@ -152,6 +156,9 @@ class GoalRunController:
         )
 
     async def create_and_start(self, tab_id: str, request: GoalRunCreate) -> GoalRun:
+        native = await self.native.create(tab_id, request)
+        if native is not None:
+            return native
         goal = self.create(tab_id, request)
         async with self._lock_for(goal.id):
             goal = self.store.get(goal.id)
@@ -170,8 +177,20 @@ class GoalRunController:
     def current(self, tab_id: str) -> GoalRun | None:
         return self.store.current_for_tab(tab_id)
 
+    async def refresh_current(self, tab_id: str) -> GoalRun | None:
+        _, goal = await self.native.refresh(tab_id)
+        return goal
+
     def has_goal_history(self, tab_id: str) -> bool:
         return self.store.has_goal_history(tab_id)
+
+    def uses_hub_goal_protocol(self, tab_id: str) -> bool:
+        latest = self.store.latest_for_tab(tab_id)
+        return (
+            not self.native.owns_tab(tab_id)
+            and latest is not None
+            and latest.execution_owner == "hub_managed"
+        )
 
     def replay_create(self, tab_id: str, request: GoalRunCreate) -> GoalRun | None:
         return self.store.replay_create(tab_id, request)
@@ -228,6 +247,9 @@ class GoalRunController:
         return self.store.put(latest)
 
     async def pause(self, goal_id: str, client_request_id: str) -> GoalRun:
+        native = await self.native.mutate(goal_id, client_request_id, "pause")
+        if native is not None:
+            return native
         async with self._mutation_lock_for(goal_id):
             async with self._lock_for(goal_id):
                 goal = self._pause_locked(goal_id, client_request_id)
@@ -262,6 +284,15 @@ class GoalRunController:
         dispatch: DispatchCallback | None = None,
     ) -> GoalRun:
         """Resume now, optionally scoping one dispatch to a caller-owned step."""
+        existing = self.store.get(goal_id)
+        handled, current = await self.native.refresh(existing.tab_id)
+        if handled:
+            if step_id is not None or dispatch is not None:
+                # Provider thread recovery owns its continuation; never add a Hub turn.
+                return current or self.store.get(goal_id)
+            native = await self.native.mutate(goal_id, client_request_id, "resume")
+            assert native is not None
+            return native
         if after_current_turn and (step_id is not None or dispatch is not None):
             raise GoalPolicyError("A fixed dispatch requires an immediate Goal resume")
         if dispatch is not None and step_id is None:
@@ -353,6 +384,17 @@ class GoalRunController:
             raise ValueError(
                 f"Goal steer messages are limited to {GOAL_STEER_INPUT_MAX_LENGTH} characters"
             )
+        native = await self.native.mutate(
+            goal_id,
+            client_request_id,
+            "steer",
+            text=text,
+            turn_id=turn_id,
+            image_count=image_count,
+            image_digest=image_digest,
+        )
+        if native is not None:
+            return native
         operation = "steer:" + hashlib.sha256((text + "\0" + image_digest).encode()).hexdigest()
         async with self._mutation_lock_for(goal_id):
             async with self._lock_for(goal_id):
@@ -401,6 +443,11 @@ class GoalRunController:
     async def update_objective(
         self, goal_id: str, client_request_id: str, objective: str
     ) -> GoalRun:
+        native = await self.native.mutate(
+            goal_id, client_request_id, "objective", objective=objective
+        )
+        if native is not None:
+            return native
         operation = "objective:" + hashlib.sha256(objective.encode()).hexdigest()
         async with self._mutation_lock_for(goal_id):
             async with self._lock_for(goal_id):
@@ -418,6 +465,9 @@ class GoalRunController:
                 return self._mutate_once(goal_id, client_request_id, operation, apply)
 
     async def complete(self, goal_id: str, client_request_id: str) -> GoalRun:
+        native = await self.native.mutate(goal_id, client_request_id, "complete")
+        if native is not None:
+            return native
         async with self._mutation_lock_for(goal_id):
             async with self._lock_for(goal_id):
                 goal = self._complete_locked(goal_id, client_request_id)
@@ -440,6 +490,9 @@ class GoalRunController:
         return self._mutate_once(goal_id, client_request_id, "complete", apply)
 
     async def clear(self, goal_id: str, client_request_id: str) -> GoalRun:
+        native = await self.native.mutate(goal_id, client_request_id, "clear")
+        if native is not None:
+            return native
         async with self._mutation_lock_for(goal_id):
             async with self._lock_for(goal_id):
                 goal = self._clear_locked(goal_id, client_request_id)
@@ -480,6 +533,18 @@ class GoalRunController:
         assistant_text: str,
         usage: GoalTurnUsage | dict[str, Any] | None = None,
     ) -> GoalRun | None:
+        handled, native = await self.native.refresh(tab_id)
+        if handled:
+            if (
+                native is not None
+                and turn_id in native.provider_owned_turn_ids
+                and turn_id not in native.completed_turn_ids
+            ):
+                native.completed_turn_ids.append(turn_id)
+                native.completed_turn_ids = native.completed_turn_ids[-GOAL_RECENT_TURN_IDS_LIMIT:]
+                native.turns_completed += 1
+                native = self.store.put(native)
+            return native
         goal = self.store.current_for_tab(tab_id)
         if goal is None:
             return None
@@ -646,7 +711,7 @@ class GoalRunController:
         dispatch: DispatchCallback | None = None,
     ) -> GoalRun:
         goal = self.store.get(goal_id)
-        if goal.status != GoalRunStatus.ACTIVE:
+        if goal.execution_owner == "provider_native" or goal.status != GoalRunStatus.ACTIVE:
             return goal
         if goal.dispatch_state != GoalDispatchState.IDLE:
             return goal
@@ -668,6 +733,9 @@ class GoalRunController:
     async def _dispatch_prepared(
         self, prepared: GoalRun, *, dispatch: DispatchCallback | None = None
     ) -> GoalRun:
+        handled, native = await self.native.refresh(prepared.tab_id)
+        if handled:
+            return native or self.store.get(prepared.id)
         step_id = prepared.pending_step_id
         if prepared.dispatch_state != GoalDispatchState.PENDING or step_id is None:
             return self.store.get(prepared.id)
@@ -729,6 +797,8 @@ class GoalRunController:
         """Fail closed for dispatches whose provider acceptance is uncertain."""
         recovered: list[GoalRun] = []
         for goal in self.store.list():
+            if goal.execution_owner == "provider_native":
+                continue
             was_active = goal.status == GoalRunStatus.ACTIVE
             if was_active:
                 goal.status = GoalRunStatus.PAUSED
