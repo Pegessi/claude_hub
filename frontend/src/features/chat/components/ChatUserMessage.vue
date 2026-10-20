@@ -7,11 +7,12 @@
       :data-message-origin="turn.origin"
     >
       <div
-        v-if="turn.origin === 'feishu'"
+        v-if="turn.origin === 'feishu' || turn.origin === 'hub_message'"
         class="conversation-message-source"
         data-testid="conversation-message-source"
       >
         <FeishuIdentityMark
+          v-if="turn.origin === 'feishu'"
           class="conversation-message-source__mark"
           :avatar-url="resolvedFeishuSourceAvatarUrl(turn)"
           :identity-key="feishuSourceIdentityKey(turn)"
