@@ -7,6 +7,13 @@
 
 ## Released
 
+### fix(terminal): recognize busy Codex with persistent prompt footer
+
+- Give Codex's explicit live Working indicator precedence over the persistent
+  shortcuts footer, so managed agent and tab badges remain Working mid-turn.
+- Preserve selection/shell precedence, frozen-frame alerts and other provider
+  paths; replay real ANSI busy/idle captures and rapid frames in regression tests.
+
 ### fix(chat): render Codex inline directives instead of leaking markers
 
 - Codex writes rich-content requests inline as private-use-delimited
