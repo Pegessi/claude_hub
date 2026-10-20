@@ -578,6 +578,33 @@ async def main(browser_run: BrowserRun) -> None:
                 assert not overlap["intersections"], overlap
                 await page.screenshot(path=str(output / "mobile-unbound.png"), full_page=True)
                 report["screenshots"].append("mobile-unbound.png")
+
+                hub_bubble = page.locator(
+                    '.conversation-bubble--user[data-message-origin="hub_message"]'
+                )
+                await hub_bubble.scroll_into_view_if_needed()
+                await expect(hub_bubble).to_be_in_viewport()
+                hub_badge = hub_bubble.get_by_test_id("conversation-message-source")
+                await expect(hub_badge).to_be_visible()
+                await expect(hub_badge).to_have_text("Hub message · local CLI")
+                # source_tab_id is an unverified caller hint, never identity.
+                await expect(hub_bubble).not_to_contain_text("unverified-tab")
+                await expect(
+                    hub_bubble.get_by_test_id("conversation-message-source-avatar")
+                ).to_have_count(0)
+                hub_geometry = await hub_badge.evaluate("""element => {
+                  const badge = element.getBoundingClientRect();
+                  const bubble = element.closest('.conversation-bubble').getBoundingClientRect();
+                  return {badge: badge.toJSON(), bubble: bubble.toJSON(), width: innerWidth};
+                }""")
+                report["mobile_hub_badge_geometry"] = hub_geometry
+                assert hub_geometry["badge"]["left"] >= hub_geometry["bubble"]["left"]
+                assert hub_geometry["badge"]["right"] <= min(
+                    hub_geometry["bubble"]["right"], hub_geometry["width"]
+                )
+                await page.screenshot(path=str(output / "mobile-hub-message.png"))
+                report["screenshots"].append("mobile-hub-message.png")
+
                 assert not report["unknown_api_requests"], report["unknown_api_requests"]
                 assert not report["unexpected_external_requests"], report[
                     "unexpected_external_requests"
