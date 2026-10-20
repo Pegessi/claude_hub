@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "612f45b99f50e8a2ec647df7f1d3504d2bd84e87",
+  "parents": [
+    "3e76860aac4ce629f964217c4937f9704be50506",
+    "993abbd963fb301e606cd18a5d9c51a74e63f301"
+  ],
+  "base": "c960fdc8f72e8132d3730cbd692415189e6d1646",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "e0f6af9001187a9835e7736f0b9eb5dd6f25407a",
+  "reconstructed_tree": "e84044f978b0d94655ebe9913509a575b1dcc4f9",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a111d0a2b16b51d4901f81391fe9aee83fe83a73"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4771cc7c742ab2c051ccebb43b1f5ce3b7e710c9"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3e7347ec5040b8ffd6f000c018fd639d16cd7c2a"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fb7e80c4216354c282e39100f06be7139d6b037c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0c31b29c57c0682ac51ca069ad5c92fedba0730d"
+      },
+      "reason": "Both parents added a new top entry under Released; keep both entries, chat transcript first, no other text changed.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
