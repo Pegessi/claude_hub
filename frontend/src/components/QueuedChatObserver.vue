@@ -7,6 +7,7 @@ import { computed, onUnmounted, watch } from 'vue'
 import { useAgentStream } from '@/composables/useAgentStream'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { IncrementalTimelineReducer } from '@/utils/agentStreamTimeline'
+import { streamCapabilityConfiguration } from '@/utils/agentStreamCapabilitiesCache'
 import { isComposerHeldByTurn } from '@/utils/chatTurnLifecycle'
 
 const props = defineProps<{
@@ -18,7 +19,11 @@ const props = defineProps<{
 
 const store = useTerminalStore()
 const queue = store.getQueuedChatState(props.paneId, props.tabId)
-const { events, connectionState, start, stop } = useAgentStream()
+const currentTab = computed(() => store.tabs.find(tab => tab.id === props.tabId) ?? null)
+const capabilityConfiguration = computed(() => streamCapabilityConfiguration(currentTab.value))
+const streamSource = computed(() => props.managedChat ? 'managed-session' as const : 'terminal-tab' as const)
+const streamSourceId = computed(() => props.managedChat ? props.managedSessionId ?? '' : props.tabId)
+const { events, connectionState, start, stop } = useAgentStream(() => capabilityConfiguration.value)
 const reducer = new IncrementalTimelineReducer()
 const turnInFlight = computed(() => isComposerHeldByTurn(false, reducer.reduce(events.value)))
 
@@ -40,12 +45,17 @@ function reconcileQueue() {
   }
 }
 
-if (!props.managedChat || props.managedSessionId) {
-  void start(
-    props.managedSessionId ?? props.tabId,
-    props.managedChat ? 'managed-session' : 'terminal-tab',
-  )
-}
+watch(
+  [streamSourceId, streamSource, capabilityConfiguration],
+  ([sourceId, source]) => {
+    if (!sourceId) {
+      stop()
+      return
+    }
+    void start(sourceId, source)
+  },
+  { immediate: true },
+)
 watch(
   [
     () => queue.drafts.length,

@@ -151,6 +151,8 @@ async def main(browser_run: BrowserRun) -> None:
         "managed_available": True,
         "capability_delays": {},
         "capability_status": {},
+        "retry_delays": {},
+        "retry_status": {},
         "previews": {},
     }
 
@@ -242,6 +244,17 @@ async def main(browser_run: BrowserRun) -> None:
             ) or (method == "POST" and path in {f"{BASE}/retry", f"{MANAGED_BASE}/retry"}):
                 if method == "POST":
                     retry_requests.append(path)
+                    delay = state["retry_delays"].pop(path, None)
+                    if delay is not None:
+                        await delay.wait()
+                    status = state["retry_status"].get(path, 200)
+                    if status != 200:
+                        await route.fulfill(
+                            status=status,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "fixture retry unavailable"}),
+                        )
+                        return
                 else:
                     capability_requests.append({"path": path, "query": parsed.query})
                     delay = state["capability_delays"].pop(path, None)
@@ -572,23 +585,46 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(composer).to_be_enabled()
         assert capability_count(f"{BASE}/capabilities") > manual_capability_requests
 
-        # A capabilities HTTP failure must not hide the already fetched history;
-        # Retry discards the bad state and refreshes capabilities.
+        # A capabilities HTTP failure must not hide the already fetched history.
+        # Pending and failed transport Retry keep that history readable before a
+        # later successful Retry refreshes capabilities.
         state["capability_status"][f"{BASE}/capabilities"] = 503
         await page.reload()
         await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
-        await expect(page.locator(".structured-banner[role='alert']")).to_contain_text(
-            "capabilities HTTP 503"
-        )
+        alert = page.locator(".structured-banner[role='alert']")
+        await expect(alert).to_contain_text("capabilities HTTP 503")
         await expect(composer).to_be_disabled()
         await expect(send_button).to_be_disabled()
         await expect(model_trigger).to_be_disabled()
+        retry_delay = asyncio.Event()
+        state["retry_delays"][f"{BASE}/retry"] = retry_delay
+        state["retry_status"][f"{BASE}/retry"] = 503
+        retries_before = retry_requests.count(f"{BASE}/retry")
+        await alert.get_by_role("button", name="Retry", exact=True).click()
+        for _ in range(20):
+            if retry_requests.count(f"{BASE}/retry") > retries_before:
+                break
+            await asyncio.sleep(0.05)
+        assert retry_requests.count(f"{BASE}/retry") > retries_before
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        assert await page.locator(".structured-timeline").evaluate(
+            "element => !element.classList.contains('is-timeline-hidden')"
+        ), "history must remain visible while Retry is pending"
+        retry_delay.set()
+        await expect(alert).to_contain_text("fixture retry unavailable")
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        assert await page.locator(".structured-timeline").evaluate(
+            "element => !element.classList.contains('is-timeline-hidden')"
+        ), "history must remain visible after Retry fails"
+        await expect(composer).to_be_disabled()
+        await expect(send_button).to_be_disabled()
+        await expect(model_trigger).to_be_disabled()
+
         before_retry_caps = capability_count(f"{BASE}/capabilities")
+        state["retry_status"][f"{BASE}/retry"] = 200
         state["capability_status"][f"{BASE}/capabilities"] = 200
-        await page.locator(".structured-banner[role='alert']").get_by_role(
-            "button", name="Retry", exact=True
-        ).click()
-        await expect(page.locator(".structured-banner[role='alert']")).to_have_count(0)
+        await alert.get_by_role("button", name="Retry", exact=True).click()
+        await expect(alert).to_have_count(0)
         await expect(composer).to_be_enabled()
         assert capability_count(f"{BASE}/capabilities") > before_retry_caps
         assert f"{BASE}/retry" in retry_requests
@@ -641,9 +677,11 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(preflight).to_contain_text("MASO service is ready.")
         await expect(create_button).to_be_enabled()
         await expect(page.locator(".modal").get_by_text("Solo Mode", exact=True)).to_have_count(0)
-        await page.locator(".session-kind-control").get_by_role(
-            "button", name="Terminal", exact=True
-        ).click()
+        await (
+            page.locator(".session-kind-control")
+            .get_by_role("button", name="Terminal", exact=True)
+            .click()
+        )
         terminal_picker = page.get_by_label("Terminal Profile", exact=True)
         await expect(terminal_picker).to_have_value("claude")
         await expect(terminal_picker.locator('option[value="maso"]')).to_have_count(0)
@@ -686,9 +724,11 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(trigger).to_contain_text("seed · High")
         refresh_caps_before = capability_count(f"{BASE}/capabilities", "refresh=true")
         await trigger.click()
-        await page.get_by_role("listbox", name="Thinking effort", exact=True).get_by_role(
-            "option", name=re.compile(r"^High")
-        ).click()
+        await (
+            page.get_by_role("listbox", name="Thinking effort", exact=True)
+            .get_by_role("option", name=re.compile(r"^High"))
+            .click()
+        )
         await expect(trigger).to_contain_text("High")
         assert model_changes[-1]["env"] == {"MASO_MODEL": "seed-high"}, model_changes
         for _ in range(20):

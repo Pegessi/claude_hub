@@ -547,6 +547,21 @@ def register_observation_routes(
     ) -> AgentStreamEventPage:
         session = bindings.session_or_404(managed_session_id)
         manager = bindings.get_tailer_manager()
+        if persisted_only:
+            bindings.require_current_managed_session(session, manager)
+            page = await bindings.stream_events_for(
+                session,
+                manager,
+                since_sequence,
+                limit,
+                compact=compact,
+                view=view,
+                turn_id=turn_id,
+                through_sequence=through_sequence,
+                persisted_only=True,
+            )
+            bindings.require_current_managed_session(session, manager)
+            return page
         async with bindings.managed_stream_interaction(session) as live:
             page = await bindings.stream_events_for(
                 live,
@@ -557,7 +572,7 @@ def register_observation_routes(
                 view=view,
                 turn_id=turn_id,
                 through_sequence=through_sequence,
-                persisted_only=persisted_only,
+                persisted_only=False,
             )
         bindings.require_current_managed_session(session, manager)
         return page

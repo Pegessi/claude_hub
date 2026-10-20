@@ -466,6 +466,123 @@ test('live reconciliation filters null-turn replay identities learned from summa
   assert.deepEqual(waitBodies.slice(0, 2).map(body => body.since_sequence), [10, 12])
 })
 
+test('stop flushes pending events even when capabilities are no longer ready', async t => {
+  const previous = globalThis.EventSource
+  const sources = []
+  globalThis.EventSource = class {
+    handlers = new Map()
+    constructor() { sources.push(this) }
+    addEventListener(name, callback) { this.handlers.set(name, callback) }
+    close() {}
+  }
+  t.after(() => { if (previous === undefined) delete globalThis.EventSource; else globalThis.EventSource = previous })
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    if (url.endsWith('/capabilities')) return { ok: true, json: async () => ({ structured: true }) }
+    if (url.includes('/events?')) return { ok: true, json: async () => ({ events: [], next_sequence: -1, has_more: false }) }
+    return pendingUntilAbort(options)
+  })
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+  await stream.start('stop-before-ready', 'terminal-tab')
+  sources[0].handlers.get('agent-stream')({
+    data: JSON.stringify({ stream_sequence: 0, type: 'text_delta', payload: { text: 'pending' } }),
+  })
+  stream.capabilities.value = null
+
+  stream.stop()
+  assert.equal(stream.events.value.length, 1, 'stop must synchronously settle the pending batch')
+  await delay(60)
+  assert.equal(stream.events.value.length, 1, 'a retired batch must not mutate history later')
+})
+
+test('failed retry preserves same-source history and cursor for the next recovery', async t => {
+  const descriptor = { turn_id: 'turn-1', first_sequence: 0, last_sequence: 7, event_count: 8 }
+  const event = { stream_sequence: 7, type: 'text_delta', turn_id: 'turn-1', payload: { text: 'saved answer' } }
+  const historySince = []
+  let capabilitiesAvailable = false
+  let retryAttempts = 0
+  let finishSuccessfulRetry
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    if (url.endsWith('/capabilities')) {
+      return { ok: true, json: async () => ({ structured: capabilitiesAvailable, unavailable_reason: capabilitiesAvailable ? null : 'offline' }) }
+    }
+    if (url.includes('/events?')) {
+      const since = Number(new URL(url, 'http://test').searchParams.get('since_sequence'))
+      historySince.push(since)
+      return { ok: true, json: async () => since < 0
+        ? { events: [event], next_sequence: 7, has_more: false, history_details: [descriptor] }
+        : { events: [], next_sequence: 7, has_more: false, history_details: [descriptor] } }
+    }
+    if (url.endsWith('/retry')) {
+      retryAttempts += 1
+      if (retryAttempts === 1) return { ok: false, status: 503, json: async () => ({ detail: 'still offline' }) }
+      return new Promise(resolve => {
+        finishSuccessfulRetry = () => {
+          capabilitiesAvailable = true
+          resolve({ ok: true, json: async () => ({}) })
+        }
+      })
+    }
+    return pendingUntilAbort(options)
+  })
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+
+  await stream.start('retry-history', 'terminal-tab')
+  assert.equal(stream.connectionState.value, 'failed')
+  assert.equal(stream.historyReady.value, true)
+
+  await stream.retry('retry-history', 'terminal-tab')
+  assert.equal(stream.connectionState.value, 'failed')
+  assert.equal(stream.errorMessage.value, 'still offline')
+  assert.equal(stream.historyReady.value, true)
+  assert.deepEqual(stream.events.value, [event])
+  assert.deepEqual(stream.historyDetails.value['turn-1'].descriptor, descriptor)
+
+  const recovering = stream.retry('retry-history', 'terminal-tab')
+  await nextImmediate()
+  stream.historyDetails.value = {
+    ...stream.historyDetails.value,
+    'turn-1': { ...stream.historyDetails.value['turn-1'], status: 'loaded' },
+  }
+  finishSuccessfulRetry()
+  await recovering
+  assert.equal(stream.connectionState.value, 'live')
+  assert.deepEqual(historySince, [-1, 7])
+  assert.deepEqual(stream.events.value, [event])
+  assert.equal(stream.historyDetails.value['turn-1'].status, 'loaded')
+})
+
+test('retry never carries history to a different source', async t => {
+  let rejectOtherRetry
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    if (url.endsWith('/capabilities')) {
+      return { ok: true, json: async () => ({ structured: false, unavailable_reason: 'offline' }) }
+    }
+    if (url.includes('/events?')) {
+      return { ok: true, json: async () => ({
+        events: [{ stream_sequence: 0, type: 'text_delta', payload: { text: 'source A' } }],
+        next_sequence: 0,
+        has_more: false,
+      }) }
+    }
+    if (url.includes('/tabs/source-b/stream/retry')) {
+      return new Promise(resolve => { rejectOtherRetry = () => resolve({ ok: false, status: 503, json: async () => ({}) }) })
+    }
+    return pendingUntilAbort(options)
+  })
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+
+  await stream.start('source-a', 'terminal-tab')
+  const retrying = stream.retry('source-b', 'terminal-tab')
+  await nextImmediate()
+  assert.equal(stream.historyReady.value, false)
+  assert.deepEqual(stream.events.value, [])
+  rejectOtherRetry()
+  await retrying
+})
+
 function pendingUntilAbort(options) {
   return new Promise((_, reject) => {
     if (options.signal.aborted) reject(new Error('aborted'))

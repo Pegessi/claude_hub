@@ -17,7 +17,12 @@
   retry or settings updates. Dynamic model/mode state and action validation stay
   current; MASO's combined service-readiness check is not cached.
 - Ignore superseded capability responses and retain a clear error with readable
-  history when a live capability handshake becomes unavailable.
+  history when a live capability handshake becomes unavailable. Pending or failed
+  Retry keeps the same-source transcript visible, and queued observers use the
+  same configuration identity as the active Chat pane.
+- Keep incomplete model discovery out of long-lived capability caches. Managed
+  persisted-history reads do not wait behind runtime preparation, while stale
+  session incarnations are still rejected.
 
 ### fix(chat): render Codex inline directives instead of leaking markers
 

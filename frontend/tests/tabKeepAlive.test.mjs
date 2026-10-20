@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { h, nextTick, reactive } from 'vue'
+import { createSidebarLoader, makeRenderer } from './chatSidebarTestHarness.mjs'
 
 const terminalPane = readFileSync(
   new URL('../src/components/TerminalPane.vue', import.meta.url),
@@ -55,7 +57,7 @@ test('TerminalPane keeps the full Chat cache bounded and mounts minimal queue ob
 })
 
 test('minimal queued observer requests foreground activation on completion or failure', () => {
-  assert.match(queuedObserver, /props\.managedChat \? 'managed-session' : 'terminal-tab'/)
+  assert.match(queuedObserver, /props\.managedChat \? 'managed-session'(?: as const)? : 'terminal-tab'/)
   assert.match(
     queuedObserver,
     /connectionState\.value === 'live' && !turnInFlight\.value/,
@@ -96,6 +98,68 @@ test('only scrolling an active revealed timeline can detach from latest', () => 
   assert.match(timelineController, /const el = timelineEl\.value[\s\S]*?if \(!el\) return/)
   assert.match(timelineController, /if \(timelineDisposed \|\| timelinePhase\.value !== 'revealed' \|\| isLoadingEarlier\.value\) return/)
   assert.match(timelineController, /if \(isTimelineNearBottom\(el\)\)[\s\S]*?rearmFollow\(\)[\s\S]*?else[\s\S]*?detachFromTail\(\)/)
+})
+
+test('queued observer scopes starts to source configuration without presentation restarts', async t => {
+  const starts = []
+  const stops = []
+  const queue = reactive({
+    drafts: [{}], paused: false, editing: false, sendInProgress: false, autoActivationBlock: null,
+  })
+  const store = reactive({
+    tabs: [{
+      id: 'tab-a', agent_type: 'codex', session_kind: 'chat', agent_session_id: 'session-a',
+      env: { MODEL: 'one' }, name: 'Original', is_unread: false,
+    }],
+    getQueuedChatState: () => queue,
+    releaseQueuedChatActivation() {},
+    requestQueuedChatActivation() {},
+  })
+  globalThis.__queuedObserverTest = { starts, stops, store }
+  t.after(() => { delete globalThis.__queuedObserverTest })
+  const load = createSidebarLoader({
+    'stores/terminalStore.ts': 'export const useTerminalStore = () => globalThis.__queuedObserverTest.store',
+    'composables/useAgentStream.ts': `
+      import { ref } from 'vue'
+      export function useAgentStream(configuration) {
+        return {
+          events: ref([]), connectionState: ref('hydrating'),
+          start: async (id, source) => globalThis.__queuedObserverTest.starts.push([id, source, configuration()]),
+          stop: () => globalThis.__queuedObserverTest.stops.push('stop'),
+        }
+      }
+    `,
+    'utils/agentStreamTimeline.ts': 'export class IncrementalTimelineReducer { reduce() { return [] } }',
+    'utils/chatTurnLifecycle.ts': 'export const isComposerHeldByTurn = () => false',
+  })
+  const { default: Observer } = await load('components/QueuedChatObserver.vue')
+  const renderer = makeRenderer()
+  const mount = () => {
+    const app = renderer.createApp({ render: () => h(Observer, { paneId: 'pane-a', tabId: 'tab-a' }) })
+    app.mount({ children: [] })
+    return app
+  }
+
+  let app = mount()
+  await nextTick()
+  assert.equal(starts.length, 1)
+  const initialConfiguration = starts[0][2]
+  store.tabs[0].name = 'Renamed'
+  store.tabs[0].is_unread = true
+  await nextTick()
+  assert.equal(starts.length, 1, 'title and unread presentation changes must not restart observation')
+
+  store.tabs[0].env = { MODEL: 'two' }
+  await nextTick()
+  assert.equal(starts.length, 2)
+  assert.notEqual(starts[1][2], initialConfiguration)
+
+  app.unmount()
+  app = mount()
+  await nextTick()
+  assert.equal(starts.length, 3)
+  assert.equal(starts[2][2], starts[1][2], 'a remount must use the latest configuration signature')
+  app.unmount()
 })
 
 test('default history LRU capacity is expanded well beyond the old value of 3', () => {

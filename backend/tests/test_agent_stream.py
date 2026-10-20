@@ -480,6 +480,7 @@ class _CapabilityTransport:
         self.prepare_count = 0
         self.current_mode = "default"
         self.structured = True
+        self.metadata_cacheable = True
         self.failures_remaining = 0
         self.entered: Optional[asyncio.Event] = None
         self.release: Optional[asyncio.Event] = None
@@ -495,7 +496,11 @@ class _CapabilityTransport:
             raise RuntimeError("capability preparation failed")
 
     def capabilities(self) -> StreamCapabilities:
-        return StreamCapabilities(structured=self.structured, current_mode=self.current_mode)
+        return StreamCapabilities(
+            structured=self.structured,
+            current_mode=self.current_mode,
+            metadata_cacheable=self.metadata_cacheable,
+        )
 
 
 def _capability_manager(session: ManagedSession, transport: _CapabilityTransport) -> MagicMock:
@@ -640,6 +645,66 @@ async def test_capability_preparation_does_not_cache_unstructured_result() -> No
 
     assert first.structured is False
     assert second.structured is True
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_capability_preparation_does_not_cache_uncacheable_metadata() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    transport.metadata_cacheable = False
+    manager = _capability_manager(session, transport)
+
+    first = await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    second = await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+
+    assert first.metadata_cacheable is False
+    assert second.metadata_cacheable is False
+    assert transport.prepare_count == 2
+
+
+@pytest.mark.asyncio
+async def test_capability_preparation_cache_hit_expires_if_metadata_becomes_uncacheable() -> None:
+    from claude_hub.api.routes.agent_stream import runtime as stream_runtime
+
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    transport = _CapabilityTransport()
+    manager = _capability_manager(session, transport)
+
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+    transport.metadata_cacheable = False
+    await stream_runtime.capabilities_for(
+        lambda: manager,
+        lambda _session: True,
+        lambda _session: None,
+        session,
+        manager,
+        cache_preparation=True,
+    )
+
     assert transport.prepare_count == 2
 
 

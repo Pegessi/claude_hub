@@ -31,7 +31,13 @@ export function createAgentStreamCapabilitiesCache(
       entries.delete(path)
       // MASO's current endpoint combines its model catalog with a live service
       // readiness check. Reuse would also freeze that readiness result.
-      if (!capabilities.structured || capabilities.unavailable_reason || capabilities.adapter_id === 'maso_http' || capacity <= 0) return
+      if (
+        !capabilities.structured
+        || capabilities.unavailable_reason
+        || capabilities.metadata_cacheable === false
+        || capabilities.adapter_id === 'maso_http'
+        || capacity <= 0
+      ) return
       entries.set(path, { configuration, capabilities, expiresAt: now() + ttlMs })
       while (entries.size > capacity) entries.delete(entries.keys().next().value!)
     },
@@ -45,8 +51,8 @@ export function createAgentStreamCapabilitiesCache(
 export function streamCapabilityConfiguration(tab: TerminalTab | null): string {
   if (!tab) return ''
   return JSON.stringify([
-    tab.agent_type, tab.session_kind, tab.managed_session_id, tab.agent_session_id,
-    tab.cwd, tab.solo_mode, tab.target, tab.remote_profile_id, tab.remote_cwd,
+    tab.id, tab.created_at, tab.agent_type, tab.session_kind, tab.managed_session_id, tab.agent_session_id,
+    tab.cwd, tab.solo_mode, tab.target, tab.remote_profile_id, tab.remote_cwd, tab.remote_reconnect,
     tab.cursor_transport, Object.entries(tab.env ?? {}).sort(([a], [b]) => a.localeCompare(b)),
   ])
 }
