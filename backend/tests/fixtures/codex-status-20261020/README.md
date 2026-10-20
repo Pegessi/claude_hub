@@ -26,5 +26,7 @@ screens for these providers.
 
 Tests explicitly derive elapsed-time, braille-spinner and tall/resized-chrome
 variants from the busy bytes. Those variants are not claimed as independent
-live captures. No live resize was performed. Captured busy screens already
-contain real ANSI-heavy tool history; captured idle retains Ran/Worked history.
+live captures. No shared session was resized. Review round 3 adds actual installed-Codex
+private-TUI resize captures in `resized/`; see its README and manifest.
+Captured busy screens already contain real ANSI-heavy tool history; captured
+idle retains Ran/Worked history.

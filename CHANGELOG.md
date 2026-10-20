@@ -13,6 +13,8 @@
   shortcuts footer, so managed agent and tab badges remain Working mid-turn.
 - Preserve selection/shell precedence, frozen-frame alerts and other provider
   paths; replay real ANSI busy/idle captures and rapid frames in regression tests.
+- Recognize narrow Codex status ellipses with an elapsed-time/bullet header and
+  interrupt-hint prefix; actual private-TUI width/height captures cover resize.
 
 ### fix(chat): render Codex inline directives instead of leaking markers
 

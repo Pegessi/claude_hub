@@ -165,3 +165,44 @@ def test_derived_tool_and_subagent_history_does_not_mean_busy(manager, verb):
     assert classify(manager, raw) == AgentRuntimeStatus.IDLE
     busy = frame("busy.ansi").replace("Ran", verb)
     assert classify(manager, busy) == AgentRuntimeStatus.WORKING
+
+
+@pytest.mark.parametrize(
+    "dimensions",
+    [(120, 40), (80, 24), (40, 24), (30, 16), (24, 12), (20, 12), (80, 8), (120, 12), (200, 60)],
+)
+def test_actual_codex_resize_busy_idle_and_back(manager, dimensions):
+    width, height = dimensions
+    busy = frame(f"resized/busy-{width}x{height}.ansi")
+    idle = frame(f"resized/idle-{width}x{height}.ansi")
+    assert "Working" in busy and "Working" not in idle
+    assert classify(manager, busy) == AgentRuntimeStatus.WORKING
+    assert classify(manager, idle) == AgentRuntimeStatus.IDLE
+    assert classify(manager, busy) == AgentRuntimeStatus.WORKING
+
+
+@pytest.mark.parametrize(
+    "wrapped", ["esc to\ninterrupt", "esc\n  to interrupt", "esc\n  to\n  interrupt"]
+)
+def test_derived_soft_wrapped_interrupt_hint(manager, wrapped):
+    raw = _ANSI_ESCAPE_RE.sub("", frame("busy.ansi")).replace("esc to interrupt", wrapped)
+    assert not codex_output_is_working(raw)
+    assert codex_output_is_working(raw, allow_resized=True)
+    assert classify(manager, raw) == AgentRuntimeStatus.WORKING
+
+
+@pytest.mark.parametrize("suffix", ["example…", "esc to invent…", "done…"])
+def test_resize_detection_rejects_unrelated_working_prose(manager, suffix):
+    raw = _ANSI_ESCAPE_RE.sub("", frame("idle.ansi"))
+    raw = "• Working (21s • " + suffix + "\n" + raw
+    assert not codex_output_is_working(raw, allow_resized=True)
+    assert classify(manager, raw) == AgentRuntimeStatus.IDLE
+
+
+@pytest.mark.parametrize(
+    "provider", [AgentType.CLAUDE, AgentType.CURSOR, AgentType.MASO, AgentType.TRAEX]
+)
+def test_narrow_marker_extension_is_codex_status_only(manager, provider):
+    raw = frame("resized/busy-24x12.ansi")
+    assert not codex_output_is_working(_ANSI_ESCAPE_RE.sub("", raw))
+    assert classify(manager, raw, provider) == AgentRuntimeStatus.IDLE
