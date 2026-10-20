@@ -398,3 +398,165 @@ async def test_accepted_lost_runtime_becomes_uncertain_without_restart(tmp_path)
     await h.inbox.reconcile()
     assert (await h.inbox.get("tab", row.message_id, "actor")).state == "uncertain"
     assert h.calls == [row.call_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("submission_started", [False, True])
+async def test_held_submission_does_not_block_new_tab_or_its_fifo(tmp_path, submission_started):
+    h = Harness(tmp_path / "store.json")
+    entered, release, b_first, b_second = (asyncio.Event() for _ in range(4))
+
+    async def held_submit(item, before):
+        h.calls.append(item.call_id)
+        if item.tab_id == "A":
+            if submission_started:
+                before()
+            entered.set()
+            await release.wait()
+            if not submission_started:
+                before()
+        else:
+            before()
+            (b_first if item.call_id == "b-first" else b_second).set()
+
+    h.inbox.submit = held_submit
+    await h.inbox.start()
+    try:
+        await h.inbox.enqueue(
+            "A", "actor", "actor", ChatMessageCreate(message="held", call_id="a-first")
+        )
+        await asyncio.wait_for(entered.wait(), 1)
+        await h.inbox.enqueue(
+            "A", "actor", "actor", ChatMessageCreate(message="later", call_id="a-second")
+        )
+        first = await h.inbox.enqueue(
+            "B", "actor", "actor", ChatMessageCreate(message="first", call_id="b-first")
+        )
+        await h.inbox.enqueue(
+            "B", "actor", "actor", ChatMessageCreate(message="second", call_id="b-second")
+        )
+        await asyncio.wait_for(b_first.wait(), 1)
+        assert h.calls == ["a-first", "b-first"]
+        await h.inbox.completed("B", first.turn_id, "completed")
+        await asyncio.wait_for(b_second.wait(), 1)
+        assert h.calls == ["a-first", "b-first", "b-second"]
+        assert not release.is_set()
+    finally:
+        release.set()
+        await h.inbox.stop()
+
+
+@pytest.mark.asyncio
+async def test_periodic_recovery_advances_other_tab_while_submission_is_held(tmp_path):
+    h = Harness(tmp_path / "store.json")
+    h.inbox.redrain_seconds = 0.01
+    entered, release, b_first, b_second = (asyncio.Event() for _ in range(4))
+    recovered = False
+
+    async def evidence(item):
+        return InboxEvidence("completed" if item.call_id == "b-first" and recovered else "live")
+
+    async def submit(item, before):
+        h.calls.append(item.call_id)
+        before()
+        if item.tab_id == "A":
+            entered.set()
+            await release.wait()
+        else:
+            (b_first if item.call_id == "b-first" else b_second).set()
+
+    h.inbox.evidence, h.inbox.submit = evidence, submit
+    await h.inbox.start()
+    try:
+        # B is already accepted before A stalls; completion evidence later
+        # arrives without a callback/wakeup, exercising periodic recovery.
+        first = await h.inbox.enqueue(
+            "B", "actor", "actor", ChatMessageCreate(message="first", call_id="b-first")
+        )
+        await asyncio.wait_for(b_first.wait(), 1)
+        await h.inbox.enqueue(
+            "A", "actor", "actor", ChatMessageCreate(message="held", call_id="a-first")
+        )
+        await asyncio.wait_for(entered.wait(), 1)
+        await h.inbox.enqueue(
+            "B", "actor", "actor", ChatMessageCreate(message="second", call_id="b-second")
+        )
+        recovered = True
+        await asyncio.wait_for(b_second.wait(), 1)
+        assert (await h.inbox.get("B", first.message_id, "actor")).state == "completed"
+        assert not release.is_set()
+        assert h.calls == ["b-first", "a-first", "b-second"]
+    finally:
+        release.set()
+        await h.inbox.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("submission_started", [False, True])
+async def test_stop_joins_held_tab_pump_without_cancelling_possible_delivery(
+    tmp_path, submission_started
+):
+    h = Harness(tmp_path / "store.json")
+    entered, release = asyncio.Event(), asyncio.Event()
+    cancelled = False
+
+    async def submit(item, before):
+        nonlocal cancelled
+        if submission_started:
+            before()
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        if not submission_started:
+            before()  # shutdown must fence this not-yet-submitted intent
+
+    h.inbox.submit = submit
+    await h.inbox.start()
+    row = await h.enqueue()
+    await asyncio.wait_for(entered.wait(), 1)
+    stopping = asyncio.create_task(h.inbox.stop())
+    try:
+        await asyncio.sleep(0)
+        assert not stopping.done()
+        assert not cancelled
+        with pytest.raises(InboxError) as exc:
+            await h.enqueue(call="after-stop")
+        assert exc.value.status == 503
+    finally:
+        release.set()
+        await asyncio.wait_for(stopping, 1)
+    assert not cancelled
+    assert h.inbox._runner is None
+    assert not h.inbox._pump_tasks
+    clone = Harness(h.inbox.path)
+    await clone.inbox.reconcile(restarting=True)
+    assert clone.inbox.messages[row.message_id].state == (
+        "uncertain" if submission_started else "queued"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unexpected_pump_failure_keeps_periodic_backoff(tmp_path):
+    h = Harness(tmp_path / "store.json")
+    row = await h.enqueue()
+    entered = asyncio.Event()
+    attempts = 0
+
+    def broken_target(tab):
+        nonlocal attempts
+        attempts += 1
+        entered.set()
+        raise RuntimeError("unexpected target resolver failure")
+
+    h.inbox.target = broken_target
+    await h.inbox.start()
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.sleep(0.03)
+        assert attempts == 1
+        assert h.inbox.messages[row.message_id].state == "queued"
+    finally:
+        await h.inbox.stop()
