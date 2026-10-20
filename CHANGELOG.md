@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(chat): render Codex inline directives instead of leaking markers
+
+- Codex writes rich-content requests inline as private-use-delimited
+  directives (e.g. the visualize skill's `visualize {"path": …}`). They no
+  longer show as tofu glyphs and raw JSON: a directive with a local path
+  becomes an "Open visualization" card that opens the in-page HTML preview,
+  others are dropped, and a directive still streaming in stays hidden.
+- Copied turns carry the directive as its plain file path.
+
 ### feat(chat): Codex-style transcript with readable tool activity
 
 - Render assistant prose as unboxed, full-width document text; drop the

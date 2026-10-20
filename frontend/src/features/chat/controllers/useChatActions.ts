@@ -9,6 +9,7 @@ import { messageSourceAvatarUrl } from '../timeline/eventValues'
 import { trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
 import { writeClipboard } from '@/utils/clipboard'
 import { buildTurnCopyText } from '@/utils/chatTurnCopy'
+import { plainAgentDirectives } from '@/utils/agentDirectives'
 
 interface Dependencies {
   composerError: Ref<string | null>
@@ -105,7 +106,7 @@ export function useChatActions(deps: Dependencies) {
   let copyFeedbackTimer: ReturnType<typeof window.setTimeout> | null = null
 
   function turnCopyText(turn: TimelineTurn): string {
-    return buildTurnCopyText(turn)
+    return buildTurnCopyText(turn, plainAgentDirectives)
   }
 
   function clearCopyFeedback() {
@@ -134,7 +135,7 @@ export function useChatActions(deps: Dependencies) {
   async function copyTurn(turn: TimelineTurn) {
     clearCopyFeedback()
     try {
-      await writeClipboard(buildTurnCopyText(turn))
+      await writeClipboard(buildTurnCopyText(turn, plainAgentDirectives))
       copyFeedback.value = { turnKey: turn.key, state: 'copied' }
     } catch {
       copyFeedback.value = { turnKey: turn.key, state: 'error' }
